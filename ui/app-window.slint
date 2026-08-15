@@ -1,0 +1,753 @@
+import { Button, HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
+
+// One rendered slice of the document. Both panes use it: the vertical one
+// stacks tiles along x and the horizontal one along y, so the placement Rust
+// computes covers both and this side does not have to know which is which.
+export struct PreviewTile {
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    source: image,
+}
+
+export struct PreviewSelectionRect {
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+}
+
+export component AppWindow inherits Window {
+    title: "Editor - 横書き・縦書き切り替え検証";
+    // preferred-*, not width/height: setting width and height on a Window makes
+    // it a fixed size the window manager enforces, which is why the window could
+    // not be resized at all. These give the same starting size and still resize.
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    min-width: 640px;
+    min-height: 400px;
+
+    in-out property <int> editor-mode: 1;
+    in-out property <bool> split-view: false;
+    in property <[PreviewTile]> vertical-preview-tiles;
+    in property <[PreviewSelectionRect]> vertical-selection-rects;
+    in property <int> preview-width: 640;
+    in property <int> preview-height: 520;
+    in property <bool> preview-caret-visible: false;
+    in property <float> preview-caret-x: 0;
+    in property <float> preview-caret-y: 0;
+    in property <float> preview-caret-width: 1;
+
+    // The horizontal pane, drawn the same way: tiles, selection rectangles and
+    // a caret produced by DirectWrite rather than by a Slint text element.
+    in property <[PreviewTile]> horizontal-preview-tiles;
+    in property <[PreviewSelectionRect]> horizontal-selection-rects;
+    in property <int> horizontal-width: 640;
+    in property <int> horizontal-height: 520;
+    in property <bool> horizontal-caret-visible: false;
+    in property <float> horizontal-caret-x: 0;
+    in property <float> horizontal-caret-y: 0;
+    in property <float> horizontal-caret-height: 22;
+    in-out property <string> horizontal-ime-buffer;
+    in property <float> horizontal-ime-anchor-x: 0;
+    in property <float> horizontal-ime-anchor-y: 0;
+    in property <float> horizontal-ime-anchor-width: 1;
+    in property <float> horizontal-ime-anchor-height: 22;
+    in-out property <length> horizontal-scroll-y: 0px;
+    in-out property <length> horizontal-visible-width: 640px;
+    in-out property <length> horizontal-visible-height: 520px;
+    private property <bool> horizontal-ime-had-preedit: false;
+    private property <bool> horizontal-ime-commit-just-finished: false;
+    private property <bool> horizontal-dragging: false;
+    in property <string> status-text;
+    in property <string> directwrite-status;
+    in property <string> render-status;
+    in property <int> zoom-percent: 100;
+    in-out property <string> ime-buffer;
+    in property <float> ime-anchor-x: 0;
+    in property <float> ime-anchor-y: 0;
+    in property <float> ime-anchor-width: 1;
+    in property <float> ime-anchor-height: 22;
+    in-out property <length> preview-scroll-x: 0px;
+    in-out property <length> preview-visible-width: 640px;
+    in-out property <length> preview-visible-height: 520px;
+    // Fraction of the editor row given to the left pane. in-out because the
+    // divider writes to it, and because the session has to restore it.
+    in-out property <float> split-ratio: 0.5;
+    private property <bool> ime-had-preedit: false;
+    private property <bool> ime-commit-just-finished: false;
+    private property <bool> vertical-dragging: false;
+
+    callback horizontal-selection-start(float, float);
+    callback horizontal-selection-update(float, float);
+    callback horizontal-selection-end(float, float);
+    callback horizontal-scroll-changed(float);
+    callback horizontal-resized();
+    callback horizontal-text-input(string);
+    callback horizontal-tab();
+    callback horizontal-preedit-changed(string);
+    callback horizontal-backspace();
+    callback horizontal-delete();
+    callback horizontal-move(int, bool);
+    callback horizontal-home-end(bool, bool, bool);
+    callback view-mode-requested(int);
+    callback split-toggled();
+    callback vertical-selection-start(float, float);
+    callback vertical-selection-update(float, float);
+    callback vertical-selection-end(float, float);
+    callback vertical-scroll-changed(float);
+    callback vertical-resized();
+    callback vertical-text-input(string);
+    callback vertical-tab();
+    callback vertical-preedit-changed(string);
+    callback vertical-backspace();
+    callback vertical-delete();
+    callback vertical-move(int, bool);
+    callback vertical-home-end(bool, bool, bool);
+    callback zoom-in();
+    callback zoom-out();
+    callback zoom-reset();
+
+    ime-commit-reset := Timer {
+        interval: 50ms;
+        running: false;
+        triggered => {
+            root.ime-commit-just-finished = false;
+            self.stop();
+        }
+    }
+
+    horizontal-ime-commit-reset := Timer {
+        interval: 50ms;
+        running: false;
+        triggered => {
+            root.horizontal-ime-commit-just-finished = false;
+            self.stop();
+        }
+    }
+
+    VerticalBox {
+        spacing: 0px;
+
+        Rectangle {
+            height: 44px;
+            background: #f3f4f6;
+
+            HorizontalBox {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
+                alignment: center;
+
+                Text {
+                    text: root.split-view
+                        ? "技術検証: Split（横書き＋縦書き）"
+                        : (root.editor-mode == 0 ? "横書きソース編集" : "縦書きライブ編集");
+                    color: #1f2937;
+                    font-size: 14px;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+
+                Button {
+                    text: !root.split-view && root.editor-mode == 0 ? "● 横書き" : "横書き";
+                    clicked => { root.view-mode-requested(0); }
+                }
+                Button {
+                    text: !root.split-view && root.editor-mode == 1 ? "● 縦書き" : "縦書き";
+                    clicked => { root.view-mode-requested(1); }
+                }
+                Button {
+                    text: root.split-view ? "Split: ON" : "Split: OFF";
+                    clicked => { root.split-toggled(); }
+                }
+                Button { text: "−"; clicked => { root.zoom-out(); } }
+                Text {
+                    text: root.zoom-percent + "%";
+                    color: #374151;
+                    min-width: 52px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Button { text: "+"; clicked => { root.zoom-in(); } }
+                Button { text: "100%"; clicked => { root.zoom-reset(); } }
+            }
+        }
+
+        editor-row := HorizontalLayout {
+            spacing: 0px;
+
+            // preferred-width and min-width are pinned to 0 on both panes so the
+            // split is decided by the stretch factors alone. Left to size
+            // themselves, each pane asks for as much width as its widest content
+            // (the source text on one side, the status line on the other), and
+            // the divider then slides whenever either one changes.
+            //
+            // With both preferred widths at zero, every pixel of the row is
+            // "extra" space and is handed out in proportion to the stretch
+            // factors. Making those factors the split ratio and its complement
+            // is therefore the same as setting the widths directly, without
+            // taking the panes out of the layout.
+            if root.split-view || root.editor-mode == 0: Rectangle {
+                background: #ffffff;
+                horizontal-stretch: root.split-ratio;
+                min-width: 0px;
+                preferred-width: 0px;
+
+                VerticalBox {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    Text {
+                        text: "横書きソース編集（DirectWrite / クリックして入力）";
+                        color: #374151;
+                        font-size: 13px;
+                    }
+
+                    // The same structure as the vertical pane, with the flow
+                    // axis on y: tiles stack downwards and the scroll that
+                    // matters is the vertical one. The pane's *width* decides
+                    // how many characters fit on a line, so a width change
+                    // relays out the document just as a height change does on
+                    // the other side.
+                    horizontal-scroll := ScrollView {
+                        horizontal-scrollbar-policy: as-needed;
+                        vertical-scrollbar-policy: as-needed;
+                        viewport-y <=> root.horizontal-scroll-y;
+                        viewport-width: max(self.visible-width, root.horizontal-width * 1px);
+                        viewport-height: max(self.visible-height, root.horizontal-height * 1px);
+                        // This pane is created when it first becomes visible,
+                        // which can be long after start-up, and a size it is
+                        // born with never *changes*. Reporting it here as well
+                        // is what keeps the flow extent from staying at its
+                        // default, which left the lower part of the pane with
+                        // no tiles at all.
+                        init => {
+                            root.horizontal-visible-width = self.visible-width;
+                            root.horizontal-visible-height = self.visible-height;
+                            root.horizontal-resized();
+                        }
+                        changed viewport-y => {
+                            root.horizontal-scroll-changed(self.viewport-y / 1px);
+                        }
+                        changed visible-height => {
+                            root.horizontal-visible-height = self.visible-height;
+                            root.horizontal-scroll-changed(self.viewport-y / 1px);
+                        }
+                        changed visible-width => {
+                            root.horizontal-visible-width = self.visible-width;
+                            root.horizontal-resized();
+                        }
+
+                        Rectangle {
+                            width: root.horizontal-width * 1px;
+                            height: root.horizontal-height * 1px;
+                            background: #ffffff;
+                            border-width: horizontal-ime-input.has-focus ? 2px : 0px;
+                            border-color: #1969d2;
+
+                            horizontal-editor := FocusScope {
+                                width: parent.width;
+                                height: parent.height;
+                                focus-on-click: false;
+
+                                for tile in root.horizontal-preview-tiles: Image {
+                                    x: tile.x * 1px;
+                                    y: tile.y * 1px;
+                                    width: tile.width * 1px;
+                                    height: tile.height * 1px;
+                                    source: tile.source;
+                                    image-fit: fill;
+                                    visible: self.y + self.height + horizontal-scroll.viewport-y >= 0px
+                                        && self.y + horizontal-scroll.viewport-y <= horizontal-scroll.visible-height;
+                                }
+
+                                for selection in root.horizontal-selection-rects: Rectangle {
+                                    x: selection.x * 1px;
+                                    y: selection.y * 1px;
+                                    width: selection.width * 1px;
+                                    height: selection.height * 1px;
+                                    background: #8abcf4;
+                                    opacity: 0.48;
+                                }
+
+                                if root.horizontal-caret-visible: Rectangle {
+                                    x: root.horizontal-caret-x * 1px;
+                                    y: root.horizontal-caret-y * 1px;
+                                    width: 2px;
+                                    height: max(root.horizontal-caret-height * 1px, 2px);
+                                    background: #1969d2;
+                                }
+
+                                // 横書き側のIMEブリッジ。縦書きと同じく、文字は
+                                // DirectWriteが描くのでSlint側は透明にする。
+                                horizontal-ime-input := TextInput {
+                                    x: root.horizontal-ime-anchor-x * 1px;
+                                    y: root.horizontal-ime-anchor-y * 1px;
+                                    width: max(root.horizontal-ime-anchor-width * 1px, 1px);
+                                    height: max(root.horizontal-ime-anchor-height * 1px, 1px);
+                                    text <=> root.horizontal-ime-buffer;
+                                    font-family: "Yu Gothic UI";
+                                    font-size: 1px;
+                                    color: transparent;
+                                    selection-foreground-color: transparent;
+                                    selection-background-color: transparent;
+                                    text-cursor-width: 0px;
+                                    // Not single-line: a single-line TextInput
+                                    // strips the newlines out of pasted text,
+                                    // and everything typed or pasted into this
+                                    // pane passes through here.
+                                    single-line: false;
+
+                                    edited => {
+                                        if root.horizontal-ime-had-preedit {
+                                            root.horizontal-ime-had-preedit = false;
+                                            root.horizontal-ime-commit-just-finished = true;
+                                            horizontal-ime-commit-reset.start();
+                                            root.horizontal-text-input(self.text);
+                                        } else if root.horizontal-ime-commit-just-finished
+                                            && self.text == "\n" {
+                                            // The Enter that ended a conversion,
+                                            // arriving as a line break now that
+                                            // the field accepts them. The result
+                                            // itself came through the edit before
+                                            // this one, so swallow it once.
+                                            root.horizontal-ime-commit-just-finished = false;
+                                            horizontal-ime-commit-reset.stop();
+                                            self.text = "";
+                                        } else {
+                                            root.horizontal-text-input(self.text);
+                                        }
+                                    }
+                                    accepted => {
+                                        if root.horizontal-ime-commit-just-finished {
+                                            root.horizontal-ime-commit-just-finished = false;
+                                            horizontal-ime-commit-reset.stop();
+                                        } else {
+                                            root.horizontal-text-input("\n");
+                                        }
+                                    }
+                                    changed preedit-text => {
+                                        if self.preedit-text != "" {
+                                            root.horizontal-ime-had-preedit = true;
+                                        }
+                                        root.horizontal-preedit-changed(self.preedit-text);
+                                    }
+                                    key-pressed(event) => {
+                                        if self.preedit-text == "" && self.text == "" {
+                                            // Enter is handled here rather than
+                                            // left to the field, so a line break
+                                            // is inserted exactly once whatever
+                                            // a multi-line TextInput would do
+                                            // with the key itself.
+                                            if event.text == Key.Return {
+                                                root.horizontal-text-input("\n");
+                                                accept
+                                            } else if event.text == Key.Backspace {
+                                                root.horizontal-backspace();
+                                                accept
+                                            } else if event.text == Key.Tab {
+                                                root.horizontal-tab();
+                                                accept
+                                            } else if event.text == Key.Delete {
+                                                root.horizontal-delete();
+                                                accept
+                                            } else if event.text == Key.LeftArrow {
+                                                root.horizontal-move(-1, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.RightArrow {
+                                                root.horizontal-move(1, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.UpArrow {
+                                                root.horizontal-move(-2, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.DownArrow {
+                                                root.horizontal-move(2, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.Home {
+                                                root.horizontal-home-end(false, event.modifiers.control, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.End {
+                                                root.horizontal-home-end(true, event.modifiers.control, event.modifiers.shift);
+                                                accept
+                                            } else {
+                                                reject
+                                            }
+                                        } else {
+                                            reject
+                                        }
+                                    }
+                                }
+
+                                horizontal-pointer := TouchArea {
+                                    mouse-cursor: text;
+                                    scroll-event(event) => {
+                                        let delta = event.delta-y != 0px ? event.delta-y : event.delta-x;
+                                        let minimum-y = min(0px, horizontal-scroll.visible-height - horizontal-scroll.viewport-height);
+                                        horizontal-scroll.viewport-y = max(
+                                            minimum-y,
+                                            min(0px, horizontal-scroll.viewport-y + delta)
+                                        );
+                                        accept
+                                    }
+                                    pointer-event(event) => {
+                                        if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                            root.horizontal-dragging = true;
+                                            root.horizontal-selection-start(self.mouse-x / 1px, self.mouse-y / 1px);
+                                        } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                            if root.horizontal-dragging {
+                                                root.horizontal-selection-end(self.mouse-x / 1px, self.mouse-y / 1px);
+                                            }
+                                            root.horizontal-dragging = false;
+                                            horizontal-ime-input.focus();
+                                        }
+                                    }
+                                    // `pressed` rather than the flag alone: the
+                                    // flag only clears on a pointer-up this area
+                                    // actually receives, and a drag that ends
+                                    // anywhere else leaves it set. Every mouse
+                                    // move over the pane then moved the caret,
+                                    // which looked like the two panes being
+                                    // wired together.
+                                    moved => {
+                                        if root.horizontal-dragging && self.pressed {
+                                            root.horizontal-selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Wider than the line it draws, so there is something to grab. The
+            // line stays 1px until the pointer is on it.
+            if root.split-view: Rectangle {
+                width: 9px;
+
+                Rectangle {
+                    x: divider-area.has-hover || divider-area.pressed ? 3px : 4px;
+                    width: divider-area.has-hover || divider-area.pressed ? 3px : 1px;
+                    height: 100%;
+                    background: divider-area.has-hover || divider-area.pressed
+                        ? #6b7280
+                        : #d1d5db;
+                }
+
+                divider-area := TouchArea {
+                    mouse-cursor: ew-resize;
+
+                    // The divider moves with the ratio, so the delta is applied
+                    // rather than a start value plus an offset: once the layout
+                    // has moved this element under the pointer, `mouse-x` is
+                    // back at `pressed-x` and the next event reports only what
+                    // is new. Anchoring to a start position would double-count.
+                    moved => {
+                        if (editor-row.width > 0px) {
+                            root.split-ratio = Math.clamp(
+                                root.split-ratio
+                                    + (self.mouse-x - self.pressed-x) / editor-row.width,
+                                0.15,
+                                0.85);
+                        }
+                    }
+                }
+            }
+
+            if root.split-view || root.editor-mode == 1: Rectangle {
+                background: #fffdf7;
+                horizontal-stretch: 1 - root.split-ratio;
+                min-width: 0px;
+                preferred-width: 0px;
+
+                VerticalBox {
+                    padding-top: 12px;
+                    padding-bottom: 12px;
+                    spacing: 8px;
+
+                    Text {
+                        text: "縦書きライブ編集検証（クリックして入力）";
+                        color: #6b4f2a;
+                        font-size: 13px;
+                        x: 12px;
+                    }
+
+                    Text {
+                        text: root.directwrite-status;
+                        color: #047857;
+                        font-size: 12px;
+                        x: 12px;
+                    }
+
+                    // Deliberately not wrapped: a width taken from the parent
+                    // closes a binding loop through VerticalBox's own sizing.
+                    // The status string puts its measurements first instead, so
+                    // clipping the tail costs nothing worth reading.
+                    Text {
+                        text: root.render-status;
+                        color: #047857;
+                        font-size: 12px;
+                        x: 12px;
+                    }
+
+                    vertical-scroll := ScrollView {
+                        horizontal-scrollbar-policy: as-needed;
+                        vertical-scrollbar-policy: as-needed;
+                        viewport-x <=> root.preview-scroll-x;
+                        viewport-width: max(self.visible-width, root.preview-width * 1px);
+                        viewport-height: max(self.visible-height, root.preview-height * 1px);
+                        changed viewport-x => {
+                            root.vertical-scroll-changed(self.viewport-x / 1px);
+                        }
+                        changed visible-width => {
+                            root.preview-visible-width = self.visible-width;
+                            root.vertical-scroll-changed(self.viewport-x / 1px);
+                        }
+                        // The column height is the pane height, so this decides
+                        // how many characters fit in a column and therefore the
+                        // whole layout. Rust coalesces the callback: re-laying
+                        // out on every pixel of a drag would remeasure the
+                        // entire document each time.
+                        changed visible-height => {
+                            root.preview-visible-height = self.visible-height;
+                            root.vertical-resized();
+                        }
+
+                        Rectangle {
+                            width: root.preview-width * 1px;
+                            height: root.preview-height * 1px;
+                            background: #fffdf7;
+                            border-width: ime-input.has-focus ? 2px : 0px;
+                            border-color: #1969d2;
+
+                            vertical-editor := FocusScope {
+                                width: parent.width;
+                                height: parent.height;
+                                focus-on-click: false;
+
+                                for tile in root.vertical-preview-tiles: Image {
+                                    x: tile.x * 1px;
+                                    y: tile.y * 1px;
+                                    width: tile.width * 1px;
+                                    height: tile.height * 1px;
+                                    source: tile.source;
+                                    image-fit: fill;
+                                    visible: self.x + self.width + vertical-scroll.viewport-x >= 0px
+                                        && self.x + vertical-scroll.viewport-x <= vertical-scroll.visible-width;
+                                }
+
+                                for selection in root.vertical-selection-rects: Rectangle {
+                                    x: selection.x * 1px;
+                                    y: selection.y * 1px;
+                                    width: selection.width * 1px;
+                                    height: selection.height * 1px;
+                                    background: #8abcf4;
+                                    opacity: 0.48;
+                                }
+
+                                if root.preview-caret-visible: Rectangle {
+                                    x: root.preview-caret-x * 1px;
+                                    y: root.preview-caret-y * 1px;
+                                    width: max(root.preview-caret-width * 1px, 1px);
+                                    height: 2px;
+                                    background: #1969d2;
+                                }
+
+                                // DirectWriteが算出した縦書きキャレット位置に置くIMEブリッジ。
+                                // 文字はDirectWrite側で描画するため、Slint側は透明にする。
+                                ime-input := TextInput {
+                                    x: root.ime-anchor-x * 1px;
+                                    y: root.ime-anchor-y * 1px;
+                                    width: max(root.ime-anchor-width * 1px, 1px);
+                                    height: max(root.ime-anchor-height * 1px, 1px);
+                                    text <=> root.ime-buffer;
+                                    font-family: "Yu Mincho";
+                                    font-size: 1px;
+                                    color: transparent;
+                                    selection-foreground-color: transparent;
+                                    selection-background-color: transparent;
+                                    text-cursor-width: 0px;
+                                    // Not single-line: a single-line TextInput
+                                    // strips the newlines out of pasted text,
+                                    // and everything typed or pasted into this
+                                    // pane passes through here.
+                                    single-line: false;
+
+                                    edited => {
+                                        if root.ime-had-preedit {
+                                            root.ime-had-preedit = false;
+                                            root.ime-commit-just-finished = true;
+                                            ime-commit-reset.start();
+                                            root.vertical-text-input(self.text);
+                                        } else if root.ime-commit-just-finished
+                                            && self.text == "\n" {
+                                            // The Enter that ended a conversion,
+                                            // arriving as a line break now that
+                                            // the field accepts them. The result
+                                            // itself came through the edit before
+                                            // this one, so swallow it once.
+                                            root.ime-commit-just-finished = false;
+                                            ime-commit-reset.stop();
+                                            self.text = "";
+                                        } else {
+                                            root.vertical-text-input(self.text);
+                                        }
+                                    }
+                                    accepted => {
+                                        if root.ime-commit-just-finished {
+                                            root.ime-commit-just-finished = false;
+                                            ime-commit-reset.stop();
+                                        } else {
+                                            root.vertical-text-input("\n");
+                                        }
+                                    }
+                                    changed preedit-text => {
+                                        if self.preedit-text != "" {
+                                            root.ime-had-preedit = true;
+                                        }
+                                        root.vertical-preedit-changed(self.preedit-text);
+                                    }
+                                    key-pressed(event) => {
+                                        if self.preedit-text == "" && self.text == "" {
+                                            // Enter is handled here rather than
+                                            // left to the field, so a line break
+                                            // is inserted exactly once whatever
+                                            // a multi-line TextInput would do
+                                            // with the key itself.
+                                            if event.text == Key.Return {
+                                                root.vertical-text-input("\n");
+                                                accept
+                                            } else if event.text == Key.Backspace {
+                                                root.vertical-backspace();
+                                                accept
+                                            } else if event.text == Key.Tab {
+                                                root.vertical-tab();
+                                                accept
+                                            } else if event.text == Key.Delete {
+                                                root.vertical-delete();
+                                                accept
+                                            } else if event.text == Key.UpArrow {
+                                                root.vertical-move(-1, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.DownArrow {
+                                                root.vertical-move(1, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.LeftArrow {
+                                                root.vertical-move(-2, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.RightArrow {
+                                                root.vertical-move(2, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.Home {
+                                                root.vertical-home-end(false, event.modifiers.control, event.modifiers.shift);
+                                                accept
+                                            } else if event.text == Key.End {
+                                                root.vertical-home-end(true, event.modifiers.control, event.modifiers.shift);
+                                                accept
+                                            } else {
+                                                reject
+                                            }
+                                        } else {
+                                            reject
+                                        }
+                                    }
+                                }
+
+                                vertical-pointer := TouchArea {
+                                    mouse-cursor: none;
+                                    scroll-event(event) => {
+                                        let delta = event.delta-x != 0px ? event.delta-x : -event.delta-y;
+                                        let minimum-x = min(0px, vertical-scroll.visible-width - vertical-scroll.viewport-width);
+                                        vertical-scroll.viewport-x = max(
+                                            minimum-x,
+                                            min(0px, vertical-scroll.viewport-x + delta)
+                                        );
+                                        accept
+                                    }
+                                    pointer-event(event) => {
+                                        if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                            root.vertical-dragging = true;
+                                            root.vertical-selection-start(self.mouse-x / 1px, self.mouse-y / 1px);
+                                        } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                            if root.vertical-dragging {
+                                                root.vertical-selection-end(self.mouse-x / 1px, self.mouse-y / 1px);
+                                            }
+                                            root.vertical-dragging = false;
+                                            ime-input.focus();
+                                        }
+                                    }
+                                    // See the horizontal pane: the flag alone can
+                                    // stay set after a drag that ends elsewhere.
+                                    moved => {
+                                        if root.vertical-dragging && self.pressed {
+                                            root.vertical-selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
+                                        }
+                                    }
+                                }
+
+                                // 縦書き用の横向きテキストポインター。
+                                if vertical-pointer.has-hover: Rectangle {
+                                    x: vertical-pointer.mouse-x - 8px;
+                                    y: vertical-pointer.mouse-y - 1px;
+                                    width: 16px;
+                                    height: 2px;
+                                    background: #202020;
+
+                                    Rectangle {
+                                        x: 0px;
+                                        y: -3px;
+                                        width: 2px;
+                                        height: 8px;
+                                        background: #202020;
+                                    }
+
+                                    Rectangle {
+                                        x: 14px;
+                                        y: -3px;
+                                        width: 2px;
+                                        height: 8px;
+                                        background: #202020;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 28px;
+            background: #1f2937;
+
+            HorizontalBox {
+                padding-left: 10px;
+                padding-right: 10px;
+
+                Text {
+                    text: root.status-text;
+                    color: #f9fafb;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Text {
+                    text: root.zoom-percent + "%";
+                    color: #f9fafb;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.split-view ? "Split" : (root.editor-mode == 0 ? "横書き" : "縦書き");
+                    color: #d1d5db;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,10 @@
+# ビルド生成物
+/target
+
+# 実行のたびに書き換わる計測ログと検証結果
+/perf_log.txt
+/check_output.txt
+
+# 性能改善前のソースの控えと、削除待ちのファイル
+/_backup_before_perf/
+/_to_delete/
