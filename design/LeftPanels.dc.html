@@ -1,0 +1,144 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Shippori+Mincho:wght@600&family=Noto+Sans+Mono&display=swap">
+  <style>
+    :root{
+      --paper:#fcf9ef;--chrome:#f1f0f7;--chrome-raised:#e8e5f0;--chrome-sunken:#dad7e7;
+      --ink:#292733;--ink-strong:#171321;--ink-muted:#696774;--ink-faint:#9996a1;
+      --rule:#d5d3e0;--rule-strong:#b6b3c4;--accent:#6b4cae;--accent-strong:#572e9d;--accent-soft:#dad0fd;--accent-faint:#f2efff;--alert:#a74639;
+      --ui:"Noto Sans","Segoe UI","Yu Gothic UI",sans-serif;--doc-ink:#24211e;--mono:"Noto Sans Mono",Consolas,monospace;
+      --mincho:"Shippori Mincho","Yu Mincho",serif;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--paper);font-family:var(--ui);color:var(--ink)}
+    a{color:var(--accent)} a:hover{color:var(--ink-strong)}
+    .i{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+    .panel{width:260px;flex:none;background:var(--chrome);border:1px solid var(--rule);border-radius:3px;display:flex;flex-direction:column;overflow:hidden}
+    .phead{height:34px;flex:none;display:flex;align-items:center;gap:6px;padding:0 6px 0 10px;border-bottom:1px solid var(--rule);font-size:12px;font-weight:500;letter-spacing:.04em;color:var(--ink-muted)}
+    .row{height:26px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12px;border-radius:3px;color:var(--ink);white-space:nowrap;overflow:hidden}
+    .row.sel{background:var(--accent-soft)}
+    .row.hov{background:var(--accent-faint)}
+    .ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ico{width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:3px;color:var(--ink-muted);flex:none}
+    .lbl{font-family:var(--mincho);font-size:15px;font-weight:600;letter-spacing:.06em;color:var(--ink-strong)}
+    .cap{font-size:11px;line-height:1.75;color:var(--ink-muted)}
+    .k{font-family:var(--mono);font-size:11px;color:var(--ink-strong)}
+    .t{position:relative}
+    .t::after{content:attr(data-t);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);background:var(--ink-strong);color:#fcf9ef;font-size:11px;line-height:1.5;padding:3px 8px;border-radius:3px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s .3s;z-index:30}
+    .t:hover::after,.t.show::after{opacity:1}
+    .t.up::after{top:auto;bottom:calc(100% + 7px)}
+    .row:hover{background:var(--accent-faint)}
+    .ico:hover{background:var(--chrome-sunken);color:var(--ink-strong)}
+    .plabel{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+  </style>
+</helmet>
+
+<div style="width:1200px;padding:36px 40px;display:flex;flex-direction:column;gap:22px;background:var(--paper)">
+
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <div style="font-family:var(--mincho);font-size:26px;font-weight:600;letter-spacing:.08em;color:var(--ink-strong)">左ペインの4パネル</div>
+    <div class="cap" style="font-size:12px;max-width:900px">4つとも <span class="k">LeftRow { 名前, どれだけ内側か }</span> の1つの行リストを共有していて、クリックの意味だけが違う（<span class="k">activate_left_row</span> の1箇所）。<b>見た目もその構造どおりに揃える</b>——同じ26px、同じ12px、左の余白だけが深さで動く。パネルの切り替えは横タブをやめて<b>40pxのアイコンレール</b>へ移す：260pxの4等分は62pxで、「アウトライン」が入らなかった。</div>
+  </div>
+
+  <div style="display:flex;gap:20px;align-items:flex-start">
+
+    <!-- レール -->
+    <div style="width:40px;flex:none;background:var(--chrome-raised);border:1px solid var(--rule);border-radius:3px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 0;height:360px">
+      <div class="t" data-t="Explorer" style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:5px;background:var(--paper);color:var(--accent);box-shadow:inset 2px 0 0 var(--accent)"><svg class="i" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg></div>
+      <div class="t" data-t="Search" style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-faint)"><svg class="i" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg></div>
+      <div class="t" data-t="History" style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-faint)"><svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg></div>
+      <div class="t" data-t="Outline" style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-faint)"><svg class="i" viewBox="0 0 16 16"><path d="M3 4h10M5.5 8h7.5M8 12h5"/></svg></div>
+      <div style="flex-grow:1"></div>
+      <div style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:var(--ink-faint)"><svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg></div>
+    </div>
+
+    <!-- Explorer -->
+    <div class="panel" style="height:360px">
+      <div class="phead"><span style="flex-grow:1" class="ell plabel">testdata</span>
+        <div class="ico"><svg class="i" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></svg></div>
+        <div class="ico"><svg class="i" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg></div>
+      </div>
+      <div style="flex-grow:1;padding:4px;display:flex;flex-direction:column;gap:1px;overflow:hidden">
+        <div class="row"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M5.5 4 9.5 8l-4 4"/></svg><svg class="i" style="color:var(--ink-muted)" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg><span class="ell">入れ子フォルダ</span></div>
+        <div class="row" style="padding-left:20px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">00_この一式について.md</span></div>
+        <div class="row sel" style="padding-left:20px"><svg class="i" style="color:var(--accent)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">01_行属性.md</span><svg class="i" style="color:var(--ink-muted)" viewBox="0 0 16 16"><circle cx="4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></div>
+        <div class="row hov" style="padding-left:20px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">02_文字装飾.md</span></div>
+        <div class="row" style="padding-left:20px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">03_見出しとアウトライン.md</span></div>
+        <div class="row" style="padding-left:20px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">04_縦書き.md</span></div>
+        <div class="row" style="padding-left:20px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">05_未対応記法の保持.md</span></div>
+        <div class="row" style="padding-left:20px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">07_プレーンテキスト.txt</span></div>
+        <div class="row" style="padding-left:20px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">08_CRLFとBOM.md</span></div>
+      </div>
+      <div style="flex:none;border-top:1px solid var(--rule);background:var(--paper);padding:5px;display:flex;flex-direction:column;gap:1px">
+        <div class="row" style="height:24px;color:var(--ink-muted)"><svg class="i" viewBox="0 0 16 16"><path d="M2.5 11.5 11 3a2.1 2.1 0 0 1 3 3l-8.5 8.5-3.5.5z"/></svg>Rename<span style="flex-grow:1"></span><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">F2</span></div>
+        <div class="row" style="height:24px;color:var(--ink-muted)"><svg class="i" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="9" height="9" rx="1"/><path d="M10.5 5.5v-3h-9v9h3"/></svg>Duplicate</div>
+        <div class="row" style="height:24px;color:var(--alert)"><svg class="i" viewBox="0 0 16 16"><path d="M2.5 4.5h11M6 4.5V2.5h4v2M4 4.5l.8 9.5h6.4l.8-9.5"/></svg>Move to Recycle Bin<span style="flex-grow:1"></span><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">Del</span></div>
+      </div>
+    </div>
+
+    <!-- 検索 -->
+    <div class="panel" style="height:360px">
+      <div class="phead"><span style="flex-grow:1" class="plabel">Search</span><span style="font-size:11px;color:var(--ink-faint);font-family:var(--mono)">3 in 3 files</span></div>
+      <div style="flex:none;padding:6px;border-bottom:1px solid var(--rule)">
+        <div style="height:28px;background:var(--paper);border:1px solid var(--accent);border-radius:3px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12px"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg><span>検索テスト用キーワード</span><span style="width:1.5px;height:14px;background:var(--accent)"></span></div>
+      </div>
+      <div style="flex-grow:1;padding:4px;display:flex;flex-direction:column;gap:1px;overflow:hidden">
+        <div class="row" style="color:var(--ink-muted);font-weight:500"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">01_行属性.md</span><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">1</span></div>
+        <div class="row sel" style="padding-left:22px"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-muted);width:20px;flex:none">62</span><span class="ell">作業フォルダの全文<mark style="background:#ffe6a3;color:var(--ink-strong)">検索</mark>を試す…</span></div>
+        <div class="row" style="color:var(--ink-muted);font-weight:500"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">03_見出しとアウトライン.md</span><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">1</span></div>
+        <div class="row" style="padding-left:22px"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-muted);width:20px;flex:none">18</span><span class="ell"><mark style="background:#ffe6a3;color:var(--ink-strong)">検索</mark>テスト用キーワード</span></div>
+        <div class="row" style="color:var(--ink-muted);font-weight:500"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">入れ子フォルダ/06_深い階層.md</span><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">1</span></div>
+        <div class="row" style="padding-left:22px"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-muted);width:20px;flex:none">4</span><span class="ell">ここにも<mark style="background:#ffe6a3;color:var(--ink-strong)">検索</mark>テスト用…</span></div>
+      </div>
+      <div style="flex:none;border-top:1px solid var(--rule);padding:6px 10px;font-size:11px;color:var(--ink-faint);line-height:1.6">上限：5000ファイル／1ファイル50件／全体500件</div>
+    </div>
+
+    <!-- 履歴 -->
+    <div class="panel" style="height:360px">
+      <div class="phead"><span style="flex-grow:1" class="plabel">History</span><span style="font-size:11px;color:var(--ink-faint);font-family:var(--mono)">max 30</span></div>
+      <div style="flex-grow:1;padding:4px;display:flex;flex-direction:column;gap:1px;overflow:hidden">
+        <div class="row sel"><svg class="i" style="color:var(--accent)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">01_行属性.md</span><span style="font-size:11px;color:var(--ink-faint)" class="ell">testdata</span></div>
+        <div class="row"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">04_縦書き.md</span><span style="font-size:11px;color:var(--ink-faint)" class="ell">testdata</span></div>
+        <div class="row"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">06_深い階層.md</span><span style="font-size:11px;color:var(--ink-faint)" class="ell">入れ子フォルダ</span></div>
+        <div class="row"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">要件定義.md</span><span style="font-size:11px;color:var(--ink-faint)" class="ell">10_Editor</span></div>
+        <div class="row"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">技術検証.md</span><span style="font-size:11px;color:var(--ink-faint)" class="ell">10_Editor</span></div>
+        <div class="row"><svg class="i" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">08_CRLFとBOM.md</span><span style="font-size:11px;color:var(--ink-faint)" class="ell">testdata</span></div>
+      </div>
+      <div style="flex:none;border-top:1px solid var(--rule);padding:6px 10px;font-size:11px;color:var(--ink-faint);line-height:1.6">新しい順・重複なし。親フォルダ名を右に添える</div>
+    </div>
+
+    <!-- アウトライン -->
+    <div class="panel" style="height:360px">
+      <div class="phead"><span style="flex-grow:1" class="plabel">Outline</span><span style="font-size:11px;color:var(--ink-faint)" class="ell">01_行属性.md</span></div>
+      <div style="flex-grow:1;padding:4px;display:flex;flex-direction:column;gap:1px;overflow:hidden">
+        <div class="row" style="font-size:13px;font-weight:700;color:var(--ink-strong)"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H1</span><span class="ell">行の属性</span></div>
+        <div class="row" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H2</span><span class="ell">箇条書き</span></div>
+        <div class="row sel" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--accent);width:16px;flex:none">H2</span><span class="ell">タスクリスト</span></div>
+        <div class="row" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H2</span><span class="ell">引用</span></div>
+        <div class="row" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H2</span><span class="ell">番号付きリスト</span></div>
+        <div class="row" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H2</span><span class="ell">コードブロック</span></div>
+        <div class="row" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H2</span><span class="ell">字下げされた行</span></div>
+        <div class="row" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H2</span><span class="ell">検索テスト用キーワード</span></div>
+        <div class="row" style="padding-left:16px;font-weight:500"><span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);width:16px;flex:none">H2</span><span class="ell">閉じていないフェンス</span></div>
+      </div>
+      <div style="flex:none;border-top:1px solid var(--rule);padding:6px 10px;font-size:11px;color:var(--ink-faint);line-height:1.6">フェンスの中の <span class="k" style="font-size:10px">#</span> は見出しでないので出ない</div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:24px;padding-top:4px">
+    <div style="flex:1;border-left:3px solid var(--accent);padding-left:14px"><div style="font-size:12px;font-weight:700;color:var(--ink-strong);margin-bottom:4px">レールにした理由</div><div class="cap">横タブは260pxの4等分＝62px。<b>「アウトライン」が入らない</b>のを語幅で逃げていた。レールなら5つ目が来ても壊れず、左ペインを閉じても<b>どのパネルにいたかが残る</b>（閉じるのは本体だけ）。</div></div>
+    <div style="flex:1;border-left:3px solid var(--accent);padding-left:14px"><div style="font-size:12px;font-weight:700;color:var(--ink-strong);margin-bottom:4px">6つのボタンをやめる</div><div class="cap">新規ファイル・新規フォルダー・名前変更・複製・削除・エクスプローラーが<b>常時60px</b>を占めていた。新規は見出しの <span class="k">+</span> へ、残りは<b>選択中の行の <span class="k">…</span> と右クリック</b>へ。ツリーが60px背が高くなる。</div></div>
+    <div style="flex:1;border-left:3px solid var(--alert);padding-left:14px"><div style="font-size:12px;font-weight:700;color:var(--ink-strong);margin-bottom:4px">未確認</div><div class="cap">Slint に<b>右クリックメニューの部品が無い</b>。質問オーバーレイと同じく自前で重ねることになる（6.18 の外なのは同じ理屈）。実装量が読めるまでは <span class="k">…</span> 側だけでも成立する形にしてある。</div></div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

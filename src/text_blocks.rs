@@ -56,6 +56,490 @@ pub enum FlowOrder {
     Descending,
 }
 
+/// Deepest Markdown heading level, and so the number of heading sizes a
+/// [`Typography`] carries.
+pub const MAX_HEADING_LEVEL: usize = 6;
+
+/// How the document is set: the base size, and the three quantities the
+/// requirement asks to be free — the advance between characters, the advance
+/// between lines, and the size of a heading.
+///
+/// Every field but `font_size` is a ratio, so one spec reads the same at any
+/// zoom. The engine holds a single spec for the whole document; the only thing
+/// that varies from line to line is the heading level, and that comes from the
+/// line itself rather than from anything before it.
+/// **Not `Copy`.** It carries the four font family names (要件 9), and a name
+/// is a string; everything that reads a spec takes it by reference anyway.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Typography {
+    /// Body size in pixels.
+    pub font_size: f32,
+    /// Extra advance per character along the line axis, as a fraction of that
+    /// character's own size. `0.0` leaves DirectWrite's own advance.
+    pub character_spacing: f32,
+    /// Multiplier on each line's own advance along the flow axis. `1.0` leaves
+    /// DirectWrite's own line height. A multiplier rather than a fixed pitch,
+    /// because a line that genuinely needs more room still has to get it (4.2).
+    pub line_spacing: f32,
+    /// Size multiplier per heading level, index 0 being level 1. Read as given:
+    /// nothing here assumes the sizes descend, or that they exceed body size.
+    pub heading_scale: [f32; MAX_HEADING_LEVEL],
+    /// The ink and the paper (要件 9), as sRGB channels from 0 to 1.
+    ///
+    /// **Kept here, in the module that knows nothing about Windows**, because
+    /// they are part of how the document is set: the same spec that decides how
+    /// large a heading is decides what colour it is drawn in. What turns them
+    /// into a Direct2D colour is the renderer's business.
+    ///
+    /// Both are this sheet's: a pane writing the other way has a paper of its
+    /// own (要件 9).
+    pub ink: [f32; 3],
+    pub paper: [f32; 3],
+    /// The families 要件 9 asks to be free.
+    ///
+    /// **One spec is one writing direction's** (要件 9, revised 2026-08-22), so
+    /// nothing here says which way the text runs: the vertical body font is the
+    /// `body_font` of the vertical sheet. A heading has a family of its own per
+    /// level, beside its own size and its own ink — what is being set is that
+    /// heading, and those are three sides of it.
+    ///
+    /// An empty name means "whatever DirectWrite would have chosen", which is
+    /// what a name nobody has set looks like.
+    pub body_font: String,
+    pub heading_font: [String; MAX_HEADING_LEVEL],
+    pub code_font: String,
+    /// The ink of each heading level, index 0 being H1 (要件 9).
+    ///
+    /// **A heading is a different colour as readily as it is a different
+    /// size**, and the two are the same kind of decision — so they are set the
+    /// same way, one value per level. A level set to the body's ink simply
+    /// looks like body text, which is what every level starts as.
+    pub heading_ink: [[f32; 3]; MAX_HEADING_LEVEL],
+}
+
+/// What the editor sets text in until the writer says otherwise (要件 9).
+///
+/// **The values the editor already used**, not the ones the design proposes —
+/// changing what is on screen is the writer's to do now that these are
+/// settings, and a default that moves under them is not an improvement.
+pub const DEFAULT_BODY_FONT: &str = "Yu Mincho";
+pub const DEFAULT_HEADING_FONT: &str = "Yu Mincho";
+/// Something the body font is not. Whatever it lacks — every Japanese glyph, in
+/// Consolas' case — DirectWrite falls back for, so this narrows the Latin and
+/// leaves the rest.
+pub const DEFAULT_CODE_FONT: &str = "Consolas";
+
+/// The ink `doc-ink` in `ui/tokens.slint`: the one colour in the app with no
+/// purple in it, because it is the one a reader looks at for an hour.
+pub const DEFAULT_INK: [f32; 3] = [36.0 / 255.0, 33.0 / 255.0, 30.0 / 255.0];
+/// `paper`, the horizontal sheet's.
+pub const DEFAULT_PAPER: [f32; 3] = [252.0 / 255.0, 249.0 / 255.0, 239.0 / 255.0];
+/// `paper-alt`, the vertical sheet's. **A shade deeper on purpose**: the two
+/// panes differ just enough to answer 「どちらの向きで書いているか」 without a
+/// word being read. It is a default now rather than a rule — each sheet has a
+/// paper of its own, and the writer may set them the same.
+pub const DEFAULT_VERTICAL_PAPER: [f32; 3] = [249.0 / 255.0, 244.0 / 255.0, 226.0 / 255.0];
+
+impl Default for Typography {
+    fn default() -> Self {
+        Self::new(16.0)
+    }
+}
+
+impl Typography {
+    /// DirectWrite's own metrics at this size: no added advance anywhere, and
+    /// headings set at body size.
+    pub fn new(font_size: f32) -> Self {
+        Self {
+            font_size: font_size.max(1.0),
+            character_spacing: 0.0,
+            line_spacing: 1.0,
+            heading_scale: [1.0; MAX_HEADING_LEVEL],
+            body_font: DEFAULT_BODY_FONT.to_owned(),
+            heading_font: [const { String::new() }; MAX_HEADING_LEVEL]
+                .map(|_| DEFAULT_HEADING_FONT.to_owned()),
+            code_font: DEFAULT_CODE_FONT.to_owned(),
+            ink: DEFAULT_INK,
+            paper: DEFAULT_PAPER,
+            heading_ink: [DEFAULT_INK; MAX_HEADING_LEVEL],
+        }
+    }
+
+    /// The family the body is set in, or the fallback when nobody has said.
+    pub fn body_family(&self) -> &str {
+        if self.body_font.is_empty() {
+            DEFAULT_BODY_FONT
+        } else {
+            &self.body_font
+        }
+    }
+
+    /// The family a line at this heading level is set in. Level 0 is body text,
+    /// and so is any level past the deepest one.
+    pub fn family_for(&self, heading_level: u8) -> &str {
+        if heading_level == 0 {
+            return self.body_family();
+        }
+        match self.heading_font.get(heading_level as usize - 1) {
+            Some(family) if !family.is_empty() => family,
+            _ => self.body_family(),
+        }
+    }
+
+    /// The ink a line at this heading level is drawn in. Level 0 is body text,
+    /// and so is any level past the deepest one.
+    pub fn ink_for(&self, heading_level: u8) -> [f32; 3] {
+        if heading_level == 0 {
+            return self.ink;
+        }
+        self.heading_ink
+            .get(heading_level as usize - 1)
+            .copied()
+            .unwrap_or(self.ink)
+    }
+
+    /// Headings running from `top` at level 1 down towards body size at the
+    /// deepest level.
+    ///
+    /// **Only the tests use this.** It was the one knob the panel had; 要件 9
+    /// asks for the six levels to be set individually, so the window now writes
+    /// all six and the engine reads them as given. An evenly spaced ramp is
+    /// still a useful thing for a test to say in one line, which is why it is
+    /// here and why it is not compiled into the program.
+    #[cfg(test)]
+    pub fn with_heading_ramp(mut self, top: f32) -> Self {
+        let steps = MAX_HEADING_LEVEL as f32;
+        for (index, scale) in self.heading_scale.iter_mut().enumerate() {
+            *scale = 1.0 + (top - 1.0) * (steps - index as f32) / steps;
+        }
+        self
+    }
+
+    /// The font size multiplier of a line at this heading level. Level 0 is body
+    /// text, and so is any level past the deepest one.
+    pub fn size_scale(&self, heading_level: u8) -> f32 {
+        if heading_level == 0 {
+            return 1.0;
+        }
+        self.heading_scale
+            .get(heading_level as usize - 1)
+            .copied()
+            .unwrap_or(1.0)
+            .max(0.1)
+    }
+
+    /// The flow-axis multiplier of a line at this heading level. Both the
+    /// line's own size and the line spacing stretch its advance.
+    pub fn flow_scale(&self, heading_level: u8) -> f32 {
+        self.size_scale(heading_level) * self.line_spacing.max(0.1)
+    }
+
+    /// The line-axis advance of one body character, spacing included.
+    pub fn cell_advance(&self) -> f32 {
+        (self.font_size * (1.0 + self.character_spacing)).max(1.0)
+    }
+
+    /// One step of indenting (要件 7.3.2).
+    ///
+    /// **The same two cells everywhere it is used**: the box standing over a
+    /// list marker, and each level a blockquote sets its block in by. A quoted
+    /// item and a plain one then begin under the same rule.
+    pub fn indent_step(&self) -> f32 {
+        (self.cell_advance() * 2.0).max(1.0)
+    }
+}
+
+/// How one logical line is set, beyond what its own characters say.
+///
+/// One value per logical line, and a block reads only its own slice — the same
+/// arrangement the heading level arrived in, widened rather than duplicated.
+///
+/// **Not every attribute here is decided by the line alone.** A heading is: the
+/// marker is in the line. Beginning a paragraph is not — it depends on the line
+/// before being blank. That is settled once, over the document, when the values
+/// are built (`document.rs`); by the time a block sees them they are per-line
+/// facts like any other, and the block still depends on nothing outside itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LineStyle {
+    /// Markdown heading level, 0 for body text.
+    pub heading_level: u8,
+    /// What the whole line is (要件 7.3.2).
+    pub kind: LineKind,
+    /// How many blockquote markers the line carries, 0 for a line that is not
+    /// quoted. **At most one for now**, because the preview takes one marker
+    /// off and no more; the field is a count so that deeper quoting is a
+    /// change to one rule rather than to the shape of this.
+    pub quote_depth: u8,
+}
+
+/// What a whole logical line is, beyond the size its heading marker asks for
+/// (要件 7.3.2).
+///
+/// **One kind per line rather than a set of flags**, which is what separates
+/// this from [`Marks`]: marks combine within a line, kinds do not. A line
+/// inside a fence is code even when it begins with `-`, and a rule holds
+/// nothing at all. What does combine — being quoted — is counted beside this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum LineKind {
+    #[default]
+    Body,
+    /// `-`, `*` or `+` followed by a space.
+    Bullet,
+    /// `1.` or `1)` followed by a space.
+    Ordered,
+    /// A bullet whose item begins with `[ ]` or `[x]`.
+    Task { done: bool },
+    /// `---`, `***` or `___` on a line of its own.
+    Rule,
+    /// The fence that opens or closes a code block.
+    Fence,
+    /// A line inside a fenced code block.
+    Code,
+}
+
+impl LineKind {
+    /// Whether the line is set in the code family, and shown exactly as it was
+    /// written.
+    ///
+    /// **The fence counts as code.** It is part of the block it delimits, and
+    /// setting it as body text would leave one proportional line at each end of
+    /// every code block.
+    pub fn is_code(self) -> bool {
+        matches!(self, Self::Fence | Self::Code)
+    }
+}
+
+/// How a stretch of text is marked, beyond the size its line is set at
+/// (要件 7.3.2).
+///
+/// **Four independent flags rather than one kind**, because they combine: the
+/// inside of `**太字の*ここだけ*斜体**` is both. Nothing here says anything about
+/// geometry — a marked stretch takes the space its glyphs take, and no line
+/// moves because of one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Marks {
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+    pub code: bool,
+}
+
+/// What is drawn in place of the marker a box stands over (要件 7.3.2).
+///
+/// **The box is the space and this is the ink.** The box hides the marker's own
+/// glyphs and reserves one width for every kind of marker, so `-`, `10.` and
+/// `- [x]` all set their text at the same indent (技術検証 4.12); what appears
+/// in that space is drawn in the tile pass, where the render target already is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Ornament {
+    /// A bullet, in place of `-`, `*` or `+`.
+    Bullet,
+    /// An empty checkbox, in place of `- [ ]`.
+    TaskOpen,
+    /// A ticked one, in place of `- [x]`.
+    TaskDone,
+    /// **The number the box stands over, drawn again.** A bullet may be
+    /// replaced by one glyph for every list in the document, but `10.` says
+    /// something `9.` does not, so what is drawn here is the boxed range's own
+    /// text.
+    Number,
+    /// **Nothing at all, in place of `---`.** This box is here to hide the
+    /// marks; the stroke drawn across them is a [`LineRun`], because it
+    /// crosses the whole page rather than sitting at the head of the line.
+    ///
+    /// A blockquote has no box of its own — its indent belongs to the block
+    /// (`BlockSpan::quote_depth`), and the preview takes its marker off.
+    Rule,
+}
+
+impl Ornament {
+    /// Whether anything is drawn inside the box, as against the box being
+    /// there only to hide what it covers.
+    ///
+    /// Asked before the hit test that finds where to draw, so a document of
+    /// rules never asks DirectWrite about a rectangle nothing goes into.
+    pub fn draws_ink(self) -> bool {
+        !matches!(self, Self::Rule)
+    }
+}
+
+/// The marker at the head of one logical line, and how wide it is
+/// (要件 7.3.2).
+///
+/// **Always at the head**: the preview takes the blockquote marker off, so a
+/// list marker begins the line whether or not it was quoted — and one level of
+/// quoting is the block's indent, not the marker's. The length is in UTF-16
+/// units of the line **as the preview shows it**, which is what a DirectWrite
+/// range is measured in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LineMarker {
+    pub utf16_len: u32,
+    pub ornament: Ornament,
+}
+
+impl Marks {
+    /// A stretch set in the code family and marked nothing else.
+    pub fn code() -> Self {
+        Self {
+            code: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// One marked stretch of one logical line (要件 7.3.2).
+///
+/// **Offsets into the line, not the document**, for the reason [`StyleRun`] is
+/// block-local: what a line's markers enclose depends on that line alone, so
+/// nothing about it is recomputed when something before it changes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Emphasis {
+    pub utf16_start: u32,
+    pub utf16_len: u32,
+    pub marks: Marks,
+}
+
+impl LineStyle {
+    /// **Only the tests build one this way.** Every line the editor sets comes
+    /// from `document::line_styles`, which decides the kind and the quoting
+    /// beside the level.
+    #[cfg(test)]
+    pub fn heading(level: u8) -> Self {
+        Self {
+            heading_level: level,
+            ..Self::default()
+        }
+    }
+
+    pub fn of_kind(kind: LineKind) -> Self {
+        Self {
+            kind,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the preview shows this line exactly as it was written, markers
+    /// and all — which is what a fenced block and a rule both mean
+    /// (要件 7.3.2).
+    ///
+    /// **A rule is literal for the same reason code is**: `***` is the line's
+    /// own marks, not emphasis wrapped around nothing, and letting the preview
+    /// read it as emphasis leaves one asterisk where three were written. The
+    /// box that hides a rule is measured on the line the preview shows, so the
+    /// two have to agree about how long that line is.
+    pub fn is_literal(&self) -> bool {
+        self.kind.is_code() || matches!(self.kind, LineKind::Rule)
+    }
+}
+
+/// A document together with the per-logical-line attributes its text does not
+/// carry.
+///
+/// The vertical pane lays out the *preview*, where heading markers have already
+/// been removed, so a block cannot tell from its own characters that it holds a
+/// heading. The levels travel alongside instead, one entry per logical line.
+/// Blocks only ever cut at logical line boundaries, so a block's entries are a
+/// contiguous slice of this one — the attributes stay as block-local as the text
+/// is, and nothing about them accumulates from the start of the document.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StyledText<'a> {
+    pub text: &'a str,
+    /// How each logical line is set. May be shorter than the text has lines; a
+    /// line past the end is plain body text.
+    pub lines: &'a [LineStyle],
+    /// What is marked inside each logical line (要件 7.3.2). Indexed the same
+    /// way as `lines`, and empty for text nobody has worked the markers out
+    /// for — the source panes, where the markers are still in the text and
+    /// nothing has been taken out to mark.
+    pub spans: &'a [Vec<Emphasis>],
+    /// The marker standing at the head of each logical line (要件 7.3.2).
+    /// Indexed the same way, and empty wherever `spans` is empty: a box hides
+    /// the marker's glyphs, so it belongs exactly where the preview is already
+    /// hiding things and nowhere else.
+    pub markers: &'a [Option<LineMarker>],
+}
+
+impl<'a> StyledText<'a> {
+    /// Text set as plain body throughout.
+    pub fn plain(text: &'a str) -> Self {
+        Self {
+            text,
+            lines: &[],
+            spans: &[],
+            markers: &[],
+        }
+    }
+
+    pub fn new(text: &'a str, lines: &'a [LineStyle]) -> Self {
+        Self {
+            text,
+            lines,
+            spans: &[],
+            markers: &[],
+        }
+    }
+
+    /// Text whose lines also carry what is marked inside them (要件 7.3.2).
+    pub fn marked(text: &'a str, lines: &'a [LineStyle], spans: &'a [Vec<Emphasis>]) -> Self {
+        Self {
+            text,
+            lines,
+            spans,
+            markers: &[],
+        }
+    }
+
+    /// And what stands at the head of each of them (要件 7.3.2).
+    ///
+    /// Separate from [`Self::marked`] because the two are decided in different
+    /// places, not because they travel apart: a pane that has one has the
+    /// other.
+    pub fn with_markers(mut self, markers: &'a [Option<LineMarker>]) -> Self {
+        self.markers = markers;
+        self
+    }
+
+    pub fn style_at(&self, line_index: usize) -> LineStyle {
+        self.lines.get(line_index).copied().unwrap_or_default()
+    }
+
+    pub fn level_at(&self, line_index: usize) -> u8 {
+        self.style_at(line_index).heading_level
+    }
+
+    /// What one logical line is (要件 7.3.2).
+    pub fn kind_at(&self, line_index: usize) -> LineKind {
+        self.style_at(line_index).kind
+    }
+
+    /// What is marked inside one logical line, and nothing for a line nobody
+    /// worked out.
+    pub fn marks_at(&self, line_index: usize) -> &'a [Emphasis] {
+        match self.spans.get(line_index) {
+            Some(spans) => spans.as_slice(),
+            None => &[],
+        }
+    }
+
+    /// The marker standing at the head of one logical line (要件 7.3.2).
+    pub fn marker_at(&self, line_index: usize) -> Option<LineMarker> {
+        self.markers.get(line_index).copied().flatten()
+    }
+
+    /// Whether this is what a preview pane shows, as against a source pane.
+    ///
+    /// **The markers are the signal**, and only a preview has any: on a source
+    /// pane the markers are the characters being edited (要件 7.3.1).
+    /// **Everything that stands in for markup follows this** — the boxes over
+    /// the head of a line, the indent a quote sets its block in, the bar beside
+    /// it and the stroke across a rule. Drawn on the source they would double
+    /// the very characters the writer is reading, and the indent would move the
+    /// markup itself.
+    pub fn is_preview(&self) -> bool {
+        !self.markers.is_empty()
+    }
+}
+
 // Block size is counted in cells of line space rather than in characters. Each
 // logical line is charged for the whole lines it occupies. A blank line is one
 // character and a whole line, so a character budget put no bound on how far a
@@ -103,6 +587,15 @@ pub struct BlockSpan {
     pub byte_end: usize,
     pub utf16_start: u32,
     pub utf16_end: u32,
+    /// How deeply the whole block is quoted, 0 for a block that is not
+    /// (要件 7.3.2).
+    ///
+    /// **A block, not a line.** The indent has to move every visual line a
+    /// quoted paragraph wrapped to, and the only thing that can do that is the
+    /// layout box the block is set in — DirectWrite has no per-paragraph
+    /// indent, and the box at the head of a line reaches the head only
+    /// (技術検証 7.1). That is why a change of quoting ends a block.
+    pub quote_depth: u8,
 }
 
 impl BlockSpan {
@@ -237,36 +730,115 @@ pub struct BlockLayoutPlan {
     pub order: FlowOrder,
 }
 
-/// How many characters fit in one line at this geometry.
+/// How many body characters fit in one line at this geometry.
 ///
 /// `line_extent` is the pane's size along the line axis: its height in vertical
 /// writing, its width in horizontal writing.
 ///
 /// The layout box is the pane less a margin at each end, and the margin is one
-/// and a half times the font size, so three font sizes come off the extent.
-pub fn cells_per_line(line_extent: u32, font_size: f32) -> u32 {
-    let font_size = font_size.max(1.0);
-    let usable = (line_extent as f32 - font_size * 3.0).max(font_size);
-    (usable / font_size).floor().max(1.0) as u32
+/// and a half times the font size, so three font sizes come off the extent. What
+/// divides into the rest is the *advance*, not the size, so widening the
+/// character spacing fits fewer characters in the same pane.
+pub fn cells_per_line(line_extent: u32, typography: &Typography) -> u32 {
+    let font_size = typography.font_size.max(1.0);
+    let advance = typography.cell_advance();
+    let usable = (line_extent as f32 - font_size * 3.0).max(advance);
+    (usable / advance).floor().max(1.0) as u32
 }
 
-/// Cut `text` into blocks at logical line boundaries.
+/// The flow space one logical line is charged, in cells of body line space.
 ///
-/// Every block ends immediately after a `\n` (or at the end of the text), so the
-/// lines DirectWrite produces for a block are identical to the ones it would
-/// produce for the same text inside a whole-document layout.
+/// A heading is charged twice over, and the two are different quantities. It
+/// fits fewer characters per line, so it wraps into more lines; and each of
+/// those lines advances further. Charging only for the second would let a page
+/// of headings quietly reach much further along the flow axis than a page of
+/// body text with the same block budget.
+fn line_cells(
+    characters: u32,
+    cells_per_line: u32,
+    typography: &Typography,
+    style: LineStyle,
+) -> u32 {
+    let level = style.heading_level;
+    let cells_per_line = cells_per_line.max(1);
+    let size_scale = typography.size_scale(level);
+    let fitting = (cells_per_line as f32 / size_scale).floor().max(1.0) as u32;
+    let wrapped = characters.div_ceil(fitting).max(1);
+    let charged = wrapped as f32 * cells_per_line as f32 * typography.flow_scale(level);
+    charged.ceil().clamp(1.0, u32::MAX as f32) as u32
+}
+
+/// Where a run of text wraps when it is laid out on its own.
 ///
-/// `cells_per_line` only decides where the cuts fall, so it may be an
-/// estimate: any cut at a line boundary is correct, and DirectWrite is still
-/// what actually wraps the text.
-pub fn split_blocks(text: &str, cells_per_line: u32) -> Vec<BlockSpan> {
+/// A block boundary must be a position where a line starts, or the block after
+/// it begins mid-line and every line in it is drawn in the wrong place. A hard
+/// break is always such a position, which is why the split could ignore this
+/// until now. Cutting *inside* a logical line needs the positions the layout
+/// engine chose, and only the layout engine knows them — they depend on the
+/// font, the geometry, and the line breaking rules for the script.
+///
+/// Consulted only for a logical line too long to be one block, so a document of
+/// ordinary paragraphs never calls it.
+pub trait WrapPoints {
+    /// Byte offsets in `text` where a visual line starts, increasing, excluding
+    /// 0 and the end of the text.
+    ///
+    /// Returning nothing means "do not cut this line", which is always safe:
+    /// the line becomes one oversized block, which is what it was before.
+    /// Implementations report a failure that way rather than by an error,
+    /// because a layout that cannot be built is a reason to leave the text
+    /// alone, not a reason to stop laying out the document.
+    ///
+    /// **The whole style, not just the heading level.** A cut position is only
+    /// a line start for a layout of the same width, and quoting narrows the
+    /// box the line is set in (要件 7.3.2) — asking at the pane's full width
+    /// would hand back positions the quoted block does not break at.
+    fn line_starts(&mut self, text: &str, style: LineStyle) -> Vec<usize>;
+}
+
+/// A [`WrapPoints`] that never cuts: the behaviour of the split before it could
+/// cut inside a line. Only the tests that are not about long paragraphs want
+/// this, so it is not built into the editor.
+#[cfg(test)]
+pub struct NeverWraps;
+
+#[cfg(test)]
+impl WrapPoints for NeverWraps {
+    fn line_starts(&mut self, _text: &str, _style: LineStyle) -> Vec<usize> {
+        Vec::new()
+    }
+}
+
+/// Cut `text` into blocks.
+///
+/// Blocks end immediately after a `\n` wherever they can, so the lines
+/// DirectWrite produces for a block are identical to the ones it would produce
+/// for the same text inside a whole-document layout. A logical line too long to
+/// be one block on its own is cut at the wrap positions `wraps` reports, which
+/// are line starts for the same reason a hard break is.
+///
+/// `cells_per_line` only decides where the cuts fall, so it may be an estimate:
+/// any cut at a line start is correct, and DirectWrite is still what actually
+/// wraps the text.
+pub fn split_blocks(
+    styled: StyledText<'_>,
+    cells_per_line: u32,
+    typography: &Typography,
+    wraps: &mut dyn WrapPoints,
+) -> Vec<BlockSpan> {
+    let text = styled.text;
+    // 要件 7.3.1: a source pane is not indented, for the reason it gets no
+    // boxes — the markers are its text.
+    let indents = styled.is_preview();
     let cells_per_line = cells_per_line.max(1);
     let mut blocks = Vec::new();
     let mut byte_cursor = 0;
     let mut utf16_cursor = 0_u32;
+    let mut line_index = 0_usize;
     let mut block_byte_start = 0;
     let mut block_utf16_start = 0_u32;
     let mut block_cells = 0_u32;
+    let mut block_quote_depth = 0_u8;
 
     while byte_cursor < text.len() {
         let line_end = match text[byte_cursor..].find('\n') {
@@ -279,9 +851,86 @@ pub fn split_blocks(text: &str, cells_per_line: u32) -> Vec<BlockSpan> {
         // rather than sliced off by length so the hash of the document's last
         // line does not change when something is appended after it.
         let body = line.trim_end_matches('\n');
-        let wrapped = body.encode_utf16().count() as u32;
-        // Charge for whole lines, so a blank line costs a line like any other.
-        let line_cells = wrapped.div_ceil(cells_per_line).max(1) * cells_per_line;
+        let characters = body.encode_utf16().count() as u32;
+        // Charge for whole lines, so a blank line costs a line like any other,
+        // and for the heading size, so a heading costs what it takes up.
+        let mut style = styled.style_at(line_index);
+        if !indents {
+            style.quote_depth = 0;
+        }
+        let line_cells = line_cells(characters, cells_per_line, typography, style);
+        line_index += 1;
+
+        // 要件 7.3.2: a block is set in one layout box, so a change of quoting
+        // ends one **whatever size it has reached**. The other two reasons to
+        // end a block are about how big it has grown; this one is about what it
+        // is, and a block holding both would have to be set at two widths at
+        // once. **Before the long-line branch below**, so the piece already
+        // gathered is closed under the depth it was gathered at.
+        if block_quote_depth != style.quote_depth {
+            if block_byte_start < byte_cursor {
+                blocks.push(BlockSpan {
+                    byte_start: block_byte_start,
+                    byte_end: byte_cursor,
+                    utf16_start: block_utf16_start,
+                    utf16_end: utf16_cursor,
+                    quote_depth: block_quote_depth,
+                });
+                block_byte_start = byte_cursor;
+                block_utf16_start = utf16_cursor;
+                block_cells = 0;
+            }
+            block_quote_depth = style.quote_depth;
+        }
+
+        // A line that fills a block on its own is cut inside itself. The block
+        // being accumulated is closed first, so the long line starts one of its
+        // own: a cut position inside it is a line start only for text that
+        // begins where the layout began.
+        if line_cells > BLOCK_MAX_CELLS {
+            if block_byte_start < byte_cursor {
+                blocks.push(BlockSpan {
+                    byte_start: block_byte_start,
+                    byte_end: byte_cursor,
+                    utf16_start: block_utf16_start,
+                    utf16_end: utf16_cursor,
+                    quote_depth: block_quote_depth,
+                });
+                block_byte_start = byte_cursor;
+                block_utf16_start = utf16_cursor;
+            }
+            let pieces = cut_long_line(body, cells_per_line, typography, style, wraps);
+            for piece_end in pieces {
+                let piece_end = byte_cursor + piece_end;
+                utf16_cursor += text[block_byte_start..piece_end].encode_utf16().count() as u32;
+                blocks.push(BlockSpan {
+                    byte_start: block_byte_start,
+                    byte_end: piece_end,
+                    utf16_start: block_utf16_start,
+                    utf16_end: utf16_cursor,
+                    quote_depth: block_quote_depth,
+                });
+                block_byte_start = piece_end;
+                block_utf16_start = utf16_cursor;
+            }
+            // Whatever is left of the line, plus its newline, closes as one
+            // block rather than being carried on: the tail of a long paragraph
+            // has nothing to do with the short lines that follow it.
+            utf16_cursor += text[block_byte_start..line_end].encode_utf16().count() as u32;
+            blocks.push(BlockSpan {
+                byte_start: block_byte_start,
+                byte_end: line_end,
+                utf16_start: block_utf16_start,
+                utf16_end: utf16_cursor,
+                quote_depth: block_quote_depth,
+            });
+            block_byte_start = line_end;
+            block_utf16_start = utf16_cursor;
+            block_cells = 0;
+            byte_cursor = line_end;
+            continue;
+        }
+
         block_cells += line_cells;
         utf16_cursor += line_units;
         byte_cursor = line_end;
@@ -294,6 +943,7 @@ pub fn split_blocks(text: &str, cells_per_line: u32) -> Vec<BlockSpan> {
                 byte_end: byte_cursor,
                 utf16_start: block_utf16_start,
                 utf16_end: utf16_cursor,
+                quote_depth: block_quote_depth,
             });
             block_byte_start = byte_cursor;
             block_utf16_start = utf16_cursor;
@@ -307,10 +957,43 @@ pub fn split_blocks(text: &str, cells_per_line: u32) -> Vec<BlockSpan> {
             byte_end: text.len(),
             utf16_start: block_utf16_start,
             utf16_end: utf16_cursor,
+            quote_depth: block_quote_depth,
         });
     }
 
     blocks
+}
+
+/// Byte offsets inside `body` where the long line should be cut, relative to its
+/// own start, in increasing order and never including its end.
+///
+/// The cuts are every `n`th wrap position, `n` chosen so a piece holds about a
+/// full block. Every position comes from `wraps`, so every one of them is a line
+/// start; choosing which of them to use is all this decides.
+///
+/// Unlike the boundaries between logical lines (see [`ends_a_block`]), these are
+/// **not content-defined and do move when the text changes**. They cannot be
+/// anything else: a wrap position is a property of the layout, and an edit early
+/// in a paragraph moves every wrap position after it whatever rule picks among
+/// them. What does hold is that the wrap positions *before* an edit do not move,
+/// so the pieces before it keep their text and their measurements.
+fn cut_long_line(
+    body: &str,
+    cells_per_line: u32,
+    typography: &Typography,
+    style: LineStyle,
+    wraps: &mut dyn WrapPoints,
+) -> Vec<usize> {
+    let scale = typography.flow_scale(style.heading_level);
+    let per_visual_line = (cells_per_line as f32 * scale).max(1.0);
+    let lines_per_piece = (BLOCK_MAX_CELLS as f32 / per_visual_line).floor().max(1.0) as usize;
+    wraps
+        .line_starts(body, style)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, offset)| (index + 1) % lines_per_piece == 0 && *offset < body.len())
+        .map(|(_, offset)| offset)
+        .collect()
 }
 
 /// Place measured blocks end to end. Block 0 holds the first text, so it sits at
@@ -645,15 +1328,185 @@ pub fn visible_flow_range(viewport_flow: f32, visible_flow: f32, total_flow: f32
 /// Overshooting is safe: it only leaves unused space past the end of the block's
 /// own layout box, which `content_flow_start` accounts for. Undershooting would
 /// make DirectWrite clip lines, so the bound is deliberately generous.
-pub fn block_flow_bound(text: &str, line_extent: u32, font_size: f32) -> f32 {
-    let font_size = font_size.max(1.0);
-    let cells = cells_per_line(line_extent, font_size) as usize;
-    let lines = text
+///
+/// `styled` is the block's own text and its own slice of heading levels, so the
+/// bound grows with the sizes actually set in this block. A bound taken from the
+/// body size alone clips the moment a heading is larger than `2.2` body sizes.
+pub fn block_flow_bound(styled: StyledText<'_>, line_extent: u32, typography: &Typography) -> f32 {
+    let font_size = typography.font_size.max(1.0);
+    let cells = cells_per_line(line_extent, typography);
+    let flow = styled
+        .text
         .split('\n')
-        .map(|line| line.chars().count().div_ceil(cells).max(1))
-        .sum::<usize>()
-        .max(1);
-    (lines as f32 * font_size * 2.2 + font_size * 4.0).ceil()
+        .enumerate()
+        .map(|(index, line)| {
+            let style = styled.style_at(index);
+            let characters = line.encode_utf16().count() as u32;
+            let charged = line_cells(characters, cells, typography, style);
+            charged as f32 / cells as f32
+        })
+        .sum::<f32>()
+        .max(1.0);
+    (flow * font_size * 2.2 + font_size * 4.0 * typography.line_spacing.max(1.0)).ceil()
+}
+
+/// One stretch of a block that is set at a size of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StyleRun {
+    /// UTF-16 offset **relative to the block**, which is what DirectWrite text
+    /// ranges are relative to and what keeps this independent of everything
+    /// before the block.
+    pub utf16_start: u32,
+    pub utf16_len: u32,
+    pub heading_level: u8,
+    /// What is marked over this range (要件 7.3.2), nothing for a heading run.
+    pub marks: Marks,
+    /// Set when a box stands over this range instead of its glyphs being drawn
+    /// (要件 7.3.2). **Kept in the same list rather than a second one** so the
+    /// ranges a block hands DirectWrite stay one list with one cache key: a
+    /// block whose boxes differ is not the same layout, and a separate list
+    /// would have to be threaded through every key beside this one.
+    pub ornament: Option<Ornament>,
+}
+
+/// What is drawn over a whole logical line rather than over a stretch of its
+/// characters (要件 7.3.2).
+///
+/// **The other half of [`Ornament`].** A marker's ink goes in the box standing
+/// at the head of one line and is measured in characters; these run the whole
+/// length of the line, wrapped continuations and all, and are measured in
+/// lines. Neither changes any geometry — a line marked this way takes exactly
+/// the room it took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LineOrnament {
+    /// The bar standing beside a blockquote, one per level of quoting.
+    Quote { depth: u8 },
+    /// The stroke a `---` line is set as.
+    Rule,
+}
+
+/// One whole logical line of a block, and what is drawn over it (要件 7.3.2).
+///
+/// The range is the line's own text without its break, block-local for the
+/// reason [`StyleRun`]'s is. **The drawing side finds the line's rectangle by
+/// where each visual line starts**, rather than by counting: how many visual
+/// lines a logical line became is a property of the layout, and only their
+/// text says which logical line they came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LineRun {
+    pub utf16_start: u32,
+    pub utf16_len: u32,
+    pub ornament: LineOrnament,
+}
+
+/// The block-local whole-line ornaments.
+///
+/// Undecorated lines are left out, so a document with no quotes and no rules
+/// costs nothing here and nothing in the tile pass.
+pub fn line_runs(styled: StyledText<'_>) -> Vec<LineRun> {
+    // 要件 7.3.1: a source pane shows `>` and `---` themselves, so a bar beside
+    // one and a stroke across the other would say the same thing twice — and
+    // the stroke would be drawn straight over the marks it stands for.
+    if !styled.is_preview() {
+        return Vec::new();
+    }
+    let mut runs = Vec::new();
+    let mut utf16_start = 0_u32;
+    for (index, line) in styled.text.split('\n').enumerate() {
+        let utf16_len = line.encode_utf16().count() as u32;
+        let style = styled.style_at(index);
+        // **The two are not exclusive.** `> ---` is a rule inside a quote and
+        // carries both marks, the way `quote_depth` sits beside `kind` rather
+        // than inside it.
+        if style.quote_depth > 0 {
+            runs.push(LineRun {
+                utf16_start,
+                utf16_len,
+                ornament: LineOrnament::Quote {
+                    depth: style.quote_depth,
+                },
+            });
+        }
+        if matches!(style.kind, LineKind::Rule) {
+            runs.push(LineRun {
+                utf16_start,
+                utf16_len,
+                ornament: LineOrnament::Rule,
+            });
+        }
+        // Past the newline this split consumed.
+        utf16_start += utf16_len + 1;
+    }
+    runs
+}
+
+/// The block-local ranges that are not body text.
+///
+/// Body lines are left out, so a document with no headings costs nothing to
+/// format. The trailing newline is left out of every run: a line's advance is
+/// the tallest thing on it, so the break itself never needs the heading size,
+/// and leaving it at body size keeps the empty line a block gives up (see
+/// `measure_block`) the size it has always been.
+pub fn style_runs(styled: StyledText<'_>) -> Vec<StyleRun> {
+    let mut runs = Vec::new();
+    let mut utf16_start = 0_u32;
+    for (index, line) in styled.text.split('\n').enumerate() {
+        let utf16_len = line.encode_utf16().count() as u32;
+        let heading_level = styled.level_at(index);
+        let kind = styled.kind_at(index);
+        // 要件 7.3.2: the box standing at the head of the line. First, because
+        // that is where it sits; nothing else on the line overlaps it, so the
+        // order only has to read well.
+        if let Some(marker) = styled.marker_at(index)
+            && marker.utf16_len <= utf16_len
+        {
+            runs.push(StyleRun {
+                utf16_start,
+                utf16_len: marker.utf16_len,
+                heading_level: 0,
+                marks: Marks::default(),
+                ornament: Some(marker.ornament),
+            });
+        }
+        if heading_level > 0 && utf16_len > 0 {
+            runs.push(StyleRun {
+                utf16_start,
+                utf16_len,
+                heading_level,
+                marks: Marks::default(),
+                ornament: None,
+            });
+        }
+        // 要件 7.3.2: a fenced line is set in the code family from end to end.
+        // **The same range attribute an inline code span already uses**, so
+        // nothing about the line's geometry moves — a code block costs what the
+        // same text costs as a paragraph.
+        if kind.is_code() && utf16_len > 0 {
+            runs.push(StyleRun {
+                utf16_start,
+                utf16_len,
+                heading_level: 0,
+                marks: Marks::code(),
+                ornament: None,
+            });
+        }
+        // 要件 7.3.2: the marked stretches inside the line. **Each carries its
+        // line's heading level**, because a run says everything about the range
+        // it covers — one that left the level at 0 would set the bold part of a
+        // heading back to body size.
+        for emphasis in styled.marks_at(index) {
+            runs.push(StyleRun {
+                utf16_start: utf16_start + emphasis.utf16_start,
+                utf16_len: emphasis.utf16_len,
+                heading_level,
+                marks: emphasis.marks,
+                ornament: None,
+            });
+        }
+        // Past the newline this split consumed.
+        utf16_start += utf16_len + 1;
+    }
+    runs
 }
 
 #[cfg(test)]
@@ -663,12 +1516,28 @@ mod tests {
     /// Cells per line at the default pane extent and font size.
     const CELLS: u32 = 20;
 
+    /// The body-only spec every test that is not about typography uses.
+    fn plain_typography() -> Typography {
+        Typography::new(22.0)
+    }
+
+    /// Split with no styling and no cutting inside a line, which is what every
+    /// test that is not about long paragraphs wants.
+    fn split(text: &str) -> Vec<BlockSpan> {
+        split_with(StyledText::plain(text), &plain_typography())
+    }
+
+    fn split_with(styled: StyledText<'_>, typography: &Typography) -> Vec<BlockSpan> {
+        split_blocks(styled, CELLS, typography, &mut NeverWraps)
+    }
+
     fn span(text: &str, byte_start: usize, byte_end: usize) -> BlockSpan {
         BlockSpan {
             byte_start,
             byte_end,
             utf16_start: text[..byte_start].encode_utf16().count() as u32,
             utf16_end: text[..byte_end].encode_utf16().count() as u32,
+            quote_depth: 0,
         }
     }
 
@@ -708,7 +1577,7 @@ mod tests {
         let line = format!("{}\n", "あ".repeat(100));
         let text = line.repeat(20);
 
-        let blocks = split_blocks(&text, CELLS);
+        let blocks = split(&text);
 
         assert!(blocks.len() > 1, "a long document must produce many blocks");
         for block in &blocks {
@@ -724,7 +1593,7 @@ mod tests {
     #[test]
     fn covers_the_document_without_gaps_or_overlap() {
         let text = "一行目\n\n三行目です\n四行目\n";
-        let blocks = split_blocks(text, CELLS);
+        let blocks = split(text);
 
         let mut byte_cursor = 0;
         let mut utf16_cursor = 0;
@@ -738,10 +1607,201 @@ mod tests {
         assert_eq!(utf16_cursor, text.encode_utf16().count() as u32);
     }
 
+    /// A stand-in for DirectWrite: wraps every `cells` characters, which is what
+    /// a line of uniform ideographs does.
+    struct EveryNCharacters(usize);
+
+    impl WrapPoints for EveryNCharacters {
+        fn line_starts(&mut self, text: &str, _style: LineStyle) -> Vec<usize> {
+            text.char_indices()
+                .enumerate()
+                .filter(|(index, _)| *index > 0 && index % self.0 == 0)
+                .map(|(_, (offset, _))| offset)
+                .collect()
+        }
+    }
+
+    /// Split with a stand-in [`WrapPoints`] that breaks every `CELLS` characters.
+    fn split_wrapped(text: &str) -> Vec<BlockSpan> {
+        split_blocks(
+            StyledText::plain(text),
+            CELLS,
+            &plain_typography(),
+            &mut EveryNCharacters(CELLS as usize),
+        )
+    }
+
+    /// **A change of quoting ends a block whatever size it has reached**
+    /// (要件 7.3.2). A block is set in one layout box and its indent is part of
+    /// that box, so one holding both quoted and plain lines would have to be
+    /// set at two widths at once.
+    #[test]
+    fn a_change_of_quoting_ends_a_block() {
+        let text = "本文\n> 引用\n> まだ引用\n本文へ戻る\n";
+        let quoted = LineStyle {
+            quote_depth: 1,
+            ..LineStyle::default()
+        };
+        let plain = LineStyle::default();
+        let levels = [plain, quoted, quoted, plain, plain];
+        // A preview pane's text, which is the only one that indents (要件 7.3.1).
+        let markers = [None; 5];
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+
+        let blocks = split_with(styled, &plain_typography());
+
+        let depths = blocks
+            .iter()
+            .map(|block| block.quote_depth)
+            .collect::<Vec<u8>>();
+        let ends = blocks
+            .iter()
+            .map(|block| block.byte_end)
+            .collect::<Vec<usize>>();
+        assert_eq!(depths, vec![0, 1, 0]);
+        // The source pane shows the `>` itself, so nothing about it indents and
+        // nothing about it ends a block.
+        let source = split_with(StyledText::new(text, &levels), &plain_typography());
+        assert_eq!(source.len(), 1);
+        assert_eq!(source[0].quote_depth, 0);
+        // The boundaries fall where the quoting changes and nowhere else: these
+        // lines are far too short to end a block on their own.
+        assert_eq!(
+            ends,
+            vec![
+                "本文\n".len(),
+                "本文\n> 引用\n> まだ引用\n".len(),
+                text.len(),
+            ]
+        );
+    }
+
+    /// A cut position is a line start only for a layout of the same width, so a
+    /// quoted paragraph has to be **asked about at its own width** (要件 7.3.2).
+    /// What goes through is the whole style, not just the heading level.
+    #[test]
+    fn a_long_line_is_asked_about_under_its_own_style() {
+        struct Records(Vec<LineStyle>);
+
+        impl WrapPoints for Records {
+            fn line_starts(&mut self, _text: &str, style: LineStyle) -> Vec<usize> {
+                self.0.push(style);
+                Vec::new()
+            }
+        }
+
+        let text = format!("{}\n", "あ".repeat(CELLS as usize * 200));
+        let quoted = LineStyle {
+            quote_depth: 1,
+            ..LineStyle::default()
+        };
+        let levels = [quoted, LineStyle::default()];
+        let markers = [None; 2];
+        let mut asked = Records(Vec::new());
+
+        split_blocks(
+            StyledText::new(&text, &levels).with_markers(&markers),
+            CELLS,
+            &plain_typography(),
+            &mut asked,
+        );
+
+        assert_eq!(asked.0, vec![quoted]);
+    }
+
+    /// The point of cutting inside a line: a paragraph with no break in it must
+    /// stop being one unbounded block.
+    #[test]
+    fn cuts_a_long_logical_line_at_wrap_positions() {
+        let text = format!("{}\n", "あ".repeat(CELLS as usize * 200));
+
+        let uncut = split(&text);
+        let cut = split_wrapped(&text);
+
+        assert_eq!(uncut.len(), 1, "one line was one block before");
+        assert!(cut.len() > 4, "{} pieces is not a split", cut.len());
+
+        // Every cut lands on a position `WrapPoints` reported, so every piece
+        // starts where a line starts. That is the whole correctness argument.
+        let body = text.trim_end_matches('\n');
+        let stub = LineStyle::default();
+        let wraps = EveryNCharacters(CELLS as usize).line_starts(body, stub);
+        for piece in &cut[..cut.len() - 1] {
+            assert!(
+                wraps.contains(&piece.byte_end),
+                "a piece ended at byte {}, which is not a wrap position",
+                piece.byte_end
+            );
+        }
+    }
+
+    /// Cutting must not change what the blocks cover, in either unit. The UTF-16
+    /// running total is kept by hand down this path, so an error here would be
+    /// silent everywhere else and would put every caret position off by the
+    /// drift.
+    #[test]
+    fn a_cut_line_is_still_covered_exactly_once() {
+        let long = "日本語ABCあいう".repeat(CELLS as usize * 20);
+        let text = format!("短い行\n{long}\n最後の行\n");
+
+        let blocks = split_wrapped(&text);
+
+        let mut byte_cursor = 0;
+        let mut utf16_cursor = 0;
+        for block in &blocks {
+            assert_eq!(block.byte_start, byte_cursor, "a byte gap or overlap");
+            assert_eq!(block.utf16_start, utf16_cursor, "a UTF-16 gap or overlap");
+            assert!(text.is_char_boundary(block.byte_start));
+            let bytes = &text[block.byte_start..block.byte_end];
+            assert_eq!(
+                block.utf16_len(),
+                bytes.encode_utf16().count() as u32,
+                "a block's UTF-16 length does not match its bytes"
+            );
+            byte_cursor = block.byte_end;
+            utf16_cursor = block.utf16_end;
+        }
+        assert_eq!(byte_cursor, text.len());
+        assert_eq!(utf16_cursor, text.encode_utf16().count() as u32);
+    }
+
+    /// The asymmetry the whole approach rests on (6.9). Wrap positions before an
+    /// edit cannot move, so the pieces before it keep their text — and a block
+    /// that keeps its text keeps its measurement.
+    ///
+    /// Nothing makes these boundaries content-defined the way the boundaries
+    /// between logical lines are (4.5); they move because the wrapping moves.
+    /// What this asks is only that they move *after* the edit and not before it.
+    #[test]
+    fn an_edit_late_in_a_long_line_leaves_the_earlier_pieces_alone() {
+        let paragraph = "日本語ABCあいうえお".repeat(CELLS as usize * 20);
+        let text = format!("{paragraph}\n");
+        let ninth = paragraph.chars().count() * 9 / 10;
+        let cut = text.char_indices().nth(ninth).expect("long enough").0;
+        let edited = format!("{}編集{}", &text[..cut], &text[cut..]);
+
+        let before = split_wrapped(&text);
+        let after = split_wrapped(&edited);
+
+        let same = |b: &BlockSpan, a: &BlockSpan| {
+            text[b.byte_start..b.byte_end] == edited[a.byte_start..a.byte_end]
+        };
+        let kept = before
+            .iter()
+            .zip(&after)
+            .take_while(|(b, a)| same(b, a))
+            .count();
+        assert!(
+            kept * 2 > before.len(),
+            "only {kept} of {} pieces survived an edit in the last tenth",
+            before.len()
+        );
+    }
+
     #[test]
     fn keeps_an_oversized_logical_line_in_one_block() {
         let text = format!("{}\n短い行\n", "あ".repeat(BLOCK_MAX_CELLS as usize * 3));
-        let blocks = split_blocks(&text, CELLS);
+        let blocks = split(&text);
 
         let long_line_end = "あ".repeat(BLOCK_MAX_CELLS as usize * 3).len() + 1;
         assert_eq!(blocks[0].byte_start, 0);
@@ -776,7 +1836,7 @@ mod tests {
                 * CELLS
         };
 
-        let blocks = split_blocks(&text, CELLS);
+        let blocks = split(&text);
 
         let document: u32 = text.split_inclusive('\n').map(cells).sum();
         assert!(
@@ -822,7 +1882,7 @@ mod tests {
                 )
             })
             .collect::<String>();
-        let before = split_blocks(&text, CELLS);
+        let before = split(&text);
         assert!(before.len() > 8, "the sample must span many blocks");
 
         let line_starts = std::iter::once(0)
@@ -830,7 +1890,7 @@ mod tests {
             .filter(|&index| index < text.len());
         for cut in line_starts.step_by(3) {
             let edited = format!("{}\n{}", &text[..cut], &text[cut..]);
-            let after = split_blocks(&edited, CELLS);
+            let after = split(&edited);
 
             let rewritten = (0..before.len().min(after.len()))
                 .filter(|&index| {
@@ -849,10 +1909,352 @@ mod tests {
 
     #[test]
     fn produces_one_block_for_empty_text() {
-        let blocks = split_blocks("", CELLS);
+        let blocks = split("");
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].utf16_end, 0);
+    }
+
+    /// The advance is what divides into the pane, not the size, so asking for
+    /// half a size of air between characters must cost a third of the line.
+    #[test]
+    fn a_wider_character_advance_fits_fewer_characters_in_a_line() {
+        let plain = plain_typography();
+        let spaced = Typography {
+            character_spacing: 0.5,
+            ..plain.clone()
+        };
+
+        let tight = cells_per_line(600, &plain);
+        let loose = cells_per_line(600, &spaced);
+
+        assert!(
+            loose * 3 <= tight * 2 + 1,
+            "{tight} cells became {loose} at half a size of extra advance"
+        );
+    }
+
+    /// A heading is charged twice: it fits fewer characters per line, and each
+    /// of those lines advances further. Both have to be in the charge, or a page
+    /// of headings reaches much further along the flow axis than the block
+    /// budget says it does.
+    #[test]
+    fn a_heading_is_charged_for_the_space_it_takes() {
+        let typography = plain_typography().with_heading_ramp(2.0);
+        let text = format!("{}\n", "あ".repeat(CELLS as usize)).repeat(40);
+        let levels = vec![LineStyle::heading(1); 40];
+
+        let body = split_with(StyledText::plain(&text), &typography);
+        let heading = split_with(StyledText::new(&text, &levels), &typography);
+
+        assert!(
+            heading.len() > body.len(),
+            "the same 40 lines fell into {} blocks as headings and {} as body",
+            heading.len(),
+            body.len()
+        );
+    }
+
+    /// Undershooting this bound makes DirectWrite clip lines, and a heading is
+    /// the case where a bound taken from the body size alone does undershoot.
+    #[test]
+    fn the_flow_bound_grows_with_the_heading_size() {
+        let typography = plain_typography().with_heading_ramp(2.4);
+        let text = "見出し\n見出し\n見出し\n";
+        let levels = [LineStyle::heading(1); 3];
+
+        let body = block_flow_bound(StyledText::plain(text), 520, &typography);
+        let heading = block_flow_bound(StyledText::new(text, &levels), 520, &typography);
+
+        // Not 2.4 times: the bound carries a fixed slack term that does not
+        // scale, which is exactly the safety this test is protecting.
+        assert!(
+            heading >= body * 1.5,
+            "a bound of {body} for body text only grew to {heading} at 2.4 times the size"
+        );
+    }
+
+    /// Line spacing stretches every line, so the bound has to stretch with it.
+    #[test]
+    fn the_flow_bound_grows_with_the_line_spacing() {
+        let plain = plain_typography();
+        let airy = Typography {
+            line_spacing: 2.0,
+            ..plain.clone()
+        };
+        let text = "本文の行\n本文の行\n本文の行\n";
+
+        let tight = block_flow_bound(StyledText::plain(text), 520, &plain);
+        let loose = block_flow_bound(StyledText::plain(text), 520, &airy);
+
+        assert!(loose >= tight * 1.8, "{tight} only grew to {loose}");
+    }
+
+    /// The ranges DirectWrite is given are relative to the block, and stop
+    /// before the break, so nothing about them depends on where the block sits.
+    #[test]
+    fn style_runs_are_block_local_and_stop_before_the_break() {
+        let text = "見出し\n本文です\n## 深い見出し\n";
+        let levels = [
+            LineStyle::heading(1),
+            LineStyle::default(),
+            LineStyle::heading(2),
+        ];
+
+        let runs = style_runs(StyledText::new(text, &levels));
+
+        assert_eq!(
+            runs,
+            vec![
+                StyleRun {
+                    utf16_start: 0,
+                    utf16_len: 3,
+                    heading_level: 1,
+                    marks: Marks::default(),
+                    ornament: None,
+                },
+                StyleRun {
+                    utf16_start: "見出し\n本文です\n".encode_utf16().count() as u32,
+                    utf16_len: "## 深い見出し".encode_utf16().count() as u32,
+                    heading_level: 2,
+                    marks: Marks::default(),
+                    ornament: None,
+                },
+            ]
+        );
+    }
+
+    /// A fenced line is one run in the code family from end to end
+    /// (要件 7.3.2), and the fences themselves are part of the block they
+    /// delimit — a proportional line at each end would be the only thing in a
+    /// code block that was not code.
+    #[test]
+    fn every_line_of_a_fenced_block_is_one_code_run() {
+        let text = "```\nlet x = 1;\n```\n本文";
+        let levels = [
+            LineStyle::of_kind(LineKind::Fence),
+            LineStyle::of_kind(LineKind::Code),
+            LineStyle::of_kind(LineKind::Fence),
+            LineStyle::default(),
+        ];
+
+        let runs = style_runs(StyledText::new(text, &levels));
+
+        let ranges = runs
+            .iter()
+            .map(|run| (run.utf16_start, run.utf16_len))
+            .collect::<Vec<(u32, u32)>>();
+        assert_eq!(ranges, vec![(0, 3), (4, 10), (15, 3)]);
+        assert!(runs.iter().all(|run| run.marks == Marks::code()));
+        // The body line asks for nothing, so a document with no code block in
+        // it costs what it always did.
+        assert_eq!(runs.len(), 3);
+    }
+
+    /// The box at the head of a line is a run like any other, placed by where
+    /// its line begins in the block (要件 7.3.2). **It sets no font**: what it
+    /// stands over is hidden, and the ink is drawn in the tile pass.
+    #[test]
+    fn a_box_is_a_run_covering_the_head_of_its_line() {
+        let text = "見出し\n- 箇条書き\n1. 番号";
+        let levels = [
+            LineStyle::heading(1),
+            LineStyle::of_kind(LineKind::Bullet),
+            LineStyle::of_kind(LineKind::Ordered),
+        ];
+        let bullet = LineMarker {
+            utf16_len: 2,
+            ornament: Ornament::Bullet,
+        };
+        let number = LineMarker {
+            utf16_len: 3,
+            ornament: Ornament::Number,
+        };
+        let markers = [None, Some(bullet), Some(number)];
+
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+        let boxes = style_runs(styled)
+            .into_iter()
+            .filter(|run| run.ornament.is_some())
+            .collect::<Vec<StyleRun>>();
+
+        let after = |shown: &str| shown.encode_utf16().count() as u32;
+        let placed = boxes
+            .iter()
+            .map(|run| (run.utf16_start, run.utf16_len, run.ornament))
+            .collect::<Vec<(u32, u32, Option<Ornament>)>>();
+        assert_eq!(
+            placed,
+            vec![
+                (after("見出し\n"), 2, Some(Ornament::Bullet)),
+                (after("見出し\n- 箇条書き\n"), 3, Some(Ornament::Number)),
+            ]
+        );
+        // A box says nothing about the font its range would have been set in.
+        assert!(boxes.iter().all(|run| run.marks == Marks::default()));
+        assert!(boxes.iter().all(|run| run.heading_level == 0));
+    }
+
+    /// A source pane hands over no markers and gets no boxes. **The markers are
+    /// the text there**, and a box hides the glyphs it stands over, so one set
+    /// on a source pane would hide what is being edited.
+    #[test]
+    fn text_with_no_markers_asks_for_no_boxes() {
+        let text = "- 箇条書き";
+        let levels = [LineStyle::of_kind(LineKind::Bullet)];
+
+        let runs = style_runs(StyledText::new(text, &levels));
+        assert!(runs.iter().all(|run| run.ornament.is_none()));
+    }
+
+    /// A quote and a rule are marks on the **whole line** rather than on a
+    /// stretch of its characters (要件 7.3.2), so each comes back as a run of
+    /// its own, covering its line's text without the break.
+    #[test]
+    fn a_quote_and_a_rule_are_marks_on_whole_lines() {
+        let text = "引用\n本文\n---";
+        let levels = [
+            LineStyle {
+                quote_depth: 1,
+                ..LineStyle::default()
+            },
+            LineStyle::default(),
+            LineStyle::of_kind(LineKind::Rule),
+        ];
+
+        let markers = [None; 3];
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+
+        let runs = line_runs(styled);
+
+        let after = |shown: &str| shown.encode_utf16().count() as u32;
+        assert_eq!(
+            runs,
+            vec![
+                LineRun {
+                    utf16_start: 0,
+                    utf16_len: after("引用"),
+                    ornament: LineOrnament::Quote { depth: 1 },
+                },
+                LineRun {
+                    utf16_start: after("引用\n本文\n"),
+                    utf16_len: after("---"),
+                    ornament: LineOrnament::Rule,
+                },
+            ]
+        );
+    }
+
+    /// **The two are not exclusive.** `> ---` is a rule inside a quote and
+    /// carries both marks, the way `quote_depth` sits beside `kind` rather than
+    /// inside it.
+    #[test]
+    fn a_quoted_rule_carries_both_marks() {
+        let quoted_rule = LineStyle {
+            kind: LineKind::Rule,
+            quote_depth: 1,
+            ..LineStyle::default()
+        };
+        let levels = [quoted_rule];
+        let markers = [None; 1];
+        let styled = StyledText::new("---", &levels).with_markers(&markers);
+
+        let runs = line_runs(styled);
+
+        let ornaments = runs
+            .iter()
+            .map(|run| run.ornament)
+            .collect::<Vec<LineOrnament>>();
+        assert_eq!(
+            ornaments,
+            vec![LineOrnament::Quote { depth: 1 }, LineOrnament::Rule]
+        );
+    }
+
+    /// A document with neither asks for nothing, so nothing is drawn and
+    /// nothing goes into the tile's fingerprint.
+    #[test]
+    fn plain_text_asks_for_no_whole_line_marks() {
+        let levels = [LineStyle::heading(1), LineStyle::default()];
+        let markers = [None; 2];
+        let styled = StyledText::new("見出し\n本文", &levels).with_markers(&markers);
+
+        let runs = line_runs(styled);
+
+        assert!(runs.is_empty());
+    }
+
+    /// **And a source pane asks for nothing whatever it holds** (要件 7.3.1).
+    /// It shows the `>` and the `---` themselves, so a bar beside one and a
+    /// stroke across the other would say the same thing twice — and the stroke
+    /// would be drawn straight over the marks it stands for.
+    #[test]
+    fn a_source_pane_asks_for_no_whole_line_marks() {
+        let levels = [
+            LineStyle {
+                quote_depth: 1,
+                ..LineStyle::default()
+            },
+            LineStyle::of_kind(LineKind::Rule),
+        ];
+
+        let runs = line_runs(StyledText::new("引用\n---", &levels));
+
+        assert!(runs.is_empty());
+    }
+
+    /// A marked stretch becomes a run of its own, offset by where its line
+    /// begins in the block, and it keeps the line's heading size (要件 7.3.2).
+    #[test]
+    fn a_marked_stretch_is_a_run_inside_its_line() {
+        let text = "見出し\n太字とふつう";
+        let levels = [LineStyle::heading(1), LineStyle::default()];
+        let bold = Marks {
+            bold: true,
+            ..Marks::default()
+        };
+        let spans = [
+            vec![Emphasis {
+                utf16_start: 1,
+                utf16_len: 2,
+                marks: bold,
+            }],
+            vec![Emphasis {
+                utf16_start: 0,
+                utf16_len: 2,
+                marks: bold,
+            }],
+        ];
+
+        let runs = style_runs(StyledText::marked(text, &levels, &spans));
+
+        // The heading's own run, then what is marked inside it, then the
+        // marked stretch on the body line.
+        let shape: Vec<(u32, u32, u8, bool)> = runs
+            .iter()
+            .map(|run| {
+                let marked = run.marks.bold;
+                (run.utf16_start, run.utf16_len, run.heading_level, marked)
+            })
+            .collect();
+        let wanted = vec![(0, 3, 1, false), (1, 2, 1, true), (4, 2, 0, true)];
+        assert_eq!(shape, wanted);
+        // A line nobody worked out has no marked stretches, and the headings
+        // are unchanged by the shorter list.
+        let plain = style_runs(StyledText::new(text, &levels));
+        assert_eq!(plain.len(), 1);
+    }
+
+    /// A level the spec has no size for is body text, not a panic and not a
+    /// silent zero. Levels arrive from Markdown, which allows six.
+    #[test]
+    fn a_level_past_the_deepest_heading_is_body_text() {
+        let typography = plain_typography().with_heading_ramp(2.0);
+
+        assert_eq!(typography.size_scale(0), 1.0);
+        assert_eq!(typography.size_scale(7), 1.0);
+        assert!(typography.size_scale(1) > typography.size_scale(6));
+        assert!(typography.size_scale(6) > 1.0);
     }
 
     #[test]
@@ -1325,7 +2727,7 @@ mod tests {
     #[test]
     fn bounds_a_block_width_above_its_column_count() {
         let text = "あ".repeat(100);
-        let bound = block_flow_bound(&text, 520, 22.0);
+        let bound = block_flow_bound(StyledText::plain(&text), 520, &plain_typography());
 
         let usable = 520.0_f32 - 22.0 * 3.0;
         let cells = (usable / 22.0).floor() as usize;

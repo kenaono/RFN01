@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Shippori+Mincho:wght@400;600&family=Noto+Sans+Mono&display=swap">
+  <style>
+    :root{
+      --paper:#fcf9ef; --paper-alt:#f9f4e2; --doc-ink:#24211e;
+      --chrome:#f1f0f7; --chrome-raised:#e8e5f0; --chrome-sunken:#dad7e7;
+      --rule:#d5d3e0; --rule-strong:#b6b3c4;
+      --ink:#292733; --ink-strong:#171321; --ink-muted:#696774; --ink-faint:#9996a1;
+      --accent:#6b4cae; --accent-strong:#572e9d; --accent-soft:#dad0fd; --accent-faint:#f2efff;
+      --alert:#a74639; --alert-soft:#fbd4cd;
+      --ui:"Noto Sans","Segoe UI","Yu Gothic UI",sans-serif;
+      --doc:"Noto Sans JP","BIZ UDPGothic","Yu Gothic",sans-serif;
+      --mincho:"Shippori Mincho","Yu Mincho","BIZ UDMincho",serif;
+      --mono:"Noto Sans Mono",Consolas,monospace;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--chrome);font-family:var(--ui);color:var(--ink)}
+    a{color:var(--accent)} a:hover{color:var(--accent-strong)}
+    .i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+    .i.s{width:14px;height:14px}
+    .t{position:relative}
+    .t::after{content:attr(data-t);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);background:var(--ink-strong);color:#fcf9ef;font-size:11px;line-height:1.5;padding:3px 8px;border-radius:3px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s .3s;z-index:30;letter-spacing:.01em}
+    .t:hover::after,.t.show::after{opacity:1}
+    .t.up::after{top:auto;bottom:calc(100% + 7px)}
+    .ico{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-muted);flex:none}
+    .ico:hover{background:var(--chrome-sunken);color:var(--ink-strong)}
+    .ico.on{background:var(--accent-soft);color:var(--accent-strong)}
+    .rbtn{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-faint);flex:none}
+    .rbtn:hover{color:var(--ink)}
+    .rbtn.on{background:var(--paper);color:var(--accent);box-shadow:inset 2px 0 0 var(--accent)}
+    .row{height:26px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12px;border-radius:4px;color:var(--ink);white-space:nowrap}
+    .row:hover{background:var(--accent-faint)}
+    .row.sel{background:var(--accent-soft);color:var(--ink-strong)}
+    .ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .tab{height:28px;display:flex;align-items:center;gap:7px;padding:0 11px;font-size:13px;border-radius:6px 6px 0 0;color:var(--ink-muted)}
+    .tab.on{background:var(--paper);color:var(--ink-strong);box-shadow:inset 0 2px 0 var(--accent)}
+    .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+  </style>
+</helmet>
+<div style="width:1180px;height:760px;display:flex;flex-direction:column;background:var(--chrome);overflow:hidden">
+
+  <div style="height:34px;flex:none;display:flex;align-items:center;gap:2px;padding:0 6px;background:var(--chrome);border-bottom:1px solid var(--rule)">
+    <div class="ico t show" data-t="Menu &nbsp;Alt"><svg class="i" viewBox="0 0 16 16"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg></div>
+    <div class="ico t on" data-t="Sidebar &nbsp;Ctrl+B"><svg class="i" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M6 2.5v11"/></svg></div>
+  </div>
+
+  <div style="flex-grow:1;display:flex;min-height:0">
+
+    <div style="width:40px;flex:none;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 0;background:var(--chrome-raised);border-right:1px solid var(--rule)">
+      <div class="rbtn t on" data-t="Explorer"><svg class="i" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg></div>
+      <div class="rbtn t" data-t="Search"><svg class="i" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg></div>
+      <div class="rbtn t" data-t="History"><svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg></div>
+      <div class="rbtn t" data-t="Outline"><svg class="i" viewBox="0 0 16 16"><path d="M3 4h10M5.5 8h7.5M8 12h5"/></svg></div>
+      <div style="flex-grow:1"></div>
+      <div class="rbtn t up" data-t="Settings"><svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg></div>
+    </div>
+
+    <div style="width:220px;flex:none;display:flex;flex-direction:column;background:var(--chrome);border-right:1px solid var(--rule)">
+      <div style="height:34px;flex:none;display:flex;align-items:center;gap:2px;padding:0 5px 0 10px;border-bottom:1px solid var(--rule)">
+        <div style="font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);flex-grow:1" class="ell">testdata</div>
+        <div class="ico t" data-t="New File" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></svg></div>
+        <div class="ico t" data-t="Open Folder" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg></div>
+      </div>
+      <div style="flex-grow:1;padding:4px;display:flex;flex-direction:column;gap:1px;min-height:0;overflow:hidden"><div class="row"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M5.5 4 9.5 8l-4 4"/></svg><svg class="i s" style="color:var(--ink-muted)" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg><span class="ell">入れ子フォルダ</span></div><div class="row" style="padding-left:20px"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">00_この一式について.md</span></div><div class="row sel" style="padding-left:20px"><svg class="i s" style="color:var(--accent)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell" style="flex-grow:1">01_行属性.md</span><span style="flex-grow:1"></span><svg class="i s" style="color:var(--ink-muted)" viewBox="0 0 16 16"><circle cx="4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></div><div class="row" style="padding-left:20px"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">02_文字装飾.md</span></div><div class="row" style="padding-left:20px"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">03_見出しとアウトライン.md</span></div><div class="row" style="padding-left:20px"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">04_縦書き.md</span></div><div class="row" style="padding-left:20px"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">05_未対応記法の保持.md</span></div><div class="row" style="padding-left:20px"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">07_プレーンテキスト.txt</span></div><div class="row" style="padding-left:20px"><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span class="ell">08_CRLFとBOM.md</span></div></div>
+    </div>
+
+    <div style="flex-grow:1;display:flex;min-width:0">
+
+      <div style="flex-grow:1;min-width:0;display:flex;flex-direction:column;background:var(--paper)">
+        <div style="height:34px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 5px;background:var(--chrome-raised);border-bottom:1px solid var(--rule)">
+          <div class="tab"><span>無題1</span><span class="dot"></span></div>
+          <div class="tab on"><span>01_行属性.md</span><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5"/></svg></div>
+          <div style="flex-grow:1"></div>
+          <div style="display:flex;gap:1px;height:28px;align-items:center;padding-bottom:3px"><div class="ico t up on" data-t="Horizontal" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg></div><div class="ico t up" data-t="Vertical" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M11.5 3v10M8 3v10M4.5 3v6"/></svg></div><div style="width:1px;height:15px;background:var(--rule);margin:0 3px"></div><div class="ico t up on" data-t="Live Preview" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.6"/></svg></div><div style="width:1px;height:15px;background:var(--rule);margin:0 3px"></div><div class="ico t up show" data-t="Pane menu" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><circle cx="8" cy="3.6" r="1.15" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.15" fill="currentColor" stroke="none"/><circle cx="8" cy="12.4" r="1.15" fill="currentColor" stroke="none"/></svg></div></div>
+        </div>
+        <div style="flex-grow:1;padding:24px 32px;font-family:var(--doc);color:var(--doc-ink);min-height:0;overflow:hidden">
+          <div style="font-size:30px;font-weight:700;color:#100e0c;line-height:1.4">行の属性</div>
+          <div style="height:16px"></div>
+          <div style="font-size:16px;line-height:1.9">要件7.3.2の「行の属性」を画面で確かめるためのファイルです。各節に、そこで何が起きてほしいかを書いてあります。</div>
+          <div style="height:24px"></div>
+          <div style="font-size:22px;font-weight:700;color:#100e0c;line-height:1.5">箇条書き</div>
+          <div style="height:12px"></div>
+          <div style="display:flex;flex-direction:column;gap:4px;font-size:16px;line-height:1.9">
+            <div style="display:flex;gap:10px"><span style="color:var(--ink-faint);width:12px;text-align:center;flex:none">&bull;</span><span>ハイフンの箇条書き</span></div>
+            <div style="display:flex;gap:10px"><span style="color:var(--ink-faint);width:12px;text-align:center;flex:none">&bull;</span><span>アスタリスクの箇条書き</span></div>
+          </div>
+          <div style="height:24px"></div>
+          <div style="font-size:22px;font-weight:700;color:#100e0c;line-height:1.5">タスクリスト</div>
+          <div style="height:12px"></div>
+          <div style="display:flex;flex-direction:column;gap:6px;font-size:16px;line-height:1.9">
+            <div style="display:flex;gap:10px;align-items:baseline"><svg class="i s" style="color:var(--accent);position:relative;top:2px" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="m5 8 2.2 2.2L11 6"/></svg><span>終わった</span></div>
+            <div style="display:flex;gap:10px;align-items:baseline"><svg class="i s" style="color:var(--ink-faint);position:relative;top:2px" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/></svg><span>まだ終わっていない<span style="display:inline-block;width:2px;height:19px;background:var(--accent);vertical-align:-4px;margin-left:1px"></span></span></div>
+          </div>
+          <div style="height:24px"></div>
+          <div style="font-size:22px;font-weight:700;color:#100e0c;line-height:1.5">引用</div>
+          <div style="height:12px"></div>
+          <div style="border-left:3px solid var(--rule-strong);padding-left:14px;font-size:16px;line-height:1.9;color:var(--ink-muted)">引用の一行目</div>
+        </div>
+      </div>
+
+      <div style="width:1px;flex:none;background:var(--rule-strong)"></div>
+
+      <div style="width:430px;flex:none;display:flex;flex-direction:column;background:var(--paper-alt)">
+        <div style="height:34px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 5px;background:var(--chrome-raised);border-bottom:1px solid var(--rule)">
+          <div class="tab on" style="background:var(--paper-alt);box-shadow:none"><span>04_縦書き.md</span><svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5"/></svg></div>
+          <div style="flex-grow:1"></div>
+          <div style="display:flex;gap:1px;height:28px;align-items:center;padding-bottom:3px"><div class="ico t up" data-t="Horizontal" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg></div><div class="ico t up on" data-t="Vertical" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M11.5 3v10M8 3v10M4.5 3v6"/></svg></div><div style="width:1px;height:15px;background:var(--rule);margin:0 3px"></div><div class="ico t up on" data-t="Live Preview" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.6"/></svg></div><div style="width:1px;height:15px;background:var(--rule);margin:0 3px"></div><div class="ico t up" data-t="Pane menu" style="width:24px;height:24px"><svg class="i s" viewBox="0 0 16 16"><circle cx="8" cy="3.6" r="1.15" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.15" fill="currentColor" stroke="none"/><circle cx="8" cy="12.4" r="1.15" fill="currentColor" stroke="none"/></svg></div></div>
+        </div>
+        <div style="flex-grow:1;min-height:0;overflow:hidden;padding:28px 24px;display:flex;justify-content:flex-end">
+          <div style="writing-mode:vertical-rl;font-family:var(--mincho);font-size:17px;line-height:2.1;letter-spacing:.04em;color:var(--doc-ink);height:100%">
+            <div style="font-size:28px;font-weight:600;color:#100e0c;letter-spacing:.06em;margin-left:18px;border-right:2px solid var(--rule-strong);padding-right:6px">縦書きの紙</div>
+            <p style="margin:0 0 0 22px">縦書きは横書きと同じ本文を、同じ編集の道で扱います。ペインごとに向きを持ち、タブが自分の向きを覚えています。</p>
+            <p style="margin:0 0 0 22px">紙の色をわずかに深くしてあります。どちらの向きで書いているかを、文字を読まずに分かるようにするためです。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="height:28px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:var(--chrome);border-top:1px solid var(--rule);font-size:12px;color:var(--ink-muted);font-variant-numeric:tabular-nums">
+    <span style="color:var(--ink)">01_行属性.md</span>
+    <span>97 lines</span>
+    <span>1,086 chars</span>
+    <span>1,141 source</span>
+    <span>0 selected</span>
+    <div style="flex-grow:1"></div>
+    <span>Ln 17, Col 24</span>
+    <span>100%</span>
+    <span class="t up" data-t="Split view" style="display:flex;align-items:center;gap:5px;color:var(--ink)"><svg class="i s" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M9 2.5v11"/></svg>Split</span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

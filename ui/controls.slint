@@ -1,0 +1,773 @@
+// The small pieces the chrome is built from.
+//
+// The window used to be made of `Button`s carrying Japanese labels, which is
+// why the toolbar needed 44px and two rows: a label is as wide as its longest
+// word. Icons are all one size, so the row that holds them is as short as the
+// icon, and what each one does is said by a tooltip instead of by the button.
+//
+// Icons are `Path`s rather than images. An image would have to be a file on
+// disk and could not take its colour from `Tok`, so a button could not tint its
+// icon when it is hovered or switched on; a path can, and the whole set stays
+// in one place — `Icons` below — where it can be read.
+
+import { Tok } from "tokens.slint";
+
+// The path data for every icon the window draws, in a 16×16 box.
+//
+// SVG path syntax, which is what `Path.commands` speaks. They are stroked, not
+// filled, so each one is a line drawing and the stroke colour is the tint.
+export global Icons {
+    out property <string> menu: "M2.5 4.5h11M2.5 8h11M2.5 11.5h11";
+    out property <string> sidebar: "M3 2.5h10a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-10a1.5 1.5 0 0 1-1.5-1.5v-8a1.5 1.5 0 0 1 1.5-1.5z M6 2.5v11";
+    // Three dots. Each is a segment a fifth of a pixel long, which a round cap
+    // turns into a dot the width of the stroke — a stroked circle that small
+    // reads as a ring rather than a point.
+    out property <string> more: "M8 3.4v0.2M8 7.9v0.2M8 12.4v0.2";
+    // The same three dots lying down, for a row rather than a column.
+    out property <string> dots: "M3.9 8h0.2M7.9 8h0.2M11.9 8h0.2";
+    out property <string> plus: "M8 3.5v9M3.5 8h9";
+    out property <string> minus: "M3.5 8h9";
+    out property <string> horizontal: "M3 4.5h10M3 8h10M3 11.5h6";
+    out property <string> vertical: "M11.5 3v10M8 3v10M4.5 3v6";
+    out property <string> folder: "M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z";
+    out property <string> search: "M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 1 1 9 0M10.6 10.6 14 14";
+    out property <string> history: "M14 8a6 6 0 1 1-6-6 6 6 0 0 1 6 6M8 4.5V8l2.5 1.5";
+    out property <string> outline: "M3 4h10M5.5 8h7.5M8 12h5";
+    out property <string> down: "M4.5 6.5 8 10 11.5 6.5";
+    out property <string> up: "M4.5 9.5 8 6 11.5 9.5";
+    // Two arrows passing each other: what replacing one word with another is.
+    out property <string> replace: "M2.5 5.5h8l-2-2M13.5 10.5h-8l2 2";
+    // A pane divided, for the status bar.
+    out property <string> split: "M1.5 2.5h13v11h-13zM8 2.5v11";
+    out property <string> warning: "M8 2.5 14.5 13.5h-13zM8 6.5v3M8 11.4v0.1";
+    out property <string> close: "M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5";
+    out property <string> preview: "M1.5 8c2-3 4.2-4.5 6.5-4.5s4.5 1.5 6.5 4.5c-2 3-4.2 4.5-6.5 4.5s-4.5-1.5-6.5-4.5z M9.6 8a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 1 1 3.2 0";
+}
+
+// One line drawing, tinted by whoever holds it.
+export component Icon inherits Rectangle {
+    in property <string> commands;
+    in property <brush> tint: Tok.ink-muted;
+
+    width: 16px;
+    height: 16px;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.commands;
+        stroke: root.tint;
+        stroke-width: 1.5px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
+}
+
+// A button that is an icon and a tooltip, and nothing else.
+//
+// `checked` is for the buttons that report a state rather than doing something
+// once — the sidebar toggle, the writing direction — so that "this is on" and
+// "the pointer is here" never look the same.
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tip;
+    in property <bool> checked: false;
+    /// Square, and 26px unless something it has to sit inside is smaller — a
+    /// tree row is 24px, and a button taller than its row overlaps the rows
+    /// either side of it.
+    in property <length> size: 26px;
+    callback clicked();
+
+    width: root.size;
+    height: root.size;
+    border-radius: 5px;
+    background: root.checked
+        ? Tok.accent-soft
+        : (touch.has-hover ? Tok.chrome-sunken : transparent);
+
+    // A child with no x/y sits at the corner, not in the middle, so the two
+    // are said here rather than left to the default.
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        commands: root.icon;
+        tint: root.checked ? Tok.accent-strong : (touch.has-hover ? Tok.ink-strong : Tok.ink-muted);
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // Last, and that is the whole of why it works.
+    //
+    // The lowering pass puts the area it generates at the index the `Tooltip`
+    // was written at, and children are hit-tested from the last one back, so a
+    // `Tooltip` written above the TouchArea sits underneath it and never sees
+    // the pointer. On top it observes the move without claiming it, and the
+    // TouchArea below still gets the click.
+    //
+    // Built in, so the delay before it appears, the placement beside the
+    // pointer and the turn away from the edge of the screen are not ours to
+    // get wrong. It is drawn in the widget style's colours rather than in
+    // `Tok`, which is the price of not writing it.
+    //
+    // `text` is a styled-text and a string does not become one on its own, so
+    // the value goes through `@markdown`. That means a tip is read as markdown:
+    // keep `*` and `_` out of one, or the word around them turns italic.
+    // Guarded, so a button without a tip does not raise an empty box. The
+    // lowering pass forwards the condition onto the area it generates, which is
+    // why `if` is allowed here where `for` is not.
+    if root.tip != "": Tooltip {
+        text: @markdown("\{root.tip}");
+    }
+}
+
+// One tab in one pane's strip (要件 6.3).
+//
+// **A tab is as wide as its name.** It was made to shrink instead, once, so
+// that a strip could hold more tabs than it had room for; what that produced
+// was a row of tabs too narrow to read, which is not more tabs — it is none.
+// The strip scrolls now, and this stays wide enough to be read.
+//
+// `overflow: elide` is still here for the other end: a name past `max-width` is
+// cut with an ellipsis rather than allowed to push the rest of the strip along.
+// It also means the name's own min-width is zero (`builtins.slint`, Text), so
+// if the strip is ever short of room the name is what gives way rather than the
+// close cross or the unsaved dot.
+export component Tab inherits Rectangle {
+    in property <string> title;
+    in property <bool> edited;
+    in property <bool> current;
+    /// The paper of the pane this strip belongs to, so that the tab in front is
+    /// the top edge of the page rather than a shape sitting above it. The two
+    /// panes do not have the same paper (要件 7.2 縦書き／横書き), so it is
+    /// asked for rather than assumed.
+    in property <brush> paper: Tok.paper;
+    callback chosen();
+    callback closed();
+    /// Where this tab is inside the strip, raised whenever it is the one in
+    /// front. The strip scrolls to it (要件 6.3).
+    ///
+    /// **The tab reports itself rather than being asked.** A tab comes to the
+    /// front from the strip, from the list of tabs, from the file tree, by its
+    /// neighbour being closed and by being restored at startup; what those have
+    /// in common is only the tab ending up in front, and the strip cannot know
+    /// where a tab is without asking the layout that put it there.
+    callback shown(length, length);
+
+    function report() {
+        if (root.current) {
+            root.shown(root.x, root.width);
+        }
+    }
+
+    // `init` as well as the changes, for the reason 6.11 records elsewhere: a
+    // tab that is in front from the moment it is created never raises a change
+    // to say so.
+    init => {
+        root.report();
+    }
+    changed current => {
+        root.report();
+    }
+    changed x => {
+        root.report();
+    }
+    changed width => {
+        root.report();
+    }
+
+    height: 28px;
+    // A floor and a ceiling, not a size: a tab is as wide as its name between
+    // the two. The floor keeps 無題1 from being a stub too small to aim at, and
+    // the ceiling stops one long name from taking the whole strip. **Neither is
+    // a squeeze**: the scroll view around the strip asks for the width the tabs
+    // want, so what is between the two is the name's own width (要件 6.3).
+    min-width: 80px;
+    max-width: 240px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    background: root.current
+        ? root.paper
+        : (touch.has-hover ? Tok.chrome-sunken : transparent);
+
+    // Which tab is in front. Drawn rather than given as a border, because a
+    // border is on all four sides and this is on one.
+    if root.current: Rectangle {
+        y: 0;
+        height: 2px;
+        background: Tok.accent;
+    }
+
+    HorizontalLayout {
+        padding-left: 11px;
+        // Room for the cross, which is not in this layout: it has to be
+        // declared after the touch area below to be clickable at all.
+        padding-right: root.current ? 24px : 11px;
+        spacing: 7px;
+
+        Text {
+            text: root.title;
+            color: root.current ? Tok.ink-strong : Tok.ink-muted;
+            font-size: 13px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        // 要件 8.4: work that is not in the file yet. A dot rather than the
+        // `*` the title used to carry, so that the name is the whole of what
+        // is elided when the strip is full.
+        if root.edited: Rectangle {
+            width: 6px;
+
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: Tok.accent;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.chosen();
+        }
+    }
+
+    // After the area that chooses the tab, and that is the whole of why it
+    // works: children are hit-tested from the last one back, so the cross sees
+    // the click first and the rest of the tab still answers everywhere else.
+    // The same ordering the tooltip in `IconButton` depends on.
+    //
+    // Only the tab in front carries one. A cross on every tab is a row of ways
+    // to lose the wrong document, and the tabs are narrow enough already.
+    if root.current: Rectangle {
+        x: parent.width - 22px;
+        y: (parent.height - self.height) / 2;
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+        background: cross.has-hover ? Tok.chrome-sunken : transparent;
+
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            commands: Icons.close;
+            tint: cross.has-hover ? Tok.ink-strong : Tok.ink-faint;
+        }
+
+        cross := TouchArea {
+            clicked => {
+                root.closed();
+            }
+        }
+    }
+}
+
+/// What a button is for, which is the whole of what tells them apart
+/// (`Overlays.dc.html`). **Only one of these is a colour**: the primary is the
+/// thing the writer came to do, the danger is the one that loses something, and
+/// everything else is an outline.
+export enum Role {
+    normal,
+    primary,
+    danger,
+    quiet,
+}
+
+// A button with a word in it, for the places an icon cannot say enough — the
+// answers to a question, and the two replace commands.
+//
+// Not `Button` from the widget set: that one is drawn by the chosen style and
+// its palette is `out` properties all the way down (技術検証 6.22), so a window
+// in purple would have grey buttons in it.
+export component TextButton inherits Rectangle {
+    in property <string> title;
+    in property <Role> role: Role.normal;
+    in property <bool> enabled: true;
+    /// Fill whatever it is put in, rather than fitting its word. **For a column
+    /// of answers**: a question with four of them in Japanese is wider than any
+    /// card it fits in, and a row that overflows draws its buttons over the
+    /// edge (6.23).
+    in property <bool> wide: false;
+    callback clicked();
+
+    height: 28px;
+    // The word plus the padding either side of it, as a floor and a ceiling
+    // rather than a width: a ceiling that is the floor is a fixed size, and
+    // lifting it is what lets a layout stretch this one to its own width.
+    // **A wide one may also be narrowed**, because its word is a font family
+    // name and some of those are longer than the panel.
+    //
+    // **`preferred-width`, never `width`.** The label's width is what the
+    // layout gave it, and the layout works from these two — asking for it here
+    // is a binding loop the compiler catches (min-width → layout → width →
+    // label.width → min-width). The preferred width is the text's own, which
+    // nothing here decides.
+    min-width: root.wide ? 44px : label.preferred-width + 22px;
+    max-width: root.wide ? 100000px : label.preferred-width + 22px;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: root.role == Role.primary
+        ? Tok.accent
+        : (root.role == Role.danger
+            ? Tok.alert
+            : (root.role == Role.quiet ? transparent : Tok.rule-strong));
+    background: root.role == Role.primary
+        ? (touch.has-hover ? Tok.accent-strong : Tok.accent)
+        : (touch.has-hover ? Tok.accent-faint : (root.role == Role.quiet ? transparent : Tok.paper));
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    label := Text {
+        x: 11px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 22px;
+        horizontal-alignment: root.wide ? left : center;
+        text: root.title;
+        overflow: elide;
+        font-size: 13px;
+        color: root.role == Role.primary
+            ? Tok.paper
+            : (root.role == Role.danger
+                ? Tok.alert
+                : (root.role == Role.quiet ? Tok.ink-muted : Tok.ink));
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A line of text the writer types into.
+//
+// The same builtin `TextInput` a `LineEdit` is made of — the cursor, the
+// selection and every editing key are Slint's — inside a box drawn in `Tok`,
+// for the same reason `TextButton` exists.
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text <=> input.text;
+    // A one-way binding, not `<=>`: the input's own `has-focus` is read-only,
+    // and a two-way binding needs both ends to be writable.
+    out property <bool> has-focus: input.has-focus;
+    callback accepted();
+    callback edited();
+    /// Escape, which a field has to pass on rather than swallow: the bar it
+    /// sits in is what closes (要件 6.7).
+    callback escaped();
+    /// A key the field is asked about before the text gets it. Return `accept`
+    /// to take it; the default is `reject`, which is what an unanswered
+    /// callback returns, so a field nobody asks about behaves as before.
+    ///
+    /// **This is how a shortcut still works while the writer is typing in the
+    /// field it opened** — `Ctrl+F` in the find box is the same key it was in
+    /// the document, and the key handler above the field never sees it.
+    callback shortcut(event: KeyEvent) -> EventResult;
+
+    height: 28px;
+    background: Tok.paper;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: input.has-focus ? Tok.accent : Tok.rule-strong;
+    // A click anywhere in the box, including the padding either side of the
+    // text, is a click in the field.
+    forward-focus: input;
+
+    /// Called by whoever raised the bar this field is in.
+    public function take-focus() {
+        input.focus();
+    }
+
+    // Under the input, so the pointer reaches the text rather than this.
+    if root.text == "": Text {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        text: root.placeholder;
+        color: Tok.ink-faint;
+        font-size: 13px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    input := TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        font-size: 13px;
+        color: Tok.ink;
+        selection-background-color: Tok.accent-soft;
+        selection-foreground-color: Tok.ink-strong;
+        vertical-alignment: center;
+        single-line: true;
+        accepted => {
+            root.accepted();
+        }
+        edited => {
+            root.edited();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.escaped();
+                return accept;
+            }
+            return root.shortcut(event);
+        }
+    }
+}
+
+// The mark on a setting that only does something in one writing direction
+// (要件 9): `H` for horizontal, `V` for vertical.
+//
+// **Without it, a writer moves a number or picks a font while looking at the
+// pane it cannot reach.** 要件 9 writes the line spacing as horizontal
+// writing's, the character advance and column gap as vertical writing's, and
+// the body font as one of each — so half the panel is about the pane the writer
+// is not in, and only this says which half.
+export component Tag inherits Rectangle {
+    in property <string> text;
+
+    width: 16px;
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 15px;
+        border-radius: 3px;
+        background: Tok.chrome-sunken;
+
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.text;
+            color: Tok.ink-muted;
+            font-size: 10px;
+        }
+    }
+}
+
+// A label, a value, and the two steps either side of it.
+//
+// Steps rather than a slider because every one of these re-lays out the whole
+// document: a drag would remeasure on each frame, the way the pane resize did
+// before it was debounced.
+export component StepRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    /// `H` or `V`, when the number only does something in one writing
+    /// direction (要件 9 asks for the line spacing of horizontal text and for
+    /// the advance and column gap of vertical text). **Without it, a writer
+    /// moves a number while looking at the pane it cannot reach.**
+    in property <string> only;
+    callback stepped(int);
+
+    height: 28px;
+
+    HorizontalLayout {
+        spacing: 6px;
+
+        Text {
+            text: root.label;
+            color: Tok.ink-muted;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        if root.only != "": Tag {
+            text: root.only;
+            horizontal-stretch: 0;
+        }
+
+        IconButton {
+            icon: Icons.minus;
+            tip: "Less";
+            clicked => {
+                root.stepped(-1);
+            }
+        }
+
+        Text {
+            text: root.value;
+            color: Tok.ink;
+            font-size: 12px;
+            min-width: 50px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+        }
+
+        IconButton {
+            icon: Icons.plus;
+            tip: "More";
+            clicked => {
+                root.stepped(1);
+            }
+        }
+    }
+}
+
+// Everything about one kind of text: how large, what colour, which family
+// (要件 9).
+//
+// **One row per thing being set.** The size, the colour and the family were
+// three sections once, and finding H3 meant counting rows in all three; what is
+// being set is H3, and those are three sides of it.
+export component TextRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> shown;
+    in property <string> family;
+    callback stepped(int);
+    callback picked();
+    callback chose-font();
+
+    height: 28px;
+
+    HorizontalLayout {
+        spacing: 4px;
+
+        Text {
+            text: root.label;
+            color: Tok.ink-muted;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+            min-width: 34px;
+        }
+
+        IconButton {
+            size: 20px;
+            horizontal-stretch: 0;
+            icon: Icons.minus;
+            clicked => {
+                root.stepped(-1);
+            }
+        }
+
+        Text {
+            text: root.value;
+            color: Tok.ink;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+            min-width: 46px;
+        }
+
+        IconButton {
+            size: 20px;
+            horizontal-stretch: 0;
+            icon: Icons.plus;
+            clicked => {
+                root.stepped(1);
+            }
+        }
+
+        // The swatch is a button: a square of colour beside a row of controls
+        // says "press me" whether or not it does anything, so it does.
+        Rectangle {
+            width: 24px;
+            horizontal-stretch: 0;
+
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 24px;
+                height: 20px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
+                background: root.shown;
+
+                swatch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.picked();
+                    }
+                }
+            }
+        }
+
+        TextButton {
+            wide: true;
+            title: root.family;
+            clicked => {
+                root.chose-font();
+            }
+        }
+    }
+}
+
+// A colour: what it looks like, and pressing it to change it.
+//
+// **Picked, not typed** (要件 9). The six digits were a field here once, and
+// the swatch beside it did nothing — which read as a colour that could not be
+// changed. Windows draws the picker; the digits are still how a colour is
+// written into the settings file, where a person can edit them.
+export component ColorCell inherits Rectangle {
+    in property <string> label;
+    in property <color> shown;
+    callback picked();
+
+    height: 28px;
+
+    HorizontalLayout {
+        spacing: 6px;
+
+        Text {
+            text: root.label;
+            color: Tok.ink-muted;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            min-width: 30px;
+        }
+
+        Rectangle {
+            width: 24px;
+            horizontal-stretch: 0;
+
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 24px;
+                height: 20px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
+                background: root.shown;
+
+                swatch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.picked();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A label and what is set, opened by pressing it: a font family (要件 9), and
+// anything else later that is chosen from a list rather than stepped.
+export component PickRow inherits Rectangle {
+    in property <string> label;
+    in property <string> only;
+    in property <string> value;
+    callback pressed();
+
+    height: 28px;
+
+    HorizontalLayout {
+        spacing: 6px;
+
+        Text {
+            text: root.label;
+            color: Tok.ink-muted;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+            min-width: 54px;
+        }
+
+        if root.only != "": Tag {
+            text: root.only;
+            horizontal-stretch: 0;
+        }
+
+        TextButton {
+            wide: true;
+            title: root.value;
+            clicked => {
+                root.pressed();
+            }
+        }
+    }
+}
+
+// One line of a menu.
+//
+// The shortcut is written rather than bound, because the keys are handled by
+// the window's `FocusScope` and by Rust, not here: a menu that claimed a
+// shortcut it did not own would be the second opinion that goes stale.
+export component MenuRow inherits Rectangle {
+    in property <string> title;
+    in property <string> shortcut;
+    /// The row that stands for what is already the case — the tab in front, in
+    /// the list of tabs. **Shown, not hidden**: a list you are picking from has
+    /// to say where you are in it.
+    in property <bool> checked: false;
+    callback activated();
+
+    height: 28px;
+    border-radius: 5px;
+    background: root.checked
+        ? Tok.accent-soft
+        : (touch.has-hover ? Tok.accent-faint : transparent);
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 12px;
+
+        Text {
+            text: root.title;
+            color: root.checked ? Tok.ink-strong : Tok.ink;
+            font-size: 13px;
+            // A title is a file name here, and a frame is a fixed width: without
+            // this a long one is drawn straight through the side of the menu.
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.shortcut;
+            color: Tok.ink-faint;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.activated();
+        }
+    }
+}
+
+// The rule between groups of rows. Inset, so it separates the titles rather
+// than cutting the frame in two.
+export component MenuSep inherits Rectangle {
+    height: 11px;
+
+    Rectangle {
+        y: 5px;
+        x: 6px;
+        width: parent.width - 12px;
+        height: 1px;
+        background: Tok.rule;
+    }
+}
+
+// The frame a menu is drawn in. The caller fills it with rows.
+export component MenuFrame inherits Rectangle {
+    background: Tok.paper;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Tok.rule-strong;
+    drop-shadow-color: #1713213d;
+    drop-shadow-blur: 24px;
+    drop-shadow-offset-y: 8px;
+
+    @children
+}

@@ -1,0 +1,123 @@
+{
+  "pages": [
+    {
+      "id": "page-1",
+      "name": "Main window"
+    },
+    {
+      "id": "page-2",
+      "name": "Tokens"
+    },
+    {
+      "id": "page-3",
+      "name": "Sidebar · Modes · Splits"
+    },
+    {
+      "id": "page-4",
+      "name": "Preview · Bars"
+    }
+  ],
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "page": "page-1",
+      "x": 0,
+      "y": 0,
+      "w": 1180,
+      "h": 760,
+      "title": "Main window"
+    },
+    {
+      "file": "Tokens.dc.html",
+      "page": "page-2",
+      "x": 0,
+      "y": 0,
+      "w": 960,
+      "h": 2260,
+      "title": "Design tokens"
+    },
+    {
+      "file": "LeftPanels.dc.html",
+      "page": "page-3",
+      "x": 0,
+      "y": 0,
+      "w": 1200,
+      "h": 700,
+      "title": "Sidebar — 4 panels"
+    },
+    {
+      "file": "Modes.dc.html",
+      "page": "page-3",
+      "x": 1320,
+      "y": 0,
+      "w": 1240,
+      "h": 1220,
+      "title": "4 editing modes"
+    },
+    {
+      "file": "Splits.dc.html",
+      "page": "page-3",
+      "x": 0,
+      "y": 820,
+      "w": 1000,
+      "h": 760,
+      "title": "Pane splits"
+    },
+    {
+      "file": "Preview.dc.html",
+      "page": "page-4",
+      "x": 0,
+      "y": 0,
+      "w": 940,
+      "h": 1620,
+      "title": "Live preview"
+    },
+    {
+      "file": "Overlays.dc.html",
+      "page": "page-4",
+      "x": 1060,
+      "y": 0,
+      "w": 1080,
+      "h": 2180,
+      "title": "Menus, bars & dialogs"
+    }
+  ],
+  "annotations": [
+    {
+      "id": "brief-1",
+      "page": "page-1",
+      "x": 0,
+      "y": -230,
+      "w": 540,
+      "text": "紫のUI ／ アイボリーの紙。\n\nchrome とアクセントは紫（色相295）、紙とその文字はアイボリー（色相92）。この2つの色相を混ぜないのが全体の規則で、本文の墨だけは紫を一切入れていない——長時間読む文字だから。\n\nトップバーは ☰ と Sidebar の2つだけ。ファイル・保存・検索・設定はメニューの中へ。分割・組版・倍率・タブを閉じるは、タブ列右端の ⋮ へ。\n\n残したのは向きとプレビューのチップだけ——4モードは常に見えている必要がある。\n\nアプリの語はすべて英語。文書の中身だけが日本語のまま。"
+    },
+    {
+      "id": "brief-2",
+      "page": "page-2",
+      "x": 1060,
+      "y": 0,
+      "w": 380,
+      "text": "この1枚が実装の入口。\n\nSlint に global ブロックが無く、色は18種がべた書き、余白は生px。build.rs が Slint を組むので、トークン化は cargo check が全部捕まえる回になる——画面ツリーを変えないので往復が1回で済む種類の作業。\n\n一番下の表が ui/*.slint の置き換え先そのもの。青2つと緑1つが accent と ink-muted に吸収されて消える。"
+    },
+    {
+      "id": "brief-3",
+      "page": "page-3",
+      "x": 0,
+      "y": -200,
+      "w": 500,
+      "text": "この3枚は画面ツリーが変わる。\n\nアイコンレール・モードのチップ・タブ列の焦点線は、どれも Slint の構造を触るので cargo check では守られない（6.14 のフォーカス、6.18 の repeater が効く範囲）。\n\nトークン化を先に済ませてから、1枚ずつ入れるのが安全。\n\nツールチップは Slint に部品が無いので、質問オーバーレイと同じく自前で重ねることになる。"
+    },
+    {
+      "id": "brief-4",
+      "page": "page-4",
+      "x": 0,
+      "y": -200,
+      "w": 500,
+      "text": "メニューは2つ。左上の ☰ がアプリのもの、右上の ⋮ がペインとタブのもの。開いた中身をこのページに置いてある。\n\nSlint にメニューの部品もツールチップの部品も無いので、質問オーバーレイと同じ自前の重ねになる。この2つは同じ1つの仕組みで、先に作れば左ペインの右クリックメニューもそれで済む。\n\n整形表示の右列が、いま何が済んで何が残っているかの一覧。「line box」の3つは同じ仕組みが要るので分けずに1回で。"
+    }
+  ],
+  "launch": {
+    "view": "canvas",
+    "page": "page-1"
+  }
+}

@@ -19,7 +19,9 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    ffi::c_void,
     hash::{DefaultHasher, Hash, Hasher},
+    ops::Range,
 };
 
 use windows::{
@@ -27,7 +29,9 @@ use windows::{
         Foundation::RPC_E_CHANGED_MODE,
         Graphics::{
             Direct2D::{
-                Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT},
+                Common::{
+                    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+                },
                 D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
                 D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
                 D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
@@ -35,12 +39,18 @@ use windows::{
                 ID2D1RenderTarget, ID2D1SolidColorBrush,
             },
             DirectWrite::{
-                DWRITE_FACTORY_TYPE_SHARED, DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT,
-                DWRITE_FLOW_DIRECTION_TOP_TO_BOTTOM, DWRITE_FONT_STRETCH_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS,
-                DWRITE_LINE_METRICS, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
-                DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_RANGE, DWriteCreateFactory,
-                IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+                DWRITE_BREAK_CONDITION, DWRITE_BREAK_CONDITION_NEUTRAL, DWRITE_FACTORY_TYPE_SHARED,
+                DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT, DWRITE_FLOW_DIRECTION_TOP_TO_BOTTOM,
+                DWRITE_FONT_LINE_GAP_USAGE_DEFAULT, DWRITE_FONT_STRETCH_NORMAL,
+                DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS, DWRITE_INLINE_OBJECT_METRICS,
+                DWRITE_LINE_METRICS, DWRITE_LINE_SPACING, DWRITE_LINE_SPACING_METHOD_PROPORTIONAL,
+                DWRITE_MEASURING_MODE_NATURAL, DWRITE_OVERHANG_METRICS,
+                DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_READING_DIRECTION_TOP_TO_BOTTOM,
+                DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+                IDWriteInlineObject, IDWriteInlineObject_Impl, IDWriteLocalizedStrings,
+                IDWriteTextFormat, IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1,
+                IDWriteTextRenderer,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Imaging::{
@@ -53,12 +63,14 @@ use windows::{
             CoUninitialize,
         },
     },
-    core::{Interface, Result, w},
+    core::{BOOL, HSTRING, IUnknown, Interface, Ref, Result, implement, w},
 };
 
 use crate::text_blocks::{
-    BlockLayoutPlan, BlockMeasure, FlowOrder, LineInfo, TileSpan, block_flow_bound, cells_per_line,
-    place_blocks, split_blocks,
+    BlockLayoutPlan, BlockMeasure, BlockSpan, DEFAULT_INK, Emphasis, FlowOrder, LineInfo,
+    LineMarker, LineOrnament, LineRun, LineStyle, MAX_HEADING_LEVEL, Ornament, StyleRun,
+    StyledText, TileSpan, Typography, WrapPoints, block_flow_bound, cells_per_line, line_runs,
+    place_blocks, split_blocks, style_runs,
 };
 
 /// Which way the text runs.
@@ -152,18 +164,15 @@ impl WritingMode {
     }
 }
 
-const BACKGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 1.0,
-    g: 253.0 / 255.0,
-    b: 247.0 / 255.0,
-    a: 1.0,
-};
-const FOREGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 41.0 / 255.0,
-    g: 37.0 / 255.0,
-    b: 36.0 / 255.0,
-    a: 1.0,
-};
+/// One of the two colours 要件 9 lets the writer set, as Direct2D wants it.
+fn colour(rgb: [f32; 3]) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: rgb[0],
+        g: rgb[1],
+        b: rgb[2],
+        a: 1.0,
+    }
+}
 
 /// The widest tile ever rasterized, and the tile width at the default height.
 pub const MAX_TILE_FLOW_SIZE: u32 = 1024;
@@ -213,6 +222,19 @@ impl Drop for ComApartment {
 }
 
 fn ensure_com_apartment() -> Result<Option<ComApartment>> {
+    // Single-threaded, because the window's thread has to be. **This runs
+    // before the window exists** — the startup probe lays text out first — and
+    // winit calls `OleInitialize` when it creates the window, which fails
+    // outright against a multi-threaded apartment. Asking for one here stopped
+    // the editor from starting at all.
+    //
+    // Multi-threaded was tried, on the reasoning that a thread which lays text
+    // out never pumps messages and so has no business claiming a single-threaded
+    // apartment (7.3). It changed nothing about the tests it was meant to fix,
+    // and broke the window. Two threads with genuinely different needs are being
+    // served by one decision here; a thread that is not the window's would want
+    // the other answer.
+    //
     // SAFETY: The reserved pointer is null as required. A changed apartment mode
     // means COM is already usable here and must not be uninitialized by us.
     let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
@@ -231,6 +253,11 @@ struct RenderTargetCache {
     bitmap: IWICBitmap,
     target: ID2D1RenderTarget,
     brush: ID2D1SolidColorBrush,
+    /// One per heading level (要件 9), for the levels drawn in another colour
+    /// than the body. **Made with the target and told their colour before every
+    /// tile**, because a brush belongs to the target that made it while a
+    /// colour is a setting that outlives any of them.
+    heading_brushes: Vec<ID2D1SolidColorBrush>,
 }
 
 /// Per-thread DirectWrite, Direct2D and WIC state.
@@ -245,7 +272,10 @@ struct Graphics {
     /// Keyed by size *and* mode: the two modes need different reading and flow
     /// directions set on the format, and this cache is shared by every engine on
     /// the thread.
-    formats: HashMap<(u32, WritingMode), IDWriteTextFormat>,
+    /// Keyed by the three things a format itself carries: the body size, the
+    /// line spacing and the family (要件 9). Everything else typography asks
+    /// for is set per range on the layout, because it varies within a block.
+    formats: HashMap<(u32, u32, WritingMode, String), IDWriteTextFormat>,
     target: Option<RenderTargetCache>,
     /// Reused for every `CopyPixels`. A tile is a couple of megabytes, and a
     /// fresh `vec![0; n]` per tile would zero all of it just to overwrite it.
@@ -271,18 +301,27 @@ impl Graphics {
         }
     }
 
-    fn text_format(&mut self, font_size: f32, mode: WritingMode) -> Result<IDWriteTextFormat> {
-        let font_size = font_size.max(1.0);
-        let key = (font_size.to_bits(), mode);
+    fn text_format(
+        &mut self,
+        typography: &Typography,
+        mode: WritingMode,
+    ) -> Result<IDWriteTextFormat> {
+        let font_size = typography.font_size.max(1.0);
+        let line_spacing = typography.line_spacing.max(0.1);
+        // 要件 9: the family is part of what makes two formats different, and
+        // the writer can change it while the editor is running.
+        let family = typography.body_family().to_owned();
+        let key = (font_size.to_bits(), line_spacing.to_bits(), mode, family);
         if let Some(format) = self.formats.get(&key) {
             return Ok(format.clone());
         }
+        let family = HSTRING::from(key.3.as_str());
 
-        // SAFETY: The factory is alive for the lifetime of this struct and the
-        // string literals are static wide strings.
+        // SAFETY: The factory is alive for the lifetime of this struct, the
+        // family name outlives the call, and the locale is a static wide string.
         let format = unsafe {
             self.dwrite.CreateTextFormat(
-                w!("Yu Mincho"),
+                &family,
                 None,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
@@ -292,6 +331,7 @@ impl Graphics {
             )?
         };
         mode.apply_to(&format)?;
+        apply_line_spacing(&format, line_spacing)?;
         self.formats.insert(key, format.clone());
         Ok(format)
     }
@@ -317,7 +357,7 @@ impl Graphics {
             };
             // SAFETY: The bitmap outlives the render target created from it,
             // both being owned by the cache entry stored below.
-            let (bitmap, target, brush) = unsafe {
+            let (bitmap, target, brush, heading_brushes) = unsafe {
                 let bitmap = self.wic.CreateBitmap(
                     width,
                     height,
@@ -330,8 +370,15 @@ impl Graphics {
                 // Slint as an image and may be scaled, so the subpixel trick is
                 // wrong here anyway; greyscale is both cheaper and more correct.
                 target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-                let brush = target.CreateSolidColorBrush(&FOREGROUND, None)?;
-                (bitmap, target, brush)
+                // Any colour: the brush is set to the ink of the moment before
+                // every tile is drawn, because the ink is a setting now and the
+                // render target outlives a change to it.
+                let brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
+                let mut heading_brushes = Vec::with_capacity(MAX_HEADING_LEVEL);
+                for _ in 0..MAX_HEADING_LEVEL {
+                    heading_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
+                }
+                (bitmap, target, brush, heading_brushes)
             };
             self.target = Some(RenderTargetCache {
                 width,
@@ -339,10 +386,571 @@ impl Graphics {
                 bitmap,
                 target,
                 brush,
+                heading_brushes,
             });
         }
         Ok(self.target.as_ref().expect("render target created above"))
     }
+}
+
+/// Every font family installed on this machine, by name (要件 9).
+///
+/// **Sorted and deduplicated**, because it is a list to look down rather than
+/// the order a system collection happens to be in. Names are asked for in
+/// Japanese first: a Japanese family that also has an English name is listed
+/// the way the writer would look for it.
+///
+/// An empty list is what a machine with no font collection would give, and the
+/// panel shows it as no choices rather than as an error — the editor still sets
+/// text in whatever DirectWrite falls back to.
+pub fn font_families() -> Vec<String> {
+    with_graphics(|graphics| {
+        // SAFETY: the collection and everything taken out of it live only
+        // inside this call. The collection comes back through an out
+        // parameter, which is why it arrives as an `Option`.
+        let names = unsafe {
+            let mut held: Option<IDWriteFontCollection> = None;
+            graphics.dwrite.GetSystemFontCollection(&mut held, false)?;
+            let Some(collection) = held else {
+                return Ok(Vec::new());
+            };
+            let count = collection.GetFontFamilyCount();
+            let mut names = Vec::with_capacity(count as usize);
+            for index in 0..count {
+                let family = collection.GetFontFamily(index)?;
+                if let Some(name) = localized_name(&family.GetFamilyNames()?) {
+                    names.push(name);
+                }
+            }
+            names
+        };
+        Ok(names)
+    })
+    .map(|mut names| {
+        names.sort();
+        names.dedup();
+        names
+    })
+    .unwrap_or_default()
+}
+
+/// One name out of a family's localized ones.
+///
+/// Japanese if it is there, English if not, and the first one otherwise —
+/// **whatever comes back, it is a name a writer could look for.**
+///
+/// # Safety
+///
+/// The strings outlive the call, which is the caller's business.
+unsafe fn localized_name(names: &IDWriteLocalizedStrings) -> Option<String> {
+    unsafe {
+        let mut index = 0u32;
+        let mut exists = BOOL(0);
+        names
+            .FindLocaleName(w!("ja-jp"), &mut index, &mut exists)
+            .ok()?;
+        if !exists.as_bool() {
+            names
+                .FindLocaleName(w!("en-us"), &mut index, &mut exists)
+                .ok()?;
+        }
+        if !exists.as_bool() {
+            index = 0;
+        }
+        let length = names.GetStringLength(index).ok()? as usize;
+        let mut buffer = vec![0u16; length + 1];
+        names.GetString(index, &mut buffer).ok()?;
+        buffer.pop();
+        String::from_utf16(&buffer).ok()
+    }
+}
+
+/// Set the line advance as a multiple of the one DirectWrite computed.
+///
+/// Proportional, not uniform. `SetLineSpacing` with `UNIFORM` replaces every
+/// line's advance with one number, which would undo 4.2: a line holding a
+/// rotated Latin run genuinely needs more room than a line of plain ideographs,
+/// and the block's extent is the sum of those individual advances. Proportional
+/// spacing scales each line's own height, so the differences survive and so does
+/// the invariant that a block measures to the sum of its lines.
+fn apply_line_spacing(format: &IDWriteTextFormat, line_spacing: f32) -> Result<()> {
+    if (line_spacing - 1.0).abs() < f32::EPSILON {
+        return Ok(());
+    }
+    let spacing = DWRITE_LINE_SPACING {
+        method: DWRITE_LINE_SPACING_METHOD_PROPORTIONAL,
+        height: line_spacing,
+        baseline: line_spacing,
+        leadingBefore: 0.0,
+        fontLineGapUsage: DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
+    };
+    // SAFETY: The format is alive for this call, and the spacing struct is
+    // read before it returns.
+    unsafe {
+        format
+            .cast::<IDWriteTextFormat3>()?
+            .SetLineSpacing(&spacing)
+    }
+}
+
+/// A box of a fixed size standing in for the marker at the head of a line
+/// (要件 7.3.2).
+///
+/// **It draws nothing.** The ink — the bullet, the checkbox, the number — is
+/// drawn in the tile pass, where the render target and the brush already are. A
+/// COM object holding a render target would have to be rebuilt every time the
+/// target is, and the layouts that reference it are cached across exactly that.
+///
+/// What it is for is the space, and that space is honest: the text after it
+/// starts one box in and **the caret agrees** (技術検証 4.12). `leadingSpacing`
+/// would have moved the glyphs and left the caret behind (4.11).
+#[implement(IDWriteInlineObject)]
+struct MarkerBox {
+    /// How far the box reaches along the line axis — the indent itself.
+    /// DirectWrite reads this as the advance in **either** writing direction,
+    /// which is the one thing 4.12 had to be asked rather than assumed.
+    along: f32,
+    /// Across the line. Kept under what the text on the line already asks for,
+    /// so no line grows because a box sits on it.
+    across: f32,
+    baseline: f32,
+}
+
+impl IDWriteInlineObject_Impl for MarkerBox_Impl {
+    fn Draw(
+        &self,
+        _context: *const c_void,
+        _renderer: Ref<IDWriteTextRenderer>,
+        _origin_x: f32,
+        _origin_y: f32,
+        _sideways: BOOL,
+        _right_to_left: BOOL,
+        _effect: Ref<IUnknown>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn GetMetrics(&self) -> Result<DWRITE_INLINE_OBJECT_METRICS> {
+        Ok(DWRITE_INLINE_OBJECT_METRICS {
+            width: self.along,
+            height: self.across,
+            baseline: self.baseline,
+            supportsSideways: true.into(),
+        })
+    }
+
+    fn GetOverhangMetrics(&self) -> Result<DWRITE_OVERHANG_METRICS> {
+        // Nothing is drawn here, so nothing hangs outside the box.
+        Ok(DWRITE_OVERHANG_METRICS::default())
+    }
+
+    fn GetBreakConditions(
+        &self,
+        before: *mut DWRITE_BREAK_CONDITION,
+        after: *mut DWRITE_BREAK_CONDITION,
+    ) -> Result<()> {
+        // SAFETY: DirectWrite hands us two pointers to its own storage, and the
+        // writes are guarded against the null it is allowed to pass.
+        unsafe {
+            if !before.is_null() {
+                *before = DWRITE_BREAK_CONDITION_NEUTRAL;
+            }
+            if !after.is_null() {
+                *after = DWRITE_BREAK_CONDITION_NEUTRAL;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Put a box over every range a marker stands at the head of (要件 7.3.2).
+///
+/// **Both places that build a layout call this**, right after
+/// [`apply_typography`]: the one in `update` that measures the block, and the
+/// one in `layout_for` that draws it. A block measured without its boxes and
+/// drawn with them would be placed at a size it is not.
+///
+/// One width for every marker is the whole point — `-`, `10.` and `- [x]` are
+/// four, five and eight characters, and all three set their text at the same
+/// indent.
+fn apply_marker_boxes(
+    layout: &IDWriteTextLayout,
+    typography: &Typography,
+    runs: &[StyleRun],
+) -> Result<()> {
+    if runs.iter().all(|run| run.ornament.is_none()) {
+        return Ok(());
+    }
+    // One step of indenting: room for a bullet and the gap after it.
+    let along = typography.indent_step();
+    let object: IDWriteInlineObject = MarkerBox {
+        along,
+        across: typography.font_size,
+        baseline: typography.font_size * 0.8,
+    }
+    .into();
+    for run in runs {
+        if run.ornament.is_none() {
+            continue;
+        }
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: run.utf16_start,
+            length: run.utf16_len,
+        };
+        // SAFETY: `style_runs` keeps every range inside the block's own text,
+        // and both objects outlive the call.
+        unsafe { layout.SetInlineObject(&object, range)? };
+    }
+    Ok(())
+}
+
+/// The byte offset of a UTF-16 position within `text`.
+///
+/// Only ever asked about a marker, which sits at the head of a line and is a
+/// handful of ASCII characters, so the walk stops almost at once.
+fn byte_at_utf16(text: &str, utf16: u32) -> usize {
+    let mut units = 0;
+    for (byte, character) in text.char_indices() {
+        if units >= utf16 {
+            return byte;
+        }
+        units += character.len_utf16() as u32;
+    }
+    text.len()
+}
+
+/// What goes in the box standing over one marker (要件 7.3.2).
+///
+/// A bullet and a checkbox are one glyph for every list in the document, but
+/// **`10.` says something `9.` does not**, so an ordered item draws the text the
+/// box is standing over. The trailing space is dropped: that space was the gap
+/// after the marker, and the gap is now the box.
+///
+fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
+    match ornament {
+        Ornament::Bullet => "•".to_owned(),
+        Ornament::TaskOpen => "☐".to_owned(),
+        Ornament::TaskDone => "☑".to_owned(),
+        // A box that is there only to hide what it covers. The stroke drawn
+        // across a rule is the line's, not the box's.
+        Ornament::Rule => String::new(),
+        Ornament::Number => {
+            let start = byte_at_utf16(block_text, run.utf16_start);
+            let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
+            block_text[start..end].trim_end().to_owned()
+        }
+    }
+}
+
+/// Draw what stands in each of a block's boxes (要件 7.3.2).
+///
+/// **Here rather than in the box itself.** Direct2D hands an inline object a
+/// renderer, not a render target, so a box that drew its own ink would have to
+/// hold one — and the target is rebuilt on every resize while the layouts
+/// referencing the box are cached across exactly that (技術検証 4.12).
+///
+/// Each ornament goes into the rectangle its own range hit-tests to, in the
+/// coordinates the block was drawn at. **Nothing here asks which way the line
+/// runs**: the rectangle already answers that, and the format is the pane's own.
+fn draw_marker_ink(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    format: &IDWriteTextFormat,
+    layout: &IDWriteTextLayout,
+    runs: &[StyleRun],
+    text: &str,
+    origin: windows_numerics::Vector2,
+) -> Result<()> {
+    // A box is one cluster and hit-tests to one region (技術検証 4.12). The
+    // room for a few more costs nothing and keeps a surprise from becoming an
+    // insufficient-buffer error in the middle of a draw.
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
+    for run in runs {
+        let Some(ornament) = run.ornament.filter(|kind| kind.draws_ink()) else {
+            continue;
+        };
+        let mut count = 0;
+        // SAFETY: `style_runs` keeps every range inside the block's own text,
+        // and the buffer is larger than one cluster can need.
+        unsafe {
+            layout.HitTestTextRange(
+                run.utf16_start,
+                run.utf16_len,
+                origin.X,
+                origin.Y,
+                Some(&mut regions),
+                &mut count,
+            )?;
+        }
+        if count == 0 {
+            continue;
+        }
+        let region = regions[0];
+        let ink = marker_ink(ornament, text, run);
+        let utf16 = ink.encode_utf16().collect::<Vec<u16>>();
+        let rect = D2D_RECT_F {
+            left: region.left,
+            top: region.top,
+            right: region.left + region.width,
+            bottom: region.top + region.height,
+        };
+        // SAFETY: The buffer, the format and the brush all outlive the call,
+        // and the rectangle is read before it returns.
+        unsafe {
+            target.DrawText(
+                &utf16,
+                format,
+                &rect,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether a run's box has anything drawn in it.
+///
+/// A free function rather than a closure so the two callers ask the same
+/// question, and so the `any` reading it stays one line (`chain_width`).
+fn run_draws_ink(run: &StyleRun) -> bool {
+    run.ornament.is_some_and(Ornament::draws_ink)
+}
+
+/// How much of the body ink a mark on the text is drawn with.
+///
+/// **Not a colour of its own.** 要件 9 lets the writer set the ink and the
+/// paper, and a bar beside a quote or a stroke across a rule is a mark on the
+/// text rather than text: drawing it out of the ink already chosen keeps it in
+/// that family whatever the writer picks. This value is what puts the default
+/// ink on the default paper at the design's `rule-strong`.
+const ORNAMENT_ALPHA: f32 = 0.30;
+
+/// Where one block was drawn inside the tile, and how wide the page is.
+///
+/// Everything that decides a whole-line mark is in flow and line terms, the
+/// way the rest of the engine is; this is the one place the two become a
+/// screen rectangle.
+struct OrnamentPage {
+    mode: WritingMode,
+    /// The flow coordinate the block layout's own origin was drawn at.
+    flow_origin: f32,
+    /// The page margin: where an unindented block's text begins on the line
+    /// axis, and where the first quote bar stands.
+    margin: f32,
+    /// What this block's own indent takes, past the margin (要件 7.3.2). The
+    /// text begins at `margin + inset`, and the bars stand in between.
+    inset: f32,
+    /// One step of indenting, which is also the space each bar has to itself.
+    indent: f32,
+    /// The pane across the line axis, both margins included.
+    line_extent: f32,
+    font_size: f32,
+}
+
+impl OrnamentPage {
+    /// The screen rectangle of a box given as a flow range and a line range.
+    fn rect(&self, flow: (f32, f32), line: (f32, f32)) -> D2D_RECT_F {
+        let (left, top) = self.mode.to_screen(self.flow_origin + flow.0, line.0);
+        let (right, bottom) = self.mode.to_screen(self.flow_origin + flow.1, line.1);
+        D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+}
+
+/// The flow extent of the visual lines one logical line became, in the block
+/// layout's own space.
+///
+/// **Matched by where each visual line starts, not by counting them.** How
+/// many a logical line wrapped to is a property of the layout; the only thing
+/// that says which logical line a visual one came from is where its text
+/// begins. `None` for a line the block measured nothing for.
+fn line_flow_range(lines: &[LineInfo], run: &LineRun) -> Option<(f32, f32)> {
+    let end = run.utf16_start + run.utf16_len;
+    let mut flow_start = f32::INFINITY;
+    let mut flow_end = f32::NEG_INFINITY;
+    for line in lines {
+        if line.utf16_start < run.utf16_start || line.utf16_start > end {
+            continue;
+        }
+        flow_start = flow_start.min(line.flow_start);
+        flow_end = flow_end.max(line.flow_start + line.flow_size);
+    }
+    (flow_start < flow_end).then_some((flow_start, flow_end))
+}
+
+/// Draw what stands over each whole logical line of a block (要件 7.3.2).
+///
+/// **The line's own rectangle, not a range's.** A bar beside a quote runs the
+/// height of everything that line wrapped to, and a rule crosses the whole
+/// page; neither can be asked of `HitTestTextRange`, which answers in
+/// characters. What answers instead is the block's own line table, which the
+/// measurement left behind — so this costs no DirectWrite call at all.
+///
+/// Before the text, so a mark never covers a glyph.
+fn draw_line_ornaments(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    lines: &[LineInfo],
+    runs: &[LineRun],
+    page: &OrnamentPage,
+) {
+    if runs.is_empty() {
+        return;
+    }
+    let bar = (page.font_size * 0.14).round().max(2.0);
+    let stroke = (page.font_size * 0.06).round().max(1.0);
+    // What a bar leaves between itself and the text it stands beside.
+    let gap = page.indent / 3.0;
+    // Where this block's text begins on the line axis, and where the page ends.
+    let near = page.margin + page.inset;
+    let far = (page.line_extent - page.margin).max(near + stroke);
+    // SAFETY: The brush is the render target's own and outlives every call
+    // here. The text is drawn with it too, so the opacity goes back below.
+    unsafe { brush.SetOpacity(ORNAMENT_ALPHA) };
+    for run in runs {
+        let Some(flow) = line_flow_range(lines, run) else {
+            continue;
+        };
+        match run.ornament {
+            // In the gutter the block's own indent opened, one bar per level
+            // of quoting. **Each stands at the far end of its own gutter**,
+            // one gap clear of the text that level would have begun at — a bar
+            // at the near end sits out by the margin with a whole indent of air
+            // between it and the words it belongs to.
+            LineOrnament::Quote { depth } => {
+                for level in 0..depth.max(1) {
+                    let text_at = page.margin + (f32::from(level) + 1.0) * page.indent;
+                    let at = text_at - gap - bar;
+                    let rect = page.rect(flow, (at, at + bar));
+                    // SAFETY: The rectangle is read before the call returns,
+                    // and the brush and the target both outlive it.
+                    unsafe { target.FillRectangle(&rect, brush) };
+                }
+            }
+            // Across the page, halfway along the room the line took.
+            LineOrnament::Rule => {
+                let half = stroke * 0.5;
+                let middle = (flow.0 + flow.1) * 0.5;
+                let rect = page.rect((middle - half, middle + half), (near, far));
+                // SAFETY: As above.
+                unsafe { target.FillRectangle(&rect, brush) };
+            }
+        }
+    }
+    // SAFETY: As above. The text after this is drawn at full strength.
+    unsafe { brush.SetOpacity(1.0) };
+}
+
+/// Set the per-range parts of the spec on one block's layout: the advance
+/// between characters, and the size of every heading in the block.
+///
+/// The ranges come from [`style_runs`] and are relative to the block, so this
+/// depends on nothing outside it. Character spacing is applied over the whole
+/// block first and then again over each heading, because the spacing is a
+/// fraction of the size of the character it follows, and a heading's characters
+/// are larger.
+fn apply_typography(
+    layout: &IDWriteTextLayout,
+    typography: &Typography,
+    runs: &[StyleRun],
+    utf16_len: u32,
+) -> Result<()> {
+    let spacing = typography.character_spacing;
+    let has_spacing = spacing.abs() > f32::EPSILON;
+    if !has_spacing && runs.is_empty() {
+        return Ok(());
+    }
+    let layout1 = if has_spacing {
+        Some(layout.cast::<IDWriteTextLayout1>()?)
+    } else {
+        None
+    };
+    // SAFETY: Every range below lies inside the layout's own text, and the
+    // layout outlives the calls.
+    unsafe {
+        if let Some(layout1) = &layout1 {
+            set_character_spacing(layout1, typography.font_size, spacing, 0, utf16_len)?;
+        }
+        for run in runs {
+            // 要件 7.3.2: a box stands over this range and hides its glyphs, so
+            // nothing about the font they would have been set in matters. The
+            // box itself is set on the layout, not here.
+            if run.ornament.is_some() {
+                continue;
+            }
+            let range = DWRITE_TEXT_RANGE {
+                startPosition: run.utf16_start,
+                length: run.utf16_len,
+            };
+            let size = typography.font_size * typography.size_scale(run.heading_level);
+            // Headings set at body size are the default state of the toolbar, so
+            // this is the common case and it should cost nothing.
+            if (size - typography.font_size).abs() > f32::EPSILON {
+                layout.SetFontSize(size, range)?;
+            }
+            // 要件 7.3.2: what the markers said about this stretch. Each is set
+            // only when it is set, so a document with no emphasis in it asks
+            // DirectWrite for nothing it would not have asked anyway.
+            //
+            // **Overlapping runs are how nesting works.** A bold stretch and
+            // the italic one inside it are two ranges, and the later call only
+            // changes the attribute it names; the two do not have to be worked
+            // out into one flat list of non-overlapping pieces.
+            if run.marks.bold {
+                layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, range)?;
+            }
+            if run.marks.italic {
+                layout.SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range)?;
+            }
+            if run.marks.strike {
+                layout.SetStrikethrough(true, range)?;
+            }
+            // 要件 9: a heading has a family of its own, and a code span has
+            // another. **The code one is set last** so that a code span inside
+            // a heading is still code — the later call is the one that stands.
+            if run.heading_level > 0 {
+                let family = HSTRING::from(typography.family_for(run.heading_level));
+                layout.SetFontFamilyName(&family, range)?;
+            }
+            if run.marks.code && !typography.code_font.is_empty() {
+                let family = HSTRING::from(typography.code_font.as_str());
+                layout.SetFontFamilyName(&family, range)?;
+            }
+            if let Some(layout1) = &layout1 {
+                set_character_spacing(layout1, size, spacing, run.utf16_start, run.utf16_len)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Split the extra advance evenly either side of the character, so a run stays
+/// centred in the space it is given rather than drifting one way.
+///
+/// # Safety
+///
+/// The range must lie inside the layout's text.
+unsafe fn set_character_spacing(
+    layout: &IDWriteTextLayout1,
+    size: f32,
+    spacing: f32,
+    start: u32,
+    length: u32,
+) -> Result<()> {
+    let half = size * spacing * 0.5;
+    let range = DWRITE_TEXT_RANGE {
+        startPosition: start,
+        length,
+    };
+    // SAFETY: The caller guarantees the range, and the minimum advance of zero
+    // leaves DirectWrite's own advance as the floor.
+    unsafe { layout.SetCharacterSpacing(half, half, 0.0, range) }
 }
 
 thread_local! {
@@ -365,34 +973,156 @@ struct MeasuredBlock {
     measure: BlockMeasure,
 }
 
+/// What one [`TextEngine::update`] had to re-measure.
+///
+/// The block count alone is misleading, and misleading in the direction that
+/// matters: `blocks == 1` reads like the cheapest possible update, but a block
+/// is whatever a paragraph makes it, so that one block may be the entire
+/// document. The UTF-16 total is what the cost actually follows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpdateCost {
+    pub blocks: usize,
+    pub utf16: u32,
+    /// UTF-16 units handed to [`LayoutWraps`], which is a whole layout each.
+    ///
+    /// Separate from `utf16` because it is a separate cost with a separate
+    /// cause, and because the one time it was not reported it hid a 205ms floor
+    /// under every keystroke in plain sight (6.10). An edit that does not touch
+    /// a long paragraph must leave this at zero.
+    pub wrapped: u32,
+    /// How the wrap positions of each long paragraph were arrived at: how many
+    /// were asked for, how many came back unchanged, and how many carried on
+    /// from a line start the edit did not reach.
+    ///
+    /// `asked - exact - resumed` is the number laid out from their first
+    /// character. `wrapped` says what that cost; these say why it was paid.
+    pub wrap_asked: u32,
+    pub wrap_exact: u32,
+    pub wrap_resumed: u32,
+    /// For the paragraph that was laid out from its first character: how many
+    /// bytes it still shared with its previous self, and how many line starts
+    /// that previous self had.
+    ///
+    /// Between them these say why the reuse was refused. A small `shared` means
+    /// the edit really was near the start of the paragraph and there was
+    /// nothing to keep. A large `shared` with few `starts` means the previous
+    /// wrapping was not there to be reused.
+    pub wrap_shared: usize,
+    pub wrap_starts: usize,
+}
+
 /// The layout of one document in one writing mode, split into independently
 /// laid out blocks.
 #[derive(Default)]
 pub struct TextEngine {
     mode: WritingMode,
     text: String,
+    /// Heading level per logical line of `text`. Blocks cut only at logical line
+    /// boundaries, so `block_lines` slices this without ever cutting an entry.
+    line_styles: Vec<LineStyle>,
+    /// What is marked inside each logical line (要件 7.3.2), sliced by
+    /// `block_lines` exactly as `line_styles` is.
+    line_spans: Vec<Vec<Emphasis>>,
+    /// The marker standing at the head of each logical line (要件 7.3.2). Held
+    /// beside the spans for the same reason they are, and compared for the same
+    /// reason: **a box changes where a line's text begins**, so an engine whose
+    /// markers differ is not describing this document.
+    line_markers: Vec<Option<LineMarker>>,
+    /// The logical lines each block covers, as an index into `line_styles`.
+    /// One entry per block, in reading order.
+    block_lines: Vec<Range<usize>>,
     /// The pane's extent along the line axis: its height in vertical writing,
     /// its width in horizontal writing. Every measurement depends on it.
     line_extent: u32,
-    font_size: f32,
+    typography: Typography,
     margin: f32,
     plan: BlockLayoutPlan,
     /// Measurements keyed by block text. Unchanged blocks survive every edit.
     measures: HashMap<u64, MeasuredBlock>,
     /// Live layouts, most recently used first.
     layouts: Vec<(u64, IDWriteTextLayout)>,
+    /// Where each long paragraph wraps. See [`LayoutWraps`].
+    wraps: Vec<ParagraphWraps>,
 }
 
-/// Identifies a layout object. Two blocks with the same text at the same size
-/// share one, whatever their position in the document.
+/// Everything about the spec that changes a layout, hashed.
+///
+/// Only the heading sizes a block actually uses go in, via [`hash_style_runs`];
+/// hashing all six here would rebuild every layout in the document when a level
+/// nobody used changed size.
+fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
+    typography.font_size.to_bits().hash(hasher);
+    typography.character_spacing.to_bits().hash(hasher);
+    typography.line_spacing.to_bits().hash(hasher);
+    // 要件 9: **a family changes every measurement**, so unlike the colours it
+    // belongs here rather than only in the tile's signature. Two specs that
+    // differ by a font are not the same layout and never were.
+    typography.body_font.hash(hasher);
+    typography.heading_font.hash(hasher);
+    typography.code_font.hash(hasher);
+}
+
+/// The colours a tile is drawn in (要件 9).
+///
+/// **Only the tiles are keyed by these**, never the layouts or the measures: a
+/// colour is the one setting that changes no geometry, so the layout that was
+/// measured is still the right one and only its pixels are stale. This was
+/// missed once and the symptom was a setting that appeared to do nothing —
+/// every tile was already in the cache under a key that said nothing about
+/// colour, so nothing was ever drawn again.
+fn hash_colours(typography: &Typography, hasher: &mut DefaultHasher) {
+    for channel in typography.ink.iter().chain(typography.paper.iter()) {
+        channel.to_bits().hash(hasher);
+    }
+    for level in &typography.heading_ink {
+        for channel in level {
+            channel.to_bits().hash(hasher);
+        }
+    }
+}
+
+/// The block-local ranges and the size each is set at.
+///
+/// The size, not the level: two specs that give a level the same size produce
+/// the same pixels and should share the cached layout.
+fn hash_style_runs(runs: &[StyleRun], typography: &Typography, hasher: &mut DefaultHasher) {
+    for run in runs {
+        run.utf16_start.hash(hasher);
+        run.utf16_len.hash(hasher);
+        let size = typography.font_size * typography.size_scale(run.heading_level);
+        size.to_bits().hash(hasher);
+        // 要件 7.3.2: two blocks whose text is the same but whose markers said
+        // different things are not the same layout, and must not share one.
+        run.marks.hash(hasher);
+        // And the same for a box standing over the head of a line: it hides the
+        // glyphs it covers and moves everything after it.
+        run.ornament.hash(hasher);
+    }
+}
+
+/// The block-local whole-line ornaments.
+///
+/// **Only the tiles are keyed by these**, for the reason [`hash_colours`] gives:
+/// a bar and a stroke change no geometry, so the layout that was measured is
+/// still the right one and only its pixels are stale.
+fn hash_line_runs(runs: &[LineRun], hasher: &mut DefaultHasher) {
+    runs.hash(hasher);
+}
+
+/// Identifies a layout object. Two blocks with the same text, set the same way,
+/// share one whatever their position in the document.
 ///
 /// The mode is not part of the key: these caches belong to one engine, and an
 /// engine keeps the mode it was built with.
-fn layout_key(text: &str, font_size: f32, line_extent: u32) -> u64 {
+/// **The block's own line box, not the pane's extent.** Two blocks of the same
+/// text set at different indents are different layouts (要件 7.3.2), and the
+/// box is the one number that says so.
+fn layout_key(text: &str, runs: &[StyleRun], typography: &Typography, line_box: f32) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
-    font_size.to_bits().hash(&mut hasher);
-    line_extent.hash(&mut hasher);
+    hash_typography(typography, &mut hasher);
+    hash_style_runs(runs, typography, &mut hasher);
+    line_box.to_bits().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -400,12 +1130,13 @@ fn layout_key(text: &str, font_size: f32, line_extent: u32) -> u64 {
 /// keeps a trailing empty line the others give up, so it measures differently.
 fn measure_key(
     text: &str,
-    font_size: f32,
-    line_extent: u32,
+    runs: &[StyleRun],
+    typography: &Typography,
+    line_box: f32,
     keep_trailing_empty_line: bool,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
-    layout_key(text, font_size, line_extent).hash(&mut hasher);
+    layout_key(text, runs, typography, line_box).hash(&mut hasher);
     keep_trailing_empty_line.hash(&mut hasher);
     hasher.finish()
 }
@@ -414,6 +1145,33 @@ fn measure_key(
 /// whole number of pixels from it. See `place_blocks`.
 fn margin_for(font_size: f32) -> f32 {
     (font_size * 1.5).max(16.0).round()
+}
+
+/// How far one block's text is set in from the page margin (要件 7.3.2).
+///
+/// **A property of the block, not of the pane.** An indent has to move every
+/// visual line a quoted paragraph wrapped to, and the only thing that can is
+/// the layout box the block is set in: DirectWrite has no per-paragraph
+/// indent, and a box at the head of a line reaches that head and no further
+/// (技術検証 7.1). That is why a change of quoting ends a block.
+///
+/// Every place that turns a line coordinate into a screen one goes through
+/// this — drawing, the caret, the hit test, the selection rectangles and the
+/// scroll that follows the caret. A place that forgot it would put the caret
+/// beside the text it is in.
+fn block_inset(span: &BlockSpan, typography: &Typography) -> f32 {
+    f32::from(span.quote_depth) * typography.indent_step()
+}
+
+/// The pane's line extent, less what one block's own indent takes.
+///
+/// Only ever used to estimate how far a block reaches along the flow axis,
+/// where being on the low side is the safe direction: fewer cells to a line
+/// means more lines reserved, and a reservation that is short is what makes
+/// DirectWrite drop the end of a block.
+fn block_extent(span: &BlockSpan, line_extent: u32, typography: &Typography) -> u32 {
+    let inset = block_inset(span, typography) as u32;
+    line_extent.saturating_sub(inset).max(1)
 }
 
 impl TextEngine {
@@ -444,6 +1202,22 @@ impl TextEngine {
         self.plan.blocks.len()
     }
 
+    /// The largest block in the document, in UTF-16 units.
+    ///
+    /// A block is the unit of re-measurement, so this is the worst a keystroke
+    /// can cost — and it is the one figure that says whether a document holds a
+    /// paragraph the split cannot cut. Blocks are bounded in line space
+    /// (`BLOCK_MAX_CELLS`) only where there is a logical line boundary to cut
+    /// at; one paragraph with no `\n` in it is one block however long it is.
+    pub fn largest_block_utf16(&self) -> u32 {
+        self.plan
+            .blocks
+            .iter()
+            .map(|block| block.span.utf16_len())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// How far a tile reaches along the flow axis, keeping the pixels per tile
     /// roughly constant as the window grows or shrinks.
     pub fn tile_flow_size(&self) -> u32 {
@@ -451,46 +1225,147 @@ impl TextEngine {
     }
 
     /// True when the engine already describes exactly this text and geometry.
-    pub fn matches(&self, text: &str, line_extent: u32, font_size: f32) -> bool {
-        self.line_extent == line_extent && self.font_size == font_size && self.text == text
+    pub fn matches(
+        &self,
+        styled: StyledText<'_>,
+        line_extent: u32,
+        typography: &Typography,
+    ) -> bool {
+        self.line_extent == line_extent
+            && self.typography == *typography
+            && self.text == styled.text
+            && self.line_styles == styled.lines
+            && self.line_spans == styled.spans
+            && self.line_markers == styled.markers
     }
 
-    /// Re-split and re-measure the document, reusing every block whose text did
-    /// not change. Returns the number of blocks that had to be measured.
-    pub fn update(&mut self, text: &str, line_extent: u32, font_size: f32) -> Result<usize> {
+    /// Re-split and re-measure the document, reusing every block whose text and
+    /// styling did not change. Returns what had to be measured.
+    pub fn update(
+        &mut self,
+        styled: StyledText<'_>,
+        line_extent: u32,
+        typography: &Typography,
+    ) -> Result<UpdateCost> {
         let line_extent = line_extent.max(1);
-        let font_size = font_size.max(1.0);
-        if self.matches(text, line_extent, font_size) {
-            return Ok(0);
+        let typography = Typography {
+            font_size: typography.font_size.max(1.0),
+            ..typography.clone()
+        };
+        if self.matches(styled, line_extent, &typography) {
+            return Ok(UpdateCost::default());
         }
-        if self.line_extent != line_extent || self.font_size != font_size {
-            // Both feed into every measurement, so nothing cached survives.
+        if self.line_extent != line_extent || self.typography != typography {
+            // Both feed into every measurement, so nothing cached survives. The
+            // wrap positions go too: they are keyed by the geometry, so the old
+            // entries would simply never be hit again.
             self.measures.clear();
             self.layouts.clear();
+            self.wraps.clear();
         }
 
+        let text = styled.text;
         let mode = self.mode;
-        let margin = margin_for(font_size);
+        let margin = margin_for(typography.font_size);
         let line_box = (line_extent as f32 - margin * 2.0).max(1.0);
         // The split is charged in line space, so it needs the geometry: the same
         // pane at a different line extent wraps differently and cuts elsewhere.
-        let spans = split_blocks(text, cells_per_line(line_extent, font_size));
+        let cells = cells_per_line(line_extent, &typography);
+        // A logical line longer than one block is cut at the positions
+        // DirectWrite wraps it, so the split needs a layout of its own for it.
+        // Ordinary paragraphs never reach `LayoutWraps` at all.
+        let (spans, fresh_wraps, wrap_cost) = with_graphics(|graphics| {
+            let format = graphics.text_format(&typography, mode)?;
+            let mut wraps = LayoutWraps {
+                format: &format,
+                typography: &typography,
+                mode,
+                line_extent,
+                line_box,
+                previous: &self.wraps,
+                current: Vec::new(),
+                laid_out: 0,
+                asked: 0,
+                exact: 0,
+                resumed: 0,
+                shared: 0,
+                starts: 0,
+                graphics,
+            };
+            let spans = split_blocks(styled, cells, &typography, &mut wraps);
+            let cost = UpdateCost {
+                wrapped: wraps.laid_out,
+                wrap_asked: wraps.asked,
+                wrap_exact: wraps.exact,
+                wrap_resumed: wraps.resumed,
+                wrap_shared: wraps.shared,
+                wrap_starts: wraps.starts,
+                ..UpdateCost::default()
+            };
+            Ok((spans, wraps.current, cost))
+        })?;
+        self.wraps = fresh_wraps;
         let mut measures = Vec::with_capacity(spans.len());
+        let mut block_lines = Vec::with_capacity(spans.len());
         let mut live_measure_keys = HashSet::with_capacity(spans.len());
         let mut live_layout_keys = HashSet::with_capacity(spans.len());
         let mut fresh_measures = Vec::new();
         let mut fresh_layouts = Vec::new();
-        let mut measured = 0;
+        let mut measured = wrap_cost;
 
         with_graphics(|graphics| {
-            let format = graphics.text_format(font_size, mode)?;
+            let format = graphics.text_format(&typography, mode)?;
             let last_index = spans.len().saturating_sub(1);
+            // Which logical line each block starts on. Counted forwards rather
+            // than looked up, so it costs one pass over the text and not one
+            // scan per block.
+            let mut line_cursor = 0;
             for (index, span) in spans.iter().enumerate() {
                 let block_text = &text[span.byte_start..span.byte_end];
+                // A block ends just after a newline, so it holds exactly as many
+                // logical lines as it has newlines — except the last block of a
+                // document that does not end in one, which holds one more.
+                let breaks = block_text.matches('\n').count();
+                let lines = if block_text.ends_with('\n') {
+                    breaks
+                } else {
+                    breaks + 1
+                };
+                // Advanced by the newlines, not by the lines covered. A piece
+                // cut out of the middle of a long line covers that line without
+                // finishing it, so the next piece is still on the same one.
+                let advance = breaks;
+                let block_levels = styled.lines.get(line_cursor..).unwrap_or(&[]);
+                let block_levels = &block_levels[..lines.min(block_levels.len())];
+                let block_spans = styled.spans.get(line_cursor..).unwrap_or(&[]);
+                let block_spans = &block_spans[..lines.min(block_spans.len())];
+                let block_markers = styled.markers.get(line_cursor..).unwrap_or(&[]);
+                let block_markers = &block_markers[..lines.min(block_markers.len())];
+                let block_styled = StyledText::marked(block_text, block_levels, block_spans);
+                // **The boxes have to be here too.** This is the layout the
+                // block is measured with, and it is kept as the layout it is
+                // drawn with; measuring without them would place every block
+                // after a list at a size that is not the one on screen.
+                let block_styled = block_styled.with_markers(block_markers);
+                block_lines.push(line_cursor..line_cursor + lines);
+                line_cursor += advance;
+
+                let runs = style_runs(block_styled);
                 let keep_trailing_empty_line = index == last_index;
-                let key = measure_key(block_text, font_size, line_extent, keep_trailing_empty_line);
+                // 要件 7.3.2: this block's own box, narrowed by its indent.
+                // **The measurement has to be taken in it**, or the block is
+                // placed at a size it is not drawn at.
+                let block_box = (line_box - block_inset(span, &typography)).max(1.0);
+                let key = measure_key(
+                    block_text,
+                    &runs,
+                    &typography,
+                    block_box,
+                    keep_trailing_empty_line,
+                );
+                let block_layout = layout_key(block_text, &runs, &typography, block_box);
                 live_measure_keys.insert(key);
-                live_layout_keys.insert(layout_key(block_text, font_size, line_extent));
+                live_layout_keys.insert(block_layout);
                 if let Some(cached) = self.measures.get(&key)
                     && cached.text == block_text
                     && cached.keep_trailing_empty_line == keep_trailing_empty_line
@@ -501,11 +1376,12 @@ impl TextEngine {
                     continue;
                 }
 
-                let max_flow_size = block_flow_bound(block_text, line_extent, font_size);
+                let extent = block_extent(span, line_extent, &typography);
+                let max_flow_size = block_flow_bound(block_styled, extent, &typography);
                 let utf16 = block_text.encode_utf16().collect::<Vec<u16>>();
-                // The layout box is the block's flow bound by the pane's line
-                // box, which way round depending on the mode.
-                let (max_width, max_height) = mode.to_screen(max_flow_size, line_box);
+                // The layout box is the block's flow bound by its own line box,
+                // which way round depending on the mode.
+                let (max_width, max_height) = mode.to_screen(max_flow_size, block_box);
                 // SAFETY: The UTF-16 buffer stays alive across CreateTextLayout,
                 // and the layout owns everything it needs afterwards.
                 let layout = unsafe {
@@ -513,9 +1389,12 @@ impl TextEngine {
                         .dwrite
                         .CreateTextLayout(&utf16, &format, max_width, max_height)?
                 };
+                apply_typography(&layout, &typography, &runs, utf16.len() as u32)?;
+                apply_marker_boxes(&layout, &typography, &runs)?;
                 let measure =
                     measure_block(&layout, max_flow_size, keep_trailing_empty_line, mode)?;
-                measured += 1;
+                measured.blocks += 1;
+                measured.utf16 += span.utf16_len();
                 measures.push(measure.clone());
                 fresh_measures.push((
                     key,
@@ -528,7 +1407,7 @@ impl TextEngine {
                 // Keep the layout that was just built. The caret hit test and the
                 // tile render both want this exact block moments from now, and
                 // building it again is one of the more expensive things here.
-                fresh_layouts.push((layout_key(block_text, font_size, line_extent), layout));
+                fresh_layouts.push((block_layout, layout));
             }
             Ok(())
         })?;
@@ -549,10 +1428,56 @@ impl TextEngine {
         self.layouts.truncate(LAYOUT_CACHE_LIMIT);
         self.plan = place_blocks(&spans, &measures, margin, mode.flow_order());
         self.text = text.to_owned();
+        self.line_styles = styled.lines.to_vec();
+        self.line_spans = styled.spans.to_vec();
+        self.line_markers = styled.markers.to_vec();
+        self.block_lines = block_lines;
         self.line_extent = line_extent;
-        self.font_size = font_size;
+        self.typography = typography;
         self.margin = margin;
         Ok(measured)
+    }
+
+    /// How one block's own logical lines are set.
+    fn block_levels(&self, block_index: usize) -> &[LineStyle] {
+        let Some(lines) = self.block_lines.get(block_index) else {
+            return &[];
+        };
+        let start = lines.start.min(self.line_styles.len());
+        let end = lines.end.min(self.line_styles.len());
+        &self.line_styles[start..end]
+    }
+
+    /// What one block's own logical lines have marked inside them.
+    fn block_spans(&self, block_index: usize) -> &[Vec<Emphasis>] {
+        let Some(lines) = self.block_lines.get(block_index) else {
+            return &[];
+        };
+        let start = lines.start.min(self.line_spans.len());
+        let end = lines.end.min(self.line_spans.len());
+        &self.line_spans[start..end]
+    }
+
+    /// The markers standing at the head of one block's own logical lines.
+    fn block_markers(&self, block_index: usize) -> &[Option<LineMarker>] {
+        let Some(lines) = self.block_lines.get(block_index) else {
+            return &[];
+        };
+        let start = lines.start.min(self.line_markers.len());
+        let end = lines.end.min(self.line_markers.len());
+        &self.line_markers[start..end]
+    }
+
+    /// One block's text and its own styling, which together decide everything
+    /// about its layout and nothing outside it.
+    fn block_styled(&self, block_index: usize) -> StyledText<'_> {
+        let Some(block) = self.plan.blocks.get(block_index) else {
+            return StyledText::plain("");
+        };
+        let text = &self.text[block.span.byte_start..block.span.byte_end];
+        let levels = self.block_levels(block_index);
+        let marked = StyledText::marked(text, levels, self.block_spans(block_index));
+        marked.with_markers(self.block_markers(block_index))
     }
 
     fn layout_for(
@@ -560,19 +1485,19 @@ impl TextEngine {
         graphics: &mut Graphics,
         block_index: usize,
     ) -> Result<IDWriteTextLayout> {
-        let (byte_start, byte_end, max_flow_size) = {
+        let (byte_start, byte_end, max_flow_size, inset) = {
             let block = &self.plan.blocks[block_index];
             (
                 block.span.byte_start,
                 block.span.byte_end,
                 block.max_flow_size,
+                block_inset(&block.span, &self.typography),
             )
         };
-        let key = layout_key(
-            &self.text[byte_start..byte_end],
-            self.font_size,
-            self.line_extent,
-        );
+        let runs = style_runs(self.block_styled(block_index));
+        let block_text = &self.text[byte_start..byte_end];
+        let line_box = (self.line_extent as f32 - self.margin * 2.0 - inset).max(1.0);
+        let key = layout_key(block_text, &runs, &self.typography, line_box);
         if let Some(position) = self.layouts.iter().position(|(cached, _)| *cached == key) {
             let entry = self.layouts.remove(position);
             let layout = entry.1.clone();
@@ -580,8 +1505,7 @@ impl TextEngine {
             return Ok(layout);
         }
 
-        let format = graphics.text_format(self.font_size, self.mode)?;
-        let line_box = (self.line_extent as f32 - self.margin * 2.0).max(1.0);
+        let format = graphics.text_format(&self.typography, self.mode)?;
         let (max_width, max_height) = self.mode.to_screen(max_flow_size, line_box);
         let utf16 = self.text[byte_start..byte_end]
             .encode_utf16()
@@ -592,6 +1516,11 @@ impl TextEngine {
                 .dwrite
                 .CreateTextLayout(&utf16, &format, max_width, max_height)?
         };
+        // The same spec the measurement was taken under. A layout rebuilt
+        // without it would draw and hit test at a different size from the one
+        // the block was placed at.
+        apply_typography(&layout, &self.typography, &runs, utf16.len() as u32)?;
+        apply_marker_boxes(&layout, &self.typography, &runs)?;
         self.layouts.insert(0, (key, layout.clone()));
         self.layouts.truncate(LAYOUT_CACHE_LIMIT);
         Ok(layout)
@@ -620,6 +1549,10 @@ impl TextEngine {
         mut emit: impl FnMut(TileSpan, u32, u32, &[u8]),
     ) -> Result<()> {
         let mode = self.mode;
+        // 要件 9: this sheet's paper. The window paints the page behind the
+        // tiles from the same setting, so the two cannot show a seam.
+        let paper = colour(self.typography.paper);
+        let ink = colour(self.typography.ink);
         let line_extent = self.line_extent();
         let margin = self.margin;
         // One surface for every tile, at the furthest a tile can reach.
@@ -646,11 +1579,12 @@ impl TextEngine {
 
                 // Scoped so the cache borrow ends before `layout_for` needs
                 // `graphics` mutably again.
-                let (target, brush, bitmap) = {
+                let (target, brush, heading_brushes, bitmap) = {
                     let cache = graphics.render_target(surface_width, surface_height)?;
                     (
                         cache.target.clone(),
                         cache.brush.clone(),
+                        cache.heading_brushes.clone(),
                         cache.bitmap.clone(),
                     )
                 };
@@ -659,7 +1593,15 @@ impl TextEngine {
                 // cache for the whole draw, and BeginDraw/EndDraw are paired.
                 unsafe {
                     target.BeginDraw();
-                    target.Clear(Some(&BACKGROUND));
+                    target.Clear(Some(&paper));
+                    // The brushes the target keeps, told what the inks are now.
+                    // Cheaper than building them per tile, and the settings may
+                    // have moved since the target was made (要件 9).
+                    brush.SetColor(&ink);
+                    for (level, heading_brush) in heading_brushes.iter().enumerate() {
+                        let heading_ink = colour(self.typography.ink_for(level as u8 + 1));
+                        heading_brush.SetColor(&heading_ink);
+                    }
                 }
                 let layout = self.layout_for(graphics, span.block_index)?;
                 let block = &self.plan.blocks[span.block_index];
@@ -671,14 +1613,59 @@ impl TextEngine {
                         start + length,
                     )
                 });
+                // 要件 9: a heading is drawn in its own ink. **Set on the
+                // layout before every draw rather than once when it is built**
+                // — the layout is cached and a colour changes no geometry, so
+                // the cached one is still the right layout; and the brush it
+                // was given last time belongs to a render target that may since
+                // have been rebuilt. Body runs are left alone: they are drawn
+                // with the brush handed to `DrawTextLayout`.
+                let runs = style_runs(self.block_styled(span.block_index));
+                // SAFETY: the layout and the brushes both outlive the draw.
+                unsafe {
+                    for run in &runs {
+                        if run.heading_level == 0 {
+                            continue;
+                        }
+                        let Some(heading_brush) =
+                            heading_brushes.get(run.heading_level as usize - 1)
+                        else {
+                            continue;
+                        };
+                        layout.SetDrawingEffect(
+                            heading_brush,
+                            DWRITE_TEXT_RANGE {
+                                startPosition: run.utf16_start,
+                                length: run.utf16_len,
+                            },
+                        )?;
+                    }
+                }
                 // The block is drawn at its own offset inside the tile, and the
-                // margin sits on the line axis. Both swap with the mode.
+                // margin plus the block's own indent sit on the line axis. All
+                // of it swaps with the mode.
                 let block_origin = block.draw_origin() - tile_start as f32;
-                let (origin_x, origin_y) = mode.to_screen(block_origin, margin);
+                let inset = block_inset(&block.span, &self.typography);
+                let (origin_x, origin_y) = mode.to_screen(block_origin, margin + inset);
                 let origin = windows_numerics::Vector2 {
                     X: origin_x,
                     Y: origin_y,
                 };
+                // 要件 7.3.2: the marks that belong to whole lines — the bar
+                // beside a quote, the stroke across a rule. Drawn from the
+                // block's own line table rather than from a hit test, and
+                // before the text, so neither ever covers a glyph.
+                let page = OrnamentPage {
+                    mode,
+                    flow_origin: block_origin,
+                    margin,
+                    inset,
+                    indent: self.typography.indent_step(),
+                    line_extent: line_extent as f32,
+                    font_size: self.typography.font_size,
+                };
+                let line_marks = line_runs(self.block_styled(span.block_index));
+                draw_line_ornaments(&target, &brush, &block.lines, &line_marks, &page);
                 // SAFETY: The layout outlives the draw call, and the underline
                 // is set and cleared on the same layout.
                 unsafe {
@@ -701,6 +1688,13 @@ impl TextEngine {
                             },
                         )?;
                     }
+                }
+                // 要件 7.3.2: what stands in each of this block's boxes. After
+                // the text, so the ink sits on top of nothing it has to fight.
+                if runs.iter().any(run_draws_ink) {
+                    let format = graphics.text_format(&self.typography, mode)?;
+                    let text = &self.text[block.span.byte_start..block.span.byte_end];
+                    draw_marker_ink(&target, &brush, &format, &layout, &runs, text, origin)?;
                 }
                 // SAFETY: Paired with BeginDraw above.
                 unsafe { target.EndDraw(None, None)? };
@@ -747,12 +1741,24 @@ impl TextEngine {
         tile.sub_index.hash(&mut hasher);
         tile.flow_size.hash(&mut hasher);
         self.line_extent.hash(&mut hasher);
-        self.font_size.to_bits().hash(&mut hasher);
+        hash_typography(&self.typography, &mut hasher);
+        hash_colours(&self.typography, &mut hasher);
         // Two panes showing the same text at the same size draw different
         // pixels, so a shared tile cache must not confuse them.
         self.mode.hash(&mut hasher);
         if let Some(block) = self.plan.blocks.get(tile.block_index) {
             self.text[block.span.byte_start..block.span.byte_end].hash(&mut hasher);
+            // Block-local, like the underline below: the same heading drawn at
+            // the same size is the same pixels wherever it sits.
+            let runs = style_runs(self.block_styled(tile.block_index));
+            hash_style_runs(&runs, &self.typography, &mut hasher);
+            // 要件 7.3.2: and the marks that belong to whole lines. **Nothing
+            // in the block's own text says a line is one** — three hyphens
+            // inside a fence are three hyphens — and neither mark moves a
+            // glyph, so without this the tile already in the cache is the one
+            // that gets shown. The same trap the colours fell into above.
+            let line_marks = line_runs(self.block_styled(tile.block_index));
+            hash_line_runs(&line_marks, &mut hasher);
             // The underline is the one thing the block's own text does not say.
             // Hashed block-local, so it stays put when earlier text changes.
             if let Some(local) = preedit_utf16_range.and_then(|(start, length)| {
@@ -775,12 +1781,12 @@ impl TextEngine {
             return Ok(CaretGeometry {
                 x: self.margin,
                 y: self.margin,
-                width: self.font_size,
-                height: self.font_size,
+                width: self.typography.font_size,
+                height: self.typography.font_size,
             });
         }
         let block_index = self.plan.block_at_utf16(caret_utf16);
-        let font_size = self.font_size;
+        let font_size = self.typography.font_size;
         let margin = self.margin;
         let mode = self.mode;
 
@@ -804,11 +1810,13 @@ impl TextEngine {
                 )?;
             }
             // The hit test answers on both axes at once: the flow coordinate
-            // needs the block's offset applied, the line coordinate the margin.
+            // needs the block's offset applied, the line coordinate the margin
+            // and the block's own indent (要件 7.3.2).
             let (_, line_point) = mode.to_axes(point_x, point_y);
+            let inset = block_inset(&block.span, &self.typography);
             let (x, y) = mode.to_screen(
                 block.to_global_flow(mode.flow_of(&metrics)),
-                margin + line_point,
+                margin + inset + line_point,
             );
             Ok(CaretGeometry {
                 x,
@@ -876,7 +1884,8 @@ impl TextEngine {
                 let local_length = local_end - local_start;
                 // Given the same origin the tile is drawn at, DirectWrite
                 // reports the regions already in the pane's coordinates.
-                let (origin_x, origin_y) = mode.to_screen(block.draw_origin(), margin);
+                let inset = block_inset(&block.span, &self.typography);
+                let (origin_x, origin_y) = mode.to_screen(block.draw_origin(), margin + inset);
 
                 // One region per selected UTF-16 unit is the hard upper bound.
                 // Supplying it avoids DirectWrite's insufficient-buffer probe.
@@ -931,7 +1940,9 @@ impl TextEngine {
         with_graphics(|graphics| {
             let layout = self.layout_for(graphics, block_index)?;
             let block = &self.plan.blocks[block_index];
-            let (layout_x, layout_y) = mode.to_screen(block.to_layout_flow(flow), line - margin);
+            let inset = block_inset(&block.span, &self.typography);
+            let (layout_x, layout_y) =
+                mode.to_screen(block.to_layout_flow(flow), line - margin - inset);
             hit_test_in_block(
                 &layout,
                 layout_x,
@@ -993,9 +2004,10 @@ impl TextEngine {
         with_graphics(|graphics| {
             let layout = self.layout_for(graphics, next_block)?;
             let block = &self.plan.blocks[next_block];
+            let inset = block_inset(&block.span, &self.typography);
             let (layout_x, layout_y) = mode.to_screen(
                 block.to_layout_flow(center_flow),
-                (target_line - margin).max(0.0),
+                (target_line - margin - inset).max(0.0),
             );
             hit_test_in_block(
                 &layout,
@@ -1068,24 +2080,345 @@ fn hit_test_in_block(
 ///
 /// `keep_trailing_empty_line` must be true only for the last block of the
 /// document. See the comment on the trailing newline below.
+/// Asks DirectWrite where a paragraph wraps, by laying it out.
+///
+/// This is what cutting inside a logical line costs: the positions to cut at are
+/// a property of the layout, so one has to be built to find them, and building
+/// it costs what measuring the paragraph costs (6.9). The cut pieces are then
+/// measured separately on top of that.
+///
+/// Only reached for a logical line too long to be one block, so an ordinary
+/// document never builds this layout at all.
+/// One long paragraph's wrapping, kept so the next update need not find it
+/// again from nothing.
+struct ParagraphWraps {
+    text: String,
+    /// How the line was set when these positions were found. **All of it, not
+    /// just the heading level**: quoting narrows the box a line is set in
+    /// (要件 7.3.2), and positions found at another width are not line starts
+    /// here.
+    style: LineStyle,
+    /// Byte offsets where each line after the first begins.
+    starts: Vec<usize>,
+}
+
+/// The furthest along the flow axis any one layout is asked to reach.
+///
+/// DirectWrite's own limit is 262144px. Staying well under it means the editor
+/// never arrives there, so what happens at that limit never has to be known.
+///
+/// This is not a number of characters and cannot be turned into one: how many
+/// fit in a line depends on the pane, so the same paragraph reaches a different
+/// distance in a different window. It is a guard on the layout, not a rule about
+/// documents — the rule about documents is a separate, much smaller number in
+/// the editor, and lowering this one to meet it would only make the range
+/// between them slower (技術検証 7.4).
+const MAX_LAYOUT_FLOW: f32 = 200_000.0;
+
+/// Line starts given back beyond the first changed byte, as a margin.
+///
+/// Everything before an edit wraps as it did, because a line is decided by the
+/// text that precedes it. But a break also depends on the characters just after
+/// it: Japanese line breaking will not leave a closing bracket or a full stop at
+/// the start of a line, so the last break before an edit can still move when the
+/// edit lands right on top of it. Two lines of margin costs about forty
+/// characters of re-wrapping and removes the question.
+const WRAP_REUSE_MARGIN: usize = 2;
+
+struct LayoutWraps<'a> {
+    graphics: &'a mut Graphics,
+    format: &'a IDWriteTextFormat,
+    typography: &'a Typography,
+    mode: WritingMode,
+    line_extent: u32,
+    line_box: f32,
+    /// Where each paragraph wrapped last time. **Without this, every long
+    /// paragraph in the document was laid out on every keystroke**, which put
+    /// a floor under the whole document equal to measuring all of them at once
+    /// — 205ms on the sample, however small the edit (6.10).
+    previous: &'a [ParagraphWraps],
+    /// What was asked for this time, which becomes `previous` for the next
+    /// update. Built fresh so a paragraph that no longer exists is dropped
+    /// without having to be found.
+    current: Vec<ParagraphWraps>,
+    /// UTF-16 units actually laid out, so the cost of this shows up in the log
+    /// rather than hiding inside `layout`.
+    laid_out: u32,
+    asked: u32,
+    exact: u32,
+    resumed: u32,
+    /// The widest miss seen this update, for the log. See [`UpdateCost`].
+    shared: usize,
+    starts: usize,
+}
+
+impl WrapPoints for LayoutWraps<'_> {
+    fn line_starts(&mut self, text: &str, style: LineStyle) -> Vec<usize> {
+        let starts = self.starts_for(text, style);
+        self.current.push(ParagraphWraps {
+            text: text.to_owned(),
+            style,
+            starts: starts.clone(),
+        });
+        starts
+    }
+}
+
+impl LayoutWraps<'_> {
+    fn starts_for(&mut self, text: &str, style: LineStyle) -> Vec<usize> {
+        self.asked += 1;
+        // Copied out first: this is a borrow of the caller's slice, not of
+        // `self`, and taking it now leaves `self` free to lay text out below.
+        let previous = self.previous;
+        let same = previous
+            .iter()
+            .find(|kept| kept.style == style && kept.text == text);
+        if let Some(same) = same {
+            self.exact += 1;
+            return same.starts.clone();
+        }
+
+        // The longest surviving prefix of any paragraph set the same way. With
+        // one long paragraph in the document this finds it; with several it
+        // finds the edited one, because the others matched in full above.
+        let nearest = previous
+            .iter()
+            .filter(|kept| kept.style == style)
+            .map(|kept| (common_prefix(&kept.text, text), kept))
+            .max_by_key(|(shared, _)| *shared);
+        if let Some((shared, kept)) = &nearest
+            && *shared >= self.shared
+        {
+            self.shared = *shared;
+            self.starts = kept.starts.len();
+        }
+        let resume = nearest.and_then(|(shared, kept)| {
+            let usable = kept.starts.partition_point(|start| *start <= shared);
+            let usable = usable.checked_sub(WRAP_REUSE_MARGIN)?;
+            let starts = &kept.starts[..usable];
+            Some((*starts.last()?, starts.to_vec()))
+        });
+
+        match resume {
+            // Laying out from a line start is legitimate for the same reason
+            // cutting there is: the lines from there on depend on nothing
+            // before it.
+            Some((offset, mut kept)) => {
+                self.resumed += 1;
+                let tail = self.lay_out(&text[offset..], style);
+                kept.extend(tail.iter().map(|start| start + offset));
+                kept
+            }
+            None => self.lay_out(text, style),
+        }
+    }
+
+    /// Lay `text` out and report where its lines begin, relative to its own
+    /// start.
+    ///
+    /// A layout that cannot be built reports nothing, which means "do not cut":
+    /// the paragraph stays the one oversized block it has always been. Failing
+    /// to build a layout is a reason to leave the text alone, not a reason to
+    /// stop laying out the document.
+    fn lay_out(&mut self, text: &str, style: LineStyle) -> Vec<usize> {
+        self.laid_out += text.encode_utf16().count() as u32;
+        self.wrap_offsets(text, style).unwrap_or_default()
+    }
+
+    /// Where a paragraph's lines begin, found a window at a time.
+    ///
+    /// **No layout is ever asked to reach further than [`MAX_LAYOUT_FLOW`].**
+    /// DirectWrite's own limit is 262144px, and what it does at that limit is
+    /// something this editor should never find out — an unknown behaviour at
+    /// the maximum is worse than a smaller maximum that was chosen.
+    ///
+    /// Windowing rather than truncating is what makes that guarantee hold all
+    /// the way through. Stopping at one window would leave the rest of the
+    /// paragraph uncut, and *that* block would then be handed a layout box as
+    /// long as the tail — moving the problem rather than removing it. Carrying
+    /// on from the last line start of each window cuts a paragraph of any
+    /// length, so **every layout the editor builds is small, whatever the
+    /// document contains.**
+    ///
+    /// Each window resumes from a line start for the same reason a block may
+    /// begin at one: what follows a line start is decided by what follows it.
+    /// The last few positions of an unfinished window are dropped and found
+    /// again next time round, because a break near the end of a window can still
+    /// move when the text after it arrives — the same margin, for the same
+    /// reason, as reusing an earlier wrapping.
+    fn wrap_offsets(&mut self, text: &str, style: LineStyle) -> Result<Vec<usize>> {
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut start = 0;
+        while start < text.len() {
+            let end = self.window_end(text, start, style);
+            let found = self.wrap_offsets_in(&text[start..end], style)?;
+            let whole_rest = end == text.len();
+            let usable = if whole_rest {
+                found.len()
+            } else {
+                found.len().saturating_sub(WRAP_REUSE_MARGIN)
+            };
+            if usable == 0 {
+                // A window with nothing usable in it cannot be advanced past,
+                // so the rest of the line stays in one piece. Slow, and decided.
+                break;
+            }
+            offsets.extend(found[..usable].iter().map(|offset| offset + start));
+            if whole_rest {
+                break;
+            }
+            // How far the window actually got. Bounded from below on purpose: a
+            // window that comes back with barely more lines than the margin
+            // would advance a line at a time, laying the paragraph out once per
+            // line. Leaving the rest in one piece is slow; laying it out
+            // thousands of times is a hang.
+            let advance = found[usable - 1];
+            if advance * 4 < end - start {
+                break;
+            }
+            start += advance;
+        }
+        Ok(offsets)
+    }
+
+    /// The byte offset one window past `start`, on a character boundary.
+    fn window_end(&self, text: &str, start: usize, style: LineStyle) -> usize {
+        let typography = self.typography;
+        let level = style.heading_level;
+        let flow_per_line = typography.font_size * 2.2 * typography.flow_scale(level);
+        let lines = (MAX_LAYOUT_FLOW / flow_per_line.max(1.0)).floor().max(1.0);
+        let extent = self.quoted_extent(style);
+        let cells = cells_per_line(extent, typography) as f32;
+        let per_line = (cells / typography.size_scale(level)).max(1.0);
+        let characters = (lines * per_line) as usize;
+        let rest = &text[start..];
+        // A character is at least one byte, so a byte length already under the
+        // allowance is under it in characters too, and needs no walk.
+        if rest.len() <= characters {
+            return text.len();
+        }
+        match rest.char_indices().nth(characters) {
+            Some((offset, _)) => start + offset,
+            None => text.len(),
+        }
+    }
+
+    /// The line extent a paragraph set at `style` is laid out across.
+    ///
+    /// **A quoted paragraph is asked at the width it will be cut at.** A wrap
+    /// position is only a line start for a layout of the same width, and the
+    /// pieces are measured in the block's own narrower box (要件 7.3.2).
+    fn quoted_extent(&self, style: LineStyle) -> u32 {
+        let inset = f32::from(style.quote_depth) * self.typography.indent_step();
+        self.line_extent.saturating_sub(inset as u32).max(1)
+    }
+
+    /// And the box that goes with it, which is what the pieces are measured
+    /// in once they are cut.
+    fn quoted_box(&self, style: LineStyle) -> f32 {
+        let inset = f32::from(style.quote_depth) * self.typography.indent_step();
+        (self.line_box - inset).max(1.0)
+    }
+
+    fn wrap_offsets_in(&mut self, text: &str, style: LineStyle) -> Result<Vec<usize>> {
+        // One logical line, so one style covers all of it.
+        let levels = [style];
+        let styled = StyledText::new(text, &levels);
+        let bound = block_flow_bound(styled, self.quoted_extent(style), self.typography);
+        let line_box = self.quoted_box(style);
+        let (max_width, max_height) = self.mode.to_screen(bound, line_box);
+        let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+        // SAFETY: The UTF-16 buffer outlives CreateTextLayout, and the format
+        // is owned by the caller for the whole call.
+        let layout = unsafe {
+            self.graphics
+                .dwrite
+                .CreateTextLayout(&utf16, self.format, max_width, max_height)?
+        };
+        // The same spec the pieces will be measured under. Character spacing and
+        // heading size both move where the text wraps, so a bare layout would
+        // report positions the pieces do not actually break at.
+        let runs = style_runs(styled);
+        apply_typography(&layout, self.typography, &runs, utf16.len() as u32)?;
+        Ok(wrap_byte_offsets(text, &line_metrics(&layout)?))
+    }
+}
+
+/// How many leading bytes two paragraphs share, ending on a character boundary.
+///
+/// This is where an edit begins, and everything before it wraps as it did.
+fn common_prefix(before: &str, after: &str) -> usize {
+    let mut shared = before
+        .as_bytes()
+        .iter()
+        .zip(after.as_bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while shared > 0 && !before.is_char_boundary(shared) {
+        shared -= 1;
+    }
+    shared
+}
+
+/// Byte offsets in `text` where each line after the first begins.
+///
+/// DirectWrite counts in UTF-16 and the split works in bytes, so the two are
+/// walked together once. The end of the text is dropped: it closes the last line
+/// rather than starting one, and a cut there would make an empty block.
+fn wrap_byte_offsets(text: &str, metrics: &[DWRITE_LINE_METRICS]) -> Vec<usize> {
+    let mut wanted = Vec::with_capacity(metrics.len());
+    let mut utf16 = 0_u32;
+    for line in metrics {
+        utf16 += line.length;
+        wanted.push(utf16);
+    }
+    wanted.pop();
+
+    let mut offsets = Vec::with_capacity(wanted.len());
+    let mut next = 0;
+    let mut utf16 = 0_u32;
+    for (byte, character) in text.char_indices() {
+        // A while loop rather than an if: an empty line would ask for the same
+        // offset twice, and only the first of them may become a cut.
+        while next < wanted.len() && wanted[next] <= utf16 {
+            // Never the start of the text: a cut there makes an empty block.
+            if byte > 0 && offsets.last() != Some(&byte) {
+                offsets.push(byte);
+            }
+            next += 1;
+        }
+        utf16 += character.len_utf16() as u32;
+    }
+    offsets
+}
+
+/// Every line DirectWrite produced for a layout.
+///
+/// Two calls: one to learn the count, which is expected to report an
+/// insufficient buffer, and one to fill it.
+fn line_metrics(layout: &IDWriteTextLayout) -> Result<Vec<DWRITE_LINE_METRICS>> {
+    let mut line_count = 0_u32;
+    // SAFETY: The probe call is expected to fail with the required count; only
+    // that count is used.
+    unsafe {
+        let _ = layout.GetLineMetrics(None, &mut line_count);
+    }
+    let mut metrics = vec![DWRITE_LINE_METRICS::default(); line_count as usize];
+    if line_count > 0 {
+        // SAFETY: The buffer holds exactly the count reported above.
+        unsafe { layout.GetLineMetrics(Some(&mut metrics), &mut line_count)? };
+    }
+    metrics.truncate(line_count as usize);
+    Ok(metrics)
+}
+
 fn measure_block(
     layout: &IDWriteTextLayout,
     max_flow_size: f32,
     keep_trailing_empty_line: bool,
     mode: WritingMode,
 ) -> Result<BlockMeasure> {
-    let mut line_count = 0_u32;
-    // SAFETY: The probe call is expected to report an insufficient buffer; only
-    // the returned count is used.
-    unsafe {
-        let _ = layout.GetLineMetrics(None, &mut line_count);
-    }
-    let mut line_metrics = vec![DWRITE_LINE_METRICS::default(); line_count as usize];
-    if line_count > 0 {
-        // SAFETY: The buffer holds exactly the count reported above.
-        unsafe { layout.GetLineMetrics(Some(&mut line_metrics), &mut line_count)? };
-    }
-    line_metrics.truncate(line_count as usize);
+    let mut line_metrics = line_metrics(layout)?;
 
     // Every block ends just after a newline, and DirectWrite answers a trailing
     // newline with an extra empty line. Within the whole document that position
@@ -1182,7 +2515,7 @@ fn measure_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::text_blocks::visible_flow_range;
+    use crate::text_blocks::{LineKind, Marks, visible_flow_range};
 
     /// The pane extent along the line axis every test lays text out in.
     const LINE_EXTENT: u32 = 520;
@@ -1192,11 +2525,26 @@ mod tests {
     }
 
     fn engine_in(mode: WritingMode, text: &str, font_size: f32) -> TextEngine {
+        engine_set(mode, StyledText::plain(text), &Typography::new(font_size))
+    }
+
+    fn engine_set(
+        mode: WritingMode,
+        styled: StyledText<'_>,
+        typography: &Typography,
+    ) -> TextEngine {
         let mut engine = TextEngine::new(mode);
         engine
-            .update(text, LINE_EXTENT, font_size)
+            .update(styled, LINE_EXTENT, typography)
             .expect("DirectWrite block measurement");
         engine
+    }
+
+    /// Re-lay out an existing engine with no styling and the default spec.
+    fn update_plain(engine: &mut TextEngine, text: &str) -> UpdateCost {
+        engine
+            .update(StyledText::plain(text), LINE_EXTENT, &plain())
+            .expect("DirectWrite block measurement")
     }
 
     #[test]
@@ -1291,7 +2639,7 @@ mod tests {
         // Several lengths, so the split lands on different boundaries and the
         // final block comes out a different size each time.
         for repeats in [37, 40, 41, 53] {
-            assert_split_matches_one_layout(WritingMode::Vertical, repeats);
+            assert_split_matches_one_layout(WritingMode::Vertical, repeats, &plain());
         }
     }
 
@@ -1302,30 +2650,160 @@ mod tests {
     #[test]
     fn horizontal_block_heights_sum_to_the_single_layout_height() {
         for repeats in [37, 40, 41, 53] {
-            assert_split_matches_one_layout(WritingMode::Horizontal, repeats);
+            assert_split_matches_one_layout(WritingMode::Horizontal, repeats, &plain());
         }
     }
 
-    fn assert_split_matches_one_layout(mode: WritingMode, repeats: usize) {
-        let paragraph = "これは検証用の段落です。句読点、括弧（かっこ）、全角ＡＢＣ、半角ABC123を含みます。\n\n";
-        let text = paragraph.repeat(repeats);
-        let font_size = 22.0;
-        let engine = engine_in(mode, &text, font_size);
-        assert!(engine.block_count() > 1, "the sample must span many blocks");
+    /// The same invariant again, with none of the three quantities left at
+    /// DirectWrite's own value and with headings scattered through the sample.
+    ///
+    /// This is the question this round of validation exists to answer. A block
+    /// sizes itself from its own line metrics, and every line is now free to be
+    /// a different size from its neighbours — if that breaks the sum, per-line
+    /// sizing cannot be built on this structure at all. Both writing modes,
+    /// because the heading size lands on the line axis and the spacing on the
+    /// flow axis, and the two swap between them.
+    #[test]
+    fn block_extents_sum_to_the_single_layout_under_free_typography() {
+        let typography = Typography {
+            character_spacing: 0.18,
+            line_spacing: 1.35,
+            ..Typography::new(22.0)
+        }
+        .with_heading_ramp(1.8);
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            for repeats in [37, 40, 41, 53] {
+                assert_split_matches_one_layout(mode, repeats, &typography);
+            }
+        }
+    }
 
+    fn plain() -> Typography {
+        Typography::new(22.0)
+    }
+
+    /// **The question the whole approach turns on.**
+    ///
+    /// A paragraph with no break in it is cut at the positions DirectWrite says
+    /// it wraps at. For that to be legitimate, laying out the text *from* such a
+    /// position has to produce the same lines it produced inside the paragraph.
+    /// It was not obvious that it would: Japanese line breaking has kinsoku
+    /// rules that forbid certain characters at the start or the end of a line,
+    /// and a rule that looks at what precedes a break could well decide
+    /// differently when nothing precedes it.
+    ///
+    /// If this fails, the paragraph cannot be cut and 6.9's 212ms stands.
+    #[test]
+    fn a_cut_paragraph_sums_to_the_single_layout() {
+        // Long enough to be cut into several pieces, and full of the characters
+        // the breaking rules care about: closing brackets and punctuation that
+        // may not begin a line, and Latin runs that may not be split.
+        let sentence = "日本語ABC123と句読点、括弧（かっこ）「鉤括弧」を含む段落である。";
+        let text = format!("{}\n", sentence.repeat(160));
+
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            let styled = StyledText::plain(&text);
+            let engine = engine_set(mode, styled, &plain());
+            assert!(
+                engine.block_count() > 3,
+                "the paragraph must be cut into pieces, not left as {} block(s)",
+                engine.block_count()
+            );
+            assert_blocks_match_one_layout(mode, styled, &plain(), "one long paragraph");
+        }
+    }
+
+    /// The same paragraph with the three typography quantities moved off their
+    /// defaults, because all three change where the text wraps and therefore
+    /// where it may be cut.
+    #[test]
+    fn a_cut_paragraph_holds_under_free_typography() {
+        let typography = Typography {
+            character_spacing: 0.18,
+            line_spacing: 1.35,
+            ..Typography::new(22.0)
+        };
+        let sentence = "縦書きの長い段落で、句読点や（括弧）やABC123が混ざっている。";
+        let text = format!("{}\n", sentence.repeat(160));
+        let styled = StyledText::plain(&text);
+
+        assert_blocks_match_one_layout(
+            WritingMode::Vertical,
+            styled,
+            &typography,
+            "one long paragraph, free typography",
+        );
+    }
+
+    /// The sample every invariant test lays out: paragraphs with a heading every
+    /// fourth logical line, so blocks land on both kinds of line.
+    fn sample_document(repeats: usize) -> (String, Vec<LineStyle>) {
+        let paragraph = "これは検証用の段落です。句読点、括弧（かっこ）、全角ＡＢＣ、半角ABC123を含みます。\n\n";
+        let mut text = String::new();
+        let mut levels = Vec::new();
+        for index in 0..repeats {
+            if index % 4 == 0 {
+                text.push_str(&format!("## 第{index}節\n"));
+                levels.push(LineStyle::heading(2));
+            }
+            text.push_str(paragraph);
+            levels.push(LineStyle::default());
+            levels.push(LineStyle::default());
+        }
+        (text, levels)
+    }
+
+    fn assert_split_matches_one_layout(mode: WritingMode, repeats: usize, typography: &Typography) {
+        let (text, levels) = sample_document(repeats);
+        let label = format!("{repeats} paragraphs");
+        let styled = StyledText::new(&text, &levels);
+        assert_blocks_match_one_layout(mode, styled, typography, &label);
+    }
+
+    /// Lay the text out both ways and compare: as the blocks the split produces,
+    /// and as one layout of the whole thing. The columns must land in the same
+    /// places and the extents must add up.
+    fn assert_blocks_match_one_layout(
+        mode: WritingMode,
+        styled: StyledText<'_>,
+        typography: &Typography,
+        label: &str,
+    ) {
+        let engine = engine_set(mode, styled, typography);
+        assert_engine_matches_one_layout(&engine, styled, typography, label);
+    }
+
+    /// The same comparison against an engine that already exists, so an engine
+    /// that reached its blocks through a series of edits can be checked as well
+    /// as one built in a single pass.
+    fn assert_engine_matches_one_layout(
+        engine: &TextEngine,
+        styled: StyledText<'_>,
+        typography: &Typography,
+        label: &str,
+    ) {
+        let text = styled.text;
+        let mode = engine.mode;
+        assert!(engine.block_count() > 1, "{label}: must span many blocks");
+
+        let font_size = typography.font_size;
         let margin = margin_for(font_size);
         let line_box = (LINE_EXTENT as f32 - margin * 2.0).max(1.0);
-        let bound = block_flow_bound(&text, LINE_EXTENT, font_size);
+        let bound = block_flow_bound(styled, LINE_EXTENT, typography);
         let (max_width, max_height) = mode.to_screen(bound, line_box);
         let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+        // The whole document set exactly as its blocks were: same spec, same
+        // ranges, only measured in one piece.
+        let runs = style_runs(styled);
         let whole = with_graphics(|graphics| {
-            let format = graphics.text_format(font_size, mode)?;
+            let format = graphics.text_format(typography, mode)?;
             // SAFETY: The UTF-16 buffer outlives CreateTextLayout.
             let layout = unsafe {
                 graphics
                     .dwrite
                     .CreateTextLayout(&utf16, &format, max_width, max_height)?
             };
+            apply_typography(&layout, typography, &runs, utf16.len() as u32)?;
             // The whole document is its own last block, so it keeps the
             // trailing empty line the split blocks give up.
             measure_block(&layout, bound, true, mode)
@@ -1347,7 +2825,7 @@ mod tests {
                 .map(|b| b.lines.len())
                 .sum::<usize>(),
             whole.lines.len(),
-            "splitting must not change the column count ({repeats} paragraphs)"
+            "{label}: splitting must not change the column count"
         );
         // Nothing is estimated any more: both sides are the sum of the same line
         // advances, so the only difference allowed is float summation order.
@@ -1355,12 +2833,208 @@ mod tests {
         let error = (split_width - whole.flow_size).abs();
         assert!(
             error <= 0.5,
-            "{repeats} paragraphs: split blocks total {split_width}px \
+            "{label}: split blocks total {split_width}px \
              but one layout is {}px, over {} blocks — {:.3}px per boundary",
             whole.flow_size,
             engine.block_count(),
             error / boundaries
         );
+    }
+
+    /// A heading takes its size from the range it is set over, so the line it
+    /// sits on advances further than the body line under it. This is what
+    /// `line_cells` is charging for and what `block_flow_bound` is reserving.
+    #[test]
+    fn a_heading_line_advances_further_than_a_body_line() {
+        let text = "見出しの行\n本文の行です\n";
+        let levels = [LineStyle::heading(1), LineStyle::default()];
+        let styled = StyledText::new(text, &levels);
+        let at_one_size = engine_set(WritingMode::Vertical, styled, &plain());
+        let big_headings = plain().with_heading_ramp(2.0);
+        let with_headings = engine_set(WritingMode::Vertical, styled, &big_headings);
+
+        let flat = &at_one_size.plan.blocks[0].lines;
+        let sized = &with_headings.plan.blocks[0].lines;
+        assert!(flat.len() >= 2 && sized.len() >= 2, "two lines are needed");
+        assert!(
+            (flat[0].flow_size - flat[1].flow_size).abs() < 0.5,
+            "at one size both lines advance the same: {} and {}",
+            flat[0].flow_size,
+            flat[1].flow_size
+        );
+        assert!(
+            sized[0].flow_size > sized[1].flow_size * 1.5,
+            "the heading line advanced {} against the body line's {}",
+            sized[0].flow_size,
+            sized[1].flow_size
+        );
+        // The body line is untouched: only the range that was set changed size.
+        assert!(
+            (sized[1].flow_size - flat[1].flow_size).abs() < 0.5,
+            "setting the heading moved the body line from {} to {}",
+            flat[1].flow_size,
+            sized[1].flow_size
+        );
+    }
+
+    /// Character spacing is added to the advance, so the same logical line wraps
+    /// into more visual lines. If it did not, `cells_per_line` would be counting
+    /// something DirectWrite does not do.
+    #[test]
+    fn wider_character_spacing_wraps_a_line_sooner() {
+        let text = "あ".repeat(120);
+        let tight = engine_for(&text, 22.0);
+        let loose = engine_set(
+            WritingMode::Vertical,
+            StyledText::plain(&text),
+            &Typography {
+                character_spacing: 0.5,
+                ..Typography::new(22.0)
+            },
+        );
+
+        let tight_lines: usize = tight.plan.blocks.iter().map(|b| b.lines.len()).sum();
+        let loose_lines: usize = loose.plan.blocks.iter().map(|b| b.lines.len()).sum();
+        assert!(
+            loose_lines > tight_lines,
+            "{tight_lines} lines stayed {loose_lines} at half a size of extra advance"
+        );
+    }
+
+    /// Proportional line spacing must scale each line's own advance, not replace
+    /// them all with one number.
+    ///
+    /// This is 4.2 restated for the spacing control. A block's extent is the sum
+    /// of its lines' individual advances, and
+    /// `DWRITE_LINE_SPACING_METHOD_UNIFORM` would replace all of them with one
+    /// pitch — which flattens the differences and breaks every block boundary.
+    ///
+    /// The uneven pair is a heading and a body line. The obvious sample — a line
+    /// holding a rotated Latin run against one of plain ideographs — turned out
+    /// to measure the *same* advance to within a tenth of a pixel at this size,
+    /// so the difference 4.2 found over a whole document is not something two
+    /// lines can be relied on to show.
+    #[test]
+    fn proportional_line_spacing_keeps_the_lines_uneven() {
+        let text = "見出しの行\n本文の行です\n";
+        let levels = [LineStyle::heading(1), LineStyle::default()];
+        let styled = StyledText::new(text, &levels);
+        let headings = plain().with_heading_ramp(2.0);
+        let airy = Typography {
+            line_spacing: 1.5,
+            ..headings.clone()
+        };
+        let tight = engine_set(WritingMode::Vertical, styled, &headings);
+        let loose = engine_set(WritingMode::Vertical, styled, &airy);
+
+        let uneven = |engine: &TextEngine| {
+            let lines = &engine.plan.blocks[0].lines;
+            lines[0].flow_size - lines[1].flow_size
+        };
+        assert!(
+            uneven(&tight) > 1.0,
+            "the heading and body lines must differ to start: {}",
+            uneven(&tight)
+        );
+        // Scaled, not levelled. Uniform spacing would bring this to zero.
+        assert!(
+            uneven(&loose) > uneven(&tight) * 1.4,
+            "spacing flattened a {}px difference to {}px",
+            uneven(&tight),
+            uneven(&loose)
+        );
+        let stretch = loose.plan.blocks[0].exact_flow_size / tight.plan.blocks[0].exact_flow_size;
+        assert!(
+            (stretch - 1.5).abs() < 0.05,
+            "asking for 1.5 times the advance gave {stretch}"
+        );
+    }
+
+    /// The bound is what DirectWrite is given as the layout box, and a block
+    /// that reaches past it has its last lines clipped away. A heading larger
+    /// than the factor the bound assumed is exactly how that happens.
+    #[test]
+    fn the_flow_bound_holds_for_a_block_of_headings() {
+        let typography = Typography {
+            line_spacing: 1.4,
+            ..Typography::new(22.0)
+        }
+        .with_heading_ramp(2.4);
+        let text = "# 大きな見出しの行です\n".repeat(40);
+        let levels = vec![LineStyle::heading(1); 40];
+        let engine = engine_set(
+            WritingMode::Vertical,
+            StyledText::new(&text, &levels),
+            &typography,
+        );
+
+        for (index, block) in engine.plan.blocks.iter().enumerate() {
+            assert!(
+                block.exact_flow_size <= block.max_flow_size,
+                "block {index} measured {}px inside a {}px bound",
+                block.exact_flow_size,
+                block.max_flow_size
+            );
+        }
+        let lines: usize = engine.plan.blocks.iter().map(|b| b.lines.len()).sum();
+        assert!(lines >= 40, "{lines} lines came back from 40 headings");
+    }
+
+    /// Stepping column by column must cross the whole document, in both
+    /// directions, without ever standing still.
+    ///
+    /// A caret that stops advancing partway through looks to the writer like a
+    /// key that stopped working. Every boundary it has to get over is here: the
+    /// ends of ordinary blocks, and the cuts inside a long paragraph, which are
+    /// not at line breaks and so are the ones with no newline to lean on.
+    #[test]
+    fn stepping_by_column_crosses_every_block_boundary() {
+        // Just past two cuts inside the paragraph, which is all this needs: the
+        // boundaries are what it is about, not the distance.
+        let long = "日本語ABCと句読点、を含む長い段落である。".repeat(60);
+        let text = format!("# 見出し\n短い行\n{long}\n終わりの行\n");
+        let mut engine = engine_for(&text, 22.0);
+        assert!(engine.block_count() > 2, "the sample must span many blocks");
+        let utf16_len = engine.utf16_len();
+
+        // Forwards is towards smaller flow coordinates in vertical writing, so
+        // it is the negative delta.
+        let mut caret = 0;
+        let mut steps = 0;
+        loop {
+            let next = engine
+                .move_caret_by_line(caret, -2, None)
+                .expect("a column step")
+                .utf16_position;
+            if next == caret {
+                break;
+            }
+            assert!(
+                next > caret,
+                "stepping forwards went backwards, from {caret} to {next}"
+            );
+            caret = next;
+            steps += 1;
+            assert!(steps < 1_000, "stepping never reached the end");
+        }
+        assert!(
+            caret + 200 >= utf16_len,
+            "stepping forwards stalled at {caret} of {utf16_len}"
+        );
+
+        let mut back = caret;
+        loop {
+            let next = engine
+                .move_caret_by_line(back, 2, None)
+                .expect("a column step")
+                .utf16_position;
+            if next == back {
+                break;
+            }
+            assert!(next < back, "stepping back went forwards");
+            back = next;
+        }
+        assert!(back < 200, "stepping back stalled at {back} of {utf16_len}");
     }
 
     #[test]
@@ -1442,6 +3116,194 @@ mod tests {
         );
         assert_eq!(bytes, width as usize * height as usize * 4);
         assert!(ink > 100, "expected visible glyph pixels");
+    }
+
+    /// A bullet and a checkbox are one glyph apiece for every list in the
+    /// document, but an ordered item draws the text its own box stands over:
+    /// **`10.` says something `9.` does not** (要件 7.3.2). The trailing space
+    /// goes — that space was the gap after the marker, and the gap is the box.
+    #[test]
+    fn the_ink_for_a_number_is_the_text_its_box_stands_over() {
+        let text = "見出し\n10. 番号";
+        let run = StyleRun {
+            utf16_start: "見出し\n".encode_utf16().count() as u32,
+            utf16_len: 4,
+            heading_level: 0,
+            marks: Marks::default(),
+            ornament: Some(Ornament::Number),
+        };
+
+        assert_eq!(marker_ink(Ornament::Number, text, &run), "10.");
+        assert_eq!(marker_ink(Ornament::Bullet, text, &run), "•");
+        assert_eq!(marker_ink(Ornament::TaskOpen, text, &run), "☐");
+        assert_eq!(marker_ink(Ornament::TaskDone, text, &run), "☑");
+    }
+
+    /// A block covering nothing, quoted to the given depth.
+    fn quoted_span(quote_depth: u8) -> BlockSpan {
+        BlockSpan {
+            byte_start: 0,
+            byte_end: 0,
+            utf16_start: 0,
+            utf16_end: 0,
+            quote_depth,
+        }
+    }
+
+    /// A quoted block is moved in from the margin by one step per level, and
+    /// set in a box narrower by the same amount (要件 7.3.2). **Every line of
+    /// it**, which is the whole reason the indent belongs to the block rather
+    /// than to the head of a line.
+    #[test]
+    fn a_quoted_block_is_set_in_by_one_step_a_level() {
+        let typography = plain();
+        let step = typography.indent_step();
+
+        assert_eq!(block_inset(&quoted_span(0), &typography), 0.0);
+        assert_eq!(block_inset(&quoted_span(1), &typography), step);
+        assert_eq!(block_inset(&quoted_span(2), &typography), step * 2.0);
+        assert_eq!(block_extent(&quoted_span(0), 800, &typography), 800);
+        assert_eq!(
+            block_extent(&quoted_span(1), 800, &typography),
+            800 - step as u32
+        );
+        // A pane narrower than the indent still leaves a box to lay out in.
+        assert_eq!(block_extent(&quoted_span(4), 10, &typography), 1);
+    }
+
+    /// A rule's box is there to hide the marks and nothing else: the stroke
+    /// drawn across it is the line's, not the box's (要件 7.3.2).
+    #[test]
+    fn a_rule_puts_no_ink_in_its_box() {
+        assert!(!Ornament::Rule.draws_ink());
+        assert!(Ornament::Bullet.draws_ink());
+        assert!(Ornament::Number.draws_ink());
+    }
+
+    /// The offset is in UTF-16 units, which is what a DirectWrite range is
+    /// measured in: a character outside the basic plane is two of them, and a
+    /// position inside the pair resolves to the byte after it — the same answer
+    /// the preview's own table gives.
+    #[test]
+    fn a_utf16_offset_counts_a_surrogate_pair_as_two() {
+        let text = "𠮷野家";
+
+        assert_eq!(byte_at_utf16(text, 0), 0);
+        assert_eq!(byte_at_utf16(text, 1), "𠮷".len());
+        assert_eq!(byte_at_utf16(text, 2), "𠮷".len());
+        assert_eq!(byte_at_utf16(text, 3), "𠮷野".len());
+        assert_eq!(byte_at_utf16(text, 99), text.len());
+    }
+
+    /// 要件 7.3.2: the box a marker stands in has to be a **real box in the
+    /// run** — the text after it starts one box in and the caret agrees
+    /// (技術検証 4.12). A layout without the box would put the caret where the
+    /// text is not, which is what `leadingSpacing` would have done (4.11).
+    #[test]
+    fn a_marker_box_indents_the_text_after_it() {
+        let text = "- 箇条書き";
+        let levels = [LineStyle::of_kind(LineKind::Bullet)];
+        let bullet = LineMarker {
+            utf16_len: 2,
+            ornament: Ornament::Bullet,
+        };
+        let markers = [Some(bullet)];
+        let typography = plain();
+        let boxed = StyledText::new(text, &levels).with_markers(&markers);
+        let bare = StyledText::new(text, &levels);
+
+        let mut with_box = engine_set(WritingMode::Horizontal, boxed, &typography);
+        let mut without = engine_set(WritingMode::Horizontal, bare, &typography);
+
+        // The head of the line is where it always was.
+        let head = with_box.caret_geometry(0).expect("caret geometry");
+        let bare_head = without.caret_geometry(0).expect("caret geometry");
+        assert!((head.x - bare_head.x).abs() < 0.5, "{head:?} {bare_head:?}");
+
+        // And the item's first character has moved by the box's own width.
+        let item = with_box.caret_geometry(2).expect("caret geometry");
+        let bare_item = without.caret_geometry(2).expect("caret geometry");
+        let width = typography.cell_advance() * 2.0;
+        assert!(
+            (item.x - bare_head.x - width).abs() < 1.0,
+            "expected {width} of indent, got {item:?} against {bare_head:?}"
+        );
+        assert!(
+            item.x > bare_item.x,
+            "{item:?} did not move past {bare_item:?}"
+        );
+    }
+
+    /// One visual line of a block, at a fixed pitch. Only where it starts and
+    /// where it sits along the flow axis matter to a whole-line mark.
+    fn visual_line(utf16_start: u32, flow_start: f32) -> LineInfo {
+        LineInfo {
+            utf16_start,
+            utf16_len: 10,
+            newline_len: 0,
+            flow_start,
+            flow_size: 20.0,
+        }
+    }
+
+    /// A wrapped logical line is several visual lines, and the mark drawn over
+    /// it has to reach across all of them (要件 7.3.2).
+    #[test]
+    fn a_whole_line_mark_covers_every_visual_line_it_wrapped_to() {
+        let lines = [
+            visual_line(0, 0.0),
+            visual_line(10, 20.0),
+            visual_line(20, 40.0),
+        ];
+        let run = LineRun {
+            utf16_start: 0,
+            utf16_len: 24,
+            ornament: LineOrnament::Rule,
+        };
+
+        assert_eq!(line_flow_range(&lines, &run), Some((0.0, 60.0)));
+    }
+
+    /// And the line after it is not covered, however close it sits. The visual
+    /// lines are matched by where they start, which is the only thing that says
+    /// which logical line they came from.
+    #[test]
+    fn a_whole_line_mark_stops_at_the_end_of_its_own_line() {
+        let lines = [visual_line(0, 0.0), visual_line(10, 20.0)];
+        let run = LineRun {
+            utf16_start: 10,
+            utf16_len: 5,
+            ornament: LineOrnament::Quote { depth: 1 },
+        };
+
+        assert_eq!(line_flow_range(&lines, &run), Some((20.0, 40.0)));
+    }
+
+    /// **A box must not make its line taller.** The height and the baseline it
+    /// reports sit inside what the text on the line already asks for, so a
+    /// document does not grow along the flow axis because its markers got
+    /// boxes.
+    #[test]
+    fn a_marker_box_does_not_change_the_flow_size() {
+        let text = "- 箇条書き\n- もう一行\n本文";
+        let levels = [
+            LineStyle::of_kind(LineKind::Bullet),
+            LineStyle::of_kind(LineKind::Bullet),
+            LineStyle::default(),
+        ];
+        let bullet = LineMarker {
+            utf16_len: 2,
+            ornament: Ornament::Bullet,
+        };
+        let markers = [Some(bullet), Some(bullet), None];
+        let typography = plain();
+        let boxed = StyledText::new(text, &levels).with_markers(&markers);
+        let bare = StyledText::new(text, &levels);
+
+        let with_box = engine_set(WritingMode::Horizontal, boxed, &typography);
+        let without = engine_set(WritingMode::Horizontal, bare, &typography);
+
+        assert_eq!(with_box.total_flow_size(), without.total_flow_size());
     }
 
     /// Hit testing and caret geometry must agree in horizontal writing too, which
@@ -1549,9 +3411,7 @@ mod tests {
             text.len(),
             "the swap must not resize the text"
         );
-        engine
-            .update(&edited, LINE_EXTENT, 22.0)
-            .expect("update after edit");
+        update_plain(&mut engine, &edited);
 
         assert_eq!(
             engine.total_flow_size(),
@@ -1624,9 +3484,7 @@ mod tests {
         let edited_block = engine
             .plan
             .block_at_utf16(text[..cut].encode_utf16().count() as u32);
-        engine
-            .update(&edited, LINE_EXTENT, 22.0)
-            .expect("update after Enter");
+        update_plain(&mut engine, &edited);
 
         assert!(
             engine.total_flow_size() > width_before,
@@ -1785,9 +3643,7 @@ mod tests {
         let mut edited = text.clone();
         edited.insert_str(0, "あ");
         let blocks = engine.block_count();
-        let measured = engine
-            .update(&edited, LINE_EXTENT, 22.0)
-            .expect("incremental update");
+        let measured = update_plain(&mut engine, &edited).blocks;
 
         assert!(
             measured <= 2,
@@ -1796,17 +3652,194 @@ mod tests {
         );
     }
 
+    /// The regression that made cutting slower than not cutting (6.10).
+    /// [`LayoutWraps`] built a layout for every long paragraph on every update,
+    /// so a keystroke anywhere in the document paid to lay all of them out — a
+    /// floor of 205ms on the measurement sample, under an edit of one
+    /// character.
+    ///
+    /// A paragraph whose text has not changed wraps where it wrapped before,
+    /// and must not be laid out again to find that out.
+    #[test]
+    fn an_edit_elsewhere_does_not_lay_a_long_paragraph_out_again() {
+        let long = "日本語ABCと句読点、を含む長い段落である。".repeat(120);
+        let text = format!("短い行\n{long}\n末尾の行\n");
+        let mut engine = engine_for(&text, 22.0);
+        assert!(engine.block_count() > 3, "the paragraph must have been cut");
+
+        let edited = text.replace("短い行", "短い行を編集");
+        let cost = update_plain(&mut engine, &edited);
+
+        assert_eq!(
+            cost.wrapped, 0,
+            "an edit outside the paragraph laid it out again"
+        );
+        assert!(
+            cost.utf16 < 1_000,
+            "an edit outside the paragraph re-measured {} units",
+            cost.utf16
+        );
+    }
+
+    /// The other half: an edit *inside* the paragraph does lay it out again,
+    /// because its wrap positions have genuinely moved.
+    #[test]
+    fn an_edit_inside_a_long_paragraph_lays_it_out_again() {
+        let long = "日本語ABCと句読点、を含む長い段落である。".repeat(120);
+        let text = format!("短い行\n{long}\n末尾の行\n");
+        let mut engine = engine_for(&text, 22.0);
+
+        let edited = text.replace("日本語ABCと句読点", "日本語ABCと句読点を編集");
+        let cost = update_plain(&mut engine, &edited);
+
+        assert!(cost.wrapped > 0, "the changed paragraph must be re-wrapped");
+    }
+
+    /// The asymmetry, at the engine: an edit near the end of a long paragraph
+    /// only re-wraps from the edit onwards, because everything before it is
+    /// decided by text that has not changed (6.9).
+    #[test]
+    fn an_edit_late_in_a_long_paragraph_only_re_wraps_its_tail() {
+        let sentence = "日本語ABCと句読点、を含む長い段落である。";
+        let long = sentence.repeat(400);
+        let text = format!("{long}\n");
+        let mut engine = engine_for(&text, 22.0);
+
+        // In the last twentieth, on a sentence boundary so the edit is a plain
+        // insertion rather than a change of the repeated text everywhere.
+        let cut = text.char_indices().nth(long.chars().count() * 19 / 20);
+        let cut = cut.expect("long enough").0;
+        let edited = format!("{}編集{}", &text[..cut], &text[cut..]);
+        let cost = update_plain(&mut engine, &edited);
+
+        let whole = text.encode_utf16().count() as u32;
+        assert!(
+            cost.wrapped * 5 < whole,
+            "an edit in the last twentieth re-wrapped {} of {whole} units",
+            cost.wrapped
+        );
+    }
+
+    /// The shape the measurement sample actually has: several long paragraphs,
+    /// not one. An edit late in one of them must carry on from that paragraph's
+    /// own earlier wrapping, and must leave the others matched whole.
+    ///
+    /// The single-paragraph case passed while the editor still laid a whole
+    /// paragraph out on most keystrokes (6.10), so one paragraph was not enough
+    /// to hold the reuse honest.
+    #[test]
+    fn an_edit_among_several_long_paragraphs_reuses_the_right_one() {
+        let sentences = [
+            "日本語ABCと句読点、を含む長い段落である。",
+            "縦書きの組版では、行が右から左へ積み上がっていく。",
+            "折り返しの位置は内容によって決まるものである。",
+        ];
+        let mut text = String::new();
+        let mut ends = Vec::new();
+        for (index, sentence) in sentences.iter().enumerate() {
+            text.push_str(&sentence.repeat(150 * (index + 1)));
+            ends.push(text.len());
+            text.push('\n');
+        }
+        let mut engine = engine_for(&text, 22.0);
+        assert!(engine.block_count() > 10, "every paragraph must be cut");
+
+        // Late in the second paragraph, on a sentence boundary. The other two
+        // are untouched and the first half of this one is as well.
+        let cut = ends[1] - sentences[1].len() * 2;
+        let edited = format!("{}編集{}", &text[..cut], &text[cut..]);
+        let cost = update_plain(&mut engine, &edited);
+
+        assert_eq!(cost.wrap_asked, 3, "every long paragraph is asked about");
+        assert_eq!(cost.wrap_exact, 2, "the untouched paragraphs match whole");
+        assert_eq!(cost.wrap_resumed, 1, "the edited paragraph must carry on");
+        let whole = text.encode_utf16().count() as u32;
+        assert!(
+            cost.wrapped * 8 < whole,
+            "{} of {whole} units were laid out again",
+            cost.wrapped
+        );
+    }
+
+    /// **A paragraph of any length ends up in bounded blocks.**
+    ///
+    /// The guarantee asked for is that reaching a maximum must not produce
+    /// something unknown — no crash, no clipped text, no layout at
+    /// DirectWrite's own limit. Finding the wrap positions a window at a time
+    /// is what delivers it: stopping after one window would leave the rest of
+    /// the paragraph in a single block, and that block's own layout box would
+    /// then be as long as the tail.
+    ///
+    /// A window is a *distance* along the flow axis, so a large font makes one
+    /// only a few hundred characters. That is how this crosses several windows
+    /// while laying out about a thousand lines — the first version of this test
+    /// used a narrow pane instead, which crosses windows by producing tens of
+    /// thousands of lines, and lines are what laying out costs.
+    #[test]
+    fn a_paragraph_far_past_one_window_is_still_cut_into_bounded_blocks() {
+        // 2 characters to a line, and a window of about 900 characters.
+        let huge = Typography::new(200.0);
+        let text = format!("{}\n", "あ".repeat(3_000));
+        let mut engine = TextEngine::new(WritingMode::Vertical);
+        engine
+            .update(StyledText::plain(&text), 1_000, &huge)
+            .expect("a very long paragraph must lay out");
+
+        assert!(
+            engine.block_count() >= 4,
+            "the paragraph must be cut throughout, not left as {} block(s)",
+            engine.block_count()
+        );
+        let largest = engine.largest_block_utf16();
+        let whole = text.encode_utf16().count() as u32;
+        assert!(
+            largest * 3 < whole,
+            "one block still holds {largest} of {whole} units"
+        );
+        // Covered exactly once, so nothing was dropped at a window boundary.
+        let mut cursor = 0;
+        for block in &engine.plan.blocks {
+            assert_eq!(block.span.utf16_start, cursor, "a gap at a window edge");
+            cursor = block.span.utf16_end;
+        }
+        assert_eq!(cursor, whole);
+    }
+
+    /// Reusing the earlier wrap positions must not change where the text ends
+    /// up. This is the same invariant as
+    /// `a_cut_paragraph_sums_to_the_single_layout`, asked of an engine that took
+    /// the shortcut rather than one that laid the paragraph out in full.
+    ///
+    /// The margin (`WRAP_REUSE_MARGIN`) exists for this test to hold: a break
+    /// right before the edit can move, because Japanese line breaking looks at
+    /// what follows a break as well as what precedes it.
+    #[test]
+    fn reusing_earlier_wraps_still_matches_one_layout() {
+        let sentence = "日本語ABC123と句読点、括弧（かっこ）「鉤括弧」を含む段落である。";
+        let text = format!("{}\n", sentence.repeat(160));
+        let mut engine = engine_for(&text, 22.0);
+
+        // Edited at several depths, each starting from the wrapping the one
+        // before it left behind, so the reuse compounds.
+        for twentieth in [19, 15, 11, 7, 3] {
+            let characters = text.chars().count() * twentieth / 20;
+            let cut = text.char_indices().nth(characters);
+            let cut = cut.expect("long enough").0;
+            let edited = format!("{}編集{}", &text[..cut], &text[cut..]);
+            update_plain(&mut engine, &edited);
+
+            let label = format!("edited at {twentieth}/20");
+            let styled = StyledText::plain(&edited);
+            assert_engine_matches_one_layout(&engine, styled, &plain(), &label);
+        }
+    }
+
     #[test]
     fn a_repeated_update_measures_nothing() {
         let text = "同じ内容での更新\n\n本文\n";
         let mut engine = engine_for(text, 22.0);
 
-        assert_eq!(
-            engine
-                .update(text, LINE_EXTENT, 22.0)
-                .expect("no-op update"),
-            0
-        );
+        assert_eq!(update_plain(&mut engine, text), UpdateCost::default());
     }
 
     #[test]

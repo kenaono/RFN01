@@ -1,0 +1,64 @@
+// The colours the window is allowed to use.
+//
+// Every colour used to be written where it was needed — eighteen literals, the
+// most common one seventeen times — so a change of mind meant finding all of
+// them, and two places that meant the same thing could drift apart without
+// anyone noticing.
+//
+// The set is small on purpose. It comes from two hue families that are never
+// mixed: the chrome and the one accent are purple (hue 295), the paper and the
+// text on it are ivory (hue 92). Text the reader stares at for an hour carries
+// no purple at all — that is what `doc-ink` is for, and why it is the only ink
+// outside the purple family.
+//
+// The values were chosen in oklch and converted, so lightness and chroma line
+// up across a family rather than drifting the way hand-picked hex does. The
+// comment on each one is the oklch it came from; edit there, not here.
+//
+// Spacing, sizes and type scale are not here yet. They belong to the round that
+// changes the screen tree — the toolbar collapsing into a menu is what removes
+// the 44px and 40px bars — and a token nothing reads is a token nobody checks.
+export global Tok {
+    // Surfaces, in the order they stack. `chrome` is the ground the window
+    // paints everywhere the document is not.
+    out property <color> chrome: #f1f0f7; // oklch(.958 .010 295)
+    out property <color> chrome-raised: #e8e5f0; // oklch(.928 .015 295)
+    out property <color> chrome-sunken: #dad7e7; // oklch(.885 .022 295)
+
+    // Lines. `rule` separates regions; `rule-strong` is for edges the pointer
+    // can grab and for marks inside the document (the quote bar, the rule).
+    out property <color> rule: #d5d3e0; // oklch(.872 .018 295)
+    out property <color> rule-strong: #b6b3c4; // oklch(.775 .024 295)
+
+    // Text on chrome. Four steps, because the window needs to say "this is the
+    // thing", "this is a thing", "this labels a thing" and "this is off".
+    out property <color> ink-strong: #171321; // oklch(.200 .028 295)
+    out property <color> ink: #292733; // oklch(.280 .022 295)
+    out property <color> ink-muted: #696774; // oklch(.520 .020 295)
+    out property <color> ink-faint: #9996a1; // oklch(.680 .016 295)
+
+    // The one accent. Focus, the caret, the selection and what is switched on
+    // all speak with it, so a glance finds where the keyboard is.
+    out property <color> accent: #6b4cae; // oklch(.500 .150 295)
+    out property <color> accent-strong: #572e9d; // oklch(.420 .170 295)
+    out property <color> accent-soft: #dad0fd; // oklch(.880 .062 295)
+    out property <color> accent-faint: #f2efff; // oklch(.960 .024 295)
+
+    // Paper. The two differ only enough to answer "which way am I writing?"
+    // without reading a word. `doc-ink` matches BACKGROUND/FOREGROUND in
+    // directwrite_render.rs — the tiles are drawn there, not here, so the two
+    // have to be changed together.
+    out property <color> paper: #fcf9ef; // oklch(.982 .014 92)
+    out property <color> paper-alt: #f9f4e2; // oklch(.966 .024 92)
+    out property <color> doc-ink: #24211e; // oklch(.250 .008 70)
+
+    // The only colour outside the two families, and it is spent on one thing:
+    // an operation with something to lose. Anything that merely reports a
+    // number stays in `ink-muted`.
+    out property <color> alert: #a74639; // oklch(.520 .130 30)
+    out property <color> alert-soft: #fbd4cd; // oklch(.900 .045 30)
+
+    // The veil behind a question. `ink-strong` at 52%, so the paper underneath
+    // reads as paper rather than as grey.
+    out property <color> scrim: #17132185;
+}

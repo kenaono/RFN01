@@ -1,0 +1,17 @@
+    :root{
+      --paper:#fbfaf7; --paper-tate:#faf6ed;
+      --chrome:#f3f0ea; --chrome-raised:#e9e6de; --chrome-sunken:#e0dcd3;
+      --ink:#25211d; --ink-strong:#17130e; --ink-muted:#6e6862; --ink-faint:#9c9792; --ink-inverse:#f3f2ee;
+      --rule:#d8d4cc; --rule-strong:#bcb7ac;
+      --ai:#326893; --ai-soft:#c0dbf4; --ai-faint:#e7f2fc;
+      --shu:#8f4f3f; --shu-soft:#f7d5cc;
+      --ui:"Noto Sans JP","Yu Gothic UI","Meiryo UI",sans-serif;
+      --doc:"Noto Sans JP","BIZ UDPGothic","Yu Gothic",sans-serif;
+      --mincho:"Shippori Mincho","Yu Mincho","BIZ UDMincho",serif;
+      --mono:"Noto Sans Mono","BIZ UDGothic",Consolas,monospace;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--chrome);font-family:var(--ui);color:var(--ink)}
+    a{color:var(--ai)} a:hover{color:var(--ink-strong)}
+    .i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+    .i.s{width:14px;height:14px}

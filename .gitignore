@@ -3,8 +3,21 @@
 
 # 実行のたびに書き換わる計測ログと検証結果
 /perf_log.txt
+/perf_log.prev.txt
 /check_output.txt
+
+# 1回の実行につき1つ書き出される診断ログ
+/diag/
 
 # 性能改善前のソースの控えと、削除待ちのファイル
 /_backup_before_perf/
 /_to_delete/
+
+# 画面の確認に使ったスクリーンショット。会話ごとに増えるもので、製品の一部ではない
+/ScreenShot/
+
+# 手で動かしたときにできた保存先の切れ端。手で確かめる一式は testdata/ にある
+/TEST.md
+/TEST 2.md
+/TestData2
+/無題.md

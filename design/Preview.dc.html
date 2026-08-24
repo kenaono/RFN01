@@ -1,0 +1,167 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Shippori+Mincho:wght@400;600&family=Noto+Sans+Mono&display=swap">
+  <style>
+    :root{
+      --paper:#fcf9ef;--paper-alt:#f9f4e2;--chrome:#f1f0f7;--chrome-raised:#e8e5f0;--chrome-sunken:#dad7e7;
+      --ink:#292733;--ink-strong:#171321;--ink-muted:#696774;--ink-faint:#9996a1;
+      --rule:#d5d3e0;--rule-strong:#b6b3c4;--accent:#6b4cae;--accent-strong:#572e9d;--accent-soft:#dad0fd;--accent-faint:#f2efff;--alert:#a74639;--alert-soft:#fbd4cd;
+      --ui:"Noto Sans","Segoe UI","Yu Gothic UI",sans-serif;--doc-ink:#24211e;--doc:"Noto Sans JP","BIZ UDPGothic","Yu Gothic",sans-serif;
+      --mincho:"Shippori Mincho","Yu Mincho",serif;--mono:"Noto Sans Mono",Consolas,monospace;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--paper);font-family:var(--ui);color:var(--ink)}
+    a{color:var(--accent)} a:hover{color:var(--ink-strong)}
+    .doc{font-family:var(--doc);font-size:16px;line-height:1.9;color:var(--doc-ink)}
+    .h1{font-size:32px;font-weight:700;color:#100e0c;line-height:1.35;letter-spacing:.01em}
+    .h2{font-size:26px;font-weight:700;color:#100e0c;line-height:1.4}
+    .h3{font-size:21px;font-weight:700;color:#100e0c;line-height:1.45}
+    .h4{font-size:18px;font-weight:700;color:#100e0c}
+    .h5{font-size:17px;font-weight:700;color:#5d564c}
+    .h6{font-size:16px;font-weight:700;color:#5d564c;letter-spacing:.08em}
+    .li{display:flex;gap:11px}
+    .bul{color:var(--ink-faint);width:13px;text-align:center;flex:none}
+    .num{color:var(--ink-faint);width:24px;text-align:right;flex:none;font-variant-numeric:tabular-nums}
+    .code{font-family:var(--mono);font-size:15px;background:#efe9d8;border-radius:3px;padding:1px 5px;color:var(--doc-ink)}
+    .cap{font-size:11px;line-height:1.75;color:var(--ink-muted)}
+    .k{font-family:var(--mono);font-size:11px;color:var(--ink-strong)}
+    .tag{font-size:10px;font-family:var(--mono);padding:1px 6px;border-radius:9px;border:1px solid var(--rule-strong);color:var(--ink-muted);white-space:nowrap}
+    .tag.done{border-color:var(--accent);color:var(--accent);background:var(--accent-faint)}
+    .tag.todo{border-color:var(--alert);color:var(--alert)}
+    .name{font-family:var(--ui);font-size:14px;font-weight:600;letter-spacing:.02em;color:var(--ink-strong)}
+    .sp{height:20px}
+  </style>
+</helmet>
+
+<div style="width:940px;padding:36px 40px 44px;display:flex;flex-direction:column;gap:22px;background:var(--paper)">
+
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <div style="font-family:var(--mincho);font-size:26px;font-weight:600;letter-spacing:.08em;color:var(--ink-strong)">整形表示の見本</div>
+    <div class="cap" style="font-size:12px;max-width:820px">要件7.3.2 の一覧を上から順に、<b>いま組めるもの・行の矩形が要るもの・まだ形の無いもの</b>で分けてある。記号は隠れているが原文は変わらない（要件7.4）。<b>倍率は要件9の設定で動く</b>ので、ここに出ている数字は既定値。</div>
+  </div>
+
+  <div style="display:flex;gap:32px;align-items:flex-start">
+
+    <!-- 紙 -->
+    <div style="flex-grow:1;min-width:0;border:1px solid var(--rule);border-radius:3px;background:var(--paper);padding:28px 32px;display:flex;flex-direction:column">
+      <div class="h1">見出しの一</div>
+      <div class="sp"></div>
+      <div class="doc">本文は16px、行間1.9。<b style="font-weight:700">太字</b>と<i>斜体</i>と<s style="text-decoration-color:var(--ink-faint)">取り消し線</s>、それに<span class="code">インラインコード</span>。<a href="#">通常リンク</a>は <span class="code" style="background:transparent;padding:0">accent</span> の紫で、下線は引かない——本文の下に線が増えると縦書きへ持っていったとき字送りを食う。</div>
+      <div class="sp"></div>
+      <div class="doc" style="color:var(--ink-muted)"><span class="code">2*3</span> も <span class="code">snake_case_name</span> も、<b>閉じないマーカーはマーカーではない</b>のでそのまま残る。</div>
+
+      <div class="sp"></div>
+      <div class="h2">見出しの二</div>
+      <div class="sp"></div>
+      <div class="doc" style="display:flex;flex-direction:column;gap:3px">
+        <div class="li"><span class="bul">•</span><span>ハイフンの箇条書き</span></div>
+        <div class="li"><span class="bul">•</span><span>アスタリスクの箇条書き。長くなって折り返したときは、<b>二行目が記号ではなく本文の頭に揃う</b>のがこの実装の狙い。</span></div>
+        <div class="li"><span class="bul">•</span><span>プラスの箇条書き</span></div>
+      </div>
+      <div class="sp"></div>
+      <div class="doc" style="display:flex;flex-direction:column;gap:3px">
+        <div class="li"><span class="num">1.</span><span>ピリオドの番号</span></div>
+        <div class="li"><span class="num">2)</span><span>丸括弧の番号</span></div>
+        <div class="li"><span class="num">10.</span><span>二桁の番号——<b>点の位置が揃う</b>ので桁で本文がずれない</span></div>
+      </div>
+      <div class="sp"></div>
+      <div class="doc" style="display:flex;flex-direction:column;gap:5px">
+        <div class="li" style="align-items:baseline"><svg style="width:15px;height:15px;flex:none;stroke:var(--accent);fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;position:relative;top:2px" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="m5 8 2.2 2.2L11 6"/></svg><span style="color:var(--ink-muted)">終わった</span></div>
+        <div class="li" style="align-items:baseline"><svg style="width:15px;height:15px;flex:none;stroke:var(--ink-faint);fill:none;stroke-width:1.5;position:relative;top:2px" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/></svg><span>まだ終わっていない</span></div>
+      </div>
+
+      <div class="sp"></div>
+      <div class="h3">見出しの三</div>
+      <div class="sp"></div>
+      <div style="border-left:3px solid var(--rule-strong);padding-left:16px;display:flex;flex-direction:column;gap:2px">
+        <div class="doc" style="color:var(--ink-muted)">引用の一行目。縦棒は <span class="code" style="background:transparent;padding:0">rule-strong</span> の3px。</div>
+        <div style="border-left:3px solid var(--rule-strong);padding-left:16px;margin-left:-1px"><div class="doc" style="color:var(--ink-muted)">入れ子の引用は棒が増える</div></div>
+      </div>
+
+      <div class="sp"></div>
+      <div style="height:1px;background:var(--rule-strong);margin:6px 0"></div>
+      <div class="sp"></div>
+
+      <div class="h4">見出しの四</div>
+      <div style="height:12px"></div>
+      <div style="background:#efe9d8;border-radius:4px;padding:14px 16px;font-family:var(--mono);font-size:15px;line-height:1.7;color:var(--doc-ink);white-space:pre"><span style="color:var(--ink-faint)">// この中では ** は太字になりません</span>
+let bold = "**そのまま**";
+<span style="color:var(--ink-faint)"># not a heading</span>
+let snake_case_name = 1;</div>
+      <div style="height:8px"></div>
+      <div class="cap"><b>コードの中には何もマーカーが無い。</b>見出しもフェンスの中では見出しでないので、アウトラインにも出ない。</div>
+
+      <div class="sp"></div>
+      <div class="h5">見出しの五</div>
+      <div style="height:8px"></div>
+      <div class="h6">見出しの六</div>
+      <div style="height:14px"></div>
+      <div class="doc" style="color:var(--ink-muted);font-size:15px">H5とH6は太らせても大きさが本文と変わらないので、<b>色を一段落として本文と分ける</b>。H6だけ字間を開ける。</div>
+
+      <div class="sp"></div>
+      <div style="height:1px;background:var(--rule)"></div>
+      <div class="sp"></div>
+
+      <div class="cap" style="font-size:12px;color:var(--ink-faint);letter-spacing:.06em">— ここから下は、まだ形の無いもの —</div>
+      <div style="height:14px"></div>
+
+      <div style="border:1px dashed var(--rule-strong);border-radius:4px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;font-family:var(--doc);font-size:15px">
+          <div style="padding:8px 12px;background:#efe9d8;font-weight:700;border-bottom:1px solid var(--rule)">列</div>
+          <div style="padding:8px 12px;background:#efe9d8;font-weight:700;border-bottom:1px solid var(--rule)">列</div>
+          <div style="padding:8px 12px;background:#efe9d8;font-weight:700;border-bottom:1px solid var(--rule)">列</div>
+          <div style="padding:8px 12px;border-bottom:1px solid var(--rule)">値</div><div style="padding:8px 12px;border-bottom:1px solid var(--rule)">値</div><div style="padding:8px 12px;border-bottom:1px solid var(--rule)">値</div>
+          <div style="padding:8px 12px">値</div><div style="padding:8px 12px">値</div><div style="padding:8px 12px">値</div>
+        </div>
+      </div>
+      <div style="height:12px"></div>
+      <div style="border:1px dashed var(--rule-strong);border-left:3px solid var(--accent);border-radius:4px;padding:12px 16px;background:var(--accent-faint)">
+        <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:4px">NOTE</div>
+        <div class="doc" style="font-size:15px">Callout。地は <span class="code" style="background:var(--paper)">ai-faint</span>、左の棒だけ種類で色が変わる。</div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="doc" style="font-size:15px">脚注つきの文<sup style="font-size:11px;color:var(--accent)">[1]</sup>。<span style="color:var(--ink-muted)">本体は文書の末尾に、細い罫のあとで。</span></div>
+    </div>
+
+    <!-- 進み具合 -->
+    <div style="width:236px;flex:none;display:flex;flex-direction:column;gap:14px">
+      <div class="name">Status</div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag done">done</span><span style="font-size:12px">Headings H1&ndash;H6</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag done">done</span><span style="font-size:12px">Bold, italic, strikethrough</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag done">done</span><span style="font-size:12px">Inline code</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag done">done</span><span style="font-size:12px">Code block</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag done">done</span><span style="font-size:12px">Lists, ordered, tasks</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag done">done</span><span style="font-size:12px">Indent &amp; markers</span></div>
+        <div style="height:6px"></div>
+        <div style="display:flex;gap:8px;align-items:flex-start"><span class="tag">line box</span><span style="font-size:12px;line-height:1.6">Blockquote bar</span></div>
+        <div style="display:flex;gap:8px;align-items:flex-start"><span class="tag">line box</span><span style="font-size:12px;line-height:1.6">Horizontal rule</span></div>
+        <div style="display:flex;gap:8px;align-items:flex-start"><span class="tag">line box</span><span style="font-size:12px;line-height:1.6">Hanging indent on wrap</span></div>
+        <div style="height:6px"></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag todo">todo</span><span style="font-size:12px">Links</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag todo">todo</span><span style="font-size:12px">Tables</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag todo">todo</span><span style="font-size:12px">Footnotes</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="tag todo">todo</span><span style="font-size:12px">Callouts</span></div>
+      </div>
+
+      <div style="height:1px;background:var(--rule)"></div>
+
+      <div class="cap" style="border-left:3px solid var(--accent);padding-left:12px"><b>「行の矩形」の3つは1回で片づく。</b>いま描けるのは <span class="k">Marks</span> ＝<b>範囲</b>の属性だけで、引用の棒も水平線も折り返しの揃えも、<b>行そのものの矩形</b>を要る点が同じ。3回に分けると同じ仕組みを3回考えることになる。</div>
+
+      <div class="cap" style="border-left:3px solid var(--alert);padding-left:12px"><b>表は §14 ではない。</b>初期版の対象外にしたのは「縦書きの中の表を横書きで組む」ほうで、<b>横書きの中の表は要件7.3.2に残っている</b>。1ペイン＝1書字方向の前提は崩れない。</div>
+
+      <div class="cap" style="border-left:3px solid var(--rule-strong);padding-left:12px"><b>既知の近似。</b>折り返しキャッシュ <span class="k">line_starts</span> の鍵が <span class="k">(text, heading_level)</span> で <span class="k">Marks</span> を見ていない。行の矩形へ入る前にここを直す。</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

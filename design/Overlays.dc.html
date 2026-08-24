@@ -1,0 +1,186 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Shippori+Mincho:wght@400;600&family=Noto+Sans+Mono&display=swap">
+  <style>
+    :root{
+      --paper:#fcf9ef; --paper-alt:#f9f4e2; --doc-ink:#24211e;
+      --chrome:#f1f0f7; --chrome-raised:#e8e5f0; --chrome-sunken:#dad7e7;
+      --rule:#d5d3e0; --rule-strong:#b6b3c4;
+      --ink:#292733; --ink-strong:#171321; --ink-muted:#696774; --ink-faint:#9996a1;
+      --accent:#6b4cae; --accent-strong:#572e9d; --accent-soft:#dad0fd; --accent-faint:#f2efff;
+      --alert:#a74639; --alert-soft:#fbd4cd;
+      --ui:"Noto Sans","Segoe UI","Yu Gothic UI",sans-serif;
+      --doc:"Noto Sans JP","BIZ UDPGothic","Yu Gothic",sans-serif;
+      --mincho:"Shippori Mincho","Yu Mincho","BIZ UDMincho",serif;
+      --mono:"Noto Sans Mono",Consolas,monospace;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--chrome);font-family:var(--ui);color:var(--ink)}
+    a{color:var(--accent)} a:hover{color:var(--accent-strong)}
+    .i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+    .i.s{width:14px;height:14px}
+    .t{position:relative}
+    .t::after{content:attr(data-t);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);background:var(--ink-strong);color:#fcf9ef;font-size:11px;line-height:1.5;padding:3px 8px;border-radius:3px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s .3s;z-index:30;letter-spacing:.01em}
+    .t:hover::after,.t.show::after{opacity:1}
+    .t.up::after{top:auto;bottom:calc(100% + 7px)}
+    body{background:var(--paper)}
+    .cap{font-size:11px;line-height:1.8;color:var(--ink-muted);font-family:var(--doc)}
+    .k{font-family:var(--mono);font-size:11px;color:var(--ink-strong)}
+    .name{font-family:var(--ui);font-size:14px;font-weight:600;letter-spacing:.02em;color:var(--ink-strong)}
+    .ttl{font-family:var(--mincho);font-size:26px;font-weight:600;letter-spacing:.08em;color:var(--ink-strong)}
+    .menu{width:252px;background:var(--paper);border:1px solid var(--rule-strong);border-radius:10px;box-shadow:0 14px 34px rgba(23,19,33,.18);padding:6px;display:flex;flex-direction:column;gap:1px}
+    .mi{height:28px;display:flex;align-items:center;gap:10px;padding:0 9px;font-size:13px;border-radius:5px;color:var(--ink);white-space:nowrap}
+    .mi:hover{background:var(--accent-faint)}
+    .mi.hi{background:var(--accent-soft);color:var(--ink-strong)}
+    .mi .kb{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-faint);letter-spacing:.02em}
+    .mi svg{color:var(--ink-muted)}
+    .mi.hi svg{color:var(--accent-strong)}
+    .msep{height:1px;background:var(--rule);margin:5px 6px}
+    .mlab{font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-faint);padding:5px 9px 2px}
+    .field{height:28px;background:var(--paper);border:1px solid var(--rule-strong);border-radius:5px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:13px;color:var(--ink)}
+    .field.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-faint)}
+    .btn{height:28px;display:flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;border-radius:5px;border:1px solid var(--rule-strong);background:var(--paper);font-size:13px;color:var(--ink);white-space:nowrap}
+    .btn.pri{background:var(--accent);border-color:var(--accent);color:#fcf9ef}
+    .btn.dan{border-color:var(--alert);color:var(--alert)}
+    .btn.quiet{border-color:transparent;background:transparent;color:var(--ink-muted)}
+    .ico{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink-muted);border:1px solid transparent;flex:none}
+    .ico:hover{background:var(--chrome-sunken);color:var(--ink-strong)}
+    .ico.on{background:var(--accent-soft);color:var(--accent-strong)}
+    .txt{background:var(--doc-ink);opacity:.28;border-radius:1px}
+    .note{border-left:3px solid var(--accent);padding-left:12px}
+    .note.w{border-left-color:var(--alert)}
+  </style>
+</helmet>
+<div style="width:1080px;padding:36px 40px 44px;display:flex;flex-direction:column;gap:28px;background:var(--paper)">
+
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <div class="ttl">Menus, bars &amp; dialogs</div>
+    <div class="cap" style="font-size:12px;max-width:880px">窓の上に出るものは5つ。<b>アプリのものは左上の &#9776; に、ペインとタブのものは右上の &#8942; に</b>——どちらの持ち物かが、押す場所で決まる。いずれも Slint で自前に重ねる（メッセージループを回さないので 6.18 の外にいる、という既存の判断をそのまま引き継ぐ）。</div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:baseline;gap:12px"><div class="name">Two menus</div><div class="cap">トップバーは <b>34px に2ボタンだけ</b>になり、44px の段が消えた</div></div>
+    <div style="display:flex;gap:26px;align-items:flex-start">
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="width:252px;height:34px;background:var(--chrome);border:1px solid var(--rule);border-radius:5px;display:flex;align-items:center;gap:2px;padding:0 6px">
+          <div class="ico on"><svg class="i" viewBox="0 0 16 16"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg></div>
+          <div class="ico on"><svg class="i" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M6 2.5v11"/></svg></div>
+        </div>
+        <div class="menu"><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg><span>Open File&hellip;</span><span class="kb">Ctrl+O</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg><span>Open Folder&hellip;</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg><span>Recent</span><span class="kb">&rsaquo;</span></div><div class="msep"></div><div class="mi hi"><svg class="i s" viewBox="0 0 16 16"><path d="M2.5 2.5h8l3 3v8a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z"/><path d="M5 2.5v3.5h5"/><path d="M5 13.5v-3.5h6v3.5"/></svg><span>Save All</span><span class="kb">Ctrl+Alt+S</span></div><div class="msep"></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg><span>Find in File&hellip;</span><span class="kb">Ctrl+F</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg><span>Find in Folder&hellip;</span><span class="kb">Ctrl+Shift+F</span></div><div class="msep"></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.5M8 12.7v1.5M1.8 8h1.5M12.7 8h1.5M3.5 3.5l1 1M11.5 11.5l1 1M12.5 3.5l-1 1M4.5 11.5l-1 1"/></svg><span>Settings&hellip;</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M6 2.5H2.5v11H6"/><path d="M9.5 5 12.5 8l-3 3M12.5 8h-7"/></svg><span>Exit</span><span class="kb">Alt+F4</span></div></div>
+        <div class="cap" style="width:252px">アプリ全体のもの。<b>開く・Save All・検索・設定</b>。<span class="k">Alt</span> でも開く。</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="width:252px;height:34px;background:var(--chrome-raised);border:1px solid var(--rule);border-radius:5px;display:flex;align-items:flex-end;gap:2px;padding:0 5px">
+          <div style="height:28px;display:flex;align-items:center;padding:0 10px;font-size:13px;border-radius:6px 6px 0 0;background:var(--paper);color:var(--ink-strong);box-shadow:inset 0 2px 0 var(--accent)">01_行属性.md</div>
+          <div style="flex-grow:1"></div>
+          <div style="display:flex;gap:1px;align-items:center;padding-bottom:3px">
+            <div class="ico on" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg></div>
+            <div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M11.5 3v10M8 3v10M4.5 3v6"/></svg></div>
+            <div style="width:1px;height:14px;background:var(--rule);margin:0 2px"></div>
+            <div class="ico on" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.6"/></svg></div>
+            <div style="width:1px;height:14px;background:var(--rule);margin:0 2px"></div>
+            <div class="ico on" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><circle cx="8" cy="3.6" r="1.15" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.15" fill="currentColor" stroke="none"/><circle cx="8" cy="12.4" r="1.15" fill="currentColor" stroke="none"/></svg></div>
+          </div>
+        </div>
+        <div class="menu"><div class="mlab">Tab</div><div class="mi hi"><svg class="i s" viewBox="0 0 16 16"><path d="M2.5 2.5h8l3 3v8a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z"/><path d="M5 2.5v3.5h5"/><path d="M5 13.5v-3.5h6v3.5"/></svg><span>Save</span><span class="kb">Ctrl+S</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3h3"/></svg><span>Save As&hellip;</span><span class="kb">Ctrl+Shift+S</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/><path d="m8.5 10.5 2.5-2.5-2.5-2.5"/></svg><span>Reveal in Explorer</span></div><div class="msep"></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5"/></svg><span>Close Tab</span><span class="kb">Ctrl+W</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M3 5 7 9M7 5 3 9"/><path d="M10 5l3 3-3 3"/></svg><span>Close Other Tabs</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M3 5 7 9M7 5 3 9"/><path d="M10 5l3 3-3 3"/></svg><span>Close All Tabs</span></div><div class="msep"></div><div class="mlab">Layout</div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M8 2.5v11"/><path d="M10.9 8h2.8M12.4 6.7 13.7 8l-1.3 1.3"/></svg><span>Split Right</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M1.5 8h13"/><path d="M8 10.2v2.8M6.7 11.7 8 13l1.3-1.3"/></svg><span>Split Down</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M2.5 5.5h9l-2.2-2.2M13.5 10.5h-9l2.2 2.2"/></svg><span>Swap Panes</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M6.2 6.2 9.8 9.8M9.8 6.2 6.2 9.8"/></svg><span>Close Split</span></div><div class="msep"></div><div class="mlab">View</div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M3 3.5h10M8 3.5v9M6 12.5h4"/></svg><span>Typography&hellip;</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5M7 5v4M5 7h4"/></svg><span>Zoom In</span><span class="kb">Ctrl+=</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5M5 7h4"/></svg><span>Zoom Out</span><span class="kb">Ctrl+-</span></div><div class="mi"><svg class="i s" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13.2 2.2v2.8h-2.8"/></svg><span>Reset Zoom</span><span class="kb">Ctrl+0</span></div></div>
+        <div class="cap" style="width:252px">そのペインとタブのもの。<b>保存・閉じる・分割・組版・倍率</b>。</div>
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;gap:14px;padding-top:44px">
+        <div class="cap note"><b>向きとプレビューだけはチップのまま残した。</b>4モードは<b>いまどれなのかが常に見えている必要がある</b>——メニューの中に入れると、開くまで自分がどのモードにいるか分からない。押す回数も他と桁が違う。</div>
+        <div class="cap note"><b>押した場所がそのペインを焦点にする。</b>既存の規則（ペインの持ち物を触ったらそのペインが焦点になる）が、&#8942; にそのまま効く。右ペインの &#8942; から Split Right を選べば、割れるのは右ペイン。<b>「どのペインに効くのか」を選ばせる必要がなくなった</b>——いまツールバーにある「左ペイン／右ペイン」ボタンが消える。</div>
+        <div class="cap note w"><b>Slint にメニューの部品もツールチップの部品も無い。</b>質問オーバーレイと同じ自前の重ねで、<b>この2つは同じ1つの仕組み</b>（画面の外を押したら閉じる・Esc で閉じる・キーボードで辿れる）。先にこれを作れば、右クリックメニュー（左ペインの複製・削除）も同じもので済む。</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="height:1px;background:var(--rule)"></div>
+
+  <div style="display:flex;flex-direction:column;gap:12px"><div style="display:flex;align-items:baseline;gap:12px"><div class="name">Typography</div><div class="cap">&#9776; Settings&hellip; と &#8942; View &rarr; Typography&hellip; の両方から開く。第二ツールバー（40px・常時）を畳んだ先</div></div><div style="display:flex;gap:26px;align-items:flex-start"><div style="width:392px;flex:none;background:var(--paper);border:1px solid var(--rule-strong);border-radius:10px;box-shadow:0 14px 34px rgba(23,19,33,.18);padding:14px;display:flex;flex-direction:column;gap:11px"><div style="display:flex;align-items:baseline;gap:8px"><div class="mlab" style="padding:0;flex-grow:1">Typography</div><div style="font-size:10px;color:var(--ink-faint);letter-spacing:.02em">Applies to all panes</div></div><div style="height:1px;background:var(--rule);margin:2px 0"></div><div class="mlab" style="padding:0">Font</div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:74px;flex:none">Body</div><div style="height:26px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:5px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12px;color:var(--ink);min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Yu Gothic</span><svg class="i s" style="color:var(--ink-faint);margin-left:auto" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg></div></div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:74px;flex:none">Heading</div><div style="height:26px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:5px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12px;color:var(--ink);min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Yu Gothic</span><svg class="i s" style="color:var(--ink-faint);margin-left:auto" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg></div></div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:74px;flex:none">Vertical</div><div style="height:26px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:5px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12px;color:var(--ink);min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Yu Mincho</span><svg class="i s" style="color:var(--ink-faint);margin-left:auto" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg></div><span style="font-size:10px;font-weight:600;letter-spacing:.06em;color:var(--ink-faint);border:1px solid var(--rule);border-radius:3px;padding:0 4px;line-height:15px;flex:none">V</span></div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:74px;flex:none">Code</div><div style="height:26px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:5px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12px;color:var(--ink);min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">BIZ UDGothic</span><svg class="i s" style="color:var(--ink-faint);margin-left:auto" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg></div></div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:74px;flex:none">Body size</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M4 8h8"/></svg></div><div style="flex-grow:1;text-align:center;font-size:12px;font-variant-numeric:tabular-nums">16 px</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M8 4v8M4 8h8"/></svg></div></div><div style="height:1px;background:var(--rule);margin:2px 0"></div><div class="mlab" style="padding:0">Heading size</div><div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px 10px"><div style="display:flex;align-items:center;gap:5px"><div style="font-size:11px;font-family:var(--mono);color:var(--ink-muted);width:18px;flex:none">H1</div><div style="height:24px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;font-variant-numeric:tabular-nums">200%</div></div><div style="display:flex;align-items:center;gap:5px"><div style="font-size:11px;font-family:var(--mono);color:var(--ink-muted);width:18px;flex:none">H2</div><div style="height:24px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;font-variant-numeric:tabular-nums">160%</div></div><div style="display:flex;align-items:center;gap:5px"><div style="font-size:11px;font-family:var(--mono);color:var(--ink-muted);width:18px;flex:none">H3</div><div style="height:24px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;font-variant-numeric:tabular-nums">130%</div></div><div style="display:flex;align-items:center;gap:5px"><div style="font-size:11px;font-family:var(--mono);color:var(--ink-muted);width:18px;flex:none">H4</div><div style="height:24px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;font-variant-numeric:tabular-nums">115%</div></div><div style="display:flex;align-items:center;gap:5px"><div style="font-size:11px;font-family:var(--mono);color:var(--ink-muted);width:18px;flex:none">H5</div><div style="height:24px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;font-variant-numeric:tabular-nums">105%</div></div><div style="display:flex;align-items:center;gap:5px"><div style="font-size:11px;font-family:var(--mono);color:var(--ink-muted);width:18px;flex:none">H6</div><div style="height:24px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;font-variant-numeric:tabular-nums">100%</div></div></div><div style="height:1px;background:var(--rule);margin:2px 0"></div><div class="mlab" style="padding:0">Spacing</div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:88px;flex:none">Line height</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M4 8h8"/></svg></div><div style="flex-grow:1;text-align:center;font-size:12px;font-variant-numeric:tabular-nums">190%</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M8 4v8M4 8h8"/></svg></div><span style="font-size:10px;font-weight:600;letter-spacing:.06em;color:var(--ink-faint);border:1px solid var(--rule);border-radius:3px;padding:0 4px;line-height:15px;flex:none">H</span></div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:88px;flex:none">Char spacing</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M4 8h8"/></svg></div><div style="flex-grow:1;text-align:center;font-size:12px;font-variant-numeric:tabular-nums">0%</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M8 4v8M4 8h8"/></svg></div><span style="font-size:10px;font-weight:600;letter-spacing:.06em;color:var(--ink-faint);border:1px solid var(--rule);border-radius:3px;padding:0 4px;line-height:15px;flex:none">V</span></div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:88px;flex:none">Column gap</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M4 8h8"/></svg></div><div style="flex-grow:1;text-align:center;font-size:12px;font-variant-numeric:tabular-nums">100%</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M8 4v8M4 8h8"/></svg></div><span style="font-size:10px;font-weight:600;letter-spacing:.06em;color:var(--ink-faint);border:1px solid var(--rule);border-radius:3px;padding:0 4px;line-height:15px;flex:none">V</span></div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--ink-muted);width:88px;flex:none">Page margin</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M4 8h8"/></svg></div><div style="flex-grow:1;text-align:center;font-size:12px;font-variant-numeric:tabular-nums">32 px</div><div class="ico" style="width:22px;height:22px"><svg class="i s" viewBox="0 0 16 16"><path d="M8 4v8M4 8h8"/></svg></div></div><div style="height:1px;background:var(--rule);margin:2px 0"></div><div class="mlab" style="padding:0">Color</div><div style="display:flex;gap:10px"><div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0"><div style="font-size:12px;color:var(--ink-muted);width:44px;flex:none">Text</div><div style="height:26px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:5px;display:flex;align-items:center;gap:7px;padding:0 7px;min-width:0"><div style="width:14px;height:14px;border-radius:3px;background:#24211e;border:1px solid var(--rule-strong);flex:none"></div><span style="font-family:var(--mono);font-size:11px;color:var(--ink)">#24211e</span></div></div><div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0"><div style="font-size:12px;color:var(--ink-muted);width:44px;flex:none">Paper</div><div style="height:26px;flex-grow:1;background:var(--paper);border:1px solid var(--rule-strong);border-radius:5px;display:flex;align-items:center;gap:7px;padding:0 7px;min-width:0"><div style="width:14px;height:14px;border-radius:3px;background:#fcf9ef;border:1px solid var(--rule-strong);flex:none"></div><span style="font-family:var(--mono);font-size:11px;color:var(--ink)">#fcf9ef</span></div></div></div><div style="height:1px;background:var(--rule);margin:2px 0"></div><div style="display:flex;gap:8px;padding-top:2px"><div class="btn quiet" style="flex-grow:1">Reset to defaults</div><div class="btn quiet">Sample</div></div></div><div style="flex:1;display:flex;flex-direction:column;gap:14px"><div class="cap note"><b>&#9662; Applies to all panes を見出しに添えた。</b>要件9は表示設定を<b>アプリ全体で共通</b>と決めている。ここに並ぶ値はすべてそれで、<b>ペインごとなのは倍率だけ</b>——だから Zoom は同じ &#8942; の View にいて、このパネルには入っていない。</div><div class="cap note"><b>フォントは4つ。</b>要件9が挙げるのは本文・見出しの2つだが、<b>縦書きは既定を Yu Mincho にしたい</b>（縦組みで明朝が読みやすい）ので Vertical を分けた。Code は<b>要件9に無い追加</b>——コードブロックの等幅は既に <span class="k">SetFontFamilyName</span> で切り替えているので、値だけ設定へ出す形。<b>この2つは要件の改訂になります。</b></div><div class="cap note"><b>H1〜H6 は6つ並べる。</b>要件9が「個別に指定できる」と書いているので、1つの倍率では足りない。3列2段にすると、いまツールバーが持っている「見出し 160%」の1つより<b>場所を取らずに6つ入る</b>。</div><div class="cap note"><b>H / V の札は「その向きでだけ効く」印。</b>要件9が行間を横書き、文字送りと列間隔を縦書きと書き分けている。札が無いと、縦書きペインを見ながら Line height を動かして何も起きない、が起きる。</div><div class="cap note w"><b>&#9776; Settings&hellip; と &#8942; Typography&hellip; は同じものを開く。</b>値がアプリ全体で共通である以上、面を2つ持つと必ず食い違う。<b>&#8942; 側はこの節へ直接降りるだけ</b>にして、&#9776; 側は設定の頭から開く——中身は1つ。</div></div></div></div>
+
+  <div style="height:1px;background:var(--rule)"></div>
+
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:baseline;gap:12px"><div class="name">Find &amp; Replace</div><div class="cap"><span class="k">Ctrl+F</span> / <span class="k">Ctrl+H</span>。窓に1つ、対象はフォーカス中のペインの文書</div></div>
+    <div style="border:1px solid var(--rule);border-radius:5px;overflow:hidden;max-width:760px">
+      <div style="height:34px;background:var(--chrome);border-bottom:1px solid var(--rule);display:flex;align-items:center;gap:6px;padding:0 8px">
+        <svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg>
+        <div class="field on" style="width:230px"><span>検索テスト</span><span style="width:1.5px;height:15px;background:var(--accent)"></span></div>
+        <div style="font-size:12px;color:var(--ink-muted);font-variant-numeric:tabular-nums;min-width:52px">2 of 4</div>
+        <div class="ico t up" data-t="Previous"><svg class="i s" viewBox="0 0 16 16"><path d="M5 10 8 7l3 3"/></svg></div>
+        <div class="ico t up" data-t="Next"><svg class="i s" viewBox="0 0 16 16"><path d="M5 6.5 8 9.5l3-3"/></svg></div>
+        <div style="width:1px;height:18px;background:var(--rule);margin:0 2px"></div>
+        <div class="ico on t up" data-t="Match Case" style="font-size:12px;font-weight:600">Aa</div>
+        <div style="flex-grow:1"></div>
+        <div class="ico t up" data-t="Close &nbsp;Esc"><svg class="i s" viewBox="0 0 16 16"><path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5"/></svg></div>
+      </div>
+      <div style="height:34px;background:var(--chrome);border-bottom:1px solid var(--rule);display:flex;align-items:center;gap:6px;padding:0 8px">
+        <svg class="i s" style="color:var(--ink-faint)" viewBox="0 0 16 16"><path d="M2.5 5.5h8l-2-2M13.5 10.5h-8l2 2"/></svg>
+        <div class="field" style="width:230px"><span style="color:var(--ink-faint)">Replace with&hellip;</span></div>
+        <div class="btn">Replace</div>
+        <div class="btn">Replace All</div>
+      </div>
+      <div style="background:var(--paper);padding:16px 20px;display:flex;flex-direction:column;gap:9px">
+        <div class="txt" style="width:66%;height:6px"></div>
+        <div style="display:flex;align-items:center"><div class="txt" style="width:120px;height:6px"></div><div style="width:64px;height:15px;background:var(--accent-soft);border-radius:3px;margin:0 5px"></div><div class="txt" style="width:150px;height:6px"></div></div>
+        <div style="display:flex;align-items:center"><div class="txt" style="width:90px;height:6px"></div><div style="width:64px;height:15px;background:#f6e6b8;border-radius:3px;margin:0 5px"></div><div class="txt" style="width:190px;height:6px"></div></div>
+        <div class="txt" style="width:52%;height:6px"></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:24px;max-width:900px">
+      <div class="cap note" style="flex:1"><b>いま見ている一致は <span class="k">accent-soft</span>、ほかの一致は薄い黄。</b>選択と同じ色にすると「次へ」で何が動いたか分からない。件数は <span class="k">2 of 4</span> の1つだけにして、現状の紫の説明文は消す。</div>
+      <div class="cap note" style="flex:1"><b>置換の段は Ctrl+H のときだけ出る。</b>いまは両方が常に出ていて 40px を2段使っている。上の段だけなら 34px で済む。</div>
+    </div>
+  </div>
+
+  <div style="height:1px;background:var(--rule)"></div>
+
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:baseline;gap:12px"><div class="name">Dialogs &amp; notices</div><div class="cap">作業を失いうる問い（&sect;8.4）と、失わない知らせ（&sect;8.3）は<b>形を変える</b></div></div>
+    <div style="display:flex;gap:26px;align-items:flex-start">
+
+      <div style="width:440px;flex:none;position:relative;height:230px;border-radius:5px;overflow:hidden;border:1px solid var(--rule)">
+        <div style="position:absolute;inset:0;background:var(--paper);padding:14px 18px;display:flex;flex-direction:column;gap:8px">
+          <div class="txt" style="width:60%;height:11px;opacity:.5"></div><div style="height:4px"></div>
+          <div class="txt" style="width:100%;height:5px"></div><div class="txt" style="width:88%;height:5px"></div><div class="txt" style="width:94%;height:5px"></div><div class="txt" style="width:62%;height:5px"></div>
+        </div>
+        <div style="position:absolute;inset:0;background:rgba(23,19,33,.52)"></div>
+        <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:376px;background:var(--paper);border:1px solid var(--rule-strong);border-radius:10px;box-shadow:0 16px 40px rgba(23,19,33,.30);padding:20px;display:flex;flex-direction:column;gap:14px">
+          <div style="font-size:15px;font-weight:600;color:var(--ink-strong);line-height:1.6">Save changes to &ldquo;01_行属性.md&rdquo;?</div>
+          <div style="font-size:12px;color:var(--ink-muted);line-height:1.75">Changes since the last autosave will be lost.</div>
+          <div style="display:flex;gap:8px;justify-content:flex-end"><div class="btn quiet">Cancel</div><div class="btn dan">Don&rsquo;t Save</div><div class="btn pri">Save</div></div>
+        </div>
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;gap:14px">
+        <div style="border:1px solid var(--rule);border-radius:5px;overflow:hidden">
+          <div style="height:34px;background:var(--alert-soft);display:flex;align-items:center;gap:8px;padding:0 10px">
+            <svg class="i s" style="color:var(--alert)" viewBox="0 0 16 16"><path d="M8 2.5 14.5 13.5h-13z"/><path d="M8 6.5v3M8 11.4v.1"/></svg>
+            <div style="font-size:12px;color:var(--ink-strong);flex-grow:1">This file changed on disk</div>
+            <div class="btn" style="height:24px;font-size:12px">Reload</div>
+            <div class="btn quiet" style="height:24px;font-size:12px">Keep Mine</div>
+          </div>
+          <div style="background:var(--paper);padding:12px 14px;display:flex;flex-direction:column;gap:7px">
+            <div class="txt" style="width:80%;height:5px"></div><div class="txt" style="width:64%;height:5px"></div>
+          </div>
+        </div>
+        <div class="cap note"><b>幕を張るかどうかは、答えないと進めないかで決まる。</b>保存の問いは<b>答えるまで先が無い</b>ので幕を張って手を止める。外部変更は<b>放っておいても本文は無事</b>なので、ペインの上に帯を出して打鍵を止めない。いまは両方とも同じオーバーレイになっている。</div>
+        <div class="cap note"><b>選択肢の並びは Cancel / Don&rsquo;t Save / Save。</b>右端が既定で、<b>失うほうだけ <span class="k">alert</span> の枠</b>。文字色だけで塗りは持たせない——赤いボタンは押したくなる。</div>
+        <div class="cap" style="border-left:3px solid var(--rule-strong);padding-left:12px">名前を訊く4つのコマンド（新規・改名・複製）は、このカードに入力欄が1本増える形。<span class="k">FocusScope</span> が中身を包む形はそのまま——横に置くと名前欄で Esc が効かない。</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,1172 @@
+import { ScrollView, VerticalBox } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, Tab, TextButton } from "controls.slint";
+
+// One editing pane.
+//
+// The two panes were the same 280 lines twice, differing only in which axis the
+// document flows along and what the properties behind them were called. That
+// duplication is where 6.15 and 6.16 came from: the same thing in two places
+// gets fixed in one of them. Everything that differs is now `vertical`.
+//
+// This is also the shape 要件 6.4 needs. A pane that takes its whole state as
+// parameters can be instantiated twice — as it is today — or repeated over a
+// model of panes, which is the next step (ペイン分割設計 5.2).
+
+// One rendered slice of the document. Both directions use it: the vertical pane
+// stacks tiles along x and the horizontal one along y, so the placement Rust
+// computes covers both and this side does not have to know which is which.
+export struct PreviewTile {
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    source: image,
+}
+
+// One tab in one pane's strip.
+//
+// Moved here from the window: the strips belong to the panes (要件 6.3), so
+// what one holds is part of what that pane is showing.
+export struct TabInfo {
+    title: string,
+    edited: bool,
+}
+
+export struct PreviewSelectionRect {
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+}
+
+// One pane as the screen has it: one row of the window's pane model.
+//
+// Named for the screen because the Rust side already has a `PaneView` — the
+// half of a pane that is not a graphics object. This is the other direction:
+// what one pane is currently showing, in pixels.
+//
+// The two panes used to be two sets of root properties named `vertical-*` and
+// `horizontal-*`, bound twice. They are one repeated element over this model
+// instead (ペイン分割設計 5), so adding a pane adds a row rather than another
+// copy of every binding.
+//
+// Rust writes a row by reading it, changing one field and setting it back. The
+// fields the pane itself writes — its scroll, the size it shows and its IME
+// field — come back through a two-way binding, which the compiler turns into a
+// write to this model rather than to a copy of the row.
+export struct PaneScreen {
+    // Which pane this is, in `editor-mode`'s numbering: 0 horizontal, 1
+    // vertical. **The callbacks carry this rather than the row's position**, so
+    // that a model holding only the panes on screen still names them the same.
+    id: int,
+    // Which way the document flows. Everything else that differs between the
+    // panes — the label, the paper colour, the padding — follows from it, so
+    // none of that is in this model.
+    vertical: bool,
+
+    tiles: [PreviewTile],
+    selection-rects: [PreviewSelectionRect],
+    // The laid-out document's size, in pixels.
+    content-width: int,
+    content-height: int,
+
+    caret-visible: bool,
+    caret-x: float,
+    caret-y: float,
+    caret-width: float,
+    caret-height: float,
+
+    ime-anchor-x: float,
+    ime-anchor-y: float,
+    ime-anchor-width: float,
+    ime-anchor-height: float,
+
+    // This pane's own strip (要件 6.3: 各編集ペインは独立したタブ列を持つ), and
+    // which of them the pane is showing.
+    tabs: [TabInfo],
+    active-tab: int,
+    // Where this pane sits in the editing area, from the layout tree
+    // (要件 6.4). **A pane with no width is not on screen at all** — the tree
+    // hands out the area, and one it does not name gets none.
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    // Whether the tab in front of this pane is being shown formatted rather
+    // than as its source: half of the four modes (要件 7.2). **Per pane per
+    // tab**, which is why it is here and not on the window.
+    preview: bool,
+
+    // Written by the pane, read by Rust.
+    ime-buffer: string,
+    scroll-x: length,
+    scroll-y: length,
+    shown-width: length,
+    shown-height: length,
+}
+
+export component EditorPane inherits Rectangle {
+    // Which way the document flows. Everything that differs between the two
+    // panes is decided by this and nothing else.
+    in property <bool> vertical;
+    in property <string> label;
+    in property <color> label-color;
+    in property <color> page-background;
+    // Two lines the validation build shows above the vertical pane. Empty on
+    // the other one, and the elements are then not there at all.
+    in property <string> status-a;
+    in property <string> status-b;
+    // The vertical pane's own box indents its text by hand rather than padding
+    // the whole column, because the scroll view below it must reach the edge.
+    in property <length> text-indent: 0px;
+    in property <length> side-padding: 12px;
+    /// 要件 9's 余白 along the line axis: above and below the text in a pane
+    /// writing horizontally, and at the head and foot of the columns in one
+    /// writing vertically.
+    in property <length> page-margin: 12px;
+
+    in property <[TabInfo]> tabs;
+    /// 要件 7.7: the find bar, **inside the pane whose text it searches**. It
+    /// was a band across the window once; it acts on one document, and putting
+    /// it over the tabs of the pane holding that document is what says so.
+    /// The window decides which pane has it, so this is `in`.
+    in property <bool> find-open;
+    /// `Ctrl+H` rather than `Ctrl+F`: the second row is only in the way when
+    /// nothing is being replaced.
+    in property <bool> find-replacing;
+    in-out property <string> find-needle;
+    in-out property <string> find-replacement;
+    in property <string> find-status;
+    in property <int> find-generation;
+    in property <int> active-tab: 0;
+    in property <bool> preview: false;
+
+    in property <[PreviewTile]> tiles;
+    in property <[PreviewSelectionRect]> selection-rects;
+    // The laid-out document's size, in pixels.
+    in property <int> content-width;
+    in property <int> content-height;
+
+    in property <bool> caret-visible: false;
+    in property <float> caret-x: 0;
+    in property <float> caret-y: 0;
+    in property <float> caret-width: 1;
+    in property <float> caret-height: 22;
+
+    in property <float> ime-anchor-x: 0;
+    in property <float> ime-anchor-y: 0;
+    in property <float> ime-anchor-width: 1;
+    in property <float> ime-anchor-height: 22;
+    in-out property <string> ime-buffer;
+
+    // The scroll offsets, both declared so the component does not have to know
+    // which one its parent cares about. The unused one stays at zero.
+    in-out property <length> scroll-x: 0px;
+    in-out property <length> scroll-y: 0px;
+    // What the pane actually shows, reported back so Rust can decide how much
+    // of the document to lay out.
+    in-out property <length> shown-width: 640px;
+    in-out property <length> shown-height: 520px;
+
+    // Whether this pane answers a request for the keyboard. The parent decides,
+    // because it is the one that knows which pane the writer was last in.
+    in property <bool> takes-focus: false;
+    in property <int> focus-generation: 0;
+
+    callback resized();
+    callback scrolled(float);
+    callback selection-start(float, float, bool);
+    callback selection-update(float, float);
+    callback selection-end(float, float);
+    callback select-all();
+    callback text-input(string);
+    callback tab-pressed();
+    callback preedit-changed(string);
+    callback backspace-pressed();
+    callback delete-pressed();
+    callback move-caret(int, bool);
+    callback home-end(bool, bool, bool);
+    /// This pane now has the keyboard.
+    callback focus-taken();
+    callback save-requested();
+    /// Show another of this pane's tabs, close one, or open a new one. The
+    /// position is in this pane's strip and nobody else's.
+    callback tab-selected(int);
+    callback tab-closed(int);
+    callback new-tab-requested();
+    /// What the pane's own menu asks for, beside `save-requested` above. Every
+    /// one of these is the window's to carry out — a pane knows which pane it
+    /// is and nothing else — so they are forwarded rather than acted on here.
+    /// Sent when the pane's menu is about to open, so the window can make this
+    /// the focused pane once instead of every row saying so.
+    callback menu-opened();
+    callback split-requested(bool);
+    callback swap-requested();
+    callback close-split-requested();
+    callback save-as-requested();
+    /// Show this document's file in Explorer (要件 5.2).
+    callback reveal-requested();
+    callback typography-requested();
+    callback zoom-in-requested();
+    callback zoom-out-requested();
+    callback zoom-reset-requested();
+    callback close-active-tab();
+    /// Close every tab in the window but the one in front of this pane, or
+    /// every one (要件 6.3). **すべて means the window, not this strip**: the
+    /// pane the menu hangs from decides one thing only, which tab is kept.
+    callback close-other-tabs();
+    callback close-all-tabs();
+    /// Open the find bar (要件 7.7, 11.2). True is 置換, which is the row the
+    /// bar grows for it.
+    callback find-requested(bool);
+    /// What the bar asks for once it is open. True is forwards.
+    callback find-step(bool);
+    callback replace-one();
+    callback replace-every();
+    callback find-dismissed();
+    /// The two halves of 要件 7.2's four modes, both of them this tab's: which
+    /// way the text runs, and whether it is shown formatted or as its source.
+    /// **The mode belongs to the tab, so the controls sit beside the tabs.**
+    callback preview-toggled();
+    callback direction-toggled();
+    /// Take back the last change to this document, or put it back
+    /// (要件 7.1, 11.2). True is the way forwards.
+    callback undo-requested(bool);
+    /// Escape was pressed and this pane had nothing open to close. **True if
+    /// the window closed something of its own** — the app menu, or the
+    /// typography panel — so that the key is not passed on twice.
+    callback escaped() -> bool;
+
+    /// Close whichever of this pane's menus is open, and say whether one was.
+    ///
+    /// **`is-open` rather than a flag of our own**: a popup closes by itself
+    /// when the writer clicks outside it, and a flag set at `show()` would not
+    /// hear about that.
+    function dismiss-menus() -> bool {
+        if (tabs-menu.is-open) {
+            tabs-menu.close();
+            return true;
+        }
+        if (pane-menu.is-open) {
+            pane-menu.close();
+            return true;
+        }
+        // Last, because a menu opened over the find bar is what the writer is
+        // looking at. The bar itself closes on Escape when the keyboard is in
+        // one of its fields; this is the same key with the keyboard still in
+        // the document.
+        if (root.find-open) {
+            root.find-dismissed();
+            return true;
+        }
+        return false;
+    }
+
+    /// The two keys that raise this bar, answered from inside it (要件 11.2).
+    ///
+    /// **The same key closes it**, which is decided by the window: it is the
+    /// one that knows whether the bar is already open, in which pane, and in
+    /// which of its two shapes. All this does is pass the key on.
+    function find-shortcut(event: KeyEvent) -> EventResult {
+        if (event.modifiers.control
+            && (event.text == "f" || event.text == "F" || event.text == "\u{6}")) {
+            root.find-requested(false);
+            return accept;
+        }
+        if (event.modifiers.control
+            && (event.text == "h" || event.text == "H" || event.text == "\u{8}")) {
+            root.find-requested(true);
+            return accept;
+        }
+        return reject;
+    }
+
+    // Bring the tab in front into view (要件 6.3).
+    //
+    // `viewport-x` is zero or negative — how far the strip has been pushed to
+    // the left — so what is on screen is `-viewport-x` to
+    // `-viewport-x + visible-width`. A tab before that pulls the strip back to
+    // its own left edge; one after it pulls the strip up to its right edge.
+    //
+    // **Called by the tab, not by whatever chose it.** A tab is chosen from the
+    // strip, from the list, from the tree, by closing its neighbour and by
+    // being restored at startup; the one thing all of those have in common is
+    // that the tab ends up in front, and only the tab knows where it is.
+    function reveal-tab(at: length, wide: length) {
+        if (at < -tabs-view.viewport-x) {
+            tabs-view.viewport-x = -at;
+        } else if (at + wide > -tabs-view.viewport-x + tabs-view.visible-width) {
+            tabs-view.viewport-x = tabs-view.visible-width - at - wide;
+        }
+    }
+
+    private property <bool> had-preedit: false;
+    private property <bool> commit-just-finished: false;
+    private property <bool> dragging: false;
+
+    commit-reset := Timer {
+        interval: 50ms;
+        running: false;
+        triggered => {
+            root.commit-just-finished = false;
+            self.stop();
+        }
+    }
+
+    VerticalLayout {
+        // The strip (要件 6.5), inside the pane it belongs to. Reordering by
+        // drag is a separate requirement and is not implemented yet.
+        Rectangle {
+            height: 34px;
+            background: Tok.chrome-raised;
+
+            // The tabs get the strip minus the group anchored at the far end,
+            // and slide under it when there are more than fit.
+            //
+            // **The viewport is as wide as the tabs want to be**, which is the
+            // whole of why they are not squeezed: a layout given its preferred
+            // width takes nothing off anything. The same line Slint's own
+            // `TextEdit` uses to stop a line of text being compressed into its
+            // box (`widgets/common/textedit-base.slint`).
+            //
+            // A strip that is wider than the pane is reached two ways, both of
+            // them 要件 6.3: the list beside it names every tab, and whichever
+            // tab is in front pulls the strip to itself (`reveal-tab`).
+            tabs-view := ScrollView {
+                width: parent.width - 182px;
+                height: parent.height;
+                x: 0;
+                y: 0;
+                // No bars. This scrolls to follow the tab in front rather than
+                // by being dragged, and a bar in a 34px band would be a second
+                // thing to aim at beside the tabs themselves.
+                horizontal-scrollbar-policy: always-off;
+                vertical-scrollbar-policy: always-off;
+                viewport-width: max(self.visible-width, strip.preferred-width);
+                viewport-height: self.visible-height;
+
+                strip := HorizontalLayout {
+                    padding-left: 5px;
+                    // 34 - 28: the tabs stand on the strip's bottom edge, so
+                    // the one in front runs into the paper below it.
+                    padding-top: 6px;
+                    spacing: 2px;
+                    // Start, so that two tabs are two tabs rather than two
+                    // halves of the strip.
+                    alignment: start;
+
+                    for tab[index] in root.tabs: Tab {
+                        title: tab.title;
+                        edited: tab.edited;
+                        current: index == root.active-tab;
+                        paper: root.page-background;
+                        chosen => {
+                            root.tab-selected(index);
+                        }
+                        closed => {
+                            root.tab-closed(index);
+                        }
+                        shown(at, wide) => {
+                            root.reveal-tab(at, wide);
+                        }
+                    }
+                }
+            }
+
+            // The pane's own controls, held against the right edge.
+            //
+            // A stretchy spacer in the row above does not work: `alignment:
+            // start` gives every child its preferred width and leaves the slack
+            // at the end of the row, so nothing in the middle ever grows and
+            // this group ends up packed against the tabs. Six 26px buttons with
+            // 2px between them is 166px, and that is what is held.
+            //
+            // **New Tab and the tab list are here rather than in the strip**
+            // because the strip scrolls: a button that goes with the tabs is a
+            // button that is gone exactly when there are enough tabs to need
+            // it.
+            Rectangle {
+                width: 166px;
+                height: 26px;
+                x: parent.width - self.width - 8px;
+                y: 4px;
+
+                HorizontalLayout {
+                    spacing: 2px;
+
+                    IconButton {
+                        icon: Icons.plus;
+                        tip: "New Tab";
+                        clicked => {
+                            root.new-tab-requested();
+                        }
+                    }
+                    IconButton {
+                        icon: Icons.down;
+                        tip: "All Tabs";
+                        clicked => {
+                            root.menu-opened();
+                            tabs-menu.show();
+                        }
+                    }
+                    IconButton {
+                        icon: Icons.horizontal;
+                        tip: "Horizontal";
+                        checked: !root.vertical;
+                        clicked => {
+                            if (root.vertical) {
+                                root.direction-toggled();
+                            }
+                        }
+                    }
+                    IconButton {
+                        icon: Icons.vertical;
+                        tip: "Vertical";
+                        checked: root.vertical;
+                        clicked => {
+                            if (!root.vertical) {
+                                root.direction-toggled();
+                            }
+                        }
+                    }
+                    IconButton {
+                        icon: Icons.preview;
+                        tip: "Live Preview";
+                        checked: root.preview;
+                        clicked => {
+                            root.preview-toggled();
+                        }
+                    }
+                    IconButton {
+                        icon: Icons.more;
+                        tip: "Pane menu";
+                        clicked => {
+                            root.menu-opened();
+                            pane-menu.show();
+                        }
+                    }
+                }
+            }
+
+            // One of these per pane, because the menu acts on the pane it hangs
+            // from: nothing in it has to name which pane it means.
+            //
+            // Every row closes the popup before it asks for anything. Half of
+            // them change how many panes there are, and the window rebuilds the
+            // repeater when that count changes — which is the same shape as
+            // 6.18, where a repeater rebuilt under an open modal. Closing first
+            // means the popup is already gone when its owner is replaced.
+            // Every tab of this pane by name, whether it is on the strip or
+            // past its end (要件 6.3). Picking one shows it, and the strip
+            // scrolls to it because it is then the tab in front.
+            tabs-menu := PopupWindow {
+                x: parent.width - 258px;
+                y: 32px;
+                width: 250px;
+                close-policy: close-on-click-outside;
+
+                MenuFrame {
+                    width: 250px;
+
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 1px;
+
+                        for tab[index] in root.tabs: MenuRow {
+                            title: tab.title;
+                            // The unsaved dot the tab itself carries, in the
+                            // column the shortcuts use. There are no shortcuts
+                            // in this menu to be confused with.
+                            shortcut: tab.edited ? "●" : "";
+                            checked: index == root.active-tab;
+                            // **Chosen first, closed second**, which is the
+                            // opposite of every row in the pane's menu below.
+                            // These rows are a repeater inside the popup, so
+                            // closing first takes the element whose handler is
+                            // running with it and the line after it never runs.
+                            // Slint's own `ComboBox` orders it this way for the
+                            // same reason (`widgets/fluent/combobox.slint`).
+                            // Nothing is rebuilt underneath the open popup by
+                            // this: the Rust side hands the switch to the event
+                            // loop rather than doing it in the callback.
+                            activated => {
+                                root.tab-selected(index);
+                                tabs-menu.close();
+                            }
+                        }
+                    }
+                }
+            }
+
+            pane-menu := PopupWindow {
+                x: parent.width - 256px;
+                y: 32px;
+                width: 250px;
+                close-policy: close-on-click-outside;
+
+                MenuFrame {
+                    width: 250px;
+
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 1px;
+
+                        MenuRow {
+                            title: "Save";
+                            shortcut: "Ctrl+S";
+                            activated => {
+                                pane-menu.close();
+                                root.save-requested();
+                            }
+                        }
+                        MenuRow {
+                            title: "Save As…";
+                            shortcut: "Ctrl+Shift+S";
+                            activated => {
+                                pane-menu.close();
+                                root.save-as-requested();
+                            }
+                        }
+                        MenuRow {
+                            title: "Reveal in Explorer";
+                            activated => {
+                                pane-menu.close();
+                                root.reveal-requested();
+                            }
+                        }
+                        MenuSep { }
+                        MenuRow {
+                            title: "Close Tab";
+                            shortcut: "Ctrl+W";
+                            activated => {
+                                pane-menu.close();
+                                root.close-active-tab();
+                            }
+                        }
+                        MenuRow {
+                            title: "Close Other Tabs";
+                            activated => {
+                                pane-menu.close();
+                                root.close-other-tabs();
+                            }
+                        }
+                        MenuRow {
+                            title: "Close All Tabs";
+                            activated => {
+                                pane-menu.close();
+                                root.close-all-tabs();
+                            }
+                        }
+                        MenuSep { }
+                        MenuRow {
+                            title: "Split Right";
+                            activated => {
+                                pane-menu.close();
+                                root.split-requested(true);
+                            }
+                        }
+                        MenuRow {
+                            title: "Split Down";
+                            activated => {
+                                pane-menu.close();
+                                root.split-requested(false);
+                            }
+                        }
+                        MenuRow {
+                            title: "Swap Panes";
+                            activated => {
+                                pane-menu.close();
+                                root.swap-requested();
+                            }
+                        }
+                        MenuRow {
+                            title: "Close Split";
+                            activated => {
+                                pane-menu.close();
+                                root.close-split-requested();
+                            }
+                        }
+                        MenuSep { }
+                        MenuRow {
+                            title: "Typography…";
+                            activated => {
+                                pane-menu.close();
+                                root.typography-requested();
+                            }
+                        }
+                        MenuRow {
+                            title: "Zoom In";
+                            shortcut: "Ctrl+=";
+                            activated => {
+                                pane-menu.close();
+                                root.zoom-in-requested();
+                            }
+                        }
+                        MenuRow {
+                            title: "Zoom Out";
+                            shortcut: "Ctrl+-";
+                            activated => {
+                                pane-menu.close();
+                                root.zoom-out-requested();
+                            }
+                        }
+                        MenuRow {
+                            title: "Reset Zoom";
+                            shortcut: "Ctrl+0";
+                            activated => {
+                                pane-menu.close();
+                                root.zoom-reset-requested();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 要件 7.7: finding and replacing, in the pane the document is in.
+        //
+        // **One row unless something is being replaced.** `Ctrl+F` and
+        // `Ctrl+H` used to raise the same band with the same two fields in it,
+        // and the second one was a field to look past every time the writer was
+        // only looking for a word.
+        //
+        // The needle stretches and the count takes the slack, so the bar is at
+        // home in half a window: a pane is not the width of the screen, and
+        // 230px of field with a fixed gap after it is not something that fits
+        // twice.
+        if root.find-open: Rectangle {
+            height: root.find-replacing ? 68px : 34px;
+            background: Tok.chrome;
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Tok.rule;
+            }
+
+            VerticalLayout {
+                Rectangle {
+                    height: 34px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        spacing: 6px;
+
+                        Rectangle {
+                            width: 16px;
+                            horizontal-stretch: 0;
+
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: Icons.search;
+                                tint: Tok.ink-faint;
+                            }
+                        }
+
+                        needle := Field {
+                            horizontal-stretch: 1;
+                            min-width: 70px;
+                            max-width: 230px;
+                            placeholder: "Find";
+                            text <=> root.find-needle;
+                            // At `init` because the bar is built when it opens,
+                            // and on the generation because asking for it again
+                            // while it is already open has to bring the
+                            // keyboard back (6.11).
+                            property <int> asked: root.find-generation;
+                            init => {
+                                self.take-focus();
+                            }
+                            changed asked => {
+                                self.take-focus();
+                            }
+                            // Enter is "the next one", which is what a writer
+                            // expects from a search box they have just typed in.
+                            accepted => {
+                                root.find-step(true);
+                            }
+                            escaped => {
+                                root.find-dismissed();
+                            }
+                            shortcut(event) => {
+                                return root.find-shortcut(event);
+                            }
+                        }
+
+                        Text {
+                            text: root.find-status;
+                            color: Tok.ink-muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        IconButton {
+                            horizontal-stretch: 0;
+                            icon: Icons.up;
+                            tip: "Previous";
+                            clicked => {
+                                root.find-step(false);
+                            }
+                        }
+                        IconButton {
+                            horizontal-stretch: 0;
+                            icon: Icons.down;
+                            tip: "Next";
+                            clicked => {
+                                root.find-step(true);
+                            }
+                        }
+                        IconButton {
+                            horizontal-stretch: 0;
+                            icon: Icons.close;
+                            tip: "Close";
+                            clicked => {
+                                root.find-dismissed();
+                            }
+                        }
+                    }
+                }
+
+                if root.find-replacing: Rectangle {
+                    height: 34px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        spacing: 6px;
+
+                        Rectangle {
+                            width: 16px;
+                            horizontal-stretch: 0;
+
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: Icons.replace;
+                                tint: Tok.ink-faint;
+                            }
+                        }
+
+                        Field {
+                            horizontal-stretch: 1;
+                            min-width: 70px;
+                            max-width: 230px;
+                            placeholder: "Replace with…";
+                            text <=> root.find-replacement;
+                            accepted => {
+                                root.replace-one();
+                            }
+                            escaped => {
+                                root.find-dismissed();
+                            }
+                            shortcut(event) => {
+                                return root.find-shortcut(event);
+                            }
+                        }
+
+                        TextButton {
+                            horizontal-stretch: 0;
+                            title: "Replace";
+                            clicked => {
+                                root.replace-one();
+                            }
+                        }
+                        TextButton {
+                            horizontal-stretch: 0;
+                            title: "Replace All";
+                            clicked => {
+                                root.replace-every();
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        VerticalBox {
+            padding-top: root.page-margin;
+            padding-bottom: root.page-margin;
+            padding-left: root.side-padding;
+            padding-right: root.side-padding;
+            spacing: 8px;
+
+            Text {
+                text: root.label;
+                color: root.label-color;
+                font-size: 13px;
+                x: root.text-indent;
+            }
+
+            if root.status-a != "": Text {
+                text: root.status-a;
+                color: Tok.ink-muted;
+                font-size: 12px;
+                x: root.text-indent;
+            }
+
+            // Deliberately not wrapped: a width taken from the parent closes a
+            // binding loop through VerticalBox's own sizing. The status string puts
+            // its measurements first instead, so clipping the tail costs nothing
+            // worth reading.
+            if root.status-b != "": Text {
+                text: root.status-b;
+                color: Tok.ink-muted;
+                font-size: 12px;
+                x: root.text-indent;
+            }
+
+            scroll := ScrollView {
+                horizontal-scrollbar-policy: as-needed;
+                vertical-scrollbar-policy: as-needed;
+                viewport-x <=> root.scroll-x;
+                viewport-y <=> root.scroll-y;
+                viewport-width: max(self.visible-width, root.content-width * 1px);
+                viewport-height: max(self.visible-height, root.content-height * 1px);
+
+                // Reported at `init` as well as on change, for the reason 6.7 and
+                // 6.11 both record: a pane is created when it becomes visible, so a
+                // size that is right from birth never fires a change event and the
+                // default is kept instead. Split creates it at half width, which is
+                // exactly that case.
+                init => {
+                    root.shown-width = self.visible-width;
+                    root.shown-height = self.visible-height;
+                    root.resized();
+                }
+                changed viewport-x => {
+                    if (root.vertical) {
+                        root.scrolled(self.viewport-x / 1px);
+                    }
+                }
+                changed viewport-y => {
+                    if (!root.vertical) {
+                        root.scrolled(self.viewport-y / 1px);
+                    }
+                }
+                // One of these two is the flow axis and re-lays out the document;
+                // the other only changes how much of it is on screen.
+                changed visible-width => {
+                    root.shown-width = self.visible-width;
+                    if (root.vertical) {
+                        root.scrolled(self.viewport-x / 1px);
+                    } else {
+                        root.resized();
+                    }
+                }
+                changed visible-height => {
+                    root.shown-height = self.visible-height;
+                    if (root.vertical) {
+                        root.resized();
+                    } else {
+                        root.scrolled(self.viewport-y / 1px);
+                    }
+                }
+
+                page := Rectangle {
+                    width: root.content-width * 1px;
+                    height: root.content-height * 1px;
+                    background: root.page-background;
+                    border-width: ime-input.has-focus ? 2px : 0px;
+                    border-color: Tok.accent;
+
+                    // Held here rather than watched on the parent: a `changed`
+                    // handler belongs to the element whose property it is, and this
+                    // element only exists while the pane does. `init` as well, for
+                    // 6.11's reason — switching mode creates this pane, so the bump
+                    // that asked for the focus has already happened by the time it
+                    // exists. Alone, either one leaves a case where the keyboard
+                    // goes nowhere.
+                    property <int> generation: root.focus-generation;
+                    changed generation => {
+                        if (root.takes-focus) {
+                            ime-input.focus();
+                        }
+                    }
+                    init => {
+                        if (root.takes-focus) {
+                            ime-input.focus();
+                        }
+                    }
+
+                    editor := FocusScope {
+                        width: parent.width;
+                        height: parent.height;
+                        focus-on-click: false;
+
+                        for tile in root.tiles: Image {
+                            x: tile.x * 1px;
+                            y: tile.y * 1px;
+                            width: tile.width * 1px;
+                            height: tile.height * 1px;
+                            source: tile.source;
+                            image-fit: fill;
+                            visible: root.vertical
+                                ? (self.x + self.width + scroll.viewport-x >= 0px
+                                    && self.x + scroll.viewport-x <= scroll.visible-width)
+                                : (self.y + self.height + scroll.viewport-y >= 0px
+                                    && self.y + scroll.viewport-y <= scroll.visible-height);
+                        }
+
+                        for selection in root.selection-rects: Rectangle {
+                            x: selection.x * 1px;
+                            y: selection.y * 1px;
+                            width: selection.width * 1px;
+                            height: selection.height * 1px;
+                            background: Tok.accent-soft;
+                            opacity: 0.48;
+                        }
+
+                        // The caret lies across the writing direction: a bar down
+                        // the line in horizontal text, a bar across the column in
+                        // vertical text.
+                        if root.caret-visible: Rectangle {
+                            x: root.caret-x * 1px;
+                            y: root.caret-y * 1px;
+                            width: root.vertical ? max(root.caret-width * 1px, 1px) : 2px;
+                            height: root.vertical ? 2px : max(root.caret-height * 1px, 2px);
+                            background: Tok.accent;
+                        }
+
+                        // The IME bridge. The characters are drawn by DirectWrite,
+                        // so everything here is transparent; what this field is for
+                        // is telling Windows where the composition is.
+                        ime-input := TextInput {
+                            // Moving the field is what tells Windows where the
+                            // composition is, but moving it is not enough on its
+                            // own: the position is reported when the field's own
+                            // cursor changes, so the first conversion after a click
+                            // opened where the caret used to be (技術検証 7.2).
+                            // Touching the cursor here asks for it to be sent again.
+                            changed x => {
+                                self.set-selection-offsets(0, 0);
+                            }
+                            changed y => {
+                                self.set-selection-offsets(0, 0);
+                            }
+                            changed has-focus => {
+                                if self.has-focus {
+                                    root.focus-taken();
+                                }
+                            }
+                            x: root.ime-anchor-x * 1px;
+                            y: root.ime-anchor-y * 1px;
+                            width: max(root.ime-anchor-width * 1px, 1px);
+                            height: max(root.ime-anchor-height * 1px, 1px);
+                            text <=> root.ime-buffer;
+                            font-family: "Yu Gothic UI";
+                            font-size: 1px;
+                            color: transparent;
+                            selection-foreground-color: transparent;
+                            selection-background-color: transparent;
+                            text-cursor-width: 0px;
+                            // Not single-line: a single-line TextInput strips the
+                            // newlines out of pasted text, and everything typed or
+                            // pasted into this pane passes through here.
+                            single-line: false;
+
+                            edited => {
+                                if root.had-preedit {
+                                    root.had-preedit = false;
+                                    root.commit-just-finished = true;
+                                    commit-reset.start();
+                                    root.text-input(self.text);
+                                } else if root.commit-just-finished && self.text == "\n" {
+                                    // The Enter that ended a conversion, arriving as
+                                    // a line break now that the field accepts them.
+                                    // The result itself came through the edit before
+                                    // this one, so swallow it once.
+                                    root.commit-just-finished = false;
+                                    commit-reset.stop();
+                                    self.text = "";
+                                } else {
+                                    root.text-input(self.text);
+                                }
+                            }
+                            accepted => {
+                                if root.commit-just-finished {
+                                    root.commit-just-finished = false;
+                                    commit-reset.stop();
+                                } else {
+                                    root.text-input("\n");
+                                }
+                            }
+                            changed preedit-text => {
+                                if self.preedit-text != "" {
+                                    root.had-preedit = true;
+                                }
+                                root.preedit-changed(self.preedit-text);
+                            }
+                            key-pressed(event) => {
+                                if self.preedit-text == "" && self.text == "" {
+                                    // Enter is handled here rather than left to the
+                                    // field, so a line break is inserted exactly
+                                    // once whatever a multi-line TextInput would do
+                                    // with the key itself.
+                                    if event.modifiers.control
+                                        && (event.text == "s" || event.text == "S" || event.text == "\u{13}") {
+                                        root.save-requested();
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "f" || event.text == "F" || event.text == "\u{6}") {
+                                        root.find-requested(false);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "h" || event.text == "H" || event.text == "\u{8}") {
+                                        root.find-requested(true);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "z" || event.text == "Z" || event.text == "\u{1a}") {
+                                        root.undo-requested(false);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "y" || event.text == "Y" || event.text == "\u{19}") {
+                                        root.undo-requested(true);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "a" || event.text == "A" || event.text == "\u{1}") {
+                                        root.select-all();
+                                        accept
+                                    } else if event.text == Key.Escape {
+                                        // The way out of a menu (要件 6.7).
+                                        // **Handled here rather than inside the
+                                        // menus**: a `FocusScope` in a popup
+                                        // takes the keyboard, and a popup that
+                                        // is dismissed by a click outside never
+                                        // runs any of our code to give it back
+                                        // (6.14). The keyboard stays where it
+                                        // is, and the key travels instead.
+                                        if (root.dismiss-menus() || root.escaped()) {
+                                            accept
+                                        } else {
+                                            reject
+                                        }
+                                    } else if event.text == Key.Return {
+                                        root.text-input("\n");
+                                        accept
+                                    } else if event.text == Key.Backspace {
+                                        root.backspace-pressed();
+                                        accept
+                                    } else if event.text == Key.Tab {
+                                        root.tab-pressed();
+                                        accept
+                                    } else if event.text == Key.Delete {
+                                        root.delete-pressed();
+                                        accept
+                                    } else if event.text == Key.UpArrow {
+                                        // A step along the line in vertical text,
+                                        // a step between lines in horizontal text.
+                                        root.move-caret(root.vertical ? -1 : -2, event.modifiers.shift);
+                                        accept
+                                    } else if event.text == Key.DownArrow {
+                                        root.move-caret(root.vertical ? 1 : 2, event.modifiers.shift);
+                                        accept
+                                    } else if event.text == Key.LeftArrow {
+                                        root.move-caret(root.vertical ? -2 : -1, event.modifiers.shift);
+                                        accept
+                                    } else if event.text == Key.RightArrow {
+                                        root.move-caret(root.vertical ? 2 : 1, event.modifiers.shift);
+                                        accept
+                                    } else if event.text == Key.Home {
+                                        root.home-end(false, event.modifiers.control, event.modifiers.shift);
+                                        accept
+                                    } else if event.text == Key.End {
+                                        root.home-end(true, event.modifiers.control, event.modifiers.shift);
+                                        accept
+                                    } else {
+                                        reject
+                                    }
+                                } else {
+                                    reject
+                                }
+                            }
+                        }
+
+                        pointer := TouchArea {
+                            // Vertical writing draws its own pointer below, so the
+                            // system one is taken away there.
+                            mouse-cursor: root.vertical ? none : text;
+                            scroll-event(event) => {
+                                if (root.vertical) {
+                                    // 要件 7.5: the wheel moves the document
+                                    // sideways. A wheel that only reports y still
+                                    // has to work, so it is turned.
+                                    let delta = event.delta-x != 0px ? event.delta-x : -event.delta-y;
+                                    let minimum-x = min(0px, scroll.visible-width - scroll.viewport-width);
+                                    scroll.viewport-x = max(minimum-x, min(0px, scroll.viewport-x + delta));
+                                } else {
+                                    let delta = event.delta-y != 0px ? event.delta-y : event.delta-x;
+                                    let minimum-y = min(0px, scroll.visible-height - scroll.viewport-height);
+                                    scroll.viewport-y = max(minimum-y, min(0px, scroll.viewport-y + delta));
+                                }
+                                accept
+                            }
+                            pointer-event(event) => {
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                    root.dragging = true;
+                                    root.selection-start(
+                                        self.mouse-x / 1px,
+                                        self.mouse-y / 1px,
+                                        event.modifiers.shift,
+                                    );
+                                } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                    if root.dragging {
+                                        root.selection-end(self.mouse-x / 1px, self.mouse-y / 1px);
+                                    }
+                                    root.dragging = false;
+                                    ime-input.focus();
+                                }
+                            }
+                            // `pressed` rather than the flag alone: the flag only
+                            // clears on a pointer-up this area actually receives,
+                            // and a drag that ends anywhere else leaves it set.
+                            // Every mouse move over the pane then moved the caret,
+                            // which looked like the two panes being wired together.
+                            moved => {
+                                if root.dragging && self.pressed {
+                                    root.selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
+                                }
+                            }
+                        }
+
+                        // The vertical pane's own pointer, lying across the column
+                        // the way the caret does.
+                        if root.vertical && pointer.has-hover: Rectangle {
+                            x: pointer.mouse-x - 8px;
+                            y: pointer.mouse-y - 1px;
+                            width: 16px;
+                            height: 2px;
+                            background: Tok.ink-strong;
+
+                            Rectangle {
+                                x: 0px;
+                                y: -3px;
+                                width: 2px;
+                                height: 8px;
+                                background: Tok.ink-strong;
+                            }
+
+                            Rectangle {
+                                x: 14px;
+                                y: -3px;
+                                width: 2px;
+                                height: 8px;
+                                background: Tok.ink-strong;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

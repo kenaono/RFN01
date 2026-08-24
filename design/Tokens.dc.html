@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Shippori+Mincho:wght@400;600&family=Noto+Sans+Mono&display=swap">
+  <style>
+    :root{
+      --paper:#fcf9ef; --paper-alt:#f9f4e2; --doc-ink:#24211e;
+      --chrome:#f1f0f7; --chrome-raised:#e8e5f0; --chrome-sunken:#dad7e7;
+      --rule:#d5d3e0; --rule-strong:#b6b3c4;
+      --ink:#292733; --ink-strong:#171321; --ink-muted:#696774; --ink-faint:#9996a1;
+      --accent:#6b4cae; --accent-strong:#572e9d; --accent-soft:#dad0fd; --accent-faint:#f2efff;
+      --alert:#a74639; --alert-soft:#fbd4cd;
+      --ui:"Noto Sans","Segoe UI","Yu Gothic UI",sans-serif;
+      --doc:"Noto Sans JP","BIZ UDPGothic","Yu Gothic",sans-serif;
+      --mincho:"Shippori Mincho","Yu Mincho","BIZ UDMincho",serif;
+      --mono:"Noto Sans Mono",Consolas,monospace;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--chrome);font-family:var(--ui);color:var(--ink)}
+    a{color:var(--accent)} a:hover{color:var(--accent-strong)}
+    .i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+    .i.s{width:14px;height:14px}
+    .t{position:relative}
+    .t::after{content:attr(data-t);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);background:var(--ink-strong);color:#fcf9ef;font-size:11px;line-height:1.5;padding:3px 8px;border-radius:3px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s .3s;z-index:30;letter-spacing:.01em}
+    .t:hover::after,.t.show::after{opacity:1}
+    .t.up::after{top:auto;bottom:calc(100% + 7px)}
+    body{background:var(--paper)}
+    .sec{font-family:var(--mincho);font-size:20px;font-weight:600;color:var(--ink-strong);letter-spacing:.06em}
+    .cap{font-size:12px;color:var(--ink-muted);line-height:1.85;font-family:var(--doc)}
+    .k{font-family:var(--mono);font-size:12px;color:var(--ink-strong)}
+    .v{font-family:var(--mono);font-size:11px;color:var(--ink-muted)}
+    .sw{width:52px;height:32px;border-radius:4px;border:1px solid var(--rule);flex:none}
+    .crow{display:grid;grid-template-columns:52px 132px 76px 130px 1fr;gap:12px;align-items:center;padding:5px 0}
+    .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:34px}
+    .hr{height:1px;background:var(--rule)}
+    .ttl{font-family:var(--mincho);font-size:34px;font-weight:600;color:var(--ink-strong);letter-spacing:.08em}
+  </style>
+</helmet>
+<div style="width:960px;background:var(--paper);padding:40px 44px;display:flex;flex-direction:column;gap:28px">
+
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <div class="ttl">Design Tokens</div>
+    <div class="cap" style="max-width:660px">Slint の <span class="k">global Tok</span> にそのまま入る値。<b>色18個</b>（現状のべた書き18個を置き換える）、<b>間隔8段</b>、<b>高さ4種</b>、<b>文字5段</b>。すべて oklch で決めてから sRGB へ落としてあるので、段の間で明度と彩度が揃っている。<b>UIは紫、紙はアイボリー</b>——2つの色相を混ぜないことがこの表の主旨。</div>
+  </div>
+
+  <div class="hr"></div>
+
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:12px"><div class="sec">Color</div><div class="cap"><b>アクセントは紫ひとつ。</b>ほかに色が要るのは「失うものがある操作」だけで、そこにだけ alert を置く。</div></div>
+    <div><div class="cap" style="color:var(--ink-faint);margin-bottom:4px;font-weight:600">Chrome — 紫</div><div class="crow"><div class="sw" style="background:#f1f0f7"></div><div class="k">chrome</div><div class="v">#f1f0f7</div><div class="v">oklch(.958 .010 295)</div><div class="cap">トップバー・左ペイン・ステータスバーの地</div></div><div class="crow"><div class="sw" style="background:#e8e5f0"></div><div class="k">chrome-raised</div><div class="v">#e8e5f0</div><div class="v">oklch(.928 .015 295)</div><div class="cap">タブ列・アイコンレール</div></div><div class="crow"><div class="sw" style="background:#dad7e7"></div><div class="k">chrome-sunken</div><div class="v">#dad7e7</div><div class="v">oklch(.885 .022 295)</div><div class="cap">ホバーしているアイコン</div></div><div class="crow"><div class="sw" style="background:#d5d3e0"></div><div class="k">rule</div><div class="v">#d5d3e0</div><div class="v">oklch(.872 .018 295)</div><div class="cap">領域の区切り 1px</div></div><div class="crow"><div class="sw" style="background:#b6b3c4"></div><div class="k">rule-strong</div><div class="v">#b6b3c4</div><div class="v">oklch(.775 .024 295)</div><div class="cap">ペイン境界・引用の縦棒・水平線</div></div></div><div><div class="cap" style="color:var(--ink-faint);margin-bottom:4px;font-weight:600">Text — 紫に寄った墨</div><div class="crow"><div class="sw" style="background:#171321"></div><div class="k">ink-strong</div><div class="v">#171321</div><div class="v">oklch(.200 .028 295)</div><div class="cap">活性タブ・見出しラベル</div></div><div class="crow"><div class="sw" style="background:#292733"></div><div class="k">ink</div><div class="v">#292733</div><div class="v">oklch(.280 .022 295)</div><div class="cap">UIの本文</div></div><div class="crow"><div class="sw" style="background:#696774"></div><div class="k">ink-muted</div><div class="v">#696774</div><div class="v">oklch(.520 .020 295)</div><div class="cap">ラベル・ステータスバーの数字・アイコン既定</div></div><div class="crow"><div class="sw" style="background:#9996a1"></div><div class="k">ink-faint</div><div class="v">#9996a1</div><div class="v">oklch(.680 .016 295)</div><div class="cap">行頭記号・チェック未・非活性</div></div></div><div><div class="cap" style="color:var(--ink-faint);margin-bottom:4px;font-weight:600">Accent — 紫（唯一のアクセント）</div><div class="crow"><div class="sw" style="background:#6b4cae"></div><div class="k">accent</div><div class="v">#6b4cae</div><div class="v">oklch(.500 .150 295)</div><div class="cap">キャレット・活性のレール／タブ・リンク・チェック済</div></div><div class="crow"><div class="sw" style="background:#572e9d"></div><div class="k">accent-strong</div><div class="v">#572e9d</div><div class="v">oklch(.420 .170 295)</div><div class="cap">押している瞬間・主ボタンの地</div></div><div class="crow"><div class="sw" style="background:#dad0fd"></div><div class="k">accent-soft</div><div class="v">#dad0fd</div><div class="v">oklch(.880 .062 295)</div><div class="cap">選択範囲・選ばれている行・入になったアイコン</div></div><div class="crow"><div class="sw" style="background:#f2efff"></div><div class="k">accent-faint</div><div class="v">#f2efff</div><div class="v">oklch(.960 .024 295)</div><div class="cap">ホバーしている行</div></div></div><div><div class="cap" style="color:var(--ink-faint);margin-bottom:4px;font-weight:600">Paper — アイボリー（紫を持ち込まない）</div><div class="crow"><div class="sw" style="background:#fcf9ef"></div><div class="k">paper</div><div class="v">#fcf9ef</div><div class="v">oklch(.982 .014 92)</div><div class="cap">横書きの紙。<b>真っ白より一段暖かい</b></div></div><div class="crow"><div class="sw" style="background:#f9f4e2"></div><div class="k">paper-alt</div><div class="v">#f9f4e2</div><div class="v">oklch(.966 .024 92)</div><div class="cap">縦書きの紙。<b>色だけで向きが分かる</b></div></div><div class="crow"><div class="sw" style="background:#24211e"></div><div class="k">doc-ink</div><div class="v">#24211e</div><div class="v">oklch(.250 .008 70)</div><div class="cap">本文。<b>ここだけ紫を混ぜない</b>——長時間読む文字なので</div></div></div><div><div class="cap" style="color:var(--ink-faint);margin-bottom:4px;font-weight:600">Alert — 失うものがあるときだけ</div><div class="crow"><div class="sw" style="background:#a74639"></div><div class="k">alert</div><div class="v">#a74639</div><div class="v">oklch(.520 .130 30)</div><div class="cap">破棄・削除のボタンの縁と文字</div></div><div class="crow"><div class="sw" style="background:#fbd4cd"></div><div class="k">alert-soft</div><div class="v">#fbd4cd</div><div class="v">oklch(.900 .045 30)</div><div class="cap">外部変更を知らせる帯の地</div></div></div>
+  </div>
+
+  <div class="hr"></div>
+
+  <div class="grid2">
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="sec">Spacing</div>
+      <div class="cap">現状は 1・2・3・4・6・8・10・12・13・14px が混在。<b>8段へ畳む</b>（13・10・3 は消える）。</div>
+      <div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-1</div><div style="width:2px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">2px</div><div class="cap">タブの間・境界</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-2</div><div style="width:4px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">4px</div><div class="cap">記号と語の間</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-3</div><div style="width:6px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">6px</div><div class="cap">ボタンの中身の間</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-4</div><div style="width:8px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">8px</div><div class="cap">部品と部品の間</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-5</div><div style="width:12px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">12px</div><div class="cap">領域の内側の余白</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-6</div><div style="width:16px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">16px</div><div class="cap">段落の間</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-7</div><div style="width:24px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">24px</div><div class="cap">節の間・紙の上下</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:56px">sp-8</div><div style="width:32px;height:14px;background:var(--accent)"></div><div class="v" style="width:34px">32px</div><div class="cap">紙の左右</div></div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="sec">Size</div>
+      <div class="cap">現状は 44・40・34・30・28・24px の6種。<b>3種へ畳む</b>——トップバーがメニュー1つになり、44px と 40px が同時に消えた。</div>
+      <div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:74px">h-bar</div><div style="width:60px;height:17px;background:var(--chrome);border:1px solid var(--rule);border-radius:3px"></div><div class="v" style="width:40px">34px</div><div class="cap">トップバー・タブ列・左ペインの見出し・検索バー</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:74px">h-field</div><div style="width:60px;height:14px;background:var(--paper);border:1px solid var(--rule);border-radius:3px"></div><div class="v" style="width:40px">28px</div><div class="cap">入力欄・文字のあるボタン・ステータスバー</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:74px">h-icon</div><div style="width:26px;height:13px;background:var(--chrome-raised);border:1px solid var(--rule);border-radius:3px"></div><div class="v" style="width:40px">26px</div><div class="cap">アイコンボタン・メニュー項目・左ペインの行</div></div><div style="display:flex;align-items:center;gap:12px"><div class="k" style="width:74px">w-rail</div><div style="width:20px;height:20px;background:var(--chrome-raised);border:1px solid var(--rule);border-radius:3px"></div><div class="v" style="width:40px">40px</div><div class="cap">アイコンレールの幅</div></div></div>
+      <div style="height:6px"></div>
+      <div class="sec">Radius</div>
+      <div style="display:flex;gap:20px;align-items:flex-end">
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:center"><div style="width:48px;height:32px;background:var(--chrome-sunken);border-radius:5px"></div><div class="k">r-btn 5px</div><div class="cap">アイコンボタン・メニュー項目</div></div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:center"><div style="width:48px;height:32px;background:var(--chrome-sunken);border-radius:6px 6px 0 0"></div><div class="k">r-tab 6px</div><div class="cap">タブの上角</div></div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:center"><div style="width:48px;height:32px;background:var(--chrome-sunken);border-radius:10px"></div><div class="k">r-card 10px</div><div class="cap">メニュー・パネル・ダイアログ</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;align-items:baseline;gap:12px"><div class="sec">Type</div><div class="cap">現状は 12・13・14px の3種。<b>UIは4段、紙は別の系統</b>。UIの語は英語なので、日本語より小さい字でも読める。</div></div>
+    <div class="grid2">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div class="cap" style="color:var(--ink-faint);font-weight:600">UI — Segoe UI / Yu Gothic UI</div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">ui-xs</div><div class="v" style="width:56px">11 / 1.5</div><div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--ink-muted)">Section label</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">ui-sm</div><div class="v" style="width:56px">12 / 1.5</div><div style="font-size:12px">Sidebar rows, status bar</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">ui-base</div><div class="v" style="width:56px">13 / 1.6</div><div style="font-size:13px">Tabs, buttons, fields</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">ui-lg</div><div class="v" style="width:56px">15 / 1.6</div><div style="font-size:15px;font-weight:600">Dialog title</div></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div class="cap" style="color:var(--ink-faint);font-weight:600">Document — 横書き Yu Gothic ／ 縦書き Yu Mincho</div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">doc-base</div><div class="v" style="width:56px">16 / 1.9</div><div style="font-size:16px;font-family:var(--doc);color:var(--doc-ink)">本文</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">doc-code</div><div class="v" style="width:56px">15 / 1.7</div><div style="font-size:15px;font-family:var(--mono);color:var(--doc-ink)">let x = 1;</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">h1</div><div class="v" style="width:56px">200%</div><div style="font-size:32px;font-weight:700;color:#100e0c;line-height:1.3;font-family:var(--doc)">見出し</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">h2</div><div class="v" style="width:56px">160%</div><div style="font-size:26px;font-weight:700;color:#100e0c;line-height:1.3;font-family:var(--doc)">見出し</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">h3</div><div class="v" style="width:56px">130%</div><div style="font-size:21px;font-weight:700;color:#100e0c;line-height:1.4;font-family:var(--doc)">見出し</div></div>
+        <div style="display:flex;align-items:baseline;gap:14px"><div class="k" style="width:70px">h4&ndash;h6</div><div class="v" style="width:56px">115/105/100</div><div style="font-size:18px;font-weight:700;color:#100e0c;font-family:var(--doc)">見出し</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:baseline;gap:12px"><div class="sec">現状の18色をどこへ送るか</div><div class="cap"><span class="k">ui/*.slint</span> のべた書きを1対1で置き換える表</div></div>
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 28px"><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#374151;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#374151</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">ink</div><div class="v">&times;10</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#f9fafb;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#f9fafb</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">chrome</div><div class="v">&times;4</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#e5e7eb;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#e5e7eb</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">chrome-raised</div><div class="v">&times;4</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#d1d5db;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#d1d5db</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">rule</div><div class="v">&times;4</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#1f2937;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#1f2937</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">ink-strong</div><div class="v">&times;4</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#ffffff;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#ffffff</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">paper</div><div class="v">&times;3</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#f3f4f6;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#f3f4f6</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">chrome</div><div class="v">&times;3</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#eef2ff;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#eef2ff</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">accent-faint</div><div class="v">&times;3</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#202020;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#202020</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">ink-strong</div><div class="v">&times;3</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#fffdf7;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#fffdf7</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">paper-alt</div><div class="v">&times;2</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#6b7280;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#6b7280</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">ink-muted</div><div class="v">&times;2</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#4338ca;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#4338ca</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">accent</div><div class="v">&times;2</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#1969d2;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#1969d2</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">accent</div><div class="v">&times;2</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#047857;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#047857</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">ink-muted</div><div class="v">&times;2</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#8abcf4;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#8abcf4</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">accent-soft</div><div class="v">&times;1</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#6b4f2a;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#6b4f2a</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">ink-muted</div><div class="v">&times;1</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#dbeafe;border:1px solid var(--rule)"></div><div class="v" style="width:62px">#dbeafe</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">accent-soft</div><div class="v">&times;1</div></div><div style="display:flex;align-items:center;gap:8px"><div style="width:18px;height:18px;border-radius:3px;background:#1f2937;border:1px solid var(--rule);opacity:.8"></div><div class="v" style="width:62px">#1f2937cc</div><div class="v" style="color:var(--ink-faint)">&rarr;</div><div class="k">scrim</div><div class="v">&times;1</div></div></div>
+    <div class="cap" style="border-left:3px solid var(--accent);padding-left:12px;max-width:800px"><b>青2つと緑1つが消える。</b><span class="k">#4338ca</span>（検索バーの件数）と <span class="k">#1969d2</span>（キャレットとフォーカス枠）は accent へ、<span class="k">#047857</span>（ペイン上部の計測値）は数字であって状態ではないので <span class="k">ink-muted</span> へ。<b>ステータスバーの地も濃紺 <span class="k">#1f2937</span> から chrome へ</b>——1本だけ濃い帯が窓の下端を切っていた。</div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

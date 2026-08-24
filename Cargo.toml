@@ -6,6 +6,9 @@ publish = false
 
 [dependencies]
 slint = { version = "1.17.1", features = ["raw-window-handle-06"] }
+# Only to reach the window's own handle, which the IME calls need. The version
+# must match the one Slint's `raw-window-handle-06` feature exposes.
+raw-window-handle = "0.6"
 unicode-segmentation = "1.13.3"
 windows-numerics = "0.3.1"
 windows = { version = "0.62.2", features = [
@@ -13,9 +16,28 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
+    # The wall clock, for naming this run's diagnostic log.
+    "Win32_System_SystemInformation",
+    # The colour dialog, for 要件 9's text and paper colours. Windows draws it,
+    # so a colour is picked the way it is picked in every other Windows program.
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Input_Ime",
+    # The open and save dialogs. Features of a crate already vendored, so no
+    # new package is fetched and `--offline` still resolves.
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
 ] }
+# `windows::core` re-exports this, but the `implement` macro expands to absolute
+# `::windows_core::…` paths, which only resolve for a crate named that in this
+# package's own dependencies. Already in the lock file as `windows`'s own
+# dependency and already in the registry cache, so `--offline` still resolves
+# and no new package is fetched. The version must be the one `windows` uses, or
+# there would be two `windows_core` crates and the COM traits of one would not
+# satisfy the other.
+windows-core = "0.62.2"
 
 [build-dependencies]
 slint-build = "1.17.1"
