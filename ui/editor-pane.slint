@@ -61,7 +61,7 @@ export struct PaneScreen {
     // that a model holding only the panes on screen still names them the same.
     id: int,
     // Which way the document flows. Everything else that differs between the
-    // panes — the label, the paper colour, the padding — follows from it, so
+    // panes — the paper colour, the padding, the indent — follows from it, so
     // none of that is in this model.
     vertical: bool,
 
@@ -110,13 +110,11 @@ export component EditorPane inherits Rectangle {
     // Which way the document flows. Everything that differs between the two
     // panes is decided by this and nothing else.
     in property <bool> vertical;
-    in property <string> label;
-    in property <color> label-color;
+
     in property <color> page-background;
-    // Two lines the validation build shows above the vertical pane. Empty on
-    // the other one, and the elements are then not there at all.
-    in property <string> status-a;
-    in property <string> status-b;
+    // What to say above the paper when something went wrong. Empty the rest of
+    // the time, and then nothing is there at all.
+    in property <string> status;
     // The vertical pane's own box indents its text by hand rather than padding
     // the whole column, because the scroll view below it must reach the edge.
     in property <length> text-indent: 0px;
@@ -801,26 +799,18 @@ export component EditorPane inherits Rectangle {
             padding-right: root.side-padding;
             spacing: 8px;
 
-            Text {
-                text: root.label;
-                color: root.label-color;
-                font-size: 13px;
-                x: root.text-indent;
-            }
-
-            if root.status-a != "": Text {
-                text: root.status-a;
-                color: Tok.ink-muted;
-                font-size: 12px;
-                x: root.text-indent;
-            }
-
+            // **Nothing above the paper unless something went wrong.** The two
+            // captions that used to sit here were from the verification days —
+            // a fixed one naming the mode, which stopped being true once a pane
+            // could switch, and the DirectWrite probe's measurements, which are
+            // in `diag/Diag_*.log` where the rest of them are.
+            //
             // Deliberately not wrapped: a width taken from the parent closes a
-            // binding loop through VerticalBox's own sizing. The status string puts
-            // its measurements first instead, so clipping the tail costs nothing
+            // binding loop through VerticalBox's own sizing. The message puts
+            // what matters first instead, so clipping the tail costs nothing
             // worth reading.
-            if root.status-b != "": Text {
-                text: root.status-b;
+            if root.status != "": Text {
+                text: root.status;
                 color: Tok.ink-muted;
                 font-size: 12px;
                 x: root.text-indent;

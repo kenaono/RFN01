@@ -307,6 +307,11 @@ impl LineKind {
     pub fn is_code(self) -> bool {
         matches!(self, Self::Fence | Self::Code)
     }
+
+    /// Whether the line begins with a list marker.
+    pub fn is_list(self) -> bool {
+        matches!(self, Self::Bullet | Self::Ordered | Self::Task { .. })
+    }
 }
 
 /// How a stretch of text is marked, beyond the size its line is set at
@@ -343,13 +348,17 @@ pub enum Ornament {
     /// something `9.` does not, so what is drawn here is the boxed range's own
     /// text.
     Number,
-    /// **Nothing at all, in place of `---`.** This box is here to hide the
-    /// marks; the stroke drawn across them is a [`LineRun`], because it
-    /// crosses the whole page rather than sitting at the head of the line.
+    /// **Nothing at all: a box over a whole line that is all marks.** `---`
+    /// and the ``` that opens or closes a fence are both this — what stands in
+    /// their place runs the length of the line or the height of the block, and
+    /// is a [`LineRun`] rather than ink in a box.
+    ///
+    /// The line still takes the room a line takes, which is what gives a code
+    /// block its padding at each end.
     ///
     /// A blockquote has no box of its own — its indent belongs to the block
     /// (`BlockSpan::quote_depth`), and the preview takes its marker off.
-    Rule,
+    Hidden,
 }
 
 impl Ornament {
@@ -359,7 +368,7 @@ impl Ornament {
     /// Asked before the hit test that finds where to draw, so a document of
     /// rules never asks DirectWrite about a rectangle nothing goes into.
     pub fn draws_ink(self) -> bool {
-        !matches!(self, Self::Rule)
+        !matches!(self, Self::Hidden)
     }
 }
 
@@ -470,6 +479,13 @@ impl<'a> StyledText<'a> {
         }
     }
 
+    /// Lines set at a size each, with nothing marked inside them.
+    ///
+    /// **Only the tests build one this way.** Every pane hands over what its
+    /// lines have marked and what stands at their heads, because leaving
+    /// either out lays the text out differently from the way it is drawn —
+    /// which is the whole of why `line_starts` now takes a [`LongLine`].
+    #[cfg(test)]
     pub fn new(text: &'a str, lines: &'a [LineStyle]) -> Self {
         Self {
             text,
@@ -779,6 +795,54 @@ fn line_cells(
 ///
 /// Consulted only for a logical line too long to be one block, so a document of
 /// ordinary paragraphs never calls it.
+/// One logical line too long to be a block, as the search for its wrap
+/// positions has to see it (要件 2.3).
+///
+/// **Everything that moves a break.** A cut position is a line start only for a
+/// layout set the way the pieces will be set: the size a heading asks for, the
+/// width one level of quoting leaves, the box standing at the head, and the
+/// families and weights the markers inside call for. Asked without them, the
+/// answer is a list of positions the block does not actually break at, and a
+/// piece beginning at one of those is drawn from the middle of a line.
+#[derive(Clone, Copy)]
+pub struct LongLine<'a> {
+    pub text: &'a str,
+    pub style: LineStyle,
+    /// What is marked inside it, in UTF-16 units from the head of the line.
+    pub marks: &'a [Emphasis],
+    /// The box standing at its head, if one does.
+    pub marker: Option<LineMarker>,
+}
+
+impl LongLine<'_> {
+    /// The marks that reach into the suffix beginning at `byte`, measured from
+    /// that suffix's own start.
+    ///
+    /// **A window and a resumed search both lay out a suffix**, and a mark is
+    /// measured from the head of the line: one that ended before the suffix has
+    /// nothing to say about it, and one that straddles the cut says it about
+    /// the part that is there. The box at the head belongs to the head alone,
+    /// and is left to the caller.
+    pub fn marks_from(&self, byte: usize) -> Vec<Emphasis> {
+        if byte == 0 {
+            return self.marks.to_vec();
+        }
+        let before = self.text[..byte].encode_utf16().count() as u32;
+        self.marks
+            .iter()
+            .filter_map(|mark| {
+                let mark_end = mark.utf16_start + mark.utf16_len;
+                let start = mark.utf16_start.max(before);
+                (mark_end > start).then(|| Emphasis {
+                    utf16_start: start - before,
+                    utf16_len: mark_end - start,
+                    marks: mark.marks,
+                })
+            })
+            .collect()
+    }
+}
+
 pub trait WrapPoints {
     /// Byte offsets in `text` where a visual line starts, increasing, excluding
     /// 0 and the end of the text.
@@ -789,11 +853,9 @@ pub trait WrapPoints {
     /// because a layout that cannot be built is a reason to leave the text
     /// alone, not a reason to stop laying out the document.
     ///
-    /// **The whole style, not just the heading level.** A cut position is only
-    /// a line start for a layout of the same width, and quoting narrows the
-    /// box the line is set in (要件 7.3.2) — asking at the pane's full width
-    /// would hand back positions the quoted block does not break at.
-    fn line_starts(&mut self, text: &str, style: LineStyle) -> Vec<usize>;
+    /// **The whole line, not just its heading level.** See [`LongLine`] for
+    /// what has to travel with it and why.
+    fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize>;
 }
 
 /// A [`WrapPoints`] that never cuts: the behaviour of the split before it could
@@ -804,7 +866,7 @@ pub struct NeverWraps;
 
 #[cfg(test)]
 impl WrapPoints for NeverWraps {
-    fn line_starts(&mut self, _text: &str, _style: LineStyle) -> Vec<usize> {
+    fn line_starts(&mut self, _line: LongLine<'_>) -> Vec<usize> {
         Vec::new()
     }
 }
@@ -854,12 +916,13 @@ pub fn split_blocks(
         let characters = body.encode_utf16().count() as u32;
         // Charge for whole lines, so a blank line costs a line like any other,
         // and for the heading size, so a heading costs what it takes up.
-        let mut style = styled.style_at(line_index);
+        let index = line_index;
+        line_index += 1;
+        let mut style = styled.style_at(index);
         if !indents {
             style.quote_depth = 0;
         }
         let line_cells = line_cells(characters, cells_per_line, typography, style);
-        line_index += 1;
 
         // 要件 7.3.2: a block is set in one layout box, so a change of quoting
         // ends one **whatever size it has reached**. The other two reasons to
@@ -899,7 +962,13 @@ pub fn split_blocks(
                 block_byte_start = byte_cursor;
                 block_utf16_start = utf16_cursor;
             }
-            let pieces = cut_long_line(body, cells_per_line, typography, style, wraps);
+            let long = LongLine {
+                text: body,
+                style,
+                marks: styled.marks_at(index),
+                marker: styled.marker_at(index),
+            };
+            let pieces = cut_long_line(long, cells_per_line, typography, wraps);
             for piece_end in pieces {
                 let piece_end = byte_cursor + piece_end;
                 utf16_cursor += text[block_byte_start..piece_end].encode_utf16().count() as u32;
@@ -935,8 +1004,20 @@ pub fn split_blocks(
         utf16_cursor += line_units;
         byte_cursor = line_end;
 
+        // 要件 7.3.2: **a fenced block is one thing on the page**, so an
+        // ordinary boundary does not fall inside it. A ground cut in two has a
+        // seam, and the half that holds no fence cannot tell its own end from
+        // the cut — a piece that was only the closing fence looked like a whole
+        // code block and was rounded as one. `BLOCK_MAX_CELLS` still caps the
+        // block, so this cannot make one unbounded.
+        //
+        // **This is the one boundary that looks past its own line**: a fence
+        // opened far above decides it. `line_cells` already reads the style for
+        // the same reason, so the boundaries were never quite text-local once a
+        // fence was in the document; this widens that rather than starting it.
+        let may_end = !style.kind.is_code();
         if block_cells >= BLOCK_MAX_CELLS
-            || (block_cells >= BLOCK_MIN_CELLS && ends_a_block(body, line_cells))
+            || (block_cells >= BLOCK_MIN_CELLS && may_end && ends_a_block(body, line_cells))
         {
             blocks.push(BlockSpan {
                 byte_start: block_byte_start,
@@ -978,17 +1059,17 @@ pub fn split_blocks(
 /// them. What does hold is that the wrap positions *before* an edit do not move,
 /// so the pieces before it keep their text and their measurements.
 fn cut_long_line(
-    body: &str,
+    line: LongLine<'_>,
     cells_per_line: u32,
     typography: &Typography,
-    style: LineStyle,
     wraps: &mut dyn WrapPoints,
 ) -> Vec<usize> {
-    let scale = typography.flow_scale(style.heading_level);
+    let body = line.text;
+    let scale = typography.flow_scale(line.style.heading_level);
     let per_visual_line = (cells_per_line as f32 * scale).max(1.0);
     let lines_per_piece = (BLOCK_MAX_CELLS as f32 / per_visual_line).floor().max(1.0) as usize;
     wraps
-        .line_starts(body, style)
+        .line_starts(line)
         .into_iter()
         .enumerate()
         .filter(|(index, offset)| (index + 1) % lines_per_piece == 0 && *offset < body.len())
@@ -1380,9 +1461,21 @@ pub struct StyleRun {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineOrnament {
     /// The bar standing beside a blockquote, one per level of quoting.
+    ///
+    /// **One bar for the whole quote, not one per line.** Two bars that meet
+    /// are two shapes drawn over the same edge, and the pixel they share is
+    /// composited twice — lighter or heavier than the rest of the bar, and the
+    /// seam is visible.
     Quote { depth: u8 },
     /// The stroke a `---` line is set as.
     Rule,
+    /// The ground a fenced block sits on.
+    ///
+    /// **One run for the whole block**, for the reason a quote's bar is one
+    /// bar, and because a ground drawn line by line could not be rounded at
+    /// its corners. The fences at each end are hidden rather than removed, so
+    /// the run reaches over them and they become the block's padding.
+    Code,
 }
 
 /// One whole logical line of a block, and what is drawn over it (要件 7.3.2).
@@ -1397,6 +1490,21 @@ pub struct LineRun {
     pub utf16_start: u32,
     pub utf16_len: u32,
     pub ornament: LineOrnament,
+    /// Whether each end of this run is the mark's own end, as against the point
+    /// where the block it was gathered in ran out.
+    ///
+    /// Only a ground has corners to round, and **a corner rounded at a seam is
+    /// a notch**. A fenced block cut in two by a block boundary must be square
+    /// where the halves meet and round only at its fences — and **where that
+    /// boundary fell is a property of the split, not of the document**, so the
+    /// fences are the only thing that says which end is which.
+    ///
+    /// **A fence at the end of a run is that end**, which holds because an
+    /// ordinary boundary never falls inside a fenced block (`split_blocks`): a
+    /// closing fence therefore never begins a block, and a run that begins at
+    /// a fence begins at the opening one. A bar and a stroke have no corners;
+    /// theirs are set true and read by nobody.
+    pub own_ends: (bool, bool),
 }
 
 /// The block-local whole-line ornaments.
@@ -1412,32 +1520,83 @@ pub fn line_runs(styled: StyledText<'_>) -> Vec<LineRun> {
     }
     let mut runs = Vec::new();
     let mut utf16_start = 0_u32;
+    // What is being gathered, where it began and where its last line ended.
+    // **Gathered rather than emitted line by line**, for the reason
+    // [`LineOrnament`] gives: two shapes that meet share an edge, and a shared
+    // edge is a seam.
+    let mut held: Option<Gathering> = None;
     for (index, line) in styled.text.split('\n').enumerate() {
         let utf16_len = line.encode_utf16().count() as u32;
         let style = styled.style_at(index);
-        // **The two are not exclusive.** `> ---` is a rule inside a quote and
-        // carries both marks, the way `quote_depth` sits beside `kind` rather
-        // than inside it.
-        if style.quote_depth > 0 {
-            runs.push(LineRun {
+        // **Code before quoting, and the two never meet anyway**: a fence
+        // inside a blockquote is not a fence (`document::line_style`), so a
+        // line is at most one of these.
+        let ornament = if style.kind.is_code() {
+            Some(LineOrnament::Code)
+        } else if style.quote_depth > 0 {
+            Some(LineOrnament::Quote {
+                depth: style.quote_depth,
+            })
+        } else {
+            None
+        };
+        let line_end = utf16_start + utf16_len;
+        // **Only a fence says where a ground's own end is** (see
+        // [`LineRun::own_ends`]).
+        let own_end =
+            !matches!(ornament, Some(LineOrnament::Code)) || matches!(style.kind, LineKind::Fence);
+        if held.map(|held| held.ornament) == ornament {
+            if let Some(held) = held.as_mut() {
+                held.utf16_end = line_end;
+                held.own_ends.1 = own_end;
+            }
+        } else {
+            runs.extend(finished(held.take()));
+            held = ornament.map(|ornament| Gathering {
+                ornament,
                 utf16_start,
-                utf16_len,
-                ornament: LineOrnament::Quote {
-                    depth: style.quote_depth,
-                },
+                utf16_end: line_end,
+                own_ends: (own_end, own_end),
             });
         }
+        // **A rule is one line and never more**, so it is not gathered — and a
+        // quoted one carries both marks, the way `quote_depth` sits beside
+        // `kind` rather than inside it.
         if matches!(style.kind, LineKind::Rule) {
             runs.push(LineRun {
                 utf16_start,
                 utf16_len,
                 ornament: LineOrnament::Rule,
+                own_ends: (true, true),
             });
         }
         // Past the newline this split consumed.
         utf16_start += utf16_len + 1;
     }
+    // A quote or a fence that reaches the end of the block, which is what a
+    // document being typed into looks like.
+    runs.extend(finished(held));
     runs
+}
+
+/// The stretch of consecutive lines being gathered into one whole-line mark.
+#[derive(Clone, Copy)]
+struct Gathering {
+    ornament: LineOrnament,
+    utf16_start: u32,
+    utf16_end: u32,
+    own_ends: (bool, bool),
+}
+
+/// The gathered stretch as a run, if there was one.
+fn finished(held: Option<Gathering>) -> Option<LineRun> {
+    let held = held?;
+    Some(LineRun {
+        utf16_start: held.utf16_start,
+        utf16_len: held.utf16_end - held.utf16_start,
+        ornament: held.ornament,
+        own_ends: held.own_ends,
+    })
 }
 
 /// The block-local ranges that are not body text.
@@ -1612,7 +1771,8 @@ mod tests {
     struct EveryNCharacters(usize);
 
     impl WrapPoints for EveryNCharacters {
-        fn line_starts(&mut self, text: &str, _style: LineStyle) -> Vec<usize> {
+        fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize> {
+            let text = line.text;
             text.char_indices()
                 .enumerate()
                 .filter(|(index, _)| *index > 0 && index % self.0 == 0)
@@ -1629,6 +1789,55 @@ mod tests {
             &plain_typography(),
             &mut EveryNCharacters(CELLS as usize),
         )
+    }
+
+    /// **A fenced block is one thing on the page**, so an ordinary boundary
+    /// does not fall inside it (要件 7.3.2): the ground would be cut in two,
+    /// and the half holding no fence cannot tell its own end from the cut.
+    /// `BLOCK_MAX_CELLS` still caps the block, so this cannot make one
+    /// unbounded — the fence here is well under it.
+    #[test]
+    fn an_ordinary_boundary_does_not_fall_inside_a_fence() {
+        let typography = plain_typography();
+        let code = LineStyle::of_kind(LineKind::Code);
+        let charged = |line: &str| {
+            let characters = line.encode_utf16().count() as u32;
+            line_cells(characters, CELLS, &typography, code)
+        };
+        // **Every line inside would end a block on its own**, so without the
+        // guard the fence is certainly cut and this says something.
+        let inside = (0..)
+            .map(|n| format!("{}{n}", "あ".repeat(CELLS as usize - 4)))
+            .filter(|line| ends_a_block(line, charged(line)))
+            .take(20)
+            .collect::<Vec<String>>();
+
+        // Twelve short lines: under `BLOCK_MIN_CELLS`, so the block reaches the
+        // fence still open and every line inside it is a candidate.
+        let mut text = "本文\n".repeat(12);
+        let mut levels = vec![LineStyle::default(); 12];
+        let opened = text.len();
+        text.push_str("```\n");
+        levels.push(LineStyle::of_kind(LineKind::Fence));
+        for line in &inside {
+            text.push_str(line);
+            text.push('\n');
+            levels.push(code);
+        }
+        text.push_str("```\n");
+        levels.push(LineStyle::of_kind(LineKind::Fence));
+        let closed = text.len();
+        levels.push(LineStyle::default());
+
+        let blocks = split_with(StyledText::new(&text, &levels), &typography);
+
+        for block in &blocks {
+            assert!(
+                block.byte_start <= opened || block.byte_start >= closed,
+                "a block began at {} inside the fence {opened}..{closed}",
+                block.byte_start
+            );
+        }
     }
 
     /// **A change of quoting ends a block whatever size it has reached**
@@ -1676,16 +1885,18 @@ mod tests {
         );
     }
 
-    /// A cut position is a line start only for a layout of the same width, so a
-    /// quoted paragraph has to be **asked about at its own width** (要件 7.3.2).
-    /// What goes through is the whole style, not just the heading level.
+    /// A cut position is a line start only for a layout set the way the pieces
+    /// will be, so a long line has to be **asked about as it is set**
+    /// (要件 7.3.2): its width, what is marked inside it, and the box at its
+    /// head all travel with it.
     #[test]
-    fn a_long_line_is_asked_about_under_its_own_style() {
-        struct Records(Vec<LineStyle>);
+    fn a_long_line_is_asked_about_as_it_is_set() {
+        struct Records(Vec<(LineStyle, usize, bool)>);
 
         impl WrapPoints for Records {
-            fn line_starts(&mut self, _text: &str, style: LineStyle) -> Vec<usize> {
-                self.0.push(style);
+            fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize> {
+                let held = (line.style, line.marks.len(), line.marker.is_some());
+                self.0.push(held);
                 Vec::new()
             }
         }
@@ -1695,18 +1906,31 @@ mod tests {
             quote_depth: 1,
             ..LineStyle::default()
         };
+        let bold = Emphasis {
+            utf16_start: 0,
+            utf16_len: 4,
+            marks: Marks {
+                bold: true,
+                ..Marks::default()
+            },
+        };
+        let bullet = LineMarker {
+            utf16_len: 2,
+            ornament: Ornament::Bullet,
+        };
         let levels = [quoted, LineStyle::default()];
-        let markers = [None; 2];
+        let spans = [vec![bold], Vec::new()];
+        let markers = [Some(bullet), None];
         let mut asked = Records(Vec::new());
 
         split_blocks(
-            StyledText::new(&text, &levels).with_markers(&markers),
+            StyledText::marked(&text, &levels, &spans).with_markers(&markers),
             CELLS,
             &plain_typography(),
             &mut asked,
         );
 
-        assert_eq!(asked.0, vec![quoted]);
+        assert_eq!(asked.0, vec![(quoted, 1, true)]);
     }
 
     /// The point of cutting inside a line: a paragraph with no break in it must
@@ -1724,8 +1948,13 @@ mod tests {
         // Every cut lands on a position `WrapPoints` reported, so every piece
         // starts where a line starts. That is the whole correctness argument.
         let body = text.trim_end_matches('\n');
-        let stub = LineStyle::default();
-        let wraps = EveryNCharacters(CELLS as usize).line_starts(body, stub);
+        let stub = LongLine {
+            text: body,
+            style: LineStyle::default(),
+            marks: &[],
+            marker: None,
+        };
+        let wraps = EveryNCharacters(CELLS as usize).line_starts(stub);
         for piece in &cut[..cut.len() - 1] {
             assert!(
                 wraps.contains(&piece.byte_end),
@@ -2135,11 +2364,13 @@ mod tests {
                     utf16_start: 0,
                     utf16_len: after("引用"),
                     ornament: LineOrnament::Quote { depth: 1 },
+                    own_ends: (true, true),
                 },
                 LineRun {
                     utf16_start: after("引用\n本文\n"),
                     utf16_len: after("---"),
                     ornament: LineOrnament::Rule,
+                    own_ends: (true, true),
                 },
             ]
         );
@@ -2167,8 +2398,34 @@ mod tests {
             .collect::<Vec<LineOrnament>>();
         assert_eq!(
             ornaments,
-            vec![LineOrnament::Quote { depth: 1 }, LineOrnament::Rule]
+            vec![LineOrnament::Rule, LineOrnament::Quote { depth: 1 }]
         );
+    }
+
+    /// **One bar for the whole quote, not one per line** (要件 7.3.2). Two bars
+    /// that meet share an edge, and a shared edge is composited twice: the seam
+    /// shows, and it moves as the block boundaries move under the caret.
+    #[test]
+    fn a_run_of_quoted_lines_asks_for_one_bar() {
+        let text = "引用の一行目\n引用の二行目\n本文";
+        let quoted = LineStyle {
+            quote_depth: 1,
+            ..LineStyle::default()
+        };
+        let levels = [quoted, quoted, LineStyle::default()];
+        let markers = [None; 3];
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+
+        let runs = line_runs(styled);
+
+        let after = |shown: &str| shown.encode_utf16().count() as u32;
+        let expected = LineRun {
+            utf16_start: 0,
+            utf16_len: after("引用の一行目\n引用の二行目"),
+            ornament: LineOrnament::Quote { depth: 1 },
+            own_ends: (true, true),
+        };
+        assert_eq!(runs, vec![expected]);
     }
 
     /// A document with neither asks for nothing, so nothing is drawn and
@@ -2182,6 +2439,75 @@ mod tests {
         let runs = line_runs(styled);
 
         assert!(runs.is_empty());
+    }
+
+    /// **One run for the whole fenced block**, reaching over the fences at each
+    /// end (要件 7.3.2). A ground drawn line by line would seam at every break
+    /// and could not be rounded at its corners.
+    #[test]
+    fn a_fenced_block_asks_for_one_ground() {
+        let text = "本文\n```\nlet x = 1;\n```\n本文";
+        let levels = [
+            LineStyle::default(),
+            LineStyle::of_kind(LineKind::Fence),
+            LineStyle::of_kind(LineKind::Code),
+            LineStyle::of_kind(LineKind::Fence),
+            LineStyle::default(),
+        ];
+        let markers = [None; 5];
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+
+        let runs = line_runs(styled);
+
+        let after = |shown: &str| shown.encode_utf16().count() as u32;
+        let expected = LineRun {
+            utf16_start: after("本文\n"),
+            utf16_len: after("```\nlet x = 1;\n```"),
+            ornament: LineOrnament::Code,
+            own_ends: (true, true),
+        };
+        assert_eq!(runs, vec![expected]);
+    }
+
+    /// A fence nobody closes grounds the rest of the block, which is what a
+    /// document being typed into looks like.
+    #[test]
+    fn an_unclosed_fence_grounds_the_rest_of_the_block() {
+        let text = "```\nlet x = 1;";
+        let levels = [
+            LineStyle::of_kind(LineKind::Fence),
+            LineStyle::of_kind(LineKind::Code),
+        ];
+        let markers = [None; 2];
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+
+        let runs = line_runs(styled);
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].utf16_len, text.encode_utf16().count() as u32);
+        // It opens at a fence and closes at nothing, because nothing closed it.
+        assert_eq!(runs[0].own_ends, (true, false));
+    }
+
+    /// **A ground cut by a block boundary is square where the halves meet.**
+    /// The half that holds no fence at an end did not end there — the split
+    /// did — and where a split fell says nothing about the document, so only a
+    /// fence may round a corner (要件 7.3.2).
+    #[test]
+    fn a_ground_that_holds_no_fence_does_not_own_that_end() {
+        let text = "let x = 1;\nlet y = 2;\n```";
+        let levels = [
+            LineStyle::of_kind(LineKind::Code),
+            LineStyle::of_kind(LineKind::Code),
+            LineStyle::of_kind(LineKind::Fence),
+        ];
+        let markers = [None; 3];
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+
+        let runs = line_runs(styled);
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].own_ends, (false, true));
     }
 
     /// **And a source pane asks for nothing whatever it holds** (要件 7.3.1).

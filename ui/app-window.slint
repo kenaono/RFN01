@@ -160,7 +160,8 @@ export component AppWindow inherits Window {
     in property <string> count-source;
     in property <string> count-selected;
     in property <string> count-warning;
-    in property <string> directwrite-status;
+    // What to say above the paper when something went wrong: the document
+    // would not open, would not be laid out, would not be saved.
     in property <string> render-status;
     in property <int> zoom-percent: 100;
     // The three quantities the typography validation is about. Character
@@ -850,10 +851,6 @@ export component AppWindow inherits Window {
                         height: parent.height;
 
                         vertical: pane.vertical;
-                        label: pane.vertical
-                            ? "縦書きライブ編集検証（クリックして入力）"
-                            : "横書きソース編集（DirectWrite / クリックして入力）";
-                        label-color: Tok.ink-muted;
                         background: pane.vertical ? Tok.paper-alt : Tok.paper;
                         // 要件 9: this pane's sheet — the paper and the margin
                         // are that direction's, like everything else on it.
@@ -863,11 +860,10 @@ export component AppWindow inherits Window {
                         page-margin: (pane.vertical
                             ? root.sheet-numbers[13]
                             : root.sheet-numbers[3]) * 1px;
-                        // The two validation lines belong to the vertical pane, and
-                        // are empty on the other one, where the elements are then
-                        // not there at all.
-                        status-a: pane.vertical ? root.directwrite-status : "";
-                        status-b: pane.vertical ? root.render-status : "";
+                        // **One pane says it, not both.** A failure is about the
+                        // document rather than about a direction, and saying it
+                        // twice reads as two failures.
+                        status: pane.vertical ? root.render-status : "";
                         // The vertical pane indents its own text instead of padding
                         // the column, because its scroll view has to reach the edge.
                         text-indent: pane.vertical ? 12px : 0px;

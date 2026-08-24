@@ -34,7 +34,7 @@ use windows::{
                 },
                 D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
                 D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-                D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+                D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
                 D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Factory,
                 ID2D1RenderTarget, ID2D1SolidColorBrush,
             },
@@ -67,10 +67,10 @@ use windows::{
 };
 
 use crate::text_blocks::{
-    BlockLayoutPlan, BlockMeasure, BlockSpan, DEFAULT_INK, Emphasis, FlowOrder, LineInfo,
-    LineMarker, LineOrnament, LineRun, LineStyle, MAX_HEADING_LEVEL, Ornament, StyleRun,
-    StyledText, TileSpan, Typography, WrapPoints, block_flow_bound, cells_per_line, line_runs,
-    place_blocks, split_blocks, style_runs,
+    BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, DEFAULT_INK, Emphasis, FlowOrder,
+    LineInfo, LineMarker, LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL, Ornament,
+    StyleRun, StyledText, TileSpan, Typography, WrapPoints, block_flow_bound, cells_per_line,
+    line_runs, place_blocks, split_blocks, style_runs,
 };
 
 /// Which way the text runs.
@@ -606,8 +606,10 @@ fn apply_marker_boxes(
 
 /// The byte offset of a UTF-16 position within `text`.
 ///
-/// Only ever asked about a marker, which sits at the head of a line and is a
-/// handful of ASCII characters, so the walk stops almost at once.
+/// A walk, because that is what the question is. Asked about a marker at the
+/// head of a line it stops almost at once; asked about where two mark tables
+/// stopped agreeing (`reusable_prefix`) it walks that far, once per paragraph
+/// whose wrapping could not be reused whole.
 fn byte_at_utf16(text: &str, utf16: u32) -> usize {
     let mut units = 0;
     for (byte, character) in text.char_indices() {
@@ -631,9 +633,9 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
         Ornament::Bullet => "•".to_owned(),
         Ornament::TaskOpen => "☐".to_owned(),
         Ornament::TaskDone => "☑".to_owned(),
-        // A box that is there only to hide what it covers. The stroke drawn
-        // across a rule is the line's, not the box's.
-        Ornament::Rule => String::new(),
+        // A box that is there only to hide what it covers. The stroke across a
+        // rule and the ground under a fence are the line's, not the box's.
+        Ornament::Hidden => String::new(),
         Ornament::Number => {
             let start = byte_at_utf16(block_text, run.utf16_start);
             let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
@@ -718,14 +720,16 @@ fn run_draws_ink(run: &StyleRun) -> bool {
     run.ornament.is_some_and(Ornament::draws_ink)
 }
 
-/// How much of the body ink a mark on the text is drawn with.
+/// How much of the body ink each whole-line mark is drawn with.
 ///
-/// **Not a colour of its own.** 要件 9 lets the writer set the ink and the
-/// paper, and a bar beside a quote or a stroke across a rule is a mark on the
-/// text rather than text: drawing it out of the ink already chosen keeps it in
-/// that family whatever the writer picks. This value is what puts the default
-/// ink on the default paper at the design's `rule-strong`.
+/// **Not colours of their own.** 要件 9 lets the writer set the ink and the
+/// paper, and a bar beside a quote, a stroke across a rule and the ground under
+/// a code block are marks on the text rather than text: drawing them out of the
+/// ink already chosen keeps them in that family whatever the writer picks.
+/// These are what put the default ink on the default paper at the design's
+/// `rule-strong` and its code ground.
 const ORNAMENT_ALPHA: f32 = 0.30;
+const CODE_GROUND_ALPHA: f32 = 0.08;
 
 /// Where one block was drawn inside the tile, and how wide the page is.
 ///
@@ -763,40 +767,69 @@ impl OrnamentPage {
     }
 }
 
-/// The flow extent of the visual lines one logical line became, in the block
+/// The flow extent of the visual lines one whole-line mark covers, in the block
 /// layout's own space.
 ///
 /// **Matched by where each visual line starts, not by counting them.** How
-/// many a logical line wrapped to is a property of the layout; the only thing
-/// that says which logical line a visual one came from is where its text
-/// begins. `None` for a line the block measured nothing for.
-fn line_flow_range(lines: &[LineInfo], run: &LineRun) -> Option<(f32, f32)> {
+/// many a line wrapped to is a property of the layout; the only thing that says
+/// which logical line a visual one came from is where its text begins. `None`
+/// for a mark the block measured nothing for.
+///
+/// An end that reaches as far as the block's own lines do is moved to the
+/// block's **placed** edge. `place_blocks` rounds each block's extent on its
+/// own, so the sum of a block's lines falls up to half a pixel short of it —
+/// and consecutive blocks abut at the placed edge and nowhere else. A mark
+/// that stopped where its lines stopped would leave that half pixel of paper
+/// showing through the seam, or paint it twice.
+fn mark_extent(block: &BlockPlacement, run: &LineRun) -> Option<(f32, f32)> {
     let end = run.utf16_start + run.utf16_len;
     let mut flow_start = f32::INFINITY;
     let mut flow_end = f32::NEG_INFINITY;
-    for line in lines {
+    // The block's own reach, to measure the mark's against. **Not its first and
+    // last line**: reading order runs the other way along the flow axis in a
+    // vertical pane, so line 0 sits at the far end there and a mark holding it
+    // was snapped to the wrong edge — which stretched a code block's ground
+    // over everything past it. Where a mark reaches is a coordinate, and a
+    // coordinate does not care which way the reading goes.
+    let mut nearest = f32::INFINITY;
+    let mut furthest = f32::NEG_INFINITY;
+    for line in block.lines.iter() {
+        let line_end = line.flow_start + line.flow_size;
+        nearest = nearest.min(line.flow_start);
+        furthest = furthest.max(line_end);
         if line.utf16_start < run.utf16_start || line.utf16_start > end {
             continue;
         }
         flow_start = flow_start.min(line.flow_start);
-        flow_end = flow_end.max(line.flow_start + line.flow_size);
+        flow_end = flow_end.max(line_end);
     }
-    (flow_start < flow_end).then_some((flow_start, flow_end))
+    if flow_start >= flow_end {
+        return None;
+    }
+    if flow_start <= nearest {
+        flow_start = block.content_flow_start;
+    }
+    if flow_end >= furthest {
+        flow_end = block.content_flow_start + block.flow_size;
+    }
+    Some((flow_start, flow_end))
 }
 
 /// Draw what stands over each whole logical line of a block (要件 7.3.2).
 ///
 /// **The line's own rectangle, not a range's.** A bar beside a quote runs the
-/// height of everything that line wrapped to, and a rule crosses the whole
-/// page; neither can be asked of `HitTestTextRange`, which answers in
-/// characters. What answers instead is the block's own line table, which the
-/// measurement left behind — so this costs no DirectWrite call at all.
+/// height of everything that line wrapped to, a rule crosses the whole page,
+/// and a code block's ground reaches over every line between its fences; none
+/// of them can be asked of `HitTestTextRange`, which answers in characters.
+/// What answers instead is the block's own line table, which the measurement
+/// left behind — so this costs no DirectWrite call at all.
 ///
-/// Before the text, so a mark never covers a glyph.
+/// Before the text, so a mark never covers a glyph and the ground stays under
+/// one.
 fn draw_line_ornaments(
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
-    lines: &[LineInfo],
+    block: &BlockPlacement,
     runs: &[LineRun],
     page: &OrnamentPage,
 ) {
@@ -805,18 +838,27 @@ fn draw_line_ornaments(
     }
     let bar = (page.font_size * 0.14).round().max(2.0);
     let stroke = (page.font_size * 0.06).round().max(1.0);
+    // The design's 4px against its 15px body, kept as the ratio so the ground
+    // is rounded the same amount at any size the writer sets.
+    let radius = (page.font_size * 0.27).round().max(2.0);
     // What a bar leaves between itself and the text it stands beside.
     let gap = page.indent / 3.0;
     // Where this block's text begins on the line axis, and where the page ends.
     let near = page.margin + page.inset;
     let far = (page.line_extent - page.margin).max(near + stroke);
-    // SAFETY: The brush is the render target's own and outlives every call
-    // here. The text is drawn with it too, so the opacity goes back below.
-    unsafe { brush.SetOpacity(ORNAMENT_ALPHA) };
     for run in runs {
-        let Some(flow) = line_flow_range(lines, run) else {
+        let Some(flow) = mark_extent(block, run) else {
             continue;
         };
+        // A ground is a wash the text sits on; a bar and a stroke are marks
+        // beside it. **The brush is the render target's own and the text is
+        // drawn with it too**, so whatever is set here goes back below.
+        let alpha = match run.ornament {
+            LineOrnament::Code => CODE_GROUND_ALPHA,
+            _ => ORNAMENT_ALPHA,
+        };
+        // SAFETY: The brush outlives every call here.
+        unsafe { brush.SetOpacity(alpha) };
         match run.ornament {
             // In the gutter the block's own indent opened, one bar per level
             // of quoting. **Each stands at the far end of its own gutter**,
@@ -840,6 +882,29 @@ fn draw_line_ornaments(
                 let rect = page.rect((middle - half, middle + half), (near, far));
                 // SAFETY: As above.
                 unsafe { target.FillRectangle(&rect, brush) };
+            }
+            // The ground the whole fenced block sits on, from where its text
+            // begins to the far margin. **The fences at each end are hidden
+            // rather than removed**, so the room they take is the padding.
+            LineOrnament::Code => {
+                let rect = page.rect(flow, (near, far));
+                // **Rounded only where the fences are.** A ground cut in two by
+                // a block boundary is square where the halves meet, and where
+                // that boundary fell says nothing about the document — a ground
+                // that merely ends at one is a whole code block and keeps its
+                // corners (see `LineRun::own_ends`).
+                if !(run.own_ends.0 && run.own_ends.1) {
+                    // SAFETY: As above.
+                    unsafe { target.FillRectangle(&rect, brush) };
+                } else {
+                    let ground = D2D1_ROUNDED_RECT {
+                        rect,
+                        radiusX: radius,
+                        radiusY: radius,
+                    };
+                    // SAFETY: As above.
+                    unsafe { target.FillRoundedRectangle(&ground, brush) };
+                }
             }
         }
     }
@@ -1438,6 +1503,19 @@ impl TextEngine {
         Ok(measured)
     }
 
+    /// How many of the document's logical lines begin with a list marker
+    /// (要件 7.3.2).
+    ///
+    /// **Logged rather than used.** Giving a list item the indent a quote has
+    /// means ending a block at every item, and what that costs is a number
+    /// about real documents rather than an argument (技術検証 7.1).
+    pub fn list_items(&self) -> usize {
+        self.line_styles
+            .iter()
+            .filter(|style| style.kind.is_list())
+            .count()
+    }
+
     /// How one block's own logical lines are set.
     fn block_levels(&self, block_index: usize) -> &[LineStyle] {
         let Some(lines) = self.block_lines.get(block_index) else {
@@ -1665,7 +1743,7 @@ impl TextEngine {
                     font_size: self.typography.font_size,
                 };
                 let line_marks = line_runs(self.block_styled(span.block_index));
-                draw_line_ornaments(&target, &brush, &block.lines, &line_marks, &page);
+                draw_line_ornaments(&target, &brush, block, &line_marks, &page);
                 // SAFETY: The layout outlives the draw call, and the underline
                 // is set and cleared on the same layout.
                 unsafe {
@@ -2093,11 +2171,12 @@ fn hit_test_in_block(
 /// again from nothing.
 struct ParagraphWraps {
     text: String,
-    /// How the line was set when these positions were found. **All of it, not
-    /// just the heading level**: quoting narrows the box a line is set in
-    /// (要件 7.3.2), and positions found at another width are not line starts
-    /// here.
+    /// How the line was set when these positions were found — **all of what
+    /// moves a break**, which is what [`LongLine`] is a list of. Positions
+    /// found under anything else are not line starts here.
     style: LineStyle,
+    marks: Vec<Emphasis>,
+    marker: Option<LineMarker>,
     /// Byte offsets where each line after the first begins.
     starts: Vec<usize>,
 }
@@ -2153,11 +2232,13 @@ struct LayoutWraps<'a> {
 }
 
 impl WrapPoints for LayoutWraps<'_> {
-    fn line_starts(&mut self, text: &str, style: LineStyle) -> Vec<usize> {
-        let starts = self.starts_for(text, style);
+    fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize> {
+        let starts = self.starts_for(line);
         self.current.push(ParagraphWraps {
-            text: text.to_owned(),
-            style,
+            text: line.text.to_owned(),
+            style: line.style,
+            marks: line.marks.to_vec(),
+            marker: line.marker,
             starts: starts.clone(),
         });
         starts
@@ -2165,14 +2246,18 @@ impl WrapPoints for LayoutWraps<'_> {
 }
 
 impl LayoutWraps<'_> {
-    fn starts_for(&mut self, text: &str, style: LineStyle) -> Vec<usize> {
+    fn starts_for(&mut self, line: LongLine<'_>) -> Vec<usize> {
         self.asked += 1;
         // Copied out first: this is a borrow of the caller's slice, not of
         // `self`, and taking it now leaves `self` free to lay text out below.
         let previous = self.previous;
-        let same = previous
-            .iter()
-            .find(|kept| kept.style == style && kept.text == text);
+        let same_line = |kept: &&ParagraphWraps| {
+            kept.style == line.style
+                && kept.marker == line.marker
+                && kept.marks == line.marks
+                && kept.text == line.text
+        };
+        let same = previous.iter().find(same_line);
         if let Some(same) = same {
             self.exact += 1;
             return same.starts.clone();
@@ -2183,8 +2268,8 @@ impl LayoutWraps<'_> {
         // finds the edited one, because the others matched in full above.
         let nearest = previous
             .iter()
-            .filter(|kept| kept.style == style)
-            .map(|kept| (common_prefix(&kept.text, text), kept))
+            .filter(|kept| kept.style == line.style && kept.marker == line.marker)
+            .map(|kept| (reusable_prefix(kept, line), kept))
             .max_by_key(|(shared, _)| *shared);
         if let Some((shared, kept)) = &nearest
             && *shared >= self.shared
@@ -2205,24 +2290,24 @@ impl LayoutWraps<'_> {
             // before it.
             Some((offset, mut kept)) => {
                 self.resumed += 1;
-                let tail = self.lay_out(&text[offset..], style);
-                kept.extend(tail.iter().map(|start| start + offset));
+                kept.extend(self.lay_out(line, offset));
                 kept
             }
-            None => self.lay_out(text, style),
+            None => self.lay_out(line, 0),
         }
     }
 
-    /// Lay `text` out and report where its lines begin, relative to its own
-    /// start.
+    /// Lay the line out from `from` on, and report where its lines begin —
+    /// as offsets within the whole line, which is what the caller keeps.
     ///
     /// A layout that cannot be built reports nothing, which means "do not cut":
     /// the paragraph stays the one oversized block it has always been. Failing
     /// to build a layout is a reason to leave the text alone, not a reason to
     /// stop laying out the document.
-    fn lay_out(&mut self, text: &str, style: LineStyle) -> Vec<usize> {
-        self.laid_out += text.encode_utf16().count() as u32;
-        self.wrap_offsets(text, style).unwrap_or_default()
+    fn lay_out(&mut self, line: LongLine<'_>, from: usize) -> Vec<usize> {
+        let tail = &line.text[from..];
+        self.laid_out += tail.encode_utf16().count() as u32;
+        self.wrap_offsets(line, from).unwrap_or_default()
     }
 
     /// Where a paragraph's lines begin, found a window at a time.
@@ -2246,13 +2331,13 @@ impl LayoutWraps<'_> {
     /// again next time round, because a break near the end of a window can still
     /// move when the text after it arrives — the same margin, for the same
     /// reason, as reusing an earlier wrapping.
-    fn wrap_offsets(&mut self, text: &str, style: LineStyle) -> Result<Vec<usize>> {
+    fn wrap_offsets(&mut self, line: LongLine<'_>, from: usize) -> Result<Vec<usize>> {
         let mut offsets: Vec<usize> = Vec::new();
-        let mut start = 0;
-        while start < text.len() {
-            let end = self.window_end(text, start, style);
-            let found = self.wrap_offsets_in(&text[start..end], style)?;
-            let whole_rest = end == text.len();
+        let mut start = from;
+        while start < line.text.len() {
+            let end = self.window_end(line, start);
+            let found = self.wrap_offsets_in(line, start, end)?;
+            let whole_rest = end == line.text.len();
             let usable = if whole_rest {
                 found.len()
             } else {
@@ -2282,7 +2367,9 @@ impl LayoutWraps<'_> {
     }
 
     /// The byte offset one window past `start`, on a character boundary.
-    fn window_end(&self, text: &str, start: usize, style: LineStyle) -> usize {
+    fn window_end(&self, line: LongLine<'_>, start: usize) -> usize {
+        let text = line.text;
+        let style = line.style;
         let typography = self.typography;
         let level = style.heading_level;
         let flow_per_line = typography.font_size * 2.2 * typography.flow_scale(level);
@@ -2320,10 +2407,26 @@ impl LayoutWraps<'_> {
         (self.line_box - inset).max(1.0)
     }
 
-    fn wrap_offsets_in(&mut self, text: &str, style: LineStyle) -> Result<Vec<usize>> {
-        // One logical line, so one style covers all of it.
+    /// Where the window `from..to` of one long line wraps, relative to `from`.
+    fn wrap_offsets_in(
+        &mut self,
+        line: LongLine<'_>,
+        from: usize,
+        to: usize,
+    ) -> Result<Vec<usize>> {
+        let style = line.style;
+        let text = &line.text[from..to];
+        // One logical line, so one style covers all of it — and **the same spec
+        // the pieces will be measured under**, marks and head box included.
+        // Character spacing, heading size, a bold stretch and an indent all move
+        // where the text wraps, so a barer layout reports positions the pieces
+        // do not actually break at. The box belongs to the head of the line, so
+        // only a window that starts there gets one.
         let levels = [style];
-        let styled = StyledText::new(text, &levels);
+        let spans = [line.marks_from(from)];
+        let markers = [line.marker.filter(|_| from == 0)];
+        let marked = StyledText::marked(text, &levels, &spans);
+        let styled = marked.with_markers(&markers);
         let bound = block_flow_bound(styled, self.quoted_extent(style), self.typography);
         let line_box = self.quoted_box(style);
         let (max_width, max_height) = self.mode.to_screen(bound, line_box);
@@ -2335,12 +2438,54 @@ impl LayoutWraps<'_> {
                 .dwrite
                 .CreateTextLayout(&utf16, self.format, max_width, max_height)?
         };
-        // The same spec the pieces will be measured under. Character spacing and
-        // heading size both move where the text wraps, so a bare layout would
-        // report positions the pieces do not actually break at.
         let runs = style_runs(styled);
         apply_typography(&layout, self.typography, &runs, utf16.len() as u32)?;
+        apply_marker_boxes(&layout, self.typography, &runs)?;
         Ok(wrap_byte_offsets(text, &line_metrics(&layout)?))
+    }
+}
+
+/// How far a kept paragraph's wrapping still describes `line`, in bytes.
+///
+/// The text they share, **cut back to before the first marked stretch they do
+/// not agree on**. Sharing the text is not enough: a marker that closes changes
+/// what came before it — typing the second `**` of a pair makes an earlier
+/// stretch bold, and bold text wraps elsewhere. Ordinary typing inside a marked
+/// paragraph moves no earlier mark, so this still keeps the prefix in the case
+/// that matters (6.10).
+fn reusable_prefix(kept: &ParagraphWraps, line: LongLine<'_>) -> usize {
+    let shared = common_prefix(&kept.text, line.text);
+    let agree = marks_agree_until(&kept.marks, line.marks);
+    if agree == u32::MAX {
+        return shared;
+    }
+    shared.min(byte_at_utf16(line.text, agree))
+}
+
+/// How far two mark tables say the same thing, in UTF-16 units, or `u32::MAX`
+/// when they say it throughout.
+///
+/// **Sorted before they are walked**: the tables are recorded in the order the
+/// markers close rather than in reading order (`document::push_marked`), so the
+/// inside of a nested pair comes first.
+fn marks_agree_until(before: &[Emphasis], after: &[Emphasis]) -> u32 {
+    let in_order = |marks: &[Emphasis]| {
+        let mut sorted = marks.to_vec();
+        sorted.sort_by_key(|mark| (mark.utf16_start, mark.utf16_len));
+        sorted
+    };
+    let before = in_order(before);
+    let after = in_order(after);
+    for (index, mark) in before.iter().enumerate() {
+        match after.get(index) {
+            Some(other) if other == mark => continue,
+            Some(other) => return mark.utf16_start.min(other.utf16_start),
+            None => return mark.utf16_start,
+        }
+    }
+    match after.get(before.len()) {
+        Some(extra) => extra.utf16_start,
+        None => u32::MAX,
     }
 }
 
@@ -3139,6 +3284,35 @@ mod tests {
         assert_eq!(marker_ink(Ornament::TaskDone, text, &run), "☑");
     }
 
+    /// **A marker that closes changes what came before it**, so a paragraph's
+    /// wrapping may be carried over only as far as its marks are unchanged
+    /// (要件 7.3.2). Typing plain text moves no earlier mark, which is the case
+    /// the reuse exists for (6.10).
+    #[test]
+    fn marks_are_agreed_on_up_to_the_first_that_moved() {
+        let bold = |utf16_start, utf16_len| Emphasis {
+            utf16_start,
+            utf16_len,
+            marks: Marks {
+                bold: true,
+                ..Marks::default()
+            },
+        };
+
+        // The same table says the same thing throughout.
+        assert_eq!(marks_agree_until(&[bold(4, 2)], &[bold(4, 2)]), u32::MAX);
+        // One that moved is disagreed on from wherever it now begins.
+        assert_eq!(marks_agree_until(&[bold(4, 2)], &[bold(6, 2)]), 4);
+        // One that appeared is disagreed on from where it begins.
+        assert_eq!(marks_agree_until(&[], &[bold(9, 2)]), 9);
+        // An earlier one kept and a later one added: the earlier still agrees,
+        // which is what lets an edit late in a paragraph keep its prefix.
+        assert_eq!(
+            marks_agree_until(&[bold(1, 2)], &[bold(1, 2), bold(9, 2)]),
+            9
+        );
+    }
+
     /// A block covering nothing, quoted to the given depth.
     fn quoted_span(quote_depth: u8) -> BlockSpan {
         BlockSpan {
@@ -3171,11 +3345,12 @@ mod tests {
         assert_eq!(block_extent(&quoted_span(4), 10, &typography), 1);
     }
 
-    /// A rule's box is there to hide the marks and nothing else: the stroke
-    /// drawn across it is the line's, not the box's (要件 7.3.2).
+    /// The box over a line that is all marks is there to hide them and nothing
+    /// else: what stands in their place is the line's, not the box's
+    /// (要件 7.3.2).
     #[test]
-    fn a_rule_puts_no_ink_in_its_box() {
-        assert!(!Ornament::Rule.draws_ink());
+    fn a_hidden_line_puts_no_ink_in_its_box() {
+        assert!(!Ornament::Hidden.draws_ink());
         assert!(Ornament::Bullet.draws_ink());
         assert!(Ornament::Number.draws_ink());
     }
@@ -3246,22 +3421,39 @@ mod tests {
         }
     }
 
+    /// A block of visual lines at a fixed pitch, placed at the origin. The
+    /// placed extent is given on its own, because it is what a mark reaching
+    /// the block's edge is snapped to.
+    fn placed(starts: &[u32], flow_size: f32) -> BlockPlacement {
+        BlockPlacement {
+            span: quoted_span(0),
+            flow_start: 0.0,
+            flow_size,
+            exact_flow_size: flow_size,
+            content_flow_start: 0.0,
+            max_flow_size: flow_size,
+            lines: starts
+                .iter()
+                .enumerate()
+                .map(|(index, start)| visual_line(*start, index as f32 * 20.0))
+                .collect(),
+        }
+    }
+
     /// A wrapped logical line is several visual lines, and the mark drawn over
     /// it has to reach across all of them (要件 7.3.2).
     #[test]
     fn a_whole_line_mark_covers_every_visual_line_it_wrapped_to() {
-        let lines = [
-            visual_line(0, 0.0),
-            visual_line(10, 20.0),
-            visual_line(20, 40.0),
-        ];
+        let block = placed(&[0, 10, 20], 60.0);
         let run = LineRun {
             utf16_start: 0,
             utf16_len: 24,
             ornament: LineOrnament::Rule,
+            own_ends: (true, true),
         };
 
-        assert_eq!(line_flow_range(&lines, &run), Some((0.0, 60.0)));
+        let flow = mark_extent(&block, &run).expect("a mark");
+        assert_eq!(flow, (0.0, 60.0));
     }
 
     /// And the line after it is not covered, however close it sits. The visual
@@ -3269,14 +3461,58 @@ mod tests {
     /// which logical line they came from.
     #[test]
     fn a_whole_line_mark_stops_at_the_end_of_its_own_line() {
-        let lines = [visual_line(0, 0.0), visual_line(10, 20.0)];
+        let block = placed(&[0, 10, 20], 60.0);
         let run = LineRun {
             utf16_start: 10,
             utf16_len: 5,
             ornament: LineOrnament::Quote { depth: 1 },
+            own_ends: (true, true),
         };
 
-        assert_eq!(line_flow_range(&lines, &run), Some((20.0, 40.0)));
+        let flow = mark_extent(&block, &run).expect("a mark");
+        assert_eq!(flow, (20.0, 40.0));
+    }
+
+    /// **A mark that runs to the block's edge is snapped to the placed edge.**
+    /// `place_blocks` rounds each block's extent on its own, so the sum of its
+    /// lines falls short of it; two blocks carrying one mark would leave that
+    /// fraction of a pixel of paper showing through the seam, or paint it
+    /// twice. Here the lines sum to 40 and the block was placed at 41.
+    #[test]
+    fn a_mark_reaching_the_block_edge_is_snapped_to_it() {
+        let block = placed(&[0, 10], 41.0);
+        let run = LineRun {
+            utf16_start: 0,
+            utf16_len: 14,
+            ornament: LineOrnament::Code,
+            own_ends: (true, true),
+        };
+
+        let flow = mark_extent(&block, &run).expect("a mark");
+        assert_eq!(flow, (0.0, 41.0));
+    }
+
+    /// **Which edge a mark reaches is a coordinate, not a line number.**
+    /// Reading order runs the other way along the flow axis in a vertical pane,
+    /// so the block's first line sits at its far end: a mark holding that line
+    /// reaches the far edge, and testing the index instead stretched a code
+    /// block's ground over everything past it.
+    #[test]
+    fn a_mark_is_snapped_by_where_it_reaches_not_by_the_line_it_holds() {
+        let mut block = placed(&[0, 10], 41.0);
+        // The vertical pane's order: line 0 furthest along, line 1 nearer.
+        block.lines = [visual_line(0, 20.0), visual_line(10, 0.0)]
+            .into_iter()
+            .collect();
+        let run = LineRun {
+            utf16_start: 0,
+            utf16_len: 5,
+            ornament: LineOrnament::Code,
+            own_ends: (true, true),
+        };
+
+        let flow = mark_extent(&block, &run).expect("a mark");
+        assert_eq!(flow, (20.0, 41.0));
     }
 
     /// **A box must not make its line taller.** The height and the baseline it

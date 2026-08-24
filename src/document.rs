@@ -928,14 +928,17 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
         LineKind::Ordered => Ornament::Number,
         LineKind::Task { done: false } => Ornament::TaskOpen,
         LineKind::Task { done: true } => Ornament::TaskDone,
-        LineKind::Rule => Ornament::Rule,
+        // **A line that is all marks goes under one box.** A rule has a stroke
+        // drawn across it and a fence has the block's ground reaching over it;
+        // either way what stands in its place is a whole-line mark, and the
+        // line keeps the room it takes (要件 7.3.2).
+        LineKind::Rule | LineKind::Fence => Ornament::Hidden,
         _ => return None,
     };
-    // **A rule is marks from end to end**, so the whole of it goes under one
-    // box — trailing spaces and all, which are part of what the line was
-    // written as and nothing to look at.
+    // Trailing spaces and all, which are part of what the line was written as
+    // and nothing to look at.
     let utf16_len = match ornament {
-        Ornament::Rule => content.encode_utf16().count() as u32,
+        Ornament::Hidden => content.encode_utf16().count() as u32,
         _ => marker_len(content, style.kind)?,
     };
     Some(LineMarker {
@@ -1396,19 +1399,39 @@ mod tests {
         assert_eq!(marker.ornament, Ornament::Bullet);
     }
 
-    /// **A rule is marks from end to end**, so the whole line goes under one
-    /// box — trailing spaces and all, which are part of what was written and
-    /// nothing to look at. What is drawn across it is the line's stroke.
+    /// **A line that is all marks goes under one box** — trailing spaces and
+    /// all, which are part of what was written and nothing to look at. What
+    /// stands in its place is a whole-line mark: a stroke across a rule, the
+    /// block's ground over a fence.
     #[test]
-    fn a_rule_puts_its_whole_line_under_the_box() {
+    fn a_line_that_is_all_marks_goes_under_one_box() {
         for (line, utf16_len) in [("---", 3), ("***", 3), ("___   ", 6), ("> ---", 3)] {
             let style = line_styles(line)[0];
             let expected = LineMarker {
                 utf16_len,
-                ornament: Ornament::Rule,
+                ornament: Ornament::Hidden,
             };
             assert_eq!(line_marker(line, style), Some(expected), "{line}");
         }
+    }
+
+    /// The fence is one of them, and **only the fence**: the lines between two
+    /// of them are the code itself and stay where they are.
+    #[test]
+    fn a_fence_goes_under_a_box_but_the_code_does_not() {
+        let source = "```rust\nlet x = 1;\n```\n本文";
+        let preview = PreviewDocument::from_source(source);
+        let ornaments = preview
+            .markers()
+            .iter()
+            .map(|marker| marker.map(|found| found.ornament))
+            .collect::<Vec<Option<Ornament>>>();
+
+        assert_eq!(
+            ornaments,
+            vec![Some(Ornament::Hidden), None, Some(Ornament::Hidden), None]
+        );
+        assert_eq!(preview.markers()[0].expect("a fence").utf16_len, 7);
     }
 
     /// **A rule is literal, for the reason code is.** `***` is the line's own
@@ -1437,7 +1460,7 @@ mod tests {
 
     #[test]
     fn a_line_with_nothing_at_its_head_has_no_marker() {
-        for line in ["本文", "# 見出し", "> 引用", "```"] {
+        for line in ["本文", "# 見出し", "> 引用"] {
             let style = line_styles(line)[0];
             assert_eq!(line_marker(line, style), None, "{line}");
         }

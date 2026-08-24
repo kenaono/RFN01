@@ -1101,6 +1101,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let status = inline_object_status(name, vertical);
         render_cache.borrow_mut().log_diag("probe", &status);
     }
+    // **In the log rather than on the paper.** This used to be a caption above
+    // the vertical pane, from the round that was proving DirectWrite could set
+    // a column at all; it is a measurement, and measurements live where the
+    // rest of them do.
+    let vertical_layout = directwrite_status();
+    render_cache
+        .borrow_mut()
+        .log_diag("probe", &vertical_layout);
     if was_restored {
         // The carets went into the panes with their tabs above; this is what
         // came back, for the log.
@@ -1119,7 +1127,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // until then.
     place_panes(&window, &layout.borrow());
     publish_left(&window, &live);
-    window.set_directwrite_status(directwrite_status().into());
 
     // Bracket the renderer so the log can separate our own work from what Slint
     // does with the images afterwards.
@@ -6507,6 +6514,9 @@ fn refresh_pane(
 
     let blocks = cache.pane(id).graphics.engine.block_count();
     let max_block = cache.pane(id).graphics.engine.largest_block_utf16();
+    // 要件 7.3.2: how many blocks a list item's own indent would add, if it got
+    // the one a quote has. A number about real documents, not an argument.
+    let items = cache.pane(id).graphics.engine.list_items();
     let upload_kb = cache.pane(id).graphics.uploaded_bytes / 1024;
     cache.pane(id).graphics.uploaded_bytes = 0;
     let caret_at = cache
@@ -6565,7 +6575,8 @@ fn refresh_pane(
          frames={frames} frame_min={frame_min:.2} frame_med={frame_med:.2} \
          frame_max={frame_max:.2} frame_slow={frame_slow} gap_med={gap_med:.2} \
          upload_kb={upload_kb} split={split} mode={mode} zoom={zoom_percent} \
-         blocks={blocks} measured={measured} measured_utf16={measured_utf16} \
+         blocks={blocks} items={items} measured={measured} \
+         measured_utf16={measured_utf16} \
          wrapped={wrapped} wrap={wrap_asked}/{wrap_exact}/{wrap_resumed} \
          miss={wrap_shared}/{wrap_starts} max_block={max_block} \
          content={content_flow} extent={line_extent} shown={shown_flow:.0} \
