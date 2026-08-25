@@ -10,6 +10,7 @@ mod file_tree;
 mod find;
 mod ime;
 mod pane_layout;
+mod searcher;
 mod shell;
 mod text_blocks;
 #[cfg(test)]
@@ -32,6 +33,7 @@ use diag::DiagLog;
 use directwrite_render::{CaretGeometry, SelectionRect, TextEngine, WritingMode};
 use document::{DocumentCounts, PreviewDocument};
 use pane_layout::{Layout, Rect, Split};
+use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, RenderingState, Rgba8Pixel, SharedPixelBuffer,
     SharedString, Timer, TimerMode, VecModel, Weak,
@@ -1047,6 +1049,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // One bundle for everything a tab operation touches. The editing callbacks
     // keep their own handles; this exists so a switch does not need six.
     let layout = Rc::new(RefCell::new(arrangement));
+    // **The searching thread reaches the editor through the event loop and
+    // nowhere else** (要件 2). Everything the editor holds is `Rc`, so none of
+    // it can go to another thread; a weak handle to the window can, and ringing
+    // one callback on it is the whole of what that thread is allowed to do.
+    // What to collect and how to draw it stays on this side.
+    let weak = window.as_weak();
+    let wake_for_search = move || {
+        let _ = weak.upgrade_in_event_loop(|window| {
+            window.invoke_folder_search_finished();
+        });
+    };
     let live = Live {
         states: pane_states.clone(),
         folder: Rc::new(RefCell::new(work_folder)),
@@ -1059,6 +1072,8 @@ fn main() -> Result<(), slint::PlatformError> {
         cache: render_cache.clone(),
         tabs: tab_list.clone(),
         writer: Rc::new(FileWriter::start()),
+        searcher: Rc::new(Searcher::start(wake_for_search)),
+        searched: Rc::new(Cell::new(0)),
     };
     render_cache
         .borrow_mut()
@@ -1424,6 +1439,15 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_folder_search_requested(move || {
         if let Some(window) = weak.upgrade() {
             search_work_folder(&window, &search_live);
+        }
+    });
+
+    // 要件 2: and the answer, whenever the searching thread has one.
+    let weak = window.as_weak();
+    let found_live = live.clone();
+    window.on_folder_search_finished(move || {
+        if let Some(window) = weak.upgrade() {
+            collect_search(&window, &found_live);
         }
     });
 
@@ -2367,6 +2391,17 @@ struct Live {
     /// The thread that writes work copies, so that the flush at the end of one
     /// does not land in the middle of somebody's sentence (要件 2).
     writer: Rc<FileWriter>,
+    /// The thread that searches the work folder (要件 2, 7.7). **The one place
+    /// the editor reads many files at once**, and how long that takes is
+    /// decided by the folder somebody opened rather than by the editor.
+    searcher: Rc<Searcher>,
+    /// Which folder-wide search the writer is waiting for.
+    ///
+    /// **Counting up, and only the newest is shown.** An answer arrives turns
+    /// of the event loop after the question, by which time the question may
+    /// have changed; there is nothing to cancel on the editor's side, so
+    /// instead every answer says which question it is for.
+    searched: Rc<Cell<u64>>,
 }
 
 impl Live {
@@ -3264,12 +3299,20 @@ const HITS_PER_FILE: usize = 50;
 
 /// Search every file in the work folder (要件 7.7).
 ///
-/// **On the UI thread, and bounded because of it.** This is the one place the
-/// editor reads many files at once; 要件 2 wants that off the UI thread and it
-/// is not there yet, so instead it is stopped early — so many files, so many
-/// lines from one file, so many lines in all. The bounds are what makes a work
-/// folder somebody dropped a repository into merely unhelpful rather than a
-/// window that stops answering.
+/// **Asked for here and answered somewhere else.** This is the one place the
+/// editor reads many files at once, and 要件 2 wants that off the UI thread —
+/// so what happens here is that a question is written down and handed over.
+/// The answer comes back through [`collect_search`], turns of the event loop
+/// later, and may be for a word the writer has already stopped typing.
+///
+/// The bounds stay. They were the whole defence when this ran on the UI thread
+/// and they are still what makes a work folder somebody dropped a repository
+/// into merely unhelpful: a list of ten thousand lines is no better than a
+/// wait, whichever thread built it.
+///
+/// **The old way is still here**, for a run where the thread could not be
+/// started. It is the same search on the same data; only who waits for it
+/// differs.
 fn search_work_folder(window: &AppWindow, live: &Live) {
     let needle = window.get_folder_needle().to_string();
     let Some(root) = live.folder.borrow().root.clone() else {
@@ -3277,53 +3320,111 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
         return;
     };
     if needle.is_empty() {
+        // **Nothing to wait for, so nothing is waited for.** The generation
+        // still moves, or an answer already in flight would land on the empty
+        // list a moment after it was cleared.
+        live.searched.set(live.searched.get() + 1);
         live.results.borrow_mut().clear();
         window.set_folder_status(SharedString::new());
         publish_left(window, live);
         return;
     }
-    let started = Instant::now();
-    let files = file_tree::files_under(&root, &file_tree::read_folder, SEARCHED_FILES);
-    let mut rows: Vec<ResultRow> = Vec::new();
-    let mut answered = 0usize;
-    let mut total = 0usize;
-    for path in files {
-        if rows.len() >= REPORTED_HITS {
-            break;
+    let generation = live.searched.get() + 1;
+    live.searched.set(generation);
+    let job = SearchJob {
+        root,
+        needle,
+        generation,
+        files: SEARCHED_FILES,
+        hits_per_file: HITS_PER_FILE,
+        hits_in_all: REPORTED_HITS,
+        characters: MAX_DOCUMENT_CHARACTERS,
+    };
+    let handed_over = match live.searcher.dispatch(job) {
+        Ok(()) => {
+            window.set_folder_status("検索しています…".into());
+            true
         }
-        let Ok(loaded) = file_io::read(&path, MAX_DOCUMENT_CHARACTERS) else {
+        Err(job) => {
+            if let Some(outcome) = searcher::search(&job, &mut NeverSuperseded) {
+                show_search(window, live, &outcome);
+            }
+            false
+        }
+    };
+    // **The question, not only the answer.** What this thread does that the
+    // old one could not is give up on a search and answer a newer one instead,
+    // and none of that is visible on screen when the folder is small enough to
+    // answer at once: the pane simply shows the newest list either way. In the
+    // log the asking and the dropping each leave a line, so the order they
+    // happened in can be read afterwards.
+    let asked = format!("asked gen={generation} thread={}", u8::from(handed_over));
+    live.cache.borrow_mut().log_diag("search", &asked);
+}
+
+/// Take whatever the searching thread has finished (要件 7.7).
+///
+/// Rung by that thread through the event loop, so it runs here, on the editor's
+/// own thread, with everything the editor holds to hand.
+///
+/// **An outcome for an older question is dropped without being drawn.** The
+/// thread abandons a search as soon as a newer one reaches it, but one that was
+/// already finished when the next was asked still arrives, and drawing it would
+/// answer a word that is no longer in the field.
+fn collect_search(window: &AppWindow, live: &Live) {
+    let wanted = live.searched.get();
+    let finished = live.searcher.drain();
+    for outcome in &finished {
+        if outcome.generation == wanted {
+            continue;
+        }
+        let (stale, ms) = (outcome.generation, outcome.ms);
+        let dropped = format!("stale gen={stale} wanted={wanted} ms={ms:.2}");
+        live.cache.borrow_mut().log_diag("search", &dropped);
+    }
+    let Some(outcome) = finished.iter().find(|found| found.generation == wanted) else {
+        return;
+    };
+    show_search(window, live, outcome);
+}
+
+/// Put one search's matches in the left pane (要件 6.2, 7.7).
+///
+/// **A file's row, then the lines under it**, the way the tree draws what is
+/// inside a folder. The thread hands over matches; what a row says is decided
+/// here, where the pane is.
+fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
+    let mut rows: Vec<ResultRow> = Vec::new();
+    for file in &outcome.files {
+        let Some(first) = file.hits.first() else {
             continue;
         };
-        let hits = find::hits_in(&loaded.text, &needle, HITS_PER_FILE);
-        if hits.is_empty() {
-            continue;
-        }
-        answered += 1;
-        total += hits.len();
         rows.push(ResultRow {
-            text: entry_name(&path),
+            text: entry_name(&file.path),
             under_file: false,
-            path: path.clone(),
-            at: hits[0].at,
+            path: file.path.clone(),
+            at: first.at,
         });
-        for hit in hits {
+        for hit in &file.hits {
             rows.push(ResultRow {
                 text: format!("{}: {}", hit.line, hit.preview),
                 under_file: true,
-                path: path.clone(),
+                path: file.path.clone(),
                 at: hit.at,
             });
         }
     }
     *live.results.borrow_mut() = rows;
-    let elapsed = elapsed_ms(started);
+    let total = outcome.total;
+    let answered = outcome.files.len();
     let told = if total == 0 {
-        format!("「{needle}」は見つかりません")
+        format!("「{}」は見つかりません", outcome.needle)
     } else {
         format!("{total}件 / {answered}ファイル")
     };
     window.set_folder_status(told.into());
-    let message = format!("hits={total} files={answered} ms={elapsed:.2}");
+    let (generation, ms) = (outcome.generation, outcome.ms);
+    let message = format!("found gen={generation} hits={total} files={answered} ms={ms:.2}");
     live.cache.borrow_mut().log_diag("search", &message);
     publish_left(window, live);
 }

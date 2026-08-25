@@ -106,6 +106,10 @@ export component AppWindow inherits Window {
     in-out property <string> folder-needle;
     in property <string> folder-status;
     callback folder-search-requested();
+    // 要件 2: the search runs on a thread of its own, so the answer arrives
+    // after the callback that asked for it has long returned. **Rung by that
+    // thread, through the event loop** — nothing here decides when.
+    callback folder-search-finished();
     /// A file command, by the position of its button: 0 新規ファイル,
     /// 1 新規フォルダー, 2 名前変更, 3 複製, 4 削除, 5 エクスプローラー
     /// (要件 5.2). One callback carrying a number, the way a pane is named by
