@@ -270,14 +270,16 @@ pub struct LineStyle {
     /// off and no more; the field is a count so that deeper quoting is a
     /// change to one rule rather than to the shape of this.
     pub quote_depth: u8,
-    /// How far in a list item is nested, 0 for one at the margin and 0 for
-    /// every line that is not an item at all (要件 7.3.2).
+    /// How many steps a list sets this line in, 0 for a line no list touches
+    /// (要件 7.3.2).
     ///
-    /// **A step of nesting, not the item's own step.** An item is set in by one
-    /// step for being an item and one more for each level it is under, so this
-    /// is what is left when that first step is taken out — which keeps it zero
-    /// for the ordinary case and for everything that is not a list.
-    pub list_depth: u8,
+    /// **The whole step, not the nesting on top of it**: one for an item at the
+    /// margin, one more for each level it is under. It is a count of steps
+    /// rather than a depth of nesting because **the lines that continue an item
+    /// are set in with it and are not items themselves** — a paragraph written
+    /// under an item lines up with that item's text, and has no marker and no
+    /// depth of its own to derive it from.
+    pub list_indent: u8,
 }
 
 /// What a whole logical line is, beyond the size its heading marker asks for
@@ -370,6 +372,11 @@ pub enum Ornament {
     /// and its indent belongs to the block ([`BlockSpan::indent_steps`]) the
     /// way a list item's does.
     Hidden,
+    /// **The white space a writer typed to line a continuation up under its
+    /// item.** Nothing is drawn in its place and it keeps no room either: what
+    /// sets the line in is the block, and space that also took room would set
+    /// it in twice — and only on the first line it wrapped to.
+    Indent,
 }
 
 impl Ornament {
@@ -379,7 +386,17 @@ impl Ornament {
     /// Asked before the hit test that finds where to draw, so a document of
     /// rules never asks DirectWrite about a rectangle nothing goes into.
     pub fn draws_ink(self) -> bool {
-        !matches!(self, Self::Hidden)
+        !matches!(self, Self::Hidden | Self::Indent)
+    }
+
+    /// Whether the box keeps the room the text under it took.
+    ///
+    /// **Only a box over a whole line of marks does.** A rule and a fence leave
+    /// their line behind as blank space, which is what gives a code block its
+    /// padding at each end. Everything else a box covers is standing where an
+    /// indent will be, and an indent is the block's (要件 7.3.2).
+    pub fn keeps_room(self) -> bool {
+        matches!(self, Self::Hidden)
     }
 }
 
@@ -431,9 +448,17 @@ impl LineStyle {
         }
     }
 
+    /// A line of one kind, at the margin.
+    ///
+    /// **An item made this way is an item at the margin**, which is to say it
+    /// asks for the one step being an item is worth. `kind` and `list_indent`
+    /// are separate facts — a line that continues an item has the indent
+    /// without the kind — and this is where the two are kept from drifting for
+    /// everything that does not come from `document::line_styles`.
     pub fn of_kind(kind: LineKind) -> Self {
         Self {
             kind,
+            list_indent: u8::from(kind.is_list()),
             ..Self::default()
         }
     }
@@ -455,7 +480,8 @@ impl LineStyle {
     /// (要件 7.3.2).
     ///
     /// **A list item asks for one, and one more for each level it is nested
-    /// under** (`list_depth`). The step
+    /// under; a line that continues an item asks for what that item asked**
+    /// (`list_indent`). The step
     /// used to be a box at the head of the line, which reached that head and no
     /// further, so the continuation of a wrapped item came back to the margin
     /// (技術検証 7.1). The block's box is the only thing that moves every
@@ -467,7 +493,7 @@ impl LineStyle {
     /// the width this leaves. A second opinion would cut blocks at one width
     /// and measure them at another.
     pub fn indent_steps(&self) -> u8 {
-        self.quote_depth + u8::from(self.kind.is_list()) + self.list_depth
+        self.quote_depth + self.list_indent
     }
 }
 
@@ -2182,6 +2208,7 @@ mod tests {
         let quoted_item = LineStyle {
             kind: LineKind::Bullet,
             quote_depth: 1,
+            list_indent: 1,
             ..LineStyle::default()
         };
 
@@ -2190,6 +2217,15 @@ mod tests {
         assert_eq!(quoted_item.indent_steps(), 2);
         // A rule and a fence are whole lines of marks, not things set in.
         assert_eq!(LineStyle::of_kind(LineKind::Rule).indent_steps(), 0);
+        // **A line that continues an item has the indent without the kind**,
+        // which is the whole reason this is a count of steps rather than a
+        // depth of nesting: there is no marker under it to count from.
+        let continuing = LineStyle {
+            list_indent: 2,
+            ..LineStyle::default()
+        };
+        assert!(!continuing.kind.is_list());
+        assert_eq!(continuing.indent_steps(), 2);
     }
 
     /// A cut position is a line start only for a layout set the way the pieces

@@ -580,11 +580,11 @@ fn push_visible_line(
     marks: &mut Vec<Emphasis>,
 ) {
     // **The style decides, here too.** An indented line is shown as written —
-    // markers and all — unless the style says it is an item, and then it is a
-    // nested one whose indent is the block's (要件 7.3.2). Reading the spaces
-    // here instead would be a second opinion about what a line is, and the one
-    // that loses: the pane sets what the style says.
-    let indented = line.starts_with([' ', '\t']) && !style.kind.is_list();
+    // markers and all — unless a list set it in (要件 7.3.2), which is either a
+    // nested item or a paragraph continuing one. Reading the spaces here
+    // instead would be a second opinion about what a line is, and the one that
+    // loses: the pane sets what the style says.
+    let indented = line.starts_with([' ', '\t']) && style.list_indent == 0;
     // 要件 7.3.2: the blockquote marker comes off whatever is under it — a rule
     // inside a quote is still a rule, and the quoting itself is the block's
     // indent (`BlockSpan::indent_steps`, 技術検証 7.1). **A box was tried at the
@@ -928,6 +928,19 @@ impl ListLevels {
             self.0.clear();
         }
     }
+
+    /// How far in a line that continues an item is set, and `None` for one that
+    /// continues nothing (要件 7.3.2).
+    ///
+    /// **The deepest level it is indented past.** A writer lines a continuation
+    /// up under the text of the item it belongs to, so the item it belongs to
+    /// is the last one that begins to the left of it. Being indented further
+    /// than that changes nothing: it lines up with the same item's text, which
+    /// is where it is set.
+    fn continuing(&self, columns: usize) -> Option<u8> {
+        let depth = self.0.iter().rposition(|open| *open < columns)?;
+        u8::try_from(depth + 1).ok()
+    }
 }
 
 /// How one line outside every fence is set.
@@ -940,30 +953,43 @@ fn outside_fence(line: &str, levels: &mut ListLevels) -> LineStyle {
     } else {
         list_kind(body).unwrap_or_default()
     };
-    // **The rule the preview reads a line by**: indented text is literal,
-    // markers and all (`push_visible_line`). An indented item is the one thing
-    // that is not — it is nested — and everything else indented stays as
-    // written, so a line the pane sets is never a line the preview shows
-    // verbatim.
-    if columns > 0 && !kind.is_list() {
-        levels.ended_by(columns, body);
-        return LineStyle::default();
-    }
+    let quote_depth = u8::from(quote.is_some());
     if kind.is_list() {
-        let depth = levels.depth_of(columns);
         return LineStyle {
             heading_level: 0,
             kind,
-            quote_depth: u8::from(quote.is_some()),
-            list_depth: depth,
+            quote_depth,
+            list_indent: levels.depth_of(columns) + 1,
         };
+    }
+    // 要件 7.3.2: a paragraph written under an item belongs to it and is set in
+    // with it. **Not an item itself** — it has no marker, and none is drawn for
+    // it; what it has is the same indent, so that the writer's own lining-up on
+    // the page is what appears on it.
+    if let Some(indent) = levels.continuing(columns)
+        && matches!(kind, LineKind::Body)
+    {
+        return LineStyle {
+            heading_level: 0,
+            kind,
+            quote_depth,
+            list_indent: indent,
+        };
+    }
+    // **The rule the preview reads a line by**: indented text that continues
+    // nothing is literal, markers and all (`push_visible_line`). Nothing here
+    // may call such a line a list or a rule, or the pane would set a line the
+    // preview shows verbatim.
+    if columns > 0 {
+        levels.ended_by(columns, body);
+        return LineStyle::default();
     }
     levels.ended_by(columns, body);
     LineStyle {
         heading_level: heading_level(line),
         kind,
-        quote_depth: u8::from(quote.is_some()),
-        list_depth: 0,
+        quote_depth,
+        list_indent: 0,
     }
 }
 
@@ -1009,6 +1035,10 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
         // either way what stands in its place is a whole-line mark, and the
         // line keeps the room it takes (要件 7.3.2).
         LineKind::Rule | LineKind::Fence => Ornament::Hidden,
+        // 要件 7.3.2: the white space a writer typed to line a continuation up
+        // under its item. **The style is what says it is that** — the same
+        // spaces under nothing are text, and shown as text.
+        LineKind::Body if style.list_indent > 0 => Ornament::Indent,
         _ => return None,
     };
     // Trailing spaces and all, which are part of what the line was written as
@@ -1019,17 +1049,19 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
     // spaces the writer typed must take no room of their own — they would be
     // added to the indent rather than being it, and only on the item's first
     // line at that.
+    // Bytes as UTF-16 units, which they are: an indent is spaces and tabs, and
+    // `marker_len` says the same about every marker.
+    let (_, body) = leading_indent(content);
+    let indent = (content.len() - body.len()) as u32;
     let utf16_len = match ornament {
         Ornament::Hidden => content.encode_utf16().count() as u32,
-        _ => {
-            // Bytes as UTF-16 units, which they are: an indent is spaces and
-            // tabs, and `marker_len` says the same about every marker.
-            let (_, body) = leading_indent(content);
-            let indent = (content.len() - body.len()) as u32;
-            indent + marker_len(body, style.kind)?
-        }
+        Ornament::Indent => indent,
+        _ => indent + marker_len(body, style.kind)?,
     };
-    Some(LineMarker {
+    // Nothing to cover. A continuation that is not indented at all does not
+    // arise — being indented is how it was recognised — but a box of no length
+    // is a range DirectWrite has no use for either way.
+    (utf16_len > 0).then_some(LineMarker {
         utf16_len,
         ornament,
     })
@@ -1853,12 +1885,13 @@ mod tests {
             styles
                 .iter()
                 .take(3)
-                .map(|style| style.list_depth)
+                .map(|style| style.list_indent)
                 .collect::<Vec<u8>>()
         };
 
-        assert_eq!(depths(by_two), vec![0, 1, 2]);
-        assert_eq!(depths(by_four), vec![0, 1, 2]);
+        // One step for being an item, one more for each level it is under.
+        assert_eq!(depths(by_two), vec![1, 2, 3]);
+        assert_eq!(depths(by_four), vec![1, 2, 3]);
     }
 
     /// Coming back out closes the levels it passed, and a paragraph at the
@@ -1867,27 +1900,41 @@ mod tests {
     #[test]
     fn coming_back_out_closes_the_levels_it_passed() {
         let styles = line_styles("- 一\n  - 二\n- 三\n\n  - 四\n本文\n  - 五\n");
-        let depths = styles.iter().map(|s| s.list_depth).collect::<Vec<u8>>();
+        let depths = styles.iter().map(|s| s.list_indent).collect::<Vec<u8>>();
 
         // 一 二 三 (blank) 四 本文 五
-        assert_eq!(depths[0], 0);
-        assert_eq!(depths[1], 1);
-        assert_eq!(depths[2], 0, "back at the margin");
-        assert_eq!(depths[4], 1, "a blank line did not end the list");
-        assert_eq!(depths[6], 0, "a paragraph at the margin did");
+        assert_eq!(depths[0], 1);
+        assert_eq!(depths[1], 2);
+        assert_eq!(depths[2], 1, "back at the margin");
+        assert_eq!(depths[4], 2, "a blank line did not end the list");
+        assert_eq!(depths[6], 1, "a paragraph at the margin did");
     }
 
-    /// 要件 7.3.2: an indented line that is not an item is shown as written,
-    /// markers and all. **Only an item is nested**, and the preview reads that
-    /// from the style rather than from the spaces.
+    /// 要件 7.3.2: a paragraph written under an item belongs to it and is set
+    /// in with it — **without becoming an item**. It has no marker and none is
+    /// drawn for it; what it has is the same indent.
     #[test]
-    fn an_indented_line_that_is_not_an_item_is_still_literal() {
-        let styles = line_styles("- 一\n  続きの行です\n  - 二\n");
+    fn a_line_that_continues_an_item_is_set_in_with_it() {
+        let styles = line_styles("- 一\n  続きの行です\n  - 二\n    その続き\n");
 
-        assert_eq!(styles[1].kind, LineKind::Body);
-        assert_eq!(styles[1].list_depth, 0);
+        assert_eq!(styles[1].kind, LineKind::Body, "not an item");
+        assert_eq!(styles[1].list_indent, 1, "set in with 一");
         assert_eq!(styles[2].kind, LineKind::Bullet);
-        assert_eq!(styles[2].list_depth, 1, "the level above is still open");
+        assert_eq!(styles[2].list_indent, 2);
+        assert_eq!(styles[3].list_indent, 2, "set in with 二");
+    }
+
+    /// **The deepest level it is indented past**, so being indented further
+    /// than the item's own text changes nothing: it lines up with the same
+    /// item. And indented text under no list at all is still literal.
+    #[test]
+    fn a_continuation_belongs_to_the_last_item_that_begins_left_of_it() {
+        let far = line_styles("- 一\n  - 二\n          深く下げた続き\n");
+        let alone = line_styles("本文\n\n    字下げされただけの行\n");
+
+        assert_eq!(far[2].list_indent, 2, "still 二's, however far in");
+        assert_eq!(alone[2].list_indent, 0, "there is no item above it");
+        assert_eq!(alone[2].kind, LineKind::Body);
     }
 
     /// An item is set in one step for being an item and one more for each level

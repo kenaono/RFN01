@@ -609,9 +609,9 @@ fn apply_marker_boxes(
     // object replaces the range it covers, so the marker's glyphs are not
     // drawn.
     //
-    // A whole-line box keeps its width. It stands over a line that is nothing
-    // but marks — `---`, or a fence — where the room is what the line leaves
-    // behind, not an indent for anything after it.
+    // A whole-line box keeps its width (`keeps_room`). It stands over a line
+    // that is nothing but marks — `---`, or a fence — where the room is what
+    // the line leaves behind, not an indent for anything after it.
     let box_of = |along: f32| -> IDWriteInlineObject {
         MarkerBox {
             along,
@@ -626,10 +626,10 @@ fn apply_marker_boxes(
         let Some(ornament) = run.ornament else {
             continue;
         };
-        let object = if ornament.draws_ink() {
-            &marker
-        } else {
+        let object = if ornament.keeps_room() {
             &whole_line
+        } else {
+            &marker
         };
         let range = DWRITE_TEXT_RANGE {
             startPosition: run.utf16_start,
@@ -672,8 +672,9 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
         Ornament::TaskOpen => "☐".to_owned(),
         Ornament::TaskDone => "☑".to_owned(),
         // A box that is there only to hide what it covers. The stroke across a
-        // rule and the ground under a fence are the line's, not the box's.
-        Ornament::Hidden => String::new(),
+        // rule and the ground under a fence are the line's, not the box's, and
+        // what an indent stands for is the block's.
+        Ornament::Hidden | Ornament::Indent => String::new(),
         Ornament::Number => {
             let start = byte_at_utf16(block_text, run.utf16_start);
             let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
@@ -3889,8 +3890,22 @@ mod tests {
     #[test]
     fn a_hidden_line_puts_no_ink_in_its_box() {
         assert!(!Ornament::Hidden.draws_ink());
+        assert!(!Ornament::Indent.draws_ink());
         assert!(Ornament::Bullet.draws_ink());
         assert!(Ornament::Number.draws_ink());
+    }
+
+    /// **Only a box over a whole line of marks keeps the room it covered**
+    /// (要件 7.3.2). A rule and a fence leave their line behind as blank space,
+    /// which is what gives a code block its padding; everything else a box
+    /// covers stands where an indent will be, and the indent is the block's —
+    /// a box that also took a step would set the line in twice, and only on the
+    /// first line it wrapped to.
+    #[test]
+    fn only_a_whole_line_box_keeps_the_room_it_covered() {
+        assert!(Ornament::Hidden.keeps_room());
+        assert!(!Ornament::Indent.keeps_room());
+        assert!(!Ornament::Bullet.keeps_room());
     }
 
     /// Measure these on the laying-out threads.
