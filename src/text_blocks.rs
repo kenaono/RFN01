@@ -956,6 +956,89 @@ pub trait WrapPoints {
     fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize>;
 }
 
+/// One logical line a split asked about, in a form that can leave the thread.
+///
+/// Everything [`LongLine`] borrows, owned — because the answer is worked out
+/// somewhere else and the document goes on being edited in the meantime.
+#[derive(Clone)]
+pub struct AskedLine {
+    pub text: String,
+    pub style: LineStyle,
+    pub marks: Vec<Emphasis>,
+    pub marker: Option<LineMarker>,
+    pub indent_steps: u8,
+}
+
+impl AskedLine {
+    /// The borrowed form, for a search that is about to be run.
+    pub fn borrowed(&self) -> LongLine<'_> {
+        LongLine {
+            text: &self.text,
+            style: self.style,
+            marks: &self.marks,
+            marker: self.marker,
+            indent_steps: self.indent_steps,
+        }
+    }
+}
+
+/// A [`WrapPoints`] that answers nothing and writes down what it was asked
+/// (要件 2).
+///
+/// **The questions, not the answers.** Which logical lines a split has to ask
+/// about is decided by the split, from each line's own size; asking it is the
+/// only way to find out without keeping a second copy of that rule — and a
+/// second copy is a second opinion about where blocks end, which is the one
+/// thing this module cannot afford (see [`split_blocks`]).
+///
+/// Answering nothing is safe: every line it was asked about stays the one
+/// oversized block it would have been. The blocks of this pass are used as they
+/// are when nothing was asked, and thrown away when something was.
+#[derive(Default)]
+pub struct RecordedWraps {
+    pub asked: Vec<AskedLine>,
+}
+
+impl WrapPoints for RecordedWraps {
+    fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize> {
+        self.asked.push(AskedLine {
+            text: line.text.to_owned(),
+            style: line.style,
+            marks: line.marks.to_vec(),
+            marker: line.marker,
+            indent_steps: line.indent_steps,
+        });
+        Vec::new()
+    }
+}
+
+/// A [`WrapPoints`] that answers from a table worked out ahead of time
+/// (要件 2).
+///
+/// **Answered in the order they are asked**, which is exact rather than
+/// hopeful: the recording pass and this one run the same split over the same
+/// text with the same spec, and what a split asks about depends on each line's
+/// own size and on nothing that came back. So the *n*th question here is the
+/// *n*th question there.
+pub struct PreparedWraps {
+    answers: Vec<Vec<usize>>,
+    next: usize,
+}
+
+impl PreparedWraps {
+    pub fn new(answers: Vec<Vec<usize>>) -> Self {
+        Self { answers, next: 0 }
+    }
+}
+
+impl WrapPoints for PreparedWraps {
+    fn line_starts(&mut self, _line: LongLine<'_>) -> Vec<usize> {
+        let answer = self.answers.get(self.next).cloned().unwrap_or_default();
+        self.next += 1;
+        answer
+    }
+}
+
 /// A [`WrapPoints`] that never cuts: the behaviour of the split before it could
 /// cut inside a line. Only the tests that are not about long paragraphs want
 /// this, so it is not built into the editor.
@@ -1888,6 +1971,61 @@ mod tests {
                 .map(|(_, (offset, _))| offset)
                 .collect()
         }
+    }
+
+    /// **Asking and then answering must cut where one pass would** (要件 2).
+    /// The recording pass exists so the answers can be found somewhere else,
+    /// and the whole idea rests on two things: that it asks exactly what a real
+    /// pass asks, and that it asks in the same order — which is why the answers
+    /// can be matched to the questions by position.
+    ///
+    /// It holds because **what a split asks about depends on each line's own
+    /// size and on nothing that came back**. If that ever stops being true this
+    /// is the test that says so, and it says it without DirectWrite.
+    #[test]
+    fn asking_and_then_answering_cuts_where_one_pass_would() {
+        let text = format!("{}\n短い行\n", "あ".repeat(CELLS as usize * 200));
+        let styled = StyledText::plain(&text);
+        let typography = plain_typography();
+        let mut once_through = EveryNCharacters(CELLS as usize);
+
+        let once = split_blocks(styled, CELLS, &typography, &mut once_through);
+
+        let mut asking = RecordedWraps::default();
+        let recorded = split_blocks(styled, CELLS, &typography, &mut asking);
+        let answers = asking
+            .asked
+            .iter()
+            .map(|line| EveryNCharacters(CELLS as usize).line_starts(line.borrowed()))
+            .collect::<Vec<Vec<usize>>>();
+        let twice = split_blocks(styled, CELLS, &typography, &mut PreparedWraps::new(answers));
+
+        assert_eq!(asking.asked.len(), 1, "one line was too long to be a block");
+        // The recording pass answers nothing, so it cuts nothing: that is what
+        // makes it safe to use its blocks when it was asked nothing at all.
+        assert!(
+            recorded.len() < once.len(),
+            "answering nothing cut something"
+        );
+        assert_eq!(twice, once);
+    }
+
+    /// A line the split never asks about leaves the recording pass with the
+    /// blocks the editor keeps: **an ordinary document is split once.**
+    #[test]
+    fn a_document_with_no_long_line_asks_nothing() {
+        let text = "短い行\n".repeat(40);
+        let mut asking = RecordedWraps::default();
+
+        let blocks = split_blocks(
+            StyledText::plain(&text),
+            CELLS,
+            &plain_typography(),
+            &mut asking,
+        );
+
+        assert!(asking.asked.is_empty());
+        assert_eq!(blocks, split(&text));
     }
 
     /// Split with a stand-in [`WrapPoints`] that breaks every `CELLS` characters.

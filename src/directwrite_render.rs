@@ -74,10 +74,11 @@ use windows::{
 };
 
 use crate::text_blocks::{
-    BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, DEFAULT_INK, Emphasis, FlowOrder,
-    LineInfo, LineMarker, LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL, Ornament,
-    StyleRun, StyledText, TileSpan, Typography, WrapPoints, block_flow_bound, cells_per_line,
-    line_runs, place_blocks, split_blocks, style_runs, wrapping_list_lines,
+    AskedLine, BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, DEFAULT_INK, Emphasis,
+    FlowOrder, LineInfo, LineMarker, LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL,
+    Ornament, PreparedWraps, RecordedWraps, StyleRun, StyledText, TileSpan, Typography,
+    block_flow_bound, cells_per_line, line_runs, place_blocks, split_blocks, style_runs,
+    wrapping_list_lines,
 };
 
 /// Which way the text runs.
@@ -1140,6 +1141,26 @@ fn measure_task(
     Ok((measure, layout))
 }
 
+/// The measurement in one answer, and nothing for an answer of another kind.
+///
+/// **A batch is all of one kind**, because only the editor's thread hands work
+/// over and it waits for each batch before starting the next; this is the type
+/// system being told so.
+fn measured_answer(answer: PoolAnswer) -> Option<(usize, BlockMeasure)> {
+    match answer {
+        PoolAnswer::Measure(index, measure) => Some((index, measure)),
+        PoolAnswer::Wrap(..) => None,
+    }
+}
+
+/// And the wrap positions in one.
+fn wrapped_answer(answer: PoolAnswer) -> Option<(usize, Vec<usize>)> {
+    match answer {
+        PoolAnswer::Wrap(at, found) => Some((at, found)),
+        PoolAnswer::Measure(..) => None,
+    }
+}
+
 /// Where one block's answer goes, for a block the cache had nothing for.
 ///
 /// **Kept beside the tasks rather than in them.** A measuring thread is given
@@ -1151,6 +1172,13 @@ struct PendingBlock {
     layout_key: u64,
     keep_trailing_empty_line: bool,
 }
+
+/// How many long paragraphs make it worth waking the other threads (要件 2).
+///
+/// **Two, because a long paragraph is never small.** The cheapest one here is
+/// one that only just grew past a block, where a block is 768 cells; below that
+/// the split never asks at all.
+const PARALLEL_WRAP_MIN: usize = 2;
 
 /// How many blocks make it worth waking the other threads (要件 2).
 ///
@@ -1166,41 +1194,73 @@ const PARALLEL_MEASURE_MIN: usize = 48;
 /// Beyond a handful the gain flattens and the cost does not: each thread keeps
 /// a DirectWrite factory of its own, isolated from the others (7.3), with its
 /// own font cache behind it.
-const MEASURE_THREADS_MAX: usize = 8;
+const LAYOUT_THREADS_MAX: usize = 8;
 
 /// How long to wait for a batch before giving up on the threads.
 ///
 /// **Not a performance figure — a way for a bug to stay visible.** A worker
 /// that panicked takes its answers with it, and the editor would otherwise
 /// wait on them for ever. Long enough that no honest measurement reaches it.
-const MEASURE_WAIT: Duration = Duration::from_secs(5);
+const LAYOUT_WAIT: Duration = Duration::from_secs(5);
 
-/// The threads that measure blocks, and the queues to them.
+/// One long line to find the wrap positions of (要件 2, 技術検証 7.4).
+///
+/// **The reuse is already decided.** Which earlier wrapping this line can
+/// resume from, and how much of it stands, is a comparison of text and marks
+/// (6.10) — no graphics, so it is worked out where the cache is and what
+/// crosses is only the byte to lay out from.
+#[derive(Clone)]
+struct WrapTask {
+    /// Which question this answers, in the order the split asked them.
+    at: usize,
+    line: AskedLine,
+    page: WrapPage,
+    from: usize,
+}
+
+/// What one thread was given to do.
+enum PoolTask {
+    Measure(MeasureTask),
+    Wrap(WrapTask),
+}
+
+/// And what it answered. **Which question, always** — the answers come back in
+/// whatever order the threads finish.
+enum PoolAnswer {
+    Measure(usize, BlockMeasure),
+    Wrap(usize, Vec<usize>),
+}
+
+/// The threads that lay text out, and the queues to them.
 ///
 /// **One queue per thread rather than one shared queue**, because a shared
 /// `Receiver` has to sit behind a lock, and a thread blocked on that lock while
 /// holding it is every other thread's problem. Blocks are bounded in size
 /// (`BLOCK_MAX_CELLS`), so dealing them round-robin divides the work evenly
 /// enough without any of that.
-struct MeasurePool {
-    queues: Vec<Sender<MeasureTask>>,
-    done: Receiver<std::result::Result<(usize, BlockMeasure), String>>,
+///
+/// **The same threads do both jobs.** They exist for what they keep — a
+/// DirectWrite factory and the font cache behind it (7.3) — and that is the
+/// same thing whichever question is being asked.
+struct LayoutPool {
+    queues: Vec<Sender<PoolTask>>,
+    done: Receiver<std::result::Result<PoolAnswer, String>>,
 }
 
-impl MeasurePool {
+impl LayoutPool {
     fn start() -> Option<Self> {
         let threads = thread::available_parallelism()
             .map(NonZeroUsize::get)
             .unwrap_or(2)
-            .clamp(1, MEASURE_THREADS_MAX);
+            .clamp(1, LAYOUT_THREADS_MAX);
         let (done_sender, done) = channel();
         let mut queues = Vec::with_capacity(threads);
         for number in 0..threads {
-            let (task_sender, tasks) = channel::<MeasureTask>();
+            let (task_sender, tasks) = channel::<PoolTask>();
             let answers = done_sender.clone();
             let spawned = thread::Builder::new()
-                .name(format!("rfnedit-measure-{number}"))
-                .spawn(move || measure_worker(&tasks, &answers));
+                .name(format!("rfnedit-layout-{number}"))
+                .spawn(move || layout_worker(&tasks, &answers));
             if spawned.is_ok() {
                 queues.push(task_sender);
             }
@@ -1208,29 +1268,29 @@ impl MeasurePool {
         (!queues.is_empty()).then_some(Self { queues, done })
     }
 
-    /// Measure what these threads can, in whatever order they finish.
+    /// Do what these threads can, in whatever order they finish.
     ///
-    /// **It may answer fewer blocks than it was asked about**, and says nothing
+    /// **It may answer fewer questions than it was asked**, and says nothing
     /// about which: a queue refuses when its thread is gone, and a thread that
-    /// stopped answering takes its share with it. The caller measures whatever
-    /// is still unanswered on its own thread, which is the same path it takes
-    /// when there are no threads at all — so every way this can fall short ends
-    /// in one piece of code.
-    fn measure(&self, tasks: &[MeasureTask]) -> Result<Vec<(usize, BlockMeasure)>> {
+    /// stopped answering takes its share with it. The caller does whatever is
+    /// still unanswered on its own thread, which is the same path it takes when
+    /// there are no threads at all — so every way this can fall short ends in
+    /// one piece of code.
+    fn run(&self, tasks: Vec<PoolTask>) -> Result<Vec<PoolAnswer>> {
         let mut sent = 0usize;
-        for (dealt, task) in tasks.iter().enumerate() {
+        for (dealt, task) in tasks.into_iter().enumerate() {
             let queue = &self.queues[dealt % self.queues.len()];
-            if queue.send(task.clone()).is_ok() {
+            if queue.send(task).is_ok() {
                 sent += 1;
             }
         }
         // **Every answer is taken before any failure is reported.** An answer
         // left in the queue would be picked up by the next update and counted
-        // against a block it says nothing about.
+        // against a question it says nothing about.
         let mut done = Vec::with_capacity(sent);
         let mut failure: Option<String> = None;
         for _ in 0..sent {
-            match self.done.recv_timeout(MEASURE_WAIT) {
+            match self.done.recv_timeout(LAYOUT_WAIT) {
                 Ok(Ok(answer)) => done.push(answer),
                 Ok(Err(message)) => failure = failure.or(Some(message)),
                 // Every thread is gone, or one of them stopped answering.
@@ -1245,43 +1305,54 @@ impl MeasurePool {
     }
 }
 
-/// One measuring thread.
+/// One laying-out thread.
 ///
 /// It keeps its `Graphics` for as long as it lives, which is the whole reason
 /// the threads are kept rather than made per update: an isolated DirectWrite
 /// factory builds a font cache of its own, and paying for that on every
-/// divider drag would cost more than the measuring it is meant to divide.
-fn measure_worker(
-    tasks: &Receiver<MeasureTask>,
-    answers: &Sender<std::result::Result<(usize, BlockMeasure), String>>,
+/// divider drag would cost more than the work it is meant to divide.
+fn layout_worker(
+    tasks: &Receiver<PoolTask>,
+    answers: &Sender<std::result::Result<PoolAnswer, String>>,
 ) {
     while let Ok(task) = tasks.recv() {
         // The error is carried as text: a Windows error holds COM state of its
         // own and has no business crossing a thread.
-        let answered = with_graphics(|graphics| measure_task(graphics, &task))
-            .map(|(measure, _layout)| (task.index, measure))
-            .map_err(|error| error.to_string());
+        let answered = with_graphics(|graphics| match &task {
+            PoolTask::Measure(task) => {
+                let (measure, _layout) = measure_task(graphics, task)?;
+                Ok(PoolAnswer::Measure(task.index, measure))
+            }
+            PoolTask::Wrap(task) => {
+                let page = &task.page;
+                let format = graphics.text_format(&page.typography, page.mode)?;
+                let line = task.line.borrowed();
+                let found = wrap_offsets(graphics, &format, page, line, task.from);
+                Ok(PoolAnswer::Wrap(task.at, found.unwrap_or_default()))
+            }
+        })
+        .map_err(|error| error.to_string());
         if answers.send(answered).is_err() {
             return;
         }
     }
 }
 
-/// Measure these blocks on the measuring threads, if there are any.
+/// Hand this work to the laying-out threads, if there are any.
 ///
-/// `None` when there are none, which is not fatal: the caller measures on its
-/// own thread instead, which is what the editor did before this existed.
+/// `None` when there are none, which is not fatal: the caller does the work on
+/// its own thread instead, which is what the editor did before this existed.
 ///
 /// **The threads are the process's, not a pane's**, so they are started once
 /// and both panes hand work to the same ones. The lock is what lets them live
 /// in a `static` at all — a queue is `Send` but not something two threads may
 /// hold at once — and it is never contended, because only the editor's thread
 /// gets this far.
-fn measure_on_threads(tasks: &[MeasureTask]) -> Option<Result<Vec<(usize, BlockMeasure)>>> {
-    static POOL: OnceLock<Mutex<Option<MeasurePool>>> = OnceLock::new();
-    let held = POOL.get_or_init(|| Mutex::new(MeasurePool::start()));
+fn on_layout_threads(tasks: Vec<PoolTask>) -> Option<Result<Vec<PoolAnswer>>> {
+    static POOL: OnceLock<Mutex<Option<LayoutPool>>> = OnceLock::new();
+    let held = POOL.get_or_init(|| Mutex::new(LayoutPool::start()));
     let pool = held.lock().ok()?;
-    Some(pool.as_ref()?.measure(tasks))
+    Some(pool.as_ref()?.run(tasks))
 }
 
 fn with_graphics<T>(body: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> {
@@ -1310,7 +1381,8 @@ struct MeasuredBlock {
 pub struct UpdateCost {
     pub blocks: usize,
     pub utf16: u32,
-    /// UTF-16 units handed to [`LayoutWraps`], which is a whole layout each.
+    /// UTF-16 units actually laid out to find wrap positions, which is a whole
+    /// layout each.
     ///
     /// Separate from `utf16` because it is a separate cost with a separate
     /// cause, and because the one time it was not reported it hid a 205ms floor
@@ -1333,6 +1405,13 @@ pub struct UpdateCost {
     pub wrap_asked: u32,
     pub wrap_exact: u32,
     pub wrap_resumed: u32,
+    /// How many of them were found on the other threads (要件 2).
+    ///
+    /// The same number for the wrap search that `divided` is for the measuring,
+    /// and it is a separate one because the two divide differently: **a long
+    /// paragraph cannot be cut in half and shared**, so this is bounded by the
+    /// longest paragraph in the document however many threads there are.
+    pub wrap_divided: u32,
     /// For the paragraph that was laid out from its first character: how many
     /// bytes it still shared with its previous self, and how many line starts
     /// that previous self had.
@@ -1375,7 +1454,8 @@ pub struct TextEngine {
     measures: HashMap<u64, MeasuredBlock>,
     /// Live layouts, most recently used first.
     layouts: Vec<(u64, IDWriteTextLayout)>,
-    /// Where each long paragraph wraps. See [`LayoutWraps`].
+    /// Where each long paragraph wraps, from the last update. **Without this,
+    /// every long paragraph was laid out on every keystroke** (6.10).
     wraps: Vec<ParagraphWraps>,
     /// How many list items wrap at this geometry. See [`Self::list_items`].
     wrapping_items: usize,
@@ -1612,39 +1692,33 @@ impl TextEngine {
         // The split is charged in line space, so it needs the geometry: the same
         // pane at a different line extent wraps differently and cuts elsewhere.
         let cells = cells_per_line(line_extent, &typography);
-        // A logical line longer than one block is cut at the positions
-        // DirectWrite wraps it, so the split needs a layout of its own for it.
-        // Ordinary paragraphs never reach `LayoutWraps` at all.
-        let (spans, fresh_wraps, wrap_cost) = with_graphics(|graphics| {
-            let format = graphics.text_format(&typography, mode)?;
-            let mut wraps = LayoutWraps {
-                format: &format,
-                typography: &typography,
-                mode,
-                line_extent,
-                line_box,
-                previous: &self.wraps,
-                current: Vec::new(),
-                laid_out: 0,
-                asked: 0,
-                exact: 0,
-                resumed: 0,
-                shared: 0,
-                starts: 0,
-                graphics,
-            };
-            let spans = split_blocks(styled, cells, &typography, &mut wraps);
-            let cost = UpdateCost {
-                wrapped: wraps.laid_out,
-                wrap_asked: wraps.asked,
-                wrap_exact: wraps.exact,
-                wrap_resumed: wraps.resumed,
-                wrap_shared: wraps.shared,
-                wrap_starts: wraps.starts,
-                ..UpdateCost::default()
-            };
-            Ok((spans, wraps.current, cost))
-        })?;
+        // The same spec, in a form a task can carry. One spec covers the whole
+        // update and holds a family name for the body, one for code and one per
+        // heading level, so it is shared rather than cloned per task.
+        let spec = Arc::new(typography.clone());
+        // **Ask first, answer afterwards** (要件 2). A logical line longer than
+        // one block is cut at the positions DirectWrite wraps it, and finding
+        // those is the one piece of laying out the split itself does. So the
+        // split is run once with nothing to answer it, purely to find out which
+        // lines it needs — **asking is the only way to know without keeping a
+        // second copy of the rule about which lines are too long**, and a second
+        // copy is a second opinion about where blocks end.
+        //
+        // Ordinary documents ask nothing, and then this pass is the split: its
+        // blocks are already the right ones, and the second one never runs.
+        let mut asking = RecordedWraps::default();
+        let spans = split_blocks(styled, cells, &typography, &mut asking);
+        let page = WrapPage {
+            typography: spec.clone(),
+            mode,
+            line_extent,
+            line_box,
+        };
+        let answered = self.wrap_answers(&asking.asked, &page, styled, cells, &typography)?;
+        let (spans, fresh_wraps, wrap_cost) = match answered {
+            Some(done) => done,
+            None => (spans, Vec::new(), UpdateCost::default()),
+        };
         self.wraps = fresh_wraps;
         // **One slot per block, filled in whatever order the answers arrive.**
         // A block measured on another thread comes back when it comes back, so
@@ -1659,10 +1733,6 @@ impl TextEngine {
         // The blocks the cache had nothing for, and where each answer belongs.
         let mut tasks: Vec<MeasureTask> = Vec::new();
         let mut pending: HashMap<usize, PendingBlock> = HashMap::new();
-        // The same spec, in a form a task can carry. One spec covers the whole
-        // update and holds ten font family names, so it is shared rather than
-        // cloned per block.
-        let spec = Arc::new(typography.clone());
 
         // **Deciding what to measure needs no graphics at all.** Which blocks
         // the cache already answers, what ranges each one sets, how wide its box
@@ -1765,10 +1835,14 @@ impl TextEngine {
         // blocks on screen, whose layouts `layout_for` builds again when the
         // tiles are drawn; measuring them all again is what it saves.
         let divide = tasks.len() >= PARALLEL_MEASURE_MIN;
-        if let Some(answered) = divide.then(|| measure_on_threads(&tasks)).flatten() {
+        let handed = divide.then(|| {
+            let queued = tasks.iter().cloned().map(PoolTask::Measure).collect();
+            on_layout_threads(queued)
+        });
+        if let Some(answered) = handed.flatten() {
             let answered = answered?;
             measured.divided = answered.len() as u32;
-            for (index, measure) in answered {
+            for (index, measure) in answered.into_iter().filter_map(measured_answer) {
                 if let Some(slot) = pending.get(&index) {
                     let span = &spans[index];
                     fresh_measures.push((
@@ -1849,6 +1923,115 @@ impl TextEngine {
         self.typography = typography;
         self.margin = margin;
         Ok(measured)
+    }
+
+    /// Answer every question the recording split asked, and split again
+    /// (要件 2, 技術検証 7.4).
+    ///
+    /// `None` when it asked nothing, which is what an ordinary document does:
+    /// the caller keeps the blocks the recording pass already made.
+    ///
+    /// **Three steps that each need something the others do not.** Deciding
+    /// what an earlier update leaves usable is a comparison of text and marks
+    /// and has to see the cache; finding where the text wraps is DirectWrite
+    /// and can be done anywhere; cutting the blocks is arithmetic. Only the
+    /// middle one is worth dividing, and separating them is what lets it be.
+    fn wrap_answers(
+        &self,
+        asked: &[AskedLine],
+        page: &WrapPage,
+        styled: StyledText<'_>,
+        cells: u32,
+        typography: &Typography,
+    ) -> Result<Option<(Vec<BlockSpan>, Vec<ParagraphWraps>, UpdateCost)>> {
+        if asked.is_empty() {
+            return Ok(None);
+        }
+        let mut cost = UpdateCost {
+            wrap_asked: asked.len() as u32,
+            ..UpdateCost::default()
+        };
+        let mut answers: Vec<Vec<usize>> = vec![Vec::new(); asked.len()];
+        let mut kept: Vec<Vec<usize>> = vec![Vec::new(); asked.len()];
+        let mut tasks: Vec<WrapTask> = Vec::new();
+        for (at, line) in asked.iter().enumerate() {
+            let reuse = wrap_reuse(&self.wraps, line.borrowed());
+            if reuse.shared >= cost.wrap_shared {
+                cost.wrap_shared = reuse.shared;
+                cost.wrap_starts = reuse.starts;
+            }
+            if reuse.whole {
+                cost.wrap_exact += 1;
+                answers[at] = reuse.kept;
+                continue;
+            }
+            if reuse.from > 0 {
+                cost.wrap_resumed += 1;
+            }
+            cost.wrapped += line.text[reuse.from..].encode_utf16().count() as u32;
+            kept[at] = reuse.kept;
+            tasks.push(WrapTask {
+                at,
+                line: line.clone(),
+                page: page.clone(),
+                from: reuse.from,
+            });
+        }
+
+        // **Two paragraphs are already worth dividing.** Unlike a block, a long
+        // paragraph is never small: the cheapest one here is the one that only
+        // just grew past a block.
+        let divide = tasks.len() >= PARALLEL_WRAP_MIN;
+        let handed = divide.then(|| {
+            let queued = tasks.iter().cloned().map(PoolTask::Wrap).collect();
+            on_layout_threads(queued)
+        });
+        let mut done = vec![false; asked.len()];
+        if let Some(found) = handed.flatten() {
+            for (at, offsets) in found?.into_iter().filter_map(wrapped_answer) {
+                answers[at] = std::mem::take(&mut kept[at]);
+                answers[at].extend(offsets);
+                done[at] = true;
+                cost.wrap_divided += 1;
+            }
+        }
+
+        // Whatever is left, which is all of it when there are no threads.
+        let left = tasks
+            .iter()
+            .filter(|task| !done[task.at])
+            .collect::<Vec<&WrapTask>>();
+        if !left.is_empty() {
+            with_graphics(|graphics| {
+                let format = graphics.text_format(typography, page.mode)?;
+                for task in left {
+                    let line = task.line.borrowed();
+                    let found = wrap_offsets(graphics, &format, page, line, task.from);
+                    answers[task.at] = std::mem::take(&mut kept[task.at]);
+                    answers[task.at].extend(found.unwrap_or_default());
+                }
+                Ok(())
+            })?;
+        }
+
+        // What was asked for this time, which becomes the cache for the next
+        // update. Built fresh so a paragraph that no longer exists is dropped
+        // without having to be found.
+        let current = asked
+            .iter()
+            .zip(&answers)
+            .map(|(line, starts)| ParagraphWraps {
+                text: line.text.clone(),
+                style: line.style,
+                indent_steps: line.indent_steps,
+                marks: line.marks.clone(),
+                marker: line.marker,
+                starts: starts.clone(),
+            })
+            .collect();
+        let mut prepared = PreparedWraps::new(answers);
+        let spans = split_blocks(styled, cells, typography, &mut prepared);
+        Ok(Some((spans, current, cost)))
     }
 
     /// How many of the document's logical lines begin with a list marker
@@ -2556,6 +2739,16 @@ struct ParagraphWraps {
     starts: Vec<usize>,
 }
 
+impl ParagraphWraps {
+    /// Whether these positions were found for a line set exactly as this one
+    /// is — the text apart, which each caller compares its own way.
+    fn matches(&self, line: LongLine<'_>) -> bool {
+        self.style == line.style
+            && self.indent_steps == line.indent_steps
+            && self.marker == line.marker
+    }
+}
+
 /// The furthest along the flow axis any one layout is asked to reach.
 ///
 /// DirectWrite's own limit is 262144px. Staying well under it means the editor
@@ -2579,200 +2772,20 @@ const MAX_LAYOUT_FLOW: f32 = 200_000.0;
 /// characters of re-wrapping and removes the question.
 const WRAP_REUSE_MARGIN: usize = 2;
 
-struct LayoutWraps<'a> {
-    graphics: &'a mut Graphics,
-    format: &'a IDWriteTextFormat,
-    typography: &'a Typography,
+/// Everything a wrap search needs about the page, without the graphics.
+///
+/// **Owned, so a search can be run on another thread** (要件 2, 技術検証 7.4).
+/// The text format is not here: a DirectWrite format belongs to the factory
+/// that made it, and each thread has one of its own.
+#[derive(Clone)]
+struct WrapPage {
+    typography: Arc<Typography>,
     mode: WritingMode,
     line_extent: u32,
     line_box: f32,
-    /// Where each paragraph wrapped last time. **Without this, every long
-    /// paragraph in the document was laid out on every keystroke**, which put
-    /// a floor under the whole document equal to measuring all of them at once
-    /// — 205ms on the sample, however small the edit (6.10).
-    previous: &'a [ParagraphWraps],
-    /// What was asked for this time, which becomes `previous` for the next
-    /// update. Built fresh so a paragraph that no longer exists is dropped
-    /// without having to be found.
-    current: Vec<ParagraphWraps>,
-    /// UTF-16 units actually laid out, so the cost of this shows up in the log
-    /// rather than hiding inside `layout`.
-    laid_out: u32,
-    asked: u32,
-    exact: u32,
-    resumed: u32,
-    /// The widest miss seen this update, for the log. See [`UpdateCost`].
-    shared: usize,
-    starts: usize,
 }
 
-impl WrapPoints for LayoutWraps<'_> {
-    fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize> {
-        let starts = self.starts_for(line);
-        self.current.push(ParagraphWraps {
-            text: line.text.to_owned(),
-            style: line.style,
-            indent_steps: line.indent_steps,
-            marks: line.marks.to_vec(),
-            marker: line.marker,
-            starts: starts.clone(),
-        });
-        starts
-    }
-}
-
-impl ParagraphWraps {
-    /// Whether these positions were found for a line set exactly as this one
-    /// is — the text apart, which each caller compares its own way.
-    fn matches(&self, line: LongLine<'_>) -> bool {
-        self.style == line.style
-            && self.indent_steps == line.indent_steps
-            && self.marker == line.marker
-    }
-}
-
-impl LayoutWraps<'_> {
-    fn starts_for(&mut self, line: LongLine<'_>) -> Vec<usize> {
-        self.asked += 1;
-        // Copied out first: this is a borrow of the caller's slice, not of
-        // `self`, and taking it now leaves `self` free to lay text out below.
-        let previous = self.previous;
-        let same_line = |kept: &&ParagraphWraps| {
-            kept.matches(line) && kept.marks == line.marks && kept.text == line.text
-        };
-        let same = previous.iter().find(same_line);
-        if let Some(same) = same {
-            self.exact += 1;
-            return same.starts.clone();
-        }
-
-        // The longest surviving prefix of any paragraph set the same way. With
-        // one long paragraph in the document this finds it; with several it
-        // finds the edited one, because the others matched in full above.
-        let nearest = previous
-            .iter()
-            .filter(|kept| kept.matches(line))
-            .map(|kept| (reusable_prefix(kept, line), kept))
-            .max_by_key(|(shared, _)| *shared);
-        if let Some((shared, kept)) = &nearest
-            && *shared >= self.shared
-        {
-            self.shared = *shared;
-            self.starts = kept.starts.len();
-        }
-        let resume = nearest.and_then(|(shared, kept)| {
-            let usable = kept.starts.partition_point(|start| *start <= shared);
-            let usable = usable.checked_sub(WRAP_REUSE_MARGIN)?;
-            let starts = &kept.starts[..usable];
-            Some((*starts.last()?, starts.to_vec()))
-        });
-
-        match resume {
-            // Laying out from a line start is legitimate for the same reason
-            // cutting there is: the lines from there on depend on nothing
-            // before it.
-            Some((offset, mut kept)) => {
-                self.resumed += 1;
-                kept.extend(self.lay_out(line, offset));
-                kept
-            }
-            None => self.lay_out(line, 0),
-        }
-    }
-
-    /// Lay the line out from `from` on, and report where its lines begin —
-    /// as offsets within the whole line, which is what the caller keeps.
-    ///
-    /// A layout that cannot be built reports nothing, which means "do not cut":
-    /// the paragraph stays the one oversized block it has always been. Failing
-    /// to build a layout is a reason to leave the text alone, not a reason to
-    /// stop laying out the document.
-    fn lay_out(&mut self, line: LongLine<'_>, from: usize) -> Vec<usize> {
-        let tail = &line.text[from..];
-        self.laid_out += tail.encode_utf16().count() as u32;
-        self.wrap_offsets(line, from).unwrap_or_default()
-    }
-
-    /// Where a paragraph's lines begin, found a window at a time.
-    ///
-    /// **No layout is ever asked to reach further than [`MAX_LAYOUT_FLOW`].**
-    /// DirectWrite's own limit is 262144px, and what it does at that limit is
-    /// something this editor should never find out — an unknown behaviour at
-    /// the maximum is worse than a smaller maximum that was chosen.
-    ///
-    /// Windowing rather than truncating is what makes that guarantee hold all
-    /// the way through. Stopping at one window would leave the rest of the
-    /// paragraph uncut, and *that* block would then be handed a layout box as
-    /// long as the tail — moving the problem rather than removing it. Carrying
-    /// on from the last line start of each window cuts a paragraph of any
-    /// length, so **every layout the editor builds is small, whatever the
-    /// document contains.**
-    ///
-    /// Each window resumes from a line start for the same reason a block may
-    /// begin at one: what follows a line start is decided by what follows it.
-    /// The last few positions of an unfinished window are dropped and found
-    /// again next time round, because a break near the end of a window can still
-    /// move when the text after it arrives — the same margin, for the same
-    /// reason, as reusing an earlier wrapping.
-    fn wrap_offsets(&mut self, line: LongLine<'_>, from: usize) -> Result<Vec<usize>> {
-        let mut offsets: Vec<usize> = Vec::new();
-        let mut start = from;
-        while start < line.text.len() {
-            let end = self.window_end(line, start);
-            let found = self.wrap_offsets_in(line, start, end)?;
-            let whole_rest = end == line.text.len();
-            let usable = if whole_rest {
-                found.len()
-            } else {
-                found.len().saturating_sub(WRAP_REUSE_MARGIN)
-            };
-            if usable == 0 {
-                // A window with nothing usable in it cannot be advanced past,
-                // so the rest of the line stays in one piece. Slow, and decided.
-                break;
-            }
-            offsets.extend(found[..usable].iter().map(|offset| offset + start));
-            if whole_rest {
-                break;
-            }
-            // How far the window actually got. Bounded from below on purpose: a
-            // window that comes back with barely more lines than the margin
-            // would advance a line at a time, laying the paragraph out once per
-            // line. Leaving the rest in one piece is slow; laying it out
-            // thousands of times is a hang.
-            let advance = found[usable - 1];
-            if advance * 4 < end - start {
-                break;
-            }
-            start += advance;
-        }
-        Ok(offsets)
-    }
-
-    /// The byte offset one window past `start`, on a character boundary.
-    fn window_end(&self, line: LongLine<'_>, start: usize) -> usize {
-        let text = line.text;
-        let style = line.style;
-        let typography = self.typography;
-        let level = style.heading_level;
-        let flow_per_line = typography.font_size * 2.2 * typography.flow_scale(level);
-        let lines = (MAX_LAYOUT_FLOW / flow_per_line.max(1.0)).floor().max(1.0);
-        let extent = self.indented_extent(line.indent_steps);
-        let cells = cells_per_line(extent, typography) as f32;
-        let per_line = (cells / typography.size_scale(level)).max(1.0);
-        let characters = (lines * per_line) as usize;
-        let rest = &text[start..];
-        // A character is at least one byte, so a byte length already under the
-        // allowance is under it in characters too, and needs no walk.
-        if rest.len() <= characters {
-            return text.len();
-        }
-        match rest.char_indices().nth(characters) {
-            Some((offset, _)) => start + offset,
-            None => text.len(),
-        }
-    }
-
+impl WrapPage {
     /// The line extent a paragraph set `steps` in is laid out across.
     ///
     /// **An indented paragraph is asked at the width it will be cut at.** A
@@ -2789,44 +2802,185 @@ impl LayoutWraps<'_> {
         let inset = indent_of(steps, &self.typography);
         (self.line_box - inset).max(1.0)
     }
+}
 
-    /// Where the window `from..to` of one long line wraps, relative to `from`.
-    fn wrap_offsets_in(
-        &mut self,
-        line: LongLine<'_>,
-        from: usize,
-        to: usize,
-    ) -> Result<Vec<usize>> {
-        let style = line.style;
-        let text = &line.text[from..to];
-        // One logical line, so one style covers all of it — and **the same spec
-        // the pieces will be measured under**, marks and head box included.
-        // Character spacing, heading size, a bold stretch and an indent all move
-        // where the text wraps, so a barer layout reports positions the pieces
-        // do not actually break at. The box belongs to the head of the line, so
-        // only a window that starts there gets one.
-        let levels = [style];
-        let spans = [line.marks_from(from)];
-        let markers = [line.marker.filter(|_| from == 0)];
-        let marked = StyledText::marked(text, &levels, &spans);
-        let styled = marked.with_markers(&markers);
-        let steps = line.indent_steps;
-        let bound = block_flow_bound(styled, self.indented_extent(steps), self.typography);
-        let line_box = self.indented_box(steps);
-        let (max_width, max_height) = self.mode.to_screen(bound, line_box);
-        let utf16 = text.encode_utf16().collect::<Vec<u16>>();
-        // SAFETY: The UTF-16 buffer outlives CreateTextLayout, and the format
-        // is owned by the caller for the whole call.
-        let layout = unsafe {
-            self.graphics
-                .dwrite
-                .CreateTextLayout(&utf16, self.format, max_width, max_height)?
+/// What an earlier update leaves usable for one long line (6.10).
+///
+/// **No graphics at all**: which earlier wrapping this line can resume from is
+/// decided by comparing text, marks and the way the line is set. That is why
+/// the search itself can be run somewhere else — the part that has to see the
+/// cache stays where the cache is, and only a byte offset crosses.
+struct WrapReuse {
+    /// The line starts already known, which the search extends.
+    kept: Vec<usize>,
+    /// The byte to lay out from. Zero when nothing was reusable.
+    from: usize,
+    /// The line is unchanged and its whole wrapping stands: nothing to lay out.
+    whole: bool,
+    /// The widest prefix any earlier paragraph shared and how many line starts
+    /// it had, for the log. See [`UpdateCost`].
+    shared: usize,
+    starts: usize,
+}
+
+/// Look one long line up among the paragraphs of the last update.
+fn wrap_reuse(previous: &[ParagraphWraps], line: LongLine<'_>) -> WrapReuse {
+    let same = previous
+        .iter()
+        .find(|kept| kept.matches(line) && kept.marks == line.marks && kept.text == line.text);
+    if let Some(same) = same {
+        return WrapReuse {
+            kept: same.starts.clone(),
+            from: 0,
+            whole: true,
+            shared: 0,
+            starts: 0,
         };
-        let runs = style_runs(styled);
-        apply_typography(&layout, self.typography, &runs, utf16.len() as u32)?;
-        apply_marker_boxes(&layout, self.typography, &runs)?;
-        Ok(wrap_byte_offsets(text, &line_metrics(&layout)?))
     }
+
+    // The longest surviving prefix of any paragraph set the same way. With one
+    // long paragraph in the document this finds it; with several it finds the
+    // edited one, because the others matched in full above.
+    let nearest = previous
+        .iter()
+        .filter(|kept| kept.matches(line))
+        .map(|kept| (reusable_prefix(kept, line), kept))
+        .max_by_key(|(shared, _)| *shared);
+    let (shared, starts) = nearest
+        .as_ref()
+        .map(|(shared, kept)| (*shared, kept.starts.len()))
+        .unwrap_or_default();
+    let resume = nearest.and_then(|(shared, kept)| {
+        let usable = kept.starts.partition_point(|start| *start <= shared);
+        let usable = usable.checked_sub(WRAP_REUSE_MARGIN)?;
+        let starts = &kept.starts[..usable];
+        Some((*starts.last()?, starts.to_vec()))
+    });
+    // Laying out from a line start is legitimate for the same reason cutting
+    // there is: the lines from there on depend on nothing before it.
+    match resume {
+        Some((from, kept)) => WrapReuse {
+            kept,
+            from,
+            whole: false,
+            shared,
+            starts,
+        },
+        None => WrapReuse {
+            kept: Vec::new(),
+            from: 0,
+            whole: false,
+            shared,
+            starts,
+        },
+    }
+}
+
+/// Where a paragraph's lines begin, found a window at a time.
+fn wrap_offsets(
+    graphics: &mut Graphics,
+    format: &IDWriteTextFormat,
+    page: &WrapPage,
+    line: LongLine<'_>,
+    from: usize,
+) -> Result<Vec<usize>> {
+    let mut offsets: Vec<usize> = Vec::new();
+    let mut start = from;
+    while start < line.text.len() {
+        let end = window_end(page, line, start);
+        let found = wrap_offsets_in(graphics, format, page, line, start, end)?;
+        let whole_rest = end == line.text.len();
+        let usable = if whole_rest {
+            found.len()
+        } else {
+            found.len().saturating_sub(WRAP_REUSE_MARGIN)
+        };
+        if usable == 0 {
+            // A window with nothing usable in it cannot be advanced past,
+            // so the rest of the line stays in one piece. Slow, and decided.
+            break;
+        }
+        offsets.extend(found[..usable].iter().map(|offset| offset + start));
+        if whole_rest {
+            break;
+        }
+        // How far the window actually got. Bounded from below on purpose: a
+        // window that comes back with barely more lines than the margin
+        // would advance a line at a time, laying the paragraph out once per
+        // line. Leaving the rest in one piece is slow; laying it out
+        // thousands of times is a hang.
+        let advance = found[usable - 1];
+        if advance * 4 < end - start {
+            break;
+        }
+        start += advance;
+    }
+    Ok(offsets)
+}
+
+/// The byte offset one window past `start`, on a character boundary.
+fn window_end(page: &WrapPage, line: LongLine<'_>, start: usize) -> usize {
+    let text = line.text;
+    let style = line.style;
+    let typography = &page.typography;
+    let level = style.heading_level;
+    let flow_per_line = typography.font_size * 2.2 * typography.flow_scale(level);
+    let lines = (MAX_LAYOUT_FLOW / flow_per_line.max(1.0)).floor().max(1.0);
+    let extent = page.indented_extent(line.indent_steps);
+    let cells = cells_per_line(extent, typography) as f32;
+    let per_line = (cells / typography.size_scale(level)).max(1.0);
+    let characters = (lines * per_line) as usize;
+    let rest = &text[start..];
+    // A character is at least one byte, so a byte length already under the
+    // allowance is under it in characters too, and needs no walk.
+    if rest.len() <= characters {
+        return text.len();
+    }
+    match rest.char_indices().nth(characters) {
+        Some((offset, _)) => start + offset,
+        None => text.len(),
+    }
+}
+
+/// Where the window `from..to` of one long line wraps, relative to `from`.
+fn wrap_offsets_in(
+    graphics: &mut Graphics,
+    format: &IDWriteTextFormat,
+    page: &WrapPage,
+    line: LongLine<'_>,
+    from: usize,
+    to: usize,
+) -> Result<Vec<usize>> {
+    let style = line.style;
+    let text = &line.text[from..to];
+    // One logical line, so one style covers all of it — and **the same spec
+    // the pieces will be measured under**, marks and head box included.
+    // Character spacing, heading size, a bold stretch and an indent all move
+    // where the text wraps, so a barer layout reports positions the pieces
+    // do not actually break at. The box belongs to the head of the line, so
+    // only a window that starts there gets one.
+    let levels = [style];
+    let spans = [line.marks_from(from)];
+    let markers = [line.marker.filter(|_| from == 0)];
+    let marked = StyledText::marked(text, &levels, &spans);
+    let styled = marked.with_markers(&markers);
+    let steps = line.indent_steps;
+    let typography = &page.typography;
+    let bound = block_flow_bound(styled, page.indented_extent(steps), typography);
+    let line_box = page.indented_box(steps);
+    let (max_width, max_height) = page.mode.to_screen(bound, line_box);
+    let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+    // SAFETY: The UTF-16 buffer outlives CreateTextLayout, and the format
+    // is owned by the caller for the whole call.
+    let layout = unsafe {
+        graphics
+            .dwrite
+            .CreateTextLayout(&utf16, format, max_width, max_height)?
+    };
+    let runs = style_runs(styled);
+    apply_typography(&layout, typography, &runs, utf16.len() as u32)?;
+    apply_marker_boxes(&layout, typography, &runs)?;
+    Ok(wrap_byte_offsets(text, &line_metrics(&layout)?))
 }
 
 /// How far a kept paragraph's wrapping still describes `line`, in bytes.
@@ -3739,6 +3893,17 @@ mod tests {
         assert!(Ornament::Number.draws_ink());
     }
 
+    /// Measure these on the laying-out threads.
+    fn on_threads(tasks: &[MeasureTask]) -> Vec<(usize, BlockMeasure)> {
+        let queued = tasks.iter().cloned().map(PoolTask::Measure).collect();
+        on_layout_threads(queued)
+            .expect("the laying-out threads started")
+            .expect("measured on the threads")
+            .into_iter()
+            .filter_map(measured_answer)
+            .collect()
+    }
+
     /// Blocks enough to be dealt round-robin across every queue.
     fn measure_tasks(count: usize) -> Vec<MeasureTask> {
         let typography = Arc::new(plain());
@@ -3776,9 +3941,7 @@ mod tests {
             Ok(done)
         })
         .expect("measured on this thread");
-        let mut there = measure_on_threads(&tasks)
-            .expect("the measuring threads started")
-            .expect("measured on the threads");
+        let mut there = on_threads(&tasks);
         there.sort_by_key(|(index, _)| *index);
 
         assert_eq!(there.len(), here.len(), "every block came back");
@@ -3792,9 +3955,7 @@ mod tests {
     fn every_block_comes_back_once_and_says_which_it_is() {
         let tasks = measure_tasks(60);
 
-        let mut answered = measure_on_threads(&tasks)
-            .expect("the measuring threads started")
-            .expect("measured on the threads")
+        let mut answered = on_threads(&tasks)
             .into_iter()
             .map(|(index, _)| index)
             .collect::<Vec<usize>>();
@@ -4352,7 +4513,7 @@ mod tests {
     }
 
     /// The regression that made cutting slower than not cutting (6.10).
-    /// [`LayoutWraps`] built a layout for every long paragraph on every update,
+    /// The wrap search built a layout for every long paragraph on every update,
     /// so a keystroke anywhere in the document paid to lay all of them out — a
     /// floor of 205ms on the measurement sample, under an edit of one
     /// character.
