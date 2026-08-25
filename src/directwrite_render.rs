@@ -54,8 +54,8 @@ use windows::{
                 DWRITE_INLINE_OBJECT_METRICS, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING,
                 DWRITE_LINE_SPACING_METHOD_PROPORTIONAL, DWRITE_MEASURING_MODE_NATURAL,
                 DWRITE_OVERHANG_METRICS, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
-                DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_RANGE, DWriteCreateFactory,
-                IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
+                DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
+                DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
                 IDWriteInlineObject_Impl, IDWriteLocalizedStrings, IDWriteTextFormat,
                 IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTextRenderer,
             },
@@ -74,11 +74,11 @@ use windows::{
 };
 
 use crate::text_blocks::{
-    AskedLine, BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, DEFAULT_INK, Emphasis,
-    FlowOrder, LineInfo, LineMarker, LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL,
-    Ornament, PreparedWraps, RecordedWraps, StyleRun, StyledText, TileSpan, Typography,
-    block_flow_bound, cells_per_line, line_runs, place_blocks, split_blocks, style_runs,
-    wrapping_list_lines,
+    Align, AskedLine, BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, BoxWidth,
+    DEFAULT_INK, Emphasis, FlowOrder, LineInfo, LineMarker, LineOrnament, LineRun, LineStyle,
+    LongLine, MAX_HEADING_LEVEL, Marks, Ornament, PreparedWraps, RecordedWraps, StyleRun,
+    StyledText, TileSpan, Typography, block_flow_bound, cells_per_line, line_runs, place_blocks,
+    split_blocks, style_runs, table_alignments, table_cells, tables, wrapping_list_lines,
 };
 
 /// Which way the text runs.
@@ -622,14 +622,24 @@ fn apply_marker_boxes(
     };
     let marker = box_of(0.0);
     let whole_line = box_of(typography.indent_step());
+    // Every box built here is kept until the call returns.
+    let mut built = Vec::new();
     for run in runs {
         let Some(ornament) = run.ornament else {
             continue;
         };
-        let object = if ornament.keeps_room() {
-            &whole_line
-        } else {
-            &marker
+        // 要件 7.3.2: **a table's boxes are the ones built per run.** Every
+        // marker begins its text at the same step and can share one object; no
+        // two cells of a table can, because what the box holds is what is left
+        // of the column before it — and the box over the delimiter row is as
+        // wide as the whole table (技術検証 7.7).
+        let object = match ornament.width() {
+            Some(width) => {
+                built.push(box_of(width.along()));
+                built.last().expect("just pushed")
+            }
+            None if ornament.keeps_room() => &whole_line,
+            None => &marker,
         };
         let range = DWRITE_TEXT_RANGE {
             startPosition: run.utf16_start,
@@ -640,6 +650,472 @@ fn apply_marker_boxes(
         unsafe { layout.SetInlineObject(object, range)? };
     }
     Ok(())
+}
+
+/// Which of the document's logical lines each block covers.
+///
+/// A block ends just after a newline, so it holds exactly as many logical lines
+/// as it has newlines — except a last block that does not end in one, which
+/// holds one more. **The cursor advances by the breaks and not by the lines
+/// covered**: a piece cut out of the middle of a long line covers that line
+/// without finishing it, so the next piece is still on the same one.
+///
+/// Counted forwards once for the whole document rather than looked up per
+/// block, which costs one pass over the text and not one scan per block.
+fn block_line_ranges(text: &str, spans: &[BlockSpan]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::with_capacity(spans.len());
+    let mut cursor = 0;
+    for span in spans {
+        let block_text = &text[span.byte_start..span.byte_end];
+        let breaks = block_text.matches('\n').count();
+        let lines = if block_text.ends_with('\n') {
+            breaks
+        } else {
+            breaks + 1
+        };
+        ranges.push(cursor..cursor + lines);
+        cursor += breaks;
+    }
+    ranges
+}
+
+/// One block's text with its own slice of the document's per-line attributes.
+///
+/// **The boxes come too.** This is the styling the block is measured with and
+/// the styling it is drawn with; a block measured without its boxes would be
+/// placed at a size it is not shown at.
+fn block_styling<'a>(
+    styled: StyledText<'a>,
+    span: &BlockSpan,
+    lines: &Range<usize>,
+) -> StyledText<'a> {
+    let text = &styled.text[span.byte_start..span.byte_end];
+    let count = lines.end - lines.start;
+    let levels = styled.lines.get(lines.start..).unwrap_or(&[]);
+    let levels = &levels[..count.min(levels.len())];
+    let spans = styled.spans.get(lines.start..).unwrap_or(&[]);
+    let spans = &spans[..count.min(spans.len())];
+    let markers = styled.markers.get(lines.start..).unwrap_or(&[]);
+    let markers = &markers[..count.min(markers.len())];
+    StyledText::marked(text, levels, spans).with_markers(markers)
+}
+
+/// How wide the gap between two columns of a table is, as a fraction of the
+/// font size (要件 7.3.2).
+///
+/// **One character of the body face.** It is the gap a writer already leaves by
+/// hand when writing ` | `, and it reads as a boundary between two columns
+/// without a rule drawn between them.
+const TABLE_GUTTER: f32 = 1.0;
+
+/// The box a cell is measured in: wide enough that nothing wraps inside it.
+///
+/// A cell is measured on a line of its own, and what is wanted is the width its
+/// text asks for — so the box must never be the thing that decides it.
+const CELL_BOX: f32 = 1.0e6;
+
+/// One cell of a table row, measured (要件 7.3.2).
+///
+/// The offsets are UTF-16 units of the row's own line. **The padding is not
+/// part of the text**: what a writer typed around a bar is the writer lining
+/// the source up, and it goes under the box with the bar.
+struct MeasuredCell {
+    /// The bar that opens the cell.
+    bar: u32,
+    /// Where the cell's text begins and ends once its padding is off.
+    text_start: u32,
+    text_end: u32,
+    /// Where what is shown of it ends, which is `text_end` until a narrowed
+    /// column takes the tail off (要件 7.3.2).
+    shown_end: u32,
+    /// How far the shown part reaches along the line axis.
+    along: f32,
+    /// The cell's own text, kept so that the part that fits can be measured
+    /// again once the columns are known.
+    text: String,
+    /// What that text has marked, in the cell's own units.
+    marks: Vec<StyleRun>,
+}
+
+/// How many UTF-16 units `text` is.
+fn utf16_units(text: &str) -> u32 {
+    text.encode_utf16().count() as u32
+}
+
+/// One cell's text laid out on a line of its own, in a box `room` across
+/// (要件 7.3.2).
+///
+/// **The spec a cell is measured with is the spec it is drawn with.** A cell
+/// measured plain and drawn bold is a column that does not line up — the same
+/// rule that made `WrapPoints::line_starts` take a whole `LongLine` (6.10).
+fn cell_layout(
+    graphics: &Graphics,
+    format: &IDWriteTextFormat,
+    typography: &Typography,
+    mode: WritingMode,
+    text: &str,
+    runs: &[StyleRun],
+    room: f32,
+) -> Result<IDWriteTextLayout> {
+    let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+    // The box is given on the two axes and handed over as a width and a height,
+    // which way round depending on the mode. **The flow bound is never the
+    // question here**: a cell is one line, and what is asked is how far along
+    // that line its text reaches.
+    let (max_width, max_height) = mode.to_screen(CELL_BOX, room);
+    // SAFETY: The UTF-16 buffer stays alive across CreateTextLayout, and the
+    // layout owns everything it needs afterwards.
+    let layout = unsafe {
+        graphics
+            .dwrite
+            .CreateTextLayout(&utf16, format, max_width, max_height)?
+    };
+    apply_typography(&layout, typography, runs, utf16.len() as u32)?;
+    Ok(layout)
+}
+
+/// How far one cell's text reaches along the line axis, given room enough for
+/// all of it.
+///
+/// **DirectWrite answers in screen terms, so which of the two is the answer
+/// depends on the mode** — a cell's text runs across the screen in a horizontal
+/// pane and down it in a vertical one. Reading the width in both left every
+/// cell measured as the thickness of its own line, which is the same for all of
+/// them: the columns then had nothing to correct by, and each row's second
+/// column began wherever its first cell happened to end.
+fn cell_along(
+    graphics: &Graphics,
+    format: &IDWriteTextFormat,
+    typography: &Typography,
+    mode: WritingMode,
+    text: &str,
+    runs: &[StyleRun],
+) -> Result<f32> {
+    if text.is_empty() {
+        return Ok(0.0);
+    }
+    let layout = cell_layout(graphics, format, typography, mode, text, runs, CELL_BOX)?;
+    let mut metrics = DWRITE_TEXT_METRICS::default();
+    // SAFETY: The layout is alive and the metrics are written into our own
+    // storage.
+    unsafe { layout.GetMetrics(&mut metrics)? };
+    let (_, along) = mode.to_axes(metrics.width, metrics.height);
+    Ok(along)
+}
+
+/// How much of one cell's text a column `room` across has space for, in UTF-16
+/// units of the cell (要件 7.3.2).
+///
+/// **Asked of the wrapping rather than worked out.** Where a line can be cut is
+/// DirectWrite's business — a cluster is not always a character, and a Latin
+/// word does not break in the middle — so the cell is laid out in the room it
+/// has and the first line is what fits. Any trailing space at that cut belongs
+/// to neither side and is left with the part that goes.
+fn cell_fits(
+    graphics: &Graphics,
+    format: &IDWriteTextFormat,
+    typography: &Typography,
+    mode: WritingMode,
+    text: &str,
+    runs: &[StyleRun],
+    room: f32,
+) -> Result<u32> {
+    let layout = cell_layout(graphics, format, typography, mode, text, runs, room)?;
+    let mut count = 0;
+    // SAFETY: Asked with no buffer, which is how DirectWrite reports the count
+    // it needs; the error that comes back with it is the answer.
+    let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
+    if count == 0 {
+        return Ok(0);
+    }
+    let mut metrics = vec![DWRITE_LINE_METRICS::default(); count as usize];
+    // SAFETY: The buffer is the length DirectWrite just asked for.
+    unsafe { layout.GetLineMetrics(Some(&mut metrics), &mut count)? };
+    let first = metrics[0];
+    Ok(first.length.saturating_sub(first.trailingWhitespaceLength))
+}
+
+/// Where each column of a table begins across the line axis, and how far the
+/// whole of it reaches (要件 7.3.2).
+///
+/// **The gap after a column is the gutter, except at the table's edge, where it
+/// is the page's own pad.** The bar that closes a row leaves an empty cell
+/// behind, and the box over that bar is the table's far-side padding rather
+/// than one more gutter — a gutter there makes every row wider than the table
+/// drawn under it, and the row then wraps to a second line. **It wrapped in a
+/// vertical pane and not in a horizontal one**, because the overflow falls at
+/// the end of the row and there is nothing after it to carry down.
+///
+/// **One walk, read by everything**: whether the table has to be narrowed, how
+/// wide the rule under its header is, and where each box carries its cell. A
+/// second opinion anywhere here is a table drawn at one width and set at
+/// another.
+fn column_heads(widths: &[f32], pad: f32, gutter: f32) -> (Vec<f32>, f32) {
+    // The last column anything reached. Past it there is nothing to separate,
+    // so nothing is added and every further column begins at the same edge.
+    let last = widths.iter().rposition(|width| *width > 0.0);
+    let mut heads = Vec::with_capacity(widths.len());
+    let mut head = pad;
+    for (column, width) in widths.iter().enumerate() {
+        heads.push(head);
+        head += width
+            + match last {
+                Some(last) if column < last => gutter,
+                Some(last) if column == last => pad,
+                _ => 0.0,
+            };
+    }
+    (heads, head)
+}
+
+/// How far into its column a cell's text is set, as the delimiter row said
+/// (要件 7.3.2).
+///
+/// **The slack, shared out.** A column is as wide as its widest cell, so every
+/// other cell has room over; where that room goes is the whole of what `:---`,
+/// `---:` and `:---:` decide. **The box before the cell carries it** — nothing
+/// else can, because the text itself has no idea how wide its column is.
+fn cell_offset(align: Align, column: f32, along: f32) -> f32 {
+    let slack = (column - along).max(0.0);
+    match align {
+        Align::Start => 0.0,
+        Align::Center => slack * 0.5,
+        Align::End => slack,
+    }
+}
+
+/// What one cell's own stretch of its line has marked, moved to be relative to
+/// the cell (要件 7.3.2).
+fn cell_marks(styled: StyledText<'_>, line: usize, start: u32, end: u32) -> Vec<StyleRun> {
+    styled
+        .marks_at(line)
+        .iter()
+        .filter_map(|emphasis| {
+            let from = emphasis.utf16_start.max(start);
+            let to = (emphasis.utf16_start + emphasis.utf16_len).min(end);
+            (from < to).then_some(StyleRun {
+                utf16_start: from - start,
+                utf16_len: to - from,
+                heading_level: 0,
+                marks: emphasis.marks,
+                ornament: None,
+            })
+        })
+        .collect()
+}
+
+/// The boxes that carry a table's cells to the heads of their columns
+/// (要件 7.3.2).
+///
+/// **The one thing about a block that its own text and some arithmetic cannot
+/// decide.** A column is as wide as the widest cell anywhere in it, and how
+/// wide a cell is only DirectWrite knows. What comes back is ordinary
+/// [`StyleRun`]s, so the widths travel with every other run — into the cache
+/// key, and onto the measuring threads — rather than beside them (技術検証 7.7).
+///
+/// Each box covers **the padding around one bar**: the spaces left after the
+/// previous cell, the bar itself, and the spaces before this one. Its width is
+/// what is left of the previous column plus the gutter, so **a box depends on
+/// the column before it and on nothing else** — not on how far along the row it
+/// sits — and every cell's text begins exactly at its column's head whatever
+/// padding the writer typed.
+fn table_runs(
+    graphics: &mut Graphics,
+    styled: StyledText<'_>,
+    typography: &Typography,
+    mode: WritingMode,
+    line_box: f32,
+) -> Result<Vec<StyleRun>> {
+    // **A vertical pane shows a table as it was written** (初期版の限界、
+    // 技術検証 7.7). Everything a table's geometry rests on is the width of a
+    // box, and **DirectWrite does not give an inline object a reliable advance
+    // in vertical writing**: measured against boxes of 11, 17.5, 28.5 and
+    // 380.5 units it advanced 11, 22, 22 and 380.5. Columns that line up only
+    // when their widths happen to fall on the em are columns that do not line
+    // up. 要件定義 §14 does not ask for a vertical table either way; what it
+    // rules out is setting one *horizontally* inside vertical text.
+    if matches!(mode, WritingMode::Vertical) {
+        return Ok(Vec::new());
+    }
+    let found = tables(styled);
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
+    let format = graphics.text_format(typography, mode)?;
+    let gutter = typography.font_size * TABLE_GUTTER;
+    let pad = gutter * 0.5;
+    let mut runs = Vec::new();
+    for table in &found {
+        let mut measured: Vec<Vec<MeasuredCell>> = Vec::with_capacity(table.rows.len());
+        for row in &table.rows {
+            let line = &styled.text[row.byte_start..row.byte_end];
+            let mut cells = Vec::new();
+            for cell in table_cells(line) {
+                let text = &line[cell.byte_start..cell.byte_end];
+                let lead = text.len() - text.trim_start().len();
+                let text_start = cell.byte_start + lead;
+                let text_end = text_start + text.trim().len();
+                let start = utf16_units(&line[..text_start]);
+                let end = utf16_units(&line[..text_end]);
+                let marks = cell_marks(styled, row.line, start, end);
+                let text = line[text_start..text_end].to_owned();
+                let along = cell_along(graphics, &format, typography, mode, &text, &marks)?;
+                cells.push(MeasuredCell {
+                    bar: cell.bar_utf16,
+                    text_start: start,
+                    text_end: end,
+                    shown_end: end,
+                    along,
+                    text,
+                    marks,
+                });
+            }
+            measured.push(cells);
+        }
+
+        // **A row may hold more cells than the delimiter row named**, and the
+        // closing bar leaves an empty one at the end of every row: the columns
+        // are however many the widest row has, and one no cell reaches is no
+        // width.
+        let columns = measured.iter().map(Vec::len).max().unwrap_or(0);
+        let mut widths = (0..columns)
+            .map(|column| {
+                measured
+                    .iter()
+                    .filter_map(|cells| cells.get(column))
+                    .fold(0.0_f32, |widest, cell| widest.max(cell.along))
+            })
+            .collect::<Vec<f32>>();
+
+        // 要件 7.3.2: **a table wider than the pane is shrunk in proportion**
+        // (技術検証 7.7, decided 2026-08-25). The pads and the gutters are what
+        // they are — they are the table being a table — so the whole of what
+        // has to give is the columns, and they give in proportion: a column
+        // twice as wide loses twice as much.
+        //
+        // **Not by setting the table smaller**, which would make a wide table
+        // the one place on the page where the writer's font size does not hold;
+        // and **not by wrapping inside the cells**, which would give a row a
+        // height that its own line no longer decides — every whole-line mark on
+        // the page stands on that (7.1).
+        let natural: f32 = widths.iter().sum();
+        let (_, reach) = column_heads(&widths, pad, gutter);
+        if reach > line_box && natural > 0.0 {
+            let scale = ((line_box - (reach - natural)) / natural).clamp(0.0, 1.0);
+            for width in &mut widths {
+                *width *= scale;
+            }
+        }
+
+        // What a narrowed column has no room for comes off the page. **Asked
+        // cell by cell**, because a column is only ever as narrow as its widest
+        // cell needed it to be: in a table that fits, nothing here asks
+        // DirectWrite anything at all.
+        for cells in &mut measured {
+            for (column, cell) in cells.iter_mut().enumerate() {
+                if cell.along <= widths[column] {
+                    continue;
+                }
+                let fits = cell_fits(
+                    graphics,
+                    &format,
+                    typography,
+                    mode,
+                    &cell.text,
+                    &cell.marks,
+                    widths[column],
+                )?;
+                let kept = byte_at_utf16(&cell.text, fits);
+                let along = cell_along(
+                    graphics,
+                    &format,
+                    typography,
+                    mode,
+                    &cell.text[..kept],
+                    &cell.marks,
+                )?;
+                cell.shown_end = cell.text_start + fits;
+                cell.along = along;
+            }
+        }
+
+        // 要件 7.3.2: how each column is set, as its delimiter row said. A
+        // column the row never named is set at its head, which is what an
+        // ordinary `---` asks for anyway.
+        let aligns = table
+            .rule
+            .and_then(|rule| table_alignments(&styled.text[rule.byte_start..rule.byte_end]))
+            .unwrap_or_default();
+        let offset = |column: usize, along: f32| {
+            let align = aligns.get(column).copied().unwrap_or_default();
+            cell_offset(align, widths[column], along)
+        };
+
+        // **The rule under the header is drawn across a box of exactly the
+        // table's reach**, so it is the width of the thing it belongs to rather
+        // than the width of the page (要件 7.3.2). Taken again because the
+        // columns may have been narrowed since.
+        let (heads, edge) = column_heads(&widths, pad, gutter);
+        if let Some(rule) = table.rule {
+            runs.push(StyleRun {
+                utf16_start: rule.utf16_start,
+                utf16_len: utf16_units(&styled.text[rule.byte_start..rule.byte_end]),
+                heading_level: 0,
+                marks: Marks::default(),
+                ornament: Some(Ornament::TableRule(BoxWidth::new(edge))),
+            });
+        }
+
+        for (row, cells) in table.rows.iter().zip(&measured) {
+            for (column, cell) in cells.iter().enumerate() {
+                // Where this cell's text has to begin, and how far the row had
+                // got when the box opened. **Both are absolute**, so every box
+                // carries the row to the head of its own column whatever
+                // happened before it, and an error in one box cannot travel.
+                let head = heads[column] + offset(column, cell.along);
+                let (from, reached) = match column.checked_sub(1) {
+                    None => (cell.bar, 0.0),
+                    // **From where the cell before stopped being shown**, so
+                    // the tail a narrowed column had no room for goes under
+                    // this same box. A box of its own would be a box of no
+                    // width, and a box of no width still takes a line's worth
+                    // of room in a vertical pane (技術検証 7.7).
+                    Some(before) => (
+                        cells[before].shown_end,
+                        heads[before] + offset(before, cells[before].along) + cells[before].along,
+                    ),
+                };
+                let along = (head - reached).max(0.0);
+                runs.push(StyleRun {
+                    utf16_start: row.utf16_start + from,
+                    utf16_len: cell.text_start - from,
+                    heading_level: 0,
+                    marks: Marks::default(),
+                    ornament: Some(Ornament::Bar(BoxWidth::new(along))),
+                });
+            }
+            // **A row need not close with a bar.** When it does not and its
+            // last cell was cut, there is no box after it to hide the tail, so
+            // one stands there instead — as wide as the paper left between that
+            // cell and the table's edge.
+            if let Some((column, cell)) = cells
+                .iter()
+                .enumerate()
+                .next_back()
+                .filter(|(_, cell)| cell.shown_end < cell.text_end)
+            {
+                let shown_end = heads[column] + offset(column, cell.along) + cell.along;
+                runs.push(StyleRun {
+                    utf16_start: row.utf16_start + cell.shown_end,
+                    utf16_len: cell.text_end - cell.shown_end,
+                    heading_level: 0,
+                    marks: Marks::default(),
+                    ornament: Some(Ornament::Bar(BoxWidth::new(edge - shown_end))),
+                });
+            }
+        }
+    }
+    Ok(runs)
 }
 
 /// The byte offset of a UTF-16 position within `text`.
@@ -673,8 +1149,15 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
         Ornament::TaskDone => "☑".to_owned(),
         // A box that is there only to hide what it covers. The stroke across a
         // rule and the ground under a fence are the line's, not the box's, and
-        // what an indent stands for is the block's.
-        Ornament::Hidden | Ornament::Indent => String::new(),
+        // what an indent stands for is the block's. A table's bar stands for
+        // the gap between two columns, which is room and not ink.
+        //
+        // **A table's rule has no word either** — it is a shape, drawn across
+        // the box rather than set in it, and `draw_marker_ink` takes it before
+        // it ever asks what goes inside.
+        Ornament::Hidden | Ornament::Indent | Ornament::Bar(_) | Ornament::TableRule(_) => {
+            String::new()
+        }
         Ornament::Number => {
             let start = byte_at_utf16(block_text, run.utf16_start);
             let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
@@ -703,6 +1186,7 @@ fn draw_marker_ink(
     origin: windows_numerics::Vector2,
     mode: WritingMode,
     indent: f32,
+    stroke: f32,
 ) -> Result<()> {
     // A box is one cluster and hit-tests to one region (技術検証 4.12). The
     // room for a few more costs nothing and keeps a surprise from becoming an
@@ -735,6 +1219,14 @@ fn draw_marker_ink(
             continue;
         }
         let region = regions[0];
+        // 要件 7.3.2: the rule under a table's header. **A shape rather than a
+        // word**, and the only ornament drawn across its box rather than set
+        // inside it: the box was built as wide as the table, so the rule is the
+        // width of what it belongs to (技術検証 7.7).
+        if matches!(ornament, Ornament::TableRule(_)) {
+            draw_table_rule(target, brush, &region, mode, stroke);
+            continue;
+        }
         let ink = marker_ink(ornament, text, run);
         let utf16 = ink.encode_utf16().collect::<Vec<u16>>();
         // **The box takes no room now**, so what comes back is a sliver at the
@@ -768,6 +1260,57 @@ fn draw_marker_ink(
         }
     }
     Ok(())
+}
+
+/// How thick a drawn rule is, at the size the writer set (要件 7.3.2).
+///
+/// **One answer for both.** The stroke across a `---` line and the rule under a
+/// table's header are the same mark drawn the same way; only how far each
+/// reaches differs, and a second opinion about the weight would show as two
+/// kinds of rule on one page.
+fn rule_stroke(font_size: f32) -> f32 {
+    (font_size * 0.06).round().max(1.0)
+}
+
+/// Draw the rule under a table's header, across the box that stands in for the
+/// delimiter row (要件 7.3.2).
+///
+/// **Halfway along the room the row took**, which is what a `---` rule already
+/// does with its own line — so the two are the same mark drawn the same way,
+/// and the only difference is how far each reaches: a `---` crosses the page,
+/// and this crosses the table.
+///
+/// **Nothing here asks which way the text runs.** The region answers that: its
+/// flow extent is the row's height and its line extent is the table's width,
+/// whichever of the two is the screen's width.
+fn draw_table_rule(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    region: &DWRITE_HIT_TEST_METRICS,
+    mode: WritingMode,
+    stroke: f32,
+) {
+    let (flow_size, line_size) = mode.to_axes(region.width, region.height);
+    let (near_x, near_y) = mode.to_screen((flow_size - stroke) * 0.5, 0.0);
+    let (size_x, size_y) = mode.to_screen(stroke, line_size);
+    let left = region.left + near_x;
+    let top = region.top + near_y;
+    let rect = D2D_RECT_F {
+        left,
+        top,
+        right: left + size_x,
+        bottom: top + size_y,
+    };
+    // **The same strength as the bar beside a quote and the stroke across a
+    // rule**, and set back to full afterwards: the brush is the target's own
+    // and the text is drawn with it too.
+    // SAFETY: The brush and the target both outlive the calls, and the
+    // rectangle is read before the middle one returns.
+    unsafe {
+        brush.SetOpacity(ORNAMENT_ALPHA);
+        target.FillRectangle(&rect, brush);
+        brush.SetOpacity(1.0);
+    }
 }
 
 /// Whether a run's box has anything drawn in it.
@@ -895,7 +1438,7 @@ fn draw_line_ornaments(
         return;
     }
     let bar = (page.font_size * 0.14).round().max(2.0);
-    let stroke = (page.font_size * 0.06).round().max(1.0);
+    let stroke = rule_stroke(page.font_size);
     // The design's 4px against its 15px body, kept as the ratio so the ground
     // is rounded the same amount at any size the writer sets.
     let radius = (page.font_size * 0.27).round().max(2.0);
@@ -1732,7 +2275,6 @@ impl TextEngine {
         // A block measured on another thread comes back when it comes back, so
         // the order of the document is kept here rather than in the measuring.
         let mut measures: Vec<Option<BlockMeasure>> = vec![None; spans.len()];
-        let mut block_lines = Vec::with_capacity(spans.len());
         let mut live_measure_keys = HashSet::with_capacity(spans.len());
         let mut live_layout_keys = HashSet::with_capacity(spans.len());
         let mut fresh_measures = Vec::new();
@@ -1742,52 +2284,52 @@ impl TextEngine {
         let mut tasks: Vec<MeasureTask> = Vec::new();
         let mut pending: HashMap<usize, PendingBlock> = HashMap::new();
 
+        let block_lines = block_line_ranges(text, &spans);
+        // 要件 7.3.2: this block's own box, narrowed by its indent. **The
+        // measurement has to be taken in it**, or the block is placed at a size
+        // it is not drawn at — and a table has to be brought inside the same
+        // one.
+        let block_boxes = spans
+            .iter()
+            .map(|span| (line_box - block_inset(span, &typography)).max(1.0))
+            .collect::<Vec<f32>>();
+        // 要件 7.3.2: **the one thing here that text and arithmetic cannot
+        // decide.** A table's column is as wide as the widest cell anywhere in
+        // it, and how wide a cell is only DirectWrite knows — so the tables are
+        // measured first, in one pass, and what comes back is ordinary style
+        // runs. A document with no table in it asks for nothing and never wakes
+        // the graphics at all (技術検証 7.7).
+        let mut bars: Vec<Vec<StyleRun>> = vec![Vec::new(); spans.len()];
+        if styled.lines.iter().any(|line| line.kind.is_table()) {
+            with_graphics(|graphics| {
+                for (index, span) in spans.iter().enumerate() {
+                    let block_styled = block_styling(styled, span, &block_lines[index]);
+                    bars[index] = table_runs(
+                        graphics,
+                        block_styled,
+                        &typography,
+                        mode,
+                        block_boxes[index],
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+
         // **Deciding what to measure needs no graphics at all.** Which blocks
         // the cache already answers, what ranges each one sets, how wide its box
         // is — all of it is text and arithmetic, and separating it from the
         // measuring is what lets the measuring go somewhere else.
         {
             let last_index = spans.len().saturating_sub(1);
-            // Which logical line each block starts on. Counted forwards rather
-            // than looked up, so it costs one pass over the text and not one
-            // scan per block.
-            let mut line_cursor = 0;
             for (index, span) in spans.iter().enumerate() {
                 let block_text = &text[span.byte_start..span.byte_end];
-                // A block ends just after a newline, so it holds exactly as many
-                // logical lines as it has newlines — except the last block of a
-                // document that does not end in one, which holds one more.
-                let breaks = block_text.matches('\n').count();
-                let lines = if block_text.ends_with('\n') {
-                    breaks
-                } else {
-                    breaks + 1
-                };
-                // Advanced by the newlines, not by the lines covered. A piece
-                // cut out of the middle of a long line covers that line without
-                // finishing it, so the next piece is still on the same one.
-                let advance = breaks;
-                let block_levels = styled.lines.get(line_cursor..).unwrap_or(&[]);
-                let block_levels = &block_levels[..lines.min(block_levels.len())];
-                let block_spans = styled.spans.get(line_cursor..).unwrap_or(&[]);
-                let block_spans = &block_spans[..lines.min(block_spans.len())];
-                let block_markers = styled.markers.get(line_cursor..).unwrap_or(&[]);
-                let block_markers = &block_markers[..lines.min(block_markers.len())];
-                let block_styled = StyledText::marked(block_text, block_levels, block_spans);
-                // **The boxes have to be here too.** This is the layout the
-                // block is measured with, and it is kept as the layout it is
-                // drawn with; measuring without them would place every block
-                // after a list at a size that is not the one on screen.
-                let block_styled = block_styled.with_markers(block_markers);
-                block_lines.push(line_cursor..line_cursor + lines);
-                line_cursor += advance;
+                let block_styled = block_styling(styled, span, &block_lines[index]);
 
-                let runs = style_runs(block_styled);
+                let mut runs = style_runs(block_styled);
+                runs.extend(std::mem::take(&mut bars[index]));
                 let keep_trailing_empty_line = index == last_index;
-                // 要件 7.3.2: this block's own box, narrowed by its indent.
-                // **The measurement has to be taken in it**, or the block is
-                // placed at a size it is not drawn at.
-                let block_box = (line_box - block_inset(span, &typography)).max(1.0);
+                let block_box = block_boxes[index];
                 let key = measure_key(
                     block_text,
                     &runs,
@@ -2114,23 +2656,62 @@ impl TextEngine {
         marked.with_markers(self.block_markers(block_index))
     }
 
+    /// The box one block's text is set in, across the line axis (要件 7.3.2).
+    ///
+    /// The page less both margins less this block's own indent — the same
+    /// figure the update measured it at, which is what keeps the layout built
+    /// here the layout the block was placed by.
+    fn block_line_box(&self, span: &BlockSpan) -> f32 {
+        let inset = block_inset(span, &self.typography);
+        (self.line_extent as f32 - self.margin * 2.0 - inset).max(1.0)
+    }
+
+    /// Every range one block sets, the boxes a table asked for included
+    /// (要件 7.3.2).
+    ///
+    /// **One place, because three had to agree.** The layout is built with
+    /// these ranges, what stands in each box is drawn from them, and the tile
+    /// signature is taken over them. Two of the three read `style_runs` alone
+    /// while the third added the table's boxes, and the result was a table
+    /// whose columns lined up under a rule that was never drawn: the layout had
+    /// the boxes, and the pass that draws into them had never heard of them.
+    fn block_runs(&self, graphics: &mut Graphics, block_index: usize) -> Result<Vec<StyleRun>> {
+        let styled = self.block_styled(block_index);
+        let mut runs = style_runs(styled);
+        let Some(block) = self.plan.blocks.get(block_index) else {
+            return Ok(runs);
+        };
+        let line_box = self.block_line_box(&block.span);
+        runs.extend(table_runs(
+            graphics,
+            styled,
+            &self.typography,
+            self.mode,
+            line_box,
+        )?);
+        Ok(runs)
+    }
+
     fn layout_for(
         &mut self,
         graphics: &mut Graphics,
         block_index: usize,
     ) -> Result<IDWriteTextLayout> {
-        let (byte_start, byte_end, max_flow_size, inset) = {
+        let (byte_start, byte_end, max_flow_size, line_box) = {
             let block = &self.plan.blocks[block_index];
             (
                 block.span.byte_start,
                 block.span.byte_end,
                 block.max_flow_size,
-                block_inset(&block.span, &self.typography),
+                self.block_line_box(&block.span),
             )
         };
-        let runs = style_runs(self.block_styled(block_index));
+        // 要件 7.3.2: the table's boxes are measured again here rather than
+        // kept. **The same measurement either way** — the cells and the spec
+        // are what they were — so the key below is the key the update put on
+        // this block's measurement.
+        let runs = self.block_runs(graphics, block_index)?;
         let block_text = &self.text[byte_start..byte_end];
-        let line_box = (self.line_extent as f32 - self.margin * 2.0 - inset).max(1.0);
         let key = layout_key(block_text, &runs, &self.typography, line_box);
         if let Some(position) = self.layouts.iter().position(|(cached, _)| *cached == key) {
             let entry = self.layouts.remove(position);
@@ -2254,7 +2835,7 @@ impl TextEngine {
                 // was given last time belongs to a render target that may since
                 // have been rebuilt. Body runs are left alone: they are drawn
                 // with the brush handed to `DrawTextLayout`.
-                let runs = style_runs(self.block_styled(span.block_index));
+                let runs = self.block_runs(graphics, span.block_index)?;
                 // SAFETY: the layout and the brushes both outlive the draw.
                 unsafe {
                     for run in &runs {
@@ -2330,7 +2911,16 @@ impl TextEngine {
                     let text = &self.text[block.span.byte_start..block.span.byte_end];
                     let indent = self.typography.indent_step();
                     draw_marker_ink(
-                        &target, &brush, &format, &layout, &runs, text, origin, mode, indent,
+                        &target,
+                        &brush,
+                        &format,
+                        &layout,
+                        &runs,
+                        text,
+                        origin,
+                        mode,
+                        indent,
+                        rule_stroke(self.typography.font_size),
                     )?;
                 }
                 // SAFETY: Paired with BeginDraw above.
@@ -2387,6 +2977,12 @@ impl TextEngine {
             self.text[block.span.byte_start..block.span.byte_end].hash(&mut hasher);
             // Block-local, like the underline below: the same heading drawn at
             // the same size is the same pixels wherever it sits.
+            // **Without the table's boxes, and that is not an omission**
+            // (要件 7.3.2). A column's width is a function of this block's own
+            // text, the spec and the mode, and all three are already hashed
+            // above — so a signature that carries them says nothing the rest of
+            // it does not. Measuring cells here would cost a DirectWrite call
+            // per tile per frame to learn what is already known (技術検証 7.7).
             let runs = style_runs(self.block_styled(tile.block_index));
             hash_style_runs(&runs, &self.typography, &mut hasher);
             // 要件 7.3.2: and the marks that belong to whole lines. **Nothing
@@ -3211,6 +3807,10 @@ mod tests {
     /// The pane extent along the line axis every test lays text out in.
     const LINE_EXTENT: u32 = 520;
 
+    /// The box a block of that pane is set in, which is what a table has to
+    /// come inside (要件 7.3.2). The margin is `margin_for(22.0)`.
+    const PAGE: f32 = LINE_EXTENT as f32 - 33.0 * 2.0;
+
     fn engine_for(text: &str, font_size: f32) -> TextEngine {
         engine_in(WritingMode::Vertical, text, font_size)
     }
@@ -3371,6 +3971,274 @@ mod tests {
 
     fn plain() -> Typography {
         Typography::new(22.0)
+    }
+
+    /// A preview pane's styling for `source`, the way the editor hands it over.
+    fn preview_of(source: &str) -> (crate::document::PreviewDocument, Vec<LineStyle>) {
+        (
+            crate::document::PreviewDocument::from_source(source),
+            crate::document::line_styles(source),
+        )
+    }
+
+    /// Where the caret sits along the line axis at the first character of
+    /// `word`, which every test below uses to ask where a column begins.
+    ///
+    /// **Through `to_axes` rather than reading `x`**, because the line axis is
+    /// the screen's x in one mode and its y in the other — which is the very
+    /// thing these tests are here to hold.
+    fn line_axis_at(engine: &mut TextEngine, mode: WritingMode, text: &str, word: &str) -> f32 {
+        let byte = text.find(word).expect("the word is in the preview");
+        let caret = engine
+            .caret_geometry(utf16_units(&text[..byte]))
+            .expect("DirectWrite hit test");
+        mode.to_axes(caret.x, caret.y).1
+    }
+
+    /// 要件 7.3.2: **every cell of a column begins at one place**, whatever the
+    /// cells above it hold and whatever padding the writer typed around the
+    /// bars. This is the whole of what the boxes over a table's bars are for
+    /// (技術検証 7.7).
+    ///
+    /// **A cell's own extent is how far its text runs**, which is the screen's
+    /// width in one writing direction and its height in the other. Measured on
+    /// the wrong one, every cell comes back as the thickness of its own line —
+    /// the same for all of them — and the columns have nothing to correct by.
+    #[test]
+    fn a_column_begins_at_one_place_in_every_row() {
+        let source =
+            "| 短 | いろは |\n| --- | --- |\n| とても長い見出しの語 | にほへ |\n|狭|とちり |\n";
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let text = preview.text.clone();
+        let mode = WritingMode::Horizontal;
+        let mut engine = engine_set(mode, styled, &plain());
+
+        let first = line_axis_at(&mut engine, mode, &text, "いろは");
+        let second = line_axis_at(&mut engine, mode, &text, "にほへ");
+        let third = line_axis_at(&mut engine, mode, &text, "とちり");
+
+        assert!(
+            (first - second).abs() <= 0.5 && (first - third).abs() <= 0.5,
+            "the second column begins at {first}, {second} and {third}"
+        );
+        // And the first column too, whose cells are padded differently.
+        let short = line_axis_at(&mut engine, mode, &text, "短");
+        let narrow = line_axis_at(&mut engine, mode, &text, "狭");
+        assert!(
+            (short - narrow).abs() <= 0.5,
+            "the first column begins at {short} and {narrow}"
+        );
+    }
+
+    /// **A vertical pane shows a table as it was written** (初期版の限界,
+    /// 技術検証 7.7). Every part of a table's geometry is the width of a box,
+    /// and DirectWrite does not give an inline object a reliable advance in
+    /// vertical writing — so nothing stands over a vertical table at all,
+    /// exactly as nothing stands over a source pane.
+    #[test]
+    fn a_vertical_pane_leaves_a_table_as_it_was_written() {
+        let source = "| 短 | いろは |\n| --- | --- |\n| 狭 | とちり |\n";
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+
+        let runs = with_graphics(|graphics| {
+            table_runs(graphics, styled, &plain(), WritingMode::Vertical, PAGE)
+        })
+        .expect("DirectWrite cell measurement");
+
+        assert!(runs.is_empty());
+    }
+
+    /// 要件 7.3.2: **the rule under a header is as wide as its table, not as
+    /// wide as the page.** That is the whole of what the box over the delimiter
+    /// row is built for — a `LineOrnament` would have crossed the page, and a
+    /// full-width line under a small table is a `---` (技術検証 7.7).
+    #[test]
+    fn the_rule_under_a_header_is_as_wide_as_its_table() {
+        let source = "| 短 | いろは |\n| --- | --- |\n| 狭 | とちり |\n";
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+
+        let runs = with_graphics(|graphics| {
+            table_runs(graphics, styled, &plain(), WritingMode::Horizontal, PAGE)
+        })
+        .expect("DirectWrite cell measurement");
+
+        let rules = runs
+            .iter()
+            .filter_map(|run| match run.ornament {
+                Some(Ornament::TableRule(width)) => Some((run, width.along())),
+                _ => None,
+            })
+            .collect::<Vec<(&StyleRun, f32)>>();
+        assert_eq!(rules.len(), 1, "one rule per table");
+        let (run, along) = rules[0];
+        // The box covers the delimiter row whole, so none of `| --- | --- |`
+        // is drawn.
+        assert_eq!(run.utf16_len, utf16_units("| --- | --- |"));
+        let page = LINE_EXTENT as f32 - margin_for(plain().font_size) * 2.0;
+        assert!(
+            along > plain().font_size && along < page * 0.5,
+            "the rule is {along} wide, against a page of {page}"
+        );
+    }
+
+    /// Where the caret sits along the line axis just past `word`, which is
+    /// where a column set with `---:` has to end.
+    fn line_axis_after(engine: &mut TextEngine, mode: WritingMode, text: &str, word: &str) -> f32 {
+        let byte = text.find(word).expect("the word is in the preview") + word.len();
+        let caret = engine
+            .caret_geometry(utf16_units(&text[..byte]))
+            .expect("DirectWrite hit test");
+        mode.to_axes(caret.x, caret.y).1
+    }
+
+    /// 要件 7.3.2: `---:` sets a column against its far edge, so what lines up
+    /// is where its cells **end**. The slack a cell has over its column is the
+    /// same slack either way; all the delimiter row decides is which box
+    /// carries it (技術検証 7.7).
+    #[test]
+    fn a_column_set_against_its_end_lines_its_cells_up_there() {
+        let source = "| 右 | 見出し |\n| ---: | --- |\n| あ | いち |\n| ああああ | に |\n";
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let mut engine = engine_set(WritingMode::Horizontal, styled, &plain());
+        let text = preview.text.clone();
+
+        let short = line_axis_after(&mut engine, WritingMode::Horizontal, &text, "あ");
+        let long = line_axis_after(&mut engine, WritingMode::Horizontal, &text, "ああああ");
+        assert!(
+            (short - long).abs() <= 0.5,
+            "the column ends at {short} and {long}"
+        );
+        // And the second column, which the same row sets at its head, still
+        // begins at one place.
+        let first = line_axis_at(&mut engine, WritingMode::Horizontal, &text, "いち");
+        let second = line_axis_at(&mut engine, WritingMode::Horizontal, &text, "に");
+        assert!(
+            (first - second).abs() <= 0.5,
+            "the second column begins at {first} and {second}"
+        );
+    }
+
+    /// 要件 7.3.2: **the rule is actually drawn.** The list of runs the layout
+    /// is built from and the list the ink is drawn from were once built in two
+    /// different places, and the result was a table whose columns lined up
+    /// under a rule nobody ever drew — the boxes were on the layout and the
+    /// pass that draws into them had never heard of them. **Only the pixels
+    /// say this one**, which is why it is asked for here and not of
+    /// `table_runs`.
+    #[test]
+    fn the_rule_under_a_header_reaches_the_pixels() {
+        let source = "| 短 | いろは |\n| --- | --- |\n| 狭 | とちり |\n";
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let mut engine = engine_set(WritingMode::Horizontal, styled, &plain());
+        let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+
+        // The longest unbroken run of ink along one row of pixels. A mark laid
+        // at `ORNAMENT_ALPHA` over the paper lands near 187, so the threshold
+        // has to be above it; what tells the rule from an anti-aliased glyph
+        // edge is the length, not the strength.
+        let mut longest = 0_u32;
+        engine
+            .render_tiles(&tiles, None, |_, width, _, bgra| {
+                for row in bgra.chunks_exact(width as usize * 4) {
+                    let mut run = 0;
+                    for pixel in row.chunks_exact(4) {
+                        run = if pixel[2] < 200 { run + 1 } else { 0 };
+                        longest = longest.max(run);
+                    }
+                }
+            })
+            .expect("horizontal tile render");
+
+        // No glyph at this size is 60 pixels across in one unbroken row, and
+        // the document holds no `---`. **And the rule stops at the table**: a
+        // page-wide one would reach most of the line box, which is 454 here.
+        assert!(
+            (60..250).contains(&longest),
+            "the longest unbroken run of ink is {longest} pixels"
+        );
+    }
+
+    /// 要件 7.3.2: **a table wider than the pane is brought inside it.** The
+    /// columns give in proportion and a narrowed column's tail comes off the
+    /// page (技術検証 7.7, decided 2026-08-25) — **and no row wraps**, which is
+    /// what keeps a row's height its own line's business and every whole-line
+    /// mark on the page standing (7.1).
+    #[test]
+    fn a_table_wider_than_the_pane_is_brought_inside_it() {
+        let wide = "あ".repeat(40);
+        let source = format!("| {wide} | いろは |\n| --- | --- |\n| 狭 | にほへ |\n");
+        let (preview, styles) = preview_of(&source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+
+        let runs = with_graphics(|graphics| {
+            table_runs(graphics, styled, &plain(), WritingMode::Horizontal, PAGE)
+        })
+        .expect("DirectWrite cell measurement");
+        let reach = runs
+            .iter()
+            .find_map(|run| match run.ornament {
+                Some(Ornament::TableRule(width)) => Some(width.along()),
+                _ => None,
+            })
+            .expect("one rule per table");
+        // **A box that swallowed a tail is a wide one.** The padding around a
+        // bar is three characters at the most — a space, the bar, a space — so
+        // a box covering more than that is covering text nobody will see.
+        let swallowed = runs
+            .iter()
+            .filter(|run| matches!(run.ornament, Some(Ornament::Bar(_))) && run.utf16_len > 3)
+            .count();
+        assert!(
+            (reach - PAGE).abs() <= 0.5,
+            "the table reaches {reach} on a page of {PAGE}"
+        );
+        assert!(swallowed > 0, "the widest cells must lose their tails");
+
+        // And on the page itself: the second column still begins at one place,
+        // and the row ends inside the margin rather than past it.
+        let text = preview.text.clone();
+        let mode = WritingMode::Horizontal;
+        let mut engine = engine_set(mode, styled, &plain());
+        let first = line_axis_at(&mut engine, mode, &text, "いろは");
+        let second = line_axis_at(&mut engine, mode, &text, "にほへ");
+        assert!(
+            (first - second).abs() <= 0.5,
+            "the second column begins at {first} and {second}"
+        );
+        let far = LINE_EXTENT as f32 - 33.0;
+        let ends = line_axis_after(&mut engine, mode, &text, "にほへ");
+        assert!(ends <= far, "the row ends at {ends}, past {far}");
+        // **One visual line per row.** A table that had to wrap to fit would
+        // have more, and its rows would no longer be lines.
+        let lines = engine.plan.blocks[0].lines.len();
+        assert!(lines <= 4, "the table took {lines} visual lines for 3 rows");
+    }
+
+    /// 要件 7.3.1: the source pane shows the bars themselves, so nothing stands
+    /// over them — the same signal every other stand-in for markup reads.
+    #[test]
+    fn a_source_pane_gets_no_boxes_over_its_bars() {
+        let source = "| 短 | いろは |\n| --- | --- |\n";
+        let styles = crate::document::line_styles(source);
+        let styled = StyledText::new(source, &styles);
+
+        let runs = with_graphics(|graphics| {
+            table_runs(graphics, styled, &plain(), WritingMode::Horizontal, PAGE)
+        })
+        .expect("DirectWrite cell measurement");
+
+        assert!(runs.is_empty());
     }
 
     /// **The question the whole approach turns on.**

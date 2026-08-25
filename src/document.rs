@@ -1,6 +1,8 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::text_blocks::{Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament};
+use crate::text_blocks::{
+    Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, is_table_row, table_alignments,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DocumentStats {
@@ -1180,6 +1182,11 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
         // drawn across it and a fence has the block's ground reaching over it;
         // either way what stands in its place is a whole-line mark, and the
         // line keeps the room it takes (要件 7.3.2).
+        //
+        // **A table's delimiter row is not here**, though it is all marks too:
+        // its box has to be as wide as the table, and how wide that is only the
+        // measured cells say. It is built where they are measured, so that no
+        // two places have an opinion about the box over that line (技術検証 7.7).
         LineKind::Rule | LineKind::Fence => Ornament::Hidden,
         // 要件 7.3.2: the white space a writer typed to line a continuation up
         // under its item. **The style is what says it is that** — the same
@@ -1213,9 +1220,65 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
     })
 }
 
-/// How one line is set, given the fence the lines before it left open.
-fn line_style(line: &str, fence: &mut Option<char>, levels: &mut ListLevels) -> LineStyle {
-    match (*fence, fence_marker(line)) {
+/// Where a line stands in a table the lines before it opened (要件 7.3.2).
+///
+/// **The second thing besides a fence that a line cannot decide alone**
+/// (技術検証 7.1). A row of bars is a table only when a delimiter row follows
+/// the first one — otherwise it is a sentence with bars in it — and the rows
+/// after that one are rows because the delimiter row said so.
+#[derive(Clone, Copy)]
+enum TablePlace {
+    /// The header row has been read and the delimiter row comes next.
+    Delimiter,
+    /// Inside the rows under the delimiter row.
+    Body,
+}
+
+/// How a line a table reaches is set, and `None` for one no table reaches
+/// (要件 7.3.2).
+///
+/// `next` is the line after this one, and it is read in one case only: deciding
+/// whether a row of bars opens a table. **Nothing else here looks ahead**, and
+/// nothing looks further than one line.
+fn table_line(
+    line: &str,
+    next: &str,
+    levels: &mut ListLevels,
+    table: &mut Option<TablePlace>,
+) -> Option<LineStyle> {
+    let kind = match *table {
+        // The delimiter row itself. It is one because the header row was only
+        // read as a header on the strength of it.
+        Some(TablePlace::Delimiter) => {
+            *table = Some(TablePlace::Body);
+            LineKind::TableRule
+        }
+        Some(TablePlace::Body) if is_table_row(line) => LineKind::TableRow,
+        None if is_table_row(line) && table_alignments(next).is_some() => {
+            *table = Some(TablePlace::Delimiter);
+            LineKind::TableRow
+        }
+        _ => {
+            *table = None;
+            return None;
+        }
+    };
+    // A table stands at the margin, so it ends every list open above it, the
+    // way any other unindented line does.
+    levels.ended_by(0, line);
+    Some(LineStyle::of_kind(kind))
+}
+
+/// How one line is set, given the fence and the table the lines before it left
+/// open.
+fn line_style(
+    line: &str,
+    next: &str,
+    fence: &mut Option<char>,
+    levels: &mut ListLevels,
+    table: &mut Option<TablePlace>,
+) -> LineStyle {
+    let style = match (*fence, fence_marker(line)) {
         (None, Some(opened)) => {
             *fence = Some(opened);
             LineStyle::of_kind(LineKind::Fence)
@@ -1227,28 +1290,47 @@ fn line_style(line: &str, fence: &mut Option<char>, levels: &mut ListLevels) -> 
         // A run of tildes inside a backtick block closes nothing — it is one
         // more line of code.
         (Some(_), _) => LineStyle::of_kind(LineKind::Code),
-        (None, None) => outside_fence(line, levels),
-    }
+        (None, None) => {
+            if let Some(style) = table_line(line, next, levels, table) {
+                return style;
+            }
+            outside_fence(line, levels)
+        }
+    };
+    // Anything a fence decides ends whatever table was open: a table's rows are
+    // bars at the margin, and a fenced line is code whatever it is made of.
+    *table = None;
+    style
 }
 
 /// How every logical line of `source` is set (要件 7.3.2).
 ///
 /// **The one place a line's kind and its heading level are decided together**,
 /// so the preview, the panes, the counts and the outline cannot come to hold
-/// two opinions about a line. A hash inside a fenced block is not a heading,
-/// and a fence is the only thing about a line that the lines before it decide —
-/// everything else is read off the line itself, which is what lets a block
-/// depend on nothing outside its own text.
+/// two opinions about a line. A hash inside a fenced block is not a heading.
+///
+/// **Two things about a line are decided by the lines around it** — the fence
+/// it is inside, and the table it belongs to (`TablePlace`). Everything else is
+/// read off the line itself, which is what lets a block depend on nothing
+/// outside its own text; and both exceptions end a block rather than crossing
+/// one, so a block still holds whole ones of each (`split_blocks`).
 ///
 /// One entry per `split('\n')` line, which is also one entry per line of the
 /// preview: the preview emits exactly one line for each source line.
 pub fn line_styles(source: &str) -> Vec<LineStyle> {
     let mut fence = None;
     let mut levels = ListLevels::default();
-    source
-        .split('\n')
-        .map(|line| line_style(line, &mut fence, &mut levels))
-        .collect()
+    let mut table = None;
+    let mut lines = source.split('\n').peekable();
+    let mut styles = Vec::new();
+    while let Some(line) = lines.next() {
+        // The line after this one, and an empty one past the last: a row of
+        // bars at the end of the document has no delimiter row under it and is
+        // not a table.
+        let next = lines.peek().copied().unwrap_or_default();
+        styles.push(line_style(line, next, &mut fence, &mut levels, &mut table));
+    }
+    styles
 }
 
 /// One heading of a document's outline (要件 7.7).
@@ -1276,10 +1358,13 @@ pub fn outline(source: &str) -> Vec<Heading> {
     let mut at = 0usize;
     let mut fence = None;
     let mut levels = ListLevels::default();
-    for line in source.split('\n') {
+    let mut table = None;
+    let mut lines = source.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let next = lines.peek().copied().unwrap_or_default();
         // Through `line_style` rather than `heading_level`, so a hash inside a
         // fenced block is as much not-a-heading here as it is in the pane.
-        let level = line_style(line, &mut fence, &mut levels).heading_level;
+        let level = line_style(line, next, &mut fence, &mut levels, &mut table).heading_level;
         if level > 0 {
             headings.push(Heading {
                 level,
@@ -1497,6 +1582,62 @@ mod tests {
     /// What each logical line of a source is.
     fn kinds(source: &str) -> Vec<LineKind> {
         line_styles(source).iter().map(|style| style.kind).collect()
+    }
+
+    /// 要件 7.3.2: a row of bars is a table only when a delimiter row follows
+    /// the first one, and the rows after it are rows because that row said so.
+    #[test]
+    fn a_delimiter_row_is_what_opens_a_table() {
+        assert_eq!(
+            kinds("| 見出し | 見出し |\n| --- | ---: |\n| 一 | 二 |\n本文\n"),
+            vec![
+                LineKind::TableRow,
+                LineKind::TableRule,
+                LineKind::TableRow,
+                LineKind::Body,
+                LineKind::Body,
+            ]
+        );
+    }
+
+    /// **A sentence with bars in it is a sentence.** Nothing under a row of
+    /// bars that no delimiter row follows is a table (要件 7.3.2).
+    #[test]
+    fn bars_alone_are_not_a_table() {
+        assert_eq!(
+            kinds("| 一 | 二 |\n| 三 | 四 |\n"),
+            vec![LineKind::Body, LineKind::Body, LineKind::Body]
+        );
+    }
+
+    /// A table is bars at the margin, so a fenced line is code whatever it is
+    /// made of (要件 7.3.2).
+    #[test]
+    fn a_fence_ends_a_table() {
+        assert_eq!(
+            kinds("| 一 |\n| --- |\n```\n| 二 |\n```\n| 三 |\n"),
+            vec![
+                LineKind::TableRow,
+                LineKind::TableRule,
+                LineKind::Fence,
+                LineKind::Code,
+                LineKind::Fence,
+                LineKind::Body,
+                LineKind::Body,
+            ]
+        );
+    }
+
+    /// 要件 7.3.2: **no box for a table comes from here.** A row's bars and the
+    /// delimiter row both need widths that only the measured cells say, so both
+    /// are built where the measuring happens (技術検証 7.7) — and a line with
+    /// two opinions about the box over it is a line drawn twice.
+    #[test]
+    fn a_table_gets_no_box_from_the_head_of_its_lines() {
+        let styles = line_styles("| 一 |\n| --- |\n| 二 |\n");
+
+        assert_eq!(line_marker("| 一 |", styles[0]), None, "a row of cells");
+        assert_eq!(line_marker("| --- |", styles[1]), None, "the delimiter row");
     }
 
     /// A fenced block is the one thing about a line that the lines before it

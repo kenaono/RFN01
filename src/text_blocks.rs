@@ -305,6 +305,10 @@ pub enum LineKind {
     Fence,
     /// A line inside a fenced code block.
     Code,
+    /// One row of a table, the header row included (要件 7.3.2).
+    TableRow,
+    /// The row of dashes under the header, which is what names the columns.
+    TableRule,
 }
 
 impl LineKind {
@@ -322,6 +326,124 @@ impl LineKind {
     pub fn is_list(self) -> bool {
         matches!(self, Self::Bullet | Self::Ordered | Self::Task { .. })
     }
+
+    /// Whether the line belongs to a table (要件 7.3.2).
+    ///
+    /// **The one thing on the page whose geometry is not the line's own.** A
+    /// column is as wide as the widest cell anywhere in the table, so a row
+    /// cannot be set without the rows around it — which is why a table is one
+    /// block, the way a fenced block is (`split_blocks`).
+    pub fn is_table(self) -> bool {
+        matches!(self, Self::TableRow | Self::TableRule)
+    }
+}
+
+/// How one column of a table is set, as its delimiter row says (要件 7.3.2).
+///
+/// **Along the flow axis rather than to the left and the right**, for the
+/// reason [`FlowOrder`] is named that way: a column is aligned against the axis
+/// its text runs along, and that axis is the screen's horizontal in a
+/// horizontal pane only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Align {
+    /// `---` and `:---`, and every column no delimiter row named.
+    #[default]
+    Start,
+    /// `:---:`
+    Center,
+    /// `---:`
+    End,
+}
+
+/// One cell of one table row (要件 7.3.2).
+///
+/// **One cell per bar**, the cell being whatever stands between that bar and
+/// the next. A row written the usual way closes with a bar, so its last cell is
+/// empty; that costs one column the delimiter row never named, and a column no
+/// delimiter row named is given no width.
+///
+/// **The bar is the byte before `byte_start`** and is not kept beside it: a bar
+/// is one ASCII character, so where the cell begins says where its bar is. Its
+/// place in UTF-16 units is kept, because that is what a DirectWrite range is
+/// measured in and counting to it again is a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TableCell {
+    /// The bar that opens the cell, in UTF-16 units of the line. One unit long.
+    pub bar_utf16: u32,
+    /// The cell's own text, both bars excluded.
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+/// The cells of one table row (要件 7.3.2).
+///
+/// **A bar behind a backslash is a bar the writer wrote**, not a divider, which
+/// is the only way to put one inside a cell.
+pub fn table_cells(line: &str) -> Vec<TableCell> {
+    let mut bars = Vec::new();
+    let mut units = 0_u32;
+    let mut escaped = false;
+    for (byte, character) in line.char_indices() {
+        if character == '|' && !escaped {
+            bars.push((byte, units));
+        }
+        escaped = character == '\\' && !escaped;
+        units += character.len_utf16() as u32;
+    }
+    bars.iter()
+        .enumerate()
+        .map(|(index, (byte, unit))| TableCell {
+            bar_utf16: *unit,
+            byte_start: byte + 1,
+            byte_end: bars.get(index + 1).map_or(line.len(), |(next, _)| *next),
+        })
+        .collect()
+}
+
+/// Whether a line is a row of a table (要件 7.3.2).
+///
+/// **A bar at the very head of the line, and another one after it.** Prose is
+/// full of bars and none of it is a table; asking the line to open with one is
+/// what keeps a sentence from being read as a row. A quoted or indented table
+/// is not read as one — 要件定義 §14 keeps tables at the margin.
+pub fn is_table_row(line: &str) -> bool {
+    line.starts_with('|') && table_cells(line).len() >= 2
+}
+
+/// The columns a delimiter row names, and `None` for a line that is not one
+/// (要件 7.3.2).
+///
+/// `| --- | :---: | ---: |`. Every cell is dashes with a colon at one end, both
+/// ends or neither; the empty cell the closing bar leaves is not a column.
+pub fn table_alignments(line: &str) -> Option<Vec<Align>> {
+    if !is_table_row(line) {
+        return None;
+    }
+    let cells = table_cells(line);
+    let mut alignments = Vec::new();
+    for (index, cell) in cells.iter().enumerate() {
+        let text = line[cell.byte_start..cell.byte_end].trim();
+        if text.is_empty() && index + 1 == cells.len() {
+            break;
+        }
+        alignments.push(alignment_of(text)?);
+    }
+    (!alignments.is_empty()).then_some(alignments)
+}
+
+/// One cell of a delimiter row.
+fn alignment_of(text: &str) -> Option<Align> {
+    let opens = text.starts_with(':');
+    let closes = text.ends_with(':');
+    let dashes = text.trim_matches(':');
+    if dashes.is_empty() || !dashes.chars().all(|letter| letter == '-') {
+        return None;
+    }
+    Some(match (opens, closes) {
+        (true, true) => Align::Center,
+        (false, true) => Align::End,
+        _ => Align::Start,
+    })
 }
 
 /// How a stretch of text is marked, beyond the size its line is set at
@@ -344,6 +466,27 @@ pub struct Marks {
     /// is on both sides *and* between them; only the part a reader is meant to
     /// read comes through, and this is what says which part that was.
     pub link: bool,
+}
+
+/// How wide a box is, kept as the bits of the `f32` it came from.
+///
+/// **A width has to be part of a cache key.** Two layouts are the same layout
+/// only if their boxes are the same width, and the key is a hash — so the
+/// width travels inside the [`Ornament`] rather than beside it, and compares as
+/// its bits. Putting it anywhere else is the mistake already made three times
+/// (6.18, 6.22b, `line_runs`): something that changes the picture, left out of
+/// the signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BoxWidth(u32);
+
+impl BoxWidth {
+    pub fn new(along: f32) -> Self {
+        Self(along.max(0.0).to_bits())
+    }
+
+    pub fn along(self) -> f32 {
+        f32::from_bits(self.0)
+    }
 }
 
 /// What is drawn in place of the marker a box stands over (要件 7.3.2).
@@ -384,6 +527,30 @@ pub enum Ornament {
     /// sets the line in is the block, and space that also took room would set
     /// it in twice — and only on the first line it wrapped to.
     Indent,
+    /// **The bar between two cells of a table, and the padding around it**
+    /// (要件 7.3.2). Nothing is drawn in its place either, but this is the one
+    /// box whose whole purpose is the room it keeps: its width is what carries
+    /// the text after it to the start of its column.
+    ///
+    /// **A width of its own rather than one shared width**, which is what makes
+    /// this the only box built per run: `-` and `10.` all begin their text at
+    /// the same step, and no two cells of a table do (技術検証 7.7).
+    ///
+    /// It covers everything between one cell's shown text and the next cell's:
+    /// **the tail a narrowed column had no room for**, the padding the writer
+    /// typed, and the bar. One box rather than two, because a box of no width
+    /// is not free — in a vertical pane it still takes a line's worth of room.
+    Bar(BoxWidth),
+    /// **The rule under a table's header, in place of `|---|---|`**
+    /// (要件 7.3.2). The box covers the delimiter row whole and is **as wide as
+    /// the table**, so the rule drawn inside it is exactly the width of what it
+    /// belongs to.
+    ///
+    /// **The third thing a box does.** It has always hidden what it covers and
+    /// held room; this is the first one whose room is what something is drawn
+    /// across. A [`LineOrnament`] could not do it — those reach the whole page
+    /// or the whole block, and how wide a table is only its own cells say.
+    TableRule(BoxWidth),
 }
 
 impl Ornament {
@@ -393,7 +560,20 @@ impl Ornament {
     /// Asked before the hit test that finds where to draw, so a document of
     /// rules never asks DirectWrite about a rectangle nothing goes into.
     pub fn draws_ink(self) -> bool {
-        !matches!(self, Self::Hidden | Self::Indent)
+        !matches!(self, Self::Hidden | Self::Indent | Self::Bar(_))
+    }
+
+    /// The width this box was built with, and `None` for one that shares an
+    /// object with every other box of its kind.
+    ///
+    /// **Only a table asks for one.** Every marker begins its text at the same
+    /// step, so one width-less object serves all of them; a rule and a fence
+    /// share the one that keeps a line's room (要件 7.3.2).
+    pub fn width(self) -> Option<BoxWidth> {
+        match self {
+            Self::Bar(width) | Self::TableRule(width) => Some(width),
+            _ => None,
+        }
     }
 
     /// Whether the box keeps the room the text under it took.
@@ -403,7 +583,7 @@ impl Ornament {
     /// padding at each end. Everything else a box covers is standing where an
     /// indent will be, and an indent is the block's (要件 7.3.2).
     pub fn keeps_room(self) -> bool {
-        matches!(self, Self::Hidden)
+        matches!(self, Self::Hidden | Self::Bar(_) | Self::TableRule(_))
     }
 }
 
@@ -480,7 +660,7 @@ impl LineStyle {
     /// box that hides a rule is measured on the line the preview shows, so the
     /// two have to agree about how long that line is.
     pub fn is_literal(&self) -> bool {
-        self.kind.is_code() || matches!(self.kind, LineKind::Rule)
+        self.kind.is_code() || matches!(self.kind, LineKind::Rule | LineKind::TableRule)
     }
 
     /// How many steps of indenting a line set this way asks its block for
@@ -1249,7 +1429,13 @@ pub fn split_blocks(
         // opened far above decides it. `line_cells` already reads the style for
         // the same reason, so the boundaries were never quite text-local once a
         // fence was in the document; this widens that rather than starting it.
-        let may_end = !style.kind.is_code();
+        //
+        // 要件 7.3.2: **a table is one block for a stronger reason still.** Its
+        // columns are as wide as the widest cell anywhere in it, so the two
+        // halves of a table cut in two would be measured apart and set at
+        // different widths — the seam would be visible in every row, not only
+        // at the cut (技術検証 7.7).
+        let may_end = !style.kind.is_code() && !style.kind.is_table();
         if block_cells >= BLOCK_MAX_CELLS
             || (block_cells >= BLOCK_MIN_CELLS && may_end && ends_a_block(body, line_cells))
         {
@@ -1741,6 +1927,80 @@ pub struct LineRun {
     pub own_ends: (bool, bool),
 }
 
+/// One row of a table, as offsets into the block that holds it (要件 7.3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableRowSpan {
+    /// Which of the block's logical lines the row is, so that what its cells
+    /// have marked can be found beside it.
+    pub line: usize,
+    /// The row's own line, as bytes of the block, its break excluded.
+    pub byte_start: usize,
+    pub byte_end: usize,
+    /// Where that line begins, in UTF-16 units of the block — which is what a
+    /// DirectWrite range is measured in.
+    pub utf16_start: u32,
+}
+
+/// One table a block holds (要件 7.3.2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Table {
+    /// The rows that show cells. **The delimiter row is not one of them**: it
+    /// goes under one box whole, so it has no cells to measure and no bars to
+    /// hold a column's width.
+    pub rows: Vec<TableRowSpan>,
+    /// That delimiter row, which is where the rule under the header is drawn
+    /// (要件 7.3.2). `None` for a table whose delimiter row fell outside this
+    /// block, which a table never does (`split_blocks`) — the field is an
+    /// option because a `Default` table has to be able to say it has none yet.
+    pub rule: Option<TableRowSpan>,
+}
+
+/// The tables one block holds (要件 7.3.2).
+///
+/// **One entry per table rather than one per row**: a column is as wide as the
+/// widest cell in its own table, and two tables in one block share nothing. A
+/// table never crosses a block boundary (`split_blocks`), so every table here
+/// is a whole one.
+///
+/// 要件 7.3.1: a source pane gets none, for the reason it gets no boxes — the
+/// bars are the characters being edited.
+pub fn tables(styled: StyledText<'_>) -> Vec<Table> {
+    if !styled.is_preview() {
+        return Vec::new();
+    }
+    let mut tables: Vec<Table> = Vec::new();
+    let mut open = false;
+    let mut byte_start = 0;
+    let mut utf16_start = 0_u32;
+    for (index, line) in styled.text.split('\n').enumerate() {
+        let kind = styled.kind_at(index);
+        if kind.is_table() {
+            if !open {
+                tables.push(Table::default());
+                open = true;
+            }
+            if let Some(table) = tables.last_mut() {
+                let span = TableRowSpan {
+                    line: index,
+                    byte_start,
+                    byte_end: byte_start + line.len(),
+                    utf16_start,
+                };
+                match kind {
+                    LineKind::TableRule => table.rule = Some(span),
+                    _ => table.rows.push(span),
+                }
+            }
+        } else {
+            open = false;
+        }
+        // Past the newline this split consumed.
+        byte_start += line.len() + 1;
+        utf16_start += line.encode_utf16().count() as u32 + 1;
+    }
+    tables
+}
+
 /// The block-local whole-line ornaments.
 ///
 /// Undecorated lines are left out, so a document with no quotes and no rules
@@ -2124,6 +2384,57 @@ mod tests {
             assert!(
                 block.byte_start <= opened || block.byte_start >= closed,
                 "a block began at {} inside the fence {opened}..{closed}",
+                block.byte_start
+            );
+        }
+    }
+
+    /// **A table is one block** (要件 7.3.2), for a stronger reason than a
+    /// fenced block is: its columns are as wide as the widest cell anywhere in
+    /// it, so two halves measured apart would be set at different widths and
+    /// every row would show the seam (技術検証 7.7).
+    #[test]
+    fn an_ordinary_boundary_does_not_fall_inside_a_table() {
+        let typography = plain_typography();
+        let row = LineStyle::of_kind(LineKind::TableRow);
+        let charged = |line: &str| {
+            let characters = line.encode_utf16().count() as u32;
+            line_cells(characters, CELLS, &typography, row)
+        };
+        // **Every row would end a block on its own**, so without the guard the
+        // table is certainly cut and this says something.
+        let rows = (0..)
+            .map(|n| format!("| {}{n} |", "あ".repeat(CELLS as usize - 10)))
+            .filter(|line| ends_a_block(line, charged(line)))
+            .take(15)
+            .collect::<Vec<String>>();
+
+        // Twelve short lines first, so the block reaches the table still under
+        // `BLOCK_MIN_CELLS` and every row inside it is a candidate. Fifteen
+        // rows short enough not to wrap keep the whole of it under
+        // `BLOCK_MAX_CELLS`, which is the one boundary this guard does not hold
+        // back.
+        let mut text = "本文\n".repeat(12);
+        let mut levels = vec![LineStyle::default(); 12];
+        let opened = text.len();
+        text.push_str("| 見出し |\n| --- |\n");
+        levels.push(row);
+        levels.push(LineStyle::of_kind(LineKind::TableRule));
+        for line in &rows {
+            text.push_str(line);
+            text.push('\n');
+            levels.push(row);
+        }
+        let closed = text.len();
+        text.push_str("本文\n");
+        levels.push(LineStyle::default());
+
+        let blocks = split_with(StyledText::new(&text, &levels), &typography);
+
+        for block in &blocks {
+            assert!(
+                block.byte_start <= opened || block.byte_start >= closed,
+                "a block began at {} inside the table {opened}..{closed}",
                 block.byte_start
             );
         }
@@ -3445,6 +3756,97 @@ mod tests {
         assert!(
             bound > lines as f32 * 22.0 * 1.7,
             "the bound must exceed the width DirectWrite actually needs"
+        );
+    }
+
+    /// 要件 7.3.2: a row is cut at its bars, and each cell is what stands
+    /// between one bar and the next.
+    #[test]
+    fn a_row_is_cut_at_its_bars() {
+        let line = "| 一 | 二 |";
+
+        let cells = table_cells(line);
+
+        let said = cells
+            .iter()
+            .map(|cell| &line[cell.byte_start..cell.byte_end])
+            .collect::<Vec<_>>();
+        assert_eq!(said, vec![" 一 ", " 二 ", ""]);
+        // The bar that opens a cell is the byte before it.
+        let bars: Vec<usize> = cells.iter().map(|cell| cell.byte_start - 1).collect();
+        assert_eq!(bars, vec![0, 6, 12]);
+    }
+
+    /// 要件 7.3.2: a bar behind a backslash is one the writer wrote, and the
+    /// only way to put one inside a cell.
+    #[test]
+    fn an_escaped_bar_does_not_divide() {
+        let cells = table_cells(r"| a \| b | c |");
+
+        assert_eq!(cells.len(), 3, "the escaped bar must not open a cell");
+    }
+
+    /// 要件 7.3.2: prose is full of bars and none of it is a table.
+    #[test]
+    fn only_a_line_that_opens_with_a_bar_is_a_row() {
+        assert!(is_table_row("| 一 | 二 |"));
+        assert!(is_table_row("|一|"));
+        assert!(!is_table_row("A|B は選言である"));
+        assert!(!is_table_row("  | 字下げされた表 |"));
+        assert!(!is_table_row("|"), "one bar divides nothing");
+    }
+
+    /// 要件 7.3.2: a block hands over the rows that show cells, where they are
+    /// in its own text, and nothing else. **The delimiter row is not one of
+    /// them** — it goes under one box whole.
+    #[test]
+    fn a_block_hands_over_the_rows_that_show_cells() {
+        let text = "本文\n| 一 | 二 |\n| --- | --- |\n| 三 | 四 |\n";
+        let lines = [
+            LineStyle::default(),
+            LineStyle::of_kind(LineKind::TableRow),
+            LineStyle::of_kind(LineKind::TableRule),
+            LineStyle::of_kind(LineKind::TableRow),
+            LineStyle::default(),
+        ];
+        let markers = vec![None; lines.len()];
+        let styled = StyledText::marked(text, &lines, &[]).with_markers(&markers);
+
+        let found = tables(styled);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].rows.len(), 2, "the delimiter row shows no cells");
+        let rule = found[0]
+            .rule
+            .expect("the delimiter row is where the rule goes");
+        assert_eq!(&text[rule.byte_start..rule.byte_end], "| --- | --- |");
+        let last = found[0].rows[1];
+        assert_eq!(found[0].rows[0].line, 1);
+        assert_eq!(last.line, 3);
+        assert_eq!(&text[last.byte_start..last.byte_end], "| 三 | 四 |");
+        // 3 units for 本文 and its break, 10 for the header row, 14 for the
+        // delimiter row.
+        assert_eq!(last.utf16_start, 27);
+    }
+
+    /// 要件 7.3.2: the delimiter row is what names the columns, and how each
+    /// of them is set.
+    #[test]
+    fn the_delimiter_row_names_the_columns() {
+        assert_eq!(
+            table_alignments("| --- | :--- | :---: | ---: |"),
+            Some(vec![Align::Start, Align::Start, Align::Center, Align::End])
+        );
+        assert_eq!(table_alignments("|---|---|"), Some(vec![Align::Start; 2]));
+        assert_eq!(
+            table_alignments("| 一 | 二 |"),
+            None,
+            "a row of text names no columns"
+        );
+        assert_eq!(
+            table_alignments("| :- : |"),
+            None,
+            "a cell that is not dashes names no column"
         );
     }
 }
