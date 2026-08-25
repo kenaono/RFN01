@@ -270,6 +270,14 @@ pub struct LineStyle {
     /// off and no more; the field is a count so that deeper quoting is a
     /// change to one rule rather than to the shape of this.
     pub quote_depth: u8,
+    /// How far in a list item is nested, 0 for one at the margin and 0 for
+    /// every line that is not an item at all (要件 7.3.2).
+    ///
+    /// **A step of nesting, not the item's own step.** An item is set in by one
+    /// step for being an item and one more for each level it is under, so this
+    /// is what is left when that first step is taken out — which keeps it zero
+    /// for the ordinary case and for everything that is not a list.
+    pub list_depth: u8,
 }
 
 /// What a whole logical line is, beyond the size its heading marker asks for
@@ -446,7 +454,8 @@ impl LineStyle {
     /// How many steps of indenting a line set this way asks its block for
     /// (要件 7.3.2).
     ///
-    /// **A list item asks for one, the same as a level of quoting.** The step
+    /// **A list item asks for one, and one more for each level it is nested
+    /// under** (`list_depth`). The step
     /// used to be a box at the head of the line, which reached that head and no
     /// further, so the continuation of a wrapped item came back to the margin
     /// (技術検証 7.1). The block's box is the only thing that moves every
@@ -458,7 +467,7 @@ impl LineStyle {
     /// the width this leaves. A second opinion would cut blocks at one width
     /// and measure them at another.
     pub fn indent_steps(&self) -> u8 {
-        self.quote_depth + u8::from(self.kind.is_list())
+        self.quote_depth + u8::from(self.kind.is_list()) + self.list_depth
     }
 }
 
