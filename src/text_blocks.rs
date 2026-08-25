@@ -36,7 +36,7 @@
 //! Everything in this module is plain arithmetic over measurements taken from
 //! DirectWrite, so it builds and tests on any platform.
 
-use std::{ops::Range, rc::Rc};
+use std::{ops::Range, sync::Arc};
 
 /// Which way reading order runs along the caller's flow axis.
 ///
@@ -689,7 +689,14 @@ pub struct BlockMeasure {
     /// Shared, not owned: a measurement is cloned into the placement plan on
     /// every update, and copying a line table per block per keystroke was
     /// costing more than the measuring did.
-    pub lines: Rc<[LineInfo]>,
+    ///
+    /// **`Arc` rather than `Rc`, so that a measurement can be taken on another
+    /// thread** (要件 2, 技術検証 7.4). A block is measured from its own text
+    /// and nothing else, so measuring is the part of the work that divides;
+    /// what stopped it dividing was this one field, because a line table behind
+    /// a non-atomic count cannot leave the thread that made it. The atomic
+    /// costs a few nanoseconds per clone against the copy this exists to avoid.
+    pub lines: Arc<[LineInfo]>,
 }
 
 /// A block placed into global content coordinates.
@@ -706,7 +713,7 @@ pub struct BlockPlacement {
     pub exact_flow_size: f32,
     pub content_flow_start: f32,
     pub max_flow_size: f32,
-    pub lines: Rc<[LineInfo]>,
+    pub lines: Arc<[LineInfo]>,
 }
 
 impl BlockPlacement {
@@ -3008,7 +3015,7 @@ mod tests {
             flow_size: 100.0,
             content_flow_start: 400.0,
             max_flow_size: 500.0,
-            lines: Rc::from(Vec::new()),
+            lines: Arc::from(Vec::new()),
         }];
         let plan = place_blocks(&spans, &measures, 20.0, FlowOrder::Descending);
         let block = &plan.blocks[0];

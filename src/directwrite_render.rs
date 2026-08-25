@@ -21,12 +21,19 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
     hash::{DefaultHasher, Hash, Hasher},
+    num::NonZeroUsize,
     ops::Range,
+    sync::{
+        Arc, Mutex, OnceLock,
+        mpsc::{Receiver, Sender, channel},
+    },
+    thread,
+    time::Duration,
 };
 
 use windows::{
     Win32::{
-        Foundation::RPC_E_CHANGED_MODE,
+        Foundation::{E_FAIL, RPC_E_CHANGED_MODE},
         Graphics::{
             Direct2D::{
                 Common::{
@@ -63,7 +70,7 @@ use windows::{
             CoUninitialize,
         },
     },
-    core::{BOOL, HSTRING, IUnknown, Interface, Ref, Result, implement, w},
+    core::{BOOL, Error, HSTRING, IUnknown, Interface, Ref, Result, implement, w},
 };
 
 use crate::text_blocks::{
@@ -1071,6 +1078,212 @@ thread_local! {
     static GRAPHICS: RefCell<Option<Graphics>> = const { RefCell::new(None) };
 }
 
+/// One block to measure, and everything the measuring needs.
+///
+/// **Owned rather than borrowed**, because it may be measured on another
+/// thread while the editor goes on holding the document. A block is measured
+/// from its own text and its own styling and nothing else (3.4), which is why
+/// this can be a self-contained parcel at all — and why the work divides.
+///
+/// **Cloned into the queue rather than moved**, so the caller still holds every
+/// task after the threads have been asked. A thread that dies takes its answers
+/// with it, and the only way to measure those blocks after all is to still have
+/// what they were.
+#[derive(Clone)]
+struct MeasureTask {
+    /// Which block of the update this is. The answers come back in whatever
+    /// order the threads finish, so each has to say where it belongs.
+    index: usize,
+    text: String,
+    runs: Vec<StyleRun>,
+    /// Shared rather than cloned per block: one spec covers a whole update, and
+    /// it carries a family name for the body, one for code and one per heading
+    /// level.
+    typography: Arc<Typography>,
+    mode: WritingMode,
+    block_box: f32,
+    max_flow_size: f32,
+    keep_trailing_empty_line: bool,
+}
+
+/// Measure one block, and hand back the layout it was measured with.
+///
+/// **The measurement and the layout are the same object's two answers.** The
+/// caret hit test and the tile render both want that exact layout moments from
+/// now, so the caller keeps it — except across a thread, where it cannot go
+/// (a DirectWrite layout belongs to the thread that made it) and only the
+/// measurement comes back.
+fn measure_task(
+    graphics: &mut Graphics,
+    task: &MeasureTask,
+) -> Result<(BlockMeasure, IDWriteTextLayout)> {
+    let format = graphics.text_format(&task.typography, task.mode)?;
+    let utf16 = task.text.encode_utf16().collect::<Vec<u16>>();
+    // The layout box is the block's flow bound by its own line box, which way
+    // round depending on the mode.
+    let (max_width, max_height) = task.mode.to_screen(task.max_flow_size, task.block_box);
+    // SAFETY: The UTF-16 buffer stays alive across CreateTextLayout, and the
+    // layout owns everything it needs afterwards.
+    let layout = unsafe {
+        graphics
+            .dwrite
+            .CreateTextLayout(&utf16, &format, max_width, max_height)?
+    };
+    apply_typography(&layout, &task.typography, &task.runs, utf16.len() as u32)?;
+    apply_marker_boxes(&layout, &task.typography, &task.runs)?;
+    let measure = measure_block(
+        &layout,
+        task.max_flow_size,
+        task.keep_trailing_empty_line,
+        task.mode,
+    )?;
+    Ok((measure, layout))
+}
+
+/// Where one block's answer goes, for a block the cache had nothing for.
+///
+/// **Kept beside the tasks rather than in them.** A measuring thread is given
+/// what it needs to measure and brings back a measurement and an index; which
+/// cache entries that answer belongs in is the editor's business and never
+/// leaves this thread.
+struct PendingBlock {
+    measure_key: u64,
+    layout_key: u64,
+    keep_trailing_empty_line: bool,
+}
+
+/// How many blocks make it worth waking the other threads (要件 2).
+///
+/// **A keystroke measures one block** (6.9), and handing one block to another
+/// thread costs more than measuring it. What this is for is the other case: a
+/// change of width or of spec throws every measurement away, and the whole
+/// document is measured again before the next frame — 470 blocks at 110ms,
+/// 657 at 350ms (技術検証 7.4), on every step of a divider drag.
+const PARALLEL_MEASURE_MIN: usize = 48;
+
+/// The most threads to measure on.
+///
+/// Beyond a handful the gain flattens and the cost does not: each thread keeps
+/// a DirectWrite factory of its own, isolated from the others (7.3), with its
+/// own font cache behind it.
+const MEASURE_THREADS_MAX: usize = 8;
+
+/// How long to wait for a batch before giving up on the threads.
+///
+/// **Not a performance figure — a way for a bug to stay visible.** A worker
+/// that panicked takes its answers with it, and the editor would otherwise
+/// wait on them for ever. Long enough that no honest measurement reaches it.
+const MEASURE_WAIT: Duration = Duration::from_secs(5);
+
+/// The threads that measure blocks, and the queues to them.
+///
+/// **One queue per thread rather than one shared queue**, because a shared
+/// `Receiver` has to sit behind a lock, and a thread blocked on that lock while
+/// holding it is every other thread's problem. Blocks are bounded in size
+/// (`BLOCK_MAX_CELLS`), so dealing them round-robin divides the work evenly
+/// enough without any of that.
+struct MeasurePool {
+    queues: Vec<Sender<MeasureTask>>,
+    done: Receiver<std::result::Result<(usize, BlockMeasure), String>>,
+}
+
+impl MeasurePool {
+    fn start() -> Option<Self> {
+        let threads = thread::available_parallelism()
+            .map(NonZeroUsize::get)
+            .unwrap_or(2)
+            .clamp(1, MEASURE_THREADS_MAX);
+        let (done_sender, done) = channel();
+        let mut queues = Vec::with_capacity(threads);
+        for number in 0..threads {
+            let (task_sender, tasks) = channel::<MeasureTask>();
+            let answers = done_sender.clone();
+            let spawned = thread::Builder::new()
+                .name(format!("rfnedit-measure-{number}"))
+                .spawn(move || measure_worker(&tasks, &answers));
+            if spawned.is_ok() {
+                queues.push(task_sender);
+            }
+        }
+        (!queues.is_empty()).then_some(Self { queues, done })
+    }
+
+    /// Measure what these threads can, in whatever order they finish.
+    ///
+    /// **It may answer fewer blocks than it was asked about**, and says nothing
+    /// about which: a queue refuses when its thread is gone, and a thread that
+    /// stopped answering takes its share with it. The caller measures whatever
+    /// is still unanswered on its own thread, which is the same path it takes
+    /// when there are no threads at all — so every way this can fall short ends
+    /// in one piece of code.
+    fn measure(&self, tasks: &[MeasureTask]) -> Result<Vec<(usize, BlockMeasure)>> {
+        let mut sent = 0usize;
+        for (dealt, task) in tasks.iter().enumerate() {
+            let queue = &self.queues[dealt % self.queues.len()];
+            if queue.send(task.clone()).is_ok() {
+                sent += 1;
+            }
+        }
+        // **Every answer is taken before any failure is reported.** An answer
+        // left in the queue would be picked up by the next update and counted
+        // against a block it says nothing about.
+        let mut done = Vec::with_capacity(sent);
+        let mut failure: Option<String> = None;
+        for _ in 0..sent {
+            match self.done.recv_timeout(MEASURE_WAIT) {
+                Ok(Ok(answer)) => done.push(answer),
+                Ok(Err(message)) => failure = failure.or(Some(message)),
+                // Every thread is gone, or one of them stopped answering.
+                // Either way nothing more is coming.
+                Err(_) => break,
+            }
+        }
+        match failure {
+            Some(message) => Err(Error::new(E_FAIL, message)),
+            None => Ok(done),
+        }
+    }
+}
+
+/// One measuring thread.
+///
+/// It keeps its `Graphics` for as long as it lives, which is the whole reason
+/// the threads are kept rather than made per update: an isolated DirectWrite
+/// factory builds a font cache of its own, and paying for that on every
+/// divider drag would cost more than the measuring it is meant to divide.
+fn measure_worker(
+    tasks: &Receiver<MeasureTask>,
+    answers: &Sender<std::result::Result<(usize, BlockMeasure), String>>,
+) {
+    while let Ok(task) = tasks.recv() {
+        // The error is carried as text: a Windows error holds COM state of its
+        // own and has no business crossing a thread.
+        let answered = with_graphics(|graphics| measure_task(graphics, &task))
+            .map(|(measure, _layout)| (task.index, measure))
+            .map_err(|error| error.to_string());
+        if answers.send(answered).is_err() {
+            return;
+        }
+    }
+}
+
+/// Measure these blocks on the measuring threads, if there are any.
+///
+/// `None` when there are none, which is not fatal: the caller measures on its
+/// own thread instead, which is what the editor did before this existed.
+///
+/// **The threads are the process's, not a pane's**, so they are started once
+/// and both panes hand work to the same ones. The lock is what lets them live
+/// in a `static` at all — a queue is `Send` but not something two threads may
+/// hold at once — and it is never contended, because only the editor's thread
+/// gets this far.
+fn measure_on_threads(tasks: &[MeasureTask]) -> Option<Result<Vec<(usize, BlockMeasure)>>> {
+    static POOL: OnceLock<Mutex<Option<MeasurePool>>> = OnceLock::new();
+    let held = POOL.get_or_init(|| Mutex::new(MeasurePool::start()));
+    let pool = held.lock().ok()?;
+    Some(pool.as_ref()?.measure(tasks))
+}
+
 fn with_graphics<T>(body: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> {
     GRAPHICS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -1104,6 +1317,13 @@ pub struct UpdateCost {
     /// under every keystroke in plain sight (6.10). An edit that does not touch
     /// a long paragraph must leave this at zero.
     pub wrapped: u32,
+    /// How many of `blocks` were measured on the other threads (要件 2).
+    ///
+    /// **The one number that says whether the work divided.** A faster
+    /// `layout` on its own does not: a cache that happened to hold more looks
+    /// exactly the same from outside. Zero is the ordinary case — a keystroke
+    /// measures one block and keeps it here.
+    pub divided: u32,
     /// How the wrap positions of each long paragraph were arrived at: how many
     /// were asked for, how many came back unchanged, and how many carried on
     /// from a line start the edit did not reach.
@@ -1426,16 +1646,29 @@ impl TextEngine {
             Ok((spans, wraps.current, cost))
         })?;
         self.wraps = fresh_wraps;
-        let mut measures = Vec::with_capacity(spans.len());
+        // **One slot per block, filled in whatever order the answers arrive.**
+        // A block measured on another thread comes back when it comes back, so
+        // the order of the document is kept here rather than in the measuring.
+        let mut measures: Vec<Option<BlockMeasure>> = vec![None; spans.len()];
         let mut block_lines = Vec::with_capacity(spans.len());
         let mut live_measure_keys = HashSet::with_capacity(spans.len());
         let mut live_layout_keys = HashSet::with_capacity(spans.len());
         let mut fresh_measures = Vec::new();
         let mut fresh_layouts = Vec::new();
         let mut measured = wrap_cost;
+        // The blocks the cache had nothing for, and where each answer belongs.
+        let mut tasks: Vec<MeasureTask> = Vec::new();
+        let mut pending: HashMap<usize, PendingBlock> = HashMap::new();
+        // The same spec, in a form a task can carry. One spec covers the whole
+        // update and holds ten font family names, so it is shared rather than
+        // cloned per block.
+        let spec = Arc::new(typography.clone());
 
-        with_graphics(|graphics| {
-            let format = graphics.text_format(&typography, mode)?;
+        // **Deciding what to measure needs no graphics at all.** Which blocks
+        // the cache already answers, what ranges each one sets, how wide its box
+        // is — all of it is text and arithmetic, and separating it from the
+        // measuring is what lets the measuring go somewhere else.
+        {
             let last_index = spans.len().saturating_sub(1);
             // Which logical line each block starts on. Counted forwards rather
             // than looked up, so it costs one pass over the text and not one
@@ -1493,45 +1726,103 @@ impl TextEngine {
                 {
                     // Cheap now that the line table is shared, and the entry
                     // itself stays put rather than being copied into a new map.
-                    measures.push(cached.measure.clone());
+                    measures[index] = Some(cached.measure.clone());
                     continue;
                 }
 
                 let extent = block_extent(span, line_extent, &typography);
                 let max_flow_size = block_flow_bound(block_styled, extent, &typography);
-                let utf16 = block_text.encode_utf16().collect::<Vec<u16>>();
-                // The layout box is the block's flow bound by its own line box,
-                // which way round depending on the mode.
-                let (max_width, max_height) = mode.to_screen(max_flow_size, block_box);
-                // SAFETY: The UTF-16 buffer stays alive across CreateTextLayout,
-                // and the layout owns everything it needs afterwards.
-                let layout = unsafe {
-                    graphics
-                        .dwrite
-                        .CreateTextLayout(&utf16, &format, max_width, max_height)?
-                };
-                apply_typography(&layout, &typography, &runs, utf16.len() as u32)?;
-                apply_marker_boxes(&layout, &typography, &runs)?;
-                let measure =
-                    measure_block(&layout, max_flow_size, keep_trailing_empty_line, mode)?;
                 measured.blocks += 1;
                 measured.utf16 += span.utf16_len();
-                measures.push(measure.clone());
-                fresh_measures.push((
-                    key,
-                    MeasuredBlock {
-                        text: block_text.to_owned(),
+                pending.insert(
+                    index,
+                    PendingBlock {
+                        measure_key: key,
+                        layout_key: block_layout,
                         keep_trailing_empty_line,
-                        measure,
                     },
-                ));
-                // Keep the layout that was just built. The caret hit test and the
-                // tile render both want this exact block moments from now, and
-                // building it again is one of the more expensive things here.
-                fresh_layouts.push((block_layout, layout));
+                );
+                tasks.push(MeasureTask {
+                    index,
+                    text: block_text.to_owned(),
+                    runs,
+                    typography: spec.clone(),
+                    mode,
+                    block_box,
+                    max_flow_size,
+                    keep_trailing_empty_line,
+                });
             }
-            Ok(())
-        })?;
+        }
+
+        // **On the threads only when there is enough to divide** (要件 2). A
+        // keystroke leaves one block to measure, and handing one block over
+        // costs more than measuring it; a change of width leaves the whole
+        // document, and that is what this is for.
+        //
+        // The threads bring back measurements and no layouts — a DirectWrite
+        // layout belongs to the thread that made it. What that costs is the few
+        // blocks on screen, whose layouts `layout_for` builds again when the
+        // tiles are drawn; measuring them all again is what it saves.
+        let divide = tasks.len() >= PARALLEL_MEASURE_MIN;
+        if let Some(answered) = divide.then(|| measure_on_threads(&tasks)).flatten() {
+            let answered = answered?;
+            measured.divided = answered.len() as u32;
+            for (index, measure) in answered {
+                if let Some(slot) = pending.get(&index) {
+                    let span = &spans[index];
+                    fresh_measures.push((
+                        slot.measure_key,
+                        MeasuredBlock {
+                            text: text[span.byte_start..span.byte_end].to_owned(),
+                            keep_trailing_empty_line: slot.keep_trailing_empty_line,
+                            measure: measure.clone(),
+                        },
+                    ));
+                }
+                measures[index] = Some(measure);
+            }
+        }
+
+        // **Whatever is left, which is all of it when there are no threads.**
+        // A block the threads did not answer for is not a special case here: it
+        // is a block that still has no measurement, and this is where a block
+        // without one gets measured.
+        let left = tasks
+            .iter()
+            .filter(|task| measures[task.index].is_none())
+            .collect::<Vec<&MeasureTask>>();
+        if !left.is_empty() {
+            with_graphics(|graphics| {
+                for task in left {
+                    let (measure, layout) = measure_task(graphics, task)?;
+                    if let Some(slot) = pending.get(&task.index) {
+                        fresh_measures.push((
+                            slot.measure_key,
+                            MeasuredBlock {
+                                text: task.text.clone(),
+                                keep_trailing_empty_line: slot.keep_trailing_empty_line,
+                                measure: measure.clone(),
+                            },
+                        ));
+                        // Keep the layout that was just built. The caret hit
+                        // test and the tile render both want this exact block
+                        // moments from now, and building it again is one of the
+                        // more expensive things here. **Only here** — a layout
+                        // made on another thread belongs to that thread, so a
+                        // block measured there is laid out again when it is
+                        // drawn (`layout_for`).
+                        fresh_layouts.push((slot.layout_key, layout));
+                    }
+                    measures[task.index] = Some(measure);
+                }
+                Ok(())
+            })?;
+        }
+        let measures = measures
+            .into_iter()
+            .map(|measure| measure.expect("every block is measured or cached"))
+            .collect::<Vec<BlockMeasure>>();
 
         self.measures
             .retain(|key, _| live_measure_keys.contains(key));
@@ -3446,6 +3737,70 @@ mod tests {
         assert!(!Ornament::Hidden.draws_ink());
         assert!(Ornament::Bullet.draws_ink());
         assert!(Ornament::Number.draws_ink());
+    }
+
+    /// Blocks enough to be dealt round-robin across every queue.
+    fn measure_tasks(count: usize) -> Vec<MeasureTask> {
+        let typography = Arc::new(plain());
+        (0..count)
+            .map(|index| {
+                let text = format!("ブロック{index}の本文。長さはどれも同じである。\n");
+                MeasureTask {
+                    index,
+                    runs: style_runs(StyledText::plain(&text)),
+                    text,
+                    typography: typography.clone(),
+                    mode: WritingMode::Horizontal,
+                    block_box: 400.0,
+                    max_flow_size: 4000.0,
+                    keep_trailing_empty_line: false,
+                }
+            })
+            .collect()
+    }
+
+    /// **The threads have to answer exactly what this thread would** (要件 2).
+    /// A block is measured from its own text and its own styling and nothing
+    /// else (3.4), so where it was measured cannot show in the answer — and if
+    /// it ever did, every coordinate below it in the document would be wrong
+    /// while the document itself looked untouched.
+    #[test]
+    fn measuring_on_the_threads_answers_what_measuring_here_does() {
+        let tasks = measure_tasks(60);
+
+        let here = with_graphics(|graphics| {
+            let mut done = Vec::with_capacity(tasks.len());
+            for task in &tasks {
+                done.push((task.index, measure_task(graphics, task)?.0));
+            }
+            Ok(done)
+        })
+        .expect("measured on this thread");
+        let mut there = measure_on_threads(&tasks)
+            .expect("the measuring threads started")
+            .expect("measured on the threads");
+        there.sort_by_key(|(index, _)| *index);
+
+        assert_eq!(there.len(), here.len(), "every block came back");
+        assert_eq!(there, here);
+    }
+
+    /// The answers arrive in whatever order the threads finish, so each has to
+    /// say which block it is for. **Sorted here only to compare**: the editor
+    /// puts each into the slot its index names.
+    #[test]
+    fn every_block_comes_back_once_and_says_which_it_is() {
+        let tasks = measure_tasks(60);
+
+        let mut answered = measure_on_threads(&tasks)
+            .expect("the measuring threads started")
+            .expect("measured on the threads")
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>();
+        answered.sort_unstable();
+
+        assert_eq!(answered, (0..60).collect::<Vec<usize>>());
     }
 
     /// The offset is in UTF-16 units, which is what a DirectWrite range is

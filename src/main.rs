@@ -6650,6 +6650,7 @@ fn refresh_pane(
     let wrap_resumed = measured.wrap_resumed;
     let wrap_shared = measured.wrap_shared;
     let wrap_starts = measured.wrap_starts;
+    let divided = measured.divided;
     let measured = measured.blocks;
 
     let total_ms = elapsed_ms(refresh_started);
@@ -6679,7 +6680,7 @@ fn refresh_pane(
          frames={frames} frame_min={frame_min:.2} frame_med={frame_med:.2} \
          frame_max={frame_max:.2} frame_slow={frame_slow} gap_med={gap_med:.2} \
          upload_kb={upload_kb} split={split} mode={mode} zoom={zoom_percent} \
-         blocks={blocks} items={items}/{wrapping_items} measured={measured} \
+         blocks={blocks} items={items}/{wrapping_items} measured={measured}/{divided} \
          measured_utf16={measured_utf16} \
          wrapped={wrapped} wrap={wrap_asked}/{wrap_exact}/{wrap_resumed} \
          miss={wrap_shared}/{wrap_starts} max_block={max_block} \
