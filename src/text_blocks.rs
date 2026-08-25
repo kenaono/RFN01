@@ -331,10 +331,12 @@ pub struct Marks {
 
 /// What is drawn in place of the marker a box stands over (要件 7.3.2).
 ///
-/// **The box is the space and this is the ink.** The box hides the marker's own
-/// glyphs and reserves one width for every kind of marker, so `-`, `10.` and
-/// `- [x]` all set their text at the same indent (技術検証 4.12); what appears
-/// in that space is drawn in the tile pass, where the render target already is.
+/// **The block is the space and this is the ink.** The box over a marker hides
+/// its glyphs and nothing else; the step that `-`, `10.` and `- [x]` all begin
+/// their text after is the block's own indent, which is the only thing that
+/// reaches the lines a wrapped item ran on to (要件 7.3.2). What appears in the
+/// gutter that indent opens is drawn in the tile pass, where the render target
+/// already is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ornament {
     /// A bullet, in place of `-`, `*` or `+`.
@@ -356,8 +358,9 @@ pub enum Ornament {
     /// The line still takes the room a line takes, which is what gives a code
     /// block its padding at each end.
     ///
-    /// A blockquote has no box of its own — its indent belongs to the block
-    /// (`BlockSpan::quote_depth`), and the preview takes its marker off.
+    /// A blockquote has no box of its own — the preview takes its marker off,
+    /// and its indent belongs to the block ([`BlockSpan::indent_steps`]) the
+    /// way a list item's does.
     Hidden,
 }
 
@@ -438,6 +441,24 @@ impl LineStyle {
     /// two have to agree about how long that line is.
     pub fn is_literal(&self) -> bool {
         self.kind.is_code() || matches!(self.kind, LineKind::Rule)
+    }
+
+    /// How many steps of indenting a line set this way asks its block for
+    /// (要件 7.3.2).
+    ///
+    /// **A list item asks for one, the same as a level of quoting.** The step
+    /// used to be a box at the head of the line, which reached that head and no
+    /// further, so the continuation of a wrapped item came back to the margin
+    /// (技術検証 7.1). The block's box is the only thing that moves every
+    /// visual line, so the indent belongs there and the marker's box keeps only
+    /// the half of its job that was ever a box's: hiding the glyphs it covers.
+    ///
+    /// **One rule read in two places**: the split ends a block where this
+    /// changes, and the search for a long line's wrap positions lays it out at
+    /// the width this leaves. A second opinion would cut blocks at one width
+    /// and measure them at another.
+    pub fn indent_steps(&self) -> u8 {
+        self.quote_depth + u8::from(self.kind.is_list())
     }
 }
 
@@ -603,15 +624,19 @@ pub struct BlockSpan {
     pub byte_end: usize,
     pub utf16_start: u32,
     pub utf16_end: u32,
-    /// How deeply the whole block is quoted, 0 for a block that is not
-    /// (要件 7.3.2).
+    /// How far in the whole block is set, in steps of
+    /// [`Typography::indent_step`], 0 for a block at the margin (要件 7.3.2).
     ///
     /// **A block, not a line.** The indent has to move every visual line a
-    /// quoted paragraph wrapped to, and the only thing that can do that is the
-    /// layout box the block is set in — DirectWrite has no per-paragraph
-    /// indent, and the box at the head of a line reaches the head only
-    /// (技術検証 7.1). That is why a change of quoting ends a block.
-    pub quote_depth: u8,
+    /// quoted paragraph or a wrapped list item ran to, and the only thing that
+    /// can do that is the layout box the block is set in — DirectWrite has no
+    /// per-paragraph indent, and the box at the head of a line reaches the head
+    /// only (技術検証 7.1). That is why a change of indenting ends a block.
+    ///
+    /// **A count of steps rather than a depth of quoting**, because two things
+    /// ask for it and they add: an item inside a quote is set in by both. See
+    /// [`LineStyle::indent_steps`], which is where the two are counted.
+    pub indent_steps: u8,
 }
 
 impl BlockSpan {
@@ -777,11 +802,68 @@ fn line_cells(
 ) -> u32 {
     let level = style.heading_level;
     let cells_per_line = cells_per_line.max(1);
-    let size_scale = typography.size_scale(level);
-    let fitting = (cells_per_line as f32 / size_scale).floor().max(1.0) as u32;
-    let wrapped = characters.div_ceil(fitting).max(1);
+    let wrapped = visual_lines(characters, cells_per_line, typography, style);
     let charged = wrapped as f32 * cells_per_line as f32 * typography.flow_scale(level);
     charged.ceil().clamp(1.0, u32::MAX as f32) as u32
+}
+
+/// How many lines one logical line is estimated to take.
+///
+/// The first half of what [`line_cells`] charges for, on its own because
+/// **whether a line wraps is a different question from how far it reaches**:
+/// the charge multiplies by the line spacing, so one line of loosely set text
+/// already costs more than a line's worth of cells and cannot be compared
+/// against one.
+///
+/// An estimate, like everything the split cuts by. DirectWrite breaks at words
+/// rather than wherever the character count lands, so a line this calls one
+/// line may be two.
+fn visual_lines(
+    characters: u32,
+    cells_per_line: u32,
+    typography: &Typography,
+    style: LineStyle,
+) -> u32 {
+    let cells_per_line = cells_per_line.max(1);
+    let size_scale = typography.size_scale(style.heading_level);
+    let fitting = (cells_per_line as f32 / size_scale).floor().max(1.0) as u32;
+    characters.div_ceil(fitting).max(1)
+}
+
+/// How many of a document's list items take more than one line, at the geometry
+/// the split is cutting by (要件 7.3.2).
+///
+/// **The number that says what a hanging indent costs.** An indent has to be
+/// the block's, because a box at the head of a line reaches that head and no
+/// further (技術検証 7.1), so every item given one has to be cut out as a block
+/// of its own. An item that fits on one line has no continuation to align and
+/// needs no indent — so this, beside the count of every item, is the difference
+/// between indenting all of them and indenting only the ones it shows.
+///
+/// **A count, so the estimate matters differently here.** For the split, a line
+/// called one line when it is two is the safe direction; for this it is an item
+/// missed. Near the boundary the number is low rather than wrong, and it is the
+/// same estimate the blocks would be cut by, so it is off exactly where they
+/// would be.
+///
+/// Walks the document, so it is asked once per split and not once per refresh.
+pub fn wrapping_list_lines(
+    styled: StyledText<'_>,
+    cells_per_line: u32,
+    typography: &Typography,
+) -> usize {
+    let mut wrapping = 0;
+    for (index, line) in styled.text.split_inclusive('\n').enumerate() {
+        let style = styled.style_at(index);
+        if !style.kind.is_list() {
+            continue;
+        }
+        let characters = line.trim_end_matches('\n').encode_utf16().count() as u32;
+        if visual_lines(characters, cells_per_line, typography, style) > 1 {
+            wrapping += 1;
+        }
+    }
+    wrapping
 }
 
 /// Where a run of text wraps when it is laid out on its own.
@@ -812,6 +894,15 @@ pub struct LongLine<'a> {
     pub marks: &'a [Emphasis],
     /// The box standing at its head, if one does.
     pub marker: Option<LineMarker>,
+    /// How far in the block holding it is set (要件 7.3.2).
+    ///
+    /// **Told rather than worked out again.** Whether a line is indented at all
+    /// depends on which pane is asking (要件 7.3.1), and the split is where
+    /// that is decided; a search that read [`LineStyle::indent_steps`] for
+    /// itself would look for wrap positions at the full width of a source pane
+    /// whose blocks are cut at it, and at the full width of a preview whose
+    /// blocks are not.
+    pub indent_steps: u8,
 }
 
 impl LongLine<'_> {
@@ -900,7 +991,7 @@ pub fn split_blocks(
     let mut block_byte_start = 0;
     let mut block_utf16_start = 0_u32;
     let mut block_cells = 0_u32;
-    let mut block_quote_depth = 0_u8;
+    let mut block_indent = 0_u8;
 
     while byte_cursor < text.len() {
         let line_end = match text[byte_cursor..].find('\n') {
@@ -922,28 +1013,38 @@ pub fn split_blocks(
         if !indents {
             style.quote_depth = 0;
         }
+        // 要件 7.3.1: the source pane is set at the margin, for the reason it
+        // gets no boxes — the markers are its text, and an indent would move
+        // the very markup being read.
+        let indent = if indents { style.indent_steps() } else { 0 };
         let line_cells = line_cells(characters, cells_per_line, typography, style);
 
-        // 要件 7.3.2: a block is set in one layout box, so a change of quoting
+        // 要件 7.3.2: a block is set in one layout box, so a change of indenting
         // ends one **whatever size it has reached**. The other two reasons to
         // end a block are about how big it has grown; this one is about what it
         // is, and a block holding both would have to be set at two widths at
         // once. **Before the long-line branch below**, so the piece already
-        // gathered is closed under the depth it was gathered at.
-        if block_quote_depth != style.quote_depth {
+        // gathered is closed under the indent it was gathered at.
+        //
+        // **A run of items is one block, not one block per item.** They share
+        // an indent, and what differs between them — which marker stands in the
+        // gutter — is a line's business and is drawn from the line's own
+        // rectangle. Cutting per item would have multiplied the blocks of a
+        // list-heavy document by the number of its items (技術検証 7.1).
+        if block_indent != indent {
             if block_byte_start < byte_cursor {
                 blocks.push(BlockSpan {
                     byte_start: block_byte_start,
                     byte_end: byte_cursor,
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
-                    quote_depth: block_quote_depth,
+                    indent_steps: block_indent,
                 });
                 block_byte_start = byte_cursor;
                 block_utf16_start = utf16_cursor;
                 block_cells = 0;
             }
-            block_quote_depth = style.quote_depth;
+            block_indent = indent;
         }
 
         // A line that fills a block on its own is cut inside itself. The block
@@ -957,7 +1058,7 @@ pub fn split_blocks(
                     byte_end: byte_cursor,
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
-                    quote_depth: block_quote_depth,
+                    indent_steps: block_indent,
                 });
                 block_byte_start = byte_cursor;
                 block_utf16_start = utf16_cursor;
@@ -967,6 +1068,7 @@ pub fn split_blocks(
                 style,
                 marks: styled.marks_at(index),
                 marker: styled.marker_at(index),
+                indent_steps: indent,
             };
             let pieces = cut_long_line(long, cells_per_line, typography, wraps);
             for piece_end in pieces {
@@ -977,7 +1079,7 @@ pub fn split_blocks(
                     byte_end: piece_end,
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
-                    quote_depth: block_quote_depth,
+                    indent_steps: block_indent,
                 });
                 block_byte_start = piece_end;
                 block_utf16_start = utf16_cursor;
@@ -991,7 +1093,7 @@ pub fn split_blocks(
                 byte_end: line_end,
                 utf16_start: block_utf16_start,
                 utf16_end: utf16_cursor,
-                quote_depth: block_quote_depth,
+                indent_steps: block_indent,
             });
             block_byte_start = line_end;
             block_utf16_start = utf16_cursor;
@@ -1024,7 +1126,7 @@ pub fn split_blocks(
                 byte_end: byte_cursor,
                 utf16_start: block_utf16_start,
                 utf16_end: utf16_cursor,
-                quote_depth: block_quote_depth,
+                indent_steps: block_indent,
             });
             block_byte_start = byte_cursor;
             block_utf16_start = utf16_cursor;
@@ -1038,7 +1140,7 @@ pub fn split_blocks(
             byte_end: text.len(),
             utf16_start: block_utf16_start,
             utf16_end: utf16_cursor,
-            quote_depth: block_quote_depth,
+            indent_steps: block_indent,
         });
     }
 
@@ -1696,7 +1798,7 @@ mod tests {
             byte_end,
             utf16_start: text[..byte_start].encode_utf16().count() as u32,
             utf16_end: text[..byte_end].encode_utf16().count() as u32,
-            quote_depth: 0,
+            indent_steps: 0,
         }
     }
 
@@ -1861,7 +1963,7 @@ mod tests {
 
         let depths = blocks
             .iter()
-            .map(|block| block.quote_depth)
+            .map(|block| block.indent_steps)
             .collect::<Vec<u8>>();
         let ends = blocks
             .iter()
@@ -1872,7 +1974,7 @@ mod tests {
         // nothing about it ends a block.
         let source = split_with(StyledText::new(text, &levels), &plain_typography());
         assert_eq!(source.len(), 1);
-        assert_eq!(source[0].quote_depth, 0);
+        assert_eq!(source[0].indent_steps, 0);
         // The boundaries fall where the quoting changes and nowhere else: these
         // lines are far too short to end a block on their own.
         assert_eq!(
@@ -1883,6 +1985,57 @@ mod tests {
                 text.len(),
             ]
         );
+    }
+
+    /// **A run of items is one block, and it is the run that ends one**
+    /// (要件 7.3.2). An item's indent belongs to its block, so items and body
+    /// text cannot share one; but items share that indent with each other, so
+    /// cutting per item would buy nothing and would multiply the blocks of a
+    /// list-heavy document by its item count (技術検証 7.1). Which marker
+    /// stands in the gutter is a line's business, and is drawn from the line's
+    /// own rectangle rather than from a block of its own.
+    #[test]
+    fn a_run_of_items_is_one_indented_block() {
+        let text = "本文\n- 一つめ\n- 二つめ\n- 三つめ\n本文へ戻る\n";
+        let item = LineStyle::of_kind(LineKind::Bullet);
+        let plain = LineStyle::default();
+        let levels = [plain, item, item, item, plain];
+        // A preview pane's text, which is the only one that indents (要件 7.3.1).
+        let markers = [None; 5];
+        let styled = StyledText::new(text, &levels).with_markers(&markers);
+
+        let blocks = split_with(styled, &plain_typography());
+
+        let steps = blocks
+            .iter()
+            .map(|block| block.indent_steps)
+            .collect::<Vec<u8>>();
+        let run_end = "本文\n- 一つめ\n- 二つめ\n- 三つめ\n".len();
+        assert_eq!(steps, vec![0, 1, 0]);
+        assert_eq!(blocks[1].byte_end, run_end);
+        // 要件 7.3.1: the source pane shows the markers themselves, so nothing
+        // about them indents and nothing about them ends a block.
+        let source = split_with(StyledText::new(text, &levels), &plain_typography());
+        assert_eq!(source.len(), 1);
+        assert_eq!(source[0].indent_steps, 0);
+    }
+
+    /// Being quoted and being an item are both indents, and they add: a block
+    /// holding an item inside a quote is set in by two steps. **A count rather
+    /// than a depth** is what lets them.
+    #[test]
+    fn a_quoted_item_is_set_in_by_both() {
+        let quoted_item = LineStyle {
+            kind: LineKind::Bullet,
+            quote_depth: 1,
+            ..LineStyle::default()
+        };
+
+        assert_eq!(LineStyle::default().indent_steps(), 0);
+        assert_eq!(LineStyle::of_kind(LineKind::Bullet).indent_steps(), 1);
+        assert_eq!(quoted_item.indent_steps(), 2);
+        // A rule and a fence are whole lines of marks, not things set in.
+        assert_eq!(LineStyle::of_kind(LineKind::Rule).indent_steps(), 0);
     }
 
     /// A cut position is a line start only for a layout set the way the pieces
@@ -1953,6 +2106,7 @@ mod tests {
             style: LineStyle::default(),
             marks: &[],
             marker: None,
+            indent_steps: 0,
         };
         let wraps = EveryNCharacters(CELLS as usize).line_starts(stub);
         for piece in &cut[..cut.len() - 1] {
@@ -2161,6 +2315,39 @@ mod tests {
             loose * 3 <= tight * 2 + 1,
             "{tight} cells became {loose} at half a size of extra advance"
         );
+    }
+
+    /// What a hanging indent would cost is the items that wrap, not the items
+    /// (要件 7.3.2). **Set loosely on purpose**: a single line of text spaced
+    /// at 190% is charged nearly two lines' worth of cells, so a count that
+    /// asked `line_cells` whether a line filled one would call every item here
+    /// a wrapping one.
+    #[test]
+    fn counts_only_the_list_items_that_take_more_than_one_line() {
+        let typography = Typography {
+            line_spacing: 1.9,
+            ..plain_typography()
+        };
+        let short = "あ".repeat(CELLS as usize / 2);
+        let long = "あ".repeat(CELLS as usize * 3);
+        let text = format!("- {short}\n- {long}\n- {short}\n");
+        let lines = vec![LineStyle::of_kind(LineKind::Bullet); 3];
+        let styled = StyledText::new(&text, &lines);
+
+        assert_eq!(wrapping_list_lines(styled, CELLS, &typography), 1);
+    }
+
+    /// Only an item has a marker to hang its continuation under, so a paragraph
+    /// that wraps is not one of these however long it is.
+    #[test]
+    fn a_long_line_that_is_not_an_item_is_not_counted() {
+        let typography = plain_typography();
+        let long = "あ".repeat(CELLS as usize * 3);
+        let text = format!("{long}\n- {long}\n");
+        let lines = vec![LineStyle::default(), LineStyle::of_kind(LineKind::Bullet)];
+        let styled = StyledText::new(&text, &lines);
+
+        assert_eq!(wrapping_list_lines(styled, CELLS, &typography), 1);
     }
 
     /// A heading is charged twice: it fits fewer characters per line, and each

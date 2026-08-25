@@ -582,7 +582,7 @@ fn push_visible_line(
     let indented = line.starts_with([' ', '\t']);
     // 要件 7.3.2: the blockquote marker comes off whatever is under it — a rule
     // inside a quote is still a rule, and the quoting itself is the block's
-    // indent (`BlockSpan::quote_depth`, 技術検証 7.1). **A box was tried at the
+    // indent (`BlockSpan::indent_steps`, 技術検証 7.1). **A box was tried at the
     // head of the line instead and taken out again**: it indented the first
     // line of a quoted paragraph and left every line it wrapped to flush with
     // the body, because a box reaches that head and no further.

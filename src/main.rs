@@ -6516,7 +6516,10 @@ fn refresh_pane(
     let max_block = cache.pane(id).graphics.engine.largest_block_utf16();
     // 要件 7.3.2: how many blocks a list item's own indent would add, if it got
     // the one a quote has. A number about real documents, not an argument.
+    // **Both halves**: every item, then the ones that take more than one line
+    // and are therefore the only ones an indent does anything for.
     let items = cache.pane(id).graphics.engine.list_items();
+    let wrapping_items = cache.pane(id).graphics.engine.wrapping_items();
     let upload_kb = cache.pane(id).graphics.uploaded_bytes / 1024;
     cache.pane(id).graphics.uploaded_bytes = 0;
     let caret_at = cache
@@ -6575,7 +6578,7 @@ fn refresh_pane(
          frames={frames} frame_min={frame_min:.2} frame_med={frame_med:.2} \
          frame_max={frame_max:.2} frame_slow={frame_slow} gap_med={gap_med:.2} \
          upload_kb={upload_kb} split={split} mode={mode} zoom={zoom_percent} \
-         blocks={blocks} items={items} measured={measured} \
+         blocks={blocks} items={items}/{wrapping_items} measured={measured} \
          measured_utf16={measured_utf16} \
          wrapped={wrapped} wrap={wrap_asked}/{wrap_exact}/{wrap_resumed} \
          miss={wrap_shared}/{wrap_starts} max_block={max_block} \

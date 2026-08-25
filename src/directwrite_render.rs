@@ -70,7 +70,7 @@ use crate::text_blocks::{
     BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, DEFAULT_INK, Emphasis, FlowOrder,
     LineInfo, LineMarker, LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL, Ornament,
     StyleRun, StyledText, TileSpan, Typography, WrapPoints, block_flow_bound, cells_per_line,
-    line_runs, place_blocks, split_blocks, style_runs,
+    line_runs, place_blocks, split_blocks, style_runs, wrapping_list_lines,
 };
 
 /// Which way the text runs.
@@ -570,9 +570,11 @@ impl IDWriteInlineObject_Impl for MarkerBox_Impl {
 /// one in `layout_for` that draws it. A block measured without its boxes and
 /// drawn with them would be placed at a size it is not.
 ///
-/// One width for every marker is the whole point — `-`, `10.` and `- [x]` are
-/// four, five and eight characters, and all three set their text at the same
-/// indent.
+/// **The same indent for every marker is the whole point** — `-`, `10.` and
+/// `- [x]` are four, five and eight characters, and all three set their text at
+/// the same place. That used to be the box's width; it is the block's indent
+/// now, so the box over a marker is width-less and only hides. See
+/// [`LineStyle::indent_steps`].
 fn apply_marker_boxes(
     layout: &IDWriteTextLayout,
     typography: &Typography,
@@ -581,25 +583,42 @@ fn apply_marker_boxes(
     if runs.iter().all(|run| run.ornament.is_none()) {
         return Ok(());
     }
-    // One step of indenting: room for a bullet and the gap after it.
-    let along = typography.indent_step();
-    let object: IDWriteInlineObject = MarkerBox {
-        along,
-        across: typography.font_size,
-        baseline: typography.font_size * 0.8,
-    }
-    .into();
-    for run in runs {
-        if run.ornament.is_none() {
-            continue;
+    // **A marker's box takes no room.** The step its text begins after is the
+    // block's own indent now (要件 7.3.2), and a box that also took one would
+    // set the first line of an item a step further in than the lines it wraps
+    // on to. What is left is the half of the job only a box can do: an inline
+    // object replaces the range it covers, so the marker's glyphs are not
+    // drawn.
+    //
+    // A whole-line box keeps its width. It stands over a line that is nothing
+    // but marks — `---`, or a fence — where the room is what the line leaves
+    // behind, not an indent for anything after it.
+    let box_of = |along: f32| -> IDWriteInlineObject {
+        MarkerBox {
+            along,
+            across: typography.font_size,
+            baseline: typography.font_size * 0.8,
         }
+        .into()
+    };
+    let marker = box_of(0.0);
+    let whole_line = box_of(typography.indent_step());
+    for run in runs {
+        let Some(ornament) = run.ornament else {
+            continue;
+        };
+        let object = if ornament.draws_ink() {
+            &marker
+        } else {
+            &whole_line
+        };
         let range = DWRITE_TEXT_RANGE {
             startPosition: run.utf16_start,
             length: run.utf16_len,
         };
         // SAFETY: `style_runs` keeps every range inside the block's own text,
         // and both objects outlive the call.
-        unsafe { layout.SetInlineObject(&object, range)? };
+        unsafe { layout.SetInlineObject(object, range)? };
     }
     Ok(())
 }
@@ -662,6 +681,8 @@ fn draw_marker_ink(
     runs: &[StyleRun],
     text: &str,
     origin: windows_numerics::Vector2,
+    mode: WritingMode,
+    indent: f32,
 ) -> Result<()> {
     // A box is one cluster and hit-tests to one region (技術検証 4.12). The
     // room for a few more costs nothing and keeps a surprise from becoming an
@@ -684,17 +705,34 @@ fn draw_marker_ink(
                 &mut count,
             )?;
         }
+        // **The one thing here that rests on DirectWrite rather than on us**:
+        // that a range covering a width-less inline object still hit-tests to a
+        // region. It should — the object keeps its text positions and its
+        // cluster, and only its advance is nothing — but if it ever does not,
+        // this is where every marker in the document would quietly stop being
+        // drawn.
         if count == 0 {
             continue;
         }
         let region = regions[0];
         let ink = marker_ink(ornament, text, run);
         let utf16 = ink.encode_utf16().collect::<Vec<u16>>();
+        // **The box takes no room now**, so what comes back is a sliver at the
+        // head of the item's text rather than a space to draw in. The glyph
+        // goes in the gutter the block's own indent opened: one step back along
+        // the line axis, and as far along the flow axis as the region reached —
+        // which is the height of the line the item starts on, whichever way the
+        // text runs.
+        let (flow_size, _) = mode.to_axes(region.width, region.height);
+        let (back_x, back_y) = mode.to_screen(0.0, -indent);
+        let (size_x, size_y) = mode.to_screen(flow_size, indent);
+        let left = region.left + back_x;
+        let top = region.top + back_y;
         let rect = D2D_RECT_F {
-            left: region.left,
-            top: region.top,
-            right: region.left + region.width,
-            bottom: region.top + region.height,
+            left,
+            top,
+            right: left + size_x,
+            bottom: top + size_y,
         };
         // SAFETY: The buffer, the format and the brush all outlive the call,
         // and the rectangle is read before it returns.
@@ -1108,6 +1146,8 @@ pub struct TextEngine {
     layouts: Vec<(u64, IDWriteTextLayout)>,
     /// Where each long paragraph wraps. See [`LayoutWraps`].
     wraps: Vec<ParagraphWraps>,
+    /// How many list items wrap at this geometry. See [`Self::list_items`].
+    wrapping_items: usize,
 }
 
 /// Everything about the spec that changes a layout, hashed.
@@ -1215,17 +1255,22 @@ fn margin_for(font_size: f32) -> f32 {
 /// How far one block's text is set in from the page margin (要件 7.3.2).
 ///
 /// **A property of the block, not of the pane.** An indent has to move every
-/// visual line a quoted paragraph wrapped to, and the only thing that can is
-/// the layout box the block is set in: DirectWrite has no per-paragraph
-/// indent, and a box at the head of a line reaches that head and no further
-/// (技術検証 7.1). That is why a change of quoting ends a block.
+/// visual line a quoted paragraph or a wrapped list item ran to, and the only
+/// thing that can is the layout box the block is set in: DirectWrite has no
+/// per-paragraph indent, and a box at the head of a line reaches that head and
+/// no further (技術検証 7.1). That is why a change of indenting ends a block.
 ///
 /// Every place that turns a line coordinate into a screen one goes through
 /// this — drawing, the caret, the hit test, the selection rectangles and the
 /// scroll that follows the caret. A place that forgot it would put the caret
 /// beside the text it is in.
 fn block_inset(span: &BlockSpan, typography: &Typography) -> f32 {
-    f32::from(span.quote_depth) * typography.indent_step()
+    indent_of(span.indent_steps, typography)
+}
+
+/// What a count of indent steps is worth on the line axis.
+fn indent_of(steps: u8, typography: &Typography) -> f32 {
+    f32::from(steps) * typography.indent_step()
 }
 
 /// The pane's line extent, less what one block's own indent takes.
@@ -1493,6 +1538,7 @@ impl TextEngine {
         self.layouts.truncate(LAYOUT_CACHE_LIMIT);
         self.plan = place_blocks(&spans, &measures, margin, mode.flow_order());
         self.text = text.to_owned();
+        self.wrapping_items = wrapping_list_lines(styled, cells, &typography);
         self.line_styles = styled.lines.to_vec();
         self.line_spans = styled.spans.to_vec();
         self.line_markers = styled.markers.to_vec();
@@ -1514,6 +1560,23 @@ impl TextEngine {
             .iter()
             .filter(|style| style.kind.is_list())
             .count()
+    }
+
+    /// How many of those items take more than one line (要件 7.3.2).
+    ///
+    /// **The number that settled how the indent is paid for.** An item that
+    /// fits on one line has no continuation to align, so "cut only the items
+    /// that wrap" looked like the cheap way to give the rest one. Measured on
+    /// `testdata/10_箇条書きの計測.md` it was not: 503 of 1749 items wrapped in
+    /// a wide pane but 1245 did in a narrow one, which is no saving at all —
+    /// and cutting by it would have made block boundaries move with the pane
+    /// width. A run of items is one block instead (技術検証 7.1).
+    ///
+    /// Kept because it says how much of a document the indent is doing work
+    /// for. Depends on the geometry, which is why it is worked out where the
+    /// split is rather than counted from the styles on the way past.
+    pub fn wrapping_items(&self) -> usize {
+        self.wrapping_items
     }
 
     /// How one block's own logical lines are set.
@@ -1772,7 +1835,10 @@ impl TextEngine {
                 if runs.iter().any(run_draws_ink) {
                     let format = graphics.text_format(&self.typography, mode)?;
                     let text = &self.text[block.span.byte_start..block.span.byte_end];
-                    draw_marker_ink(&target, &brush, &format, &layout, &runs, text, origin)?;
+                    let indent = self.typography.indent_step();
+                    draw_marker_ink(
+                        &target, &brush, &format, &layout, &runs, text, origin, mode, indent,
+                    )?;
                 }
                 // SAFETY: Paired with BeginDraw above.
                 unsafe { target.EndDraw(None, None)? };
@@ -2174,7 +2240,14 @@ struct ParagraphWraps {
     /// How the line was set when these positions were found — **all of what
     /// moves a break**, which is what [`LongLine`] is a list of. Positions
     /// found under anything else are not line starts here.
+    ///
+    /// The indent is one of them: a paragraph set one step in wraps at a
+    /// narrower box and breaks somewhere else. It follows from the style
+    /// within one engine, since only a preview indents at all (要件 7.3.1) —
+    /// but it is what the layout was actually made at, and a key that leaves
+    /// out a thing that moves a break is the kind that goes wrong quietly.
     style: LineStyle,
+    indent_steps: u8,
     marks: Vec<Emphasis>,
     marker: Option<LineMarker>,
     /// Byte offsets where each line after the first begins.
@@ -2237,11 +2310,22 @@ impl WrapPoints for LayoutWraps<'_> {
         self.current.push(ParagraphWraps {
             text: line.text.to_owned(),
             style: line.style,
+            indent_steps: line.indent_steps,
             marks: line.marks.to_vec(),
             marker: line.marker,
             starts: starts.clone(),
         });
         starts
+    }
+}
+
+impl ParagraphWraps {
+    /// Whether these positions were found for a line set exactly as this one
+    /// is — the text apart, which each caller compares its own way.
+    fn matches(&self, line: LongLine<'_>) -> bool {
+        self.style == line.style
+            && self.indent_steps == line.indent_steps
+            && self.marker == line.marker
     }
 }
 
@@ -2252,10 +2336,7 @@ impl LayoutWraps<'_> {
         // `self`, and taking it now leaves `self` free to lay text out below.
         let previous = self.previous;
         let same_line = |kept: &&ParagraphWraps| {
-            kept.style == line.style
-                && kept.marker == line.marker
-                && kept.marks == line.marks
-                && kept.text == line.text
+            kept.matches(line) && kept.marks == line.marks && kept.text == line.text
         };
         let same = previous.iter().find(same_line);
         if let Some(same) = same {
@@ -2268,7 +2349,7 @@ impl LayoutWraps<'_> {
         // finds the edited one, because the others matched in full above.
         let nearest = previous
             .iter()
-            .filter(|kept| kept.style == line.style && kept.marker == line.marker)
+            .filter(|kept| kept.matches(line))
             .map(|kept| (reusable_prefix(kept, line), kept))
             .max_by_key(|(shared, _)| *shared);
         if let Some((shared, kept)) = &nearest
@@ -2374,7 +2455,7 @@ impl LayoutWraps<'_> {
         let level = style.heading_level;
         let flow_per_line = typography.font_size * 2.2 * typography.flow_scale(level);
         let lines = (MAX_LAYOUT_FLOW / flow_per_line.max(1.0)).floor().max(1.0);
-        let extent = self.quoted_extent(style);
+        let extent = self.indented_extent(line.indent_steps);
         let cells = cells_per_line(extent, typography) as f32;
         let per_line = (cells / typography.size_scale(level)).max(1.0);
         let characters = (lines * per_line) as usize;
@@ -2390,20 +2471,20 @@ impl LayoutWraps<'_> {
         }
     }
 
-    /// The line extent a paragraph set at `style` is laid out across.
+    /// The line extent a paragraph set `steps` in is laid out across.
     ///
-    /// **A quoted paragraph is asked at the width it will be cut at.** A wrap
-    /// position is only a line start for a layout of the same width, and the
-    /// pieces are measured in the block's own narrower box (要件 7.3.2).
-    fn quoted_extent(&self, style: LineStyle) -> u32 {
-        let inset = f32::from(style.quote_depth) * self.typography.indent_step();
+    /// **An indented paragraph is asked at the width it will be cut at.** A
+    /// wrap position is only a line start for a layout of the same width, and
+    /// the pieces are measured in the block's own narrower box (要件 7.3.2).
+    fn indented_extent(&self, steps: u8) -> u32 {
+        let inset = indent_of(steps, &self.typography);
         self.line_extent.saturating_sub(inset as u32).max(1)
     }
 
     /// And the box that goes with it, which is what the pieces are measured
     /// in once they are cut.
-    fn quoted_box(&self, style: LineStyle) -> f32 {
-        let inset = f32::from(style.quote_depth) * self.typography.indent_step();
+    fn indented_box(&self, steps: u8) -> f32 {
+        let inset = indent_of(steps, &self.typography);
         (self.line_box - inset).max(1.0)
     }
 
@@ -2427,8 +2508,9 @@ impl LayoutWraps<'_> {
         let markers = [line.marker.filter(|_| from == 0)];
         let marked = StyledText::marked(text, &levels, &spans);
         let styled = marked.with_markers(&markers);
-        let bound = block_flow_bound(styled, self.quoted_extent(style), self.typography);
-        let line_box = self.quoted_box(style);
+        let steps = line.indent_steps;
+        let bound = block_flow_bound(styled, self.indented_extent(steps), self.typography);
+        let line_box = self.indented_box(steps);
         let (max_width, max_height) = self.mode.to_screen(bound, line_box);
         let utf16 = text.encode_utf16().collect::<Vec<u16>>();
         // SAFETY: The UTF-16 buffer outlives CreateTextLayout, and the format
@@ -3313,36 +3395,36 @@ mod tests {
         );
     }
 
-    /// A block covering nothing, quoted to the given depth.
-    fn quoted_span(quote_depth: u8) -> BlockSpan {
+    /// A block covering nothing, set in by the given number of steps.
+    fn indented_span(indent_steps: u8) -> BlockSpan {
         BlockSpan {
             byte_start: 0,
             byte_end: 0,
             utf16_start: 0,
             utf16_end: 0,
-            quote_depth,
+            indent_steps,
         }
     }
 
-    /// A quoted block is moved in from the margin by one step per level, and
+    /// An indented block is moved in from the margin by one step per level, and
     /// set in a box narrower by the same amount (要件 7.3.2). **Every line of
     /// it**, which is the whole reason the indent belongs to the block rather
     /// than to the head of a line.
     #[test]
-    fn a_quoted_block_is_set_in_by_one_step_a_level() {
+    fn an_indented_block_is_set_in_by_one_step_a_level() {
         let typography = plain();
         let step = typography.indent_step();
 
-        assert_eq!(block_inset(&quoted_span(0), &typography), 0.0);
-        assert_eq!(block_inset(&quoted_span(1), &typography), step);
-        assert_eq!(block_inset(&quoted_span(2), &typography), step * 2.0);
-        assert_eq!(block_extent(&quoted_span(0), 800, &typography), 800);
+        assert_eq!(block_inset(&indented_span(0), &typography), 0.0);
+        assert_eq!(block_inset(&indented_span(1), &typography), step);
+        assert_eq!(block_inset(&indented_span(2), &typography), step * 2.0);
+        assert_eq!(block_extent(&indented_span(0), 800, &typography), 800);
         assert_eq!(
-            block_extent(&quoted_span(1), 800, &typography),
+            block_extent(&indented_span(1), 800, &typography),
             800 - step as u32
         );
         // A pane narrower than the indent still leaves a box to lay out in.
-        assert_eq!(block_extent(&quoted_span(4), 10, &typography), 1);
+        assert_eq!(block_extent(&indented_span(4), 10, &typography), 1);
     }
 
     /// The box over a line that is all marks is there to hide them and nothing
@@ -3370,12 +3452,20 @@ mod tests {
         assert_eq!(byte_at_utf16(text, 99), text.len());
     }
 
-    /// 要件 7.3.2: the box a marker stands in has to be a **real box in the
-    /// run** — the text after it starts one box in and the caret agrees
-    /// (技術検証 4.12). A layout without the box would put the caret where the
-    /// text is not, which is what `leadingSpacing` would have done (4.11).
+    /// 要件 7.3.2: an item's text begins one step in — **and so does every line
+    /// it wraps to**, which is why the step is the block's indent rather than
+    /// the width of a box at the head of the line (技術検証 7.1). The caret
+    /// agrees because it is the same box the text is laid out in (4.12); a
+    /// `leadingSpacing` would have moved the glyphs and left the caret behind
+    /// (4.11).
+    ///
+    /// The box over the marker keeps only the other half of its old job. It
+    /// hides the glyphs and takes no room, so the head of the line and the
+    /// item's first character are the same place — a box that still took a step
+    /// would set this first line two steps in while its continuations stayed at
+    /// one.
     #[test]
-    fn a_marker_box_indents_the_text_after_it() {
+    fn an_item_is_set_in_one_step_and_its_marker_takes_no_room() {
         let text = "- 箇条書き";
         let levels = [LineStyle::of_kind(LineKind::Bullet)];
         let bullet = LineMarker {
@@ -3384,28 +3474,25 @@ mod tests {
         };
         let markers = [Some(bullet)];
         let typography = plain();
+        let step = typography.indent_step();
         let boxed = StyledText::new(text, &levels).with_markers(&markers);
+        // 要件 7.3.1: no markers is a source pane, which is not set in at all.
         let bare = StyledText::new(text, &levels);
 
         let mut with_box = engine_set(WritingMode::Horizontal, boxed, &typography);
         let mut without = engine_set(WritingMode::Horizontal, bare, &typography);
 
-        // The head of the line is where it always was.
         let head = with_box.caret_geometry(0).expect("caret geometry");
         let bare_head = without.caret_geometry(0).expect("caret geometry");
-        assert!((head.x - bare_head.x).abs() < 0.5, "{head:?} {bare_head:?}");
-
-        // And the item's first character has moved by the box's own width.
-        let item = with_box.caret_geometry(2).expect("caret geometry");
-        let bare_item = without.caret_geometry(2).expect("caret geometry");
-        let width = typography.cell_advance() * 2.0;
         assert!(
-            (item.x - bare_head.x - width).abs() < 1.0,
-            "expected {width} of indent, got {item:?} against {bare_head:?}"
+            (head.x - bare_head.x - step).abs() < 1.0,
+            "expected {step} of indent, got {head:?} against {bare_head:?}"
         );
+
+        let item = with_box.caret_geometry(2).expect("caret geometry");
         assert!(
-            item.x > bare_item.x,
-            "{item:?} did not move past {bare_item:?}"
+            (item.x - head.x).abs() < 1.0,
+            "the marker's box took room: {item:?} against {head:?}"
         );
     }
 
@@ -3426,7 +3513,7 @@ mod tests {
     /// the block's edge is snapped to.
     fn placed(starts: &[u32], flow_size: f32) -> BlockPlacement {
         BlockPlacement {
-            span: quoted_span(0),
+            span: indented_span(0),
             flow_start: 0.0,
             flow_size,
             exact_flow_size: flow_size,
@@ -3515,10 +3602,17 @@ mod tests {
         assert_eq!(flow, (20.0, 41.0));
     }
 
-    /// **A box must not make its line taller.** The height and the baseline it
-    /// reports sit inside what the text on the line already asks for, so a
-    /// document does not grow along the flow axis because its markers got
-    /// boxes.
+    /// **A box must not make its line taller.** It takes no width any more —
+    /// the indent is the block's (要件 7.3.2) — so the height and the baseline
+    /// it reports are all it can still get wrong, and both sit inside what the
+    /// text on the line already asks for.
+    ///
+    /// **Both sides are previews**, differing only in whether the marker ranges
+    /// got an inline object. Comparing against a source pane would compare two
+    /// different splits as well — that one is not set in, so its lines are one
+    /// block where these are two — and `place_blocks` rounds each block on its
+    /// own, so the totals would part company by a pixel for a reason that has
+    /// nothing to do with boxes.
     #[test]
     fn a_marker_box_does_not_change_the_flow_size() {
         let text = "- 箇条書き\n- もう一行\n本文";
@@ -3532,9 +3626,12 @@ mod tests {
             ornament: Ornament::Bullet,
         };
         let markers = [Some(bullet), Some(bullet), None];
+        // 要件 7.3.1: a preview whose items are all the caret's line, which is
+        // the one place a marker really does go boxless.
+        let unboxed = [None; 3];
         let typography = plain();
         let boxed = StyledText::new(text, &levels).with_markers(&markers);
-        let bare = StyledText::new(text, &levels);
+        let bare = StyledText::new(text, &levels).with_markers(&unboxed);
 
         let with_box = engine_set(WritingMode::Horizontal, boxed, &typography);
         let without = engine_set(WritingMode::Horizontal, bare, &typography);
