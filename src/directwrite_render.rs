@@ -1034,6 +1034,13 @@ fn apply_typography(
             if run.marks.strike {
                 layout.SetStrikethrough(true, range)?;
             }
+            // 要件 7.3.2: a link is underlined and nothing else. **Not a colour
+            // of its own** — 要件 9 gives the writer the ink, the paper and the
+            // headings, and a colour nobody can set is a colour that will not
+            // suit somebody's paper. An underline is legible on any of them.
+            if run.marks.link {
+                layout.SetUnderline(true, range)?;
+            }
             // 要件 9: a heading has a family of its own, and a code span has
             // another. **The code one is set last** so that a code span inside
             // a heading is still code — the later call is the one that stands.

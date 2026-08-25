@@ -337,6 +337,13 @@ pub struct Marks {
     pub italic: bool,
     pub strike: bool,
     pub code: bool,
+    /// The text a link shows, with the link itself taken off (要件 7.3.2).
+    ///
+    /// **Unlike the others this is not a pair of markers around the text.** A
+    /// link's markup is `[shown](where)` or `[[note|shown]]`, so what is hidden
+    /// is on both sides *and* between them; only the part a reader is meant to
+    /// read comes through, and this is what says which part that was.
+    pub link: bool,
 }
 
 /// What is drawn in place of the marker a box stands over (要件 7.3.2).

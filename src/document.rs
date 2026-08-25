@@ -667,6 +667,28 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
     let mut rest = content;
     let mut previous = None;
     while let Some(letter) = rest.chars().next() {
+        // 要件 7.3.2: a link shows what it was given to show. **Before the
+        // paired markers**, because what a link hides is not a pair around the
+        // text — `[` opens it, `](…)` closes it, and the part between them is
+        // the only part meant to be read.
+        if let Some((shown, after)) = link_here(rest, previous) {
+            let start = *at;
+            // Emphasis inside the shown text is still emphasis: `[**太字**](x)`
+            // is a bold link, and this is the same recursion that nests one
+            // marker inside another.
+            push_marked(shown, visible, marks, at);
+            marks.push(Emphasis {
+                utf16_start: start,
+                utf16_len: *at - start,
+                marks: Marks {
+                    link: true,
+                    ..Marks::default()
+                },
+            });
+            previous = shown.chars().next_back();
+            rest = after;
+            continue;
+        }
         if let Some((found, inner, after)) = opens_here(rest, previous) {
             let start = *at;
             if found.code {
@@ -694,6 +716,39 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
         previous = Some(letter);
         rest = &rest[letter.len_utf8()..];
     }
+}
+
+/// The link `rest` begins with: the text it shows, and what follows it.
+///
+/// Two shapes, and one rule they share with every other marker — **a link that
+/// does not close is not a link**, so an unmatched `[` is a bracket and stays
+/// one.
+///
+/// - `[shown](where)`, the ordinary link. 要件 7.3.2 formats it; where it
+///   points is 要件 7.3.1's business (`Ctrl+click`) and not shown.
+/// - `[[note]]` and `[[note|shown]]`, the internal link. **Kept and formatted
+///   even though going to one is out of scope** (要件定義 §14): not breaking a
+///   notation and being able to decide where it points are different things.
+///
+/// **An image is not a link.** `![説明](画像.png)` keeps its markup, because
+/// 要件 7.3.3 asks for the image to be shown as a name — and a link that read
+/// as ordinary text would hide the one thing that says it is a picture.
+fn link_here<'a>(rest: &'a str, previous: Option<char>) -> Option<(&'a str, &'a str)> {
+    if previous == Some('!') {
+        return None;
+    }
+    if let Some(inner_and_rest) = rest.strip_prefix("[[") {
+        let (inner, after) = inner_and_rest.split_once("]]")?;
+        // `[[note|shown]]` shows the second half; `[[note]]` shows the note.
+        let shown = inner.split_once('|').map_or(inner, |(_, shown)| shown);
+        return (!shown.is_empty()).then_some((shown, after));
+    }
+    let inner_and_rest = rest.strip_prefix('[')?;
+    let (shown, after_close) = inner_and_rest.split_once("](")?;
+    // The shown text may hold brackets of its own, but not a `](` — the first
+    // one closes the link, which is what Markdown itself does.
+    let (_, after) = after_close.split_once(')')?;
+    (!shown.is_empty()).then_some((shown, after))
 }
 
 /// The marker `rest` begins with, what it encloses and what follows it.
@@ -1946,6 +2001,52 @@ mod tests {
         assert_eq!(styles[0].indent_steps(), 1);
         assert_eq!(styles[1].indent_steps(), 2);
         assert_eq!(styles[2].indent_steps(), 2, "quoted, and an item");
+    }
+
+    /// 要件 7.3.2: a link shows what it was given to show, and where it points
+    /// is not on the page. **Both shapes**, because the internal one is kept
+    /// and formatted even though going to one is out of scope (§14) — not
+    /// breaking a notation and being able to decide where it points are
+    /// different things.
+    #[test]
+    fn a_link_shows_what_it_was_given_to_show() {
+        assert_eq!(visible_markdown_text("[説明](章/一.md)"), "説明");
+        assert_eq!(visible_markdown_text("[[ノート名]]"), "ノート名");
+        assert_eq!(visible_markdown_text("[[ノート名|表示名]]"), "表示名");
+        assert_eq!(visible_markdown_text("見る[説明](x)前後"), "見る説明前後");
+    }
+
+    /// **A link that does not close is not a link**, which is the rule every
+    /// other marker follows too: an unmatched bracket is a bracket.
+    #[test]
+    fn an_unclosed_link_is_left_as_written() {
+        assert_eq!(visible_markdown_text("[説明"), "[説明");
+        assert_eq!(visible_markdown_text("[説明](章"), "[説明](章");
+        assert_eq!(visible_markdown_text("[[ノート名]"), "[[ノート名]");
+        assert_eq!(visible_markdown_text("配列[0]と[1]"), "配列[0]と[1]");
+    }
+
+    /// **An image is not a link** (要件 7.3.3). It keeps its markup, because
+    /// the image is shown as a name — and a link that read as ordinary text
+    /// would hide the one thing that says it is a picture.
+    #[test]
+    fn an_image_keeps_its_markup() {
+        assert_eq!(
+            visible_markdown_text("![説明](画像.png)"),
+            "![説明](画像.png)"
+        );
+        assert_eq!(visible_markdown_text("![[画像.png]]"), "![[画像.png]]");
+    }
+
+    /// The shown text is marked as a link, and emphasis inside it still counts:
+    /// `[**太字**](x)` is a bold link.
+    #[test]
+    fn what_a_link_shows_is_marked_as_one() {
+        let preview = PreviewDocument::from_source("[**太字**](x)\n");
+        let marks = &preview.marks()[0];
+
+        assert!(marks.iter().any(|span| span.marks.link && !span.marks.bold));
+        assert!(marks.iter().any(|span| span.marks.bold && !span.marks.link));
     }
 
     #[test]
