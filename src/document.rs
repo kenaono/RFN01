@@ -620,7 +620,54 @@ fn push_visible_line(
         return;
     }
     let mut at = 0;
+    // 要件 7.3.2: a callout says on its first line what kind it is. **The label
+    // is kept as a word**, because the preview only ever deletes from the
+    // source (技術検証 4.12) — a title cannot be put on the page that was not
+    // written on it. What it can do is take the brackets off and set the word
+    // the writer typed, inside the quote's own bar and indent.
+    let content = match callout_label(content, style) {
+        Some((label, rest)) => {
+            let start = at;
+            for character in label.chars() {
+                visible.push(character);
+                at += character.len_utf16() as u32;
+            }
+            marks.push(Emphasis {
+                utf16_start: start,
+                utf16_len: at - start,
+                marks: Marks {
+                    bold: true,
+                    ..Marks::default()
+                },
+            });
+            rest
+        }
+        None => content,
+    };
     push_marked(content, visible, marks, &mut at);
+}
+
+/// The kind a callout announces on its first line, and what follows it
+/// (要件 7.3.2).
+///
+/// `> [!NOTE]` and `> [!WARNING] 見出し`. **Only inside a quote**, which is what
+/// the notation is built on: a callout is a quote that says what it is for, and
+/// the bar and the indent it is drawn in are the quote's.
+///
+/// The label is given back **as the writer typed it** — brackets off, nothing
+/// added, nothing translated. Anything else would be a word on the page that is
+/// not in the document.
+fn callout_label(content: &str, style: LineStyle) -> Option<(&str, &str)> {
+    if style.quote_depth == 0 {
+        return None;
+    }
+    let inner = content.strip_prefix("[!")?;
+    let (label, rest) = inner.split_once(']')?;
+    // A label is a word, and a `[!` with a bracket somewhere later in a
+    // sentence is not one. **Letters only**, which is every kind Obsidian
+    // defines and every kind anyone writes.
+    let named = !label.is_empty() && label.chars().all(|c| c.is_ascii_alphabetic());
+    named.then_some((label, rest))
 }
 
 /// The longest line the preview works markers out for (要件 2.3, 7.3.2).
@@ -671,6 +718,32 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
         // paired markers**, because what a link hides is not a pair around the
         // text — `[` opens it, `](…)` closes it, and the part between them is
         // the only part meant to be read.
+        // **Before the link**, because `[^1]` begins the way a link does and
+        // means something else. A link needs `](` after its text and a footnote
+        // needs a caret before it, so the two never both match — but reading
+        // the caret first is what says so at a glance.
+        if let Some((name, after)) = footnote_here(rest) {
+            let start = *at;
+            visible.push('[');
+            *at += 1;
+            for character in name.chars() {
+                visible.push(character);
+                *at += character.len_utf16() as u32;
+            }
+            visible.push(']');
+            *at += 1;
+            marks.push(Emphasis {
+                utf16_start: start,
+                utf16_len: *at - start,
+                marks: Marks {
+                    link: true,
+                    ..Marks::default()
+                },
+            });
+            previous = Some(']');
+            rest = after;
+            continue;
+        }
         if let Some((shown, after)) = link_here(rest, previous) {
             let start = *at;
             // Emphasis inside the shown text is still emphasis: `[**太字**](x)`
@@ -716,6 +789,24 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
         previous = Some(letter);
         rest = &rest[letter.len_utf8()..];
     }
+}
+
+/// The footnote `rest` begins with: what it shows, and what follows it
+/// (要件 7.3.2).
+///
+/// `[^1]` in the middle of a sentence, and `[^1]:` at the head of the line that
+/// defines it. **The caret comes off and the brackets stay**: the preview only
+/// ever deletes (技術検証 4.12), so `1` on its own would be a number nobody
+/// could tell from a number, and `[1]` is what a footnote has looked like in
+/// print for as long as there have been footnotes.
+///
+/// The name may be anything without a space or a bracket, which is what
+/// Markdown allows: `[^あ]` and `[^note-1]` are both footnotes.
+fn footnote_here(rest: &str) -> Option<(&str, &str)> {
+    let inner = rest.strip_prefix("[^")?;
+    let (name, after) = inner.split_once(']')?;
+    let named = !name.is_empty() && !name.contains([' ', '[', ']']);
+    named.then_some((name, after))
 }
 
 /// The link `rest` begins with: the text it shows, and what follows it.
@@ -2047,6 +2138,34 @@ mod tests {
 
         assert!(marks.iter().any(|span| span.marks.link && !span.marks.bold));
         assert!(marks.iter().any(|span| span.marks.bold && !span.marks.link));
+    }
+
+    /// 要件 7.3.2: a callout says what kind it is, and **the label is kept as a
+    /// word**. The preview only ever deletes from the source, so a title cannot
+    /// be put on the page that was not written on it — what it can do is take
+    /// the brackets off and set the word the writer typed.
+    #[test]
+    fn a_callout_keeps_its_label_as_a_word() {
+        assert_eq!(visible_markdown_text("> [!NOTE]"), "NOTE");
+        assert_eq!(visible_markdown_text("> [!WARNING] 注意"), "WARNING 注意");
+        // Only inside a quote: a callout is a quote that says what it is for.
+        assert_eq!(visible_markdown_text("[!NOTE]"), "[!NOTE]");
+        // A label is a word. A bracket later in a quoted sentence is not one.
+        assert_eq!(visible_markdown_text("> [!] と書いた"), "[!] と書いた");
+    }
+
+    /// 要件 7.3.2: **the caret comes off and the brackets stay.** `1` on its own
+    /// would be a number nobody could tell from a number, and `[1]` is what a
+    /// footnote has looked like in print for as long as there have been
+    /// footnotes.
+    #[test]
+    fn a_footnote_keeps_its_brackets_and_loses_its_caret() {
+        assert_eq!(visible_markdown_text("本文[^1]です"), "本文[1]です");
+        assert_eq!(visible_markdown_text("[^note-1]: 中身"), "[note-1]: 中身");
+        assert_eq!(visible_markdown_text("[^あ]"), "[あ]");
+        // Unclosed, or not a name: left as written, like every other marker.
+        assert_eq!(visible_markdown_text("[^1"), "[^1");
+        assert_eq!(visible_markdown_text("[^]"), "[^]");
     }
 
     #[test]
