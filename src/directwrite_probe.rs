@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows::{
     Win32::Graphics::DirectWrite::{
-        DWRITE_BREAK_CONDITION, DWRITE_BREAK_CONDITION_NEUTRAL, DWRITE_FACTORY_TYPE_SHARED,
+        DWRITE_BREAK_CONDITION, DWRITE_BREAK_CONDITION_NEUTRAL, DWRITE_FACTORY_TYPE_ISOLATED,
         DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS, DWRITE_INLINE_OBJECT_METRICS,
         DWRITE_OVERHANG_METRICS, DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_METRICS,
@@ -27,10 +27,15 @@ pub struct DirectWriteProbeReport {
 pub fn probe_vertical_layout(text: &str) -> Result<DirectWriteProbeReport> {
     let utf16: Vec<u16> = text.encode_utf16().collect();
 
+    // Isolated for the reason the renderer's is (技術検証 7.3): a shared
+    // factory is one object for the whole process, and this file makes two more
+    // of them — one here and one in its own tests, which run beside every other
+    // graphics test.
+
     // SAFETY: DirectWrite objects are created and used on this thread. The UTF-16
     // buffer remains alive for the complete CreateTextLayout call.
     unsafe {
-        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED)?;
         let format = factory.CreateTextFormat(
             w!("Yu Mincho"),
             None,
@@ -206,7 +211,7 @@ pub fn probe_inline_object(
     // SAFETY: Every DirectWrite object is created and used on this thread, and
     // the UTF-16 buffer outlives the CreateTextLayout call.
     unsafe {
-        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED)?;
         let format = factory.CreateTextFormat(
             w!("Yu Mincho"),
             None,

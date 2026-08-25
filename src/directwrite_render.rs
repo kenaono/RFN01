@@ -39,18 +39,18 @@ use windows::{
                 ID2D1RenderTarget, ID2D1SolidColorBrush,
             },
             DirectWrite::{
-                DWRITE_BREAK_CONDITION, DWRITE_BREAK_CONDITION_NEUTRAL, DWRITE_FACTORY_TYPE_SHARED,
-                DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT, DWRITE_FLOW_DIRECTION_TOP_TO_BOTTOM,
-                DWRITE_FONT_LINE_GAP_USAGE_DEFAULT, DWRITE_FONT_STRETCH_NORMAL,
-                DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
-                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS, DWRITE_INLINE_OBJECT_METRICS,
-                DWRITE_LINE_METRICS, DWRITE_LINE_SPACING, DWRITE_LINE_SPACING_METHOD_PROPORTIONAL,
-                DWRITE_MEASURING_MODE_NATURAL, DWRITE_OVERHANG_METRICS,
-                DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_READING_DIRECTION_TOP_TO_BOTTOM,
-                DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
-                IDWriteInlineObject, IDWriteInlineObject_Impl, IDWriteLocalizedStrings,
-                IDWriteTextFormat, IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1,
-                IDWriteTextRenderer,
+                DWRITE_BREAK_CONDITION, DWRITE_BREAK_CONDITION_NEUTRAL,
+                DWRITE_FACTORY_TYPE_ISOLATED, DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT,
+                DWRITE_FLOW_DIRECTION_TOP_TO_BOTTOM, DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
+                DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS,
+                DWRITE_INLINE_OBJECT_METRICS, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING,
+                DWRITE_LINE_SPACING_METHOD_PROPORTIONAL, DWRITE_MEASURING_MODE_NATURAL,
+                DWRITE_OVERHANG_METRICS, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
+                DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_RANGE, DWriteCreateFactory,
+                IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
+                IDWriteInlineObject_Impl, IDWriteLocalizedStrings, IDWriteTextFormat,
+                IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTextRenderer,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Imaging::{
@@ -290,7 +290,18 @@ impl Graphics {
         // already initialized in a compatible mode.
         unsafe {
             Ok(Self {
-                dwrite: DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?,
+                // **Isolated, not shared** (技術検証 7.3). A shared factory is
+                // one object for the whole process however many threads ask for
+                // it, and it is the only thing here that is: the Direct2D
+                // factory is single-threaded, the WIC factory is created per
+                // thread, and this struct is a `thread_local`. So a fault that
+                // appears only when several threads lay text out at once has
+                // exactly one place it can live.
+                //
+                // What it costs is the font cache, which an isolated factory
+                // builds per thread rather than once. The editor lays text out
+                // on one thread, so today it costs nothing at all.
+                dwrite: DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED)?,
                 d2d: D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?,
                 wic: CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?,
                 formats: HashMap::new(),
