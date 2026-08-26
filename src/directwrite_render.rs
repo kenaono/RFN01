@@ -4126,6 +4126,36 @@ mod tests {
         );
     }
 
+    /// 要件 7.3.2: `:---:` gives a cell's room over to **both** its sides in
+    /// equal halves, so what lines up is neither the head nor the tail but the
+    /// middle. It is the same room the other two alignments hand to one side
+    /// whole; centring is the only one that splits it (技術検証 7.7).
+    #[test]
+    fn a_column_set_at_its_middle_shares_the_slack_between_its_sides() {
+        let source = "| 中 | 見出し |\n| :---: | --- |\n| あ | いち |\n| ああああ | に |\n";
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let mode = WritingMode::Horizontal;
+        let mut engine = engine_set(mode, styled, &plain());
+        let text = preview.text.clone();
+
+        let short_head = line_axis_at(&mut engine, mode, &text, "あ");
+        let short_tail = line_axis_after(&mut engine, mode, &text, "あ");
+        let long_head = line_axis_at(&mut engine, mode, &text, "ああああ");
+        let long_tail = line_axis_after(&mut engine, mode, &text, "ああああ");
+
+        // The two halves of the short cell's room over, one on each side of it.
+        // **Both have to be there**: either one alone at nothing is `:---` or
+        // `---:` wearing the other's name.
+        let before = short_head - long_head;
+        let after = long_tail - short_tail;
+        assert!(
+            (before - after).abs() <= 0.5 && before > 1.0,
+            "the short cell has {before} before it and {after} after it"
+        );
+    }
+
     /// 要件 7.3.2: **the rule is actually drawn.** The list of runs the layout
     /// is built from and the list the ink is drawn from were once built in two
     /// different places, and the result was a table whose columns lined up

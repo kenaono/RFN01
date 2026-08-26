@@ -163,6 +163,11 @@ export component AppWindow inherits Window {
     in property <string> count-body;
     in property <string> count-source;
     in property <string> count-selected;
+    /// 要件 10: where the caret is in the file, as `Ln 12, Col 5`. **Empty
+    /// unless the pane showing it is on the source** — the preview's places
+    /// are not the file's, so a column counted there would name a column the
+    /// file does not have.
+    in property <string> count-caret;
     in property <string> count-warning;
     // What to say above the paper when something went wrong: the document
     // would not open, would not be laid out, would not be saved.
@@ -1170,6 +1175,15 @@ export component AppWindow inherits Window {
                 }
                 Text {
                     text: root.count-selected;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+
+                // 要件 10: only the source has a line and a column to give.
+                if root.count-caret != "": Text {
+                    text: root.count-caret;
                     color: Tok.ink-muted;
                     font-size: 12px;
                     vertical-alignment: center;

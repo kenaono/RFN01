@@ -514,6 +514,26 @@ impl DocumentCounts {
     }
 }
 
+/// 要件 10: which logical line the caret is on, and how far into that line it
+/// is. **Both counted from 1**, which is how every editor states a place and
+/// how the writer will read it back against another one.
+///
+/// **The line is the file's, not the screen's.** A paragraph that wraps over
+/// six screen lines is one line here — the same line the count beside it is of
+/// (要件 10). The column is counted in the characters the writer sees, so an
+/// emoji written from four scalars moves it by one.
+///
+/// A byte that lands inside a character falls back to that character's head,
+/// for the same reason the selection count does: naming a place must never be
+/// the thing that brings the app down.
+pub fn caret_place(source: &str, byte: usize) -> (usize, usize) {
+    let byte = crate::floor_char_boundary(source, byte.min(source.len()));
+    let head = source[..byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let line = source[..head].matches('\n').count() + 1;
+    let column = source[head..byte].graphemes(true).count() + 1;
+    (line, column)
+}
+
 /// Characters in the longest logical line of `source`.
 #[cfg(test)]
 fn longest_logical_line(source: &str) -> usize {
@@ -1409,6 +1429,41 @@ pub fn heading_levels(source: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 要件 10: **a caret names its line and its column from 1**, and the line
+    /// it names is the file's — the empty line between two paragraphs is a line
+    /// like any other.
+    #[test]
+    fn a_caret_names_its_line_and_column_from_one() {
+        let source = "一行目\n\n三行目です\n";
+        assert_eq!(caret_place(source, 0), (1, 1));
+        assert_eq!(caret_place(source, "一行".len()), (1, 3));
+        assert_eq!(caret_place(source, "一行目\n".len()), (2, 1));
+        assert_eq!(caret_place(source, "一行目\n\n".len()), (3, 1));
+        assert_eq!(caret_place(source, "一行目\n\n三行目です".len()), (3, 6));
+        // Past the last newline is the head of the line after it, which is
+        // where the caret sits when the writer has just pressed Enter.
+        assert_eq!(caret_place(source, source.len()), (4, 1));
+    }
+
+    /// 要件 10: **a character the writer sees is one column**, whatever it took
+    /// to write it. The count beside it in the bar is of the same thing.
+    #[test]
+    fn a_grapheme_of_many_scalars_moves_the_column_by_one() {
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let source = format!("{family}あ\n");
+        assert_eq!(caret_place(&source, family.len()), (1, 2));
+        assert_eq!(caret_place(&source, source.len() - 1), (1, 3));
+    }
+
+    /// A byte inside a character names that character's head rather than
+    /// panicking (要件 10).
+    #[test]
+    fn a_byte_inside_a_character_names_its_head() {
+        assert_eq!(caret_place("あい", 1), (1, 1));
+        assert_eq!(caret_place("あい", 4), (1, 2));
+        assert_eq!(caret_place("", 9), (1, 1));
+    }
 
     /// The outline lists exactly the lines the panes set as headings, says
     /// what they say, and points at where they begin (要件 7.7).

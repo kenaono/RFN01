@@ -31,7 +31,7 @@ use std::{
 use buffer::{DocumentFile, ExternalChange};
 use diag::DiagLog;
 use directwrite_render::{CaretGeometry, SelectionRect, TextEngine, WritingMode};
-use document::{DocumentCounts, PreviewDocument};
+use document::{DocumentCounts, PreviewDocument, caret_place};
 use pane_layout::{Layout, Rect, Split};
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use slint::{
@@ -3029,7 +3029,7 @@ fn follow_edit_in(
     if !id.is_shown(window) {
         // The counts under the status bar are this document's and have just
         // changed, whoever is showing it.
-        update_status(window, document, source, None);
+        update_status(window, document, source, None, None);
         cache.borrow_mut().source_push_ms = None;
         return;
     }
@@ -6556,7 +6556,13 @@ fn refresh_pane(
         Err(error) => {
             let label = id.label(window);
             window.set_render_status(format!("{label}座標計算: NG / {error}").into());
-            update_status(window, document, source, selection_source_bytes);
+            update_status(
+                window,
+                document,
+                source,
+                selection_source_bytes,
+                source_caret(window, id, caret_source_byte),
+            );
             return;
         }
     };
@@ -6569,7 +6575,13 @@ fn refresh_pane(
         Err(error) => {
             let label = id.label(window);
             window.set_render_status(format!("{label}選択座標: NG / {error}").into());
-            update_status(window, document, source, selection_source_bytes);
+            update_status(
+                window,
+                document,
+                source,
+                selection_source_bytes,
+                source_caret(window, id, caret_source_byte),
+            );
             return;
         }
     };
@@ -6596,7 +6608,8 @@ fn refresh_pane(
     // share of a keystroke is visible rather than assumed. The count belongs to
     // the document, so in Split whichever pane acted last owns it.
     let stats_started = Instant::now();
-    update_status(window, document, source, selection_source_bytes);
+    let place = source_caret(window, id, caret_source_byte);
+    update_status(window, document, source, selection_source_bytes, place);
     // 要件 7.7: the outline is of the document in front of the writer, and the
     // pane that has just drawn is only sometimes the one they are in.
     if id == focused_pane(window) {
@@ -6983,11 +6996,23 @@ fn scroll_after_content_resize(
     (visible_width - next_right).clamp(visible_width - next_width, 0.0)
 }
 
+/// 要件 10: the caret's place in the file, when the pane that just acted is
+/// showing the file.
+///
+/// **The preview has no column to give.** The caret there sits in text the
+/// markup has been taken out of, so a column counted from it would name a place
+/// the file does not have — which is why 要件 10 asks for this of source
+/// editing and not of the other two modes.
+fn source_caret(window: &AppWindow, id: PaneId, caret: Option<usize>) -> Option<usize> {
+    (!id.shows_preview(window)).then_some(caret).flatten()
+}
+
 fn update_status(
     window: &AppWindow,
     document: &OpenDocument,
     source: &str,
     selection_source_bytes: Option<(usize, usize)>,
+    source_caret: Option<usize>,
 ) {
     let stats = document.counts.borrow_mut().get(source).stats();
     let selected_characters = selection_source_bytes
@@ -7008,6 +7033,14 @@ fn update_status(
     } else {
         String::new()
     };
+    // 要件 10: stated before `source` is shadowed by its own count below.
+    let caret = match source_caret {
+        Some(byte) => {
+            let (line, column) = caret_place(source, byte);
+            format!("Ln {line}, Col {column}")
+        }
+        None => String::new(),
+    };
     let lines = format!("{} lines", thousands(stats.logical_lines));
     let body = format!("{} chars", thousands(stats.body_characters));
     let source = format!("{} source", thousands(stats.source_characters));
@@ -7016,6 +7049,7 @@ fn update_status(
     window.set_count_body(body.into());
     window.set_count_source(source.into());
     window.set_count_selected(selected.into());
+    window.set_count_caret(caret.into());
     window.set_count_warning(long_paragraph.into());
 }
 
@@ -7372,7 +7406,8 @@ fn drag_caret_only(
                 Some(caret),
                 &rects,
             );
-            update_status(window, document, source, selection);
+            let place = source_caret(window, id, Some(hit));
+            update_status(window, document, source, selection, place);
             // Nothing reported the mid-drag cost before, which is exactly the
             // path the slowness was reported on.
             let ms = elapsed_ms(started);
