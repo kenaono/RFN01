@@ -280,6 +280,15 @@ impl PreviewDocument {
         &self.markers
     }
 
+    /// The line shown as its own source, if the caret is on one (要件 7.3.1).
+    ///
+    /// **The preview's own record of it**, rather than the byte offset the
+    /// caller passed in: that offset is into the document, and what everything
+    /// downstream indexes by is the line.
+    pub fn active_line(&self) -> Option<usize> {
+        self.lines.iter().position(|line| line.active)
+    }
+
     pub fn utf16_len(&self) -> usize {
         self.utf16_starts.last().copied().unwrap_or(0)
     }

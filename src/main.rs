@@ -6430,7 +6430,9 @@ fn lay_out_pane(
     // preedit to move. Holding them back would instead make the text jump by an
     // indent for as long as somebody is converting.
     let marked = StyledText::marked(&render_text, styles, marks);
-    let styled = marked.with_markers(shown.markers());
+    let styled = marked
+        .with_markers(shown.markers())
+        .with_source_line(shown.source_line());
     let measured = match engine.update(styled, line_extent_px, typography) {
         Ok(measured) => measured,
         Err(error) => {
@@ -6890,6 +6892,17 @@ impl<'a> PaneText<'a> {
         }
     }
 
+    /// Which line is shown as its own source, if one is (要件 7.3.1).
+    ///
+    /// **A source pane says none.** Every line there is its own source, and
+    /// nothing is put over any of them — so there is no one line to name.
+    fn source_line(&self) -> Option<usize> {
+        match self {
+            Self::Source(_) => None,
+            Self::Preview(preview) => preview.active_line(),
+        }
+    }
+
     /// Where a document position sits in what the pane shows.
     fn utf16_at_source_byte(&self, byte: usize) -> usize {
         match self {
@@ -7181,7 +7194,9 @@ fn hit_test_pane(
     // against a layout without them would answer for text that is not where it
     // is on screen.
     let marked = StyledText::marked(shown.text(), styles, shown.marks());
-    let styled = marked.with_markers(shown.markers());
+    let styled = marked
+        .with_markers(shown.markers())
+        .with_source_line(shown.source_line());
     let typography = typography_for(window, zoom, id.vertical(window), id.shows_preview(window));
     let engine = &mut graphics.engine;
     let label = id.label(window);
@@ -7232,7 +7247,9 @@ fn lay_out_for_caret<'a>(
     // The same layout the drawing path builds, boxes included, for the reason
     // `hit_test_pane` gives.
     let marked = StyledText::marked(shown.text(), styles, shown.marks());
-    let styled = marked.with_markers(shown.markers());
+    let styled = marked
+        .with_markers(shown.markers())
+        .with_source_line(shown.source_line());
     let typography = typography_for(window, zoom, id.vertical(window), id.shows_preview(window));
     let engine = &mut graphics.engine;
     if let Err(error) = engine.update(styled, id.line_extent_px(window), &typography) {

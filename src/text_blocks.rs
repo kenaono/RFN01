@@ -468,27 +468,6 @@ pub struct Marks {
     pub link: bool,
 }
 
-/// How wide a box is, kept as the bits of the `f32` it came from.
-///
-/// **A width has to be part of a cache key.** Two layouts are the same layout
-/// only if their boxes are the same width, and the key is a hash — so the
-/// width travels inside the [`Ornament`] rather than beside it, and compares as
-/// its bits. Putting it anywhere else is the mistake already made three times
-/// (6.18, 6.22b, `line_runs`): something that changes the picture, left out of
-/// the signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BoxWidth(u32);
-
-impl BoxWidth {
-    pub fn new(along: f32) -> Self {
-        Self(along.max(0.0).to_bits())
-    }
-
-    pub fn along(self) -> f32 {
-        f32::from_bits(self.0)
-    }
-}
-
 /// What is drawn in place of the marker a box stands over (要件 7.3.2).
 ///
 /// **The block is the space and this is the ink.** The box over a marker hides
@@ -527,30 +506,6 @@ pub enum Ornament {
     /// sets the line in is the block, and space that also took room would set
     /// it in twice — and only on the first line it wrapped to.
     Indent,
-    /// **The bar between two cells of a table, and the padding around it**
-    /// (要件 7.3.2). Nothing is drawn in its place either, but this is the one
-    /// box whose whole purpose is the room it keeps: its width is what carries
-    /// the text after it to the start of its column.
-    ///
-    /// **A width of its own rather than one shared width**, which is what makes
-    /// this the only box built per run: `-` and `10.` all begin their text at
-    /// the same step, and no two cells of a table do (技術検証 7.7).
-    ///
-    /// It covers everything between one cell's shown text and the next cell's:
-    /// **the tail a narrowed column had no room for**, the padding the writer
-    /// typed, and the bar. One box rather than two, because a box of no width
-    /// is not free — in a vertical pane it still takes a line's worth of room.
-    Bar(BoxWidth),
-    /// **The rule under a table's header, in place of `|---|---|`**
-    /// (要件 7.3.2). The box covers the delimiter row whole and is **as wide as
-    /// the table**, so the rule drawn inside it is exactly the width of what it
-    /// belongs to.
-    ///
-    /// **The third thing a box does.** It has always hidden what it covers and
-    /// held room; this is the first one whose room is what something is drawn
-    /// across. A [`LineOrnament`] could not do it — those reach the whole page
-    /// or the whole block, and how wide a table is only its own cells say.
-    TableRule(BoxWidth),
 }
 
 impl Ornament {
@@ -560,20 +515,7 @@ impl Ornament {
     /// Asked before the hit test that finds where to draw, so a document of
     /// rules never asks DirectWrite about a rectangle nothing goes into.
     pub fn draws_ink(self) -> bool {
-        !matches!(self, Self::Hidden | Self::Indent | Self::Bar(_))
-    }
-
-    /// The width this box was built with, and `None` for one that shares an
-    /// object with every other box of its kind.
-    ///
-    /// **Only a table asks for one.** Every marker begins its text at the same
-    /// step, so one width-less object serves all of them; a rule and a fence
-    /// share the one that keeps a line's room (要件 7.3.2).
-    pub fn width(self) -> Option<BoxWidth> {
-        match self {
-            Self::Bar(width) | Self::TableRule(width) => Some(width),
-            _ => None,
-        }
+        !matches!(self, Self::Hidden | Self::Indent)
     }
 
     /// Whether the box keeps the room the text under it took.
@@ -583,7 +525,7 @@ impl Ornament {
     /// padding at each end. Everything else a box covers is standing where an
     /// indent will be, and an indent is the block's (要件 7.3.2).
     pub fn keeps_room(self) -> bool {
-        matches!(self, Self::Hidden | Self::Bar(_) | Self::TableRule(_))
+        matches!(self, Self::Hidden)
     }
 }
 
@@ -709,6 +651,18 @@ pub struct StyledText<'a> {
     /// the marker's glyphs, so it belongs exactly where the preview is already
     /// hiding things and nowhere else.
     pub markers: &'a [Option<LineMarker>],
+    /// The one logical line shown as its own source, if the caret is on one
+    /// (要件 7.3.1).
+    ///
+    /// **Nothing else can say which line that is.** The line's own text is
+    /// already the source — that is what being active means — and a table row
+    /// reads the same either way, because a bar is a bar in both. What tells
+    /// the two apart is only that nothing is put over this one: no marker box
+    /// on a list item, and no boxes over a table's bars.
+    ///
+    /// Block-local wherever the styling is, and `None` for a source pane, where
+    /// every line is its own source and nothing is put over any of them.
+    pub source_line: Option<usize>,
 }
 
 impl<'a> StyledText<'a> {
@@ -719,6 +673,7 @@ impl<'a> StyledText<'a> {
             lines: &[],
             spans: &[],
             markers: &[],
+            source_line: None,
         }
     }
 
@@ -735,6 +690,7 @@ impl<'a> StyledText<'a> {
             lines,
             spans: &[],
             markers: &[],
+            source_line: None,
         }
     }
 
@@ -745,6 +701,7 @@ impl<'a> StyledText<'a> {
             lines,
             spans,
             markers: &[],
+            source_line: None,
         }
     }
 
@@ -755,6 +712,12 @@ impl<'a> StyledText<'a> {
     /// other.
     pub fn with_markers(mut self, markers: &'a [Option<LineMarker>]) -> Self {
         self.markers = markers;
+        self
+    }
+
+    /// And which of them is shown as its own source (要件 7.3.1).
+    pub fn with_source_line(mut self, line: Option<usize>) -> Self {
+        self.source_line = line;
         self
     }
 
@@ -898,6 +861,81 @@ impl LineInfo {
     }
 }
 
+/// A table set out as a grid of cells (要件 7.3.2).
+///
+/// **The one block that is not a single layout.** Everywhere else a block is
+/// one `IDWriteTextLayout` and every question about a position is that layout's
+/// hit test. A table cannot be: a row that wraps has to show the second line of
+/// one cell *beside* the second line of the next, and the text of one layout
+/// runs in one order — cell by cell, not row by row. So each cell is set in a
+/// box of its own, and this says where the boxes are.
+///
+/// **Coordinates are the block's own**, the same space [`LineInfo`] uses: along
+/// the flow axis from the block's content start, along the line axis from where
+/// the block's text begins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableGrid {
+    /// Every cell, in reading order.
+    pub cells: Vec<GridCell>,
+    /// Where a rule stands across the table: one before each row, and one after
+    /// the last.
+    pub rules: Vec<f32>,
+    /// And down it: the table's two edges, and each boundary between columns.
+    pub columns: Vec<f32>,
+    /// How far the table reaches along the line axis.
+    pub reach: f32,
+}
+
+/// One cell of a table, and the box it is set in (要件 7.3.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridCell {
+    /// The cell's own text, in UTF-16 units of the block.
+    ///
+    /// **What the reader sees and nothing else**: the bars and the padding the
+    /// writer typed around them are not in any cell. A row shown as its own
+    /// source (要件 7.3.1) is one cell holding the whole line, bars included.
+    pub utf16_start: u32,
+    pub utf16_len: u32,
+    /// Which row and column, so that a rule and a cell can be talked about
+    /// together.
+    pub row: usize,
+    pub column: usize,
+    pub flow_start: f32,
+    pub flow_size: f32,
+    pub line_start: f32,
+    pub line_size: f32,
+    /// How the cell is set inside its box, as the delimiter row said.
+    pub align: Align,
+    /// Whether the header's own weight stands over it.
+    pub header: bool,
+    /// What is marked inside the cell, in UTF-16 units of the cell itself.
+    ///
+    /// **Kept rather than worked out again where it is drawn.** The cell was
+    /// measured with these, and a cell drawn with anything else is a column
+    /// that does not line up — the rule `WrapPoints::line_starts` was changed
+    /// for (6.10).
+    pub marks: Vec<StyleRun>,
+}
+
+impl TableGrid {
+    /// The cell a position belongs to.
+    ///
+    /// **Every position in a table belongs to one.** The bars, the padding the
+    /// writer typed around them and the delimiter row are in no cell at all —
+    /// and a caret can still be put in any of them, so the answer has to be a
+    /// place on the page. **The cell that begins last before it** is that
+    /// place: it is the one the reader would say the caret was just after.
+    pub fn cell_at(&self, utf16: u32) -> Option<usize> {
+        let mut found = None;
+        for (index, cell) in self.cells.iter().enumerate() {
+            if cell.utf16_start <= utf16 {
+                found = Some(index);
+            }
+        }
+        found.or(if self.cells.is_empty() { None } else { Some(0) })
+    }
+}
+
 /// What one block layout measured to. Produced by the DirectWrite side.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockMeasure {
@@ -919,6 +957,9 @@ pub struct BlockMeasure {
     /// a non-atomic count cannot leave the thread that made it. The atomic
     /// costs a few nanoseconds per clone against the copy this exists to avoid.
     pub lines: Arc<[LineInfo]>,
+    /// Set for the one block that is a table (要件 7.3.2), and `None` for every
+    /// other. Shared for the reason the line table is.
+    pub grid: Option<Arc<TableGrid>>,
 }
 
 /// A block placed into global content coordinates.
@@ -936,6 +977,7 @@ pub struct BlockPlacement {
     pub content_flow_start: f32,
     pub max_flow_size: f32,
     pub lines: Arc<[LineInfo]>,
+    pub grid: Option<Arc<TableGrid>>,
 }
 
 impl BlockPlacement {
@@ -1304,6 +1346,7 @@ pub fn split_blocks(
     let mut block_utf16_start = 0_u32;
     let mut block_cells = 0_u32;
     let mut block_indent = 0_u8;
+    let mut block_table = false;
 
     while byte_cursor < text.len() {
         let line_end = match text[byte_cursor..].find('\n') {
@@ -1343,7 +1386,14 @@ pub fn split_blocks(
         // gutter — is a line's business and is drawn from the line's own
         // rectangle. Cutting per item would have multiplied the blocks of a
         // list-heavy document by the number of its items (技術検証 7.1).
-        if block_indent != indent {
+        // 要件 7.3.2: **and a table is a block of its own**, for a reason of
+        // the same kind. Its rows are not set as lines of text at all — each
+        // cell is set in its own box so that a long one wraps inside its column
+        // (技術検証 7.7) — so a block holding a table and a paragraph would
+        // have to be laid out two ways at once. It was already true that a
+        // table could not be cut in two; this says it cannot share either.
+        let table = style.kind.is_table();
+        if block_indent != indent || block_table != table {
             if block_byte_start < byte_cursor {
                 blocks.push(BlockSpan {
                     byte_start: block_byte_start,
@@ -1357,6 +1407,7 @@ pub fn split_blocks(
                 block_cells = 0;
             }
             block_indent = indent;
+            block_table = table;
         }
 
         // A line that fills a block on its own is cut inside itself. The block
@@ -1531,6 +1582,7 @@ pub fn place_blocks(
             content_flow_start: measure.content_flow_start,
             max_flow_size: measure.max_flow_size,
             lines: measure.lines.clone(),
+            grid: measure.grid.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -2208,6 +2260,7 @@ mod tests {
                     flow_size: 40.0,
                 })
                 .collect(),
+            grid: None,
         }
     }
 
@@ -2387,6 +2440,34 @@ mod tests {
                 block.byte_start
             );
         }
+    }
+
+    /// **And a table is a block of its own** (要件 7.3.2): nothing that is not
+    /// part of it shares one. Its rows are not set as lines of text at all —
+    /// each cell is set in its own box so that a long one wraps inside its
+    /// column — so a block holding a table and a paragraph would have to be
+    /// laid out two ways at once (技術検証 7.7).
+    #[test]
+    fn a_table_shares_its_block_with_nothing() {
+        let text = "本文\n| 見出し | 二 |\n| --- | --- |\n| あ | い |\n本文\n";
+        let levels = [
+            LineStyle::default(),
+            LineStyle::of_kind(LineKind::TableRow),
+            LineStyle::of_kind(LineKind::TableRule),
+            LineStyle::of_kind(LineKind::TableRow),
+            LineStyle::default(),
+        ];
+        let blocks = split_with(StyledText::new(text, &levels), &plain_typography());
+
+        let table_start = text.find("| 見出し").expect("the table is in the text");
+        let table_end = text.rfind("本文").expect("the text after it");
+        let holding = blocks
+            .iter()
+            .filter(|block| block.byte_start < table_end && block.byte_end > table_start)
+            .collect::<Vec<&BlockSpan>>();
+        assert_eq!(holding.len(), 1, "{blocks:?}");
+        assert_eq!(holding[0].byte_start, table_start, "{blocks:?}");
+        assert_eq!(holding[0].byte_end, table_end, "{blocks:?}");
     }
 
     /// **A table is one block** (要件 7.3.2), for a stronger reason than a
@@ -3517,6 +3598,7 @@ mod tests {
             content_flow_start: 400.0,
             max_flow_size: 500.0,
             lines: Arc::from(Vec::new()),
+            grid: None,
         }];
         let plan = place_blocks(&spans, &measures, 20.0, FlowOrder::Descending);
         let block = &plan.blocks[0];

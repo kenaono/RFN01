@@ -106,6 +106,8 @@ struct MarkerBox {
     /// own height.
     across: f32,
     baseline: f32,
+    /// Whether the object says it can be laid sideways.
+    sideways: bool,
     /// How many times DirectWrite asked for the metrics. Shared rather than
     /// owned so the probe can read it after the object has been handed over.
     asked: Arc<AtomicU32>,
@@ -131,7 +133,7 @@ impl IDWriteInlineObject_Impl for MarkerBox_Impl {
             width: self.along,
             height: self.across,
             baseline: self.baseline,
-            supportsSideways: true.into(),
+            supportsSideways: self.sideways.into(),
         })
     }
 
@@ -204,6 +206,7 @@ pub fn probe_inline_object(
         along: box_along,
         across: 24.0,
         baseline: 19.0,
+        sideways: true,
         asked: Arc::clone(&asked),
     }
     .into();
@@ -269,6 +272,79 @@ pub fn probe_inline_object(
     }
 }
 
+/// What a box **in the middle of a line** actually advances the text by
+/// (要件 7.3.2 の表).
+///
+/// The box at the head of a line advances by its `width` in both writing
+/// directions (4.12). A table's boxes are not at the head — they stand where
+/// the bars are, between two cells — and down a column those were seen to
+/// advance by something else (7.7). This asks the question directly: one box,
+/// one thing under it, one answer.
+///
+/// The layout is made far longer than the text so that **nothing wraps**: a
+/// wrapped line would report the head of the next line as the advance, and that
+/// number would look like a rule when it is an artefact.
+#[cfg(test)]
+pub fn probe_box_advance(
+    before: &str,
+    covered: &str,
+    after: &str,
+    along: f32,
+    across: f32,
+    font_size: f32,
+    vertical: bool,
+    sideways: bool,
+) -> Result<f32> {
+    let text = format!("{before}{covered}{after}");
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    let start = before.encode_utf16().count() as u32;
+    let length = covered.encode_utf16().count() as u32;
+    let asked = Arc::new(AtomicU32::new(0));
+    let object: IDWriteInlineObject = MarkerBox {
+        along,
+        across,
+        baseline: across * 0.8,
+        sideways,
+        asked: Arc::clone(&asked),
+    }
+    .into();
+
+    // SAFETY: Every DirectWrite object is created and used on this thread, and
+    // the UTF-16 buffer outlives the CreateTextLayout call.
+    unsafe {
+        let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED)?;
+        let format = factory.CreateTextFormat(
+            w!("Yu Mincho"),
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            font_size,
+            w!("ja-JP"),
+        )?;
+        if vertical {
+            format.SetReadingDirection(DWRITE_READING_DIRECTION_TOP_TO_BOTTOM)?;
+            format.SetFlowDirection(DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT)?;
+        }
+
+        let layout = factory.CreateTextLayout(&utf16, &format, 8000.0, 8000.0)?;
+        layout.SetInlineObject(
+            &object,
+            DWRITE_TEXT_RANGE {
+                startPosition: start,
+                length,
+            },
+        )?;
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        layout.GetMetrics(&mut metrics)?;
+
+        let head = hit_test_position(&layout, start, false)?;
+        let past = hit_test_position(&layout, start + length, false)?;
+        let along_axis = |point: (f32, f32)| if vertical { point.1 } else { point.0 };
+        Ok(along_axis(past) - along_axis(head))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,11 +388,12 @@ mod tests {
 
         assert!(report.metrics_asked > 0, "{report:?}");
         assert!(report.head.abs() < 0.5, "{report:?}");
-        // **How much** it reserves is the open question here — whether
-        // DirectWrite reads the box's `width` or its `height` as the advance
-        // down a column. The diagnostic log carries the number; what has to
-        // hold in a test is that the box is in the run at all.
-        assert!(report.first_text > 1.0, "{report:?}");
+        // **How much** it reserves is the box's own width, the same as across
+        // the page — but only because the box says it cannot lie sideways
+        // (4.14). The two tests below are where that is pinned; this one is
+        // still worth having as the plain statement that a marker's indent is
+        // its box down a column too.
+        assert!((report.first_text - BOX).abs() < 0.5, "{report:?}");
         assert!(report.second_text > report.first_text, "{report:?}");
     }
 
@@ -329,6 +406,59 @@ mod tests {
 
         assert_eq!(report.box_rects, 1, "{report:?}");
         assert!((report.box_rect_extent - BOX).abs() < 0.5, "{report:?}");
+    }
+
+    /// 要件 7.3.2 の表: **a box says it cannot be laid sideways, and that is
+    /// what makes its width mean the same thing down a column as across a
+    /// page** (4.14).
+    ///
+    /// A sideways-capable box laid over an upright character advances by its
+    /// `across` instead of its `along` — the object is stood upright with the
+    /// text around it, and upright it is its height that runs along the line.
+    /// **A table's boxes land on upright characters** whenever a cell's tail is
+    /// cut, so a table built on `along` came out short by exactly the
+    /// difference. `supportsSideways: false` is not a workaround for that: the
+    /// box draws nothing, so it genuinely has no sideways form to offer, and
+    /// saying so leaves one meaning of `width` for both directions.
+    #[test]
+    fn a_box_that_cannot_lie_sideways_advances_by_its_width_either_way() {
+        // Two boxes of the same width over the same span, one of which begins
+        // on an upright character. Nothing else differs.
+        for covered in ["| ", "央 | "] {
+            for sideways in [false, true] {
+                let advance =
+                    probe_box_advance("あい", covered, "うえ", 43.0, 22.0, 22.0, true, sideways)
+                        .expect("inline object");
+                let across_the_page =
+                    probe_box_advance("あい", covered, "うえ", 43.0, 22.0, 22.0, false, sideways)
+                        .expect("inline object");
+                // Across the page the box is honoured whatever it says.
+                assert!(
+                    (across_the_page - 43.0).abs() < 0.5,
+                    "{covered:?} sideways {sideways}: {across_the_page}"
+                );
+                let upright_run = covered.starts_with('央') && sideways;
+                let expected = if upright_run { 22.0 } else { 43.0 };
+                assert!(
+                    (advance - expected).abs() < 0.5,
+                    "{covered:?} sideways {sideways}: {advance}, wanted {expected}"
+                );
+            }
+        }
+    }
+
+    /// And the value it takes instead is the box's `across`, not a rounding of
+    /// its width to the em: with `across` at 44 an upright run advances 44.
+    /// **The number identifies which of the two the layout read**, which is the
+    /// whole of why this is written down (4.14).
+    #[test]
+    fn a_sideways_box_on_an_upright_run_advances_by_its_across() {
+        for across in [0.0_f32, 44.0] {
+            let advance =
+                probe_box_advance("あい", "央 | ", "うえ", 43.0, across, 22.0, true, true)
+                    .expect("inline object");
+            assert!((advance - across).abs() < 0.5, "across {across}: {advance}");
+        }
     }
 
     /// A marker of a different length must reserve the same indent — that is
