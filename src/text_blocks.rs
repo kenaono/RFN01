@@ -186,6 +186,25 @@ impl Typography {
         }
     }
 
+    /// The ink a comment inside code is drawn in (要件 7.3.2).
+    ///
+    /// **Mixed from the two colours the writer set** rather than being a
+    /// setting of its own. 要件 9 gives the writer the ink, the paper and the
+    /// headings, and the reason a link is underlined instead of coloured
+    /// applies here as well: **a colour nobody can set is a colour that will
+    /// not suit somebody's paper.** The writer's own ink, faded towards their
+    /// own paper, suits whatever they chose — and says the same thing a
+    /// comment is for saying, which is "this is beside the point".
+    pub fn comment_ink(&self) -> [f32; 3] {
+        const FADE: f32 = 0.45;
+        let mix = |ink: f32, paper: f32| ink + (paper - ink) * FADE;
+        [
+            mix(self.ink[0], self.paper[0]),
+            mix(self.ink[1], self.paper[1]),
+            mix(self.ink[2], self.paper[2]),
+        ]
+    }
+
     /// The ink a line at this heading level is drawn in. Level 0 is body text,
     /// and so is any level past the deepest one.
     pub fn ink_for(&self, heading_level: u8) -> [f32; 3] {
@@ -270,6 +289,16 @@ pub struct LineStyle {
     /// off and no more; the field is a count so that deeper quoting is a
     /// change to one rule rather than to the shape of this.
     pub quote_depth: u8,
+    /// What starts a comment in this line's code, for a line inside a fence
+    /// (要件 7.3.2).
+    ///
+    /// **A property of the line, because it is a fence that decides it** — the
+    /// language is named on the opening fence and reaches every line under it,
+    /// exactly as the fence itself does. Keeping it here is also what makes the
+    /// preview notice: a kept line is reusable while its style is what it was,
+    /// so changing ```` ```rust ```` to ```` ```python ```` re-marks the lines
+    /// below without any of their text having changed.
+    pub comment: CommentSyntax,
     /// How many steps a list sets this line in, 0 for a line no list touches
     /// (要件 7.3.2).
     ///
@@ -280,6 +309,45 @@ pub struct LineStyle {
     /// under an item lines up with that item's text, and has no marker and no
     /// depth of its own to derive it from.
     pub list_indent: u8,
+}
+
+/// What begins a comment in one language, for the lines inside a fence
+/// (要件 7.3.2).
+///
+/// **Line comments only, and only the marker.** A block comment carries across
+/// lines, which would make one line's marking depend on the one before it in a
+/// second way besides the fence — and 要件 4.2 has already said this editor
+/// does not read code. `None` is the answer for a fence with no language on it
+/// and for every language not named: **nothing is coloured unless the writer
+/// said what the block is.**
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CommentSyntax {
+    #[default]
+    None,
+    /// `//` — C and everything shaped like it.
+    Slashes,
+    /// `#` — the shells, Python, Ruby, YAML, TOML.
+    Hash,
+    /// `--` — SQL, Lua, Haskell.
+    Dashes,
+    /// `;` — the Lisps, assembly, INI.
+    Semicolon,
+    /// `%` — TeX, Erlang, MATLAB.
+    Percent,
+}
+
+impl CommentSyntax {
+    /// The characters that begin a comment, or `None` where nothing does.
+    pub fn marker(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Slashes => Some("//"),
+            Self::Hash => Some("#"),
+            Self::Dashes => Some("--"),
+            Self::Semicolon => Some(";"),
+            Self::Percent => Some("%"),
+        }
+    }
 }
 
 /// What a whole logical line is, beyond the size its heading marker asks for
@@ -466,6 +534,14 @@ pub struct Marks {
     /// is on both sides *and* between them; only the part a reader is meant to
     /// read comes through, and this is what says which part that was.
     pub link: bool,
+    /// A comment inside a fenced code block, from its marker to the end of the
+    /// line.
+    ///
+    /// **The one thing this editor says about the inside of code.** 要件 4.2
+    /// rules out syntax highlighting; what is left is the distinction a reader
+    /// of prose actually wants, which is which lines are the writer talking and
+    /// which are the program.
+    pub comment: bool,
 }
 
 /// What is drawn in place of the marker a box stands over (要件 7.3.2).

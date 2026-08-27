@@ -1,7 +1,8 @@
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text_blocks::{
-    Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, is_table_row, table_alignments,
+    CommentSyntax, Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, is_table_row,
+    table_alignments,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -636,7 +637,22 @@ fn push_visible_line(
     // for the same reason — `***` is the line's own marks.
     if style.is_literal() || indented {
         // Indented text is literal, markers and all.
+        let start = visible.len();
         visible.push_str(content);
+        // 要件 7.3.2: **the one thing said about the inside of code.** The line
+        // is literal — nothing is taken off it and nothing stands over it — and
+        // this only says which part of it the reader may skip.
+        if let Some(at) = comment_start(&visible[start..], style.comment) {
+            let length = content.encode_utf16().count() as u32 - at;
+            marks.push(Emphasis {
+                utf16_start: at,
+                utf16_len: length,
+                marks: Marks {
+                    comment: true,
+                    ..Marks::default()
+                },
+            });
+        }
         return;
     }
 
@@ -996,6 +1012,91 @@ fn fence_marker(line: &str) -> Option<char> {
     Some(first)
 }
 
+/// A fence that is open, and what it said the block is (要件 7.3.2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Fence {
+    /// Which of the two markers opened it; only the same one closes it.
+    marker: char,
+    comment: CommentSyntax,
+}
+
+/// What starts a comment in the language an opening fence names (要件 7.3.2).
+///
+/// **The writer's word, not a guess at the contents.** A fence with nothing
+/// after it says nothing about what is in it, and a language nobody listed here
+/// is left alone — which is the safe way round: the cost of not knowing is that
+/// code looks like code, and the cost of guessing wrong is a colour over
+/// something that is not a comment.
+fn comment_syntax(line: &str) -> CommentSyntax {
+    let named = line.trim_start_matches(['`', '~']).trim();
+    // `rust,ignore` and `python title="x"` both name the language first.
+    let named = named
+        .split([' ', '\t', ',', ';', '{'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match named.as_str() {
+        "rust" | "rs" | "c" | "cc" | "cpp" | "c++" | "h" | "hpp" | "cs" | "csharp" | "java"
+        | "js" | "javascript" | "mjs" | "jsx" | "ts" | "typescript" | "tsx" | "go" | "swift"
+        | "kotlin" | "kt" | "scala" | "php" | "dart" | "zig" | "glsl" | "jsonc" => {
+            CommentSyntax::Slashes
+        }
+        "python" | "py" | "ruby" | "rb" | "sh" | "bash" | "zsh" | "shell" | "console" | "fish"
+        | "yaml" | "yml" | "toml" | "perl" | "pl" | "r" | "make" | "makefile" | "cmake"
+        | "dockerfile" | "docker" | "nim" | "elixir" | "ex" | "powershell" | "ps1" | "conf" => {
+            CommentSyntax::Hash
+        }
+        "sql" | "lua" | "haskell" | "hs" | "elm" | "ada" => CommentSyntax::Dashes,
+        "lisp" | "clojure" | "clj" | "scheme" | "elisp" | "asm" | "nasm" | "ini" => {
+            CommentSyntax::Semicolon
+        }
+        "tex" | "latex" | "erlang" | "erl" | "matlab" | "octave" => CommentSyntax::Percent,
+        _ => CommentSyntax::None,
+    }
+}
+
+/// Where a comment begins in one line of code, in UTF-16 units, if it begins.
+///
+/// **Quoted stretches are skipped, and nothing else is looked at.** A URL in a
+/// string is how a rule this simple shows itself — `"https://…"` coloured from
+/// the slashes — and stepping over quotes is the whole of what it takes to
+/// avoid the one mistake a reader would notice. What is left uncaught is the
+/// rest of what a lexer would know: a `#` inside a shell word, a marker inside
+/// a raw string, a language whose strings are not `'` or `"`. 要件 4.2 says
+/// this editor does not read code, and this is the line that draws.
+fn comment_start(line: &str, syntax: CommentSyntax) -> Option<u32> {
+    let marker = syntax.marker()?;
+    let mut at = 0u32;
+    let mut quote: Option<char> = None;
+    let mut characters = line.char_indices();
+    while let Some((byte, letter)) = characters.next() {
+        match quote {
+            Some(open) => {
+                if letter == '\\' {
+                    // The escaped character is one more character of string,
+                    // whatever it is.
+                    if let Some((_, escaped)) = characters.next() {
+                        at += letter.len_utf16() as u32 + escaped.len_utf16() as u32;
+                        continue;
+                    }
+                } else if letter == open {
+                    quote = None;
+                }
+            }
+            None => {
+                if line[byte..].starts_with(marker) {
+                    return Some(at);
+                }
+                if letter == '"' || letter == '\'' {
+                    quote = Some(letter);
+                }
+            }
+        }
+        at += letter.len_utf16() as u32;
+    }
+    None
+}
+
 /// `---`, `***` or `___` alone on a line (要件 7.3.2).
 ///
 /// Three or more of one mark and nothing else. `***強調***` begins the same way
@@ -1136,6 +1237,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels) -> LineStyle {
             heading_level: 0,
             kind,
             quote_depth,
+            comment: CommentSyntax::None,
             list_indent: levels.depth_of(columns) + 1,
         };
     }
@@ -1150,6 +1252,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels) -> LineStyle {
             heading_level: 0,
             kind,
             quote_depth,
+            comment: CommentSyntax::None,
             list_indent: indent,
         };
     }
@@ -1166,6 +1269,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels) -> LineStyle {
         heading_level: heading_level(line),
         kind,
         quote_depth,
+        comment: CommentSyntax::None,
         list_indent: 0,
     }
 }
@@ -1303,22 +1407,28 @@ fn table_line(
 fn line_style(
     line: &str,
     next: &str,
-    fence: &mut Option<char>,
+    fence: &mut Option<Fence>,
     levels: &mut ListLevels,
     table: &mut Option<TablePlace>,
 ) -> LineStyle {
     let style = match (*fence, fence_marker(line)) {
         (None, Some(opened)) => {
-            *fence = Some(opened);
+            *fence = Some(Fence {
+                marker: opened,
+                comment: comment_syntax(line),
+            });
             LineStyle::of_kind(LineKind::Fence)
         }
-        (Some(open), Some(close)) if open == close => {
+        (Some(open), Some(close)) if open.marker == close => {
             *fence = None;
             LineStyle::of_kind(LineKind::Fence)
         }
         // A run of tildes inside a backtick block closes nothing — it is one
         // more line of code.
-        (Some(_), _) => LineStyle::of_kind(LineKind::Code),
+        (Some(open), _) => LineStyle {
+            comment: open.comment,
+            ..LineStyle::of_kind(LineKind::Code)
+        },
         (None, None) => {
             if let Some(style) = table_line(line, next, levels, table) {
                 return style;
@@ -1438,6 +1548,96 @@ pub fn heading_levels(source: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 要件 7.3.2: what the fence says the block is, and how little of it is
+    /// read. The language is the first word, whatever follows it.
+    #[test]
+    fn the_fence_names_the_language() {
+        assert_eq!(comment_syntax("```rust"), CommentSyntax::Slashes);
+        assert_eq!(comment_syntax("```rust,ignore"), CommentSyntax::Slashes);
+        assert_eq!(comment_syntax("~~~ PYTHON "), CommentSyntax::Hash);
+        assert_eq!(
+            comment_syntax("```python title=\"a b\""),
+            CommentSyntax::Hash
+        );
+        assert_eq!(comment_syntax("```sql"), CommentSyntax::Dashes);
+        // **Nothing is coloured unless the writer said what the block is**, and
+        // a language nobody listed is left alone rather than guessed at.
+        assert_eq!(comment_syntax("```"), CommentSyntax::None);
+        assert_eq!(comment_syntax("```なにか"), CommentSyntax::None);
+    }
+
+    /// 要件 7.3.2: **a marker inside a string is not a comment.** The one
+    /// mistake a reader would notice is a URL coloured from its slashes, and
+    /// stepping over quotes is the whole of what it takes.
+    #[test]
+    fn a_marker_inside_a_string_starts_nothing() {
+        let syntax = CommentSyntax::Slashes;
+        assert_eq!(comment_start("let a = 1; // 説明", syntax), Some(11));
+        assert_eq!(
+            comment_start("let a = \"https://example.com\";", syntax),
+            None
+        );
+        // And the comment after the string is still found.
+        assert_eq!(
+            comment_start("let a = \"http://x\"; // 説明", syntax),
+            Some(20)
+        );
+        // An escaped quote does not end the string.
+        assert_eq!(comment_start("let a = \"\\\"//\"; ", syntax), None);
+        assert_eq!(comment_start("let a = 1;", syntax), None);
+        // A hash language is the same rule with a different marker.
+        assert_eq!(comment_start("a = 1  # 説明", CommentSyntax::Hash), Some(7));
+        // And nothing at all is looked for where nothing starts a comment.
+        assert_eq!(comment_start("# 説明", CommentSyntax::None), None);
+    }
+
+    /// 要件 7.3.2: the mark reaches the preview, over the comment and no more.
+    #[test]
+    fn a_comment_in_a_fenced_block_is_marked() {
+        let source = "```rust\nlet a = 1; // 説明\n```\n";
+        let preview = PreviewDocument::from_source(source);
+        let marked = preview
+            .marks()
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.iter().any(|mark| mark.marks.comment))
+            .collect::<Vec<_>>();
+        assert_eq!(marked.len(), 1, "one line carries a comment");
+        let (index, line) = marked[0];
+        assert_eq!(index, 1, "the line inside the fence, not the fence");
+        let mark = line.iter().find(|mark| mark.marks.comment).expect("marked");
+        assert_eq!(mark.utf16_start, 11);
+        assert_eq!(mark.utf16_len, "// 説明".encode_utf16().count() as u32);
+    }
+
+    /// **And the language reaches the lines under it**: changing what the fence
+    /// says re-marks text that did not itself change.
+    ///
+    /// This is the property `LineStyle` carries the syntax for. The preview
+    /// keeps a line while its style is what it was, so a syntax kept anywhere
+    /// else would leave these lines marked as they were before.
+    #[test]
+    fn renaming_the_language_re_marks_the_lines_under_it() {
+        let mut preview = PreviewDocument::default();
+        preview.refresh("```rust\nlet a = 1; // 説明\n```\n", None);
+        let commented = |preview: &PreviewDocument| {
+            preview
+                .marks()
+                .iter()
+                .flatten()
+                .filter(|mark| mark.marks.comment)
+                .count()
+        };
+        assert_eq!(commented(&preview), 1);
+
+        // `//` is nothing in a language whose comments begin with `#`.
+        preview.refresh("```python\nlet a = 1; // 説明\n```\n", None);
+        assert_eq!(commented(&preview), 0, "the line is code again");
+
+        preview.refresh("```なにか\nlet a = 1; // 説明\n```\n", None);
+        assert_eq!(commented(&preview), 0, "and an unnamed block says nothing");
+    }
 
     /// 要件 10: **a caret names its line and its column from 1**, and the line
     /// it names is the file's — the empty line between two paragraphs is a line

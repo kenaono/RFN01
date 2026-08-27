@@ -269,6 +269,8 @@ struct RenderTargetCache {
     /// tile**, because a brush belongs to the target that made it while a
     /// colour is a setting that outlives any of them.
     heading_brushes: Vec<ID2D1SolidColorBrush>,
+    /// And the one a comment inside code is drawn in (要件 7.3.2).
+    comment_brush: ID2D1SolidColorBrush,
 }
 
 /// Per-thread DirectWrite, Direct2D and WIC state.
@@ -375,7 +377,7 @@ impl Graphics {
             };
             // SAFETY: The bitmap outlives the render target created from it,
             // both being owned by the cache entry stored below.
-            let (bitmap, target, brush, heading_brushes) = unsafe {
+            let (bitmap, target, brush, heading_brushes, comment_brush) = unsafe {
                 let bitmap = self.wic.CreateBitmap(
                     width,
                     height,
@@ -396,7 +398,8 @@ impl Graphics {
                 for _ in 0..MAX_HEADING_LEVEL {
                     heading_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
                 }
-                (bitmap, target, brush, heading_brushes)
+                let comment_brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
+                (bitmap, target, brush, heading_brushes, comment_brush)
             };
             self.target = Some(RenderTargetCache {
                 width,
@@ -405,6 +408,7 @@ impl Graphics {
                 target,
                 brush,
                 heading_brushes,
+                comment_brush,
             });
         }
         Ok(self.target.as_ref().expect("render target created above"))
@@ -2050,12 +2054,13 @@ fn draw_tile(
     let line_extent = task.line_extent;
     let margin = task.margin;
     let (surface_width, surface_height) = mode.to_surface(task.surface_size, line_extent);
-    let (target, brush, heading_brushes, bitmap) = {
+    let (target, brush, heading_brushes, comment_brush, bitmap) = {
         let cache = graphics.render_target(surface_width, surface_height)?;
         (
             cache.target.clone(),
             cache.brush.clone(),
             cache.heading_brushes.clone(),
+            cache.comment_brush.clone(),
             cache.bitmap.clone(),
         )
     };
@@ -2073,6 +2078,7 @@ fn draw_tile(
             let heading_ink = colour(typography.ink_for(level as u8 + 1));
             heading_brush.SetColor(&heading_ink);
         }
+        comment_brush.SetColor(&colour(typography.comment_ink()));
     }
 
     // The block is drawn at its own offset inside the tile, and the margin plus
@@ -2118,6 +2124,17 @@ fn draw_tile(
         // SAFETY: the layout and the brushes both outlive the draw.
         unsafe {
             for run in &task.runs {
+                let range = DWRITE_TEXT_RANGE {
+                    startPosition: run.utf16_start,
+                    length: run.utf16_len,
+                };
+                // 要件 7.3.2: a comment inside code is drawn in its own ink,
+                // which is the writer's own faded towards their own paper
+                // (`Typography::comment_ink`).
+                if run.marks.comment {
+                    layout.SetDrawingEffect(&comment_brush, range)?;
+                    continue;
+                }
                 if run.heading_level == 0 {
                     continue;
                 }
@@ -2125,13 +2142,7 @@ fn draw_tile(
                 else {
                     continue;
                 };
-                layout.SetDrawingEffect(
-                    heading_brush,
-                    DWRITE_TEXT_RANGE {
-                        startPosition: run.utf16_start,
-                        length: run.utf16_len,
-                    },
-                )?;
+                layout.SetDrawingEffect(heading_brush, range)?;
             }
         }
         let inset = block_inset(&task.block.span, typography);
@@ -6261,6 +6272,70 @@ mod tests {
             .count();
 
         assert!(ink > 100, "expected visible glyph pixels");
+    }
+
+    /// 要件 7.3.2: **and the comment's ink reaches the pixels.**
+    ///
+    /// The same trap the rule under a table's header fell into (7.7): a mark
+    /// the layout knows about and the drawing has never heard of. **Only the
+    /// pixels say it** — and the way to ask is to draw the same code twice,
+    /// once in a block that names its language and once in one that does not.
+    /// The glyphs and their coverage are identical; the ink is the only thing
+    /// that differs.
+    #[test]
+    fn a_comment_is_drawn_in_its_own_ink() {
+        let code = "let a = 1; // これは説明です。日本語の注釈が続きます。\n";
+        let counted = |fence: &str| {
+            let source = format!("```{fence}\n{code}```\n");
+            let (preview, styles) = preview_of(&source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let mut engine = engine_set(WritingMode::Horizontal, styled, &plain());
+            let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+            let mut drawn = DrawnTiles::default();
+            engine
+                .render_tiles(&tiles, None, &mut drawn)
+                .expect("tile render");
+
+            let wanted = plain().comment_ink();
+            let byte = |value: f32| (value * 255.0).round() as i32;
+            let near = |pixel: &[u8], of: [f32; 3]| {
+                // BGRA, and the ink is given in RGB order.
+                (pixel[2] as i32 - byte(of[0])).abs() <= 3
+                    && (pixel[1] as i32 - byte(of[1])).abs() <= 3
+                    && (pixel[0] as i32 - byte(of[2])).abs() <= 3
+            };
+            let mut faded = 0;
+            let mut full = 0;
+            for (_, _, _, bgra) in &drawn.tiles {
+                for pixel in bgra.chunks_exact(4) {
+                    if near(pixel, wanted) {
+                        faded += 1;
+                    }
+                    if near(pixel, plain().ink) {
+                        full += 1;
+                    }
+                }
+            }
+            (faded, full)
+        };
+
+        let (faded_named, full_named) = counted("rust");
+        let (faded_plain, full_plain) = counted("");
+
+        // **The body's ink is the sharper of the two**, because a pixel is
+        // either the ink or it is not; the faded count also picks up the
+        // half-covered edge of every body glyph, which passes through the
+        // comment's colour on its way from paper to ink.
+        assert!(
+            full_named * 3 < full_plain,
+            "naming the language should take most of the ink off the body's \
+             colour: {full_named} against {full_plain}"
+        );
+        assert!(
+            faded_named > faded_plain * 2,
+            "and put it on the comment's: {faded_named} against {faded_plain}"
+        );
     }
 
     /// The point of the per-tile fingerprint: an edit redraws the tiles that
