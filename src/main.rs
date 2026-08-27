@@ -767,11 +767,33 @@ struct PaneView {
     /// so they look at different lines and the texts differ by that one line.
     /// Sharing one would make each pane reveal the other's line.
     preview_slot: PreviewSlot,
+    /// Where this pane is meant to be looking, until the writer looks
+    /// elsewhere (要件 8.5).
+    ///
+    /// **Because a restored scroll does not survive the window settling.** The
+    /// pane is laid out several times before it stands still — the zoom, the
+    /// split and the extent all arrive after the tabs do — and every one of
+    /// those changes what a pixel offset means. A byte does not change, so the
+    /// view is put back on every refresh until something the writer did says
+    /// where to look instead.
+    top_anchor: Option<ViewAnchor>,
     /// Caret and selection in the shown text's UTF-16, so a scroll can re-clip
     /// the selection without going back through the document model.
     caret_utf16: Option<u32>,
     selection_utf16: Option<(u32, u32)>,
     preedit_range: Option<(u32, u32)>,
+}
+
+/// A place in the text that a pane is holding its view on (要件 8.5).
+#[derive(Clone, Copy)]
+struct ViewAnchor {
+    /// The source byte to keep at the near edge.
+    byte: usize,
+    /// Where the caret was when this was set. **The anchor stands until the
+    /// caret moves** — that is the writer saying where to look, and it is one
+    /// comparison rather than a flag every caret-moving path would have to
+    /// remember to clear.
+    caret: Option<usize>,
 }
 
 /// One editing pane.
@@ -1136,8 +1158,14 @@ fn main() -> Result<(), slint::PlatformError> {
             state.caret_source_byte = state.caret_source_byte.map(rounded);
             state.selection_anchor_source_byte = state.selection_anchor_source_byte.map(rounded);
         }
+        let caret = state.caret_source_byte;
         *pane_states.of(id).borrow_mut() = state;
         id.set_scroll(&window, tab.view.scroll);
+        // 要件 8.5: and the passage it was looking at, which is what actually
+        // puts the view back — the scroll above is pixels, and the zoom, the
+        // split and the extent all change what those mean before the window
+        // stands still (`ViewAnchor`).
+        hold_view(&render_cache, id, tab.view.top, caret);
         id.set_shows_preview(&window, tab.view.preview);
         set_pane_direction(&window, &render_cache, id, tab.view.vertical);
     }
@@ -2359,7 +2387,14 @@ fn show_document_title(window: &AppWindow, file: &DocumentFile) {
 struct TabView {
     state: EditorState,
     /// Along the flow, in whichever screen axis that is for this pane.
+    ///
+    /// **A hint, not the view.** It is a number of pixels, and pixels stop
+    /// meaning anything when the layout is a different size — which is what
+    /// happens between one run and the next, and between one zoom and another.
+    /// `top` is what puts the view back.
     scroll: f32,
+    /// The source byte at the near edge of the view (要件 8.5).
+    top: Option<usize>,
     /// **The four modes of 要件 7.2, and both halves belong to the tab.**
     /// Which way the text runs, and whether it is shown formatted or as its
     /// source. A pane draws whatever the tab in front of it says, so the same
@@ -2578,9 +2613,51 @@ impl Live {
         TabView {
             state: self.states.of(id).borrow().clone(),
             scroll: id.scroll(window),
+            top: self.view_top(window, id),
             vertical: id.vertical(window),
             preview: id.shows_preview(window),
         }
+    }
+
+    /// The source byte at the near edge of what a pane is showing (要件 8.5).
+    ///
+    /// **Asked of the layout, once, when the view is being put away** — a tab
+    /// switch or the end of the run. Cheap where it is asked from: the engine
+    /// is already holding this tab's text, so the hit test walks a layout that
+    /// is already built.
+    ///
+    /// `None` when the engine cannot answer, which leaves the pixel scroll as
+    /// the only hint. That is what the session had before this and is still
+    /// right whenever nothing about the layout has changed.
+    fn view_top(&self, window: &AppWindow, id: PaneId) -> Option<usize> {
+        let document = self.states.document(id);
+        let source = document.text.borrow().clone();
+        let zoom = window.get_zoom_percent();
+        let state = self.states.of(id);
+        let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
+        // The near edge of the view, in the content's own coordinates. The flow
+        // axis is x where the text runs down the page and y where it runs
+        // across; the other axis is the head of the line, which is where a line
+        // is named from.
+        let near = -id.scroll(window) + 1.0;
+        let (x, y) = if id.vertical(window) {
+            (near, 1.0)
+        } else {
+            (1.0, near)
+        };
+        let mut borrowed = self.cache.borrow_mut();
+        let cache = &mut *borrowed;
+        hit_test_pane(
+            window,
+            cache,
+            &document,
+            id,
+            &source,
+            zoom,
+            active_line_start,
+            x,
+            y,
+        )
     }
 
     /// Bring a tab out in front of one pane.
@@ -2598,6 +2675,15 @@ impl Live {
         set_pane_direction(window, &self.cache, id, tab.view.vertical);
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
         id.set_scroll(window, tab.view.scroll);
+        // The passage this tab was left at. **A tab switch has the same problem
+        // a restored session does**: the pane it comes back to may be a
+        // different size or zoom from the one it left.
+        hold_view(
+            &self.cache,
+            id,
+            tab.view.top,
+            tab.view.state.caret_source_byte,
+        );
         id.set_shows_preview(window, tab.view.preview);
         let state = self.states.of(id);
         let source = document.text.borrow().clone();
@@ -2661,6 +2747,7 @@ fn open_session(
                         ..EditorState::default()
                     },
                     scroll: tab.scroll as f32,
+                    top: tab.top,
                     vertical: tab.vertical,
                     preview: tab.preview,
                 },
@@ -2831,6 +2918,7 @@ fn session_tab(tab: &PaneTab) -> app_data::SessionTab {
         // remembered a fraction of one would be keeping precision nobody can
         // see.
         scroll: tab.view.scroll as i32,
+        top: tab.view.top,
         caret: tab.view.state.caret_source_byte,
         anchor: tab.view.state.selection_anchor_source_byte,
     }
@@ -6642,6 +6730,30 @@ fn take_spare(
     None
 }
 
+/// The passage a pane is holding its view on, while the hold stands
+/// (要件 8.5).
+///
+/// **The caret having moved is the writer saying where to look**, and that is
+/// the end of it. Asked this way rather than cleared by every path that moves a
+/// caret: there are nine of those, and the tenth one added later would not know
+/// it had to.
+fn held_view(anchor: Option<ViewAnchor>, caret: Option<usize>) -> Option<usize> {
+    anchor
+        .filter(|anchor| anchor.caret == caret)
+        .map(|anchor| anchor.byte)
+}
+
+/// Hold a pane's view on a passage, until the writer looks somewhere else
+/// (要件 8.5).
+fn hold_view(
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    top: Option<usize>,
+    caret: Option<usize>,
+) {
+    cache.borrow_mut().pane(id).view.top_anchor = top.map(|byte| ViewAnchor { byte, caret });
+}
+
 /// Keep the tiles the viewport wants plus the nearest others, up to the cap.
 fn evict_distant_tiles(
     tiles: &mut BTreeMap<u64, CachedTile>,
@@ -6686,6 +6798,8 @@ fn evict_distant_tiles(
 struct PaneLayout {
     /// The caret in the shown text, after the IME's string was spliced in.
     render_caret: Option<u32>,
+    /// The place the view is being held on, in the shown text (要件 8.5).
+    anchor_utf16: Option<u32>,
     selection: Option<(u32, u32)>,
     /// How far the content reached before this layout, for the panes whose
     /// document start is not at the origin.
@@ -6729,6 +6843,12 @@ fn lay_out_pane(
     let slot = &mut pane.view.preview_slot;
     let shown = pane_text(window, id, slot, source, active_line_start);
     let caret = caret_source_byte.map(|byte| shown.utf16_at_source_byte(byte) as u32);
+    // 要件 8.5: the place this pane is holding its view on, if it still is.
+    // **The caret having moved is the writer saying where to look**, and that
+    // is the end of the hold — one comparison here rather than a flag every
+    // caret-moving path would have to remember to clear.
+    let anchor_utf16 = held_view(pane.view.top_anchor, caret_source_byte)
+        .map(|byte| shown.utf16_at_source_byte(byte) as u32);
     let selection = selection_source_bytes.and_then(|(start, end)| {
         let start = shown.utf16_at_source_byte(start) as u32;
         let end = shown.utf16_at_source_byte(end) as u32;
@@ -6775,6 +6895,7 @@ fn lay_out_pane(
 
     Some(PaneLayout {
         render_caret,
+        anchor_utf16,
         selection,
         previous_flow,
         measured,
@@ -6836,6 +6957,7 @@ fn refresh_pane(
     };
     let PaneLayout {
         render_caret,
+        anchor_utf16,
         selection,
         previous_flow,
         measured,
@@ -6867,6 +6989,24 @@ fn refresh_pane(
         id.set_scroll(window, scrolled);
     }
     id.set_content_size(window, content_flow, line_extent);
+
+    // 要件 8.5: put the view back where the writer left it, in spite of the
+    // layout changing size under it. **Every refresh until the caret moves**,
+    // because the window settles into its zoom, its split and its extent over
+    // the first few of them, and each of those changes what a pixel offset
+    // means (`ViewAnchor`).
+    let anchored = anchor_utf16.and_then(|at| {
+        let engine = &mut cache.pane(id).graphics.engine;
+        let place = engine.caret_geometry(at).ok()?;
+        Some(if id.vertical(window) {
+            place.x
+        } else {
+            place.y
+        })
+    });
+    if let Some(flow) = anchored {
+        id.set_scroll(window, -flow);
+    }
 
     let geometry_started = Instant::now();
     let visible = id.flow_range(window, content_flow as f32);
@@ -6921,6 +7061,7 @@ fn refresh_pane(
         content_flow as f32,
         caret,
         &selection_rects,
+        anchored.is_some(),
     );
     let geometry_ms = elapsed_ms(geometry_started);
 
@@ -7078,12 +7219,22 @@ fn apply_pane_geometry(
     content_flow: f32,
     caret: Option<CaretGeometry>,
     selection_rects: &[SelectionRect],
+    held: bool,
 ) {
     id.set_selection(window, selection_rects);
     id.set_caret(window, caret.as_ref());
     let Some(caret) = caret else {
         return;
     };
+    // 要件 8.5: while the view is being held where the writer left it, the
+    // caret does not drag it away. **The caret is where they left it too** —
+    // following it would be answering a question nobody asked, and it is what
+    // took the restored view away before (`ViewAnchor`).
+    if held {
+        let (ime_x, ime_y) = ime_candidate_anchor(&caret, id.vertical(window));
+        id.set_ime_anchor(window, ime_x, ime_y, &caret);
+        return;
+    }
     let (caret_flow, caret_size) = if id.vertical(window) {
         (caret.x, caret.width)
     } else {
@@ -7122,6 +7273,10 @@ fn refresh_after_scroll(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id
     let started = Instant::now();
     let label = id.label(window);
     let mut cache = cache.borrow_mut();
+    // **The writer has scrolled, so this is where they want to look now**
+    // (要件 8.5). The other way a hold ends is the caret moving, which the
+    // layout pass notices for itself (`ViewAnchor`).
+    cache.pane(id).view.top_anchor = None;
     let drawn = cache.refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
     match drawn {
         Ok((count, new, _, _)) if new > 0 => {
@@ -7756,6 +7911,7 @@ fn drag_caret_only(
                 content_flow,
                 Some(caret),
                 &rects,
+                false,
             );
             let place = source_caret(window, id, Some(hit));
             update_status(window, document, source, selection, place);
@@ -9443,6 +9599,29 @@ mod tests {
 
         // The short tile of a block still finds its own.
         assert!(take_spare(&mut spare, 8, 4).is_some());
+    }
+
+    /// 要件 8.5: the view stays where the writer left it until they look
+    /// somewhere else, and **the caret moving is them looking somewhere else**.
+    #[test]
+    fn a_held_view_lasts_until_the_caret_moves() {
+        let anchor = Some(ViewAnchor {
+            byte: 1200,
+            caret: Some(40),
+        });
+
+        assert_eq!(held_view(anchor, Some(40)), Some(1200));
+        assert_eq!(held_view(anchor, Some(41)), None);
+        assert_eq!(held_view(anchor, None), None);
+        assert_eq!(held_view(None, Some(40)), None);
+
+        // A tab restored with no caret is held all the same: it is where the
+        // writer left it, and nothing has said otherwise.
+        let unmoved = Some(ViewAnchor {
+            byte: 8,
+            caret: None,
+        });
+        assert_eq!(held_view(unmoved, None), Some(8));
     }
 
     /// 要件 2: **a cheap draw is never held back.** Every ordinary document

@@ -84,7 +84,19 @@ pub struct SessionTab {
     pub vertical: bool,
     pub preview: bool,
     /// Where the pane was looking, along the flow.
+    ///
+    /// **In pixels, and therefore only a hint**: the same number means a
+    /// different place at another width, zoom or mode, and the window settles
+    /// into all three after this is applied (要件 8.5). `top` is what actually
+    /// puts the view back.
     pub scroll: i32,
+    /// The source byte at the near edge of the view, which is what the writer
+    /// was looking at.
+    ///
+    /// **A place in the text rather than on the screen.** A pixel offset stops
+    /// meaning anything the moment the layout is a different size; a byte is
+    /// the same passage however the text is set.
+    pub top: Option<usize>,
     pub caret: Option<usize>,
     pub anchor: Option<usize>,
 }
@@ -161,6 +173,9 @@ pub fn encode_session(session: &Session) -> String {
             if let Some(anchor) = tab.anchor {
                 out.push_str(&format!("anchor: {anchor}\n"));
             }
+            if let Some(top) = tab.top {
+                out.push_str(&format!("top: {top}\n"));
+            }
         }
     }
     out
@@ -214,6 +229,10 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "caret" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.caret = value.parse().ok();
+            }
+            "top" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                tab.top = value.parse().ok();
             }
             "anchor" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
@@ -673,6 +692,7 @@ mod tests {
                             untitled: 2,
                             vertical: true,
                             scroll: -4200,
+                            top: Some(1200),
                             caret: Some(17),
                             anchor: Some(3),
                             ..SessionTab::default()

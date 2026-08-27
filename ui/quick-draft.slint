@@ -45,26 +45,19 @@ export component QuickDraft inherits Window {
     /// to (要件 12.4).
     in property <string> target-name: "Paste to tab";
 
-    /// One row of the tab list. **The list and the aim are measured with the
-    /// same number**: while the button is held, which row the pointer is over
-    /// is arithmetic on this, and a second opinion about a row's height would
-    /// be a menu that sends to the row above the one it is showing.
+    /// One row of the tab list, and how tall the list is.
+    ///
+    /// **The rows know which of them the pointer is over.** The list is a popup
+    /// and a popup takes the pointer when it opens, so the button's press ends
+    /// there and the rows are hovered and clicked as they would be at any other
+    /// time — releasing over one is a click on it. An earlier version worked
+    /// the row out from the pointer's position instead, on the belief that the
+    /// button kept the grab; it did not, and what that arithmetic lit up was a
+    /// row nobody was pointing at.
     property <length> row-height: 29px;
     property <length> menu-height: root.tabs.length * root.row-height + 12px;
     /// Where the list sits above the button, in the button's own coordinates.
     property <length> menu-top: -6px - root.menu-height;
-    /// Which row the pointer is over while the button is held, or -1.
-    ///
-    /// **Arithmetic rather than hover**, because there is no hover to read: the
-    /// button holds the pointer for as long as it is down, so the rows never
-    /// see it. The pointer's place in the button's coordinates is all there is,
-    /// and `row-height` is what turns it into a row.
-    property <int> aiming: (tabs-menu.is-open && send-touch.pressed && send-touch.mouse-y < -6px)
-        ? clamp(
-            floor((send-touch.mouse-y - root.menu-top - 6px) / root.row-height),
-            -1,
-            root.tabs.length - 1)
-        : -1;
 
     callback edited();
     callback copied();
@@ -332,18 +325,12 @@ export component QuickDraft inherits Window {
                             // **The grab is this button's**, so the pointer is
                             // still ours wherever it went — which is what lets
                             // the row be read off `mouse-y` (`aiming`).
+                            // **Only a release that is still this button's.**
+                            // Once the list is up it has the pointer, and the
+                            // row under it answers for itself.
                             if (!tabs-menu.is-open) {
                                 root.send-requested();
-                                return;
                             }
-                            if (root.aiming >= 0) {
-                                // Chosen first, closed second: closing takes
-                                // the row's own element with it (6.22).
-                                root.paste-to-tab-requested(root.aiming);
-                                tabs-menu.close();
-                            }
-                            // Released over nothing: the list stays up, and a
-                            // click on a row does the rest.
                         }
                     }
 
@@ -375,12 +362,9 @@ export component QuickDraft inherits Window {
 
                             for tab[index] in root.tabs: MenuRow {
                                 title: tab;
-                                // While the button is held, the row under the
-                                // pointer is the one being answered; otherwise
-                                // the mark says where the editor is.
-                                checked: root.aiming >= 0
-                                    ? index == root.aiming
-                                    : index == root.tab-current;
+                                // The mark says where the editor is; the row
+                                // under the pointer lights itself.
+                                checked: index == root.tab-current;
                                 activated => {
                                     root.paste-to-tab-requested(index);
                                     tabs-menu.close();
