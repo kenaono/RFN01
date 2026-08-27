@@ -7008,11 +7008,17 @@ fn refresh_pane(
     let anchored = anchor_utf16.and_then(|at| {
         let engine = &mut cache.pane(id).graphics.engine;
         let place = engine.caret_geometry(at).ok()?;
-        Some(if id.vertical(window) {
+        let flow = if id.vertical(window) {
             place.x
         } else {
             place.y
-        })
+        };
+        // **Never past either end.** The content is measured several times
+        // before the window stands still, and a place found in one of the
+        // earlier ones can sit beyond the last — a view pinned there shows
+        // paper, which is what "the top is cut off" looks like.
+        let last = (content_flow as f32 - id.shown_flow(window)).max(0.0);
+        Some(flow.clamp(0.0, last))
     });
     if let Some(flow) = anchored {
         id.set_scroll(window, -flow);
@@ -7210,9 +7216,17 @@ fn refresh_pane(
         &format!("refresh.{}", id.diag_suffix()),
         &format!(
             "content={content_flow} extent={line_extent} shown={shown_flow:.0} \
-             viewport={viewport_flow:.0} scroll={scroll:.0} blocks={blocks} \
+             viewport={viewport_flow:.0} scroll={scroll:.0} hold={hold} blocks={blocks} \
              measured={measured} tiles={tile_count} new={rendered} caret={caret_at} \
              preview={preview} mode={mode} split={split} zoom={zoom_percent}",
+            // 要件 8.5: where the view is being held, if it is. **Written down
+            // because a view in the wrong place says nothing about why** — a
+            // hold that resolved somewhere odd and a hold that never stood look
+            // the same on screen.
+            hold = match anchored {
+                Some(flow) => format!("{flow:.0}"),
+                None => "-".to_owned(),
+            },
             preview = u8::from(id.shows_preview(window)),
             mode = window.get_editor_mode(),
             split = u8::from(window.get_split_view()),
@@ -8027,20 +8041,29 @@ fn paste_targets(
     resolved.clear();
     let mut rows = Vec::new();
     let mut target = -1;
-    // **Numbered, not sided.** The two panes sit side by side today and one
-    // above the other tomorrow, and 要件 6.4 divides further than that; a
-    // number says which pane without saying where it is.
-    let split = PaneId::ALL.iter().filter(|id| id.is_shown(window)).count() > 1;
-    for id in PaneId::ALL {
-        if !id.is_shown(window) {
-            continue;
-        }
+    // **In the order they are on screen, and numbered by that order.** The
+    // layout decides which pane is where — `S v 0.5 P 1 P 0` puts pane 1 above
+    // pane 0 — so a number taken from `PaneId` names the panes in an order
+    // nobody can see. The writer picks the one they are looking at.
+    //
+    // **Numbered, not sided**: the two sit side by side today and one above the
+    // other tomorrow, and 要件 6.4 divides further than that.
+    let arranged = live
+        .layout
+        .borrow()
+        .panes()
+        .into_iter()
+        .map(|index| PaneId::from_index(index as i32))
+        .filter(|id| id.is_shown(window))
+        .collect::<Vec<_>>();
+    let split = arranged.len() > 1;
+    for (place, id) in arranged.into_iter().enumerate() {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
         for (index, tab) in strip.tabs.iter().enumerate() {
             let file = tab.document.file.borrow();
             let title = file.title();
-            let number = id.index() + 1;
+            let number = place + 1;
             rows.push(if split {
                 format!("{number} · {title}")
             } else {

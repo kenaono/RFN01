@@ -368,6 +368,11 @@ export component QuickDraft inherits Window {
                                 // The mark says where a click would send it;
                                 // the row under the pointer lights itself.
                                 checked: index == root.tab-target;
+                                // **The press that opened this list is still
+                                // down.** Sliding onto a row and letting go is
+                                // how a held-open menu is answered, and there
+                                // is no click here to wait for.
+                                on-release: true;
                                 activated => {
                                     root.paste-to-tab-requested(index);
                                     tabs-menu.close();

@@ -705,6 +705,14 @@ export component MenuRow inherits Rectangle {
     /// the list of tabs. **Shown, not hidden**: a list you are picking from has
     /// to say where you are in it.
     in property <bool> checked: false;
+    /// Answer when the pointer is *released* over the row rather than when it
+    /// is clicked on it.
+    ///
+    /// **For a menu opened by holding a button down.** The press that opened it
+    /// happened somewhere else, so there is no click here to wait for — the
+    /// writer slides onto a row and lets go. A row that did both would answer
+    /// twice for an ordinary click, so it is one or the other.
+    in property <bool> on-release: false;
     callback activated();
 
     height: 28px;
@@ -740,7 +748,14 @@ export component MenuRow inherits Rectangle {
 
     touch := TouchArea {
         clicked => {
-            root.activated();
+            if (!root.on-release) {
+                root.activated();
+            }
+        }
+        pointer-event(event) => {
+            if (root.on-release && event.kind == PointerEventKind.up) {
+                root.activated();
+            }
         }
     }
 }
