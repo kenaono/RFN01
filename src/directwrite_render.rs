@@ -288,9 +288,6 @@ struct Graphics {
     /// for is set per range on the layout, because it varies within a block.
     formats: HashMap<(u32, u32, WritingMode, String), IDWriteTextFormat>,
     target: Option<RenderTargetCache>,
-    /// Reused for every `CopyPixels`. A tile is a couple of megabytes, and a
-    /// fresh `vec![0; n]` per tile would zero all of it just to overwrite it.
-    scratch: Vec<u8>,
     _apartment: Option<ComApartment>,
 }
 
@@ -317,7 +314,6 @@ impl Graphics {
                 wic: CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?,
                 formats: HashMap::new(),
                 target: None,
-                scratch: Vec::new(),
                 _apartment: apartment,
             })
         }
@@ -2005,11 +2001,34 @@ struct TileTask {
     underline: Option<(u32, u32)>,
 }
 
-/// Draw one tile, and say how big it is in pixels.
+impl TileTask {
+    /// The size of this tile's image: its own extent along the flow by the
+    /// pane's extent across it, whichever way round the mode puts them.
+    fn pixel_size(&self) -> (u32, u32) {
+        self.mode.to_surface(self.span.flow_size, self.line_extent)
+    }
+}
+
+/// Where drawn tiles go, and — the point of the trait — **whose memory they are
+/// written into**.
 ///
-/// The pixels are left in `graphics.scratch`, where the caller reads them: a
-/// tile is a couple of megabytes, and the thread that drew it is the one that
-/// knows whether they have to be copied anywhere.
+/// A tile is a couple of megabytes, and the caller has somewhere to put it that
+/// the engine cannot know about: an image the window will hold. Handing the
+/// pixels over afterwards would mean writing them twice and allocating for
+/// every tile, and **allocating two megabytes costs more than drawing them
+/// does** (技術検証 7.8: 0.72ms against 0.31ms). So the engine asks for the
+/// buffer first and draws straight into it.
+pub trait TileSink {
+    /// Room for one tile: `width * height * 4` bytes, filled with **BGRA** —
+    /// the order the bitmap is in, not the order Slint wants. Turning it round
+    /// belongs to whoever holds the buffer, where it can be done in place.
+    fn buffer(&mut self, span: TileSpan, width: u32, height: u32) -> &mut [u8];
+
+    /// The pixels are in it.
+    fn filled(&mut self, span: TileSpan);
+}
+
+/// Draw one tile into the buffer the sink gave for it.
 ///
 /// `cached` is the block's own layout when the caller has one. The engine keeps
 /// the layout its measurement produced (`layout_for`); with `None` the task is
@@ -2020,7 +2039,8 @@ fn draw_tile(
     graphics: &mut Graphics,
     task: &TileTask,
     cached: Option<IDWriteTextLayout>,
-) -> Result<(u32, u32)> {
+    into: &mut [u8],
+) -> Result<()> {
     let mode = task.mode;
     let typography = &task.typography;
     // 要件 9: this sheet's paper. The window paints the page behind the tiles
@@ -2177,12 +2197,15 @@ fn draw_tile(
     // SAFETY: Paired with BeginDraw above.
     unsafe { target.EndDraw(None, None)? };
 
-    let (tile_width, tile_height) = mode.to_surface(task.span.flow_size, line_extent);
+    let (tile_width, tile_height) = task.pixel_size();
     let stride = tile_width * 4;
     let needed = stride as usize * tile_height as usize;
-    if graphics.scratch.len() < needed {
-        graphics.scratch.resize(needed, 0);
-    }
+    let Some(pixels) = into.get_mut(..needed) else {
+        return Err(Error::new(
+            E_FAIL,
+            "the tile buffer is smaller than the tile",
+        ));
+    };
     // The tile was drawn at the origin of the surface, so only its own pixels
     // are read back.
     let rect = WICRect {
@@ -2195,9 +2218,9 @@ fn draw_tile(
     // requested stride and height.
     unsafe {
         let source: IWICBitmapSource = bitmap.cast()?;
-        source.CopyPixels(&rect, stride, &mut graphics.scratch[..needed])?;
+        source.CopyPixels(&rect, stride, pixels)?;
     }
-    Ok((tile_width, tile_height))
+    Ok(())
 }
 
 /// What one thread was given to do.
@@ -3397,9 +3420,9 @@ impl TextEngine {
 
     /// Render the requested tiles. Each tile shows one block and nothing else.
     ///
-    /// `emit` receives the tile, the pixel size of its image, and its BGRA rows.
-    /// The image is the tile's flow extent by the pane's line extent, so which of
-    /// the two is the width depends on the writing mode.
+    /// The pixels go into the buffers `sink` hands over, in BGRA. The image is
+    /// the tile's flow extent by the pane's line extent, so which of the two is
+    /// the width depends on the writing mode.
     ///
     /// **On this thread, and it has to be** (要件 2, 技術検証 7.8). Drawing is
     /// the one part of laying text out that does not divide: measured, eight
@@ -3408,7 +3431,7 @@ impl TextEngine {
         &mut self,
         tiles: &[TileSpan],
         preedit_utf16_range: Option<(u32, u32)>,
-        mut emit: impl FnMut(TileSpan, u32, u32, &[u8]),
+        sink: &mut impl TileSink,
     ) -> Result<()> {
         let tasks = self.tile_tasks(tiles, preedit_utf16_range);
         if tasks.is_empty() {
@@ -3426,11 +3449,17 @@ impl TextEngine {
                     Some(_) => None,
                     None => self.layout_for(graphics, task.span.block_index).ok(),
                 };
-                let (width, height) = draw_tile(graphics, task, cached)?;
-                let needed = width as usize * height as usize * 4;
-                // Handed over borrowed: the caller converts straight out of the
-                // scratch buffer, so the pixels are walked once and copied once.
-                emit(task.span, width, height, &graphics.scratch[..needed]);
+                let (width, height) = task.pixel_size();
+                // **Written once, where they are wanted.** The buffer is the
+                // caller's, so nothing here allocates and nothing copies the
+                // tile again afterwards.
+                draw_tile(
+                    graphics,
+                    task,
+                    cached,
+                    sink.buffer(task.span, width, height),
+                )?;
+                sink.filled(task.span);
             }
             Ok(())
         })
@@ -4379,6 +4408,26 @@ mod tests {
     /// The pane extent along the line axis every test lays text out in.
     const LINE_EXTENT: u32 = 520;
 
+    /// Every tile a render produced, kept whole.
+    ///
+    /// **The pixels are the test's own buffers.** The editor draws into the
+    /// images the window will hold ([`TileSink`]); a test has nowhere to put
+    /// them but a `Vec`, and wants to look at all of them together anyway.
+    #[derive(Default)]
+    struct DrawnTiles {
+        tiles: Vec<(TileSpan, u32, u32, Vec<u8>)>,
+    }
+
+    impl TileSink for DrawnTiles {
+        fn buffer(&mut self, span: TileSpan, width: u32, height: u32) -> &mut [u8] {
+            let room = width as usize * height as usize * 4;
+            self.tiles.push((span, width, height, vec![0; room]));
+            &mut self.tiles.last_mut().expect("just pushed").3
+        }
+
+        fn filled(&mut self, _span: TileSpan) {}
+    }
+
     fn engine_for(text: &str, font_size: f32) -> TextEngine {
         engine_in(WritingMode::Vertical, text, font_size)
     }
@@ -4945,17 +4994,19 @@ mod tests {
         // and each is then only part dark; the ink is the same, spread. What
         // tells a rule from a glyph's edge is still the length.
         let mut longest = 0_u32;
+        let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, |_, width, _, bgra| {
-                for row in bgra.chunks_exact(width as usize * 4) {
-                    let mut run = 0;
-                    for pixel in row.chunks_exact(4) {
-                        run = if pixel[2] < 245 { run + 1 } else { 0 };
-                        longest = longest.max(run);
-                    }
-                }
-            })
+            .render_tiles(&tiles, None, &mut drawn)
             .expect("vertical tile render");
+        for (_, width, _, bgra) in &drawn.tiles {
+            for row in bgra.chunks_exact(*width as usize * 4) {
+                let mut run = 0;
+                for pixel in row.chunks_exact(4) {
+                    run = if pixel[2] < 245 { run + 1 } else { 0 };
+                    longest = longest.max(run);
+                }
+            }
+        }
 
         // No glyph is 60 pixels across at this size, and a column rule reaches
         // from the header row to the last one.
@@ -5081,34 +5132,36 @@ mod tests {
     fn rules_across(engine: &mut TextEngine, mode: WritingMode) -> Vec<usize> {
         let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
         let mut found = Vec::new();
+        let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, |span, width, height, bgra| {
-                let (across, along) = match mode {
-                    WritingMode::Horizontal => (width as usize, height as usize),
-                    WritingMode::Vertical => (height as usize, width as usize),
-                };
-                let ink = |flow: usize, line: usize| {
-                    let (x, y) = match mode {
-                        WritingMode::Horizontal => (line, flow),
-                        WritingMode::Vertical => (flow, line),
-                    };
-                    bgra[(y * width as usize + x) * 4 + 2] < 245
-                };
-                for flow in 0..along {
-                    let mut run = 0;
-                    let mut longest = 0;
-                    for line in 0..across {
-                        run = if ink(flow, line) { run + 1 } else { 0 };
-                        longest = longest.max(run);
-                    }
-                    // Longer than any glyph, which is what tells a rule from
-                    // a row of text.
-                    if longest > 60 {
-                        found.push(span.flow_start as usize + flow);
-                    }
-                }
-            })
+            .render_tiles(&tiles, None, &mut drawn)
             .expect("tile render");
+        for (span, width, height, bgra) in &drawn.tiles {
+            let (across, along) = match mode {
+                WritingMode::Horizontal => (*width as usize, *height as usize),
+                WritingMode::Vertical => (*height as usize, *width as usize),
+            };
+            let ink = |flow: usize, line: usize| {
+                let (x, y) = match mode {
+                    WritingMode::Horizontal => (line, flow),
+                    WritingMode::Vertical => (flow, line),
+                };
+                bgra[(y * *width as usize + x) * 4 + 2] < 245
+            };
+            for flow in 0..along {
+                let mut run = 0;
+                let mut longest = 0;
+                for line in 0..across {
+                    run = if ink(flow, line) { run + 1 } else { 0 };
+                    longest = longest.max(run);
+                }
+                // Longer than any glyph, which is what tells a rule from
+                // a row of text.
+                if longest > 60 {
+                    found.push(span.flow_start as usize + flow);
+                }
+            }
+        }
         // A stroke a little over one pixel wide lands on two of them.
         found.dedup_by(|left, right| *left <= *right + 1);
         found
@@ -5161,21 +5214,23 @@ mod tests {
         // and comes out as dark as ink.
         let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
         let mut first_glyph = usize::MAX;
+        let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, |span, width, height, bgra| {
-                for y in 0..height as usize {
-                    let flow = span.flow_start as usize + y;
-                    if rules.iter().any(|at| at.abs_diff(flow) <= 2) {
-                        continue;
-                    }
-                    let dark =
-                        (0..width as usize).any(|x| bgra[(y * width as usize + x) * 4 + 2] < 150);
-                    if dark {
-                        first_glyph = first_glyph.min(flow);
-                    }
-                }
-            })
+            .render_tiles(&tiles, None, &mut drawn)
             .expect("tile render");
+        for (span, width, height, bgra) in &drawn.tiles {
+            for y in 0..*height as usize {
+                let flow = span.flow_start as usize + y;
+                if rules.iter().any(|at| at.abs_diff(flow) <= 2) {
+                    continue;
+                }
+                let dark =
+                    (0..*width as usize).any(|x| bgra[(y * *width as usize + x) * 4 + 2] < 150);
+                if dark {
+                    first_glyph = first_glyph.min(flow);
+                }
+            }
+        }
 
         assert!(
             first_glyph > top + 2,
@@ -5238,17 +5293,19 @@ mod tests {
         // when it falls between their centres. What tells a rule from an
         // anti-aliased glyph edge is the length, not the strength.
         let mut longest = 0_u32;
+        let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, |_, width, _, bgra| {
-                for row in bgra.chunks_exact(width as usize * 4) {
-                    let mut run = 0;
-                    for pixel in row.chunks_exact(4) {
-                        run = if pixel[2] < 245 { run + 1 } else { 0 };
-                        longest = longest.max(run);
-                    }
-                }
-            })
+            .render_tiles(&tiles, None, &mut drawn)
             .expect("horizontal tile render");
+        for (_, width, _, bgra) in &drawn.tiles {
+            for row in bgra.chunks_exact(*width as usize * 4) {
+                let mut run = 0;
+                for pixel in row.chunks_exact(4) {
+                    run = if pixel[2] < 245 { run + 1 } else { 0 };
+                    longest = longest.max(run);
+                }
+            }
+        }
 
         // No glyph at this size is 60 pixels across in one unbroken row, and
         // the document holds no `---`. **And the rules stop at the table**: a
@@ -5704,15 +5761,14 @@ mod tests {
         assert!(all.len() > 2, "the sample must produce several tiles");
         let tile = all[1];
 
-        let mut seen = Vec::new();
+        let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&[tile], None, |span, width, height, bgra| {
-                seen.push((span, width, height, bgra.len()));
-            })
+            .render_tiles(&[tile], None, &mut drawn)
             .expect("visible tile render");
 
-        assert_eq!(seen.len(), 1);
-        let (span, width, height, bytes) = seen[0];
+        assert_eq!(drawn.tiles.len(), 1);
+        let (span, width, height, ref pixels) = drawn.tiles[0];
+        let bytes = pixels.len();
         assert_eq!(span, tile);
         assert_eq!(
             (width, height),
@@ -5733,19 +5789,17 @@ mod tests {
         assert!(all.len() > 2, "the sample must produce several tiles");
         let tile = all[1];
 
-        let mut seen = None;
-        let mut ink = 0;
+        let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&[tile], None, |span, width, height, bgra| {
-                seen = Some((span, width, height, bgra.len()));
-                ink = bgra
-                    .chunks_exact(4)
-                    .filter(|pixel| pixel[0] < 180 && pixel[1] < 180 && pixel[2] < 180)
-                    .count();
-            })
+            .render_tiles(&[tile], None, &mut drawn)
             .expect("horizontal tile render");
 
-        let (span, width, height, bytes) = seen.expect("one tile rendered");
+        let (span, width, height, ref pixels) = *drawn.tiles.first().expect("one tile rendered");
+        let bytes = pixels.len();
+        let ink = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] < 180 && pixel[1] < 180 && pixel[2] < 180)
+            .count();
         assert_eq!(span, tile);
         assert_eq!(
             (width, height),
@@ -6195,15 +6249,16 @@ mod tests {
         // A short document is one block, and that block is one tile.
         let all = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
         assert_eq!(all.len(), 1);
-        let mut ink = 0;
+        let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&all, None, |_, _, _, bgra| {
-                ink = bgra
-                    .chunks_exact(4)
-                    .filter(|pixel| pixel[0] < 180 && pixel[1] < 180 && pixel[2] < 180)
-                    .count();
-            })
+            .render_tiles(&all, None, &mut drawn)
             .expect("tile render");
+        let ink = drawn
+            .tiles
+            .iter()
+            .flat_map(|(_, _, _, bgra)| bgra.chunks_exact(4))
+            .filter(|pixel| pixel[0] < 180 && pixel[1] < 180 && pixel[2] < 180)
+            .count();
 
         assert!(ink > 100, "expected visible glyph pixels");
     }

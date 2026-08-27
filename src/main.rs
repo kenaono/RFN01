@@ -30,7 +30,7 @@ use std::{
 
 use buffer::{DocumentFile, ExternalChange};
 use diag::DiagLog;
-use directwrite_render::{CaretGeometry, SelectionRect, TextEngine, WritingMode};
+use directwrite_render::{CaretGeometry, SelectionRect, TextEngine, TileSink, WritingMode};
 use document::{DocumentCounts, PreviewDocument, caret_place};
 use pane_layout::{Layout, Rect, Split};
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
@@ -144,6 +144,15 @@ const TILE_PREFETCH_COUNT: u32 = 1;
 /// Resident tiles. Enough that scrolling back over ground already covered is
 /// free, small enough to stay a fixed cost on any document length.
 const TILE_CACHE_LIMIT: usize = 6;
+
+/// How many evicted tile buffers to keep for redrawing into.
+///
+/// **Enough for a screenful**, because that is what one refresh can retire and
+/// draw again: a change of width or of spec gives every tile on screen a new
+/// fingerprint at once. They are held only between the eviction and the drawing
+/// of the same refresh; what is left over waits for the next one. Each is about
+/// two megabytes, and allocating that costs more than drawing it (技術検証 7.8).
+const SPARE_TILE_BUFFERS: usize = 16;
 const HORIZONTAL_MODE: i32 = 0;
 const VERTICAL_MODE: i32 = 1;
 /// Every refresh writes one line here — beside the executable, like the trace
@@ -700,6 +709,10 @@ impl FrameProbe {
 #[derive(Clone)]
 struct CachedTile {
     image: Image,
+    /// The pixels behind that image, kept so the buffer can be drawn into again
+    /// once the image is gone (`take_spare`). **A tile is about two megabytes,
+    /// and allocating that costs more than drawing it does** (技術検証 7.8).
+    pixels: SharedPixelBuffer<Rgba8Pixel>,
     /// Where this image was last placed on the flow axis, for ranking evictions
     /// by distance.
     last_flow: i32,
@@ -715,6 +728,15 @@ struct CachedTile {
 struct PaneGraphics {
     engine: TextEngine,
     tiles: BTreeMap<u64, CachedTile>,
+    /// Buffers of evicted tiles, waiting to be drawn into again.
+    ///
+    /// **Held for their memory, not their contents.** Two megabytes is more
+    /// expensive to allocate than to draw (技術検証 7.8), and pages already
+    /// touched cost nothing to write again. Taking one back is safe whatever
+    /// else may still hold it: `make_mut_slice` copies rather than share
+    /// (Slint's `SharedVector::detach`), so the worst case is what allocating
+    /// cost anyway.
+    spare: Vec<SharedPixelBuffer<Rgba8Pixel>>,
     /// Pixel bytes of the images handed to Slint since the last log line. Every
     /// one of them is a new texture the renderer has to upload.
     uploaded_bytes: usize,
@@ -727,6 +749,7 @@ impl PaneGraphics {
         Self {
             engine: TextEngine::new(mode),
             tiles: BTreeMap::new(),
+            spare: Vec::new(),
             uploaded_bytes: 0,
         }
     }
@@ -6207,6 +6230,7 @@ impl RenderCache {
         let PaneGraphics {
             engine,
             tiles: images,
+            spare,
             uploaded_bytes,
         } = graphics;
         if engine.total_flow_size() == 0 {
@@ -6236,15 +6260,17 @@ impl RenderCache {
         }
         let rendered = missing.len();
 
-        let mut uploaded = 0_usize;
         if !missing.is_empty() {
             let spans = missing.iter().map(|(span, _)| *span).collect::<Vec<_>>();
-            let mut produced = Vec::with_capacity(spans.len());
-            engine.render_tiles(&spans, preedit, |span, width, height, bgra| {
-                uploaded += bgra.len();
-                produced.push((span, image_from_bgra(width, height, bgra)));
-            })?;
-            for (span, image) in produced {
+            let mut drawn = TileImages {
+                spare,
+                drawing: None,
+                produced: Vec::with_capacity(spans.len()),
+                uploaded: 0,
+            };
+            engine.render_tiles(&spans, preedit, &mut drawn)?;
+            *uploaded_bytes += drawn.uploaded;
+            for (span, image, pixels) in drawn.produced {
                 let queued = missing.iter().find(|(other, _)| *other == span);
                 let Some((_, signature)) = queued else {
                     continue;
@@ -6253,13 +6279,12 @@ impl RenderCache {
                     *signature,
                     CachedTile {
                         image,
+                        pixels,
                         last_flow: span.flow_start as i32,
                     },
                 );
             }
         }
-
-        *uploaded_bytes += uploaded;
 
         // Placement is not cached, so a tile that slid along with the document's
         // growing edge costs one property assignment rather than a rasterization.
@@ -6277,12 +6302,18 @@ impl RenderCache {
             })
             .collect::<Vec<_>>();
 
+        // **What is evicted leaves its buffer behind, for the refresh after
+        // this one.** Not for this one: the pane is still showing the tiles of
+        // the last refresh, so their images are alive until `set_tiles` below
+        // replaces them — drawn into now, a buffer would be copied rather than
+        // reused (Slint's `SharedVector::detach`), which is what allocating one
+        // cost in the first place (技術検証 7.8).
         let viewport_center = -scroll + shown_flow * 0.5;
         let wanted = keyed
             .iter()
             .map(|(_, signature)| *signature)
             .collect::<Vec<_>>();
-        evict_distant_tiles(images, &wanted, viewport_center);
+        evict_distant_tiles(images, spare, &wanted, viewport_center);
 
         let tile_count = tiles.len();
         id.set_tiles(window, tiles);
@@ -6310,23 +6341,79 @@ impl RenderCache {
 ///
 /// Direct2D hands back BGRA and this reads it in place, so the pixels are
 /// walked once and copied once.
-fn image_from_bgra(width: u32, height: u32, bgra: &[u8]) -> Image {
-    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-    let targets = pixels.make_mut_slice().iter_mut();
-    for (target, source) in targets.zip(bgra.chunks_exact(4)) {
-        *target = Rgba8Pixel {
-            r: source[2],
-            g: source[1],
-            b: source[0],
-            a: source[3],
-        };
+/// Where one pane's tiles are drawn, and what they are drawn into.
+///
+/// **The buffers come from the pane and go back to it.** The engine writes each
+/// tile once, straight into the image the window will hold; nothing here copies
+/// a tile again, and a buffer whose image has been evicted is drawn into rather
+/// than allocated (技術検証 7.8).
+struct TileImages<'a> {
+    spare: &'a mut Vec<SharedPixelBuffer<Rgba8Pixel>>,
+    /// The one being drawn into, between `buffer` and `filled`.
+    drawing: Option<SharedPixelBuffer<Rgba8Pixel>>,
+    produced: Vec<(TileSpan, Image, SharedPixelBuffer<Rgba8Pixel>)>,
+    uploaded: usize,
+}
+
+impl TileSink for TileImages<'_> {
+    fn buffer(&mut self, _span: TileSpan, width: u32, height: u32) -> &mut [u8] {
+        let buffer = take_spare(self.spare, width, height)
+            .unwrap_or_else(|| SharedPixelBuffer::<Rgba8Pixel>::new(width, height));
+        self.drawing = Some(buffer);
+        self.drawing
+            .as_mut()
+            .expect("the buffer was just put there")
+            .make_mut_bytes()
     }
-    Image::from_rgba8(pixels)
+
+    fn filled(&mut self, span: TileSpan) {
+        let Some(mut pixels) = self.drawing.take() else {
+            return;
+        };
+        // The bitmap holds BGRA and Slint wants RGBA. **Swapped where it lies**:
+        // written into a second buffer, this pass costs what allocating that
+        // buffer costs, which is more than the drawing did (技術検証 7.8).
+        for four in pixels.make_mut_bytes().chunks_exact_mut(4) {
+            four.swap(0, 2);
+        }
+        self.uploaded += pixels.as_bytes().len();
+        self.produced
+            .push((span, Image::from_rgba8(pixels.clone()), pixels));
+    }
+}
+
+/// A buffer of exactly this size that no image is showing any more.
+///
+/// **Tiles are not all one size** — the last slice of every block is short — so
+/// this looks for the size asked for and leaves the others where they are.
+///
+/// **A miss lets the oldest one go.** The sizes follow the pane's extent, so
+/// after a resize every buffer in here is of a size that will never be asked
+/// for again; dropping one per miss empties the pool of them over the next few
+/// refreshes without ever throwing away one that still fits.
+fn take_spare(
+    spare: &mut Vec<SharedPixelBuffer<Rgba8Pixel>>,
+    width: u32,
+    height: u32,
+) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    let fits = |buffer: &SharedPixelBuffer<Rgba8Pixel>| {
+        buffer.width() == width && buffer.height() == height
+    };
+    // **The oldest that fits**, because the oldest is the one whose image the
+    // pane has had time to let go of.
+    if let Some(at) = spare.iter().position(fits) {
+        return Some(spare.remove(at));
+    }
+    if !spare.is_empty() {
+        spare.remove(0);
+    }
+    None
 }
 
 /// Keep the tiles the viewport wants plus the nearest others, up to the cap.
 fn evict_distant_tiles(
     tiles: &mut BTreeMap<u64, CachedTile>,
+    spare: &mut Vec<SharedPixelBuffer<Rgba8Pixel>>,
     wanted: &[u64],
     viewport_center: f32,
 ) {
@@ -6352,7 +6439,14 @@ fn evict_distant_tiles(
         rank(*left).cmp(&rank(*right))
     });
     for key in keys.into_iter().skip(limit) {
-        tiles.remove(&key);
+        // **The pixels stay, the image goes.** What is being thrown away is a
+        // tile nobody is looking at; its two megabytes are worth keeping for
+        // the next tile to be drawn into (技術検証 7.8).
+        if let Some(evicted) = tiles.remove(&key) {
+            if spare.len() < SPARE_TILE_BUFFERS {
+                spare.push(evicted.pixels);
+            }
+        }
     }
 }
 
@@ -8169,6 +8263,7 @@ mod tests {
                     index as u64,
                     CachedTile {
                         image: Image::default(),
+                        pixels: SharedPixelBuffer::new(1, 1),
                         last_flow: (index * width) as i32,
                     },
                 )
@@ -8912,11 +9007,89 @@ mod tests {
         );
     }
 
+    /// The bitmap holds BGRA and Slint wants RGBA, and the swap happens in the
+    /// buffer the pixels were drawn into.
+    ///
+    /// **Nothing else would say if it stopped happening.** The engine's own
+    /// tests read the bitmap's order, and body ink is grey — red and blue swapped
+    /// in it look the same. What would change is the paper and the headings, and
+    /// only on screen.
+    #[test]
+    fn a_drawn_tile_reaches_slint_in_rgba() {
+        let mut spare = Vec::new();
+        let mut drawn = TileImages {
+            spare: &mut spare,
+            drawing: None,
+            produced: Vec::new(),
+            uploaded: 0,
+        };
+        let span = TileSpan {
+            block_index: 0,
+            sub_index: 0,
+            flow_start: 0,
+            flow_size: 2,
+        };
+        let room = drawn.buffer(span, 2, 1);
+        // Two pixels, blue-ish and red-ish, as the bitmap would hold them.
+        room.copy_from_slice(&[200, 20, 10, 255, 10, 20, 200, 255]);
+        drawn.filled(span);
+
+        let (_, _, pixels) = drawn.produced.first().expect("one tile");
+        let shown = pixels.as_slice();
+        assert_eq!(
+            (shown[0].r, shown[0].g, shown[0].b, shown[0].a),
+            (10, 20, 200, 255),
+            "the first pixel is the blue one"
+        );
+        assert_eq!(
+            (shown[1].r, shown[1].g, shown[1].b, shown[1].a),
+            (200, 20, 10, 255),
+            "and the second is the red one"
+        );
+        assert_eq!(drawn.uploaded, 8);
+    }
+
+    /// 技術検証 7.8: an evicted tile's buffer is drawn into again rather than
+    /// allocated, because allocating two megabytes costs more than drawing them.
+    #[test]
+    fn a_spare_buffer_is_the_same_memory() {
+        let mut spare = vec![SharedPixelBuffer::<Rgba8Pixel>::new(4, 4)];
+        let was = spare[0].as_bytes().as_ptr();
+
+        let taken = take_spare(&mut spare, 4, 4).expect("a buffer of that size");
+
+        assert_eq!(
+            taken.as_bytes().as_ptr(),
+            was,
+            "the pages are the ones already touched"
+        );
+        assert!(spare.is_empty(), "and it is not handed out twice");
+    }
+
+    /// **A miss lets one go, and only one.** Tiles are not all one size — the
+    /// last slice of a block is short — so a buffer that does not fit this tile
+    /// may fit the next. What must not happen is a pool that fills with a size
+    /// nobody asks for any more, which is where a resize leaves it.
+    #[test]
+    fn a_miss_lets_the_oldest_spare_go() {
+        let mut spare = vec![
+            SharedPixelBuffer::<Rgba8Pixel>::new(4, 4),
+            SharedPixelBuffer::<Rgba8Pixel>::new(8, 4),
+        ];
+
+        assert!(take_spare(&mut spare, 16, 4).is_none());
+        assert_eq!(spare.len(), 1, "one goes, not all of them");
+        assert_eq!(spare[0].width(), 8, "and it is the oldest that goes");
+
+        // The short tile of a block still finds its own.
+        assert!(take_spare(&mut spare, 8, 4).is_some());
+    }
+
     #[test]
     fn evicts_the_tiles_furthest_from_the_viewport() {
         let mut tiles = tile_map(10, 1024);
 
-        evict_distant_tiles(&mut tiles, &[5, 6], 5600.0);
+        evict_distant_tiles(&mut tiles, &mut Vec::new(), &[5, 6], 5600.0);
 
         assert_eq!(tiles.len(), TILE_CACHE_LIMIT);
         assert!(tiles.contains_key(&5), "the viewport tiles must survive");
@@ -8966,7 +9139,7 @@ mod tests {
         let mut tiles = tile_map(14, 256);
         let wanted: Vec<u64> = (0..9).collect();
 
-        evict_distant_tiles(&mut tiles, &wanted, 1024.0);
+        evict_distant_tiles(&mut tiles, &mut Vec::new(), &wanted, 1024.0);
 
         for key in &wanted {
             assert!(tiles.contains_key(key), "dropped a wanted tile {key}");
@@ -8977,7 +9150,7 @@ mod tests {
     fn keeps_a_tile_that_is_still_wanted_even_when_far_from_the_centre() {
         let mut tiles = tile_map(10, 1024);
 
-        evict_distant_tiles(&mut tiles, &[0], 8000.0);
+        evict_distant_tiles(&mut tiles, &mut Vec::new(), &[0], 8000.0);
 
         assert!(tiles.contains_key(&0));
     }
