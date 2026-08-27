@@ -6196,7 +6196,7 @@ impl RenderCache {
         window: &AppWindow,
         id: PaneId,
         prefetch: u32,
-    ) -> windows::core::Result<(usize, usize, usize)> {
+    ) -> windows::core::Result<(usize, usize)> {
         let scroll = id.scroll(window);
         let shown_flow = id.shown_flow(window);
         // Which way the tiles stack, asked before the cache is borrowed.
@@ -6210,7 +6210,7 @@ impl RenderCache {
             uploaded_bytes,
         } = graphics;
         if engine.total_flow_size() == 0 {
-            return Ok((0, 0, 0));
+            return Ok((0, 0));
         }
         let line_extent = engine.line_extent();
         // Tiles are cut out of the blocks the viewport crosses. Their size along
@@ -6237,11 +6237,10 @@ impl RenderCache {
         let rendered = missing.len();
 
         let mut uploaded = 0_usize;
-        let mut divided = 0_usize;
         if !missing.is_empty() {
             let spans = missing.iter().map(|(span, _)| *span).collect::<Vec<_>>();
             let mut produced = Vec::with_capacity(spans.len());
-            divided = engine.render_tiles(&spans, preedit, |span, width, height, bgra| {
+            engine.render_tiles(&spans, preedit, |span, width, height, bgra| {
                 uploaded += bgra.len();
                 produced.push((span, image_from_bgra(width, height, bgra)));
             })?;
@@ -6287,7 +6286,7 @@ impl RenderCache {
 
         let tile_count = tiles.len();
         id.set_tiles(window, tiles);
-        Ok((tile_count, rendered, divided))
+        Ok((tile_count, rendered))
     }
 
     /// Re-cut the selection rectangles for what the pane now shows.
@@ -6620,7 +6619,7 @@ fn refresh_pane(
     }
     let stats_ms = elapsed_ms(stats_started);
 
-    let (tile_count, rendered, tiles_divided) = match tiles {
+    let (tile_count, rendered) = match tiles {
         Ok(counts) => counts,
         Err(error) => {
             let label = id.label(window);
@@ -6704,8 +6703,7 @@ fn refresh_pane(
          content={content_flow} extent={line_extent} shown={shown_flow:.0} \
          viewport={viewport_flow:.0} scroll={scroll:.0} caret={caret_at} \
          ime={ime_at:.0}/{ime_room:.0} \
-         tiles_shown={tile_count} tiles_new={rendered}/{tiles_divided} rects={rects} \
-         font={font_size:.1} \
+         tiles_shown={tile_count} tiles_new={rendered} rects={rects} font={font_size:.1} \
          space={space:.2} lead={lead:.2} head={head:.2} preedit={preedit_chars}",
         kind = id.perf_kind(),
         // Which panes are alive. Without this the log cannot tell a slow frame
@@ -6792,7 +6790,7 @@ fn refresh_after_scroll(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id
     let mut cache = cache.borrow_mut();
     let drawn = cache.refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
     match drawn {
-        Ok((count, new, _)) if new > 0 => {
+        Ok((count, new)) if new > 0 => {
             let ms = elapsed_ms(started);
             let line = format!("{label}遅延スクロール: {count}枚{new}新 / {ms:.1}ms");
             window.set_render_status(line.into());
