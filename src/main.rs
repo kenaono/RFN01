@@ -36,8 +36,8 @@ use document::{DocumentCounts, PreviewDocument, caret_place};
 use pane_layout::{Layout, Rect, Split};
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use slint::{
-    Color, ComponentHandle, Image, Model, ModelRc, RenderingState, Rgba8Pixel, SharedPixelBuffer,
-    SharedString, Timer, TimerMode, VecModel, Weak,
+    Color, ComponentHandle, Image, Model, ModelRc, PhysicalPosition, PhysicalSize, RenderingState,
+    Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
 use std::collections::{BTreeSet, VecDeque};
 use text_blocks::{
@@ -1119,6 +1119,11 @@ fn main() -> Result<(), slint::PlatformError> {
         && zoom > 0
     {
         window.set_zoom_percent(zoom.clamp(50, 240));
+    }
+    // 要件 8.5: and where the window itself was. **Before it is shown**, so it
+    // opens where it belongs rather than moving there in front of the writer.
+    if let Some(session) = &session {
+        restore_window_place(&window, session.place, session.maximized);
     }
     let (tabs, arrangement) = open_session(&window, session, restored);
     let opening = tabs
@@ -2903,6 +2908,8 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
     let folder = live.folder.borrow();
     app_data::Session {
         layout: live.layout.borrow().encode(),
+        place: window_place(window),
+        maximized: window.window().is_maximized(),
         focused: focused_pane(window).index(),
         panes,
         folder: folder.root.clone(),
@@ -2911,6 +2918,54 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         recent: live.recent.borrow().clone(),
         zoom: window.get_zoom_percent(),
     }
+}
+
+/// Put the window back where the writer left it (要件 8.5).
+///
+/// **A size that would not fit on any screen is refused**, which is the one
+/// thing that can be said without asking Windows which screens there are: a
+/// session carried to a machine with a smaller monitor, or written by a
+/// hand-edit, must not open a window nobody can reach the edges of. Where it
+/// sits is left alone — a window off the side of a screen is one drag away,
+/// and second-guessing which monitor a writer meant is worse than obeying them.
+fn restore_window_place(window: &AppWindow, place: Option<app_data::WindowPlace>, maximized: bool) {
+    if let Some(place) =
+        place.filter(|place| place.width <= MAX_WINDOW && place.height <= MAX_WINDOW)
+    {
+        let handle = window.window();
+        handle.set_position(PhysicalPosition::new(place.x, place.y));
+        handle.set_size(PhysicalSize::new(place.width, place.height));
+    }
+    if maximized {
+        window.window().set_maximized(true);
+    }
+}
+
+/// The largest window a session may ask for, in physical pixels.
+///
+/// Two 8K screens side by side and a margin. Anything past that is not a window
+/// somebody left behind.
+const MAX_WINDOW: u32 = 16_384;
+
+/// Where the window is and how big, as Windows counts it (要件 8.5).
+///
+/// **Not while it is maximised or minimised.** Both report the size they are
+/// filling rather than the size they would go back to, and a window restored to
+/// a maximised size without being maximised is one that cannot be un-maximised.
+/// The place kept is the last one the writer actually put it in.
+fn window_place(window: &AppWindow) -> Option<app_data::WindowPlace> {
+    let handle = window.window();
+    if handle.is_maximized() || handle.is_minimized() {
+        return None;
+    }
+    let position = handle.position();
+    let size = handle.size();
+    (size.width > 0 && size.height > 0).then_some(app_data::WindowPlace {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    })
 }
 
 /// One tab, as the session keeps it.

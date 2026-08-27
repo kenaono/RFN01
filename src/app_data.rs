@@ -114,6 +114,16 @@ pub struct Session {
     /// The layout tree, in `pane_layout::Layout`'s own words. Kept as text here
     /// because this module is about files, not about how panes are arranged.
     pub layout: String,
+    /// Where the window was and how big (要件 8.5).
+    ///
+    /// **The screen is part of the arrangement.** A writer who put the window
+    /// on half of one monitor left it there on purpose, and opening in the
+    /// middle of the other one is the editor undoing that every morning.
+    pub place: Option<WindowPlace>,
+    /// Whether it was left filling the screen. Kept beside the place rather
+    /// than instead of it: unmaximising has to put the window back somewhere,
+    /// and that somewhere is where it was before.
+    pub maximized: bool,
     pub focused: i32,
     pub panes: Vec<SessionPane>,
     /// The work folder, and the folders inside it the writer had open
@@ -142,6 +152,18 @@ pub fn encode_session(session: &Session) -> String {
     out.push_str(SESSION_MAGIC);
     out.push('\n');
     out.push_str(&format!("layout: {}\n", session.layout));
+    if let Some(place) = session.place {
+        let WindowPlace {
+            x,
+            y,
+            width,
+            height,
+        } = place;
+        out.push_str(&format!("place: {x} {y} {width} {height}\n"));
+    }
+    if session.maximized {
+        out.push_str("maximized: 1\n");
+    }
     out.push_str(&format!("focused: {}\n", session.focused));
     out.push_str(&format!("zoom: {}\n", session.zoom));
     out.push_str(&format!("tree: {}\n", u8::from(session.tree_shown)));
@@ -199,6 +221,8 @@ pub fn decode_session(raw: &str) -> Option<Session> {
         let (key, value) = line.split_once(": ")?;
         match key {
             "layout" => session.layout = value.to_owned(),
+            "place" => session.place = decode_place(value),
+            "maximized" => session.maximized = value == "1",
             "focused" => session.focused = value.parse().ok()?,
             "zoom" => session.zoom = value.parse().ok()?,
             "tree" => session.tree_shown = value == "1",
@@ -348,12 +372,12 @@ pub struct Draft {
     pub target: String,
     /// Where the window was and how big, in physical pixels. `None` before the
     /// writer has ever moved it, which is when the window manager decides.
-    pub place: Option<DraftPlace>,
+    pub place: Option<WindowPlace>,
 }
 
-/// A window's place on the screen, as Windows counts it.
+/// A window's place on the screen, as Windows counts it (要件 8.5, 12.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DraftPlace {
+pub struct WindowPlace {
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -378,7 +402,7 @@ pub fn encode_draft(draft: &Draft) -> String {
         out.push_str(&format!("target: {}\n", draft.target));
     }
     if let Some(place) = draft.place {
-        let DraftPlace {
+        let WindowPlace {
             x,
             y,
             width,
@@ -422,9 +446,9 @@ pub fn decode_draft(raw: &str) -> Option<Draft> {
     None
 }
 
-fn decode_place(value: &str) -> Option<DraftPlace> {
+fn decode_place(value: &str) -> Option<WindowPlace> {
     let mut numbers = value.split(' ');
-    let place = DraftPlace {
+    let place = WindowPlace {
         x: numbers.next()?.parse().ok()?,
         y: numbers.next()?.parse().ok()?,
         width: numbers.next()?.parse().ok()?,
@@ -675,6 +699,13 @@ mod tests {
     fn session() -> Session {
         Session {
             layout: "S h 0.4000 P 0 P 1".to_owned(),
+            place: Some(WindowPlace {
+                x: -8,
+                y: 120,
+                width: 1180,
+                height: 760,
+            }),
+            maximized: false,
             focused: 1,
             zoom: 125,
             folder: Some(PathBuf::from("D:\\書きかけ")),
@@ -799,6 +830,35 @@ mod tests {
         }
     }
 
+    /// 要件 8.5: **the screen is part of the arrangement.** A window put on
+    /// half of one monitor was put there on purpose.
+    #[test]
+    fn a_session_remembers_where_the_window_was() {
+        let read = decode_session(&encode_session(&session())).expect("decodes");
+
+        assert_eq!(read.place, session().place);
+        assert!(!read.maximized);
+
+        // Maximised is kept beside the place, not instead of it: a window that
+        // is un-maximised has to go back somewhere.
+        let filled = Session {
+            maximized: true,
+            ..session()
+        };
+        let read = decode_session(&encode_session(&filled)).expect("decodes");
+        assert!(read.maximized);
+        assert_eq!(read.place, filled.place);
+
+        // A session from a build that wrote no place opens where the window
+        // manager puts it, which is what every run did before this.
+        let older = Session {
+            place: None,
+            ..session()
+        };
+        let read = decode_session(&encode_session(&older)).expect("decodes");
+        assert_eq!(read.place, None);
+    }
+
     /// 要件 12.4: the kept drafts come back as they were, whatever is in them.
     ///
     /// **Including a draft that looks like the file it is stored in.** The
@@ -862,7 +922,7 @@ mod tests {
             caret: Some(9),
             on_top: true,
             target: "file:D:\\note.md".to_owned(),
-            place: Some(DraftPlace {
+            place: Some(WindowPlace {
                 x: -40,
                 y: 120,
                 width: 460,

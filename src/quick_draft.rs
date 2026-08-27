@@ -20,7 +20,7 @@ use slint::{
     Timer, TimerMode, VecModel, WindowPosition, WindowSize,
 };
 
-use crate::app_data::{self, Draft, DraftPlace};
+use crate::app_data::{self, Draft, WindowPlace};
 use crate::{AppWindow, QuickDraft};
 
 /// How long the draft may sit unwritten after a keystroke (要件 12.4).
@@ -427,11 +427,11 @@ fn store(window: &QuickDraft, target: &str) {
     let _ = app_data::write_draft(&directory, &draft);
 }
 
-fn place_of(window: &QuickDraft) -> Option<DraftPlace> {
+fn place_of(window: &QuickDraft) -> Option<WindowPlace> {
     let handle = window.window();
     let position = handle.position();
     let size = handle.size();
-    (size.width > 0 && size.height > 0).then_some(DraftPlace {
+    (size.width > 0 && size.height > 0).then_some(WindowPlace {
         x: position.x,
         y: position.y,
         width: size.width,
