@@ -824,6 +824,11 @@ impl Pane {
     /// block measurement and tile it holds is in that direction — so a change
     /// costs the whole document being measured again, about what a zoom costs
     /// (6.8). That is a price for a deliberate switch, never for a keystroke.
+    ///
+    /// **And the pane's view goes with it**, the preview slot and the held
+    /// anchor included: this is a new pane, not the old one turned. Anything
+    /// put in the view has to be put there after the direction is settled, not
+    /// before (要件 8.5's restore learned this the hard way).
     fn set_mode(&mut self, mode: WritingMode) -> bool {
         if self.mode == mode {
             return false;
@@ -1161,13 +1166,19 @@ fn main() -> Result<(), slint::PlatformError> {
         let caret = state.caret_source_byte;
         *pane_states.of(id).borrow_mut() = state;
         id.set_scroll(&window, tab.view.scroll);
-        // 要件 8.5: and the passage it was looking at, which is what actually
-        // puts the view back — the scroll above is pixels, and the zoom, the
-        // split and the extent all change what those mean before the window
-        // stands still (`ViewAnchor`).
-        hold_view(&render_cache, id, tab.view.top, caret);
         id.set_shows_preview(&window, tab.view.preview);
         set_pane_direction(&window, &render_cache, id, tab.view.vertical);
+        // 要件 8.5: the passage it was looking at, which is what actually puts
+        // the view back — the scroll above is pixels, and the zoom, the split
+        // and the extent all change what those mean before the window stands
+        // still (`ViewAnchor`).
+        //
+        // **After the direction, not before.** A pane told to run the other way
+        // is built again from nothing (`Pane::set_mode`), and everything the
+        // view held goes with it — which is what this did when it was set
+        // first: the session says vertical, the pane starts horizontal, and the
+        // anchor was gone before the first refresh could use it.
+        hold_view(&render_cache, id, tab.view.top, caret);
     }
     // One bundle for everything a tab operation touches. The editing callbacks
     // keep their own handles; this exists so a switch does not need six.
@@ -2187,7 +2198,6 @@ fn main() -> Result<(), slint::PlatformError> {
                     let Some(window) = weak.upgrade() else {
                         return quick_draft::TabList {
                             rows: Vec::new(),
-                            current: -1,
                             target: -1,
                             target_name: NO_TARGET.to_owned(),
                         };
@@ -8016,13 +8026,11 @@ fn paste_targets(
 ) -> quick_draft::TabList {
     resolved.clear();
     let mut rows = Vec::new();
-    let mut current = -1;
     let mut target = -1;
     // **Numbered, not sided.** The two panes sit side by side today and one
     // above the other tomorrow, and 要件 6.4 divides further than that; a
     // number says which pane without saying where it is.
     let split = PaneId::ALL.iter().filter(|id| id.is_shown(window)).count() > 1;
-    let focused = focused_pane(window);
     for id in PaneId::ALL {
         if !id.is_shown(window) {
             continue;
@@ -8038,9 +8046,6 @@ fn paste_targets(
             } else {
                 title
             });
-            if id == focused && index == strip.active {
-                current = rows.len() as i32 - 1;
-            }
             if tab_name(id, &file) == aimed {
                 target = rows.len() as i32 - 1;
             }
@@ -8060,7 +8065,6 @@ fn paste_targets(
         .unwrap_or_else(|| NO_TARGET.to_owned());
     quick_draft::TabList {
         rows,
-        current,
         target,
         target_name,
     }

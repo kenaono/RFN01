@@ -40,7 +40,10 @@ export component QuickDraft inherits Window {
     /// **Filled when the list is opened**, not held: a tab may have been opened
     /// or closed since the window was.
     in property <[string]> tabs;
-    in property <int> tab-current: -1;
+    /// Which row the button would send to. **That is what the mark says** — the
+    /// row that is already the answer — rather than where the editor happens to
+    /// be, which moves whenever the writer does and means nothing here.
+    in property <int> tab-target: -1;
     /// What the send button says, which is the name of the tab a click sends
     /// to (要件 12.4).
     in property <string> target-name: "Paste to tab";
@@ -362,9 +365,9 @@ export component QuickDraft inherits Window {
 
                             for tab[index] in root.tabs: MenuRow {
                                 title: tab;
-                                // The mark says where the editor is; the row
-                                // under the pointer lights itself.
-                                checked: index == root.tab-current;
+                                // The mark says where a click would send it;
+                                // the row under the pointer lights itself.
+                                checked: index == root.tab-target;
                                 activated => {
                                     root.paste-to-tab-requested(index);
                                     tabs-menu.close();

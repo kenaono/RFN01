@@ -154,8 +154,6 @@ pub struct Editor {
 pub struct TabList {
     /// A name each, in the order they are shown.
     pub rows: Vec<String>,
-    /// Which one the editor is in, or -1.
-    pub current: i32,
     /// Where in the list the remembered target is, or **-1 when it is not open
     /// any more** — which is what makes a click ask rather than send.
     pub target: i32,
@@ -359,7 +357,7 @@ fn show_tabs(window: &QuickDraft, editor: &Rc<Editor>, target: &Rc<RefCell<Strin
         .map(SharedString::from)
         .collect::<Vec<_>>();
     window.set_tabs(ModelRc::new(VecModel::from(rows)));
-    window.set_tab_current(list.current);
+    window.set_tab_target(list.target);
     window.set_target_name(SharedString::from(list.target_name));
     list.target
 }
