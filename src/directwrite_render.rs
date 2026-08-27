@@ -1493,6 +1493,115 @@ fn mark_extent(block: &BlockPlacement, run: &LineRun) -> Option<(f32, f32)> {
 ///
 /// Before the text, so a mark never covers a glyph and the ground stays under
 /// one.
+/// One cell's own layout, set the way it is drawn (要件 7.3.2).
+///
+/// **The same layout for the ink and for every question about a position.** A
+/// cell hit tested in a layout set differently from the one it is drawn in is a
+/// caret standing where the text is not.
+fn cell_layout_for(
+    graphics: &mut Graphics,
+    typography: &Typography,
+    mode: WritingMode,
+    block_text: &str,
+    cell: &GridCell,
+) -> Result<IDWriteTextLayout> {
+    let format = graphics.text_format(typography, mode)?;
+    let start = byte_at_utf16(block_text, cell.utf16_start);
+    let end = byte_at_utf16(block_text, cell.utf16_start + cell.utf16_len);
+    let layout = cell_layout(
+        graphics,
+        &format,
+        typography,
+        mode,
+        &block_text[start..end],
+        &cell.marks,
+        cell.line_size,
+        cell.flow_size.max(1.0),
+    )?;
+    let alignment = match cell.align {
+        Align::Start => DWRITE_TEXT_ALIGNMENT_LEADING,
+        Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+        Align::End => DWRITE_TEXT_ALIGNMENT_TRAILING,
+    };
+    // SAFETY: The layout outlives the call.
+    unsafe { layout.SetTextAlignment(alignment)? };
+    Ok(layout)
+}
+
+/// Draw a table: its rules, and every cell in a box of its own (要件 7.3.2).
+///
+/// **Nothing here asks which way the page runs.** Every distance the grid holds
+/// is on the flow axis or the line axis, and `OrnamentPage` turns a pair of
+/// those into a rectangle — the same tool the bar beside a quote is drawn with.
+///
+/// **Free of the engine**, like everything else a tile is drawn with: the page,
+/// the grid and the block's own text are all a table needs, and that is what
+/// lets a tile be drawn on a thread that has no engine (要件 2).
+fn draw_grid(
+    graphics: &mut Graphics,
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    grid: &TableGrid,
+    block_text: &str,
+    typography: &Typography,
+    page: &OrnamentPage,
+) -> Result<()> {
+    let mode = page.mode;
+    let margin = page.margin;
+    let block_origin = page.flow_origin;
+    let stroke = rule_stroke(page.font_size);
+    let half = stroke * 0.5;
+    let near = grid.rules.first().copied().unwrap_or(0.0);
+    let far = grid.rules.last().copied().unwrap_or(0.0);
+    // SAFETY: The brush and the target both outlive every call here, and
+    // each rectangle is read before its call returns.
+    //
+    // `OrnamentPage::rect` takes the line axis absolutely, the way every
+    // other mark on the page gives it: from the page's edge, not from where
+    // the block's text begins.
+    unsafe {
+        brush.SetOpacity(ORNAMENT_ALPHA);
+        // **The two rules at the edges are drawn just inside them.** A
+        // stroke centred on the block's own edge is half outside it, and
+        // the tile a block is drawn into ends exactly there — so half of
+        // the table's own frame would be cut away.
+        let inside = |at: f32, first: f32, last: f32| {
+            if at <= first {
+                (at, at + stroke)
+            } else if at >= last {
+                (at - stroke, at)
+            } else {
+                (at - half, at + half)
+            }
+        };
+        for at in &grid.rules {
+            let (from, to) = inside(*at, near, far);
+            let rect = page.rect((from, to), (margin, margin + grid.reach));
+            target.FillRectangle(&rect, brush);
+        }
+        for at in &grid.columns {
+            let (from, to) = inside(*at, 0.0, grid.reach);
+            let rect = page.rect((near, far), (margin + from, margin + to));
+            target.FillRectangle(&rect, brush);
+        }
+        brush.SetOpacity(1.0);
+    }
+
+    for cell in &grid.cells {
+        if cell.utf16_len == 0 {
+            continue;
+        }
+        let layout = cell_layout_for(graphics, typography, mode, block_text, cell)?;
+        let (x, y) = mode.to_screen(block_origin + cell.flow_start, margin + cell.line_start);
+        let origin = windows_numerics::Vector2 { X: x, Y: y };
+        // SAFETY: The layout and the brush both outlive the draw.
+        unsafe {
+            target.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+    }
+    Ok(())
+}
+
 fn draw_line_ornaments(
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
@@ -1724,6 +1833,39 @@ struct MeasureTask {
     keep_trailing_empty_line: bool,
 }
 
+/// The layout one block is set in, built from the block and nothing else.
+///
+/// **Three callers and one layout.** A block is measured in it (`measure_task`),
+/// drawn in it (`draw_tile`) and hit tested in it (`layout_for`), and a layout
+/// built differently in any of the three is a caret standing where the text is
+/// not. It takes the block's own text and spec rather than the engine because
+/// two of the three may run on another thread (要件 2, 技術検証 7.4).
+fn build_block_layout(
+    graphics: &mut Graphics,
+    typography: &Typography,
+    mode: WritingMode,
+    text: &str,
+    runs: &[StyleRun],
+    max_flow_size: f32,
+    line_box: f32,
+) -> Result<IDWriteTextLayout> {
+    let format = graphics.text_format(typography, mode)?;
+    let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+    // The layout box is the block's flow bound by its own line box, which way
+    // round depending on the mode.
+    let (max_width, max_height) = mode.to_screen(max_flow_size, line_box);
+    // SAFETY: The UTF-16 buffer stays alive across CreateTextLayout, and the
+    // layout owns everything it needs afterwards.
+    let layout = unsafe {
+        graphics
+            .dwrite
+            .CreateTextLayout(&utf16, &format, max_width, max_height)?
+    };
+    apply_typography(&layout, typography, runs, utf16.len() as u32)?;
+    apply_marker_boxes(&layout, typography, runs)?;
+    Ok(layout)
+}
+
 /// Measure one block, and hand back the layout it was measured with.
 ///
 /// **The measurement and the layout are the same object's two answers.** The
@@ -1735,20 +1877,15 @@ fn measure_task(
     graphics: &mut Graphics,
     task: &MeasureTask,
 ) -> Result<(BlockMeasure, IDWriteTextLayout)> {
-    let format = graphics.text_format(&task.typography, task.mode)?;
-    let utf16 = task.text.encode_utf16().collect::<Vec<u16>>();
-    // The layout box is the block's flow bound by its own line box, which way
-    // round depending on the mode.
-    let (max_width, max_height) = task.mode.to_screen(task.max_flow_size, task.block_box);
-    // SAFETY: The UTF-16 buffer stays alive across CreateTextLayout, and the
-    // layout owns everything it needs afterwards.
-    let layout = unsafe {
-        graphics
-            .dwrite
-            .CreateTextLayout(&utf16, &format, max_width, max_height)?
-    };
-    apply_typography(&layout, &task.typography, &task.runs, utf16.len() as u32)?;
-    apply_marker_boxes(&layout, &task.typography, &task.runs)?;
+    let layout = build_block_layout(
+        graphics,
+        &task.typography,
+        task.mode,
+        &task.text,
+        &task.runs,
+        task.max_flow_size,
+        task.block_box,
+    )?;
     let measure = measure_block(
         &layout,
         task.max_flow_size,
@@ -1766,7 +1903,7 @@ fn measure_task(
 fn measured_answer(answer: PoolAnswer) -> Option<(usize, BlockMeasure)> {
     match answer {
         PoolAnswer::Measure(index, measure) => Some((index, measure)),
-        PoolAnswer::Wrap(..) => None,
+        PoolAnswer::Wrap(..) | PoolAnswer::Render(..) => None,
     }
 }
 
@@ -1774,7 +1911,15 @@ fn measured_answer(answer: PoolAnswer) -> Option<(usize, BlockMeasure)> {
 fn wrapped_answer(answer: PoolAnswer) -> Option<(usize, Vec<usize>)> {
     match answer {
         PoolAnswer::Wrap(at, found) => Some((at, found)),
-        PoolAnswer::Measure(..) => None,
+        PoolAnswer::Measure(..) | PoolAnswer::Render(..) => None,
+    }
+}
+
+/// And the pixels in one.
+fn drawn_answer(answer: PoolAnswer) -> Option<(usize, TilePixels)> {
+    match answer {
+        PoolAnswer::Render(at, pixels) => Some((at, pixels)),
+        PoolAnswer::Measure(..) | PoolAnswer::Wrap(..) => None,
     }
 }
 
@@ -1796,6 +1941,16 @@ struct PendingBlock {
 /// one that only just grew past a block, where a block is 768 cells; below that
 /// the split never asks at all.
 const PARALLEL_WRAP_MIN: usize = 2;
+
+/// How many tiles make it worth waking the other threads (要件 2).
+///
+/// **Three, because below that the screen is not being rebuilt.** A keystroke
+/// redraws the tiles of the block it lands in and nothing else, and those are
+/// the tiles whose layout this thread still holds from the measurement — drawn
+/// here they cost a draw, drawn there they cost the layout again. What this is
+/// for is the other case: a scroll, a resize or a change of spec, where every
+/// tile on screen is new and none of their layouts are here either (7.4).
+const PARALLEL_TILE_MIN: usize = 3;
 
 /// How many blocks make it worth waking the other threads (要件 2).
 ///
@@ -1835,10 +1990,248 @@ struct WrapTask {
     from: usize,
 }
 
+/// One tile to draw, and everything it takes to draw it (要件 2).
+///
+/// **Owned, like a [`MeasureTask`], and for the same reason.** A tile shows one
+/// block, and a block is drawn from its own text, its own marks and the spec —
+/// nothing else (3.4). That is what lets tiles be drawn somewhere the document
+/// is not, and it is the same property that let them be measured there (7.4).
+///
+/// Cheap to clone in spite of the text: a block is bounded (`BLOCK_MAX_CELLS`),
+/// and the line table, the grid and the spec are all shared.
+#[derive(Clone)]
+struct TileTask {
+    /// Which tile of this batch. The answers come back in whatever order the
+    /// threads finish, so each has to say where it belongs.
+    at: usize,
+    span: TileSpan,
+    /// Where the block sits, and what its lines measured to.
+    block: BlockPlacement,
+    /// **The block's own text, not the document's.** Every offset in the marks
+    /// and in the grid is counted from here.
+    text: String,
+    runs: Vec<StyleRun>,
+    lines: Vec<LineRun>,
+    typography: Arc<Typography>,
+    mode: WritingMode,
+    margin: f32,
+    line_extent: u32,
+    /// The box the block is set in on the line axis, its own indent taken off
+    /// (要件 7.3.2). The layout has to be rebuilt in it or the block is drawn at
+    /// a size it was not placed at.
+    line_box: f32,
+    /// The surface every tile of this pane is drawn on.
+    surface_size: u32,
+    /// Where the IME's underline falls inside this block, if it falls in it.
+    underline: Option<(u32, u32)>,
+}
+
+/// One drawn tile's pixels, on their way back from another thread.
+struct TilePixels {
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
+}
+
+/// Draw one tile, and say how big it is in pixels.
+///
+/// The pixels are left in `graphics.scratch`, where the caller reads them: a
+/// tile is a couple of megabytes, and the thread that drew it is the one that
+/// knows whether they have to be copied anywhere.
+///
+/// `cached` is the block's own layout when the caller has one. The engine keeps
+/// the layout its measurement produced (`layout_for`); a thread that has no
+/// engine passes `None` and the task is built into a layout here — which is
+/// what the block's measurement cost, and no more.
+fn draw_tile(
+    graphics: &mut Graphics,
+    task: &TileTask,
+    cached: Option<IDWriteTextLayout>,
+) -> Result<(u32, u32)> {
+    let mode = task.mode;
+    let typography = &task.typography;
+    // 要件 9: this sheet's paper. The window paints the page behind the tiles
+    // from the same setting, so the two cannot show a seam.
+    let paper = colour(typography.paper);
+    let ink = colour(typography.ink);
+    let line_extent = task.line_extent;
+    let margin = task.margin;
+    let (surface_width, surface_height) = mode.to_surface(task.surface_size, line_extent);
+    let (target, brush, heading_brushes, bitmap) = {
+        let cache = graphics.render_target(surface_width, surface_height)?;
+        (
+            cache.target.clone(),
+            cache.brush.clone(),
+            cache.heading_brushes.clone(),
+            cache.bitmap.clone(),
+        )
+    };
+
+    // SAFETY: The target, brush and bitmap are kept alive by the cache for the
+    // whole draw, and BeginDraw/EndDraw are paired.
+    unsafe {
+        target.BeginDraw();
+        target.Clear(Some(&paper));
+        // The brushes the target keeps, told what the inks are now. Cheaper
+        // than building them per tile, and the settings may have moved since
+        // the target was made (要件 9).
+        brush.SetColor(&ink);
+        for (level, heading_brush) in heading_brushes.iter().enumerate() {
+            let heading_ink = colour(typography.ink_for(level as u8 + 1));
+            heading_brush.SetColor(&heading_ink);
+        }
+    }
+
+    // The block is drawn at its own offset inside the tile, and the margin plus
+    // the block's own indent sit on the line axis. All of it swaps with the mode.
+    let block_origin = task.block.draw_origin() - task.span.flow_start as f32;
+    // 要件 7.3.2: **a table is drawn cell by cell.** It is not one layout, so
+    // none of what follows applies to it: no block-wide text, no boxes, no
+    // whole-line marks. Its rules and its cells are all there is
+    // (`measure_table`).
+    if let Some(grid) = &task.block.grid {
+        let page = OrnamentPage {
+            mode,
+            flow_origin: block_origin,
+            margin,
+            inset: 0.0,
+            indent: typography.indent_step(),
+            line_extent: line_extent as f32,
+            font_size: typography.font_size,
+        };
+        draw_grid(
+            graphics, &target, &brush, grid, &task.text, typography, &page,
+        )?;
+    } else {
+        let layout = match cached {
+            Some(layout) => layout,
+            None => build_block_layout(
+                graphics,
+                typography,
+                mode,
+                &task.text,
+                &task.runs,
+                task.block.max_flow_size,
+                task.line_box,
+            )?,
+        };
+        // 要件 9: a heading is drawn in its own ink. **Set on the layout before
+        // every draw rather than once when it is built** — the layout is cached
+        // and a colour changes no geometry, so the cached one is still the right
+        // layout; and the brush it was given last time belongs to a render
+        // target that may since have been rebuilt. Body runs are left alone:
+        // they are drawn with the brush handed to `DrawTextLayout`.
+        //
+        // SAFETY: the layout and the brushes both outlive the draw.
+        unsafe {
+            for run in &task.runs {
+                if run.heading_level == 0 {
+                    continue;
+                }
+                let Some(heading_brush) = heading_brushes.get(run.heading_level as usize - 1)
+                else {
+                    continue;
+                };
+                layout.SetDrawingEffect(
+                    heading_brush,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: run.utf16_start,
+                        length: run.utf16_len,
+                    },
+                )?;
+            }
+        }
+        let inset = block_inset(&task.block.span, typography);
+        let (origin_x, origin_y) = mode.to_screen(block_origin, margin + inset);
+        let origin = windows_numerics::Vector2 {
+            X: origin_x,
+            Y: origin_y,
+        };
+        // 要件 7.3.2: the marks that belong to whole lines — the bar beside a
+        // quote, the stroke across a rule. Drawn from the block's own line table
+        // rather than from a hit test, and before the text, so neither ever
+        // covers a glyph.
+        let page = OrnamentPage {
+            mode,
+            flow_origin: block_origin,
+            margin,
+            inset,
+            indent: typography.indent_step(),
+            line_extent: line_extent as f32,
+            font_size: typography.font_size,
+        };
+        draw_line_ornaments(&target, &brush, &task.block, &task.lines, &page);
+        // SAFETY: The layout outlives the draw call, and the underline is set
+        // and cleared on the same layout.
+        unsafe {
+            if let Some((start, length)) = task.underline {
+                layout.SetUnderline(
+                    true,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: start,
+                        length,
+                    },
+                )?;
+            }
+            target.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            if let Some((start, length)) = task.underline {
+                layout.SetUnderline(
+                    false,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: start,
+                        length,
+                    },
+                )?;
+            }
+        }
+        // 要件 7.3.2: what stands in each of this block's boxes. After the text,
+        // so the ink sits on top of nothing it has to fight.
+        if task.runs.iter().any(run_draws_ink) {
+            let format = graphics.text_format(typography, mode)?;
+            draw_marker_ink(
+                &target,
+                &brush,
+                &format,
+                &layout,
+                &task.runs,
+                &task.text,
+                origin,
+                mode,
+                typography.indent_step(),
+            )?;
+        }
+    }
+    // SAFETY: Paired with BeginDraw above.
+    unsafe { target.EndDraw(None, None)? };
+
+    let (tile_width, tile_height) = mode.to_surface(task.span.flow_size, line_extent);
+    let stride = tile_width * 4;
+    let needed = stride as usize * tile_height as usize;
+    if graphics.scratch.len() < needed {
+        graphics.scratch.resize(needed, 0);
+    }
+    // The tile was drawn at the origin of the surface, so only its own pixels
+    // are read back.
+    let rect = WICRect {
+        X: 0,
+        Y: 0,
+        Width: tile_width as i32,
+        Height: tile_height as i32,
+    };
+    // SAFETY: The rectangle lies inside the bitmap and the buffer matches the
+    // requested stride and height.
+    unsafe {
+        let source: IWICBitmapSource = bitmap.cast()?;
+        source.CopyPixels(&rect, stride, &mut graphics.scratch[..needed])?;
+    }
+    Ok((tile_width, tile_height))
+}
+
 /// What one thread was given to do.
 enum PoolTask {
     Measure(MeasureTask),
     Wrap(WrapTask),
+    Render(TileTask),
 }
 
 /// And what it answered. **Which question, always** — the answers come back in
@@ -1846,6 +2239,7 @@ enum PoolTask {
 enum PoolAnswer {
     Measure(usize, BlockMeasure),
     Wrap(usize, Vec<usize>),
+    Render(usize, TilePixels),
 }
 
 /// The threads that lay text out, and the queues to them.
@@ -1946,6 +2340,22 @@ fn layout_worker(
                 let line = task.line.borrowed();
                 let found = wrap_offsets(graphics, &format, page, line, task.from);
                 Ok(PoolAnswer::Wrap(task.at, found.unwrap_or_default()))
+            }
+            PoolTask::Render(task) => {
+                // **The one answer that is copied out of the scratch buffer.**
+                // The pixels have to be owned to cross a thread, and the buffer
+                // they were read back into is this thread's, reused by every
+                // tile it draws.
+                let (width, height) = draw_tile(graphics, task, None)?;
+                let needed = width as usize * height as usize * 4;
+                Ok(PoolAnswer::Render(
+                    task.at,
+                    TilePixels {
+                        width,
+                        height,
+                        bgra: graphics.scratch[..needed].to_vec(),
+                    },
+                ))
             }
         })
         .map_err(|error| error.to_string());
@@ -2780,15 +3190,6 @@ impl TextEngine {
         (self.line_extent as f32 - self.margin * 2.0 - inset).max(1.0)
     }
 
-    /// Every range one block sets, the boxes a table asked for included
-    /// (要件 7.3.2).
-    ///
-    /// **One place, because three had to agree.** The layout is built with
-    /// these ranges, what stands in each box is drawn from them, and the tile
-    /// signature is taken over them. Two of the three read `style_runs` alone
-    /// while the third added the table's boxes, and the result was a table
-    /// whose columns lined up under a rule that was never drawn: the layout had
-    /// the boxes, and the pass that draws into them had never heard of them.
     /// Every range one block sets, and the marks that stand over its whole
     /// lines (要件 7.3.2).
     ///
@@ -2871,119 +3272,16 @@ impl TextEngine {
         Ok(())
     }
 
-    /// Draw a table: its rules, and every cell in a box of its own
-    /// (要件 7.3.2).
-    ///
-    /// **Nothing here asks which way the page runs.** Every distance the grid
-    /// holds is on the flow axis or the line axis, and `OrnamentPage` turns a
-    /// pair of those into a rectangle — the same tool the bar beside a quote is
-    /// drawn with.
-    fn draw_grid(
-        &mut self,
-        graphics: &mut Graphics,
-        target: &ID2D1RenderTarget,
-        brush: &ID2D1SolidColorBrush,
-        grid: &TableGrid,
-        block: &BlockSpan,
-        block_origin: f32,
-        margin: f32,
-    ) -> Result<()> {
-        let mode = self.mode;
-        let page = OrnamentPage {
-            mode,
-            flow_origin: block_origin,
-            margin,
-            inset: 0.0,
-            indent: self.typography.indent_step(),
-            line_extent: self.line_extent as f32,
-            font_size: self.typography.font_size,
-        };
-        let stroke = rule_stroke(self.typography.font_size);
-        let half = stroke * 0.5;
-        let near = grid.rules.first().copied().unwrap_or(0.0);
-        let far = grid.rules.last().copied().unwrap_or(0.0);
-        // SAFETY: The brush and the target both outlive every call here, and
-        // each rectangle is read before its call returns.
-        //
-        // `OrnamentPage::rect` takes the line axis absolutely, the way every
-        // other mark on the page gives it: from the page's edge, not from where
-        // the block's text begins.
-        unsafe {
-            brush.SetOpacity(ORNAMENT_ALPHA);
-            // **The two rules at the edges are drawn just inside them.** A
-            // stroke centred on the block's own edge is half outside it, and
-            // the tile a block is drawn into ends exactly there — so half of
-            // the table's own frame would be cut away.
-            let inside = |at: f32, first: f32, last: f32| {
-                if at <= first {
-                    (at, at + stroke)
-                } else if at >= last {
-                    (at - stroke, at)
-                } else {
-                    (at - half, at + half)
-                }
-            };
-            for at in &grid.rules {
-                let (from, to) = inside(*at, near, far);
-                let rect = page.rect((from, to), (margin, margin + grid.reach));
-                target.FillRectangle(&rect, brush);
-            }
-            for at in &grid.columns {
-                let (from, to) = inside(*at, 0.0, grid.reach);
-                let rect = page.rect((near, far), (margin + from, margin + to));
-                target.FillRectangle(&rect, brush);
-            }
-            brush.SetOpacity(1.0);
-        }
-
-        for cell in &grid.cells {
-            if cell.utf16_len == 0 {
-                continue;
-            }
-            let layout = self.cell_layout_of(graphics, block, cell)?;
-            let (x, y) = mode.to_screen(block_origin + cell.flow_start, margin + cell.line_start);
-            let origin = windows_numerics::Vector2 { X: x, Y: y };
-            // SAFETY: The layout and the brush both outlive the draw.
-            unsafe {
-                target.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-            }
-        }
-        Ok(())
-    }
-
-    /// One cell's own layout, set the way it is drawn (要件 7.3.2).
-    ///
-    /// **The same layout for the ink and for every question about a
-    /// position.** A cell hit tested in a layout set differently from the one
-    /// it is drawn in is a caret standing where the text is not.
+    /// One cell of this engine's text, in the layout it is drawn in
+    /// ([`cell_layout_for`]).
     fn cell_layout_of(
         &self,
         graphics: &mut Graphics,
         block: &BlockSpan,
         cell: &GridCell,
     ) -> Result<IDWriteTextLayout> {
-        let format = graphics.text_format(&self.typography, self.mode)?;
         let text = &self.text[block.byte_start..block.byte_end];
-        let start = byte_at_utf16(text, cell.utf16_start);
-        let end = byte_at_utf16(text, cell.utf16_start + cell.utf16_len);
-        let layout = cell_layout(
-            graphics,
-            &format,
-            &self.typography,
-            self.mode,
-            &text[start..end],
-            &cell.marks,
-            cell.line_size,
-            cell.flow_size.max(1.0),
-        )?;
-        let alignment = match cell.align {
-            Align::Start => DWRITE_TEXT_ALIGNMENT_LEADING,
-            Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
-            Align::End => DWRITE_TEXT_ALIGNMENT_TRAILING,
-        };
-        // SAFETY: The layout outlives the call.
-        unsafe { layout.SetTextAlignment(alignment)? };
-        Ok(layout)
+        cell_layout_for(graphics, &self.typography, self.mode, text, cell)
     }
 
     /// The layout a position falls in, where inside it the position is, and
@@ -3045,22 +3343,18 @@ impl TextEngine {
             return Ok(layout);
         }
 
-        let format = graphics.text_format(&self.typography, self.mode)?;
-        let (max_width, max_height) = self.mode.to_screen(max_flow_size, line_box);
-        let utf16 = self.text[byte_start..byte_end]
-            .encode_utf16()
-            .collect::<Vec<u16>>();
-        // SAFETY: The UTF-16 buffer stays alive across CreateTextLayout.
-        let layout = unsafe {
-            graphics
-                .dwrite
-                .CreateTextLayout(&utf16, &format, max_width, max_height)?
-        };
         // The same spec the measurement was taken under. A layout rebuilt
         // without it would draw and hit test at a different size from the one
         // the block was placed at.
-        apply_typography(&layout, &self.typography, &runs, utf16.len() as u32)?;
-        apply_marker_boxes(&layout, &self.typography, &runs)?;
+        let layout = build_block_layout(
+            graphics,
+            &self.typography,
+            self.mode,
+            &self.text[byte_start..byte_end],
+            &runs,
+            max_flow_size,
+            line_box,
+        )?;
         self.layouts.insert(0, (key, layout.clone()));
         self.layouts.truncate(LAYOUT_CACHE_LIMIT);
         Ok(layout)
@@ -3077,218 +3371,139 @@ impl TextEngine {
             .visible_tiles(viewport_flow, visible_flow, self.tile_flow_size(), prefetch)
     }
 
-    /// Render the requested tiles. Each tile shows one block and nothing else.
+    /// The parcels the requested tiles are drawn from.
     ///
-    /// `emit` receives the tile, the pixel size of its image, and its BGRA rows.
-    /// The image is the tile's flow extent by the pane's line extent, so which of
-    /// the two is the width depends on the writing mode.
-    pub fn render_tiles(
-        &mut self,
+    /// **Nothing here touches graphics.** It is the same division `update`
+    /// makes between deciding what to measure and measuring it (技術検証 7.4):
+    /// what a tile shows is decided where the document is, and drawing it is
+    /// not — which is why drawing can go somewhere else (要件 2).
+    fn tile_tasks(
+        &self,
         tiles: &[TileSpan],
         preedit_utf16_range: Option<(u32, u32)>,
-        mut emit: impl FnMut(TileSpan, u32, u32, &[u8]),
-    ) -> Result<()> {
-        let mode = self.mode;
-        // 要件 9: this sheet's paper. The window paints the page behind the
-        // tiles from the same setting, so the two cannot show a seam.
-        let paper = colour(self.typography.paper);
-        let ink = colour(self.typography.ink);
-        let line_extent = self.line_extent();
-        let margin = self.margin;
+    ) -> Vec<TileTask> {
         // One surface for every tile, at the furthest a tile can reach.
         //
         // Tiles are slices of blocks, and blocks are all different sizes, so
         // sizing the surface to the tile would rebuild the WIC bitmap and its
         // render target for almost every tile. That call is the single most
-        // expensive thing here. A fixed surface is built once per pane extent;
-        // a shorter tile simply leaves the far end of it unread.
+        // expensive thing in a draw. A fixed surface is built once per pane
+        // extent; a shorter tile simply leaves the far end of it unread.
         let surface_size = self.tile_flow_size();
-        let (surface_width, surface_height) = mode.to_surface(surface_size, line_extent);
-        // Read out here: the filter must not hold a borrow of `self` across the
-        // loop, because drawing needs `self` mutably to fetch block layouts.
         let block_count = self.plan.blocks.len();
-
-        with_graphics(|graphics| {
-            for span in tiles.iter().filter(|span| {
+        // One spec for the whole batch, shared rather than cloned per tile: it
+        // carries a family name for the body, one for code and one per heading
+        // level.
+        let spec = Arc::new(self.typography.clone());
+        tiles
+            .iter()
+            .filter(|span| {
                 span.flow_size > 0
                     && span.flow_size <= surface_size
                     && span.block_index < block_count
-            }) {
-                let tile_start = span.flow_start;
-                let tile_size = span.flow_size;
-
-                // Scoped so the cache borrow ends before `layout_for` needs
-                // `graphics` mutably again.
-                let (target, brush, heading_brushes, bitmap) = {
-                    let cache = graphics.render_target(surface_width, surface_height)?;
-                    (
-                        cache.target.clone(),
-                        cache.brush.clone(),
-                        cache.heading_brushes.clone(),
-                        cache.bitmap.clone(),
+            })
+            .enumerate()
+            .map(|(at, span)| {
+                let block = self.plan.blocks[span.block_index].clone();
+                // 要件 7.3.2: a table asks for none of these — it is not one
+                // layout, so no whole-block text is set and no box stands over
+                // any of it.
+                let BlockMarks { runs, lines } = match block.grid {
+                    Some(_) => BlockMarks {
+                        runs: Vec::new(),
+                        lines: Vec::new(),
+                    },
+                    None => self.block_marks(span.block_index),
+                };
+                let underline = preedit_utf16_range.and_then(|(start, length)| {
+                    block_local_range(
+                        block.span.utf16_start,
+                        block.span.utf16_end,
+                        start,
+                        start + length,
                     )
-                };
+                });
+                TileTask {
+                    at,
+                    span: *span,
+                    text: self.text[block.span.byte_start..block.span.byte_end].to_owned(),
+                    line_box: self.block_line_box(&block.span),
+                    block,
+                    runs,
+                    lines,
+                    typography: spec.clone(),
+                    mode: self.mode,
+                    margin: self.margin,
+                    line_extent: self.line_extent,
+                    surface_size,
+                    underline,
+                }
+            })
+            .collect()
+    }
 
-                // SAFETY: The target, brush and bitmap are kept alive by the
-                // cache for the whole draw, and BeginDraw/EndDraw are paired.
-                unsafe {
-                    target.BeginDraw();
-                    target.Clear(Some(&paper));
-                    // The brushes the target keeps, told what the inks are now.
-                    // Cheaper than building them per tile, and the settings may
-                    // have moved since the target was made (要件 9).
-                    brush.SetColor(&ink);
-                    for (level, heading_brush) in heading_brushes.iter().enumerate() {
-                        let heading_ink = colour(self.typography.ink_for(level as u8 + 1));
-                        heading_brush.SetColor(&heading_ink);
-                    }
-                }
-                // 要件 7.3.2: **a table is drawn cell by cell.** It is not one
-                // layout, so none of what follows applies to it: no block-wide
-                // text, no boxes, no whole-line marks. Its rules and its cells
-                // are all there is (`measure_table`).
-                let grid = self.plan.blocks[span.block_index].grid.clone();
-                if let Some(grid) = grid {
-                    let (block_origin, bytes) = {
-                        let block = &self.plan.blocks[span.block_index];
-                        (block.draw_origin() - tile_start as f32, block.span)
+    /// Render the requested tiles. Each tile shows one block and nothing else.
+    ///
+    /// `emit` receives the tile, the pixel size of its image, and its BGRA rows.
+    /// The image is the tile's flow extent by the pane's line extent, so which of
+    /// the two is the width depends on the writing mode.
+    ///
+    /// **Answers with how many of them were drawn on other threads** (要件 2).
+    /// Nought is what a keystroke gets and what a machine with no threads gets;
+    /// neither is a fault, and the perf log is the only reader.
+    pub fn render_tiles(
+        &mut self,
+        tiles: &[TileSpan],
+        preedit_utf16_range: Option<(u32, u32)>,
+        mut emit: impl FnMut(TileSpan, u32, u32, &[u8]),
+    ) -> Result<usize> {
+        let tasks = self.tile_tasks(tiles, preedit_utf16_range);
+        if tasks.is_empty() {
+            return Ok(0);
+        }
+        let mut done = vec![false; tasks.len()];
+        let mut divided = 0usize;
+        if tasks.len() >= PARALLEL_TILE_MIN {
+            let queued = tasks.iter().cloned().map(PoolTask::Render).collect();
+            if let Some(answers) = on_layout_threads(queued) {
+                for answer in answers? {
+                    let Some((at, pixels)) = drawn_answer(answer) else {
+                        continue;
                     };
-                    self.draw_grid(
-                        graphics,
-                        &target,
-                        &brush,
-                        &grid,
-                        &bytes,
-                        block_origin,
-                        margin,
-                    )?;
-                } else {
-                    let layout = self.layout_for(graphics, span.block_index)?;
-                    let block = &self.plan.blocks[span.block_index];
-                    let underline = preedit_utf16_range.and_then(|(start, length)| {
-                        block_local_range(
-                            block.span.utf16_start,
-                            block.span.utf16_end,
-                            start,
-                            start + length,
-                        )
-                    });
-                    // 要件 9: a heading is drawn in its own ink. **Set on the
-                    // layout before every draw rather than once when it is built**
-                    // — the layout is cached and a colour changes no geometry, so
-                    // the cached one is still the right layout; and the brush it
-                    // was given last time belongs to a render target that may since
-                    // have been rebuilt. Body runs are left alone: they are drawn
-                    // with the brush handed to `DrawTextLayout`.
-                    let BlockMarks { runs, lines } = self.block_marks(span.block_index);
-                    // SAFETY: the layout and the brushes both outlive the draw.
-                    unsafe {
-                        for run in &runs {
-                            if run.heading_level == 0 {
-                                continue;
-                            }
-                            let Some(heading_brush) =
-                                heading_brushes.get(run.heading_level as usize - 1)
-                            else {
-                                continue;
-                            };
-                            layout.SetDrawingEffect(
-                                heading_brush,
-                                DWRITE_TEXT_RANGE {
-                                    startPosition: run.utf16_start,
-                                    length: run.utf16_len,
-                                },
-                            )?;
-                        }
-                    }
-                    // The block is drawn at its own offset inside the tile, and the
-                    // margin plus the block's own indent sit on the line axis. All
-                    // of it swaps with the mode.
-                    let block_origin = block.draw_origin() - tile_start as f32;
-                    let inset = block_inset(&block.span, &self.typography);
-                    let (origin_x, origin_y) = mode.to_screen(block_origin, margin + inset);
-                    let origin = windows_numerics::Vector2 {
-                        X: origin_x,
-                        Y: origin_y,
+                    let Some(task) = tasks.get(at) else {
+                        continue;
                     };
-                    // 要件 7.3.2: the marks that belong to whole lines — the bar
-                    // beside a quote, the stroke across a rule. Drawn from the
-                    // block's own line table rather than from a hit test, and
-                    // before the text, so neither ever covers a glyph.
-                    let page = OrnamentPage {
-                        mode,
-                        flow_origin: block_origin,
-                        margin,
-                        inset,
-                        indent: self.typography.indent_step(),
-                        line_extent: line_extent as f32,
-                        font_size: self.typography.font_size,
-                    };
-                    draw_line_ornaments(&target, &brush, block, &lines, &page);
-                    // SAFETY: The layout outlives the draw call, and the underline
-                    // is set and cleared on the same layout.
-                    unsafe {
-                        if let Some((start, length)) = underline {
-                            layout.SetUnderline(
-                                true,
-                                DWRITE_TEXT_RANGE {
-                                    startPosition: start,
-                                    length,
-                                },
-                            )?;
-                        }
-                        target.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-                        if let Some((start, length)) = underline {
-                            layout.SetUnderline(
-                                false,
-                                DWRITE_TEXT_RANGE {
-                                    startPosition: start,
-                                    length,
-                                },
-                            )?;
-                        }
-                    }
-                    // 要件 7.3.2: what stands in each of this block's boxes. After
-                    // the text, so the ink sits on top of nothing it has to fight.
-                    if runs.iter().any(run_draws_ink) {
-                        let format = graphics.text_format(&self.typography, mode)?;
-                        let text = &self.text[block.span.byte_start..block.span.byte_end];
-                        let indent = self.typography.indent_step();
-                        draw_marker_ink(
-                            &target, &brush, &format, &layout, &runs, text, origin, mode, indent,
-                        )?;
-                    }
+                    done[at] = true;
+                    divided += 1;
+                    emit(task.span, pixels.width, pixels.height, &pixels.bgra);
                 }
-                // SAFETY: Paired with BeginDraw above.
-                unsafe { target.EndDraw(None, None)? };
-
-                let (tile_width, tile_height) = mode.to_surface(tile_size, line_extent);
-                let stride = tile_width * 4;
-                let needed = stride as usize * tile_height as usize;
-                if graphics.scratch.len() < needed {
-                    graphics.scratch.resize(needed, 0);
-                }
-                let bgra = &mut graphics.scratch[..needed];
-                // The tile was drawn at the origin of the surface, so only its
-                // own pixels are read back.
-                let rect = WICRect {
-                    X: 0,
-                    Y: 0,
-                    Width: tile_width as i32,
-                    Height: tile_height as i32,
+            }
+        }
+        // **Whatever the threads did not draw is drawn here** — the tiles they
+        // were never given, and the ones whose answer never came. Both meet the
+        // path taken when there are no threads at all, so however this falls
+        // short there is one piece of code that finishes it (技術検証 7.4).
+        if done.iter().all(|drawn| *drawn) {
+            return Ok(divided);
+        }
+        with_graphics(|graphics| {
+            for task in tasks.iter().filter(|task| !done[task.at]) {
+                // The layout the measurement produced, when this thread still
+                // has it. A block measured on another thread left its layout
+                // there, and then this builds one — the same cost either way.
+                let cached = match task.block.grid {
+                    Some(_) => None,
+                    None => self.layout_for(graphics, task.span.block_index).ok(),
                 };
-                // SAFETY: The rectangle lies inside the bitmap and the buffer
-                // matches the requested stride and height.
-                unsafe {
-                    let source: IWICBitmapSource = bitmap.cast()?;
-                    source.CopyPixels(&rect, stride, bgra)?;
-                }
-                // Handed over borrowed: the caller converts straight out of this
-                // buffer, so the pixels are walked once and copied once.
-                emit(*span, tile_width, tile_height, bgra);
+                let (width, height) = draw_tile(graphics, task, cached)?;
+                let needed = width as usize * height as usize * 4;
+                // Handed over borrowed: the caller converts straight out of the
+                // scratch buffer, so the pixels are walked once and copied once.
+                emit(task.span, width, height, &graphics.scratch[..needed]);
             }
             Ok(())
-        })
+        })?;
+        Ok(divided)
     }
 
     /// A fingerprint of everything that decides one tile's pixels.
@@ -6061,6 +6276,95 @@ mod tests {
             .expect("tile render");
 
         assert!(ink > 100, "expected visible glyph pixels");
+    }
+
+    /// 要件 2: **a tile drawn on another thread is the tile drawn here.**
+    ///
+    /// The two paths differ in one thing, and the pixels are not meant to be
+    /// it: a worker has no layout cache, so it builds the block's layout out of
+    /// the parcel it was handed. Were that parcel short of anything the engine
+    /// knows — the block's indent, the marks over it, the box it is set in —
+    /// the tile would come back subtly different, and nothing else here would
+    /// see it. **Only the pixels say so** (7.7, where a table's rules were
+    /// drawn by a pass that had never heard of them).
+    #[test]
+    fn a_divided_tile_is_the_tile_drawn_here() {
+        let source = concat!(
+            "# 見出し\n\n",
+            "本文の段落です。日本語ABC123を含みます。\n\n",
+            "> 引用の中の**強調**と`コード`。\n\n",
+            "- 項目です\n",
+            "- [x] 済んだ項目\n\n",
+            "| 短 | いろは |\n| --- | --- |\n| とても長い見出しの語 | とちり |\n\n",
+            "```\nlet code = 1;\n```\n\n",
+            "---\n\n",
+            "最後の段落です。\n",
+        );
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            same_tiles_either_way(source, mode);
+        }
+    }
+
+    /// **Both ways round**, because a tile is cut on the flow axis and the flow
+    /// axis is a different screen axis in each — and because every mistake of
+    /// this kind so far has shown in one mode only (7.7).
+    fn same_tiles_either_way(source: &str, mode: WritingMode) {
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let mut engine = engine_set(mode, styled, &plain());
+        let all = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        assert!(
+            all.len() >= PARALLEL_TILE_MIN,
+            "need a batch worth dividing, got {} tiles in {mode:?}",
+            all.len()
+        );
+
+        // One at a time is under the threshold, so each of these is drawn here.
+        let mut here: Vec<(TileSpan, u32, u32, Vec<u8>)> = Vec::new();
+        for tile in &all {
+            let divided = engine
+                .render_tiles(
+                    std::slice::from_ref(tile),
+                    None,
+                    |span, width, height, bgra| {
+                        here.push((span, width, height, bgra.to_vec()));
+                    },
+                )
+                .expect("a tile drawn here");
+            assert_eq!(divided, 0, "one tile is never worth handing over");
+        }
+
+        // The whole batch is over it.
+        let mut there: Vec<(TileSpan, u32, u32, Vec<u8>)> = Vec::new();
+        let divided = engine
+            .render_tiles(&all, None, |span, width, height, bgra| {
+                there.push((span, width, height, bgra.to_vec()));
+            })
+            .expect("a batch drawn on the pool");
+        assert!(divided > 0, "{mode:?}: the batch was not divided at all");
+        assert_eq!(there.len(), here.len(), "the same tiles come back");
+
+        for (span, width, height, pixels) in &here {
+            let (_, wide, high, other) = there
+                .iter()
+                .find(|(other, ..)| other == span)
+                .expect("every tile comes back");
+            assert_eq!(
+                (*wide, *high),
+                (*width, *height),
+                "{mode:?}: tile {span:?} came back a different size"
+            );
+            let differing = pixels
+                .iter()
+                .zip(other.iter())
+                .filter(|(here, there)| here != there)
+                .count();
+            assert_eq!(
+                differing, 0,
+                "{mode:?}: tile {span:?} differs in {differing} bytes"
+            );
+        }
     }
 
     /// The point of the per-tile fingerprint: an edit redraws the tiles that
