@@ -293,12 +293,15 @@ export component QuickDraft inherits Window {
             HorizontalLayout {
                 send := Rectangle {
                     height: 28px;
-                    min-width: 44px;
-                    // A file name is as long as it likes and this row has other
-                    // things in it, so the button stops growing and the name
-                    // elides (6.23: a `Text` whose min width is its own text is
-                    // what pushes a row through the side of the window).
-                    max-width: min(send-label.preferred-width + 22px, 220px);
+                    // **Both ends, and the same expression.** A `min-width`
+                    // the layout may shrink past is a button squeezed down to
+                    // nothing by whatever else is in the row — which is what
+                    // happened with a floor of 44px and the notice beside it
+                    // taking the slack (6.23). Pinned like `TextButton`, and
+                    // free between the two ends: a file name is as long as it
+                    // likes, so it grows to a point and elides after it.
+                    min-width: clamp(send-label.preferred-width + 22px, 96px, 260px);
+                    max-width: clamp(send-label.preferred-width + 22px, 96px, 260px);
                     border-radius: 5px;
                     border-width: 1px;
                     border-color: root.text == "" ? Tok.rule : Tok.accent;

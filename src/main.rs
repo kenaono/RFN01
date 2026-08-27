@@ -7885,7 +7885,7 @@ fn paste_targets(
             if id == focused && index == strip.active {
                 current = rows.len() as i32 - 1;
             }
-            if tab_name(&file) == aimed {
+            if tab_name(id, &file) == aimed {
                 target = rows.len() as i32 - 1;
             }
             resolved.push((id, index));
@@ -7916,14 +7916,19 @@ const NO_TARGET: &str = "Paste to tab…";
 /// How a tab is named in the draft's own file, so that the next run finds it
 /// again (要件 12.4).
 ///
-/// **A document, not a place.** Tabs are opened, closed and moved between
-/// panes; what the writer picked was the file, and the file is what is still
-/// recognisable tomorrow. An untitled buffer is named by its number, which is
-/// what the session already knows it by (要件 8.4).
-fn tab_name(file: &DocumentFile) -> String {
+/// **The pane and the document, because a tab is both.** The document alone
+/// was not enough: 要件 6.4 opens the second pane on the tab the first one is
+/// showing, so the ordinary arrangement has one document in two tabs — and a
+/// name that fitted both matched whichever came last. The file is what is still
+/// recognisable tomorrow, and the pane is which of its tabs was picked.
+///
+/// An untitled buffer is named by its number, which is what the session already
+/// knows it by (要件 8.4).
+fn tab_name(id: PaneId, file: &DocumentFile) -> String {
+    let pane = id.index() + 1;
     match file.path() {
-        Some(path) => format!("file:{}", path.display()),
-        None => format!("untitled:{}", file.untitled_number()),
+        Some(path) => format!("{pane}|file:{}", path.display()),
+        None => format!("{pane}|untitled:{}", file.untitled_number()),
     }
 }
 
@@ -7952,7 +7957,7 @@ fn paste_into_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, tex
     let _ = window.show();
     restore_editor_focus(window);
     // What to call this tab next time, which is what the button will say.
-    tab_name(&document.file.borrow())
+    tab_name(id, &document.file.borrow())
 }
 
 /// Insert text at a pane's caret, replacing whatever it has selected.
