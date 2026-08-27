@@ -2143,19 +2143,40 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        // **What the draft window is given is a way to put text in a tab**, not
-        // the editor. It knows no more about this side than `searcher.rs` knows
-        // about the window it wakes.
-        let into_tab = {
-            let weak = window.as_weak();
-            let live = draft_live.clone();
-            move |text: &str| {
-                if let Some(window) = weak.upgrade() {
-                    paste_into_focused_tab(&window, &live, text);
-                }
-            }
+        // **What the draft window is given is a list of tabs and a way to put
+        // text in one**, not the editor. It knows no more about this side than
+        // `searcher.rs` knows about the window it wakes.
+        //
+        // The two share what the list resolved to, so the place a row stands
+        // for is decided once (`paste_targets`).
+        let resolved: Rc<RefCell<Vec<(PaneId, usize)>>> = Rc::default();
+        let editor = quick_draft::Editor {
+            tabs: {
+                let weak = window.as_weak();
+                let live = draft_live.clone();
+                let resolved = resolved.clone();
+                Box::new(move || {
+                    let Some(window) = weak.upgrade() else {
+                        return (Vec::new(), -1);
+                    };
+                    paste_targets(&window, &live, &mut resolved.borrow_mut())
+                })
+            },
+            paste: {
+                let weak = window.as_weak();
+                let live = draft_live.clone();
+                let resolved = resolved.clone();
+                Box::new(move |at, text| {
+                    let Some(&(id, index)) = resolved.borrow().get(at) else {
+                        return;
+                    };
+                    if let Some(window) = weak.upgrade() {
+                        paste_into_tab(&window, &live, id, index, text);
+                    }
+                })
+            },
         };
-        quick_draft::QuickDraftWindow::open(&held_draft, &window, into_tab);
+        quick_draft::QuickDraftWindow::open(&held_draft, &window, editor);
     });
 
     let weak = window.as_weak();
@@ -7814,14 +7835,62 @@ fn horizontal_active_line(state: &Rc<RefCell<EditorState>>, source: &str) -> Opt
     Some(source_line_start(source, caret))
 }
 
-/// Put the quick draft into the tab the editor is in (要件 12).
+/// The tabs the quick draft may be sent to, and which one the editor is in
+/// (要件 12.4).
 ///
-/// **At the caret of the focused pane**, which is what "the tab" means from the
-/// draft window's side: the document in front of the writer, in the pane they
-/// were last in. The editor comes forward with it — text arriving in a window
-/// nobody is looking at is text nobody has been told about.
-fn paste_into_focused_tab(window: &AppWindow, live: &Live, text: &str) {
-    let id = focused_pane(window);
+/// **The names the strips show**, read from the documents themselves like
+/// `publish_tabs` — there is no second copy to go stale. `resolved` is filled
+/// with what each row stands for, so that the row the writer picks is read back
+/// rather than worked out a second time: **a list built twice is two opinions
+/// about which tab they picked.**
+///
+/// A pane that is not on screen contributes nothing: its tabs are not in front
+/// of anybody, and Split is what puts the second one there.
+fn paste_targets(
+    window: &AppWindow,
+    live: &Live,
+    resolved: &mut Vec<(PaneId, usize)>,
+) -> (Vec<String>, i32) {
+    resolved.clear();
+    let mut rows = Vec::new();
+    let mut current = -1;
+    let split = PaneId::ALL.iter().filter(|id| id.is_shown(window)).count() > 1;
+    let focused = focused_pane(window);
+    for id in PaneId::ALL {
+        if !id.is_shown(window) {
+            continue;
+        }
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(id);
+        for (index, tab) in strip.tabs.iter().enumerate() {
+            let title = tab.document.file.borrow().title();
+            // Only when both are on screen: with one pane the side says nothing.
+            let side = if id.is_right() { "Right" } else { "Left" };
+            rows.push(if split {
+                format!("{side} · {title}")
+            } else {
+                title
+            });
+            if id == focused && index == strip.active {
+                current = rows.len() as i32 - 1;
+            }
+            resolved.push((id, index));
+        }
+    }
+    (rows, current)
+}
+
+/// Put the quick draft into one of the editor's tabs (要件 12.4).
+///
+/// **The tab is brought forward first.** Text put into a tab nobody is looking
+/// at is text nobody has been told about — and the caret it lands at is that
+/// tab's own, which only the tab in front of the pane has.
+fn paste_into_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, text: &str) {
+    // **The pane the tab is in becomes the one the keyboard is in.** The caret
+    // the text landed at is that pane's, and a writer sent somewhere is a
+    // writer who is now there.
+    window.set_focused_pane(id.index());
+    switch_to_tab(window, live, id, index);
     let document = live.states.document(id);
     insert_pane_text(
         window,

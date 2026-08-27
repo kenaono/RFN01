@@ -60,7 +60,7 @@ impl QuickDraftWindow {
     /// **Whoever calls this is not the point** (要件 12.2): the menu does now
     /// and a global shortcut may later, and neither knows anything the other
     /// does not.
-    pub fn open(held: &Rc<RefCell<Self>>, owner: &AppWindow, paste: impl Fn(&str) + 'static) {
+    pub fn open(held: &Rc<RefCell<Self>>, owner: &AppWindow, editor: Editor) {
         if let Some(live) = &held.borrow().open {
             // Already open: bring it forward rather than making a second one.
             let _ = live.window.show();
@@ -101,7 +101,7 @@ impl QuickDraftWindow {
             history: Rc::new(RefCell::new(history)),
         };
         held.borrow_mut().open = Some(live);
-        wire(held, &window, paste);
+        wire(held, &window, editor);
 
         if window.show().is_err() {
             owner.set_render_status("クイック下書き: 窓を出せません".into());
@@ -129,8 +129,23 @@ impl QuickDraftWindow {
     }
 }
 
+/// What the draft window is given of the editor, and all it is given.
+///
+/// **Two functions, and no more of the editor than that** — the tabs it may
+/// send to, and the way to send. `searcher.rs` is handed a way to wake the
+/// window and knows nothing else about it; this is the same arrangement seen
+/// from the other side.
+pub struct Editor {
+    /// The tabs as they are now, and which of them the editor is in. **Asked
+    /// each time the list is opened**: a tab may have been opened or closed
+    /// since the draft window was.
+    pub tabs: Box<dyn Fn() -> (Vec<String>, i32)>,
+    /// Put this text into the tab at that place in the list.
+    pub paste: Box<dyn Fn(usize, &str)>,
+}
+
 /// Everything the window asks of the editor.
-fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, paste: impl Fn(&str) + 'static) {
+fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, editor: Editor) {
     let (saving, noticing, history) = {
         let borrowed = held.borrow();
         let live = borrowed.open.as_ref();
@@ -192,11 +207,24 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, paste: impl F
         window.set_notice("Cleared".into());
     });
 
-    // 要件 12: the draft goes into the tab the editor is in, and the window
+    // 要件 12.4: the draft goes into the tab the writer picked, and the window
     // clears itself — the text has gone where it was going.
+    let Editor { tabs, paste } = editor;
+
+    let weak = window.as_weak();
+    window.on_tabs_requested(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let (open, current) = tabs();
+        let rows = open.into_iter().map(SharedString::from).collect::<Vec<_>>();
+        window.set_tabs(ModelRc::new(VecModel::from(rows)));
+        window.set_tab_current(current);
+    });
+
     let weak = window.as_weak();
     let kept = history.clone();
-    window.on_paste_to_tab_requested(move || {
+    window.on_paste_to_tab_requested(move |at| {
         let Some(window) = weak.upgrade() else {
             return;
         };
@@ -204,7 +232,7 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, paste: impl F
         if text.is_empty() {
             return;
         }
-        paste(&text);
+        paste(at.max(0) as usize, &text);
         retire(&window, &kept);
         window.set_notice("Pasted into the tab".into());
     });

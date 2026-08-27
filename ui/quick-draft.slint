@@ -36,14 +36,22 @@ export component QuickDraft inherits Window {
     /// The drafts kept behind this one, newest first — a line each, for the
     /// list to show (要件 12.4).
     in property <[string]> history;
+    /// The tabs the draft may be sent to, and which of them the editor is in.
+    /// **Filled when the list is opened**, not held: a tab may have been opened
+    /// or closed since the window was.
+    in property <[string]> tabs;
+    in property <int> tab-current: -1;
 
     callback edited();
     callback copied();
     callback copy-and-close();
     callback clear-requested();
-    /// Put the draft into the tab the editor is in, and let the window clear
-    /// itself: the text has gone where it was going.
-    callback paste-to-tab-requested();
+    /// Put the draft into one of the editor's tabs, by its place in `tabs`, and
+    /// let the window clear itself: the text has gone where it was going.
+    callback paste-to-tab-requested(int);
+    /// Asked just before the list is shown, so that what it lists is what is
+    /// open now.
+    callback tabs-requested();
     /// Bring one of the kept drafts back, by its place in the list.
     callback history-picked(int);
 
@@ -241,11 +249,44 @@ export component QuickDraft inherits Window {
                 }
             }
 
-            TextButton {
-                title: "Paste to tab";
-                enabled: root.text != "";
-                clicked => {
-                    root.paste-to-tab-requested();
+            // 要件 12.4: which tab the draft is going into is the writer's to
+            // say. **The one the editor is in is marked** rather than assumed,
+            // which is what `MenuRow`'s tick is for.
+            HorizontalLayout {
+                paste-button := TextButton {
+                    title: "Paste to tab";
+                    enabled: root.text != "";
+                    clicked => {
+                        root.tabs-requested();
+                        tabs-menu.show();
+                    }
+                }
+
+                tabs-menu := PopupWindow {
+                    property <length> rows-height: root.tabs.length * 29px + 12px;
+                    x: 0;
+                    y: -6px - self.rows-height;
+                    width: 320px;
+                    height: self.rows-height;
+                    close-policy: close-on-click-outside;
+
+                    MenuFrame {
+                        width: 320px;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 1px;
+
+                            for tab[index] in root.tabs: MenuRow {
+                                title: tab;
+                                checked: index == root.tab-current;
+                                activated => {
+                                    tabs-menu.close();
+                                    root.paste-to-tab-requested(index);
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
