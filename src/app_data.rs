@@ -320,6 +320,13 @@ pub struct Draft {
     pub caret: Option<usize>,
     /// 要件 12.2: whether the window stays above the others.
     pub on_top: bool,
+    /// The tab the draft was last sent to, as the editor names it (要件 12.4).
+    ///
+    /// **Opaque here.** What a tab is, and how one is recognised again in the
+    /// next run, is the editor's business; this file is where the answer is
+    /// kept, not where it is understood. Empty when the draft has never been
+    /// sent anywhere.
+    pub target: String,
     /// Where the window was and how big, in physical pixels. `None` before the
     /// writer has ever moved it, which is when the window manager decides.
     pub place: Option<DraftPlace>,
@@ -344,6 +351,12 @@ pub fn encode_draft(draft: &Draft) -> String {
     }
     if draft.on_top {
         out.push_str("on-top: 1\n");
+    }
+    // A target with a newline in it would be two header lines and a file that
+    // no longer parses. Nothing the editor writes has one; refusing to write it
+    // is what keeps that true whatever it starts naming tabs by.
+    if !draft.target.is_empty() && !draft.target.contains('\n') {
+        out.push_str(&format!("target: {}\n", draft.target));
     }
     if let Some(place) = draft.place {
         let DraftPlace {
@@ -377,6 +390,7 @@ pub fn decode_draft(raw: &str) -> Option<Draft> {
         match key {
             "caret" => draft.caret = value.parse().ok(),
             "on-top" => draft.on_top = value == "1",
+            "target" => draft.target = value.to_owned(),
             // **A place that does not parse is no place at all**, rather than a
             // window put at half of one: the writer gets the window manager's
             // choice, which is what they had before they ever moved it.
@@ -827,6 +841,7 @@ mod tests {
             text: "下書きです\n二行目\n".to_owned(),
             caret: Some(9),
             on_top: true,
+            target: "file:D:\\note.md".to_owned(),
             place: Some(DraftPlace {
                 x: -40,
                 y: 120,

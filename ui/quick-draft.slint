@@ -41,6 +41,30 @@ export component QuickDraft inherits Window {
     /// or closed since the window was.
     in property <[string]> tabs;
     in property <int> tab-current: -1;
+    /// What the send button says, which is the name of the tab a click sends
+    /// to (要件 12.4).
+    in property <string> target-name: "Paste to tab";
+
+    /// One row of the tab list. **The list and the aim are measured with the
+    /// same number**: while the button is held, which row the pointer is over
+    /// is arithmetic on this, and a second opinion about a row's height would
+    /// be a menu that sends to the row above the one it is showing.
+    property <length> row-height: 29px;
+    property <length> menu-height: root.tabs.length * root.row-height + 12px;
+    /// Where the list sits above the button, in the button's own coordinates.
+    property <length> menu-top: -6px - root.menu-height;
+    /// Which row the pointer is over while the button is held, or -1.
+    ///
+    /// **Arithmetic rather than hover**, because there is no hover to read: the
+    /// button holds the pointer for as long as it is down, so the rows never
+    /// see it. The pointer's place in the button's coordinates is all there is,
+    /// and `row-height` is what turns it into a row.
+    property <int> aiming: (tabs-menu.is-open && send-touch.pressed && send-touch.mouse-y < -6px)
+        ? clamp(
+            floor((send-touch.mouse-y - root.menu-top - 6px) / root.row-height),
+            -1,
+            root.tabs.length - 1)
+        : -1;
 
     callback edited();
     callback copied();
@@ -52,6 +76,15 @@ export component QuickDraft inherits Window {
     /// Asked just before the list is shown, so that what it lists is what is
     /// open now.
     callback tabs-requested();
+    /// A plain click on the send button: the tab it names, if that tab is still
+    /// open. **The editor answers that** — it is the one that knows — and asks
+    /// for the list instead when it is not.
+    callback send-requested();
+
+    /// Show the tab list, for the editor to call when a click had nowhere to go.
+    public function show-tabs() {
+        tabs-menu.show();
+    }
     /// Bring one of the kept drafts back, by its place in the list.
     callback history-picked(int);
 
@@ -249,25 +282,85 @@ export component QuickDraft inherits Window {
                 }
             }
 
-            // 要件 12.4: which tab the draft is going into is the writer's to
-            // say. **The one the editor is in is marked** rather than assumed,
-            // which is what `MenuRow`'s tick is for.
+            // 要件 12.4: the one button the draft leaves by.
+            //
+            // **A click sends it where it went last time; holding says where
+            // else.** The name on it is the tab it would go to, so the common
+            // act — send it to the same place again — is one click that needs
+            // no reading. The list is for changing one's mind, and a writer who
+            // has to change it every time would rather see the list, which is
+            // why the button opens it when its tab is gone.
             HorizontalLayout {
-                paste-button := TextButton {
-                    title: "Paste to tab";
-                    enabled: root.text != "";
-                    clicked => {
-                        root.tabs-requested();
-                        tabs-menu.show();
+                send := Rectangle {
+                    height: 28px;
+                    min-width: 44px;
+                    // A file name is as long as it likes and this row has other
+                    // things in it, so the button stops growing and the name
+                    // elides (6.23: a `Text` whose min width is its own text is
+                    // what pushes a row through the side of the window).
+                    max-width: min(send-label.preferred-width + 22px, 220px);
+                    border-radius: 5px;
+                    border-width: 1px;
+                    border-color: root.text == "" ? Tok.rule : Tok.accent;
+                    background: root.text == ""
+                        ? transparent
+                        : (send-touch.pressed
+                            ? Tok.accent-soft
+                            : (send-touch.has-hover ? Tok.accent-faint : transparent));
+
+                    send-label := Text {
+                        x: 11px;
+                        width: parent.width - 22px;
+                        height: parent.height;
+                        text: root.target-name;
+                        color: root.text == "" ? Tok.ink-faint : Tok.accent-strong;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    send-touch := TouchArea {
+                        enabled: root.text != "";
+                        pointer-event(event) => {
+                            if (event.kind != PointerEventKind.up) {
+                                return;
+                            }
+                            // **The grab is this button's**, so the pointer is
+                            // still ours wherever it went — which is what lets
+                            // the row be read off `mouse-y` (`aiming`).
+                            if (!tabs-menu.is-open) {
+                                root.send-requested();
+                                return;
+                            }
+                            if (root.aiming >= 0) {
+                                // Chosen first, closed second: closing takes
+                                // the row's own element with it (6.22).
+                                root.paste-to-tab-requested(root.aiming);
+                                tabs-menu.close();
+                            }
+                            // Released over nothing: the list stays up, and a
+                            // click on a row does the rest.
+                        }
+                    }
+
+                    // Holding is what asks for the list. **Not a click** — a
+                    // click is the answer the writer already gave.
+                    Timer {
+                        interval: 300ms;
+                        running: send-touch.pressed && !tabs-menu.is-open;
+                        triggered => {
+                            root.tabs-requested();
+                            tabs-menu.show();
+                        }
                     }
                 }
 
                 tabs-menu := PopupWindow {
-                    property <length> rows-height: root.tabs.length * 29px + 12px;
                     x: 0;
-                    y: -6px - self.rows-height;
+                    y: root.menu-top;
                     width: 320px;
-                    height: self.rows-height;
+                    height: root.menu-height;
                     close-policy: close-on-click-outside;
 
                     MenuFrame {
@@ -279,10 +372,15 @@ export component QuickDraft inherits Window {
 
                             for tab[index] in root.tabs: MenuRow {
                                 title: tab;
-                                checked: index == root.tab-current;
+                                // While the button is held, the row under the
+                                // pointer is the one being answered; otherwise
+                                // the mark says where the editor is.
+                                checked: root.aiming >= 0
+                                    ? index == root.aiming
+                                    : index == root.tab-current;
                                 activated => {
-                                    tabs-menu.close();
                                     root.paste-to-tab-requested(index);
+                                    tabs-menu.close();
                                 }
                             }
                         }

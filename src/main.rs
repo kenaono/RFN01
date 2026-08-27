@@ -2155,11 +2155,16 @@ fn main() -> Result<(), slint::PlatformError> {
                 let weak = window.as_weak();
                 let live = draft_live.clone();
                 let resolved = resolved.clone();
-                Box::new(move || {
+                Box::new(move |aimed| {
                     let Some(window) = weak.upgrade() else {
-                        return (Vec::new(), -1);
+                        return quick_draft::TabList {
+                            rows: Vec::new(),
+                            current: -1,
+                            target: -1,
+                            target_name: NO_TARGET.to_owned(),
+                        };
                     };
-                    paste_targets(&window, &live, &mut resolved.borrow_mut())
+                    paste_targets(&window, &live, aimed, &mut resolved.borrow_mut())
                 })
             },
             paste: {
@@ -2168,11 +2173,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 let resolved = resolved.clone();
                 Box::new(move |at, text| {
                     let Some(&(id, index)) = resolved.borrow().get(at) else {
-                        return;
+                        return String::new();
                     };
-                    if let Some(window) = weak.upgrade() {
-                        paste_into_tab(&window, &live, id, index, text);
-                    }
+                    let Some(window) = weak.upgrade() else {
+                        return String::new();
+                    };
+                    paste_into_tab(&window, &live, id, index, text)
                 })
             },
         };
@@ -7849,11 +7855,16 @@ fn horizontal_active_line(state: &Rc<RefCell<EditorState>>, source: &str) -> Opt
 fn paste_targets(
     window: &AppWindow,
     live: &Live,
+    aimed: &str,
     resolved: &mut Vec<(PaneId, usize)>,
-) -> (Vec<String>, i32) {
+) -> quick_draft::TabList {
     resolved.clear();
     let mut rows = Vec::new();
     let mut current = -1;
+    let mut target = -1;
+    // **Numbered, not sided.** The two panes sit side by side today and one
+    // above the other tomorrow, and 要件 6.4 divides further than that; a
+    // number says which pane without saying where it is.
     let split = PaneId::ALL.iter().filter(|id| id.is_shown(window)).count() > 1;
     let focused = focused_pane(window);
     for id in PaneId::ALL {
@@ -7863,21 +7874,57 @@ fn paste_targets(
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
         for (index, tab) in strip.tabs.iter().enumerate() {
-            let title = tab.document.file.borrow().title();
-            // Only when both are on screen: with one pane the side says nothing.
-            let side = if id.is_right() { "Right" } else { "Left" };
+            let file = tab.document.file.borrow();
+            let title = file.title();
+            let number = id.index() + 1;
             rows.push(if split {
-                format!("{side} · {title}")
+                format!("{number} · {title}")
             } else {
                 title
             });
             if id == focused && index == strip.active {
                 current = rows.len() as i32 - 1;
             }
+            if tab_name(&file) == aimed {
+                target = rows.len() as i32 - 1;
+            }
             resolved.push((id, index));
         }
     }
-    (rows, current)
+    // 要件 12.4: with nothing remembered, a click sends to the first tab —
+    // **but only while nothing is remembered**, which is what tells a first run
+    // from a tab that has since been closed.
+    if target < 0 && aimed.is_empty() && !rows.is_empty() {
+        target = 0;
+    }
+    let target_name = rows
+        .get(target.max(0) as usize)
+        .filter(|_| target >= 0)
+        .cloned()
+        .unwrap_or_else(|| NO_TARGET.to_owned());
+    quick_draft::TabList {
+        rows,
+        current,
+        target,
+        target_name,
+    }
+}
+
+/// What the send button says when it has nowhere to send to.
+const NO_TARGET: &str = "Paste to tab…";
+
+/// How a tab is named in the draft's own file, so that the next run finds it
+/// again (要件 12.4).
+///
+/// **A document, not a place.** Tabs are opened, closed and moved between
+/// panes; what the writer picked was the file, and the file is what is still
+/// recognisable tomorrow. An untitled buffer is named by its number, which is
+/// what the session already knows it by (要件 8.4).
+fn tab_name(file: &DocumentFile) -> String {
+    match file.path() {
+        Some(path) => format!("file:{}", path.display()),
+        None => format!("untitled:{}", file.untitled_number()),
+    }
 }
 
 /// Put the quick draft into one of the editor's tabs (要件 12.4).
@@ -7885,7 +7932,7 @@ fn paste_targets(
 /// **The tab is brought forward first.** Text put into a tab nobody is looking
 /// at is text nobody has been told about — and the caret it lands at is that
 /// tab's own, which only the tab in front of the pane has.
-fn paste_into_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, text: &str) {
+fn paste_into_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, text: &str) -> String {
     // **The pane the tab is in becomes the one the keyboard is in.** The caret
     // the text landed at is that pane's, and a writer sent somewhere is a
     // writer who is now there.
@@ -7904,6 +7951,8 @@ fn paste_into_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, tex
     window.window().set_minimized(false);
     let _ = window.show();
     restore_editor_focus(window);
+    // What to call this tab next time, which is what the button will say.
+    tab_name(&document.file.borrow())
 }
 
 /// Insert text at a pane's caret, replacing whatever it has selected.
