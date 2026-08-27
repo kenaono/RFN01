@@ -6219,7 +6219,7 @@ impl RenderCache {
         window: &AppWindow,
         id: PaneId,
         prefetch: u32,
-    ) -> windows::core::Result<(usize, usize)> {
+    ) -> windows::core::Result<(usize, usize, usize, usize)> {
         let scroll = id.scroll(window);
         let shown_flow = id.shown_flow(window);
         // Which way the tiles stack, asked before the cache is borrowed.
@@ -6234,7 +6234,7 @@ impl RenderCache {
             uploaded_bytes,
         } = graphics;
         if engine.total_flow_size() == 0 {
-            return Ok((0, 0));
+            return Ok((0, 0, 0, 0));
         }
         let line_extent = engine.line_extent();
         // Tiles are cut out of the blocks the viewport crosses. Their size along
@@ -6259,6 +6259,7 @@ impl RenderCache {
             }
         }
         let rendered = missing.len();
+        let mut reused = 0_usize;
 
         if !missing.is_empty() {
             let spans = missing.iter().map(|(span, _)| *span).collect::<Vec<_>>();
@@ -6267,9 +6268,11 @@ impl RenderCache {
                 drawing: None,
                 produced: Vec::with_capacity(spans.len()),
                 uploaded: 0,
+                reused: 0,
             };
             engine.render_tiles(&spans, preedit, &mut drawn)?;
             *uploaded_bytes += drawn.uploaded;
+            reused = drawn.reused;
             for (span, image, pixels) in drawn.produced {
                 let queued = missing.iter().find(|(other, _)| *other == span);
                 let Some((_, signature)) = queued else {
@@ -6314,10 +6317,11 @@ impl RenderCache {
             .map(|(_, signature)| *signature)
             .collect::<Vec<_>>();
         evict_distant_tiles(images, spare, &wanted, viewport_center);
+        let spare_held = spare.len();
 
         let tile_count = tiles.len();
         id.set_tiles(window, tiles);
-        Ok((tile_count, rendered))
+        Ok((tile_count, rendered, reused, spare_held))
     }
 
     /// Re-cut the selection rectangles for what the pane now shows.
@@ -6353,12 +6357,29 @@ struct TileImages<'a> {
     drawing: Option<SharedPixelBuffer<Rgba8Pixel>>,
     produced: Vec<(TileSpan, Image, SharedPixelBuffer<Rgba8Pixel>)>,
     uploaded: usize,
+    /// How many of these tiles went into memory that had already been written
+    /// to. **Counted rather than assumed**: a buffer the window has not let go
+    /// of is copied instead of reused (`SharedVector::detach`), and that looks
+    /// exactly like reuse from here. The pointer says which happened.
+    reused: usize,
 }
 
 impl TileSink for TileImages<'_> {
     fn buffer(&mut self, _span: TileSpan, width: u32, height: u32) -> &mut [u8] {
-        let buffer = take_spare(self.spare, width, height)
-            .unwrap_or_else(|| SharedPixelBuffer::<Rgba8Pixel>::new(width, height));
+        let taken = take_spare(self.spare, width, height);
+        // **Two things have to be true to have saved anything**: it came from
+        // the pool, and the pool's copy was the only one left — a buffer the
+        // window has not let go of is copied instead (`SharedVector::detach`),
+        // which is what allocating one cost in the first place. A buffer just
+        // allocated keeps its pointer too, so the pointer alone says nothing.
+        let from_pool = taken.is_some();
+        let mut buffer =
+            taken.unwrap_or_else(|| SharedPixelBuffer::<Rgba8Pixel>::new(width, height));
+        let was = buffer.as_bytes().as_ptr();
+        let is = buffer.make_mut_bytes().as_ptr();
+        if from_pool && was == is {
+            self.reused += 1;
+        }
         self.drawing = Some(buffer);
         self.drawing
             .as_mut()
@@ -6713,7 +6734,7 @@ fn refresh_pane(
     }
     let stats_ms = elapsed_ms(stats_started);
 
-    let (tile_count, rendered) = match tiles {
+    let (tile_count, rendered, tiles_reused, spare_held) = match tiles {
         Ok(counts) => counts,
         Err(error) => {
             let label = id.label(window);
@@ -6797,7 +6818,8 @@ fn refresh_pane(
          content={content_flow} extent={line_extent} shown={shown_flow:.0} \
          viewport={viewport_flow:.0} scroll={scroll:.0} caret={caret_at} \
          ime={ime_at:.0}/{ime_room:.0} \
-         tiles_shown={tile_count} tiles_new={rendered} rects={rects} font={font_size:.1} \
+         tiles_shown={tile_count} tiles_new={rendered}/{tiles_reused} spare={spare_held} \
+         rects={rects} font={font_size:.1} \
          space={space:.2} lead={lead:.2} head={head:.2} preedit={preedit_chars}",
         kind = id.perf_kind(),
         // Which panes are alive. Without this the log cannot tell a slow frame
@@ -6884,7 +6906,7 @@ fn refresh_after_scroll(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id
     let mut cache = cache.borrow_mut();
     let drawn = cache.refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
     match drawn {
-        Ok((count, new)) if new > 0 => {
+        Ok((count, new, _, _)) if new > 0 => {
             let ms = elapsed_ms(started);
             let line = format!("{label}遅延スクロール: {count}枚{new}新 / {ms:.1}ms");
             window.set_render_status(line.into());
@@ -9022,6 +9044,7 @@ mod tests {
             drawing: None,
             produced: Vec::new(),
             uploaded: 0,
+            reused: 0,
         };
         let span = TileSpan {
             block_index: 0,
