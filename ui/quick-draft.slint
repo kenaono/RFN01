@@ -1,5 +1,5 @@
 import { Tok } from "tokens.slint";
-import { Role, TextButton } from "controls.slint";
+import { MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 
 // 要件 12: the quick draft.
 //
@@ -17,7 +17,7 @@ export component QuickDraft inherits Window {
     title: "Quick Draft";
     // preferred-*, not width/height, for the reason the main window gives: a
     // Window given a width is a Window the writer cannot resize.
-    preferred-width: 460px;
+    preferred-width: 690px;
     preferred-height: 340px;
     min-width: 280px;
     min-height: 200px;
@@ -33,11 +33,19 @@ export component QuickDraft inherits Window {
     /// (要件 12.4).
     out property <int> caret <=> input.cursor-position-byte-offset;
 
+    /// The drafts kept behind this one, newest first — a line each, for the
+    /// list to show (要件 12.4).
+    in property <[string]> history;
+
     callback edited();
     callback copied();
     callback copy-and-close();
     callback clear-requested();
-    callback promote-requested();
+    /// Put the draft into the tab the editor is in, and let the window clear
+    /// itself: the text has gone where it was going.
+    callback paste-to-tab-requested();
+    /// Bring one of the kept drafts back, by its place in the list.
+    callback history-picked(int);
 
     /// 要件 12.3: the whole draft, whatever is selected.
     ///
@@ -183,6 +191,47 @@ export component QuickDraft inherits Window {
                 horizontal-stretch: 1;
             }
 
+            // 要件 12.4: the drafts that have been sent and cleared.
+            //
+            // **Opened upward**, because this row is at the foot of the window.
+            // The height is worked out from the number of rows rather than read
+            // back off the popup, which would be a binding loop.
+            HorizontalLayout {
+                history-button := TextButton {
+                    title: "History";
+                    enabled: root.history.length > 0;
+                    clicked => {
+                        history-menu.show();
+                    }
+                }
+
+                history-menu := PopupWindow {
+                    property <length> rows-height: root.history.length * 29px + 12px;
+                    x: 0;
+                    y: -6px - self.rows-height;
+                    width: 320px;
+                    height: self.rows-height;
+                    close-policy: close-on-click-outside;
+
+                    MenuFrame {
+                        width: 320px;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 1px;
+
+                            for kept[index] in root.history: MenuRow {
+                                title: kept;
+                                activated => {
+                                    history-menu.close();
+                                    root.history-picked(index);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             TextButton {
                 title: "Clear";
                 role: Role.danger;
@@ -193,10 +242,10 @@ export component QuickDraft inherits Window {
             }
 
             TextButton {
-                title: "Save as…";
+                title: "Paste to tab";
                 enabled: root.text != "";
                 clicked => {
-                    root.promote-requested();
+                    root.paste-to-tab-requested();
                 }
             }
 

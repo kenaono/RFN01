@@ -60,6 +60,18 @@ const SESSION_MAGIC: &str = "RFN-EDIT-SESSION 1";
 const DRAFT_FILE: &str = "draft.rfndraft";
 const DRAFT_MAGIC: &str = "RFN-EDIT-DRAFT 1";
 
+/// The drafts that have been sent somewhere and cleared.
+const DRAFT_HISTORY_FILE: &str = "draft-history.rfndrafts";
+const DRAFT_HISTORY_MAGIC: &str = "RFN-EDIT-DRAFT-HISTORY 1";
+
+/// How many of them are kept.
+///
+/// **Ten, and the oldest falls off.** The window clears itself when it is
+/// closed and when its text is sent, so this is what stands between the writer
+/// and a message they meant to keep — but a list nobody can read to the bottom
+/// is a drawer, not a history.
+pub const DRAFT_HISTORY_LIMIT: usize = 10;
+
 /// One tab, as the session remembers it.
 ///
 /// The document is named the same way a work copy names one — by its file, or by
@@ -404,6 +416,77 @@ pub fn read_draft(directory: &Path) -> Option<Draft> {
     decode_draft(&raw)
 }
 
+/// The drafts kept behind the current one, newest first.
+///
+/// **Lengths rather than separators.** A draft may hold any line at all,
+/// including whatever separator would have been chosen — the same problem the
+/// work copies solve with a blank line, and one entry per file is not on offer
+/// here. Each entry says how many bytes it is and those bytes follow.
+pub fn encode_history(entries: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str(DRAFT_HISTORY_MAGIC);
+    out.push('\n');
+    for entry in entries.iter().take(DRAFT_HISTORY_LIMIT) {
+        out.push_str(&format!("entry: {}\n", entry.len()));
+        out.push_str(entry);
+        out.push('\n');
+    }
+    out
+}
+
+/// The history read back, or `None` when this is not one.
+pub fn decode_history(raw: &str) -> Option<Vec<String>> {
+    let head = raw.strip_prefix(DRAFT_HISTORY_MAGIC)?.strip_prefix('\n')?;
+    let mut at = raw.len() - head.len();
+    let mut entries = Vec::new();
+    while at < raw.len() {
+        let rest = raw.get(at..)?;
+        let (line, _) = rest.split_once('\n')?;
+        let length: usize = line.strip_prefix("entry: ")?.parse().ok()?;
+        let start = at + line.len() + 1;
+        let end = start.checked_add(length)?;
+        // **Refused rather than trimmed.** A length that runs past the end is a
+        // file that was written by something else or cut short, and half a
+        // draft restored is worse than none.
+        let entry = raw.get(start..end)?;
+        entries.push(entry.to_owned());
+        at = end + 1;
+    }
+    Some(entries)
+}
+
+/// Put a draft at the head of the history (要件 12.4).
+///
+/// **The same text twice is one entry.** A writer who sends the same message
+/// again has not written two drafts, and ten places is few enough that a
+/// repeat would push something they wanted off the end.
+pub fn remember_draft(entries: &mut Vec<String>, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    entries.retain(|kept| kept != text);
+    entries.insert(0, text.to_owned());
+    entries.truncate(DRAFT_HISTORY_LIMIT);
+}
+
+/// Put the history away where the next run will look for it.
+pub fn write_history(directory: &Path, entries: &[String]) -> io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let path = directory.join(DRAFT_HISTORY_FILE);
+    file_io::write_atomically(&path, encode_history(entries).as_bytes())?;
+    Ok(path)
+}
+
+/// What the last run left behind the draft. Empty when there is nothing
+/// readable — a history is a convenience and must not be able to stop the
+/// window opening.
+pub fn read_history(directory: &Path) -> Vec<String> {
+    fs::read_to_string(directory.join(DRAFT_HISTORY_FILE))
+        .ok()
+        .and_then(|raw| decode_history(&raw))
+        .unwrap_or_default()
+}
+
 /// The editor's own area, or `None` when Windows does not say where it is.
 pub fn app_directory() -> Option<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")?;
@@ -680,6 +763,60 @@ mod tests {
             caret: Some(3),
             text: text.to_owned(),
         }
+    }
+
+    /// 要件 12.4: the kept drafts come back as they were, whatever is in them.
+    ///
+    /// **Including a draft that looks like the file it is stored in.** The
+    /// entries are given by length, so nothing a writer types can be mistaken
+    /// for the end of one.
+    #[test]
+    fn the_draft_history_round_trips() {
+        let entries = vec![
+            "いちばん新しい下書き\n二行目\n".to_owned(),
+            "entry: 4\nRFN-EDIT-DRAFT-HISTORY 1\n".to_owned(),
+            "".to_owned(),
+        ];
+
+        let read = decode_history(&encode_history(&entries)).expect("decodes");
+
+        assert_eq!(read, entries);
+    }
+
+    /// **The newest is first, the same text is one entry, and ten is the
+    /// most.** A writer who sends the same message twice has not written two
+    /// drafts, and a repeat would otherwise push out something they wanted.
+    #[test]
+    fn a_remembered_draft_goes_to_the_head_of_the_list() {
+        let mut entries = Vec::new();
+        remember_draft(&mut entries, "ひとつめ");
+        remember_draft(&mut entries, "ふたつめ");
+        remember_draft(&mut entries, "ひとつめ");
+
+        assert_eq!(entries, vec!["ひとつめ", "ふたつめ"]);
+
+        // Nothing is not a draft, however it is spelled.
+        remember_draft(&mut entries, "");
+        remember_draft(&mut entries, "  \n\t");
+        assert_eq!(entries.len(), 2);
+
+        for number in 0..DRAFT_HISTORY_LIMIT {
+            remember_draft(&mut entries, &format!("下書き{number}"));
+        }
+        assert_eq!(entries.len(), DRAFT_HISTORY_LIMIT);
+        assert_eq!(entries[0], format!("下書き{}", DRAFT_HISTORY_LIMIT - 1));
+    }
+
+    /// **A length that runs past the end is refused**, rather than restored as
+    /// half a draft.
+    #[test]
+    fn refuses_a_history_that_was_cut_short() {
+        assert!(decode_history("RFN-EDIT-DRAFT-HISTORY 1\nentry: 40\n短い\n").is_none());
+        assert!(decode_history("下書き\n").is_none());
+        assert_eq!(
+            decode_history("RFN-EDIT-DRAFT-HISTORY 1\n").expect("an empty history is a history"),
+            Vec::<String>::new()
+        );
     }
 
     /// 要件 12.4: the draft comes back as it was left — the text, the caret,

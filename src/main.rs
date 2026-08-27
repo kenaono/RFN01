@@ -2138,10 +2138,24 @@ fn main() -> Result<(), slint::PlatformError> {
     // same way later.
     let weak = window.as_weak();
     let held_draft = draft.clone();
+    let draft_live = live.clone();
     window.on_quick_draft_requested(move || {
-        if let Some(window) = weak.upgrade() {
-            quick_draft::QuickDraftWindow::open(&held_draft, &window);
-        }
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        // **What the draft window is given is a way to put text in a tab**, not
+        // the editor. It knows no more about this side than `searcher.rs` knows
+        // about the window it wakes.
+        let into_tab = {
+            let weak = window.as_weak();
+            let live = draft_live.clone();
+            move |text: &str| {
+                if let Some(window) = weak.upgrade() {
+                    paste_into_focused_tab(&window, &live, text);
+                }
+            }
+        };
+        quick_draft::QuickDraftWindow::open(&held_draft, &window, into_tab);
     });
 
     let weak = window.as_weak();
@@ -7798,6 +7812,29 @@ fn horizontal_active_line(state: &Rc<RefCell<EditorState>>, source: &str) -> Opt
     let caret = state.borrow().caret_source_byte?;
     let caret = floor_char_boundary(source, caret);
     Some(source_line_start(source, caret))
+}
+
+/// Put the quick draft into the tab the editor is in (要件 12).
+///
+/// **At the caret of the focused pane**, which is what "the tab" means from the
+/// draft window's side: the document in front of the writer, in the pane they
+/// were last in. The editor comes forward with it — text arriving in a window
+/// nobody is looking at is text nobody has been told about.
+fn paste_into_focused_tab(window: &AppWindow, live: &Live, text: &str) {
+    let id = focused_pane(window);
+    let document = live.states.document(id);
+    insert_pane_text(
+        window,
+        id,
+        &document,
+        &live.states,
+        &live.cache,
+        text,
+        false,
+    );
+    window.window().set_minimized(false);
+    let _ = window.show();
+    restore_editor_focus(window);
 }
 
 /// Insert text at a pane's caret, replacing whatever it has selected.

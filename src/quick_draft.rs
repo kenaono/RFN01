@@ -16,8 +16,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use slint::{
-    CloseRequestResponse, ComponentHandle, PhysicalPosition, PhysicalSize, SharedString, Timer,
-    TimerMode, WindowPosition, WindowSize,
+    CloseRequestResponse, ComponentHandle, ModelRc, PhysicalPosition, PhysicalSize, SharedString,
+    Timer, TimerMode, VecModel, WindowPosition, WindowSize,
 };
 
 use crate::app_data::{self, Draft, DraftPlace};
@@ -50,6 +50,8 @@ struct Live {
     /// when the writing stops.
     save: Rc<Timer>,
     notice: Rc<Timer>,
+    /// The drafts behind this one, newest first (要件 12.4).
+    history: Rc<RefCell<Vec<String>>>,
 }
 
 impl QuickDraftWindow {
@@ -58,7 +60,7 @@ impl QuickDraftWindow {
     /// **Whoever calls this is not the point** (要件 12.2): the menu does now
     /// and a global shortcut may later, and neither knows anything the other
     /// does not.
-    pub fn open(held: &Rc<RefCell<Self>>, owner: &AppWindow) {
+    pub fn open(held: &Rc<RefCell<Self>>, owner: &AppWindow, paste: impl Fn(&str) + 'static) {
         if let Some(live) = &held.borrow().open {
             // Already open: bring it forward rather than making a second one.
             let _ = live.window.show();
@@ -72,6 +74,10 @@ impl QuickDraftWindow {
         let draft = directory()
             .and_then(|directory| app_data::read_draft(&directory))
             .unwrap_or_default();
+        let history = directory()
+            .map(|directory| app_data::read_history(&directory))
+            .unwrap_or_default();
+        show_history(&window, &history);
         window.set_text(SharedString::from(draft.text.as_str()));
         window.set_on_top(draft.on_top);
         if let Some(place) = draft.place {
@@ -92,9 +98,10 @@ impl QuickDraftWindow {
             window: window.clone_strong(),
             save: Rc::new(Timer::default()),
             notice: Rc::new(Timer::default()),
+            history: Rc::new(RefCell::new(history)),
         };
         held.borrow_mut().open = Some(live);
-        wire(held, &window, owner);
+        wire(held, &window, paste);
 
         if window.show().is_err() {
             owner.set_render_status("クイック下書き: 窓を出せません".into());
@@ -123,115 +130,168 @@ impl QuickDraftWindow {
 }
 
 /// Everything the window asks of the editor.
-fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, owner: &AppWindow) {
-    let saving = held.borrow().open.as_ref().map(|live| live.save.clone());
-    let noticing = held.borrow().open.as_ref().map(|live| live.notice.clone());
+fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, paste: impl Fn(&str) + 'static) {
+    let (saving, noticing, history) = {
+        let borrowed = held.borrow();
+        let live = borrowed.open.as_ref();
+        (
+            live.map(|live| live.save.clone()),
+            live.map(|live| live.notice.clone()),
+            live.map(|live| live.history.clone()),
+        )
+    };
+    let (Some(save), Some(notice), Some(history)) = (saving, noticing, history) else {
+        return;
+    };
 
-    if let Some(save) = saving {
-        let weak = window.as_weak();
-        window.on_edited(move || {
-            let Some(window) = weak.upgrade() else {
-                return;
-            };
-            let inner = window.as_weak();
-            save.start(TimerMode::SingleShot, SAVE_SETTLE, move || {
-                if let Some(window) = inner.upgrade() {
-                    store(&window);
-                }
-            });
+    let weak = window.as_weak();
+    window.on_edited(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let inner = window.as_weak();
+        save.start(TimerMode::SingleShot, SAVE_SETTLE, move || {
+            if let Some(window) = inner.upgrade() {
+                store(&window);
+            }
         });
-    }
+    });
 
-    if let Some(notice) = noticing {
-        let weak = window.as_weak();
-        window.on_copied(move || {
-            let Some(window) = weak.upgrade() else {
-                return;
-            };
-            window.set_notice("Copied".into());
-            let inner = window.as_weak();
-            notice.start(TimerMode::SingleShot, NOTICE_SETTLE, move || {
-                if let Some(window) = inner.upgrade() {
-                    window.set_notice(SharedString::new());
-                }
-            });
+    let weak = window.as_weak();
+    window.on_copied(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        window.set_notice("Copied".into());
+        let inner = window.as_weak();
+        notice.start(TimerMode::SingleShot, NOTICE_SETTLE, move || {
+            if let Some(window) = inner.upgrade() {
+                window.set_notice(SharedString::new());
+            }
         });
-    }
+    });
 
     let weak = window.as_weak();
     let held_here = held.clone();
+    let kept = history.clone();
     window.on_copy_and_close(move || {
         if let Some(window) = weak.upgrade() {
-            store(&window);
+            retire(&window, &kept);
             let _ = window.hide();
         }
         held_here.borrow_mut().open = None;
     });
 
     let weak = window.as_weak();
+    let kept = history.clone();
     window.on_clear_requested(move || {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        // 要件 12.4: the draft goes only when the writer says so, and then it
-        // goes from the disk as well — a cleared draft that came back on the
-        // next run would not have been cleared.
-        window.set_text(SharedString::new());
+        retire(&window, &kept);
         window.set_notice("Cleared".into());
-        store(&window);
     });
 
+    // 要件 12: the draft goes into the tab the editor is in, and the window
+    // clears itself — the text has gone where it was going.
     let weak = window.as_weak();
-    let owner_weak = owner.as_weak();
-    window.on_promote_requested(move || {
+    let kept = history.clone();
+    window.on_paste_to_tab_requested(move || {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        promote(&window, owner_weak.upgrade().as_ref());
+        let text = window.get_text().to_string();
+        if text.is_empty() {
+            return;
+        }
+        paste(&text);
+        retire(&window, &kept);
+        window.set_notice("Pasted into the tab".into());
     });
 
-    // **Closing the window keeps the draft** (要件 12.4). The window is let go
-    // of, so the next request builds a fresh one — the draft is on disk and the
-    // window is not what holds it.
+    let weak = window.as_weak();
+    let kept = history.clone();
+    window.on_history_picked(move |at| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Some(entry) = kept.borrow().get(at.max(0) as usize).cloned() else {
+            return;
+        };
+        // **What is in the window now is kept first.** Bringing one draft back
+        // must not be a way to lose another, and the list is where a draft goes
+        // when it leaves the window.
+        retire(&window, &kept);
+        window.set_text(SharedString::from(entry.as_str()));
+        window.invoke_take_focus();
+        store(&window);
+    });
+
+    // **Closing clears the window and keeps what was in it** (要件 12.4, as the
+    // writer asked on 2026-08-27). A draft is written to be sent; one still
+    // sitting there tomorrow is a message that was not sent, and the history is
+    // where it can be found if it should have been.
     let weak = window.as_weak();
     let held_here = held.clone();
+    let kept = history.clone();
     window.window().on_close_requested(move || {
         if let Some(window) = weak.upgrade() {
-            store(&window);
+            retire(&window, &kept);
         }
         held_here.borrow_mut().open = None;
         CloseRequestResponse::HideWindow
     });
 }
 
-/// 要件 12.4: the draft becomes an ordinary Markdown file.
+/// Put what the window holds into the history, and leave the window empty.
 ///
-/// **The draft stays**, because promoting is a copy going out rather than the
-/// draft leaving: the writer asked for a file, not for an empty window.
-fn promote(window: &QuickDraft, owner: Option<&AppWindow>) {
+/// **The one way a draft leaves the window**, whether it was cleared, sent,
+/// copied away or closed on. Nothing here can lose text: it is written to the
+/// history before it is taken off the screen.
+fn retire(window: &QuickDraft, history: &Rc<RefCell<Vec<String>>>) {
     let text = window.get_text().to_string();
-    if text.is_empty() {
-        return;
+    {
+        let mut kept = history.borrow_mut();
+        app_data::remember_draft(&mut kept, &text);
+        if let Some(directory) = directory() {
+            let _ = app_data::write_history(&directory, &kept);
+        }
+        show_history(window, &kept);
     }
-    let handle = owner.map(crate::ime::window_handle).unwrap_or_default();
-    let Some(path) = crate::file_dialog::save_document_as(handle, "下書き.md") else {
-        return;
-    };
-    match crate::file_io::save(&path, &text, crate::file_io::TextForm::default()) {
-        Ok(_) => {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            window.set_notice(SharedString::from(format!("Saved as {name}")));
-        }
-        Err(error) => {
-            window.set_notice(SharedString::from(format!("保存できません: {error}")));
-        }
+    window.set_text(SharedString::new());
+    store(window);
+}
+
+/// The line each kept draft is shown by.
+fn show_history(window: &QuickDraft, entries: &[String]) {
+    let rows = entries
+        .iter()
+        .map(|entry| SharedString::from(label_of(entry)))
+        .collect::<Vec<_>>();
+    window.set_history(ModelRc::new(VecModel::from(rows)));
+}
+
+/// A draft's first line, short enough for a row.
+///
+/// **The first line and how much more there is.** A draft is usually a message,
+/// and a message says what it is in its first line; what the row has to add is
+/// whether the rest of it is still there.
+fn label_of(entry: &str) -> String {
+    let mut lines = entry.lines().filter(|line| !line.trim().is_empty());
+    let first = lines.next().unwrap_or_default().trim();
+    let shown: String = first.chars().take(LABEL_CHARS).collect();
+    let cut = shown.chars().count() < first.chars().count();
+    let more = lines.next().is_some();
+    match (cut, more) {
+        (false, false) => shown,
+        _ => format!("{shown}…"),
     }
 }
 
-/// Write what the window holds, place and all.
+/// How much of a kept draft's first line a row shows.
+const LABEL_CHARS: usize = 34;
+
+/// Write what the window holds, place and all./// Write what the window holds, place and all.
 fn store(window: &QuickDraft) {
     let Some(directory) = directory() else {
         return;
@@ -274,4 +334,25 @@ fn floor_char_boundary(text: &str, byte: usize) -> usize {
         at -= 1;
     }
     at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::label_of;
+
+    /// A row says what the draft was, which is its first line — and whether
+    /// there is more of it than the row is showing.
+    #[test]
+    fn a_kept_draft_is_shown_by_its_first_line() {
+        assert_eq!(label_of("送りたい文章"), "送りたい文章");
+        // More lines under it, so the row says so.
+        assert_eq!(label_of("一行目\n二行目"), "一行目…");
+        // A leading blank line is not the first line.
+        assert_eq!(label_of("\n  本題です\n"), "本題です");
+        // And a line longer than the row is cut where the row ends.
+        let long = "あ".repeat(60);
+        let shown = label_of(&long);
+        assert_eq!(shown.chars().count(), 35, "{shown}");
+        assert!(shown.ends_with('…'));
+    }
 }
