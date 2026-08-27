@@ -10,6 +10,7 @@ mod file_tree;
 mod find;
 mod ime;
 mod pane_layout;
+mod quick_draft;
 mod searcher;
 mod shell;
 mod text_blocks;
@@ -1154,6 +1155,10 @@ fn main() -> Result<(), slint::PlatformError> {
             window.invoke_folder_search_finished();
         });
     };
+    // 要件 12: the quick draft's window, once it has been asked for. **Held
+    // here rather than by the window itself**, so that asking twice brings the
+    // one that is open forward.
+    let draft = Rc::new(RefCell::new(quick_draft::QuickDraftWindow::default()));
     let live = Live {
         states: pane_states.clone(),
         folder: Rc::new(RefCell::new(work_folder)),
@@ -2128,6 +2133,17 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 要件 12: the quick draft. **The menu asks for it; it does not open it** —
+    // what 要件 12.2 asks of this is that a global shortcut be able to ask the
+    // same way later.
+    let weak = window.as_weak();
+    let held_draft = draft.clone();
+    window.on_quick_draft_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            quick_draft::QuickDraftWindow::open(&held_draft, &window);
+        }
+    });
+
     let weak = window.as_weak();
     let file_live = live.clone();
     window.on_save_requested(move || {
@@ -2207,6 +2223,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // panes first, because a caret and a scroll live there until they are.
     sync_active_tab(&window, &live);
     write_session(&window, &live);
+    // 要件 12.4: and the draft, which is otherwise waiting on a two-second
+    // timer that the end of the process will not let run.
+    draft.borrow().store_now();
     outcome
 }
 

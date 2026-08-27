@@ -1,0 +1,222 @@
+import { Tok } from "tokens.slint";
+import { Role, TextButton } from "controls.slint";
+
+// 要件 12: the quick draft.
+//
+// **A window for text that is going somewhere else.** What it is for is written
+// in 要件 12.1: a message bound for a chat box, written where `Enter` cannot
+// send it by accident. So `Enter` is a newline and nothing here sends anything;
+// the way out is the clipboard.
+//
+// **Plain text, and Slint's own editing.** The main window's panes exist
+// because Markdown has to be laid out two ways (要件 7.2); a draft has none of
+// that, and the built-in `TextInput` already carries the cursor, the selection,
+// undo, cut, copy, paste and select-all that 要件 12.2 asks for. Writing a
+// second editor for this would be writing one to be worse.
+export component QuickDraft inherits Window {
+    title: "Quick Draft";
+    // preferred-*, not width/height, for the reason the main window gives: a
+    // Window given a width is a Window the writer cannot resize.
+    preferred-width: 460px;
+    preferred-height: 340px;
+    min-width: 280px;
+    min-height: 200px;
+    background: Tok.chrome;
+    always-on-top <=> root.on-top;
+
+    in-out property <string> text <=> input.text;
+    in-out property <bool> on-top: false;
+    /// What just happened, shown small and taken away again by whoever set it
+    /// (要件 12.3: "非侵襲的な表示").
+    in property <string> notice;
+    /// Where the caret is, so the next run opens where this one was left
+    /// (要件 12.4).
+    out property <int> caret <=> input.cursor-position-byte-offset;
+
+    callback edited();
+    callback copied();
+    callback copy-and-close();
+    callback clear-requested();
+    callback promote-requested();
+
+    /// 要件 12.3: the whole draft, whatever is selected.
+    ///
+    /// **The selection is put back afterwards.** Copying is not an edit and
+    /// must not look like one; a caret that jumped to the end would be the
+    /// writer's place lost to a button.
+    public function copy-all() {
+        input.select-all();
+        input.copy();
+        input.set-selection-offsets(root.caret, root.caret);
+        root.copied();
+    }
+
+    public function take-focus() {
+        input.focus();
+    }
+
+    /// Put the caret back where the last run left it (要件 12.4).
+    public function set-caret(at: int) {
+        input.set-selection-offsets(at, at);
+    }
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        // The paper the draft is written on, which is the document's paper
+        // rather than the chrome's: this is text being written, not a field
+        // being filled in.
+        Rectangle {
+            background: Tok.paper;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: input.has-focus ? Tok.accent : Tok.rule;
+            clip: true;
+
+            // **The enclosing element scrolls the text**, which is what
+            // `cursor-position-changed` is for: `TextInput` reports where the
+            // cursor went and expects whoever holds it to bring it into view.
+            paper := Flickable {
+                x: 10px;
+                y: 8px;
+                width: parent.width - 20px;
+                height: parent.height - 16px;
+                viewport-width: self.width;
+                viewport-height: max(input.preferred-height, self.height);
+                interactive: true;
+
+                input := TextInput {
+                    width: parent.width;
+                    height: max(self.preferred-height, paper.height);
+                    font-size: 14px;
+                    color: Tok.doc-ink;
+                    selection-background-color: Tok.accent-soft;
+                    selection-foreground-color: Tok.ink-strong;
+                    // 要件 12.2: horizontal plain text, and `Enter` is always a
+                    // newline. Both are this one line.
+                    single-line: false;
+                    wrap: word-wrap;
+
+                    edited => {
+                        root.edited();
+                    }
+                    cursor-position-changed(position) => {
+                        // Keep the caret on screen, top and bottom alike. The
+                        // viewport's y is negative as it scrolls down, which is
+                        // why the two comparisons look the way they do.
+                        if (position.y + 24px > -paper.viewport-y + paper.height) {
+                            paper.viewport-y = paper.height - position.y - 24px;
+                        }
+                        if (position.y < -paper.viewport-y) {
+                            paper.viewport-y = -position.y;
+                        }
+                    }
+                    key-pressed(event) => {
+                        // 要件 12.3: the whole draft, without selecting it by
+                        // hand. `Ctrl+C` is the selection and is Slint's own.
+                        if (event.text == "C" && event.modifiers.control && event.modifiers.shift) {
+                            root.copy-all();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            // 要件 12.2: "常に手前に表示" — a switch rather than a menu item,
+            // because it is the one thing about this window a writer changes
+            // while looking at it.
+            Rectangle {
+                height: 28px;
+                width: pin-label.preferred-width + 40px;
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: root.on-top ? Tok.accent : Tok.rule-strong;
+                background: root.on-top ? Tok.accent-faint : transparent;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    Rectangle {
+                        y: (parent.height - 12px) / 2;
+                        width: 12px;
+                        height: 12px;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: root.on-top ? Tok.accent : Tok.rule-strong;
+                        background: root.on-top ? Tok.accent : Tok.paper;
+                    }
+
+                    pin-label := Text {
+                        text: "On top";
+                        color: root.on-top ? Tok.accent-strong : Tok.ink-muted;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                TouchArea {
+                    clicked => {
+                        root.on-top = !root.on-top;
+                    }
+                }
+            }
+
+            Text {
+                text: root.notice;
+                color: Tok.ink-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+                overflow: elide;
+                // Takes the room left over, so the buttons stay where they are
+                // whatever it says.
+                horizontal-stretch: 1;
+            }
+
+            TextButton {
+                title: "Clear";
+                role: Role.danger;
+                enabled: root.text != "";
+                clicked => {
+                    root.clear-requested();
+                }
+            }
+
+            TextButton {
+                title: "Save as…";
+                enabled: root.text != "";
+                clicked => {
+                    root.promote-requested();
+                }
+            }
+
+            TextButton {
+                title: "Copy & close";
+                enabled: root.text != "";
+                clicked => {
+                    root.copy-all();
+                    root.copy-and-close();
+                }
+            }
+
+            TextButton {
+                title: "Copy all";
+                role: Role.primary;
+                enabled: root.text != "";
+                clicked => {
+                    root.copy-all();
+                }
+            }
+        }
+    }
+}

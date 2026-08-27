@@ -52,6 +52,14 @@ const SETTINGS_MAGIC: &str = "RFN-EDIT-SETTINGS 1";
 /// First line of it, for the same reason the work copies have one.
 const SESSION_MAGIC: &str = "RFN-EDIT-SESSION 1";
 
+/// The one quick draft (要件 12.4).
+///
+/// **One file, not a folder.** 要件 12.4 keeps one draft and says a history is
+/// not part of the initial version; a folder would be the shape of a history
+/// with nothing in it.
+const DRAFT_FILE: &str = "draft.rfndraft";
+const DRAFT_MAGIC: &str = "RFN-EDIT-DRAFT 1";
+
 /// One tab, as the session remembers it.
 ///
 /// The document is named the same way a work copy names one — by its file, or by
@@ -284,6 +292,116 @@ pub struct WorkCopy {
     /// Where the caret was, so a restored document opens where it was left.
     pub caret: Option<usize>,
     pub text: String,
+}
+
+/// The quick draft, and what it takes to open its window where it was
+/// (要件 12.4).
+///
+/// **The text is the point and the rest is convenience**, which is why the two
+/// are separated the way `WorkCopy` separates them: header lines that may be
+/// missing or unreadable, then the text, taken verbatim from after the blank
+/// line.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Draft {
+    pub text: String,
+    /// Where the caret was, so the window opens where it was left.
+    pub caret: Option<usize>,
+    /// 要件 12.2: whether the window stays above the others.
+    pub on_top: bool,
+    /// Where the window was and how big, in physical pixels. `None` before the
+    /// writer has ever moved it, which is when the window manager decides.
+    pub place: Option<DraftPlace>,
+}
+
+/// A window's place on the screen, as Windows counts it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DraftPlace {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The draft as it is written: header lines, a blank line, then the text.
+pub fn encode_draft(draft: &Draft) -> String {
+    let mut out = String::with_capacity(draft.text.len() + 128);
+    out.push_str(DRAFT_MAGIC);
+    out.push('\n');
+    if let Some(caret) = draft.caret {
+        out.push_str(&format!("caret: {caret}\n"));
+    }
+    if draft.on_top {
+        out.push_str("on-top: 1\n");
+    }
+    if let Some(place) = draft.place {
+        let DraftPlace {
+            x,
+            y,
+            width,
+            height,
+        } = place;
+        out.push_str(&format!("place: {x} {y} {width} {height}\n"));
+    }
+    out.push('\n');
+    out.push_str(&draft.text);
+    out
+}
+
+/// A draft read back, or `None` when this is not one.
+pub fn decode_draft(raw: &str) -> Option<Draft> {
+    let mut lines = raw.split('\n');
+    if lines.next()? != DRAFT_MAGIC {
+        return None;
+    }
+    let mut draft = Draft::default();
+    let mut consumed = DRAFT_MAGIC.len() + 1;
+    for line in lines {
+        consumed += line.len() + 1;
+        if line.is_empty() {
+            draft.text = raw.get(consumed..)?.to_owned();
+            return Some(draft);
+        }
+        let (key, value) = line.split_once(": ")?;
+        match key {
+            "caret" => draft.caret = value.parse().ok(),
+            "on-top" => draft.on_top = value == "1",
+            // **A place that does not parse is no place at all**, rather than a
+            // window put at half of one: the writer gets the window manager's
+            // choice, which is what they had before they ever moved it.
+            "place" => draft.place = decode_place(value),
+            // A field this build does not know is from a later one, and the
+            // text is the part worth having.
+            _ => {}
+        }
+    }
+    None
+}
+
+fn decode_place(value: &str) -> Option<DraftPlace> {
+    let mut numbers = value.split(' ');
+    let place = DraftPlace {
+        x: numbers.next()?.parse().ok()?,
+        y: numbers.next()?.parse().ok()?,
+        width: numbers.next()?.parse().ok()?,
+        height: numbers.next()?.parse().ok()?,
+    };
+    // A window with no size is one nobody can find. **Refused here rather than
+    // guarded at every reader**, which is the same rule the session follows.
+    (place.width > 0 && place.height > 0).then_some(place)
+}
+
+/// Put the draft away where the next run will look for it (要件 12.4).
+pub fn write_draft(directory: &Path, draft: &Draft) -> io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let path = directory.join(DRAFT_FILE);
+    file_io::write_atomically(&path, encode_draft(draft).as_bytes())?;
+    Ok(path)
+}
+
+/// What the last run left in the draft, if anything readable.
+pub fn read_draft(directory: &Path) -> Option<Draft> {
+    let raw = fs::read_to_string(directory.join(DRAFT_FILE)).ok()?;
+    decode_draft(&raw)
 }
 
 /// The editor's own area, or `None` when Windows does not say where it is.
@@ -562,6 +680,82 @@ mod tests {
             caret: Some(3),
             text: text.to_owned(),
         }
+    }
+
+    /// 要件 12.4: the draft comes back as it was left — the text, the caret,
+    /// the window and whether it stays on top.
+    #[test]
+    fn a_draft_round_trips() {
+        let draft = Draft {
+            text: "下書きです\n二行目\n".to_owned(),
+            caret: Some(9),
+            on_top: true,
+            place: Some(DraftPlace {
+                x: -40,
+                y: 120,
+                width: 460,
+                height: 340,
+            }),
+        };
+
+        let read = decode_draft(&encode_draft(&draft)).expect("decodes");
+
+        assert_eq!(read, draft);
+    }
+
+    /// The blank line is the whole of the parsing rule here too, so a draft may
+    /// hold lines that look exactly like the header — which a draft written in
+    /// this editor's own notation certainly will.
+    #[test]
+    fn a_draft_may_contain_lines_that_look_like_the_header() {
+        let draft = Draft {
+            text: "caret: 4\non-top: 1\n\nplace: 1 2 3 4\n".to_owned(),
+            ..Draft::default()
+        };
+
+        let read = decode_draft(&encode_draft(&draft)).expect("decodes");
+
+        assert_eq!(read.text, draft.text);
+        assert_eq!(read.caret, None);
+        assert!(!read.on_top);
+        assert_eq!(read.place, None);
+    }
+
+    /// An empty draft is a draft: 要件 12.4 says the window opens on what was
+    /// left in it, and nothing is what a cleared one leaves.
+    #[test]
+    fn an_empty_draft_round_trips() {
+        let read = decode_draft(&encode_draft(&Draft::default())).expect("decodes");
+
+        assert_eq!(read, Draft::default());
+    }
+
+    /// **A place that does not parse is no place**, rather than a window put at
+    /// half of one. The text is still the part worth having.
+    #[test]
+    fn a_broken_place_leaves_the_window_where_windows_puts_it() {
+        let raw = "RFN-EDIT-DRAFT 1\nplace: 10 20\ncaret: 2\n\n下書き";
+
+        let read = decode_draft(raw).expect("decodes");
+
+        assert_eq!(read.place, None);
+        assert_eq!(read.caret, Some(2));
+        assert_eq!(read.text, "下書き");
+    }
+
+    /// A window of no size is one nobody can find.
+    #[test]
+    fn a_place_with_no_size_is_refused() {
+        let raw = "RFN-EDIT-DRAFT 1\nplace: 10 20 0 340\n\n下書き";
+
+        assert_eq!(decode_draft(raw).expect("decodes").place, None);
+    }
+
+    #[test]
+    fn refuses_something_that_is_not_a_draft() {
+        assert!(decode_draft("下書き\n").is_none());
+        // A work copy is not a draft, however much it looks like one.
+        assert!(decode_draft(&encode(&untitled_copy("本文"))).is_none());
     }
 
     #[test]

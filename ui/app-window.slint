@@ -2,11 +2,16 @@ import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo } from "editor-pane.slint";
 import { Tok } from "tokens.slint";
 import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
+import { QuickDraft } from "quick-draft.slint";
 
 // Re-exported so they stay part of this window's public API: Rust builds the
 // pane model and the tile and selection models inside it, and they reach it
 // through the generated types.
 export { PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo }
+
+// 要件 12: a window of its own, opened from the menu here. **Exported through
+// this file** because that is the one Slint compiles (`build.rs`).
+export { QuickDraft }
 
 // One boundary between two panes, where the layout tree put it (要件 6.4).
 //
@@ -287,6 +292,12 @@ export component AppWindow inherits Window {
     callback color-picked(int);
     callback typography-reset();
     callback open-file-requested();
+    /// 要件 12: open the quick draft window.
+    ///
+    /// **A request, not the window.** The one thing 要件 12.2 asks of the way
+    /// it is opened is that opening it be separable from the click that opened
+    /// it, so that a global shortcut can be given the same handle later.
+    callback quick-draft-requested();
     callback save-requested();
     callback save-as-requested();
     /// Write every open document that has a file (要件 8.2). The one file
@@ -412,6 +423,14 @@ export component AppWindow inherits Window {
                             activated => {
                                 app-menu.close();
                                 root.work-folder-requested();
+                                root.focus-generation += 1;
+                            }
+                        }
+                        MenuRow {
+                            title: "Quick Draft…";
+                            activated => {
+                                app-menu.close();
+                                root.quick-draft-requested();
                                 root.focus-generation += 1;
                             }
                         }
