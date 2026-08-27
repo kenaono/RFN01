@@ -810,6 +810,74 @@ impl Pane {
     }
 }
 
+/// How the drawing keeps up with a burst of keystrokes (要件 2).
+///
+/// **The text is never held back. Only the drawing is.** Auto-repeat delivers
+/// characters faster than a long paragraph can be laid out — an edit near the
+/// head of a 35,000 character paragraph costs 78ms of wrap search (技術検証
+/// 7.4) against the 30 or so characters a second a held key sends — so drawing
+/// every one of them means the event loop never runs. The window stops
+/// repainting, the caret stops blinking, and the editor looks frozen while the
+/// keys are in fact all registering.
+///
+/// So a draw that cost real time is followed by a wait as long as it took, and
+/// the keystrokes that arrive during it are drawn together at the end of it.
+/// **Half the time to drawing and half to the window** is what that ratio buys;
+/// the writer sees the text arrive a few characters at a time instead of not at
+/// all.
+#[derive(Default)]
+struct EditPace {
+    /// When the last edit was drawn, and what it cost.
+    drawn: Option<Instant>,
+    took: f64,
+    /// The catch-up draw waiting to happen. **Started, never restarted** — a
+    /// timer put off by each keystroke is a timer a held key never lets fire.
+    timer: Rc<Timer>,
+    waiting: bool,
+    /// Edits made since the last draw and not yet on screen.
+    ///
+    /// **Counted, because the pacing is otherwise invisible.** A faster editor
+    /// and an editor that stopped drawing look the same from outside; this says
+    /// how many keystrokes one draw was carrying (the perf log's `held=`).
+    held: u32,
+}
+
+impl EditPace {
+    /// How long the drawing owes the window before it may draw again.
+    ///
+    /// Zero while the drawing is cheap, which is every ordinary document: there
+    /// is nothing to smooth out and a wait would only add lateness.
+    fn owed(&self) -> Duration {
+        if self.took <= PACE_FREE_MS {
+            return Duration::ZERO;
+        }
+        let wait = Duration::from_secs_f64(self.took / 1000.0).min(PACE_MAX);
+        let since = self.drawn.map(|at| at.elapsed()).unwrap_or(PACE_MAX);
+        wait.saturating_sub(since)
+    }
+
+    fn drew(&mut self, took: f64) {
+        self.drawn = Some(Instant::now());
+        self.took = took;
+        self.waiting = false;
+    }
+
+    /// How many edits this draw is carrying, counting from the last one.
+    fn take_held(&mut self) -> u32 {
+        std::mem::take(&mut self.held)
+    }
+}
+
+/// A draw at or under this costs nothing worth pacing (ms).
+///
+/// **Under a frame.** The editor draws a keystroke in about 2.5ms on an
+/// ordinary document (6.9); what this is for is the document where one costs
+/// tens of milliseconds.
+const PACE_FREE_MS: f64 = 8.0;
+
+/// However long a draw took, the writer sees the next one within this.
+const PACE_MAX: Duration = Duration::from_millis(200);
+
 /// The three layers, side by side (ペイン分割設計 2).
 ///
 /// **Everything here is the app's or one pane's.** The document's own half —
@@ -829,6 +897,8 @@ struct RenderCache {
     /// This run's trace. Kept beside the perf log rather than inside it: one is
     /// about cost and the other about what happened (see `diag.rs`).
     diag: DiagLog,
+    /// How each pane is keeping up with a run of keystrokes.
+    pace: [EditPace; 2],
     /// The outline the left pane is currently showing (要件 7.7).
     ///
     /// **Kept only to know when not to draw it again.** Replacing a repeater's
@@ -851,6 +921,7 @@ impl Default for RenderCache {
             source_push_ms: None,
             perf_log: PerfLog::default(),
             diag: DiagLog::default(),
+            pace: Default::default(),
             outline_drawn: Vec::new(),
         }
     }
@@ -3039,16 +3110,14 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
 /// The caret is clamped whether or not the pane is on screen: a position it
 /// holds has to survive every edit made while it was away, or the first refresh
 /// after it comes back works from somewhere that no longer exists (6.7).
-fn follow_edit_in(
+fn draw_followed_edit(
     window: &AppWindow,
     id: PaneId,
     state: &Rc<RefCell<EditorState>>,
     cache: &Rc<RefCell<RenderCache>>,
     document: &OpenDocument,
     source: &str,
-    change: Change,
 ) {
-    carry_state_across(state, change, source);
     if !id.is_shown(window) {
         // The counts under the status bar are this document's and have just
         // changed, whoever is showing it.
@@ -6171,30 +6240,112 @@ impl PaneId {
         // mean nothing (6.7) and this text is not the text it is drawing.
         let other = self.other();
         let follows = states.same_document(self, other);
+        // **The other pane's caret follows the edit whether or not anything is
+        // drawn now.** A position is about the text, and the text has changed;
+        // holding this back with the drawing would leave that pane's caret
+        // pointing at where the text used to be.
+        if follows {
+            carry_state_across(states.of(other), change, source);
+        }
+        let owed = {
+            let mut borrowed = cache.borrow_mut();
+            let pace = &mut borrowed.pace[self.index() as usize];
+            pace.held += 1;
+            pace.owed()
+        };
+        if !owed.is_zero() {
+            // The last draw cost real time, so this edit joins the ones already
+            // waiting and they are drawn together (`EditPace`).
+            schedule_catch_up(window, states, cache, self, owed);
+            return;
+        }
+        let started = Instant::now();
+        self.draw_both(window, states, cache, document, source, Some(caret));
+        let took = elapsed_ms(started);
+        cache.borrow_mut().pace[self.index() as usize].drew(took);
+    }
+
+    /// This pane and, if it is showing the same document, the other one.
+    ///
+    /// **The order differs between the panes and is not free to choose** — see
+    /// [`PaneId::draw_edit`]. `caret` is where the edit left it, and `None`
+    /// means the panes come back showing what their own state holds, which is
+    /// what a catch-up draw wants.
+    fn draw_both(
+        self,
+        window: &AppWindow,
+        states: &PaneStates,
+        cache: &Rc<RefCell<RenderCache>>,
+        document: &OpenDocument,
+        source: &str,
+        caret: Option<usize>,
+    ) {
+        let other = self.other();
+        let follows = states.same_document(self, other);
         // **The right-hand pane's refresh writes the status line**, so it goes
         // last and its numbers are the ones left standing. Which pane, not
         // which direction: both may be running the same way now.
         if follows && self.is_right() {
-            let other_state = states.of(other);
-            follow_edit_in(window, other, other_state, cache, document, source, change);
+            draw_followed_edit(window, other, states.of(other), cache, document, source);
         }
-        refresh_pane(
-            window,
-            cache,
-            document,
-            self,
-            source,
-            window.get_zoom_percent(),
-            Some(source_line_start(source, caret)),
-            Some(caret),
-            None,
-            "",
-        );
+        match caret {
+            Some(caret) => refresh_pane(
+                window,
+                cache,
+                document,
+                self,
+                source,
+                window.get_zoom_percent(),
+                Some(source_line_start(source, caret)),
+                Some(caret),
+                None,
+                "",
+            ),
+            None => refresh_pane_from_state(window, cache, document, self, states.of(self), source),
+        }
         if follows && !self.is_right() {
-            let other_state = states.of(other);
-            follow_edit_in(window, other, other_state, cache, document, source, change);
+            draw_followed_edit(window, other, states.of(other), cache, document, source);
         }
     }
+}
+
+/// Draw the edits a held key has been leaving undrawn (`EditPace`).
+///
+/// **Started once and left alone.** Putting the timer off again on the next
+/// keystroke would be a debounce, and a debounce never fires while the key is
+/// still down — which is the case this exists for.
+fn schedule_catch_up(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    owed: Duration,
+) {
+    {
+        let mut borrowed = cache.borrow_mut();
+        let pace = &mut borrowed.pace[id.index() as usize];
+        if pace.waiting {
+            return;
+        }
+        pace.waiting = true;
+    }
+    let weak = window.as_weak();
+    let states = states.clone();
+    let cache = cache.clone();
+    let timer = cache.borrow().pace[id.index() as usize].timer.clone();
+    timer.start(TimerMode::SingleShot, owed, move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        // **Whatever the pane is showing now**, which after a tab change is not
+        // the document the keystrokes went into.
+        let document = states.document(id);
+        let source = document.text.borrow().clone();
+        let started = Instant::now();
+        id.draw_both(&window, &states, &cache, &document, &source, None);
+        let took = elapsed_ms(started);
+        cache.borrow_mut().pace[id.index() as usize].drew(took);
+    });
 }
 
 impl RenderCache {
@@ -6805,6 +6956,9 @@ fn refresh_pane(
                 .into(),
         );
     }
+    // Taken before the line is built: the log borrows the cache for the whole
+    // of it.
+    let held = cache.pace[id.index() as usize].take_held();
     cache.log_perf(&format!(
         "{kind} total={total_ms:.2} preview={preview_ms:.2} layout={layout_ms:.2} \
          geom={geometry_ms:.2} tiles={tiles_ms:.2} stats={stats_ms:.2} push={push_ms:.2} \
@@ -6818,10 +6972,14 @@ fn refresh_pane(
          content={content_flow} extent={line_extent} shown={shown_flow:.0} \
          viewport={viewport_flow:.0} scroll={scroll:.0} caret={caret_at} \
          ime={ime_at:.0}/{ime_room:.0} \
+         held={held} \
          tiles_shown={tile_count} tiles_new={rendered}/{tiles_reused} spare={spare_held} \
          rects={rects} font={font_size:.1} \
          space={space:.2} lead={lead:.2} head={head:.2} preedit={preedit_chars}",
         kind = id.perf_kind(),
+        // How many edits this draw is carrying (`EditPace`). One is the
+        // ordinary case; more means a held key was outrunning the drawing.
+        held = held,
         // Which panes are alive. Without this the log cannot tell a slow frame
         // caused by the horizontal pane from one caused by a large document,
         // because the two arrive together.
@@ -9106,6 +9264,54 @@ mod tests {
 
         // The short tile of a block still finds its own.
         assert!(take_spare(&mut spare, 8, 4).is_some());
+    }
+
+    /// 要件 2: **a cheap draw is never held back.** Every ordinary document
+    /// draws a keystroke in a couple of milliseconds, and a wait there would
+    /// only make the editor late for nothing.
+    #[test]
+    fn a_cheap_draw_owes_the_window_nothing() {
+        let mut pace = EditPace {
+            took: PACE_FREE_MS,
+            drawn: Some(Instant::now()),
+            ..EditPace::default()
+        };
+        assert_eq!(pace.owed(), Duration::ZERO);
+
+        // And one that cost real time owes about what it took.
+        pace.drew(80.0);
+        let owed = pace.owed();
+        assert!(
+            owed > Duration::from_millis(60) && owed <= Duration::from_millis(80),
+            "owed {owed:?}"
+        );
+    }
+
+    /// **And the wait is against the clock, not the keystroke.** A writer who
+    /// stopped and started again is not in a burst, so nothing is owed however
+    /// heavy the last draw was — otherwise every first keystroke after a pause
+    /// would arrive late.
+    #[test]
+    fn a_pause_pays_the_wait_off() {
+        let pace = EditPace {
+            took: 80.0,
+            drawn: Some(Instant::now() - Duration::from_millis(300)),
+            ..EditPace::default()
+        };
+
+        assert_eq!(pace.owed(), Duration::ZERO);
+    }
+
+    /// However heavy a document is, the next draw comes within `PACE_MAX`.
+    #[test]
+    fn a_very_heavy_draw_still_comes_back() {
+        let pace = EditPace {
+            took: 4_000.0,
+            drawn: Some(Instant::now()),
+            ..EditPace::default()
+        };
+
+        assert!(pace.owed() <= PACE_MAX);
     }
 
     #[test]
