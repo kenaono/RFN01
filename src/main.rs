@@ -506,6 +506,13 @@ struct EditorState {
     active_line_start: Option<usize>,
     preedit: String,
     preferred_line: Option<f32>,
+    /// Whether `Ctrl+Space` has been pressed and not yet answered (要件 11.4).
+    ///
+    /// **A held Shift that the writer does not have to hold.** While it is on,
+    /// every move extends the selection the way Shift does; it goes off when
+    /// the writer does anything but move — an edit, or a click — and when
+    /// `Ctrl+Space` is pressed again.
+    mark: bool,
 }
 
 /// Both panes' states, so that a callback carrying a pane number can reach the
@@ -2200,6 +2207,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             copy_selection(&window, id, &document, &states, &cache, cut);
+        }
+    });
+
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    window.on_pane_mark_toggled(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let document = states.document(id);
+            toggle_mark(&window, id, &document, &states, &cache);
         }
     });
 
@@ -5950,9 +5968,19 @@ fn relayout_panes(window: &AppWindow, states: &PaneStates, cache: &Rc<RefCell<Re
 ///
 /// Restarting the timer on every move means a held key never pays for it, and a
 /// caret that lands somewhere and stays gets the reveal a moment later.
+///
+/// **It redraws the pane that asked, and no other.** Which pane waits for its
+/// caret to settle is decided by the writing direction that pane is in
+/// (`PaneId::reveals_while_moving`), not by which of the two it is — so pane 0
+/// asks for this whenever its tab is turned vertical. Before the panes were put
+/// on one path this only ever ran for pane 1 and named it outright; left that
+/// way, a caret moving in pane 0 wrote pane 0's caret and scroll into pane 1 a
+/// tenth of a second later, and the writer saw the other pane jump to where
+/// they were working.
 fn schedule_active_line_reveal(
     timer: &Rc<Timer>,
     window: &AppWindow,
+    id: PaneId,
     state: &Rc<RefCell<EditorState>>,
     cache: &Rc<RefCell<RenderCache>>,
     document: &Rc<OpenDocument>,
@@ -5980,7 +6008,6 @@ fn schedule_active_line_reveal(
             }
         };
         if revealed.is_some() {
-            let id = PaneId::Vertical;
             refresh_pane_from_state(&window, &cache, &document, id, &state, &source);
         }
     });
@@ -7882,7 +7909,9 @@ fn update_selection_after_move(
     next_source_byte: usize,
     extend_selection: bool,
 ) -> Option<(usize, usize)> {
-    if extend_selection {
+    // **The mark is a Shift nobody is holding** (要件 11.4), so it is read in
+    // the one place a move decides what the selection becomes.
+    if extend_selection || state.mark {
         if state.selection_anchor_source_byte.is_none() {
             state.selection_anchor_source_byte = Some(source_byte);
         }
@@ -8037,6 +8066,9 @@ fn update_pane_selection(
         let mut state = state.borrow_mut();
         if phase == SelectionPhase::Begin || state.selection_anchor_source_byte.is_none() {
             state.selection_anchor_source_byte = Some(hit);
+            // A writer taking hold of the selection with the mouse is not the
+            // writer who left a mark standing (要件 11.4).
+            state.mark = false;
         }
         state.caret_source_byte = Some(hit);
         // Only the vertical pane keeps the revealed line: the horizontal one
@@ -8426,6 +8458,9 @@ fn insert_pane_text(
         state.active_line_start = Some(source_line_start(&source, next));
         state.preedit.clear();
         state.preferred_line = None;
+        // 要件 11.4: the mark was a selection being made, and it has been
+        // answered — the text it named is gone or replaced.
+        state.mark = false;
     }
     let change = Change {
         at,
@@ -8486,6 +8521,43 @@ fn undo_in_pane(
     cache
         .borrow_mut()
         .log_diag("edit", &format!("{kind} pane={name} caret={caret}"));
+}
+
+/// Start selecting from where the caret is, or stop (要件 11.4 の`Ctrl+Space`).
+///
+/// **It is a Shift the writer does not have to hold.** While the mark is on,
+/// every move extends the selection; pressing the key again puts it down and
+/// leaves the selection where it stands, so the same key both starts and stops.
+/// An edit or a click ends it too, because either one answers the selection
+/// that was being made.
+///
+/// Turning it on drops the anchor at the caret so that the first move already
+/// has something to extend from, and turning it off collapses nothing — what
+/// was selected is still selected, and `Alt+W` is the next key to reach for.
+fn toggle_mark(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+) {
+    let state = states.of(id);
+    let source = document.text.borrow().clone();
+    let caret = id.caret_byte(state, &source);
+    let marking = {
+        let mut state = state.borrow_mut();
+        state.mark = !state.mark;
+        if state.mark {
+            state.selection_anchor_source_byte = Some(caret);
+            state.caret_source_byte = Some(caret);
+        }
+        state.mark
+    };
+    cache.borrow_mut().log_diag(
+        "edit",
+        &format!("mark pane={} on={marking} at={caret}", id.log_name()),
+    );
+    refresh_pane_from_state(window, cache, document, id, state, &source);
 }
 
 /// The Kill Ring, and where its last yank landed (要件 11.4・11.6).
@@ -8820,6 +8892,7 @@ fn remove_source_range(
         state.selection_anchor_source_byte = Some(next);
         state.active_line_start = Some(source_line_start(&source, next));
         state.preferred_line = None;
+        state.mark = false;
     }
     let change = Change {
         at: start,
@@ -8864,6 +8937,20 @@ fn move_pane_caret(
         match direction {
             -1 => Ok((shown.previous_grapheme(caret), None)),
             1 => Ok((shown.next_grapheme(caret), None)),
+            // 要件 11.4's `Alt+B` and `Alt+F`. **Asked of the text the pane
+            // laid out**, like the grapheme steps beside them (技術検証 3.12):
+            // a word is a run of the characters the writer can see, and in the
+            // preview the markers are not among them.
+            -3 | 3 => {
+                let text = shown.text();
+                let at = shown.shown_byte_at_utf16(at as usize);
+                let moved = if direction < 0 {
+                    document::previous_word_boundary(text, at)
+                } else {
+                    document::next_word_boundary(text, at)
+                };
+                Ok((shown.source_byte_at_utf16(utf16_at_byte(text, moved)), None))
+            }
             -2 | 2 => {
                 let anchor = match preferred_line {
                     Some(anchor) => Ok(anchor),
@@ -8918,7 +9005,7 @@ fn move_pane_caret(
         "",
     );
     if !PaneId::reveals_while_moving(id.vertical(window)) {
-        schedule_active_line_reveal(reveal, window, state, cache, document);
+        schedule_active_line_reveal(reveal, window, id, state, cache, document);
     }
 }
 
@@ -8978,7 +9065,7 @@ fn move_pane_to_line_edge(
         "",
     );
     if !PaneId::reveals_while_moving(id.vertical(window)) {
-        schedule_active_line_reveal(reveal, window, state, cache, document);
+        schedule_active_line_reveal(reveal, window, id, state, cache, document);
     }
 }
 

@@ -544,6 +544,60 @@ pub fn caret_place(source: &str, byte: usize) -> (usize, usize) {
     (line, column)
 }
 
+/// Whether a character is inside a word, for 要件 11.4's `Alt+F` and `Alt+B`.
+///
+/// **Everything that is not punctuation or space.** 要件 11.4 says the move
+/// goes 「句読点または空白まで」 in Japanese, and Japanese puts no spaces between
+/// words — so the run that ends at a punctuation mark or a space *is* the word.
+/// **The same rule serves English**, where the spaces do that work instead, so
+/// there is no second rule to pick between and no guess about which language a
+/// line is in.
+///
+/// `_` counts as inside a word, so `snake_case` is one. This editor is written
+/// about code often enough for that to be worth the one exception, and a writer
+/// of prose never meets it.
+fn is_word(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// The byte an `Alt+F` lands on (要件 11.4).
+///
+/// **Past whatever is not a word, then past the word itself**, so the caret
+/// arrives at the far side of the next word rather than at its near side. That
+/// is what makes a run of presses walk forwards one word at a time instead of
+/// stopping twice at every word. The end of the text stops it.
+pub fn next_word_boundary(text: &str, from: usize) -> usize {
+    let mut at = crate::floor_char_boundary(text, from.min(text.len()));
+    let mut inside = false;
+    for character in text[at..].chars() {
+        if is_word(character) {
+            inside = true;
+        } else if inside {
+            break;
+        }
+        at += character.len_utf8();
+    }
+    at
+}
+
+/// The byte an `Alt+B` lands on (要件 11.4).
+///
+/// The mirror of [`next_word_boundary`]: back over whatever is not a word, then
+/// back over the word, landing at its near side.
+pub fn previous_word_boundary(text: &str, from: usize) -> usize {
+    let mut at = crate::floor_char_boundary(text, from.min(text.len()));
+    let mut inside = false;
+    for character in text[..at].chars().rev() {
+        if is_word(character) {
+            inside = true;
+        } else if inside {
+            break;
+        }
+        at -= character.len_utf8();
+    }
+    at
+}
+
 /// Characters in the longest logical line of `source`.
 #[cfg(test)]
 fn longest_logical_line(source: &str) -> usize {
@@ -1637,6 +1691,62 @@ mod tests {
 
         preview.refresh("```なにか\nlet a = 1; // 説明\n```\n", None);
         assert_eq!(commented(&preview), 0, "and an unnamed block says nothing");
+    }
+
+    /// 要件 11.4 asks for the far side of the next word, so a run of presses
+    /// walks forwards rather than stopping twice at each one.
+    #[test]
+    fn a_word_move_lands_past_the_word_it_crossed() {
+        let text = "hello world";
+
+        assert_eq!(next_word_boundary(text, 0), 5);
+        assert_eq!(next_word_boundary(text, 5), 11);
+        assert_eq!(next_word_boundary(text, 11), 11);
+    }
+
+    #[test]
+    fn a_backward_word_move_lands_at_the_near_side() {
+        let text = "hello world";
+
+        assert_eq!(previous_word_boundary(text, 11), 6);
+        assert_eq!(previous_word_boundary(text, 6), 0);
+        assert_eq!(previous_word_boundary(text, 0), 0);
+    }
+
+    /// **句読点または空白まで** (要件 11.4). Japanese writes no spaces, so the
+    /// punctuation is what ends the run — and it is the same rule as English's.
+    #[test]
+    fn a_japanese_word_ends_at_its_punctuation() {
+        let text = "これは、テストです。";
+
+        assert_eq!(next_word_boundary(text, 0), 9, "これは");
+        assert_eq!(next_word_boundary(text, 9), 27, "、を越えてテストです");
+        assert_eq!(
+            previous_word_boundary(text, text.len()),
+            12,
+            "テストですの頭"
+        );
+    }
+
+    /// The move never lands inside a character, whichever way it went.
+    #[test]
+    fn a_word_move_lands_on_a_character_boundary() {
+        let text = "あa、い b";
+
+        for from in 0..=text.len() {
+            let forwards = next_word_boundary(text, from);
+            let backwards = previous_word_boundary(text, from);
+            assert!(text.is_char_boundary(forwards), "forwards from {from}");
+            assert!(text.is_char_boundary(backwards), "backwards from {from}");
+        }
+    }
+
+    /// `snake_case` is one word: the underscore is inside it.
+    #[test]
+    fn an_underscore_holds_a_name_together() {
+        let text = "let snake_case = 1";
+
+        assert_eq!(next_word_boundary(text, 4), 14);
     }
 
     /// 要件 10: **a caret names its line and its column from 1**, and the line
