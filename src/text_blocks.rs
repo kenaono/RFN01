@@ -1822,6 +1822,14 @@ impl BlockLayoutPlan {
         Some(block.span.utf16_start + line.utf16_text_end())
     }
 
+    /// How many layout lines the plan holds, over every block.
+    ///
+    /// Only a bound: 要件 7.1's rectangle walks lines one at a time, and this
+    /// is how the walk knows it cannot be going round.
+    pub fn line_count(&self) -> usize {
+        self.blocks.iter().map(|block| block.lines.len()).sum()
+    }
+
     /// A line's centre on the flow axis, for re-hit-testing at a preferred
     /// position along the line axis.
     pub fn line_flow_center(&self, block_index: usize, line_index: usize) -> Option<f32> {

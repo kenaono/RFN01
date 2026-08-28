@@ -253,8 +253,9 @@ export component EditorPane inherits Rectangle {
     /// 4 は`Alt+Shift+Y`＝1つ前のものに入れ替える。
     callback kill-requested(int);
     /// Start selecting, or stop (要件 11.4 の`Ctrl+Space`). While it is on,
-    /// every move extends the selection the way Shift does.
-    callback mark-toggled();
+    /// every move extends the selection the way Shift does. **True asks for a
+    /// rectangle** (`Ctrl+Shift+Space`, 要件 7.1).
+    callback mark-toggled(bool);
     /// Escape was pressed and this pane had nothing open to close. **True if
     /// the window closed something of its own** — the app menu, or the
     /// typography panel — so that the key is not passed on twice.
@@ -1125,12 +1126,13 @@ export component EditorPane inherits Rectangle {
                                         && (event.text == "b" || event.text == "B") {
                                         root.move-caret(-3, event.modifiers.shift);
                                         accept
-                                    // 要件 11.4. **Shift is left out on purpose**
-                                    // — `Ctrl+Shift+Space` is the rectangular
-                                    // selection, which is not in yet.
-                                    } else if event.modifiers.control && !event.modifiers.shift
-                                        && event.text == " " {
-                                        root.mark-toggled();
+                                    // 要件 11.4 と 要件 7.1: **Shift is what
+                                    // makes it a rectangle.** The two are one
+                                    // key with one answer, because starting a
+                                    // selection and choosing its shape are the
+                                    // same act.
+                                    } else if event.modifiers.control && event.text == " " {
+                                        root.mark-toggled(event.modifiers.shift);
                                         accept
                                     } else if event.modifiers.alt && !event.modifiers.control
                                         && (event.text == "w" || event.text == "W") {

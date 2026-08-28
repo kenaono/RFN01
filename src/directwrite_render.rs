@@ -3863,6 +3863,87 @@ impl TextEngine {
         })
     }
 
+    /// The runs a rectangular selection covers, one per **layout line**
+    /// (要件 7.1).
+    ///
+    /// **The lines are the ones on the screen, not the ones in the file.** A
+    /// Markdown paragraph is one file line however far it wraps, so a rectangle
+    /// built out of file lines cannot be drawn across prose at all: the line
+    /// below the one the writer is on is the blank line that ends the
+    /// paragraph, and the one below that is a heading. What they are pointing
+    /// at is what they can see, and this walks that.
+    ///
+    /// `line_lo` and `line_hi` are coordinates on the **line** axis — an x
+    /// where the text runs down the page and a y where it runs across — the
+    /// same measurement `move_caret_by_line` holds on to when the caret steps
+    /// between lines. Which of the two ends of the rectangle they came from
+    /// does not matter; they are sorted here.
+    ///
+    /// One run per line between the two positions, empty runs included: a line
+    /// with nothing under the columns is still one of the lines.
+    pub fn rectangle_runs(
+        &mut self,
+        from_utf16: u32,
+        to_utf16: u32,
+        line_lo: f32,
+        line_hi: f32,
+    ) -> Result<Vec<(u32, u32)>> {
+        let (start, end) = (from_utf16.min(to_utf16), from_utf16.max(to_utf16));
+        let (line_lo, line_hi) = (line_lo.min(line_hi), line_lo.max(line_hi));
+        let (Some(first), Some(last)) = (self.plan.locate(start), self.plan.locate(end)) else {
+            return Ok(Vec::new());
+        };
+        let margin = self.margin;
+        let mode = self.mode;
+        // **The walk is bounded by the lines that exist.** A plan that cannot
+        // reach `last` — nothing here should produce one, but the loop is the
+        // only place that would spin — stops at the count instead.
+        let bound = self.plan.line_count();
+
+        with_graphics(|graphics| {
+            let mut runs = Vec::new();
+            let mut at = first;
+            for _ in 0..bound {
+                let Some(center_flow) = self.plan.line_flow_center(at.0, at.1) else {
+                    break;
+                };
+                let mut ends = [start, start];
+                for (slot, line) in ends.iter_mut().zip([line_lo, line_hi]) {
+                    let hit = if let Some(grid) = self.plan.blocks[at.0].grid.clone() {
+                        // 要件 7.3.2: in a table the point picks a cell first,
+                        // the same way a click does.
+                        self.grid_hit_test(graphics, at.0, &grid, center_flow, line)?
+                    } else {
+                        let layout = self.layout_for(graphics, at.0)?;
+                        let block = &self.plan.blocks[at.0];
+                        let inset = block_inset(&block.span, &self.typography);
+                        let (x, y) = mode.to_screen(
+                            block.to_layout_flow(center_flow),
+                            (line - margin - inset).max(0.0),
+                        );
+                        hit_test_in_block(
+                            &layout,
+                            x,
+                            y,
+                            block.span.utf16_start,
+                            block.span.utf16_end,
+                        )?
+                    };
+                    *slot = hit.utf16_position;
+                }
+                runs.push((ends[0].min(ends[1]), ends[0].max(ends[1])));
+                if at == last {
+                    break;
+                }
+                let Some(next) = self.plan.step_line(at.0, at.1, true) else {
+                    break;
+                };
+                at = next;
+            }
+            Ok(runs)
+        })
+    }
+
     /// Move the caret to either end of the line it is on.
     ///
     /// Line boundaries come from the cached line metrics, so this needs no
@@ -5399,6 +5480,73 @@ mod tests {
     /// differently when nothing precedes it.
     ///
     /// If this fails, the paragraph cannot be cut and 6.9's 212ms stands.
+    /// 要件 7.1: **the rectangle is cut out of the lines on the screen.**
+    ///
+    /// One paragraph is one line in the file however far it wraps, so a
+    /// rectangle built out of file lines could not cross it at all. This walks
+    /// the lines the engine laid out, and there is one run for each of them.
+    #[test]
+    fn a_rectangle_takes_one_run_out_of_every_line_it_crosses() {
+        let text = format!("{}\n", "あいうえおかきくけこ".repeat(40));
+
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let styled = StyledText::plain(&text);
+            let mut engine = engine_set(mode, styled, &plain());
+            let end = engine.utf16_len() / 2;
+            let (first, last) = (
+                engine.plan.locate(0).expect("a line at the start"),
+                engine.plan.locate(end).expect("a line in the middle"),
+            );
+            // The lines the walk has to cover, counted the way the plan reads
+            // them rather than the way the rectangle does.
+            let mut expected = 1;
+            let mut at = first;
+            while at != last {
+                at = engine
+                    .plan
+                    .step_line(at.0, at.1, true)
+                    .expect("a next line");
+                expected += 1;
+            }
+            assert!(expected > 3, "{mode:?}: the paragraph has to wrap");
+
+            let from = engine.caret_geometry(0).expect("caret at the start");
+            let to = engine.caret_geometry(end).expect("caret in the middle");
+            let (lo, hi) = match mode {
+                WritingMode::Vertical => (from.y, to.y),
+                WritingMode::Horizontal => (from.x, to.x),
+            };
+            let runs = engine
+                .rectangle_runs(0, end, lo, hi)
+                .expect("the rectangle's runs");
+
+            assert_eq!(runs.len(), expected, "{mode:?}: one run per line");
+            // Every run stays inside the line it was cut from, and they come
+            // out in reading order.
+            let mut at = first;
+            for (index, (start, end)) in runs.iter().enumerate() {
+                let line_start = engine
+                    .plan
+                    .line_utf16_start(at.0, at.1)
+                    .expect("the line's start");
+                let line_end = engine
+                    .plan
+                    .line_utf16_text_end(at.0, at.1)
+                    .expect("the line's end");
+                assert!(
+                    line_start <= *start && *start <= *end && *end <= line_end,
+                    "{mode:?}: run {index} {start}..{end} left its line {line_start}..{line_end}"
+                );
+                if at != last {
+                    at = engine
+                        .plan
+                        .step_line(at.0, at.1, true)
+                        .expect("a next line");
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_cut_paragraph_sums_to_the_single_layout() {
         // Long enough to be cut into several pieces, and full of the characters

@@ -506,6 +506,12 @@ struct EditorState {
     active_line_start: Option<usize>,
     preedit: String,
     preferred_line: Option<f32>,
+    /// Whether the selection is a rectangle rather than a run (要件 7.1).
+    ///
+    /// **The two ends are the same two bytes either way** — what changes is
+    /// what is read out of them: a rectangle takes the lines they sit on and
+    /// the columns they sit at, and covers every line between (`selection_ranges`).
+    rectangular: bool,
     /// Whether `Ctrl+Space` has been pressed and not yet answered (要件 11.4).
     ///
     /// **A held Shift that the writer does not have to hold.** While it is on,
@@ -801,7 +807,17 @@ struct PaneView {
     /// Caret and selection in the shown text's UTF-16, so a scroll can re-clip
     /// the selection without going back through the document model.
     caret_utf16: Option<u32>,
-    selection_utf16: Option<(u32, u32)>,
+    /// **A list, because a selection can be a rectangle** (要件 7.1): one run
+    /// for an ordinary one, one per layout line for a rectangle, none for no
+    /// selection at all.
+    selection_utf16: Vec<(u32, u32)>,
+    /// The same runs in the document's bytes.
+    ///
+    /// **Written where the engine is**, because cutting a rectangle into runs
+    /// is a question about the lines it laid out. Copying, cutting and deleting
+    /// read it back rather than asking again: the pane has been laid out by the
+    /// time the writer can press a key, and asking twice could answer twice.
+    selection_source: Vec<(usize, usize)>,
     preedit_range: Option<(u32, u32)>,
 }
 
@@ -1343,7 +1359,7 @@ fn main() -> Result<(), slint::PlatformError> {
             &initial,
             None,
             None,
-            None,
+            PaneSelection::default(),
             "",
         );
     }
@@ -2213,11 +2229,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
-    window.on_pane_mark_toggled(move |pane| {
+    window.on_pane_mark_toggled(move |pane, rectangular| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
-            toggle_mark(&window, id, &document, &states, &cache);
+            toggle_mark(&window, id, &document, &states, &cache, rectangular);
         }
     });
 
@@ -2407,6 +2423,10 @@ fn select_whole_document(
         pane.selection_anchor_source_byte = Some(0);
         pane.caret_source_byte = Some(end);
         pane.preferred_line = None;
+        // The whole document is not a rectangle, and it is not a mark being
+        // held either (要件 7.1, 11.4).
+        pane.mark = false;
+        pane.rectangular = false;
         // Only the pane that keeps the revealed line writes it; the other works
         // it out from the caret that just moved (`PaneId::revealed_line`).
         if !PaneId::reveals_while_moving(id.vertical(window)) {
@@ -3381,7 +3401,7 @@ fn draw_followed_edit(
     if !id.is_shown(window) {
         // The counts under the status bar are this document's and have just
         // changed, whoever is showing it.
-        update_status(window, document, source, None, None);
+        update_status(window, document, source, &[], None);
         cache.borrow_mut().source_push_ms = None;
         return;
     }
@@ -6030,7 +6050,7 @@ fn refresh_pane_from_state(
         let state = state.borrow();
         (
             state.caret_source_byte,
-            selection_source_range(&state),
+            pane_selection(&state),
             state.preedit.clone(),
         )
     };
@@ -6662,7 +6682,7 @@ impl PaneId {
                 source,
                 Some(source_line_start(source, caret)),
                 Some(caret),
-                None,
+                PaneSelection::default(),
                 "",
             ),
             None => refresh_pane_from_state(window, cache, document, self, states.of(self), source),
@@ -6845,12 +6865,19 @@ impl RenderCache {
         window: &AppWindow,
         id: PaneId,
     ) -> windows::core::Result<()> {
-        let Some(selection) = self.pane(id).view.selection_utf16 else {
+        let selection = self.pane(id).view.selection_utf16.clone();
+        if selection.is_empty() {
             return Ok(());
-        };
+        }
         let engine = &mut self.pane(id).graphics.engine;
         let visible = id.flow_range(window, engine.total_flow_size() as f32);
-        let rects = engine.selection_rects(Some(selection), visible)?;
+        // **One ask per run.** A run outside the viewport costs the early
+        // return in `selection_rects` and nothing else, so a rectangle over a
+        // thousand lines is charged for the lines on screen.
+        let mut rects = Vec::new();
+        for run in selection {
+            rects.extend(engine.selection_rects(Some(run), visible)?);
+        }
         id.set_selection(window, &rects);
         Ok(())
     }
@@ -7056,7 +7083,9 @@ struct PaneLayout {
     render_caret: Option<u32>,
     /// The place the view is being held on, in the shown text (要件 8.5).
     anchor_utf16: Option<u32>,
-    selection: Option<(u32, u32)>,
+    selection: Vec<(u32, u32)>,
+    /// The same runs in the document's bytes, for the status bar's count.
+    selection_source: Vec<(usize, usize)>,
     /// How far the content reached before this layout, for the panes whose
     /// document start is not at the origin.
     previous_flow: u32,
@@ -7085,7 +7114,7 @@ fn lay_out_pane(
     typography: &Typography,
     active_line_start: Option<usize>,
     caret_source_byte: Option<usize>,
-    selection_source_bytes: Option<(usize, usize)>,
+    selection: PaneSelection,
     preedit: &str,
 ) -> Option<PaneLayout> {
     let mut counts = document.counts.borrow_mut();
@@ -7105,10 +7134,11 @@ fn lay_out_pane(
     // caret-moving path would have to remember to clear.
     let anchor_utf16 = held_view(pane.view.top_anchor, caret_source_byte)
         .map(|byte| shown.utf16_at_source_byte(byte) as u32);
-    let selection = selection_source_bytes.and_then(|(start, end)| {
-        let start = shown.utf16_at_source_byte(start) as u32;
-        let end = shown.utf16_at_source_byte(end) as u32;
-        (start < end).then_some((start, end - start))
+    let selection_utf16 = selection.ends.map(|(start, end)| {
+        (
+            shown.utf16_at_source_byte(start) as u32,
+            shown.utf16_at_source_byte(end) as u32,
+        )
     });
     let (render_text, render_caret, preedit_range) = text_with_preedit(&shown, caret, preedit);
     let preview_ms = elapsed_ms(preview_started);
@@ -7145,14 +7175,35 @@ fn lay_out_pane(
     };
     let layout_ms = elapsed_ms(layout_started);
 
+    // **Cut into runs only now.** A rectangle's runs are one per *layout* line,
+    // and which lines those are is what the update just decided (要件 7.1).
+    let runs = match selection_utf16 {
+        Some((start, end)) if selection.rectangular => {
+            rectangular_runs(window, id, engine, start, end)
+        }
+        Some((start, end)) if start < end => vec![(start, end - start)],
+        _ => Vec::new(),
+    };
+    let selection_source = runs
+        .iter()
+        .map(|(start, length)| {
+            (
+                shown.source_byte_at_utf16(*start as usize),
+                shown.source_byte_at_utf16((*start + *length) as usize),
+            )
+        })
+        .collect::<Vec<_>>();
+
     pane.view.caret_utf16 = render_caret;
-    pane.view.selection_utf16 = selection;
+    pane.view.selection_utf16 = runs.clone();
+    pane.view.selection_source = selection_source.clone();
     pane.view.preedit_range = preedit_range;
 
     Some(PaneLayout {
         render_caret,
         anchor_utf16,
-        selection,
+        selection: runs,
+        selection_source,
         previous_flow,
         measured,
         preview_ms,
@@ -7177,7 +7228,7 @@ fn refresh_pane(
     source: &str,
     active_line_start: Option<usize>,
     caret_source_byte: Option<usize>,
-    selection_source_bytes: Option<(usize, usize)>,
+    selection: PaneSelection,
     preedit: &str,
 ) {
     let refresh_started = Instant::now();
@@ -7202,7 +7253,7 @@ fn refresh_pane(
         &typography,
         active_line_start,
         caret_source_byte,
-        selection_source_bytes,
+        selection,
         preedit,
     );
     let Some(laid_out) = laid_out else {
@@ -7212,6 +7263,7 @@ fn refresh_pane(
         render_caret,
         anchor_utf16,
         selection,
+        selection_source,
         previous_flow,
         measured,
         preview_ms,
@@ -7287,7 +7339,7 @@ fn refresh_pane(
                 window,
                 document,
                 source,
-                selection_source_bytes,
+                &selection_source,
                 source_caret(window, id, caret_source_byte),
             );
             return;
@@ -7295,7 +7347,17 @@ fn refresh_pane(
     };
     let selection_result = {
         let engine = &mut cache.pane(id).graphics.engine;
-        engine.selection_rects(selection, visible)
+        // One ask per run: an ordinary selection is one, a rectangle is one per
+        // line it covers (要件 7.1), and a run off screen returns at once.
+        let mut rects = Vec::new();
+        let mut outcome = Ok(());
+        for run in &selection {
+            match engine.selection_rects(Some(*run), visible) {
+                Ok(found) => rects.extend(found),
+                Err(error) => outcome = Err(error),
+            }
+        }
+        outcome.map(|()| rects)
     };
     let selection_rects = match selection_result {
         Ok(rects) => rects,
@@ -7306,7 +7368,7 @@ fn refresh_pane(
                 window,
                 document,
                 source,
-                selection_source_bytes,
+                &selection_source,
                 source_caret(window, id, caret_source_byte),
             );
             return;
@@ -7337,7 +7399,7 @@ fn refresh_pane(
     // the document, so in Split whichever pane acted last owns it.
     let stats_started = Instant::now();
     let place = source_caret(window, id, caret_source_byte);
-    update_status(window, document, source, selection_source_bytes, place);
+    update_status(window, document, source, &selection_source, place);
     // 要件 7.7: the outline is of the document in front of the writer, and the
     // pane that has just drawn is only sometimes the one they are in.
     if id == focused_pane(window) {
@@ -7780,20 +7842,23 @@ fn update_status(
     window: &AppWindow,
     document: &OpenDocument,
     source: &str,
-    selection_source_bytes: Option<(usize, usize)>,
+    selection_source_bytes: &[(usize, usize)],
     source_caret: Option<usize>,
 ) {
     let stats = document.counts.borrow_mut().get(source).stats();
-    let selected_characters = selection_source_bytes
+    // Every run, because a rectangle is several (要件 7.1) — and what 要件 10
+    // shows is how much text is selected, not how many pieces it is in.
+    let selected_characters: usize = selection_source_bytes
+        .iter()
         .map(|(start, end)| {
             // Counting characters must never be the thing that brings the app
             // down, so the ends are walked back to character boundaries here
             // too. The paths that *change* the document stay strict.
-            let start = floor_char_boundary(source, start);
-            let end = floor_char_boundary(source, end).max(start);
+            let start = floor_char_boundary(source, *start);
+            let end = floor_char_boundary(source, *end).max(start);
             source[start..end].graphemes(true).count()
         })
-        .unwrap_or(0);
+        .sum();
     let long_paragraph = if stats.longest_line_characters > PARAGRAPH_WARNING_CHARACTERS {
         format!(
             "最長段落 {}文字（長すぎます）",
@@ -7895,6 +7960,71 @@ fn caret_visible_scroll(
     };
 
     target.clamp(minimum, 0.0)
+}
+
+/// What a pane has selected, as the runs its last layout cut (要件 7.1).
+///
+/// **Read back rather than asked again.** Cutting a rectangle into runs is a
+/// question about the lines the engine laid out, and the pane has been laid out
+/// by the time the writer can press the key that reads this.
+fn selected_runs(cache: &Rc<RefCell<RenderCache>>, id: PaneId) -> Vec<(usize, usize)> {
+    cache.borrow_mut().pane(id).view.selection_source.clone()
+}
+
+/// A rectangle's runs, one per layout line (要件 7.1).
+///
+/// **The two ends give a coordinate across the line each**, and everything
+/// between those two coordinates, on every line between the two ends, is what
+/// the rectangle holds. The coordinate is a y where the text runs down the page
+/// and an x where it runs across — the same measurement the up and down keys
+/// hold on to (`PaneId::line_anchor`), so a rectangle drawn by moving the caret
+/// keeps the width the caret was already keeping.
+fn rectangular_runs(
+    window: &AppWindow,
+    id: PaneId,
+    engine: &mut TextEngine,
+    start: u32,
+    end: u32,
+) -> Vec<(u32, u32)> {
+    let vertical = id.vertical(window);
+    let (Ok(from), Ok(to)) = (engine.caret_geometry(start), engine.caret_geometry(end)) else {
+        return Vec::new();
+    };
+    let lo = PaneId::line_anchor(vertical, &from);
+    let hi = PaneId::line_anchor(vertical, &to);
+    engine
+        .rectangle_runs(start, end, lo, hi)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(start, end)| (start, end - start))
+        .collect()
+}
+
+/// What a pane has selected, before it is cut into runs (要件 7.1).
+///
+/// **Two ends and a shape.** A run is the text between them; a rectangle is the
+/// part of every layout line between them that lies between the same two
+/// coordinates across the line. Which of the two it is cannot be worked out
+/// from the ends, and where it is cut into runs the engine has to be asked —
+/// so what travels to the layout is this, and the runs come back from there.
+#[derive(Clone, Copy, Default)]
+struct PaneSelection {
+    ends: Option<(usize, usize)>,
+    rectangular: bool,
+}
+
+fn pane_selection(state: &EditorState) -> PaneSelection {
+    PaneSelection {
+        ends: selection_source_range(state),
+        rectangular: state.rectangular,
+    }
+}
+
+impl PaneSelection {
+    /// One end and the other, whatever shape it is.
+    fn run(self) -> Vec<(usize, usize)> {
+        self.ends.into_iter().collect()
+    }
 }
 
 fn selection_source_range(state: &EditorState) -> Option<(usize, usize)> {
@@ -8067,8 +8197,10 @@ fn update_pane_selection(
         if phase == SelectionPhase::Begin || state.selection_anchor_source_byte.is_none() {
             state.selection_anchor_source_byte = Some(hit);
             // A writer taking hold of the selection with the mouse is not the
-            // writer who left a mark standing (要件 11.4).
+            // writer who left a mark standing (要件 11.4), nor the one who
+            // asked for a rectangle (要件 7.1).
             state.mark = false;
+            state.rectangular = false;
         }
         state.caret_source_byte = Some(hit);
         // Only the vertical pane keeps the revealed line: the horizontal one
@@ -8079,7 +8211,7 @@ fn update_pane_selection(
         }
         state.preedit.clear();
         state.preferred_line = None;
-        selection_source_range(&state)
+        pane_selection(&state)
     };
     id.set_ime_buffer(window, "");
 
@@ -8092,7 +8224,7 @@ fn update_pane_selection(
             &source,
             active_line_start,
             hit,
-            selection,
+            &selection.run(),
             drag_started,
         );
         return;
@@ -8131,7 +8263,7 @@ fn drag_caret_only(
     source: &str,
     active_line_start: Option<usize>,
     hit: usize,
-    selection: Option<(usize, usize)>,
+    selection: &[(usize, usize)],
     started: Instant,
 ) {
     let mut borrowed = cache.borrow_mut();
@@ -8145,14 +8277,17 @@ fn drag_caret_only(
         } = &mut cache.pane(id).view;
         let shown = pane_text(window, id, preview_slot, source, active_line_start);
         let caret = shown.utf16_at_source_byte(hit) as u32;
-        let range = selection.and_then(|(start, end)| {
-            let start = shown.utf16_at_source_byte(start);
-            let end = shown.utf16_at_source_byte(end);
-            (start < end).then_some((start as u32, (end - start) as u32))
-        });
+        let ranges = selection
+            .iter()
+            .filter_map(|(start, end)| {
+                let start = shown.utf16_at_source_byte(*start);
+                let end = shown.utf16_at_source_byte(*end);
+                (start < end).then_some((start as u32, (end - start) as u32))
+            })
+            .collect::<Vec<_>>();
         *caret_utf16 = Some(caret);
-        *selection_utf16 = range;
-        (caret, range)
+        *selection_utf16 = ranges.clone();
+        (caret, ranges)
     };
 
     let content_flow = cache.pane(id).graphics.engine.total_flow_size() as f32;
@@ -8165,7 +8300,18 @@ fn drag_caret_only(
     };
     let rects = {
         let engine = &mut cache.pane(id).graphics.engine;
-        engine.selection_rects(selection_utf16, visible)
+        let mut rects = Vec::new();
+        let mut failed = None;
+        for run in &selection_utf16 {
+            match engine.selection_rects(Some(*run), visible) {
+                Ok(found) => rects.extend(found),
+                Err(error) => failed = Some(error),
+            }
+        }
+        match failed {
+            Some(error) => Err(error),
+            None => Ok(rects),
+        }
     };
     let label = id.label(window);
     match (caret, rects) {
@@ -8406,6 +8552,22 @@ fn insert_pane_text(
     if input.is_empty() {
         return;
     }
+    // 要件 7.1: **typing over a rectangle takes the rectangle out first**, and
+    // what is typed then goes in at its near corner. The selection the writer
+    // can see is what goes, which the linear span below would not be. A
+    // rectangular *insert* — the same characters put on every line — is a
+    // second and larger feature, and no requirement asks for it; doing it here
+    // would hide it behind an ordinary keystroke.
+    let rectangle = {
+        let state = states.of(id).borrow();
+        state.rectangular
+    };
+    let rectangle = rectangle.then(|| selected_runs(cache, id));
+    if let Some(ranges) = rectangle
+        && !ranges.is_empty()
+    {
+        remove_selection(window, id, document, states, cache, &ranges);
+    }
     let state = states.of(id);
     id.set_ime_buffer(window, "");
     let started = Instant::now();
@@ -8540,13 +8702,19 @@ fn toggle_mark(
     document: &Rc<OpenDocument>,
     states: &PaneStates,
     cache: &Rc<RefCell<RenderCache>>,
+    rectangular: bool,
 ) {
     let state = states.of(id);
     let source = document.text.borrow().clone();
     let caret = id.caret_byte(state, &source);
     let marking = {
         let mut state = state.borrow_mut();
-        state.mark = !state.mark;
+        // **The other shape restarts it rather than stopping it.** A writer who
+        // began a run and then asked for a rectangle asked for a rectangle
+        // (要件 7.1), and turning the key into a no-op there would be reading
+        // the press as the one before it.
+        state.mark = !state.mark || state.rectangular != rectangular;
+        state.rectangular = rectangular && state.mark;
         if state.mark {
             state.selection_anchor_source_byte = Some(caret);
             state.caret_source_byte = Some(caret);
@@ -8555,7 +8723,10 @@ fn toggle_mark(
     };
     cache.borrow_mut().log_diag(
         "edit",
-        &format!("mark pane={} on={marking} at={caret}", id.log_name()),
+        &format!(
+            "mark pane={} on={marking} rect={rectangular} at={caret}",
+            id.log_name()
+        ),
     );
     refresh_pane_from_state(window, cache, document, id, state, &source);
 }
@@ -8617,13 +8788,14 @@ fn kill_ring_action(
             remove_source_range(window, id, document, states, cache, caret, end);
         }
         KillAction::Copy | KillAction::Cut => {
-            let Some((start, end)) = selection_source_range(&state.borrow()) else {
+            let source = document.text.borrow().clone();
+            let ranges = selected_runs(cache, id);
+            if ranges.is_empty() {
                 return;
-            };
-            let taken = document.text.borrow()[start..end].to_owned();
-            kills.borrow_mut().ring.add(taken);
+            }
+            kills.borrow_mut().ring.add(selected_text(&source, &ranges));
             if what == KillAction::Cut {
-                remove_source_range(window, id, document, states, cache, start, end);
+                remove_selection(window, id, document, states, cache, &ranges);
             }
         }
         KillAction::Yank => {
@@ -8823,17 +8995,31 @@ fn copy_selection(
     cache: &Rc<RefCell<RenderCache>>,
     cut: bool,
 ) {
-    let Some((start, end)) = selection_source_range(&states.of(id).borrow()) else {
+    let source = document.text.borrow().clone();
+    let ranges = selected_runs(cache, id);
+    if ranges.is_empty() {
         return;
-    };
-    let selected = document.text.borrow()[start..end].to_owned();
-    if !clipboard::put_text(ime::window_handle(window), &selected) {
+    }
+    if !clipboard::put_text(ime::window_handle(window), &selected_text(&source, &ranges)) {
         window.set_render_status("クリップボードへ渡せませんでした".into());
         return;
     }
     if cut {
-        delete_adjacent_grapheme(window, id, document, states, cache, false);
+        remove_selection(window, id, document, states, cache, &ranges);
     }
+}
+
+/// What a selection holds, its runs joined by line breaks (要件 7.1).
+///
+/// **A rectangle comes out as lines**, one per line it covers, because that is
+/// the shape it was: a run that another program pastes back as a block. An
+/// ordinary selection is one run and comes out unchanged.
+fn selected_text(source: &str, ranges: &[(usize, usize)]) -> String {
+    ranges
+        .iter()
+        .map(|(start, end)| &source[*start..*end])
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn delete_adjacent_grapheme(
@@ -8851,14 +9037,20 @@ fn delete_adjacent_grapheme(
     // What one character is belongs to the text being shown, not to the
     // Markdown behind it (技術検証 3.12), so this asks the same text the pane
     // laid out.
+    // A selection goes out as a selection, whatever shape it is (要件 7.1).
+    let selected = selected_runs(cache, id);
+    if !selected.is_empty() {
+        remove_selection(window, id, document, states, cache, &selected);
+        return;
+    }
     let (start, end) = {
         let mut borrowed = cache.borrow_mut();
         let slot = &mut borrowed.pane(id).view.preview_slot;
         let shown = pane_text(window, id, slot, &source, revealed);
-        match selection_source_range(&state.borrow()) {
-            Some(range) => range,
-            None if backward => (shown.previous_grapheme(caret), caret),
-            None => (caret, shown.next_grapheme(caret)),
+        if backward {
+            (shown.previous_grapheme(caret), caret)
+        } else {
+            (caret, shown.next_grapheme(caret))
         }
     };
     remove_source_range(window, id, document, states, cache, start, end);
@@ -8879,29 +9071,102 @@ fn remove_source_range(
     start: usize,
     end: usize,
 ) {
+    splice_source(window, id, document, states, cache, start, end, "", start);
+}
+
+/// Take a selection out, however many runs it is in (要件 7.1).
+///
+/// **One recorded change, whatever shape the selection was.** The span from the
+/// first run's start to the last one's end is rebuilt without the runs and put
+/// back in its place, so a rectangle over twenty lines comes back with one
+/// press of `Ctrl+Z` (要件 7.1) rather than twenty.
+///
+/// The caret lands at the rectangle's near corner, which is where the writer
+/// was looking and where the next thing they type belongs.
+fn remove_selection(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    ranges: &[(usize, usize)],
+) {
+    let spliced = spliced_out(&document.text.borrow(), ranges);
+    let Some((start, end, kept)) = spliced else {
+        return;
+    };
+    splice_source(
+        window, id, document, states, cache, start, end, &kept, start,
+    );
+}
+
+/// The span a selection covers, and what is left of it once the runs are gone.
+///
+/// **One string for the whole span**, so that however many runs a rectangle is
+/// in, the document changes once and comes back with one press of `Ctrl+Z`.
+/// `None` when there is nothing to take out.
+fn spliced_out(source: &str, ranges: &[(usize, usize)]) -> Option<(usize, usize, String)> {
+    let (start, end) = (ranges.first()?.0, ranges.last()?.1);
+    // **A rectangle of no width covers lines but holds nothing.** Its span is
+    // not empty — it reaches from one line to another — so the ends alone
+    // cannot say that there is nothing to take out.
+    if start >= end || ranges.iter().all(|(start, end)| start >= end) {
+        return None;
+    }
+    let mut kept = String::new();
+    let mut at = start;
+    for (run_start, run_end) in ranges {
+        kept.push_str(&source[at..*run_start]);
+        at = *run_end;
+    }
+    kept.push_str(&source[at..end]);
+    Some((start, end, kept))
+}
+
+/// Put `text` in the place of the source between `start` and `end`, and redraw.
+///
+/// **The one way a document changes by having something taken out.** Backspace,
+/// Delete, 要件 11.4's `Ctrl+K` and `Alt+X`, and 要件 7.1's rectangle all end
+/// here, so every one of them records its undo the same way and one press of
+/// `Ctrl+Z` puts any of them back (要件 7.1). What differs between them is only
+/// which span they name and what they leave in it.
+#[allow(clippy::too_many_arguments)]
+fn splice_source(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    start: usize,
+    end: usize,
+    text: &str,
+    caret: usize,
+) {
     if start >= end {
         return;
     }
     let state = states.of(id);
     let mut source = document.text.borrow().clone();
     let removed = source[start..end].to_owned();
-    let next = replace_source_range(&mut source, (start, end), "");
+    replace_source_range(&mut source, (start, end), text);
+    let caret = caret.min(source.len());
     {
         let mut state = state.borrow_mut();
-        state.caret_source_byte = Some(next);
-        state.selection_anchor_source_byte = Some(next);
-        state.active_line_start = Some(source_line_start(&source, next));
+        state.caret_source_byte = Some(caret);
+        state.selection_anchor_source_byte = Some(caret);
+        state.active_line_start = Some(source_line_start(&source, caret));
         state.preferred_line = None;
         state.mark = false;
+        state.rectangular = false;
     }
     let change = Change {
         at: start,
         removed: removed.len(),
-        inserted: 0,
+        inserted: text.len(),
     };
-    document.record(start, removed, String::new());
+    document.record(start, removed, text.to_owned());
     *document.text.borrow_mut() = source.clone();
-    id.draw_edit(window, states, cache, document, &source, next, change);
+    id.draw_edit(window, states, cache, document, &source, caret, change);
 }
 
 /// Move a pane's caret: one grapheme along the line, or one line across.
@@ -8923,7 +9188,10 @@ fn move_pane_caret(
     let source = document.text.borrow().clone();
     let caret = id.caret_byte(state, &source);
     let revealed = PaneId::revealed_line(id.vertical(window), state, &source);
-    let preferred_line = state.borrow().preferred_line;
+    let (preferred_line, rectangular) = {
+        let state = state.borrow();
+        (state.preferred_line, state.rectangular)
+    };
 
     let moved = {
         let mut borrowed = cache.borrow_mut();
@@ -8949,7 +9217,8 @@ fn move_pane_caret(
                 } else {
                     document::next_word_boundary(text, at)
                 };
-                Ok((shown.source_byte_at_utf16(utf16_at_byte(text, moved)), None))
+                let landed = shown.source_byte_at_utf16(utf16_at_byte(text, moved));
+                Ok((landed, None))
             }
             -2 | 2 => {
                 let anchor = match preferred_line {
@@ -8982,10 +9251,29 @@ fn move_pane_caret(
     };
     let selection = {
         let mut state = state.borrow_mut();
-        let selection = update_selection_after_move(&mut state, caret, next, extend_selection);
+        update_selection_after_move(&mut state, caret, next, extend_selection);
         state.preferred_line = next_preferred;
-        selection
+        pane_selection(&state)
     };
+    // **Where a vertical step landed, in the file's own lines** (要件 7.1). The
+    // rectangle is drawn over the lines on screen, and a screen line says
+    // nothing about which line of the file the writer is on — that difference
+    // is the whole of why the rectangle was built the other way first.
+    if direction.abs() == 2 {
+        let from = document::caret_place(&source, caret);
+        let to = document::caret_place(&source, next);
+        cache.borrow_mut().log_diag(
+            "edit",
+            &format!(
+                "step pane={} dir={direction} rect={rectangular} {}:{}->{}:{}",
+                id.log_name(),
+                from.0,
+                from.1,
+                to.0,
+                to.1
+            ),
+        );
+    }
     // Whether the line the caret arrived on shows its Markdown now or once the
     // caret settles is the pane's to decide, not this function's.
     let shown_line = if PaneId::reveals_while_moving(id.vertical(window)) {
@@ -9044,9 +9332,9 @@ fn move_pane_to_line_edge(
 
     let selection = {
         let mut state = state.borrow_mut();
-        let selection = update_selection_after_move(&mut state, caret, next, extend_selection);
+        update_selection_after_move(&mut state, caret, next, extend_selection);
         state.preferred_line = None;
-        selection
+        pane_selection(&state)
     };
     let shown_line = if PaneId::reveals_while_moving(id.vertical(window)) {
         Some(source_line_start(&source, next))
@@ -9085,7 +9373,7 @@ fn set_pane_preedit(
     let caret = id.caret_byte(state, &source);
     let line = source_line_start(&source, caret);
     let revealed = PaneId::revealed_line(id.vertical(window), state, &source).unwrap_or(line);
-    let selection = selection_source_range(&state.borrow());
+    let selection = pane_selection(&state.borrow());
     let preedit = text.to_string();
     {
         let mut state = state.borrow_mut();
@@ -9492,6 +9780,53 @@ mod tests {
             utf16_at_byte(source, source.len()),
             source.encode_utf16().count()
         );
+    }
+
+    /// 要件 7.1: a rectangle comes out as lines, because that is the shape it
+    /// had — another program pastes it back as a block.
+    #[test]
+    fn a_rectangle_is_copied_as_one_line_per_line_it_covered() {
+        // The runs a rectangle three lines tall cuts: the same columns out of
+        // each of the three lines the engine laid out.
+        let source = "abcdef\nabcdef\nabcdef";
+        let ranges = [(1, 4), (8, 11), (15, 18)];
+
+        assert_eq!(selected_text(source, &ranges), "bcd\nbcd\nbcd");
+    }
+
+    /// An ordinary selection is one run and comes out as it stands.
+    #[test]
+    fn an_ordinary_selection_is_copied_unchanged() {
+        let source = "ひとつ目\nふたつ目";
+
+        assert_eq!(selected_text(source, &[(3, 16)]), "とつ目\nふ");
+    }
+
+    /// **One change for the whole rectangle** (要件 7.1): the span it covers,
+    /// with its runs gone and everything between them still there.
+    #[test]
+    fn taking_a_rectangle_out_leaves_one_span_to_record() {
+        let source = "abcdef\nabcdef\nabcdef";
+        let ranges = [(1, 4), (8, 11), (15, 18)];
+
+        let (start, end, kept) = spliced_out(source, &ranges).expect("three runs");
+        assert_eq!((start, end), (1, 18));
+        assert_eq!(kept, "ef\naef\na");
+        // What the document would become, put back together.
+        let mut after = source.to_owned();
+        after.replace_range(start..end, &kept);
+        assert_eq!(after, "aef\naef\naef");
+    }
+
+    /// A rectangle of no width takes nothing out, however many lines it covers.
+    #[test]
+    fn a_rectangle_of_no_width_takes_nothing() {
+        // Two lines, and nothing under the columns on either.
+        let source = "abcdef\nabcdef";
+        let ranges = [(2, 2), (9, 9)];
+
+        assert_eq!(selected_text(source, &ranges), "\n");
+        assert_eq!(spliced_out(source, &ranges), None);
     }
 
     /// `Ctrl+K` reaches the end of the line (要件 11.4).

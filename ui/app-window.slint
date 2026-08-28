@@ -272,7 +272,7 @@ export component AppWindow inherits Window {
     /// Ask the Kill Ring for something, in a pane (要件 11.4・11.6).
     callback pane-kill(int, int);
     /// Start selecting in a pane, or stop (要件 11.4 の`Ctrl+Space`).
-    callback pane-mark-toggled(int);
+    callback pane-mark-toggled(int, bool);
     callback view-mode-requested(int);
     /// Divide the focused pane, right or down (要件 6.4). True is right.
     callback divide-requested(bool);
@@ -1101,7 +1101,9 @@ export component AppWindow inherits Window {
                         tab-stepped(backwards) => { root.pane-tab-stepped(pane.id, backwards); }
                         focus-moved(towards) => { root.pane-focus-moved(pane.id, towards); }
                         kill-requested(what) => { root.pane-kill(pane.id, what); }
-                        mark-toggled => { root.pane-mark-toggled(pane.id); }
+                        mark-toggled(rectangular) => {
+                            root.pane-mark-toggled(pane.id, rectangular);
+                        }
                         escaped() => {
                             return root.dismiss-menus();
                         }
