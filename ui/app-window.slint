@@ -261,6 +261,8 @@ export component AppWindow inherits Window {
     callback pane-direction-toggled(int);
     /// Undo in the pane, or redo. True is the way forwards (要件 7.1, 11.2).
     callback pane-undo(int, bool);
+    /// Copy the pane's selection, or cut it. True takes it out (要件 11.2).
+    callback pane-copy(int, bool);
     callback view-mode-requested(int);
     /// Divide the focused pane, right or down (要件 6.4). True is right.
     callback divide-requested(bool);
@@ -1085,6 +1087,7 @@ export component AppWindow inherits Window {
                             root.pane-zoom-reset(pane.id);
                         }
                         undo-requested(forwards) => { root.pane-undo(pane.id, forwards); }
+                        copy-requested(cut) => { root.pane-copy(pane.id, cut); }
                         escaped() => {
                             return root.dismiss-menus();
                         }

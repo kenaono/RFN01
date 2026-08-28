@@ -238,6 +238,9 @@ export component EditorPane inherits Rectangle {
     /// Take back the last change to this document, or put it back
     /// (要件 7.1, 11.2). True is the way forwards.
     callback undo-requested(bool);
+    /// Put the selection on the clipboard (要件 11.2). **True also takes it out
+    /// of the document** — a cut is a copy that succeeded, followed by a delete.
+    callback copy-requested(bool);
     /// Escape was pressed and this pane had nothing open to close. **True if
     /// the window closed something of its own** — the app menu, or the
     /// typography panel — so that the key is not passed on twice.
@@ -1044,6 +1047,20 @@ export component EditorPane inherits Rectangle {
                                     } else if event.modifiers.control
                                         && (event.text == "a" || event.text == "A" || event.text == "\u{1}") {
                                         root.select-all();
+                                        accept
+                                    // 要件 11.2. **Taken here rather than left
+                                    // to the field**: the field is empty — it
+                                    // carries a conversion, not the document —
+                                    // so its own copy would hand over nothing.
+                                    // Paste needs no row: Ctrl+V fills the
+                                    // field, and `edited` carries it in.
+                                    } else if event.modifiers.control
+                                        && (event.text == "c" || event.text == "C" || event.text == "\u{3}") {
+                                        root.copy-requested(false);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "x" || event.text == "X" || event.text == "\u{18}") {
+                                        root.copy-requested(true);
                                         accept
                                     // 要件 11.5, and what the pane's own menu
                                     // has been advertising. Both shapes of

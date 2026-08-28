@@ -19,6 +19,10 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
+    # The clipboard (要件 11.2) and the moveable block it hands over. Features
+    # of a crate already vendored, so no new package is fetched.
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     # The wall clock, for naming this run's diagnostic log.
     "Win32_System_SystemInformation",
     # The colour dialog, for 要件 9's text and paper colours. Windows draws it,

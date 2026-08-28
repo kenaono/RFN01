@@ -1,5 +1,6 @@
 mod app_data;
 mod buffer;
+mod clipboard;
 mod diag;
 mod directwrite_probe;
 mod directwrite_render;
@@ -2167,6 +2168,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             select_whole_document(&window, &document, states.of(id), &cache, id);
+        }
+    });
+
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    window.on_pane_copy(move |pane, cut| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let document = states.document(id);
+            copy_selection(&window, id, &document, &states, &cache, cut);
         }
     });
 
@@ -8432,6 +8444,40 @@ fn undo_in_pane(
     cache
         .borrow_mut()
         .log_diag("edit", &format!("{kind} pane={name} caret={caret}"));
+}
+
+/// Put a pane's selection on the clipboard, and take it out if this is a cut
+/// (要件 11.2).
+///
+/// **What goes over is the source between the two ends.** Both panes hold the
+/// selection as source bytes even in live preview, where the caret is placed by
+/// the shown text and remembered by the byte behind it. So a copy made in the
+/// preview carries whatever markers lie between its ends, and pasting it back
+/// gives the document what it had.
+///
+/// **The cut waits on the copy.** Another program can be holding the clipboard,
+/// and taking the text out after the hand-over was turned away would lose it
+/// for a reason the writer never saw. When it does go, it goes through the
+/// ordinary delete, so one Undo puts it back (要件 7.1).
+fn copy_selection(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    cut: bool,
+) {
+    let Some((start, end)) = selection_source_range(&states.of(id).borrow()) else {
+        return;
+    };
+    let selected = document.text.borrow()[start..end].to_owned();
+    if !clipboard::put_text(ime::window_handle(window), &selected) {
+        window.set_render_status("クリップボードへ渡せませんでした".into());
+        return;
+    }
+    if cut {
+        delete_adjacent_grapheme(window, id, document, states, cache, false);
+    }
 }
 
 fn delete_adjacent_grapheme(
