@@ -269,6 +269,8 @@ export component AppWindow inherits Window {
     /// 1 right, 2 up, 3 down. Rust decides which pane that is, from the
     /// rectangles the panes were placed in, and sets `focused-pane` itself.
     callback pane-focus-moved(int, int);
+    /// Ask the Kill Ring for something, in a pane (要件 11.4・11.6).
+    callback pane-kill(int, int);
     callback view-mode-requested(int);
     /// Divide the focused pane, right or down (要件 6.4). True is right.
     callback divide-requested(bool);
@@ -1096,6 +1098,7 @@ export component AppWindow inherits Window {
                         copy-requested(cut) => { root.pane-copy(pane.id, cut); }
                         tab-stepped(backwards) => { root.pane-tab-stepped(pane.id, backwards); }
                         focus-moved(towards) => { root.pane-focus-moved(pane.id, towards); }
+                        kill-requested(what) => { root.pane-kill(pane.id, what); }
                         escaped() => {
                             return root.dismiss-menus();
                         }

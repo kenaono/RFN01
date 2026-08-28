@@ -248,6 +248,10 @@ export component EditorPane inherits Rectangle {
     /// 1 right, 2 up, 3 down — **directions on the screen**, whichever way the
     /// text in either pane happens to run.
     callback focus-moved(int);
+    /// Ask the Kill Ring for something (要件 11.4・11.6). 0 は`Ctrl+K`＝行末まで、
+    /// 1 は`Alt+W`＝控える、2 は`Alt+X`＝抜いて控える、3 は`Alt+Y`＝入れる、
+    /// 4 は`Alt+Shift+Y`＝1つ前のものに入れ替える。
+    callback kill-requested(int);
     /// Escape was pressed and this pane had nothing open to close. **True if
     /// the window closed something of its own** — the app menu, or the
     /// typography panel — so that the key is not passed on twice.
@@ -1089,6 +1093,41 @@ export component EditorPane inherits Rectangle {
                                     // below**, which indents: the modifier is
                                     // what tells the two apart, and the chain
                                     // is read in order.
+                                    // 要件 11.4. **Ctrl+D is the Delete key**,
+                                    // so it goes through the same callback:
+                                    // the requirement asks for the same act,
+                                    // not for a second way of doing it.
+                                    } else if event.modifiers.control
+                                        && (event.text == "d" || event.text == "D" || event.text == "\u{4}") {
+                                        root.delete-pressed();
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "k" || event.text == "K" || event.text == "\u{b}") {
+                                        root.kill-requested(0);
+                                        accept
+                                    // **Alt without Ctrl** for the three that
+                                    // Emacs puts on Meta: Windows reads Ctrl
+                                    // held with Alt as AltGr, and a row that
+                                    // did not say so would answer a writer
+                                    // typing a character on a European layout.
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == "w" || event.text == "W") {
+                                        root.kill-requested(1);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == "x" || event.text == "X") {
+                                        root.kill-requested(2);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && !event.modifiers.shift
+                                        && (event.text == "y" || event.text == "Y") {
+                                        root.kill-requested(3);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && event.modifiers.shift
+                                        && (event.text == "y" || event.text == "Y") {
+                                        root.kill-requested(4);
+                                        accept
                                     } else if event.modifiers.control && event.text == Key.Tab {
                                         root.tab-stepped(event.modifiers.shift);
                                         accept

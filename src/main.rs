@@ -10,6 +10,7 @@ mod file_io;
 mod file_tree;
 mod find;
 mod ime;
+mod kill_ring;
 mod pane_layout;
 mod quick_draft;
 mod searcher;
@@ -34,6 +35,7 @@ use buffer::{DocumentFile, ExternalChange};
 use diag::DiagLog;
 use directwrite_render::{CaretGeometry, SelectionRect, TextEngine, TileSink, WritingMode};
 use document::{DocumentCounts, PreviewDocument, caret_place};
+use kill_ring::{KillAction, KillRing};
 use pane_layout::{Layout, Rect, Split, Towards, neighbour};
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use slint::{
@@ -1215,6 +1217,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // 要件 12: the quick draft's window, once it has been asked for. **Held
     // here rather than by the window itself**, so that asking twice brings the
     // one that is open forward.
+    // 要件 11.6: the editor's own list of strings, kept apart from Windows'
+    // clipboard. It belongs to the run rather than to a document, because a
+    // kill taken from one document is worth putting into another.
+    let kill_ring: Rc<RefCell<Kills>> = Rc::default();
     let draft = Rc::new(RefCell::new(quick_draft::QuickDraftWindow::default()));
     let live = Live {
         states: pane_states.clone(),
@@ -2194,6 +2200,18 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             copy_selection(&window, id, &document, &states, &cache, cut);
+        }
+    });
+
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    let kills = kill_ring.clone();
+    window.on_pane_kill(move |pane, what| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let document = states.document(id);
+            kill_ring_action(&window, id, &document, &states, &cache, &kills, what);
         }
     });
 
@@ -8470,6 +8488,163 @@ fn undo_in_pane(
         .log_diag("edit", &format!("{kind} pane={name} caret={caret}"));
 }
 
+/// The Kill Ring, and where its last yank landed (要件 11.4・11.6).
+///
+/// **The yank is remembered as text at a place, not as "the last thing done".**
+/// `Alt+Shift+Y` may only replace a yank that is still standing, and asking
+/// whether the document still holds that text there answers it without every
+/// other edit having to say it happened.
+#[derive(Default)]
+struct Kills {
+    ring: KillRing,
+    last_yank: Option<LastYank>,
+}
+
+/// What a yank put in, and where.
+struct LastYank {
+    pane: PaneId,
+    at: usize,
+    text: String,
+}
+
+/// Do what one of 要件 11.4's Kill Ring keys asks.
+///
+/// **The ring is not the clipboard** (要件 11.6). `Ctrl+C` and `Ctrl+X` reach
+/// Windows'; `Ctrl+K`, `Alt+W` and `Alt+X` reach this one. A writer can carry
+/// one thing between programs and another between paragraphs, which is the
+/// whole of why the requirement asks for two.
+///
+/// Every taking and every putting goes through the ordinary edit paths
+/// (`remove_source_range`, `insert_pane_text`), so each of these is one press
+/// of `Ctrl+Z` away from being undone (要件 7.1) — **`Alt+Shift+Y` included**,
+/// because replacing the yanked run is one change and not a delete followed by
+/// an insert.
+#[allow(clippy::too_many_arguments)]
+fn kill_ring_action(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    kills: &Rc<RefCell<Kills>>,
+    what: i32,
+) {
+    let Some(what) = KillAction::from_index(what) else {
+        return;
+    };
+    let state = states.of(id);
+    match what {
+        KillAction::ToLineEnd => {
+            let source = document.text.borrow().clone();
+            let caret = id.caret_byte(state, &source);
+            let end = line_end_to_kill(&source, caret);
+            if end <= caret {
+                return;
+            }
+            kills.borrow_mut().ring.add(source[caret..end].to_owned());
+            remove_source_range(window, id, document, states, cache, caret, end);
+        }
+        KillAction::Copy | KillAction::Cut => {
+            let Some((start, end)) = selection_source_range(&state.borrow()) else {
+                return;
+            };
+            let taken = document.text.borrow()[start..end].to_owned();
+            kills.borrow_mut().ring.add(taken);
+            if what == KillAction::Cut {
+                remove_source_range(window, id, document, states, cache, start, end);
+            }
+        }
+        KillAction::Yank => {
+            let Some(text) = kills.borrow_mut().ring.newest().map(str::to_owned) else {
+                return;
+            };
+            yank_into_pane(window, id, document, states, cache, kills, text);
+        }
+        KillAction::YankOlder => {
+            // **The yank has to still be there.** The writer may have typed,
+            // undone or clicked since, and putting the older kill over whatever
+            // is at those bytes now would take out text nobody killed.
+            let Some(end) = standing_yank(id, states, document, kills) else {
+                return;
+            };
+            let Some(text) = kills.borrow_mut().ring.older().map(str::to_owned) else {
+                return;
+            };
+            {
+                let mut state = state.borrow_mut();
+                state.selection_anchor_source_byte = Some(end.0);
+                state.caret_source_byte = Some(end.1);
+            }
+            yank_into_pane(window, id, document, states, cache, kills, text);
+        }
+    }
+}
+
+/// How far a `Ctrl+K` reaches from the caret (要件 11.4).
+///
+/// To the end of the line — and **when the caret is already there, the line
+/// break itself**. Without that, the key does nothing at every line end and a
+/// writer clearing a passage has to reach for another one; with it, pressing it
+/// twice takes the line and then closes the gap, which is what the key is for.
+fn line_end_to_kill(source: &str, caret: usize) -> usize {
+    let line_end = source[caret..]
+        .find('\n')
+        .map_or(source.len(), |offset| caret + offset);
+    if line_end > caret {
+        line_end
+    } else {
+        // A line break is one byte, so this is a character boundary wherever it
+        // lands, and `min` covers the caret sitting at the very end.
+        (caret + 1).min(source.len())
+    }
+}
+
+/// Where the last yank still stands, as the run it put in.
+///
+/// `None` if it was in another pane, or if the document no longer holds that
+/// text there, or if the caret has left its end — each of those means the
+/// writer has done something since, and `Alt+Shift+Y` is about the yank that is
+/// still in front of them.
+fn standing_yank(
+    id: PaneId,
+    states: &PaneStates,
+    document: &Rc<OpenDocument>,
+    kills: &Rc<RefCell<Kills>>,
+) -> Option<(usize, usize)> {
+    let borrowed = kills.borrow();
+    let last = borrowed.last_yank.as_ref()?;
+    if last.pane != id {
+        return None;
+    }
+    let source = document.text.borrow();
+    let end = last.at + last.text.len();
+    if source.get(last.at..end) != Some(last.text.as_str()) {
+        return None;
+    }
+    let state = states.of(id);
+    let caret = id.caret_byte(state, &source);
+    (caret == end).then_some((last.at, end))
+}
+
+/// Put a kill into the pane, and write down where it went.
+fn yank_into_pane(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    kills: &Rc<RefCell<Kills>>,
+    text: String,
+) {
+    // Normalised here as well as inside the insert, so that the run written
+    // down is the run the document ends up holding.
+    let text = normalize_typed_input(&text);
+    insert_pane_text(window, id, document, states, cache, &text, false);
+    let caret = states.of(id).borrow().caret_source_byte;
+    let at = caret.and_then(|caret| caret.checked_sub(text.len()));
+    kills.borrow_mut().last_yank = at.map(|at| LastYank { pane: id, at, text });
+}
+
 /// Bring out the tab after the one a pane is showing, or the one before
 /// (要件 11.3).
 ///
@@ -8598,7 +8773,7 @@ fn delete_adjacent_grapheme(
     backward: bool,
 ) {
     let state = states.of(id);
-    let mut source = document.text.borrow().clone();
+    let source = document.text.borrow().clone();
     let caret = id.caret_byte(state, &source);
     let revealed = PaneId::revealed_line(id.vertical(window), state, &source);
     // What one character is belongs to the text being shown, not to the
@@ -8614,10 +8789,29 @@ fn delete_adjacent_grapheme(
             None => (caret, shown.next_grapheme(caret)),
         }
     };
+    remove_source_range(window, id, document, states, cache, start, end);
+}
+
+/// Take a run of source out of the document, and redraw.
+///
+/// **The one way text leaves a document by being deleted.** Backspace, Delete
+/// and 要件 11.4's `Ctrl+K` and `Alt+X` all end here, so all of them record
+/// their undo the same way and one press of `Ctrl+Z` puts any of them back
+/// (要件 7.1). What differs between them is only which run they name.
+fn remove_source_range(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    start: usize,
+    end: usize,
+) {
     if start >= end {
         return;
     }
-
+    let state = states.of(id);
+    let mut source = document.text.borrow().clone();
     let removed = source[start..end].to_owned();
     let next = replace_source_range(&mut source, (start, end), "");
     {
@@ -9211,6 +9405,49 @@ mod tests {
             utf16_at_byte(source, source.len()),
             source.encode_utf16().count()
         );
+    }
+
+    /// `Ctrl+K` reaches the end of the line (要件 11.4).
+    #[test]
+    fn a_kill_reaches_the_end_of_the_line() {
+        let source = "ひとつ目\nふたつ目\n";
+
+        // Between the second and third character of the first line.
+        assert_eq!(line_end_to_kill(source, 6), 12);
+    }
+
+    /// At the end of a line there is nothing left of it, so the break goes.
+    /// **Two presses take the line and then close the gap**, which is what
+    /// makes the key usable at all.
+    #[test]
+    fn a_kill_at_the_end_of_a_line_takes_the_break() {
+        let source = "ひとつ目\nふたつ目\n";
+
+        assert_eq!(line_end_to_kill(source, 12), 13);
+    }
+
+    /// The very end of the document has neither line nor break left.
+    #[test]
+    fn a_kill_at_the_end_of_the_document_reaches_nothing() {
+        let source = "ひとつ目";
+
+        assert_eq!(line_end_to_kill(source, source.len()), source.len());
+    }
+
+    /// A document that does not end in a break still has a line to take.
+    #[test]
+    fn a_kill_on_the_last_line_reaches_the_end_of_the_text() {
+        let source = "ひとつ目\nふたつ目";
+
+        assert_eq!(line_end_to_kill(source, 13), source.len());
+    }
+
+    /// An empty line is a break and nothing else.
+    #[test]
+    fn a_kill_on_an_empty_line_takes_its_break() {
+        let source = "\n\nあと";
+
+        assert_eq!(line_end_to_kill(source, 0), 1);
     }
 
     /// The strip has two ends and the key has one direction (要件 11.3).
