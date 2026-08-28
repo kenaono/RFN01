@@ -97,6 +97,11 @@ export struct PaneScreen {
     // than as its source: half of the four modes (要件 7.2). **Per pane per
     // tab**, which is why it is here and not on the window.
     preview: bool,
+    // How much this pane magnifies the text, as a percentage (要件 9).
+    // **Per pane, not per tab**: it is how close the writer is sitting to this
+    // half of the window, and a tab brought out in front of it is read at the
+    // same distance as the one before it.
+    zoom: int,
 
     // Written by the pane, read by Rust.
     ime-buffer: string,
@@ -206,8 +211,10 @@ export component EditorPane inherits Rectangle {
     /// Show this document's file in Explorer (要件 5.2).
     callback reveal-requested();
     callback typography-requested();
-    callback zoom-in-requested();
-    callback zoom-out-requested();
+    /// 要件 9, 11.5: magnify this pane, in notches — positive in, negative out.
+    /// **The pane the wheel is over, not the focused one**: `Ctrl+ホイール` is
+    /// pointed at something, and pointing at a pane is asking about that pane.
+    callback zoom-stepped(int);
     callback zoom-reset-requested();
     callback close-active-tab();
     /// Close every tab in the window but the one in front of this pane, or
@@ -593,12 +600,21 @@ export component EditorPane inherits Rectangle {
                                 root.typography-requested();
                             }
                         }
+                        // **These three take the keyboard back themselves**,
+                        // where the rows above them let the window do it with
+                        // `focus-generation`. The two signals they send are
+                        // also the wheel's, and the wheel magnifies whatever
+                        // the pointer is over without moving the keyboard —
+                        // so the window cannot tell from the signal alone
+                        // whether focus should follow, and this is the end
+                        // that knows.
                         MenuRow {
                             title: "Zoom In";
                             shortcut: "Ctrl+=";
                             activated => {
                                 pane-menu.close();
-                                root.zoom-in-requested();
+                                root.zoom-stepped(1);
+                                ime-input.focus();
                             }
                         }
                         MenuRow {
@@ -606,7 +622,8 @@ export component EditorPane inherits Rectangle {
                             shortcut: "Ctrl+-";
                             activated => {
                                 pane-menu.close();
-                                root.zoom-out-requested();
+                                root.zoom-stepped(-1);
+                                ime-input.focus();
                             }
                         }
                         MenuRow {
@@ -615,6 +632,7 @@ export component EditorPane inherits Rectangle {
                             activated => {
                                 pane-menu.close();
                                 root.zoom-reset-requested();
+                                ime-input.focus();
                             }
                         }
                     }
@@ -1027,6 +1045,22 @@ export component EditorPane inherits Rectangle {
                                         && (event.text == "a" || event.text == "A" || event.text == "\u{1}") {
                                         root.select-all();
                                         accept
+                                    // 要件 11.5, and what the pane's own menu
+                                    // has been advertising. Both shapes of
+                                    // each key: the row the writer presses
+                                    // sends "=" or "+" depending on Shift, and
+                                    // "-" or "_".
+                                    } else if event.modifiers.control
+                                        && (event.text == "=" || event.text == "+") {
+                                        root.zoom-stepped(1);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "-" || event.text == "_") {
+                                        root.zoom-stepped(-1);
+                                        accept
+                                    } else if event.modifiers.control && event.text == "0" {
+                                        root.zoom-reset-requested();
+                                        accept
                                     } else if event.text == Key.Escape {
                                         // The way out of a menu (要件 6.7).
                                         // **Handled here rather than inside the
@@ -1087,6 +1121,21 @@ export component EditorPane inherits Rectangle {
                             // system one is taken away there.
                             mouse-cursor: root.vertical ? none : text;
                             scroll-event(event) => {
+                                // 要件 9, 11.5: with Control down the wheel
+                                // magnifies this pane instead of moving it.
+                                // **Whichever axis the wheel reports** — a
+                                // wheel that only says y is the usual one, and
+                                // a pane writing vertically still gets a
+                                // notch out of it.
+                                if (event.modifiers.control) {
+                                    let notch = event.delta-y != 0px
+                                        ? event.delta-y
+                                        : event.delta-x;
+                                    if (notch != 0px) {
+                                        root.zoom-stepped(notch > 0px ? 1 : -1);
+                                    }
+                                    return accept;
+                                }
                                 if (root.vertical) {
                                     // 要件 7.5: the wheel moves the document
                                     // sideways. A wheel that only reports y still

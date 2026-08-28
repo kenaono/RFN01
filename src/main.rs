@@ -80,6 +80,17 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 /// pays that over and over for results nobody sees. The value is applied to the
 /// toolbar immediately either way; only the re-measuring waits.
 const SPEC_SETTLE: Duration = Duration::from_millis(150);
+/// What one notch of 要件 11.5's `Ctrl+ホイール` or `Ctrl+=` is worth, and how
+/// far the zoom may be taken either way.
+///
+/// **The bounds are held here rather than at each caller** — the buttons, the
+/// keys, the wheel and a restored session all arrive at the same two numbers,
+/// and a session that was hand-edited must not be able to open at 4000%.
+const ZOOM_STEP: i32 = 10;
+const ZOOM_MIN: i32 = 50;
+const ZOOM_MAX: i32 = 240;
+/// What a pane magnifies by until anything says otherwise.
+const ZOOM_DEFAULT: i32 = 100;
 /// How long the caret must stop moving before the Markdown of its line is
 /// revealed. Revealing rewrites that block's text, which costs a whole block's
 /// worth of pixels; a held arrow key would pay that on every repeat.
@@ -1051,10 +1062,11 @@ fn epoch_seconds() -> u64 {
 /// debug log compared against a release one shows a regression that is not
 /// there.
 fn perf_log_header(window: &AppWindow) -> String {
-    // The horizontal spec, because the header is one line and the two panes
-    // may be set differently now (要件 9). What it is for is the font size and
-    // the build profile, and the size is the same either way.
-    let typography = typography_for(window, window.get_zoom_percent(), false, true);
+    // The horizontal pane's spec, because the header is one line and the two
+    // panes may be set differently (要件 9). What it is for is the font size
+    // and the build profile.
+    let here = PaneId::Horizontal;
+    let typography = pane_typography(window, here);
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
@@ -1064,7 +1076,7 @@ fn perf_log_header(window: &AppWindow) -> String {
         "session started={} profile={profile} zoom={zoom} font={font:.1} \
          space={space:.2} lead={lead:.2} head={head:.2}",
         epoch_seconds(),
-        zoom = window.get_zoom_percent(),
+        zoom = here.zoom(window),
         font = typography.font_size,
         space = typography.character_spacing,
         lead = typography.line_spacing,
@@ -1111,14 +1123,14 @@ fn main() -> Result<(), slint::PlatformError> {
         None => WorkFolder::default(),
     };
     window.set_tree_open(session.as_ref().is_none_or(|session| session.tree_shown));
-    // 要件 9: the zoom the writer left. Held within the same bounds the buttons
-    // hold it to, so a hand-edited session cannot open at 4000%. A session from
-    // a build that did not write one says 0, which is not a zoom and is left at
-    // the default.
-    if let Some(zoom) = session.as_ref().map(|session| session.zoom)
-        && zoom > 0
-    {
-        window.set_zoom_percent(zoom.clamp(50, 240));
+    // 要件 9: the zoom each pane was left at. **Before the tabs are opened**,
+    // so the first thing drawn is already the size the writer was reading at
+    // rather than something that jumps once. A pane the session says nothing
+    // about arrives as 0, which `zoom_from` reads as the default.
+    if let Some(session) = &session {
+        for (id, stored) in PaneId::ALL.into_iter().zip(session.panes.iter()) {
+            id.set_zoom(&window, stored.zoom);
+        }
     }
     // 要件 8.5: and where the window itself was. **Before it is shown**, so it
     // opens where it belongs rather than moving there in front of the writer.
@@ -1236,7 +1248,7 @@ fn main() -> Result<(), slint::PlatformError> {
         &format!(
             "started={started} profile={profile} file={diag_path} \
              window={width}x{height} scale={scale:.2} mode={mode} split={split} \
-             zoom={zoom} limit={MAX_DOCUMENT_CHARACTERS}",
+             zoom={zoom}/{other_zoom} limit={MAX_DOCUMENT_CHARACTERS}",
             started = diag_started.stamp(),
             profile = if cfg!(debug_assertions) {
                 "debug"
@@ -1248,7 +1260,10 @@ fn main() -> Result<(), slint::PlatformError> {
             scale = window.window().scale_factor(),
             mode = window.get_editor_mode(),
             split = u8::from(window.get_split_view()),
-            zoom = window.get_zoom_percent(),
+            // Both panes' (要件 9). A session line that named one number
+            // would say nothing about the pane the writer was not in.
+            zoom = PaneId::Horizontal.zoom(&window),
+            other_zoom = PaneId::Vertical.zoom(&window),
         ),
     );
     // 要件 7.3.2: what an inline object does to the line it stands in, measured
@@ -1312,7 +1327,6 @@ fn main() -> Result<(), slint::PlatformError> {
             &opening,
             id,
             &initial,
-            100,
             None,
             None,
             None,
@@ -1937,11 +1951,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
-    window.on_zoom_in(move || {
+    window.on_pane_zoom(move |pane, notches| {
         if let Some(window) = weak.upgrade() {
-            let zoom = (window.get_zoom_percent() + 10).min(240);
-            window.set_zoom_percent(zoom);
-            schedule_relayout(&window, &states, &cache, &timer);
+            let id = PaneId::from_index(pane);
+            let percent = id.zoom(&window) + notches * ZOOM_STEP;
+            zoom_pane(&window, &states, &cache, &timer, id, percent);
         }
     });
 
@@ -1949,22 +1963,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
-    window.on_zoom_out(move || {
+    window.on_pane_zoom_reset(move |pane| {
         if let Some(window) = weak.upgrade() {
-            let zoom = (window.get_zoom_percent() - 10).max(50);
-            window.set_zoom_percent(zoom);
-            schedule_relayout(&window, &states, &cache, &timer);
-        }
-    });
-
-    let weak = window.as_weak();
-    let states = pane_states.clone();
-    let cache = render_cache.clone();
-    let timer = spec_timer.clone();
-    window.on_zoom_reset(move || {
-        if let Some(window) = weak.upgrade() {
-            window.set_zoom_percent(100);
-            schedule_relayout(&window, &states, &cache, &timer);
+            let id = PaneId::from_index(pane);
+            zoom_pane(&window, &states, &cache, &timer, id, ZOOM_DEFAULT);
         }
     });
 
@@ -2645,34 +2647,7 @@ impl Live {
     /// the only hint. That is what the session had before this and is still
     /// right whenever nothing about the layout has changed.
     fn view_top(&self, window: &AppWindow, id: PaneId) -> Option<usize> {
-        let document = self.states.document(id);
-        let source = document.text.borrow().clone();
-        let zoom = window.get_zoom_percent();
-        let state = self.states.of(id);
-        let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
-        // The near edge of the view, in the content's own coordinates. The flow
-        // axis is x where the text runs down the page and y where it runs
-        // across; the other axis is the head of the line, which is where a line
-        // is named from.
-        let near = -id.scroll(window) + 1.0;
-        let (x, y) = if id.vertical(window) {
-            (near, 1.0)
-        } else {
-            (1.0, near)
-        };
-        let mut borrowed = self.cache.borrow_mut();
-        let cache = &mut *borrowed;
-        hit_test_pane(
-            window,
-            cache,
-            &document,
-            id,
-            &source,
-            zoom,
-            active_line_start,
-            x,
-            y,
-        )
+        view_top(window, &self.states, &self.cache, id)
     }
 
     /// Bring a tab out in front of one pane.
@@ -2901,6 +2876,7 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
             let strip = tabs.of(*id);
             app_data::SessionPane {
                 active: strip.active,
+                zoom: id.zoom(window),
                 tabs: strip.tabs.iter().map(session_tab).collect(),
             }
         })
@@ -2916,7 +2892,6 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         expanded: folder.expanded.iter().cloned().collect(),
         tree_shown: window.get_tree_open(),
         recent: live.recent.borrow().clone(),
-        zoom: window.get_zoom_percent(),
     }
 }
 
@@ -5283,6 +5258,20 @@ fn usable_preview_height(height: f32) -> u32 {
     }
 }
 
+/// What a stored zoom percentage means (要件 9).
+///
+/// **Zero is not a zoom.** It is a pane row nothing has written yet and a
+/// session from a build that did not keep one, and both mean "however the
+/// editor opens" rather than "invisible". Everything else is held inside the
+/// bounds the keys hold it to, so neither a hand-edited session nor a wheel
+/// spun a hundred notches can leave a pane somewhere it cannot be read at.
+fn zoom_from(stored: i32) -> i32 {
+    match stored {
+        0 => ZOOM_DEFAULT,
+        percent => percent.clamp(ZOOM_MIN, ZOOM_MAX),
+    }
+}
+
 fn font_size_for(base_px: i32, zoom_percent: i32) -> f32 {
     base_px.max(1) as f32 * zoom_percent as f32 / 100.0
 }
@@ -5296,8 +5285,25 @@ fn font_size_for(base_px: i32, zoom_percent: i32) -> f32 {
 /// vertical text. Asking for the direction here is what keeps the writer from
 /// moving a number that cannot do anything in the pane they are looking at.
 ///
-/// Zoom is passed rather than read back, because the caller may be applying a
-/// new one; the rest only ever change through their own callback.
+/// Zoom, direction and preview are passed rather than read from a pane, because
+/// the perf log's header has a spec to describe and no pane to describe it for.
+/// Everything that actually sets a pane goes through [`pane_typography`].
+/// The spec one pane is set with, read entirely from that pane.
+///
+/// **Every path that lays a pane out comes through here**, so none of them can
+/// set a pane at another pane's zoom or in the other pane's direction. The
+/// three things it asks for all live in the pane's own row: how far the writer
+/// has magnified it (要件 9), which way the tab in front of it runs, and
+/// whether that tab is showing the formatted text or its source (要件 7.2).
+fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
+    typography_for(
+        window,
+        id.zoom(window),
+        id.vertical(window),
+        id.shows_preview(window),
+    )
+}
+
 fn typography_for(
     window: &AppWindow,
     zoom_percent: i32,
@@ -5773,6 +5779,47 @@ fn save_settings(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
 /// The zoom goes through here too. It has always had exactly this cost; the
 /// typography controls only made it obvious, because they are the ones a person
 /// sweeps through a range looking for a value they like.
+/// Magnify one pane, and leave it looking at what it was looking at
+/// (要件 9, 8.5).
+///
+/// **The character at the near edge, asked before the size changes.** Where the
+/// document sits is a pixel offset, and every pixel offset means somewhere else
+/// once the text is set larger: magnifying a pane by following the scroll bar
+/// would carry the writer off the passage they were reading, which is the one
+/// thing a zoom must not do. The hold stands until the caret moves, the same
+/// rule a restored session and a tab switch use.
+///
+/// The relayout is scheduled rather than run: a held key or a spun wheel sends
+/// these faster than a document can be measured, and only the last one matters.
+fn zoom_pane(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    timer: &Rc<Timer>,
+    id: PaneId,
+    percent: i32,
+) {
+    if id.zoom(window) == zoom_from(percent) {
+        return;
+    }
+    let caret = states.of(id).borrow().caret_source_byte;
+    // **A hold already standing is kept rather than taken again.** A spun
+    // wheel arrives faster than the 150ms the relayout waits, so by the second
+    // notch the engine is measured at a size the pane is no longer set to, and
+    // asking it where the near edge is would re-measure the whole document —
+    // paying, once per notch, exactly what the wait exists to avoid. The
+    // passage to come back to is the one the writer was on when they started
+    // spinning, which is what the standing anchor already says.
+    let standing = held_view(cache.borrow_mut().pane(id).view.top_anchor, caret);
+    let top = match standing {
+        Some(byte) => Some(byte),
+        None => view_top(window, states, cache, id),
+    };
+    id.set_zoom(window, percent);
+    hold_view(cache, id, top, caret);
+    schedule_relayout(window, states, cache, timer);
+}
+
 fn schedule_relayout(
     window: &AppWindow,
     states: &PaneStates,
@@ -5798,7 +5845,6 @@ fn schedule_relayout(
 /// measurement in both engines, so there is nothing finer to do than this.
 fn relayout_panes(window: &AppWindow, states: &PaneStates, cache: &Rc<RefCell<RenderCache>>) {
     let started = Instant::now();
-    let zoom = window.get_zoom_percent();
     // Every anchor goes, whether or not its pane is on screen: the anchor is a
     // coordinate in a layout that is about to stop existing, and a pane that
     // comes back holding one would step the caret to a line by the old
@@ -5826,11 +5872,18 @@ fn relayout_panes(window: &AppWindow, states: &PaneStates, cache: &Rc<RefCell<Re
     // 要件 9: the settings are the app's and outlive the run. Written here
     // because everything that changes one of them asks for this relayout.
     save_settings(window, cache);
-    let typography = typography_for(window, zoom, false, true);
+    // The focused pane's spec, because the line is one line. **Both zooms**
+    // though: 要件 9 gives each pane its own, and the wheel magnifies the pane
+    // it is over rather than the one holding the keyboard — a line naming one
+    // number would leave out the pane that just changed.
+    let here = focused_pane(window);
+    let typography = pane_typography(window, here);
     cache.borrow_mut().log_perf(&format!(
-        "relayout total={total:.2} zoom={zoom} font={font:.1} \
+        "relayout total={total:.2} zoom={zoom}/{other_zoom} font={font:.1} \
          space={space:.2} lead={lead:.2} head={head:.2} bytes={bytes}",
         total = elapsed_ms(started),
+        zoom = here.zoom(window),
+        other_zoom = here.other().zoom(window),
         font = typography.font_size,
         space = typography.character_spacing,
         lead = typography.line_spacing,
@@ -5906,7 +5959,6 @@ fn refresh_pane_from_state(
         document,
         id,
         source,
-        window.get_zoom_percent(),
         PaneId::revealed_line(id.vertical(window), state, source),
         caret_source_byte,
         selection,
@@ -6074,6 +6126,7 @@ impl PaneId {
             // one on the source, which is where the four modes are counted from
             // (`TabView::for_pane` says the same thing about a tab).
             preview: self.is_right(),
+            zoom: ZOOM_DEFAULT,
             content_width: 640,
             content_height: 520,
             shown_width: 640.0,
@@ -6263,6 +6316,24 @@ impl PaneId {
 
     fn set_shows_preview(self, window: &AppWindow, shows: bool) {
         self.update_screen(window, |screen| screen.preview = shows);
+    }
+
+    /// How much this pane magnifies the text (要件 9).
+    ///
+    /// In the pane's row rather than on the window, because 要件 9 asks for it
+    /// per pane: two views of one document are two distances to read it from.
+    /// **Everything that sets a pane's text asks this rather than being handed
+    /// it**, so no path can lay one pane out at another's size.
+    ///
+    /// A row that has never been written says 0, which [`zoom_from`] reads as
+    /// no zoom at all rather than as 0%.
+    fn zoom(self, window: &AppWindow) -> i32 {
+        zoom_from(self.screen(window).zoom)
+    }
+
+    fn set_zoom(self, window: &AppWindow, percent: i32) {
+        let held = zoom_from(percent);
+        self.update_screen(window, |screen| screen.zoom = held);
     }
 
     /// Where the caret was last placed, along the flow.
@@ -6508,7 +6579,6 @@ impl PaneId {
                 document,
                 self,
                 source,
-                window.get_zoom_percent(),
                 Some(source_line_start(source, caret)),
                 Some(caret),
                 None,
@@ -6808,6 +6878,46 @@ fn held_view(anchor: Option<ViewAnchor>, caret: Option<usize>) -> Option<usize> 
         .map(|anchor| anchor.byte)
 }
 
+/// The source byte at the near edge of what a pane is showing (要件 8.5).
+///
+/// **Free rather than a method** because a zoom asks it too, and a zoom is
+/// carried out by a callback holding the pane states and the cache and nothing
+/// else. [`Live::view_top`] is the same question asked when a view is being
+/// put away.
+fn view_top(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+) -> Option<usize> {
+    let document = states.document(id);
+    let source = document.text.borrow().clone();
+    let state = states.of(id);
+    let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
+    // The near edge of the view, in the content's own coordinates. The flow
+    // axis is x where the text runs down the page and y where it runs
+    // across; the other axis is the head of the line, which is where a line
+    // is named from.
+    let near = -id.scroll(window) + 1.0;
+    let (x, y) = if id.vertical(window) {
+        (near, 1.0)
+    } else {
+        (1.0, near)
+    };
+    let mut borrowed = cache.borrow_mut();
+    let cache = &mut *borrowed;
+    hit_test_pane(
+        window,
+        cache,
+        &document,
+        id,
+        &source,
+        active_line_start,
+        x,
+        y,
+    )
+}
+
 /// Hold a pane's view on a passage, until the writer looks somewhere else
 /// (要件 8.5).
 fn hold_view(
@@ -6984,19 +7094,16 @@ fn refresh_pane(
     document: &OpenDocument,
     id: PaneId,
     source: &str,
-    zoom_percent: i32,
     active_line_start: Option<usize>,
     caret_source_byte: Option<usize>,
     selection_source_bytes: Option<(usize, usize)>,
     preedit: &str,
 ) {
     let refresh_started = Instant::now();
-    let typography = typography_for(
-        window,
-        zoom_percent,
-        id.vertical(window),
-        id.shows_preview(window),
-    );
+    // Read once and logged: how far this pane is magnified is half of why a
+    // draw cost what it did, and the two panes may be set differently now.
+    let zoom_percent = id.zoom(window);
+    let typography = pane_typography(window, id);
     let font_size = typography.font_size;
     let line_extent_px = id.line_extent_px(window);
     let mut borrowed = cache.borrow_mut();
@@ -7746,7 +7853,6 @@ fn hit_test_pane(
     document: &OpenDocument,
     id: PaneId,
     source: &str,
-    zoom: i32,
     active_line_start: Option<usize>,
     x: f32,
     y: f32,
@@ -7765,7 +7871,7 @@ fn hit_test_pane(
     let styled = marked
         .with_markers(shown.markers())
         .with_source_line(shown.source_line());
-    let typography = typography_for(window, zoom, id.vertical(window), id.shows_preview(window));
+    let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
     let label = id.label(window);
     if let Err(error) = engine.update(styled, id.line_extent_px(window), &typography) {
@@ -7802,7 +7908,6 @@ fn lay_out_for_caret<'a>(
     document: &OpenDocument,
     id: PaneId,
     source: &'a str,
-    zoom: i32,
     active_line_start: Option<usize>,
 ) -> Option<MeasuredPane<'a>> {
     let mut counts = document.counts.borrow_mut();
@@ -7818,7 +7923,7 @@ fn lay_out_for_caret<'a>(
     let styled = marked
         .with_markers(shown.markers())
         .with_source_line(shown.source_line());
-    let typography = typography_for(window, zoom, id.vertical(window), id.shows_preview(window));
+    let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
     if let Err(error) = engine.update(styled, id.line_extent_px(window), &typography) {
         let label = id.label(window);
@@ -7842,7 +7947,6 @@ fn update_pane_selection(
 ) {
     let drag_started = Instant::now();
     let source = document.text.borrow().clone();
-    let zoom = window.get_zoom_percent();
     let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
 
     // A drag reuses the cached preview, the cached block measurements and the
@@ -7856,7 +7960,6 @@ fn update_pane_selection(
             document,
             id,
             &source,
-            zoom,
             active_line_start,
             x,
             y,
@@ -7914,7 +8017,6 @@ fn update_pane_selection(
         document,
         id,
         &source,
-        zoom,
         Some(next_active_line_start),
         Some(hit),
         selection,
@@ -8399,13 +8501,12 @@ fn move_pane_caret(
     let source = document.text.borrow().clone();
     let caret = id.caret_byte(state, &source);
     let revealed = PaneId::revealed_line(id.vertical(window), state, &source);
-    let zoom = window.get_zoom_percent();
     let preferred_line = state.borrow().preferred_line;
 
     let moved = {
         let mut borrowed = cache.borrow_mut();
         let cache = &mut *borrowed;
-        let measured = lay_out_for_caret(window, cache, document, id, &source, zoom, revealed);
+        let measured = lay_out_for_caret(window, cache, document, id, &source, revealed);
         let Some(measured) = measured else {
             return;
         };
@@ -8462,7 +8563,6 @@ fn move_pane_caret(
         document,
         id,
         &source,
-        zoom,
         shown_line,
         Some(next),
         selection,
@@ -8489,14 +8589,13 @@ fn move_pane_to_line_edge(
     let source = document.text.borrow().clone();
     let caret = id.caret_byte(state, &source);
     let revealed = PaneId::revealed_line(id.vertical(window), state, &source);
-    let zoom = window.get_zoom_percent();
 
     let next = if document_edge {
         if to_end { source.len() } else { 0 }
     } else {
         let mut borrowed = cache.borrow_mut();
         let cache = &mut *borrowed;
-        let measured = lay_out_for_caret(window, cache, document, id, &source, zoom, revealed);
+        let measured = lay_out_for_caret(window, cache, document, id, &source, revealed);
         let Some(measured) = measured else {
             return;
         };
@@ -8524,7 +8623,6 @@ fn move_pane_to_line_edge(
         document,
         id,
         &source,
-        zoom,
         shown_line,
         Some(next),
         selection,
@@ -8566,7 +8664,6 @@ fn set_pane_preedit(
         document,
         id,
         &source,
-        window.get_zoom_percent(),
         Some(revealed),
         Some(caret),
         selection,
@@ -9034,6 +9131,32 @@ mod tests {
                 source.len(),
                 "{id:?}: no caret yet means the end of the document"
             );
+        }
+    }
+
+    /// 要件 9: **zero is not a zoom.** A pane row nothing has written yet and a
+    /// session from before the zoom belonged to a pane both say 0, and a pane
+    /// set to 0% would be a pane with nothing on it.
+    #[test]
+    fn a_stored_zoom_of_zero_means_the_default() {
+        assert_eq!(zoom_from(0), ZOOM_DEFAULT);
+        assert_eq!(zoom_from(125), 125);
+        // Held inside the bounds the keys hold it to, whichever way it came in.
+        assert_eq!(zoom_from(4000), ZOOM_MAX);
+        assert_eq!(zoom_from(1), ZOOM_MIN);
+        assert_eq!(zoom_from(-30), ZOOM_MIN);
+        // A pane at either end stays there rather than wrapping when the next
+        // notch arrives, which is what `on_pane_zoom` adds to.
+        assert_eq!(zoom_from(ZOOM_MAX + ZOOM_STEP), ZOOM_MAX);
+        assert_eq!(zoom_from(ZOOM_MIN - ZOOM_STEP), ZOOM_MIN);
+    }
+
+    /// A new pane opens at the size the writer left nothing about, and both
+    /// panes open the same — the zoom is per pane, not per direction.
+    #[test]
+    fn a_pane_opens_at_the_default_zoom() {
+        for row in PaneId::ALL.map(PaneId::initial_screen) {
+            assert_eq!(zoom_from(row.zoom), ZOOM_DEFAULT, "{row:?}");
         }
     }
 

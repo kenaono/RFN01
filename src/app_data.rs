@@ -106,6 +106,13 @@ pub struct SessionTab {
 pub struct SessionPane {
     pub tabs: Vec<SessionTab>,
     pub active: usize,
+    /// 要件 9: how far this pane was magnified, as a percentage.
+    ///
+    /// **With the arrangement rather than with the display settings** — it is
+    /// what the writer was doing, not how they like the editor set. Zero means
+    /// a session that did not say, which is every session written before the
+    /// zoom belonged to a pane; the window puts its own default there.
+    pub zoom: i32,
 }
 
 /// What was on screen when the editor was last closed (要件 8.5).
@@ -135,12 +142,6 @@ pub struct Session {
     /// session rather than with the work folder, because it is a list of what
     /// the writer did and not of what the folder holds.
     pub recent: Vec<PathBuf>,
-    /// 要件 9: the zoom, restored with the arrangement rather than with the
-    /// display settings — it is what the writer was doing, not how they like
-    /// the editor set. **One number, because the editor has one**: the
-    /// requirement asks for it per pane and the zoom is still the window's, so
-    /// this is the whole of it until that changes.
-    pub zoom: i32,
 }
 
 /// Write the session down.
@@ -165,7 +166,6 @@ pub fn encode_session(session: &Session) -> String {
         out.push_str("maximized: 1\n");
     }
     out.push_str(&format!("focused: {}\n", session.focused));
-    out.push_str(&format!("zoom: {}\n", session.zoom));
     out.push_str(&format!("tree: {}\n", u8::from(session.tree_shown)));
     if let Some(folder) = &session.folder {
         out.push_str(&format!("folder: {}\n", folder.display()));
@@ -177,7 +177,7 @@ pub fn encode_session(session: &Session) -> String {
         out.push_str(&format!("recent: {}\n", path.display()));
     }
     for pane in &session.panes {
-        out.push_str(&format!("pane: {}\n", pane.active));
+        out.push_str(&format!("pane: {} {}\n", pane.active, pane.zoom));
         for tab in &pane.tabs {
             out.push_str(&format!(
                 "tab: {} {} {} {}\n",
@@ -214,6 +214,11 @@ pub fn decode_session(raw: &str) -> Option<Session> {
         return None;
     }
     let mut session = Session::default();
+    // 要件 9: a session written while the zoom was the window's names one
+    // number before any pane. It stands in for every pane that does not name
+    // its own, so a writer who was working at 140% opens there rather than at
+    // 100 the first time they run a build that magnifies each pane.
+    let mut window_zoom = 0;
     for line in lines {
         if line.is_empty() {
             continue;
@@ -224,15 +229,23 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "place" => session.place = decode_place(value),
             "maximized" => session.maximized = value == "1",
             "focused" => session.focused = value.parse().ok()?,
-            "zoom" => session.zoom = value.parse().ok()?,
+            "zoom" => window_zoom = value.parse().ok()?,
             "tree" => session.tree_shown = value == "1",
             "folder" => session.folder = Some(PathBuf::from(value)),
             "expanded" => session.expanded.push(PathBuf::from(value)),
             "recent" => session.recent.push(PathBuf::from(value)),
-            "pane" => session.panes.push(SessionPane {
-                tabs: Vec::new(),
-                active: value.parse().ok()?,
-            }),
+            "pane" => {
+                let mut fields = value.split(' ');
+                session.panes.push(SessionPane {
+                    tabs: Vec::new(),
+                    active: fields.next()?.parse().ok()?,
+                    // Absent in a session from before the zoom was the pane's.
+                    zoom: fields
+                        .next()
+                        .and_then(|zoom| zoom.parse().ok())
+                        .unwrap_or(window_zoom),
+                });
+            }
             "tab" => {
                 let pane = session.panes.last_mut()?;
                 let mut fields = value.split(' ');
@@ -707,7 +720,6 @@ mod tests {
             }),
             maximized: false,
             focused: 1,
-            zoom: 125,
             folder: Some(PathBuf::from("D:\\書きかけ")),
             expanded: vec![PathBuf::from("D:\\書きかけ\\章")],
             tree_shown: true,
@@ -718,6 +730,7 @@ mod tests {
             panes: vec![
                 SessionPane {
                     active: 1,
+                    zoom: 125,
                     tabs: vec![
                         SessionTab {
                             untitled: 2,
@@ -737,6 +750,7 @@ mod tests {
                 },
                 SessionPane {
                     active: 0,
+                    zoom: 80,
                     tabs: vec![SessionTab::default()],
                 },
             ],
@@ -810,6 +824,27 @@ mod tests {
         // A session written before there was a history has none, rather than
         // being unreadable for want of one.
         assert!(read.recent.is_empty());
+    }
+
+    /// 要件 9: the zoom is each pane's own, and a session written while it was
+    /// the window's still opens — its one number stands in for every pane.
+    #[test]
+    fn a_pane_keeps_its_own_zoom() {
+        let read = decode_session(&encode_session(&session())).expect("reads");
+
+        assert_eq!(read.panes[0].zoom, 125);
+        assert_eq!(read.panes[1].zoom, 80);
+
+        let older = format!("{SESSION_MAGIC}\nlayout: P 0\nzoom: 140\npane: 0\npane: 1\n");
+        let read = decode_session(&older).expect("reads");
+        assert_eq!(read.panes[0].zoom, 140);
+        assert_eq!(read.panes[1].zoom, 140);
+
+        // And one from before there was a zoom at all says nothing, which the
+        // window reads as its own default rather than as 0%.
+        let oldest = format!("{SESSION_MAGIC}\nlayout: P 0\npane: 0\n");
+        let read = decode_session(&oldest).expect("reads");
+        assert_eq!(read.panes[0].zoom, 0);
     }
 
     /// What is written is what comes back, through the file.

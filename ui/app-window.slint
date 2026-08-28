@@ -177,7 +177,6 @@ export component AppWindow inherits Window {
     // What to say above the paper when something went wrong: the document
     // would not open, would not be laid out, would not be saved.
     in property <string> render-status;
-    in property <int> zoom-percent: 100;
     // The three quantities the typography validation is about. Character
     // spacing is extra advance as a percentage of the character's own size, so
     // 0 is DirectWrite's own; the other two are multipliers, so 100 is.
@@ -272,9 +271,11 @@ export component AppWindow inherits Window {
     // True when the pane taking input runs vertically. The IME lays its own
     // windows out from this, so it has to be told when focus moves.
     callback ime-vertical-requested(bool);
-    callback zoom-in();
-    callback zoom-out();
-    callback zoom-reset();
+    /// 要件 9, 11.5: magnify one pane, in notches. **The pane is named** —
+    /// the wheel acts on the pane it is over and the keys on the pane holding
+    /// the keyboard, and neither is "the window".
+    callback pane-zoom(int, int);
+    callback pane-zoom-reset(int);
     /// Move one of 要件 9's numbers. **The first argument says which**, in the
     /// order the panel draws them: 0 body size, 1 line height, 2 char spacing,
     /// 3 column gap, 4 to 9 the six heading levels. One callback rather than
@@ -1071,17 +1072,17 @@ export component AppWindow inherits Window {
                         typography-requested => {
                             typography-panel.show();
                         }
-                        zoom-in-requested => {
-                            root.zoom-in();
-                            root.focus-generation += 1;
-                        }
-                        zoom-out-requested => {
-                            root.zoom-out();
-                            root.focus-generation += 1;
+                        // **No `focus-generation` here**: the wheel sends
+                        // this from wherever the pointer is, and taking the
+                        // keyboard away from the pane the writer is typing in
+                        // is not part of magnifying the one they are pointing
+                        // at. The menu rows come back to the pane they hang
+                        // from through `menu-opened`.
+                        zoom-stepped(notches) => {
+                            root.pane-zoom(pane.id, notches);
                         }
                         zoom-reset-requested => {
-                            root.zoom-reset();
-                            root.focus-generation += 1;
+                            root.pane-zoom-reset(pane.id);
                         }
                         undo-requested(forwards) => { root.pane-undo(pane.id, forwards); }
                         escaped() => {
@@ -1225,8 +1226,11 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                 }
 
+                // 要件 9: the zoom belongs to a pane now, so the bar shows
+                // the focused pane's — the bar is about what the writer is
+                // working in, the same as the counts to its left.
                 Text {
-                    text: root.zoom-percent + "%";
+                    text: root.panes[root.focused-pane].zoom + "%";
                     color: Tok.ink-muted;
                     font-size: 12px;
                     vertical-alignment: center;
