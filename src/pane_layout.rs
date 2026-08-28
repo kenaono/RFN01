@@ -353,6 +353,115 @@ fn cut(area: Rect, split: Split, ratio: f32) -> (Rect, Rect, Rect) {
     }
 }
 
+/// Which way a move between panes goes (要件 11.3).
+///
+/// **Screen directions, not flow ones.** `Ctrl+Alt+←` names a place on the
+/// screen, and which way the text runs in the pane it lands in is that pane's
+/// own business — a vertical pane sitting on the left is still on the left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Towards {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Towards {
+    /// The four arrows in the order the key rows name them: left, right, up,
+    /// down. `None` for anything else, so a number that never came from those
+    /// rows moves nothing.
+    pub fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Left),
+            1 => Some(Self::Right),
+            2 => Some(Self::Up),
+            3 => Some(Self::Down),
+            _ => None,
+        }
+    }
+}
+
+/// Which pane a move out of `from` lands in, or `None` if there is none that
+/// way (要件 11.3).
+///
+/// **Decided by the rectangles, not by the tree.** Two panes that look side by
+/// side are side by side however the tree came to put them there, and what the
+/// writer is naming is what they can see. The rectangles are the ones that were
+/// drawn ([`place`](Layout::place)).
+///
+/// Of the panes wholly on that side, the one sharing the most edge with the
+/// pane being left wins, and the nearer of two that share the same edge breaks
+/// the tie. **With one boundary there is only ever one candidate**; the rule is
+/// written for the arrangements 要件 6.4 allows deeper down, where a pane can
+/// face two at once.
+pub fn neighbour(placed: &[(usize, Rect)], from: usize, towards: Towards) -> Option<usize> {
+    let leaving = placed.iter().find(|(pane, _)| *pane == from)?.1;
+    let mut best: Option<(usize, f32, f32)> = None;
+    for (pane, rect) in placed {
+        if *pane == from || !beyond(leaving, *rect, towards) {
+            continue;
+        }
+        let shared = shared_edge(leaving, *rect, towards);
+        let nearness = nearness(*rect, towards);
+        let better = match best {
+            None => true,
+            Some((_, most, closest)) => shared > most || (shared == most && nearness > closest),
+        };
+        if better {
+            best = Some((*pane, shared, nearness));
+        }
+    }
+    best.map(|(pane, _, _)| pane)
+}
+
+/// How far apart two edges may be and still count as the same one.
+///
+/// The panes never touch — [`DIVIDER`] is taken out between them — so this is
+/// only there to keep a rounded coordinate from putting a pane on the wrong
+/// side of its own boundary.
+const SAME_EDGE: f32 = 1.0;
+
+/// Whether `other` lies wholly on the far side of `leaving`.
+fn beyond(leaving: Rect, other: Rect, towards: Towards) -> bool {
+    match towards {
+        Towards::Left => other.x + other.width <= leaving.x + SAME_EDGE,
+        Towards::Right => other.x + SAME_EDGE >= leaving.x + leaving.width,
+        Towards::Up => other.y + other.height <= leaving.y + SAME_EDGE,
+        Towards::Down => other.y + SAME_EDGE >= leaving.y + leaving.height,
+    }
+}
+
+/// How much of the edge they face each other across the two panes share.
+///
+/// Zero for two panes that are diagonal from one another, which is what keeps
+/// a move from landing somewhere the writer was not pointing.
+fn shared_edge(leaving: Rect, other: Rect, towards: Towards) -> f32 {
+    let across = matches!(towards, Towards::Left | Towards::Right);
+    let (leaving_start, leaving_span) = if across {
+        (leaving.y, leaving.height)
+    } else {
+        (leaving.x, leaving.width)
+    };
+    let (other_start, other_span) = if across {
+        (other.y, other.height)
+    } else {
+        (other.x, other.width)
+    };
+    let start = leaving_start.max(other_start);
+    let end = (leaving_start + leaving_span).min(other_start + other_span);
+    (end - start).max(0.0)
+}
+
+/// A number that grows the nearer `other` is to the pane being left.
+fn nearness(other: Rect, towards: Towards) -> f32 {
+    match towards {
+        Towards::Left => other.x + other.width,
+        Towards::Right => -other.x,
+        Towards::Up => other.y + other.height,
+        Towards::Down => -other.y,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,5 +645,93 @@ mod tests {
         let (panes, _) = layout.place(narrow);
         assert_eq!(panes[0].1.width, panes[1].1.width);
         assert_eq!(panes[0].1.width + DIVIDER + panes[1].1.width, 100.0);
+    }
+
+    /// Side by side, and each pane is the other's only neighbour.
+    #[test]
+    fn a_side_by_side_split_puts_one_pane_to_the_left_of_the_other() {
+        let mut layout = Layout::single(0);
+        assert!(layout.divide(0, Split::SideBySide, 1));
+        let (placed, _) = layout.place(area());
+
+        assert_eq!(neighbour(&placed, 0, Towards::Right), Some(1));
+        assert_eq!(neighbour(&placed, 1, Towards::Left), Some(0));
+    }
+
+    /// **Nothing above or below a side-by-side split.** The arrow that names an
+    /// axis the arrangement does not use moves nothing, rather than falling
+    /// back on the other axis.
+    #[test]
+    fn a_side_by_side_split_has_nothing_above_or_below() {
+        let mut layout = Layout::single(0);
+        assert!(layout.divide(0, Split::SideBySide, 1));
+        let (placed, _) = layout.place(area());
+
+        assert_eq!(neighbour(&placed, 0, Towards::Up), None);
+        assert_eq!(neighbour(&placed, 0, Towards::Down), None);
+        assert_eq!(neighbour(&placed, 0, Towards::Left), None);
+    }
+
+    #[test]
+    fn a_stacked_split_puts_one_pane_above_the_other() {
+        let mut layout = Layout::single(0);
+        assert!(layout.divide(0, Split::Stacked, 1));
+        let (placed, _) = layout.place(area());
+
+        assert_eq!(neighbour(&placed, 0, Towards::Down), Some(1));
+        assert_eq!(neighbour(&placed, 1, Towards::Up), Some(0));
+        assert_eq!(neighbour(&placed, 1, Towards::Right), None);
+    }
+
+    /// One pane has nowhere to go, in any direction.
+    #[test]
+    fn a_single_pane_has_no_neighbours() {
+        let (placed, _) = Layout::single(0).place(area());
+
+        for towards in [Towards::Left, Towards::Right, Towards::Up, Towards::Down] {
+            assert_eq!(neighbour(&placed, 0, towards), None, "{towards:?}");
+        }
+    }
+
+    /// **The pane that shares the edge, not the one that is merely on that
+    /// side.** Splitting right and then stacking the right-hand pane leaves
+    /// pane 0 facing two, and a move up out of pane 2 has to land in pane 1 —
+    /// pane 0 is above nothing, it is beside both.
+    #[test]
+    fn a_pane_facing_two_moves_to_the_one_it_shares_an_edge_with() {
+        let mut layout = Layout::single(0);
+        assert!(layout.divide(0, Split::SideBySide, 1));
+        assert!(layout.divide(1, Split::Stacked, 2));
+        let (placed, _) = layout.place(area());
+
+        assert_eq!(neighbour(&placed, 2, Towards::Up), Some(1));
+        assert_eq!(neighbour(&placed, 1, Towards::Down), Some(2));
+        assert_eq!(neighbour(&placed, 1, Towards::Left), Some(0));
+        assert_eq!(neighbour(&placed, 2, Towards::Left), Some(0));
+    }
+
+    /// Pane 0 faces both of the stacked panes, and the move goes to the one it
+    /// shares the most edge with. They are even here, so the nearer wins — and
+    /// they are equally near, so the first found stands. **What matters is that
+    /// it lands in one of them and not off the screen**; which of two panes
+    /// directly beside it is a preference no requirement states.
+    #[test]
+    fn a_pane_beside_two_lands_in_one_of_them() {
+        let mut layout = Layout::single(0);
+        assert!(layout.divide(0, Split::SideBySide, 1));
+        assert!(layout.divide(1, Split::Stacked, 2));
+        let (placed, _) = layout.place(area());
+
+        let landed = neighbour(&placed, 0, Towards::Right);
+        assert!(landed == Some(1) || landed == Some(2), "{landed:?}");
+    }
+
+    /// A number that never came from the arrow rows names no direction.
+    #[test]
+    fn only_the_four_arrows_name_a_direction() {
+        assert_eq!(Towards::from_index(0), Some(Towards::Left));
+        assert_eq!(Towards::from_index(3), Some(Towards::Down));
+        assert_eq!(Towards::from_index(4), None);
+        assert_eq!(Towards::from_index(-1), None);
     }
 }

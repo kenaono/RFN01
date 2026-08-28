@@ -263,6 +263,12 @@ export component AppWindow inherits Window {
     callback pane-undo(int, bool);
     /// Copy the pane's selection, or cut it. True takes it out (要件 11.2).
     callback pane-copy(int, bool);
+    /// Step through a pane's tabs (要件 11.3). True goes backwards.
+    callback pane-tab-stepped(int, bool);
+    /// Give the keyboard to the pane in a direction (要件 11.3): 0 left,
+    /// 1 right, 2 up, 3 down. Rust decides which pane that is, from the
+    /// rectangles the panes were placed in, and sets `focused-pane` itself.
+    callback pane-focus-moved(int, int);
     callback view-mode-requested(int);
     /// Divide the focused pane, right or down (要件 6.4). True is right.
     callback divide-requested(bool);
@@ -1088,6 +1094,8 @@ export component AppWindow inherits Window {
                         }
                         undo-requested(forwards) => { root.pane-undo(pane.id, forwards); }
                         copy-requested(cut) => { root.pane-copy(pane.id, cut); }
+                        tab-stepped(backwards) => { root.pane-tab-stepped(pane.id, backwards); }
+                        focus-moved(towards) => { root.pane-focus-moved(pane.id, towards); }
                         escaped() => {
                             return root.dismiss-menus();
                         }

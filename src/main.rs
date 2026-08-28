@@ -34,7 +34,7 @@ use buffer::{DocumentFile, ExternalChange};
 use diag::DiagLog;
 use directwrite_render::{CaretGeometry, SelectionRect, TextEngine, TileSink, WritingMode};
 use document::{DocumentCounts, PreviewDocument, caret_place};
-use pane_layout::{Layout, Rect, Split};
+use pane_layout::{Layout, Rect, Split, Towards, neighbour};
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, PhysicalPosition, PhysicalSize, RenderingState,
@@ -1392,6 +1392,21 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let weak = window.as_weak();
     let tab_live = live.clone();
+    window.on_pane_tab_stepped(move |pane, backwards| {
+        let id = PaneId::from_index(pane);
+        let weak = weak.clone();
+        let live = tab_live.clone();
+        // **The same door the click goes through**, and put off to the next
+        // tick for the same reason: the switch republishes the strip (6.18).
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                step_tab(&window, &live, id, backwards);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let tab_live = live.clone();
     window.on_pane_tab_closed(move |pane, index| {
         let index = index.max(0) as usize;
         let id = PaneId::from_index(pane);
@@ -2179,6 +2194,15 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             copy_selection(&window, id, &document, &states, &cache, cut);
+        }
+    });
+
+    let weak = window.as_weak();
+    let focus_cache = render_cache.clone();
+    window.on_pane_focus_moved(move |pane, towards| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            move_focus(&window, &focus_cache, id, towards);
         }
     });
 
@@ -8446,6 +8470,91 @@ fn undo_in_pane(
         .log_diag("edit", &format!("{kind} pane={name} caret={caret}"));
 }
 
+/// Bring out the tab after the one a pane is showing, or the one before
+/// (要件 11.3).
+///
+/// **The strip's order**, so the key walks the tabs in the order they are
+/// drawn — the same numbering the overflow list gives them. **It wraps**: the
+/// strip has two ends and the key has one direction, and stopping at an end
+/// would leave the tab across the join reachable only by turning round.
+///
+/// One tab is not a strip to walk.
+fn step_tab(window: &AppWindow, live: &Live, id: PaneId, backwards: bool) {
+    let (count, active) = {
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(id);
+        (strip.tabs.len(), strip.active)
+    };
+    let landed = stepped_tab(count, active, backwards);
+    live.cache.borrow_mut().log_diag(
+        "tab",
+        &format!(
+            "step pane={} count={count} at={active} to={landed:?}",
+            id.log_name()
+        ),
+    );
+    let Some(index) = landed else {
+        return;
+    };
+    switch_to_tab(window, live, id, index);
+}
+
+/// Where a step round the strip lands, or `None` if there is nowhere to go.
+fn stepped_tab(count: usize, active: usize, backwards: bool) -> Option<usize> {
+    if count < 2 {
+        return None;
+    }
+    // Counted forwards either way: `count - 1` steps on is one step back, and
+    // never asks a `usize` to go below zero.
+    let step = if backwards { count - 1 } else { 1 };
+    Some((active + step) % count)
+}
+
+/// Give the keyboard to the pane in a direction (要件 11.3).
+///
+/// **The rectangles decide, and they are the ones on screen**: each pane's row
+/// carries the area `place_panes` handed it, and a pane the tree does not name
+/// has none — so a pane that is not showing cannot be moved into. Nothing
+/// happens when there is no pane that way. The key does not wrap round the
+/// arrangement the way the tab key wraps round a strip: the strip's ends are
+/// a join the writer cannot see, and the editing area's edges are the window.
+///
+/// Setting the pane and asking for the keyboard is all this does. The pane that
+/// takes it says so itself (`focus-taken`), which is what turns the IME the
+/// right way round for the writing it is about to be used for.
+fn move_focus(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, from: PaneId, towards: i32) {
+    let Some(towards) = Towards::from_index(towards) else {
+        return;
+    };
+    let placed: Vec<(usize, Rect)> = PaneId::ALL
+        .iter()
+        .filter(|id| id.is_shown(window))
+        .map(|id| {
+            let screen = id.screen(window);
+            let rect = Rect::new(screen.x, screen.y, screen.width, screen.height);
+            (id.index() as usize, rect)
+        })
+        .collect();
+    let landed = neighbour(&placed, from.index() as usize, towards)
+        .map(|pane| PaneId::from_index(pane as i32));
+    // **Logged whether or not it moved.** "The key did nothing" and "the key
+    // never arrived" look the same on screen, and only one of them is a bug.
+    let arriving = landed.map_or("-", PaneId::log_name);
+    cache.borrow_mut().log_diag(
+        "layout",
+        &format!(
+            "focus {}->{arriving} {towards:?} shown={}",
+            from.log_name(),
+            placed.len()
+        ),
+    );
+    let Some(landed) = landed else {
+        return;
+    };
+    window.set_focused_pane(landed.index());
+    restore_editor_focus(window);
+}
+
 /// Put a pane's selection on the clipboard, and take it out if this is a cut
 /// (要件 11.2).
 ///
@@ -9102,6 +9211,28 @@ mod tests {
             utf16_at_byte(source, source.len()),
             source.encode_utf16().count()
         );
+    }
+
+    /// The strip has two ends and the key has one direction (要件 11.3).
+    #[test]
+    fn stepping_past_either_end_of_the_strip_comes_round() {
+        assert_eq!(stepped_tab(3, 2, false), Some(0));
+        assert_eq!(stepped_tab(3, 0, true), Some(2));
+    }
+
+    #[test]
+    fn stepping_walks_the_strip_in_the_order_it_is_drawn() {
+        assert_eq!(stepped_tab(3, 0, false), Some(1));
+        assert_eq!(stepped_tab(3, 1, false), Some(2));
+        assert_eq!(stepped_tab(3, 2, true), Some(1));
+    }
+
+    /// One tab is not a strip to walk, and a pane with none is not either.
+    #[test]
+    fn a_strip_of_one_has_nowhere_to_step() {
+        assert_eq!(stepped_tab(1, 0, false), None);
+        assert_eq!(stepped_tab(1, 0, true), None);
+        assert_eq!(stepped_tab(0, 0, false), None);
     }
 
     /// Pasting is the only way a line break reaches this function in quantity,

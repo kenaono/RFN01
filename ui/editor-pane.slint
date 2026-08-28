@@ -241,6 +241,13 @@ export component EditorPane inherits Rectangle {
     /// Put the selection on the clipboard (要件 11.2). **True also takes it out
     /// of the document** — a cut is a copy that succeeded, followed by a delete.
     callback copy-requested(bool);
+    /// Bring this pane's next tab out in front, or its previous one (要件 11.3).
+    /// True steps backwards. Wraps at either end of the strip.
+    callback tab-stepped(bool);
+    /// Give the keyboard to the pane in that direction (要件 11.3). 0 is left,
+    /// 1 right, 2 up, 3 down — **directions on the screen**, whichever way the
+    /// text in either pane happens to run.
+    callback focus-moved(int);
     /// Escape was pressed and this pane had nothing open to close. **True if
     /// the window closed something of its own** — the app menu, or the
     /// typography panel — so that the key is not passed on twice.
@@ -1077,6 +1084,33 @@ export component EditorPane inherits Rectangle {
                                         accept
                                     } else if event.modifiers.control && event.text == "0" {
                                         root.zoom-reset-requested();
+                                        accept
+                                    // 要件 11.3. **Before the plain Tab row
+                                    // below**, which indents: the modifier is
+                                    // what tells the two apart, and the chain
+                                    // is read in order.
+                                    } else if event.modifiers.control && event.text == Key.Tab {
+                                        root.tab-stepped(event.modifiers.shift);
+                                        accept
+                                    // 要件 11.3, and **before the arrow rows**
+                                    // for the same reason. Held together with
+                                    // Alt so that Ctrl+arrow stays free for the
+                                    // word-wise moves 要件 11.4 will want.
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.LeftArrow {
+                                        root.focus-moved(0);
+                                        accept
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.RightArrow {
+                                        root.focus-moved(1);
+                                        accept
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.UpArrow {
+                                        root.focus-moved(2);
+                                        accept
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.DownArrow {
+                                        root.focus-moved(3);
                                         accept
                                     } else if event.text == Key.Escape {
                                         // The way out of a menu (要件 6.7).
