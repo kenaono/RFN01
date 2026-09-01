@@ -29,6 +29,15 @@ impl Rect {
             height,
         }
     }
+
+    /// Whether a point is inside (要件 6.5).
+    ///
+    /// **The leading edges belong to the rectangle and the trailing ones do
+    /// not**, so two panes that share a boundary claim a point on it once
+    /// between them rather than twice or not at all.
+    pub fn holds(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
 }
 
 /// Which way a split cuts.
@@ -468,6 +477,27 @@ mod tests {
 
     fn area() -> Rect {
         Rect::new(0.0, 0.0, 1009.0, 600.0)
+    }
+
+    /// 要件 6.5: a tab let go over a pane lands in that pane, and two panes
+    /// sharing a boundary claim the point on it once between them.
+    #[test]
+    fn a_point_belongs_to_one_of_two_panes_that_meet() {
+        let left = Rect::new(0.0, 0.0, 500.0, 600.0);
+        let right = Rect::new(500.0, 0.0, 509.0, 600.0);
+
+        assert!(left.holds(0.0, 0.0));
+        assert!(left.holds(499.9, 599.9));
+        // The shared edge is the right pane's: leading edges are inside.
+        assert!(!left.holds(500.0, 300.0));
+        assert!(right.holds(500.0, 300.0));
+        // Past the far edge of the area is neither.
+        assert!(!right.holds(1009.0, 300.0));
+        assert!(!left.holds(200.0, 600.0));
+        // A point above or left of everything is neither, which is what a tab
+        // let go on the top bar looks like.
+        assert!(!left.holds(-4.0, 12.0));
+        assert!(!left.holds(200.0, -1.0));
     }
 
     /// One pane fills everything, and there is nothing to drag.

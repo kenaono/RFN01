@@ -150,6 +150,43 @@ export component Tab inherits Rectangle {
     in property <brush> paper: Tok.paper;
     callback chosen();
     callback closed();
+    /// 要件 6.5: this tab is being carried along the strip.
+    ///
+    /// The first length is where the pointer is **in the strip's coordinates** —
+    /// this tab's own x plus where the pointer sits inside it. What the strip
+    /// has to decide is which tab the pointer is over, and that is a question
+    /// about the strip rather than about any one tab.
+    ///
+    /// The other two are the same point in the **window's** coordinates, which
+    /// is the only way to say where the hand is once it has left this strip:
+    /// the panes it may be over are somewhere else entirely (要件 6.5).
+    callback grabbed(length, length, length);
+    callback dragged(length, length, length);
+    /// Let go after being carried. A press that never moved far enough is a
+    /// `chosen` instead, so one of the two always happens and never both.
+    ///
+    /// **Where the hand let go, in the window's coordinates** (要件 6.5). A tab
+    /// can be carried out of its own strip and into another pane, so the place
+    /// it landed cannot be said in the coordinates of the strip it left.
+    callback dropped(length, length);
+    /// The pointer is inside this tab while another one is being carried.
+    callback pointed-at();
+    /// The carry is over, whether it ended in a drop or was taken away. **Any
+    /// carry that starts raises exactly one of these**, so what is drawn during
+    /// one is always cleared.
+    callback carry-ended();
+
+    /// Where the pointer is while some tab is being carried, in the strip's
+    /// coordinates, and whether one is being carried at all. **Every tab is
+    /// told**, and the one the pointer falls inside answers.
+    in property <bool> carrying: false;
+    in property <length> carry-x: 0px;
+    /// This is the tab being carried, so it is drawn as having left its place.
+    in property <bool> carried: false;
+    /// Which edge of this tab the carried one would come to rest against:
+    /// -1 the leading edge, 1 the trailing edge, 0 neither. **An edge rather
+    /// than a tab**, because what the writer is choosing is a gap.
+    in property <int> landing: 0;
     /// Where this tab is inside the strip, raised whenever it is the one in
     /// front. The strip scrolls to it (要件 6.3).
     ///
@@ -165,6 +202,27 @@ export component Tab inherits Rectangle {
             root.shown(root.x, root.width);
         }
     }
+
+    // 要件 6.5: whether the pointer being carried is inside this tab. Worked
+    // out here rather than in the strip so that the `changed` handler that
+    // reports it sits beside the others, in the component that owns the
+    // geometry it reads.
+    property <bool> under-carry: root.carrying
+        && root.carry-x >= root.x
+        && root.carry-x < root.x + root.width;
+    changed under-carry => {
+        if (root.under-carry) {
+            root.pointed-at();
+        }
+    }
+
+    // Whether the pointer went down on this tab, where it went down, and
+    // whether it has since travelled far enough to be a carry rather than a
+    // click. **Four pixels**: a click with a hand on it is not perfectly still,
+    // and a tab that jumped at the first tremble could not be chosen at all.
+    property <bool> pressing: false;
+    property <length> press-x;
+    property <bool> carrying-self: false;
 
     // `init` as well as the changes, for the reason 6.11 records elsewhere: a
     // tab that is in front from the moment it is created never raises a change
@@ -183,6 +241,11 @@ export component Tab inherits Rectangle {
     }
 
     height: 28px;
+    // The tab being carried is drawn as having left its place (要件 6.5). It
+    // stays where it was — the strip does not reorder under the hand, because
+    // republishing it would take the element whose grab is running (6.18) —
+    // so what says a tab is in the air is that it has gone pale.
+    opacity: root.carried ? 0.45 : 1.0;
     // A floor and a ceiling, not a size: a tab is as wide as its name between
     // the two. The floor keeps 無題1 from being a stub too small to aim at, and
     // the ceiling stops one long name from taking the whole strip. **Neither is
@@ -236,9 +299,70 @@ export component Tab inherits Rectangle {
     }
 
     touch := TouchArea {
-        clicked => {
-            root.chosen();
+        // **Not `clicked`.** A click is a press and a release in the same
+        // place, which is exactly the case a carry is not; both have to come
+        // out of the same press, so the press is followed here rather than
+        // being asked about afterwards.
+        pointer-event(event) => {
+            if (event.button != PointerEventButton.left) {
+                return;
+            }
+            if (event.kind == PointerEventKind.down) {
+                root.pressing = true;
+                root.carrying-self = false;
+                root.press-x = touch.mouse-x;
+            }
+            if (event.kind == PointerEventKind.up) {
+                if (root.carrying-self) {
+                    root.dropped(
+                        root.absolute-position.x + touch.mouse-x,
+                        root.absolute-position.y + touch.mouse-y);
+                    root.carry-ended();
+                } else if (root.pressing) {
+                    root.chosen();
+                }
+                root.pressing = false;
+                root.carrying-self = false;
+            }
+            if (event.kind == PointerEventKind.cancel) {
+                if (root.carrying-self) {
+                    root.carry-ended();
+                }
+                root.pressing = false;
+                root.carrying-self = false;
+            }
         }
+        moved => {
+            if (!root.pressing) {
+                return;
+            }
+            if (!root.carrying-self
+                && (touch.mouse-x > root.press-x + 4px
+                    || touch.mouse-x < root.press-x - 4px)) {
+                root.carrying-self = true;
+                root.grabbed(
+                    root.x + touch.mouse-x,
+                    root.absolute-position.x + touch.mouse-x,
+                    root.absolute-position.y + touch.mouse-y);
+            }
+            if (root.carrying-self) {
+                root.dragged(
+                    root.x + touch.mouse-x,
+                    root.absolute-position.x + touch.mouse-x,
+                    root.absolute-position.y + touch.mouse-y);
+            }
+        }
+    }
+
+    // 要件 6.5: the gap the carried tab would fall into, drawn on the edge it
+    // would come to rest against. A mark between two tabs rather than on one,
+    // because the place a tab lands is a gap and not a neighbour.
+    if root.landing != 0: Rectangle {
+        x: root.landing < 0 ? -1px : parent.width - 1px;
+        y: 0;
+        width: 2px;
+        height: parent.height;
+        background: Tok.accent;
     }
 
     // After the area that chooses the tab, and that is the whole of why it

@@ -197,6 +197,23 @@ export component EditorPane inherits Rectangle {
     /// position is in this pane's strip and nobody else's.
     callback tab-selected(int);
     callback tab-closed(int);
+    /// 要件 6.5: a tab was carried and let go. Its old place and the place in
+    /// **this** strip it was over, both counted in the strip as it stands now,
+    /// and where the hand let go in the window's coordinates.
+    ///
+    /// **The window decides which of the two it was.** A carry that ends inside
+    /// this pane is a reordering and the pair of positions says everything; one
+    /// that ends in another pane is a move, and only the point does.
+    callback tab-dropped(int, int, length, length);
+    /// 要件 6.5: where the hand is during a carry, in the window's coordinates,
+    /// and that the carry is over. **Told to the window rather than kept here**
+    /// — the tab may be over another pane, and no pane can see another one.
+    callback carry-moved(length, length);
+    callback carry-finished();
+    /// A tab from somewhere else is being carried over this pane, or this
+    /// pane's own carry is over itself. **Either way the pointer is here**, and
+    /// that is what decides whether this strip shows where the tab would land.
+    in property <bool> carry-over: false;
     callback new-tab-requested();
     /// What the pane's own menu asks for, beside `save-requested` above. Every
     /// one of these is the window's to carry out — a pane knows which pane it
@@ -337,12 +354,27 @@ export component EditorPane inherits Rectangle {
         }
     }
 
+    // 要件 6.5: the tab in the writer's hand, where the pointer is, and which
+    // tab it is over. **Held here for the length of one drag and nowhere else**
+    // — the strip is not reordered until the hand lets go, because
+    // republishing it would take the very element whose grab is running (6.18).
+    property <bool> carrying: false;
+    property <int> carried-from: -1;
+    property <int> carried-to: -1;
+    property <length> carry-x: 0px;
+
     VerticalLayout {
-        // The strip (要件 6.5), inside the pane it belongs to. Reordering by
-        // drag is a separate requirement and is not implemented yet.
+        // The strip (要件 6.5), inside the pane it belongs to.
         Rectangle {
             height: 34px;
-            background: Tok.chrome-raised;
+            // 要件 6.5: the whole band answers when a tab is being carried over
+            // this pane. **The mark at the end of the tabs is not enough on its
+            // own** — a strip with more tabs than fit has its end outside the
+            // viewport, and an indicator that can be scrolled out of sight is
+            // an indicator that is sometimes absent.
+            background: root.carry-over && !root.carrying
+                ? Tok.accent-faint
+                : Tok.chrome-raised;
 
             // The tabs get the strip minus the group anchored at the far end,
             // and slide under it when there are more than fit.
@@ -384,6 +416,20 @@ export component EditorPane inherits Rectangle {
                         edited: tab.edited;
                         current: index == root.active-tab;
                         paper: root.page-background;
+                        carrying: root.carrying;
+                        carry-x: root.carry-x;
+                        carried: root.carrying && index == root.carried-from;
+                        // The mark goes on the side the carried tab is coming
+                        // from, so it always stands in the gap the tab would
+                        // fall into rather than on the far side of a neighbour.
+                        // Nothing is marked while the hand is over another
+                        // pane: the tab would not land here at all, and a mark
+                        // that stays behind says it would.
+                        landing: !root.carrying || !root.carry-over
+                            || root.carried-to != index
+                            || root.carried-from == index
+                            ? 0
+                            : (root.carried-from > index ? -1 : 1);
                         chosen => {
                             root.tab-selected(index);
                         }
@@ -393,6 +439,50 @@ export component EditorPane inherits Rectangle {
                         shown(at, wide) => {
                             root.reveal-tab(at, wide);
                         }
+                        // **Where the pointer is, before there is a carry.**
+                        // Every tab watches `carry-x`, so setting `carrying`
+                        // first would have them all answer once against a
+                        // position from no drag at all.
+                        grabbed(at, window-x, window-y) => {
+                            root.carry-x = at;
+                            root.carried-from = index;
+                            root.carried-to = index;
+                            root.carrying = true;
+                            root.carry-moved(window-x, window-y);
+                        }
+                        dragged(at, window-x, window-y) => {
+                            root.carry-x = at;
+                            root.carry-moved(window-x, window-y);
+                        }
+                        pointed-at => {
+                            root.carried-to = index;
+                        }
+                        // **Asked first, put down second.** Clearing `carrying`
+                        // rebuilds nothing, but the same order as every other
+                        // row inside a repeater costs nothing to keep (6.24).
+                        dropped(at-x, at-y) => {
+                            root.tab-dropped(
+                                root.carried-from, root.carried-to, at-x, at-y);
+                        }
+                        carry-ended => {
+                            root.carrying = false;
+                            root.carried-from = -1;
+                            root.carried-to = -1;
+                            root.carry-finished();
+                        }
+                    }
+
+                    // 要件 6.5: where a tab carried in from another pane would
+                    // land. **At the end**, because that is where it goes — a
+                    // tab carried into a pane is one the writer wants in front,
+                    // and the end of the strip is where a new tab belongs.
+                    if root.carry-over && !root.carrying: Rectangle {
+                        width: 2px;
+                        // The tabs' own height, written out rather than left to
+                        // the layout: the mark stands with them, and a strip
+                        // that grows taller should take it along.
+                        height: 28px;
+                        background: Tok.accent;
                     }
                 }
             }

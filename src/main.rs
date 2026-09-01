@@ -1464,6 +1464,24 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     });
 
+    // 要件 6.5: a carried tab was let go. Put off to the next tick like every
+    // other tab command, and for the same reason: the strip is republished, and
+    // the element the drag ran in is one of the rows that is rebuilt (6.18).
+    let weak = window.as_weak();
+    let tab_live = live.clone();
+    window.on_pane_tab_dropped(move |pane, from, to, at_x, at_y| {
+        let from = from.max(0) as usize;
+        let to = to.max(0) as usize;
+        let id = PaneId::from_index(pane);
+        let weak = weak.clone();
+        let live = tab_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                drop_tab(&window, &live, id, from, to, (at_x, at_y));
+            }
+        });
+    });
+
     // Both of these are the same shape as the one above, and for the same
     // reason: they are asked for from a row of the pane's menu, and closing the
     // last tab of a pane takes that pane off screen — which rebuilds the
@@ -2628,6 +2646,24 @@ fn active_after_close(count: usize, active: usize, closed: usize) -> usize {
         active
     };
     next.min(remaining - 1)
+}
+
+/// Where the tab in front sits after one tab is moved (要件 6.5).
+///
+/// **The tab in front does not change — only its position does.** Carrying the
+/// tab in front takes the front with it; carrying another tab past it shifts it
+/// by one, in whichever direction the gap it left and the gap it filled sit.
+fn active_after_move(active: usize, from: usize, to: usize) -> usize {
+    if active == from {
+        return to;
+    }
+    if from < active && to >= active {
+        return active - 1;
+    }
+    if from > active && to <= active {
+        return active + 1;
+    }
+    active
 }
 
 /// Which of a strip's tabs a まとめて閉じる takes, and in what order (要件 6.3).
@@ -4508,6 +4544,120 @@ fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
         .borrow_mut()
         .log_diag("tab", &format!("switch pane={} to={index}", id.log_name()));
     live.show_tab(window, id, &incoming);
+    publish_tabs(window, live);
+}
+
+/// Let go of a carried tab (要件 6.5).
+///
+/// **Where it landed is a question about the editing area, not about the strip
+/// it started in.** The panes are placed into that area and the point is in the
+/// same coordinates, so which pane the hand was over is asked of the
+/// arrangement rather than guessed at from how far the pointer travelled.
+/// Outside every pane — over the boundary, or past the edge of the area — is
+/// not a pane, and then it is the ordinary reordering: the writer let go
+/// somewhere that names nothing, and the strip they started in is the only
+/// answer that can be right.
+fn drop_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize, at: (f32, f32)) {
+    let (placed, _) = live.layout.borrow().place(editor_area(window));
+    let landed = placed
+        .iter()
+        .find(|(_, rect)| rect.holds(at.0, at.1))
+        .map(|(pane, _)| PaneId::from_index(*pane as i32));
+    match landed {
+        Some(other) if other != id => carry_tab_to_pane(window, live, id, from, other),
+        _ => move_tab(window, live, id, from, to),
+    }
+}
+
+/// Carry a tab out of one pane and into another (要件 6.5).
+///
+/// **The tab moves; the document does not.** What a strip holds is a view of a
+/// document — a caret, a scroll and a mode (要件 7.6) — and all of that goes
+/// with it, so the tab arrives showing what it showed. It lands at the end of
+/// the strip it is dropped into and in front, because a tab carried somewhere
+/// is a tab the writer wants to be looking at.
+///
+/// **One tab per document in a strip, and the carried view wins.** A pane
+/// almost always already holds the document being carried into it: 要件 6.4
+/// puts the tab in front into the new pane when the area is divided, so the two
+/// strips start out sharing it. Landing beside that twin would leave two tabs
+/// with the same name in one strip, which is a strip nobody can read. The twin
+/// goes and the view in the writer's hand is the one that stays — they carried
+/// this one.
+///
+/// Emptying the pane it left undivides that pane, the same as closing its last
+/// tab does (要件 6.4). It is the same event: a pane with nothing in it.
+fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, other: PaneId) {
+    write_work_copy_now(window, live);
+    sync_active_tab(window, live);
+    let emptied = {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(id);
+        if index >= strip.tabs.len() {
+            return;
+        }
+        let before = strip.tabs.len();
+        let carried = strip.tabs.remove(index);
+        strip.active = active_after_close(before, strip.active, index);
+        let emptied = strip.tabs.is_empty();
+        let arriving = carried.document();
+        let landing = tabs.of_mut(other);
+        landing
+            .tabs
+            .retain(|held| !Rc::ptr_eq(&held.document(), &arriving));
+        landing.tabs.push(carried);
+        landing.active = landing.tabs.len() - 1;
+        emptied
+    };
+    let mut cache = live.cache.borrow_mut();
+    let message = format!(
+        "carry pane={} at={index} to={}",
+        id.log_name(),
+        other.log_name()
+    );
+    cache.log_diag("tab", &message);
+    drop(cache);
+    // The keyboard follows the tab: it is in front of the pane it landed in,
+    // and that is where the writer put it.
+    window.set_focused_pane(other.index());
+    window.set_editor_mode(other.index());
+    if emptied && live.layout.borrow().panes().len() > 1 {
+        // 要件 6.4, and the same event `finish_close` handles: a pane with
+        // nothing in it comes off screen, keeping its empty strip.
+        undivide_away(window, live, id);
+    } else if emptied {
+        refill_strip(window, live, id);
+    }
+    if let Some(staying) = live.tabs.borrow().of(id).current().cloned() {
+        live.show_tab(window, id, &staying);
+    }
+    let Some(arriving) = live.tabs.borrow().of(other).current().cloned() else {
+        return;
+    };
+    live.show_tab(window, other, &arriving);
+    publish_tabs(window, live);
+}
+
+/// Carry a tab to another place in its own strip (要件 6.5).
+///
+/// **Nothing is opened, closed or shown.** The same documents are in the same
+/// pane; only the order the writer reads them in has changed. That order is
+/// part of the arrangement (要件 8.5), and `publish_tabs` writes it down.
+fn move_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize) {
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(id);
+        let last = strip.tabs.len().saturating_sub(1);
+        if from > last || to > last || from == to {
+            return;
+        }
+        let carried = strip.tabs.remove(from);
+        strip.tabs.insert(to, carried);
+        strip.active = active_after_move(strip.active, from, to);
+    }
+    live.cache
+        .borrow_mut()
+        .log_diag("tab", &format!("move pane={} {from}->{to}", id.log_name()));
     publish_tabs(window, live);
 }
 
@@ -10380,6 +10530,39 @@ mod tests {
         assert_eq!(active_after_close(3, 1, 1), 1);
         // Closing the last tab moves to the new last.
         assert_eq!(active_after_close(3, 2, 2), 1);
+    }
+
+    /// 要件 6.5: carrying a tab does not change which document is in front.
+    #[test]
+    fn carrying_a_tab_keeps_the_same_one_in_front() {
+        // The tab in front is the one being carried: the front goes with it.
+        assert_eq!(active_after_move(1, 1, 3), 3);
+        assert_eq!(active_after_move(2, 2, 0), 0);
+        // Carried from before it to after it: everything shuffles down one.
+        assert_eq!(active_after_move(2, 0, 3), 1);
+        // Carried from after it to before it: up one.
+        assert_eq!(active_after_move(2, 4, 1), 3);
+        // Carried past it on the far side, both ways: it does not move.
+        assert_eq!(active_after_move(2, 3, 4), 2);
+        assert_eq!(active_after_move(2, 1, 0), 2);
+        // Landing on the tab in front counts as passing it.
+        assert_eq!(active_after_move(2, 0, 2), 1);
+        assert_eq!(active_after_move(2, 4, 2), 3);
+    }
+
+    /// The pair the arithmetic above stands for: a strip in a known order,
+    /// carried, comes out in the order the writer put it in.
+    #[test]
+    fn carrying_a_tab_puts_it_where_it_was_let_go() {
+        let mut strip = vec!["一", "二", "三", "四"];
+        let carried = strip.remove(3);
+        strip.insert(1, carried);
+        assert_eq!(strip, ["一", "四", "二", "三"]);
+
+        let mut strip = vec!["一", "二", "三", "四"];
+        let carried = strip.remove(0);
+        strip.insert(3, carried);
+        assert_eq!(strip, ["二", "三", "四", "一"]);
     }
 
     #[test]

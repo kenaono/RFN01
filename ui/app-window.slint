@@ -329,6 +329,23 @@ export component AppWindow inherits Window {
     /// else a pane raises; the position is in that pane's own strip.
     callback pane-tab-selected(int, int);
     callback pane-tab-closed(int, int);
+    /// 要件 6.5: which pane's strip a tab was carried out of, from where in it,
+    /// which place in that same strip it was over, and where the hand let go.
+    ///
+    /// **The point is in the editing area's coordinates**, which is where the
+    /// pane rectangles are: Rust places the panes into that area and can say
+    /// which of them a point is in without being told anything more.
+    callback pane-tab-dropped(int, int, int, float, float);
+    /// 要件 6.5: the carry that is going on, if one is — which pane it started
+    /// in and where the hand is, in the editing area's coordinates.
+    ///
+    /// **Held by the window because a carry crosses the panes.** No pane can
+    /// see another one, so the pane a tab would land in cannot be told by the
+    /// pane it came from; each of them is given the point and answers for
+    /// itself, against the rectangle it was placed in.
+    property <bool> carrying: false;
+    property <float> carry-x;
+    property <float> carry-y;
     /// Close every tab in the window but the one in front of this pane, or
     /// every one (要件 6.3). No position: the pane says which tab is kept, and
     /// nothing else.
@@ -1083,6 +1100,37 @@ export component AppWindow inherits Window {
                             // using them is being in it.
                             root.focused-pane = pane.id;
                             root.pane-tab-closed(pane.id, index);
+                            root.focus-generation += 1;
+                        }
+                        // Whether the hand is over this pane. The rectangle
+                        // is the one Rust placed it in, so this and the pane
+                        // `drop_tab` decides on are the same answer.
+                        carry-over: root.carrying
+                            && root.carry-x >= pane.x
+                            && root.carry-x < pane.x + pane.width
+                            && root.carry-y >= pane.y
+                            && root.carry-y < pane.y + pane.height;
+                        carry-moved(at-x, at-y) => {
+                            root.carry-x =
+                                (at-x - editor-row.absolute-position.x) / 1px;
+                            root.carry-y =
+                                (at-y - editor-row.absolute-position.y) / 1px;
+                            root.carrying = true;
+                        }
+                        carry-finished => {
+                            root.carrying = false;
+                        }
+                        tab-dropped(from, to, at-x, at-y) => {
+                            // The strip and its buttons belong to this pane, so
+                            // using them is being in it. Where the tab lands may
+                            // move the keyboard on again; that is Rust's to say.
+                            root.focused-pane = pane.id;
+                            root.pane-tab-dropped(
+                                pane.id,
+                                from,
+                                to,
+                                (at-x - editor-row.absolute-position.x) / 1px,
+                                (at-y - editor-row.absolute-position.y) / 1px);
                             root.focus-generation += 1;
                         }
                         new-tab-requested => {
