@@ -1136,6 +1136,13 @@ fn main() -> Result<(), slint::PlatformError> {
         Some(session) => session.recent.clone(),
         None => Vec::new(),
     };
+    // 要件 5.1: the folders worked in before this one. A session written by a
+    // build from before there was a history has none, so the folder being
+    // restored is put at the head below — the way back has to start somewhere.
+    let visited = match &session {
+        Some(session) => session.folders.clone(),
+        None => Vec::new(),
+    };
     // 要件 5.1, 8.5: the folder the writer was working in, and which of its
     // folders they had open. A folder that has since gone is simply not there.
     let work_folder = match &session {
@@ -1251,6 +1258,7 @@ fn main() -> Result<(), slint::PlatformError> {
         tree_paths: Rc::new(RefCell::new(Vec::new())),
         results: Rc::new(RefCell::new(Vec::new())),
         recent: Rc::new(RefCell::new(remembered)),
+        recent_folders: Rc::new(RefCell::new(visited)),
         layout: layout.clone(),
         pending: Rc::new(RefCell::new(None)),
         close_run: Rc::new(RefCell::new(None)),
@@ -1330,6 +1338,14 @@ fn main() -> Result<(), slint::PlatformError> {
     // until then.
     place_panes(&window, &layout.borrow());
     publish_left(&window, &live);
+    // 要件 5.1: the folder being restored is the newest one worked in, whether
+    // or not the session that named it also carried a history — a build from
+    // before there was one leaves the way back to be started here.
+    let restored = live.folder.borrow().root.clone();
+    if let Some(root) = restored {
+        remember_folder(&live, &root);
+    }
+    publish_folder_history(&window, &live);
 
     // Bracket the renderer so the log can separate our own work from what Slint
     // does with the images afterwards.
@@ -1586,20 +1602,28 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(chosen) = file_dialog::open_folder(owner) else {
                 return;
             };
-            {
-                let mut folder = folder_live.folder.borrow_mut();
-                // 要件 5.1: one folder to a window, so the one that was open
-                // goes — and with it every folder that was open inside it.
-                folder.root = Some(chosen.clone());
-                folder.expanded.clear();
-            }
-            publish_left(&window, &folder_live);
-            write_session(&window, &folder_live);
-            folder_live
-                .cache
-                .borrow_mut()
-                .log_diag("folder", &format!("opened path={}", chosen.display()));
+            open_work_folder(&window, &folder_live, &chosen);
         }
+    });
+
+    // 要件 5.1: back to a folder worked in before, chosen by name rather than
+    // found again in the dialog.
+    //
+    // **Handed to the event loop rather than done here.** The rows are a
+    // repeater inside an open popup and switching folders redraws them, which
+    // is 6.18 again: the element whose handler is running would be replaced
+    // underneath it.
+    let weak = window.as_weak();
+    let history_live = live.clone();
+    window.on_recent_folder_chosen(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = history_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                go_to_remembered_folder(&window, &live, index);
+            }
+        });
     });
 
     let weak = window.as_weak();
@@ -2669,6 +2693,13 @@ struct Live {
     /// panel's rows and what each of them stands for: one path is all a row
     /// needs.
     recent: Rc<RefCell<Vec<PathBuf>>>,
+    /// The work folders opened most recently, newest first (要件 5.1), with
+    /// the one open now at the head.
+    ///
+    /// **The head is not offered back.** A window holds one work folder at a
+    /// time, so the menu is a list of the folders the writer can go to — and
+    /// the one they are already in is not one of them (`offered_folders`).
+    recent_folders: Rc<RefCell<Vec<PathBuf>>>,
     /// How the editing area is divided (要件 6.4). **The whole of the
     /// arrangement**: which panes are on screen, how they sit, and where the
     /// boundaries are.
@@ -2984,6 +3015,7 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         expanded: folder.expanded.iter().cloned().collect(),
         tree_shown: window.get_tree_open(),
         recent: live.recent.borrow().clone(),
+        folders: live.recent_folders.borrow().clone(),
     }
 }
 
@@ -3635,11 +3667,12 @@ fn open_remembered(window: &AppWindow, live: &Live, index: usize) {
     publish_left(window, live);
 }
 
-/// What a file is called in the history (要件 7.7).
+/// What something is called in a history (要件 5.1, 7.7).
 ///
 /// **With the folder holding it**, because a work folder full of chapters has
 /// several files called the same thing, and a list of identical names is not a
-/// list anybody can choose from.
+/// list anybody can choose from. Folders are named the same way, for the same
+/// reason: several years of notes are all called `notes`.
 fn remembered_name(path: &Path) -> String {
     let name = entry_name(path);
     match path.parent().map(entry_name) {
@@ -3651,16 +3684,113 @@ fn remembered_name(path: &Path) -> String {
 /// How many files the history keeps.
 const REMEMBERED_FILES: usize = 30;
 
-/// Put a file at the top of the history (要件 7.7).
+/// How many work folders the history keeps (要件 5.1).
 ///
-/// **Newest first, each file once.** Opening something already in the list
+/// **Shorter than the file history**, because this one is a menu rather than a
+/// panel: a list that runs off the bottom of the screen is not one anybody
+/// picks from.
+const REMEMBERED_FOLDERS: usize = 10;
+
+/// Put a path at the top of a history (要件 5.1, 7.7).
+///
+/// **Newest first, each path once.** Opening something already in the list
 /// moves it up rather than repeating it, which is what makes a short list worth
-/// reading.
+/// reading. Files and work folders are two lists of different lengths and the
+/// same rule, so the rule is written once.
+fn remember_path(history: &mut Vec<PathBuf>, path: &Path, keep: usize) {
+    history.retain(|held| held != path);
+    history.insert(0, path.to_path_buf());
+    history.truncate(keep);
+}
+
+/// Put a file at the top of the history (要件 7.7).
 fn remember_recent(live: &Live, path: &Path) {
     let mut recent = live.recent.borrow_mut();
-    recent.retain(|held| held != path);
-    recent.insert(0, path.to_path_buf());
-    recent.truncate(REMEMBERED_FILES);
+    remember_path(&mut recent, path, REMEMBERED_FILES);
+}
+
+/// Put a work folder at the top of the history (要件 5.1).
+fn remember_folder(live: &Live, path: &Path) {
+    let mut folders = live.recent_folders.borrow_mut();
+    remember_path(&mut folders, path, REMEMBERED_FOLDERS);
+}
+
+/// Stop offering a folder (要件 5.1).
+fn forget_folder(live: &Live, path: &Path) {
+    let mut folders = live.recent_folders.borrow_mut();
+    folders.retain(|held| held != path);
+}
+
+/// The folders the writer can go to (要件 5.1).
+///
+/// **The head of the history is where they already are**, so it is left out:
+/// every row of the menu goes somewhere. Worked out again rather than kept
+/// beside the rows, so what a click means cannot drift from what was drawn.
+fn offered_folders(live: &Live) -> Vec<PathBuf> {
+    let here = live.folder.borrow().root.clone();
+    let folders = live.recent_folders.borrow();
+    folders
+        .iter()
+        .filter(|path| Some(path.as_path()) != here.as_deref())
+        .cloned()
+        .collect()
+}
+
+/// Draw the folders the writer has worked in (要件 5.1).
+///
+/// **The count is logged**, because "the menu is empty" and "the menu is not
+/// there" look the same from the outside and are two different faults.
+fn publish_folder_history(window: &AppWindow, live: &Live) {
+    let folders = offered_folders(live);
+    let drawn = folders
+        .iter()
+        .map(|path| SharedString::from(remembered_name(path)))
+        .collect::<Vec<_>>();
+    let count = drawn.len();
+    let held = live.recent_folders.borrow().len();
+    window.set_recent_folders(ModelRc::new(VecModel::from(drawn)));
+    let mut cache = live.cache.borrow_mut();
+    cache.log_diag("folder", &format!("history held={held} offered={count}"));
+}
+
+/// Work in a folder (要件 5.1).
+///
+/// **One folder to a window**, so the one that was open goes — and with it
+/// every folder that was open inside it. The session is written on the way out
+/// rather than on the way in: nothing here closes a tab, so what it holds is
+/// the arrangement as it stands, now against the folder just opened.
+fn open_work_folder(window: &AppWindow, live: &Live, chosen: &Path) {
+    {
+        let mut folder = live.folder.borrow_mut();
+        folder.root = Some(chosen.to_path_buf());
+        folder.expanded.clear();
+    }
+    remember_folder(live, chosen);
+    publish_folder_history(window, live);
+    publish_left(window, live);
+    write_session(window, live);
+    let mut cache = live.cache.borrow_mut();
+    cache.log_diag("folder", &format!("opened path={}", chosen.display()));
+}
+
+/// Go back to a folder from the history (要件 5.1).
+///
+/// **A folder that is no longer there is dropped rather than opened.** Nothing
+/// watches the history — a folder can be renamed or unplugged between two runs
+/// — so the answer to picking one that has gone is to stop offering it.
+fn go_to_remembered_folder(window: &AppWindow, live: &Live, index: usize) {
+    let Some(path) = offered_folders(live).into_iter().nth(index) else {
+        return;
+    };
+    if path.is_dir() {
+        open_work_folder(window, live, &path);
+        return;
+    }
+    forget_folder(live, &path);
+    publish_folder_history(window, live);
+    write_session(window, live);
+    let mut cache = live.cache.borrow_mut();
+    cache.log_diag("folder", &format!("gone path={}", path.display()));
 }
 
 /// The most files one folder-wide search reads.
@@ -9638,6 +9768,29 @@ fn replace_source_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 要件 5.1, 7.7: a history is newest first, holds each path once, and
+    /// never grows past what it is allowed to keep.
+    #[test]
+    fn a_history_moves_what_is_opened_again_to_the_top() {
+        let mut history = Vec::new();
+        let a = PathBuf::from("D:\\甲");
+        let b = PathBuf::from("D:\\乙");
+        let c = PathBuf::from("D:\\丙");
+        let d = PathBuf::from("D:\\丁");
+        remember_path(&mut history, &a, 3);
+        remember_path(&mut history, &b, 3);
+        remember_path(&mut history, &a, 3);
+
+        // Opened again, so it moves up rather than appearing twice.
+        assert_eq!(history, [a.clone(), b.clone()]);
+
+        remember_path(&mut history, &c, 3);
+        remember_path(&mut history, &d, 3);
+
+        // The oldest falls off the end; the newest is never refused.
+        assert_eq!(history, [d, c, a]);
+    }
 
     fn engine_for(text: &str, zoom: i32) -> TextEngine {
         let mut engine = TextEngine::default();

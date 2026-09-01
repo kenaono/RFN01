@@ -105,6 +105,12 @@ export component AppWindow inherits Window {
     /// a folder opens or closes, a file is opened, a search result is gone to.
     callback left-row-activated(int);
     callback work-folder-requested();
+    /// The work folders opened before this one, newest first (要件 5.1).
+    /// Names with the folder that holds them, the way the 履歴 panel names a
+    /// file — Rust draws them, and the one already open is not among them.
+    in property <[string]> recent-folders;
+    /// Go back to one of them, by its place in that list.
+    callback recent-folder-chosen(int);
     // The whole work folder, not the document in front (要件 7.7). Its own
     // field, separate from the find bar's: one asks about a document and the
     // other about a folder, and they are not the same question.
@@ -354,6 +360,11 @@ export component AppWindow inherits Window {
         // that is not open does nothing, so what is lost is only the answer:
         // Escape closes this panel without being able to say that it did.
         typography-panel.close();
+        // The folder history is closed blind for the same reason, and it is
+        // the same case: it is opened from a row inside the app menu, which is
+        // two components up from here (要件 5.1). Reading its `is-open` is what
+        // makes that `show()` fail to compile — tried, and it does.
+        recent-menu.close();
         return false;
     }
 
@@ -439,6 +450,26 @@ export component AppWindow inherits Window {
                                 root.focus-generation += 1;
                             }
                         }
+                        // Nothing to go back to on a first run, and a row that
+                        // opens an empty menu is a row that lies.
+                        if root.recent-folders.length > 0: MenuRow {
+                            title: "Recent Folders";
+                            // The mark a submenu carries, in the column the
+                            // shortcuts use. There is no key for this one.
+                            shortcut: "▸";
+                            // **Shown first, closed second**, which is the
+                            // opposite of every plain row above and the same
+                            // as the tab list's rows. An `if` compiles to a
+                            // repeater, so this row is a repeated element:
+                            // closing the menu takes the element whose handler
+                            // is running with it, and the line after it never
+                            // runs. Written the other way round the row is
+                            // there, the menu closes, and nothing opens.
+                            activated => {
+                                recent-menu.show();
+                                app-menu.close();
+                            }
+                        }
                         MenuRow {
                             title: "Quick Draft…";
                             activated => {
@@ -500,6 +531,40 @@ export component AppWindow inherits Window {
                             activated => {
                                 app-menu.close();
                                 root.view-mode-requested(1);
+                                root.focus-generation += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 要件 5.1: the folders worked in before this one. A menu of its
+            // own rather than a submenu — the row above closes `app-menu` and
+            // shows this one, which is how `Typography…` already opens a panel
+            // from a menu. It stands in the same place, so the list appears
+            // where the writer was looking.
+            recent-menu := PopupWindow {
+                x: 6px;
+                y: 32px;
+                width: 264px;
+                close-policy: close-on-click-outside;
+
+                MenuFrame {
+                    width: 264px;
+
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 1px;
+
+                        for folder[index] in root.recent-folders: MenuRow {
+                            title: folder;
+                            // **Chosen first, closed second**, for the reason
+                            // the tab list gives: these rows are a repeater
+                            // inside the popup, and closing first takes the
+                            // element whose handler is running with it.
+                            activated => {
+                                root.recent-folder-chosen(index);
+                                recent-menu.close();
                                 root.focus-generation += 1;
                             }
                         }

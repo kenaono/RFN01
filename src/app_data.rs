@@ -142,6 +142,13 @@ pub struct Session {
     /// session rather than with the work folder, because it is a list of what
     /// the writer did and not of what the folder holds.
     pub recent: Vec<PathBuf>,
+    /// The work folders opened most recently, newest first (要件 5.1), the one
+    /// open now at the head.
+    ///
+    /// **`folder` above is where the writer is; this is where they have been.**
+    /// A window holds one work folder at a time, so the way back to the last
+    /// one is a list kept for them rather than a second folder kept open.
+    pub folders: Vec<PathBuf>,
 }
 
 /// Write the session down.
@@ -175,6 +182,9 @@ pub fn encode_session(session: &Session) -> String {
     }
     for path in &session.recent {
         out.push_str(&format!("recent: {}\n", path.display()));
+    }
+    for path in &session.folders {
+        out.push_str(&format!("visited: {}\n", path.display()));
     }
     for pane in &session.panes {
         out.push_str(&format!("pane: {} {}\n", pane.active, pane.zoom));
@@ -234,6 +244,7 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "folder" => session.folder = Some(PathBuf::from(value)),
             "expanded" => session.expanded.push(PathBuf::from(value)),
             "recent" => session.recent.push(PathBuf::from(value)),
+            "visited" => session.folders.push(PathBuf::from(value)),
             "pane" => {
                 let mut fields = value.split(' ');
                 session.panes.push(SessionPane {
@@ -727,6 +738,7 @@ mod tests {
                 PathBuf::from("D:\\書きかけ\\第一章.md"),
                 PathBuf::from("D:\\書きかけ\\年表.txt"),
             ],
+            folders: vec![PathBuf::from("D:\\書きかけ"), PathBuf::from("D:\\古い原稿")],
             panes: vec![
                 SessionPane {
                     active: 1,
@@ -822,8 +834,10 @@ mod tests {
         let read = decode_session(&later).expect("reads");
         assert_eq!(read.layout, "P 0");
         // A session written before there was a history has none, rather than
-        // being unreadable for want of one.
+        // being unreadable for want of one. The same holds for the folders
+        // visited (要件 5.1), which arrived later still.
         assert!(read.recent.is_empty());
+        assert!(read.folders.is_empty());
     }
 
     /// 要件 9: the zoom is each pane's own, and a session written while it was
