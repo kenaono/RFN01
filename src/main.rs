@@ -1719,6 +1719,65 @@ fn main() -> Result<(), slint::PlatformError> {
         pick_tree_row(&picked_live, index.max(0) as usize);
     });
 
+    // 要件 5.2: a row was picked up. **Answered on the spot** — the answer is
+    // one number and setting it draws nothing, which is what makes it safe to
+    // ask Rust in the middle of a drag at all (drawing the rows again would
+    // take the row the drag is running in, 6.18).
+    let weak = window.as_weak();
+    let grab_live = live.clone();
+    window.on_tree_row_grabbed(move |index| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let paths = grab_live.tree_paths.borrow();
+        let at = index.max(0) as usize;
+        window.set_tree_carry_end(file_tree::subtree_end(&paths, at) as i32);
+        // Which row holds it now, and `-1` when that is the work folder — the
+        // heading stands for the work folder, so the two answers are the two
+        // kinds of place a row can be let go in, and neither may be given what
+        // it already has.
+        let holder = paths.get(at).and_then(|path| path.parent());
+        let row = holder.and_then(|held| paths.iter().position(|path| path == held));
+        window.set_tree_carry_parent(row.map_or(-1, |at| at as i32));
+    });
+
+    // 要件 5.2: one line for one gesture on a row, so that "it does not move"
+    // has an answer to be read rather than guessed at. **The rows are inside a
+    // `ScrollView`**, and a Flickable holds a press back for 100ms and takes
+    // the drag for itself when it can scroll that way (`items/flickable.rs`),
+    // so a carry can fail before any of this code runs.
+    let trace_live = live.clone();
+    window.on_tree_row_traced(move |row, moves, pressed, carried, drop, cancelled| {
+        // A press that never moved is a row being chosen, and that is the other
+        // callback's story. This one is only for gestures that meant to carry.
+        if moves == 0 && !cancelled {
+            return;
+        }
+        let told = format!(
+            "drag row={row} moves={moves} pressed={} carried={} drop={drop} cancel={}",
+            u8::from(pressed),
+            u8::from(carried),
+            u8::from(cancelled),
+        );
+        trace_live.cache.borrow_mut().log_diag("folder", &told);
+    });
+
+    // 要件 5.2: a carried row was let go. Put off to the next tick for the
+    // reason every tab command is: the move draws the tree again, and the row
+    // the drag ran in is one of the rows that is rebuilt (6.18).
+    let weak = window.as_weak();
+    let drop_live = live.clone();
+    window.on_tree_row_dropped(move |from, onto| {
+        let from = from.max(0) as usize;
+        let weak = weak.clone();
+        let live = drop_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                drop_tree_row(&window, &live, from, onto);
+            }
+        });
+    });
+
     // 要件 7.7: finding and replacing inside the document in front of the
     // writer. All three act on the focused pane, and all three go through the
     // ordinary editing path so that undo and the other panes follow.
@@ -4327,26 +4386,83 @@ fn rename_entry(window: &AppWindow, live: &Live, from: &Path) {
         return;
     };
     let to = parent.join(name);
-    if let Err(error) = file_tree::rename(from, &to) {
+    if let Err(error) = move_entry(window, live, from, &to) {
         let told = format!("名前を変えられません: {error}");
         window.set_render_status(told.into());
         return;
     }
-    documents_follow(window, live, from, &to);
-    {
-        let mut open = live.folder.borrow_mut();
-        open.selected = Some(to.clone());
-        // A folder that was open stays open under its new name, and so does
-        // every folder inside it: both are held by path.
-        let mut moved = BTreeSet::new();
-        for path in &open.expanded {
-            let after = file_tree::moved_path(from, &to, path);
-            moved.insert(after.unwrap_or_else(|| path.clone()));
-        }
-        open.expanded = moved;
-    }
     publish_left(window, live);
     write_session(window, live);
+}
+
+/// A row carried through the tree was let go (要件 5.2).
+///
+/// **The window has already said where it would land**, and this is the same
+/// answer: the row that lit up under the hand is the row named here. Nothing is
+/// asked of the disk about which rows may be given something — a file is not a
+/// place to put anything, and a folder cannot go inside itself — because the
+/// marks the writer was watching were drawn from exactly those two rules
+/// (`file_tree::move_target` states them once more, for the paths).
+fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
+    let Some(root) = live.folder.borrow().root.clone() else {
+        return;
+    };
+    let (source, into) = {
+        let paths = live.tree_paths.borrow();
+        let Some(source) = paths.get(from).cloned() else {
+            return;
+        };
+        // `-1` is the work folder itself, which the panel's heading stands for.
+        // Anything else that is not a row is a hand let go over nothing.
+        let into = match onto {
+            -1 => Some(root),
+            at if at >= 0 => paths.get(at as usize).cloned(),
+            _ => None,
+        };
+        (source, into)
+    };
+    let Some(into) = into else {
+        return;
+    };
+    let Some(to) = file_tree::move_target(&source, &into) else {
+        return;
+    };
+    if let Err(error) = move_entry(window, live, &source, &to) {
+        let told = format!("移動できません: {error}");
+        window.set_render_status(told.into());
+        return;
+    }
+    // The folder it went into is opened, or what was just carried there would
+    // not be on screen at all — the same as a file that has just been made.
+    live.folder.borrow_mut().expanded.insert(into.clone());
+    let message = format!("move {} into={}", source.display(), into.display());
+    live.cache.borrow_mut().log_diag("folder", &message);
+    publish_left(window, live);
+    write_session(window, live);
+}
+
+/// Put a file or folder where it is going, and take what points at it along
+/// (要件 5.2).
+///
+/// **A rename and a move are the same act**: both give something a different
+/// path, and everything that has to follow — the open documents, the folders
+/// that were unfolded, what the writer is standing on — follows the path and
+/// not the name. Drawing the tree again is left to the caller, because the one
+/// that carried something into a folder has that folder to open first.
+fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::io::Result<()> {
+    file_tree::rename(from, to)?;
+    documents_follow(window, live, from, to);
+    let mut open = live.folder.borrow_mut();
+    open.selected = Some(to.to_path_buf());
+    // A folder that was open stays open where it has gone, and so does every
+    // folder inside it: both are held by path.
+    let mut moved = BTreeSet::new();
+    for path in &open.expanded {
+        let after = file_tree::moved_path(from, to, path);
+        moved.insert(after.unwrap_or_else(|| path.clone()));
+    }
+    open.expanded = moved;
+    Ok(())
 }
 
 /// Point every open document at where its file has just gone (要件 5.2).

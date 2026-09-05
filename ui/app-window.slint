@@ -131,6 +131,58 @@ export component AppWindow inherits Window {
     /// opening the file or folding the folder is not what was asked for.
     callback left-row-picked(int);
 
+    /// 要件 5.2: the row being carried through the tree, and where the hand is.
+    ///
+    /// **Held by the window** for the reason a carried tab's point is (要件
+    /// 6.5): the row that was picked up and the row it is being offered to are
+    /// two different rows, and neither can see the other. Each candidate
+    /// compares the point with its own rectangle and answers for itself, and
+    /// what it answers is what Rust is told to do — so the row that lights up
+    /// and the folder the file lands in cannot disagree.
+    ///
+    /// **The rows are not drawn again while a carry is going on.** Publishing
+    /// them would rebuild the very row whose grab is running (6.18/6.24), so
+    /// the move happens after the hand lets go, from Rust, through a `Timer`.
+    property <bool> tree-carrying: false;
+    property <int> tree-carried-from: -1;
+    /// Where the hand is, **in the coordinates the rows are laid out in**: `x`
+    /// across a row, `y` down the list from its first row. Not the window's,
+    /// and never `absolute-position` — an element carrying an `opacity` is
+    /// wrapped in an `Opacity` item, and `absolute-position` then counts the
+    /// row's place in the layout twice (6.26). Every row already knows its own
+    /// `y` in this space, which is the only space the comparison needs.
+    property <length> tree-carry-x;
+    property <length> tree-carry-y;
+    /// Where the rows under the carried one stop, from `file_tree::subtree_end`.
+    /// Rows in `[tree-carried-from, tree-carry-end)` cannot receive it: a folder
+    /// may not go inside itself. **Set once, when the carry starts** — a
+    /// property costs no redraw of the rows, which is why Rust may be asked
+    /// this in the middle of a drag at all.
+    in-out property <int> tree-carry-end: 0;
+    /// The row of the folder the carried one is already in, `-1` for the work
+    /// folder itself. **It cannot receive what it already holds**, and saying
+    /// so is what keeps every mark true: a mark that appears and then does
+    /// nothing teaches the writer to distrust the ones that do.
+    in-out property <int> tree-carry-parent: -1;
+    /// Where the carried row would land: a row's number, `-1` the work folder
+    /// itself, `-2` nowhere. The work folder is the panel's own heading,
+    /// because that heading **is** the work folder's name — and it is the one
+    /// target that is always on screen, which is what a row scrolled out of
+    /// sight is not.
+    property <int> tree-drop: -2;
+    /// A carry started at this row: Rust answers with `tree-carry-end`.
+    callback tree-row-grabbed(int);
+    /// A carried row was let go over `tree-drop` (要件 5.2).
+    callback tree-row-dropped(int, int);
+    /// 要件 5.2: one line in the diagnostic log for one gesture on a row — the
+    /// row, how many moves reached it, whether the press ever did, whether it
+    /// became a carry, where it would have landed, and whether the grab was
+    /// taken away. **The rows sit inside a `ScrollView`**, and a Flickable
+    /// delays a press and may claim the drag as a scroll (`flickable.rs`), so
+    /// "it does not move" has more than one place to fail and only the log can
+    /// say which one it was.
+    callback tree-row-traced(int, int, bool, bool, int, bool);
+
     // Finding and replacing inside the document in front of the writer
     // (要件 7.7). One bar for the window rather than one per pane: the question
     // is about a document, and which document is the focused pane's business.
@@ -672,9 +724,39 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 0px;
 
-                    if root.left-tab == 0: Rectangle {
+                    if root.left-tab == 0: tree-head := Rectangle {
                         height: 34px;
-                        background: Tok.chrome-raised;
+                        // 要件 5.2: the work folder itself is a place to let a
+                        // row go, and this heading is its name. **The one
+                        // target that cannot be scrolled away** — the rows can
+                        // be, and a mark that is sometimes absent is not a
+                        // mark (6.25).
+                        // **The band directly above the list**, said in the
+                        // list's own coordinates: the heading is what the panel
+                        // puts there, so one heading's height above the first
+                        // row that is shown is the heading.
+                        property <bool> under-carry: root.tree-carrying
+                            && root.work-folder != ""
+                            && root.tree-carry-parent != -1
+                            && root.tree-carry-x >= 0px
+                            && root.tree-carry-x < self.width
+                            && root.tree-carry-y < -tree-view.viewport-y
+                            && root.tree-carry-y >= -tree-view.viewport-y - self.height;
+                        // **Cleared by whoever set it**, so that leaving a
+                        // target and entering another can happen in either
+                        // order without the two undoing each other.
+                        changed under-carry => {
+                            if (self.under-carry) {
+                                root.tree-drop = -1;
+                            } else if (root.tree-drop == -1) {
+                                root.tree-drop = -2;
+                            }
+                        }
+                        property <bool> receiving: root.tree-carrying
+                            && root.tree-drop == -1;
+                        background: self.receiving ? Tok.accent-faint : Tok.chrome-raised;
+                        border-width: self.receiving ? 2px : 0px;
+                        border-color: Tok.accent;
 
                         HorizontalBox {
                             padding-left: 8px;
@@ -773,24 +855,106 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    ScrollView {
+                    tree-view := ScrollView {
+                        // 要件 5.2: the point being carried, but only while it
+                        // is over the rows the writer can see. **A row scrolled
+                        // out of sight still has a place in the list**, and the
+                        // point is in that same list — so the part of it that
+                        // is on screen is asked for here, once, rather than by
+                        // every row. `viewport-y` is negative as the list is
+                        // scrolled, so the top of what is shown is `-viewport-y`
+                        // rows down.
+                        property <bool> holds-carry: root.tree-carrying
+                            && root.tree-carry-x >= 0px
+                            && root.tree-carry-x < self.width
+                            && root.tree-carry-y >= -self.viewport-y
+                            && root.tree-carry-y < -self.viewport-y + self.visible-height;
+
                         VerticalLayout {
                             alignment: start;
 
-                            for row[index] in root.left-rows: Rectangle {
+                            for row[index] in root.left-rows: tree-row := Rectangle {
                                 height: 24px;
+                                // 要件 5.2: what this row can be given. A file
+                                // is not a place to put anything, the folder
+                                // it is already in cannot be given what it
+                                // holds, and a folder cannot go inside itself.
+                                // The folder a file sits in is drawn one row
+                                // up wherever it is, so aiming at that costs
+                                // nothing — and this way no mark ever says a
+                                // drop will happen where it will not. The rows
+                                // from the carried one to
+                                // `tree-carry-end` are what is under it.
+                                property <bool> takes-carry: root.tree-carrying
+                                    && root.left-tab == 0
+                                    && row.folder
+                                    && index != root.tree-carry-parent
+                                    && (index < root.tree-carried-from
+                                        || index >= root.tree-carry-end);
+                                // Only the flow direction is compared: a row is
+                                // as wide as the panel, and the view above has
+                                // already answered for the other axis. **The
+                                // row's own `y`**, which is where the layout put
+                                // it and is the same space the point is in.
+                                property <bool> under-carry: self.takes-carry
+                                    && tree-view.holds-carry
+                                    && root.tree-carry-y >= self.y
+                                    && root.tree-carry-y < self.y + self.height;
+                                changed under-carry => {
+                                    if (self.under-carry) {
+                                        root.tree-drop = index;
+                                    } else if (root.tree-drop == index) {
+                                        root.tree-drop = -2;
+                                    }
+                                }
+                                property <bool> receiving: root.tree-carrying
+                                    && root.tree-drop == index;
+                                // The row in the writer's hand has gone pale,
+                                // the way a carried tab does (要件 6.5): it
+                                // stays where it is, because the tree is not
+                                // drawn again until the hand lets go.
+                                opacity: (root.tree-carrying
+                                    && index == root.tree-carried-from) ? 0.45 : 1.0;
+                                border-width: self.receiving ? 2px : 0px;
+                                border-color: Tok.accent;
                                 // The selected row is the one the file commands
                                 // act on (要件 5.2), so it has to be visible
                                 // which one it is.
-                                background: index == root.tree-selected
-                                    ? Tok.accent-soft
-                                    : (entry.has-hover ? Tok.accent-faint : transparent);
+                                background: self.receiving
+                                    ? Tok.accent-faint
+                                    : (index == root.tree-selected
+                                        ? Tok.accent-soft
+                                        : (entry.has-hover ? Tok.accent-faint : transparent));
+
+                                // Whether the button went down on this row,
+                                // where it went down, and whether it has since
+                                // travelled far enough to be a carry rather
+                                // than a click. **Four pixels**, the same as a
+                                // tab's: a hand resting on a row is not
+                                // perfectly still.
+                                property <bool> pressing: false;
+                                property <length> press-x;
+                                property <length> press-y;
+                                property <bool> carrying-self: false;
+                                // How many moves reached this row while it was
+                                // pressed. `0` says the press or the drag never
+                                // arrived at all, which is a different fault
+                                // from a carry that found nowhere to land.
+                                property <int> moves: 0;
 
                                 entry := TouchArea {
-                                    clicked => {
-                                        root.left-row-activated(index);
-                                        root.focus-generation += 1;
-                                    }
+                                    // The hand is closed while a row is in it.
+                                    mouse-cursor: tree-row.carrying-self
+                                        ? MouseCursor.grabbing
+                                        : MouseCursor.default;
+                                    // **Not `clicked`.** A click is a press and
+                                    // a release in the same place, which is
+                                    // exactly what a carry is not, and both
+                                    // come out of the same press — so the press
+                                    // is followed here rather than asked about
+                                    // afterwards (要件 5.2, and `Tab` in
+                                    // controls.slint says it for 要件 6.5).
+                                    //
                                     // 要件 5.2: the right button asks a row
                                     // what can be done to it. **Choosing the
                                     // row is not opening it** — the commands
@@ -809,6 +973,82 @@ export component AppWindow inherits Window {
                                             root.tree-selected = index;
                                             root.left-row-picked(index);
                                             row-menu.show();
+                                        }
+                                        if (event.button != PointerEventButton.left) {
+                                            return;
+                                        }
+                                        if (event.kind == PointerEventKind.down) {
+                                            tree-row.pressing = true;
+                                            tree-row.carrying-self = false;
+                                            tree-row.moves = 0;
+                                            tree-row.press-x = entry.mouse-x;
+                                            tree-row.press-y = entry.mouse-y;
+                                        }
+                                        if (event.kind == PointerEventKind.up) {
+                                            root.tree-row-traced(index,
+                                                tree-row.moves,
+                                                tree-row.pressing,
+                                                tree-row.carrying-self,
+                                                root.tree-drop,
+                                                false);
+                                            if (tree-row.carrying-self) {
+                                                // **Asked first, put down
+                                                // second**: the move is what
+                                                // the drop means, and Rust is
+                                                // told it before the marks it
+                                                // was drawn from are cleared.
+                                                root.tree-row-dropped(index, root.tree-drop);
+                                                root.tree-carrying = false;
+                                                root.tree-carried-from = -1;
+                                                root.tree-drop = -2;
+                                            } else if (tree-row.pressing) {
+                                                root.left-row-activated(index);
+                                                root.focus-generation += 1;
+                                            }
+                                            tree-row.pressing = false;
+                                            tree-row.carrying-self = false;
+                                        }
+                                        if (event.kind == PointerEventKind.cancel) {
+                                            root.tree-row-traced(index,
+                                                tree-row.moves,
+                                                tree-row.pressing,
+                                                tree-row.carrying-self,
+                                                root.tree-drop,
+                                                true);
+                                            if (tree-row.carrying-self) {
+                                                root.tree-carrying = false;
+                                                root.tree-carried-from = -1;
+                                                root.tree-drop = -2;
+                                            }
+                                            tree-row.pressing = false;
+                                            tree-row.carrying-self = false;
+                                        }
+                                    }
+                                    moved => {
+                                        tree-row.moves += 1;
+                                        if (!tree-row.pressing || root.left-tab != 0) {
+                                            return;
+                                        }
+                                        // **The point before the carry.** Every
+                                        // row watches it, so setting `carrying`
+                                        // first would have them all answer once
+                                        // against a position from no drag at
+                                        // all (要件 6.5 says the same of tabs).
+                                        root.tree-carry-x = entry.mouse-x;
+                                        root.tree-carry-y = tree-row.y + entry.mouse-y;
+                                        if (!tree-row.carrying-self
+                                            && (entry.mouse-x > tree-row.press-x + 4px
+                                                || entry.mouse-x < tree-row.press-x - 4px
+                                                || entry.mouse-y > tree-row.press-y + 4px
+                                                || entry.mouse-y < tree-row.press-y - 4px)) {
+                                            tree-row.carrying-self = true;
+                                            root.tree-carried-from = index;
+                                            root.tree-drop = -2;
+                                            // Rust answers with how far the
+                                            // rows under this one reach, and
+                                            // answering costs no redraw.
+                                            root.tree-row-grabbed(index);
+                                            root.tree-carrying = true;
                                         }
                                     }
                                 }

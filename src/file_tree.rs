@@ -239,6 +239,39 @@ pub fn moved_path(from: &Path, to: &Path, path: &Path) -> Option<PathBuf> {
     Some(to.join(rest))
 }
 
+/// Where `source` lands when it is carried into `into` (要件 5.2).
+///
+/// **Nothing, when the move would not be one.** A folder cannot go inside
+/// itself or inside anything under it — what came away would be unreachable
+/// from the root it was carried out of — and something let go in the folder it
+/// is already in has not moved at all. Both are `None` rather than an error:
+/// neither is a mistake, and neither is a thing to tell the writer about.
+pub fn move_target(source: &Path, into: &Path) -> Option<PathBuf> {
+    if into.starts_with(source) {
+        return None;
+    }
+    if source.parent() == Some(into) {
+        return None;
+    }
+    Some(into.join(source.file_name()?))
+}
+
+/// Where the rows under the one at `at` stop (要件 5.2).
+///
+/// The rows are a flattened walk (see [`rows`]), so everything under a folder
+/// is the run directly below it — which turns "is this row inside that one"
+/// into a comparison of two numbers. **It has to be one**: the rows are drawn
+/// by Slint, and Slint cannot ask a path what it is under. A file, and a row
+/// that is not there at all, hold nothing and stop at the next row.
+pub fn subtree_end(paths: &[PathBuf], at: usize) -> usize {
+    let Some(source) = paths.get(at) else {
+        return at + 1;
+    };
+    let rest = &paths[at + 1..];
+    let inside = |path: &&PathBuf| path.starts_with(source);
+    at + 1 + rest.iter().take_while(inside).count()
+}
+
 /// The folder a new file or folder is made in (要件 5.2).
 ///
 /// The selected folder itself, the selected file's folder, or the work folder
@@ -564,6 +597,43 @@ mod tests {
 
     /// A new file lands where the writer is standing: in the folder they have
     /// selected, beside the file they have selected, or in the work folder.
+    #[test]
+    fn a_folder_does_not_go_inside_itself_or_under_itself() {
+        let source = Path::new("/w/notes");
+        assert_eq!(move_target(source, Path::new("/w/notes")), None);
+        assert_eq!(move_target(source, Path::new("/w/notes/2026")), None);
+        // A name that merely begins with the same letters is another folder.
+        let beside = move_target(source, Path::new("/w/notes2"));
+        assert_eq!(beside, Some(PathBuf::from("/w/notes2/notes")));
+    }
+
+    #[test]
+    fn let_go_in_the_folder_it_is_already_in_is_not_a_move() {
+        let source = Path::new("/w/notes/memo.md");
+        assert_eq!(move_target(source, Path::new("/w/notes")), None);
+    }
+
+    #[test]
+    fn a_move_keeps_the_name_and_takes_the_folder_it_was_dropped_in() {
+        let source = Path::new("/w/memo.md");
+        let landed = move_target(source, Path::new("/w/notes/2026"));
+        assert_eq!(landed, Some(PathBuf::from("/w/notes/2026/memo.md")));
+    }
+
+    #[test]
+    fn what_is_under_a_folder_is_the_run_of_rows_below_it() {
+        let paths: Vec<PathBuf> = ["/w/a", "/w/a/x.md", "/w/a/b", "/w/a/b/y.md", "/w/c.md"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        // The folder holds the three rows after it; the one inside it holds
+        // one; a file holds none, and neither does a row nobody drew.
+        assert_eq!(subtree_end(&paths, 0), 4);
+        assert_eq!(subtree_end(&paths, 2), 4);
+        assert_eq!(subtree_end(&paths, 4), 5);
+        assert_eq!(subtree_end(&paths, 9), 10);
+    }
+
     #[test]
     fn a_new_file_lands_where_the_writer_is_standing() {
         let root = Path::new("/work");
