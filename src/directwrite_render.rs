@@ -76,9 +76,9 @@ use windows::{
 };
 
 use crate::text_blocks::{
-    Align, AskedLine, BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, DEFAULT_INK,
-    Emphasis, FlowOrder, GridCell, LineInfo, LineKind, LineMarker, LineOrnament, LineRun,
-    LineStyle, LongLine, MAX_HEADING_LEVEL, Marks, Ornament, PreparedWraps, RecordedWraps,
+    Align, AskedLine, BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, CrossSlices,
+    DEFAULT_INK, Emphasis, FlowOrder, GridCell, LineInfo, LineKind, LineMarker, LineOrnament,
+    LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL, Marks, Ornament, PreparedWraps, RecordedWraps,
     StyleRun, StyledText, TableGrid, TileSpan, Typography, block_flow_bound, cells_per_line,
     line_runs, place_blocks, split_blocks, style_runs, table_alignments, table_cells, tables,
     wrapping_list_lines,
@@ -196,6 +196,63 @@ pub const MAX_TILE_FLOW_SIZE: u32 = 1024;
 const TILE_TARGET_PIXELS: u32 = MAX_TILE_FLOW_SIZE * 520;
 /// Narrowest tile, so a very tall window does not produce a swarm of slivers.
 const MIN_TILE_FLOW_SIZE: u32 = 256;
+/// How far a tile may reach **across** the flow (要件 9).
+///
+/// Wide enough that every page that fits a pane is one slice — so a wrapped
+/// document is cut exactly as it was before a line could be longer than its
+/// pane — and small enough that one tile stays about two megabytes whatever the
+/// writer sets the line length to.
+const MAX_TILE_CROSS: u32 = 2048;
+/// The box a line is laid out in when it is not wrapped (要件 9).
+///
+/// **A number rather than an absence**: DirectWrite lays text out into a box,
+/// and "no wrapping" is a box no line reaches the end of. A million pixels is
+/// forty thousand characters of 24px body text on one line — past that the line
+/// wraps, and a document with a line that long has other troubles.
+const FREE_LINE_BOX: f32 = 1_000_000.0;
+
+/// How long a line may be (要件 9).
+///
+/// **The engine is told which of the two it is, not handed a very large
+/// number.** The difference is not the size: a line that is wrapped puts the
+/// page's width in, and a line that is not takes the page's width out — the
+/// longest line the document holds is then what the reader scrolls across.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineFit {
+    /// Wrapped inside this many pixels across the flow, margins included.
+    Extent(u32),
+    /// Not wrapped. Every logical line is one line, however long.
+    Free,
+}
+
+impl Default for LineFit {
+    /// An engine nothing has been laid out in yet. The first `update` replaces
+    /// it, and a zero-wide line is not one anybody can write on — which is what
+    /// an engine holding no document is.
+    fn default() -> Self {
+        Self::Extent(0)
+    }
+}
+
+impl LineFit {
+    /// The box one block is laid out in, its own indent taken off.
+    fn line_box(self, margin: f32, inset: f32) -> f32 {
+        match self {
+            Self::Extent(extent) => (extent as f32 - margin * 2.0 - inset).max(1.0),
+            Self::Free => FREE_LINE_BOX,
+        }
+    }
+
+    /// The width to charge the split with (`cells_per_line`). A free line is
+    /// charged at the box it is given, which is to say **one line per logical
+    /// line** — which is what not wrapping means.
+    fn charged_extent(self) -> u32 {
+        match self {
+            Self::Extent(extent) => extent,
+            Self::Free => FREE_LINE_BOX as u32,
+        }
+    }
+}
 /// How many block layouts stay resident. A viewport spans one or two blocks, so
 /// a handful covers scrolling back and forth without holding the document.
 const LAYOUT_CACHE_LIMIT: usize = 8;
@@ -1133,6 +1190,9 @@ fn measure_table(
     };
     let measure = BlockMeasure {
         flow_size: total,
+        // 要件 7.3.2: a table's own answer to the same question — how far its
+        // widest row reaches across the flow (`reach`).
+        line_reach: reach,
         content_flow_start: 0.0,
         max_flow_size: total.max(1.0),
         lines: Arc::from(lines),
@@ -1411,14 +1471,20 @@ struct OrnamentPage {
     indent: f32,
     /// The pane across the line axis, both margins included.
     line_extent: f32,
+    /// Where this tile begins across the line axis (要件 9). Everything here is
+    /// in the page's coordinates, and the tile holds one slice of it — so the
+    /// slice's own near edge is taken off once, here, rather than by each mark.
+    line_origin: f32,
     font_size: f32,
 }
 
 impl OrnamentPage {
     /// The screen rectangle of a box given as a flow range and a line range.
     fn rect(&self, flow: (f32, f32), line: (f32, f32)) -> D2D_RECT_F {
-        let (left, top) = self.mode.to_screen(self.flow_origin + flow.0, line.0);
-        let (right, bottom) = self.mode.to_screen(self.flow_origin + flow.1, line.1);
+        let near = line.0 - self.line_origin;
+        let far = line.1 - self.line_origin;
+        let (left, top) = self.mode.to_screen(self.flow_origin + flow.0, near);
+        let (right, bottom) = self.mode.to_screen(self.flow_origin + flow.1, far);
         D2D_RECT_F {
             left,
             top,
@@ -1591,7 +1657,10 @@ fn draw_grid(
             continue;
         }
         let layout = cell_layout_for(graphics, typography, mode, block_text, cell)?;
-        let (x, y) = mode.to_screen(block_origin + cell.flow_start, margin + cell.line_start);
+        let (x, y) = mode.to_screen(
+            block_origin + cell.flow_start,
+            margin + cell.line_start - page.line_origin,
+        );
         let origin = windows_numerics::Vector2 { X: x, Y: y };
         // SAFETY: The layout and the brush both outlive the draw.
         unsafe {
@@ -1999,8 +2068,10 @@ struct TileTask {
     /// (要件 7.3.2). The layout has to be rebuilt in it or the block is drawn at
     /// a size it was not placed at.
     line_box: f32,
-    /// The surface every tile of this pane is drawn on.
+    /// The surface every tile of this pane is drawn on, along the flow and
+    /// across it.
     surface_size: u32,
+    surface_cross: u32,
     /// Where the IME's underline falls inside this block, if it falls in it.
     underline: Option<(u32, u32)>,
 }
@@ -2009,7 +2080,8 @@ impl TileTask {
     /// The size of this tile's image: its own extent along the flow by the
     /// pane's extent across it, whichever way round the mode puts them.
     fn pixel_size(&self) -> (u32, u32) {
-        self.mode.to_surface(self.span.flow_size, self.line_extent)
+        self.mode
+            .to_surface(self.span.flow_size, self.span.cross_size)
     }
 }
 
@@ -2053,7 +2125,7 @@ fn draw_tile(
     let ink = colour(typography.ink);
     let line_extent = task.line_extent;
     let margin = task.margin;
-    let (surface_width, surface_height) = mode.to_surface(task.surface_size, line_extent);
+    let (surface_width, surface_height) = mode.to_surface(task.surface_size, task.surface_cross);
     let (target, brush, heading_brushes, comment_brush, bitmap) = {
         let cache = graphics.render_target(surface_width, surface_height)?;
         (
@@ -2096,6 +2168,7 @@ fn draw_tile(
             inset: 0.0,
             indent: typography.indent_step(),
             line_extent: line_extent as f32,
+            line_origin: task.span.cross_start as f32,
             font_size: typography.font_size,
         };
         draw_grid(
@@ -2146,7 +2219,11 @@ fn draw_tile(
             }
         }
         let inset = block_inset(&task.block.span, typography);
-        let (origin_x, origin_y) = mode.to_screen(block_origin, margin + inset);
+        // 要件 9: this tile holds one slice of the page across the flow, so the
+        // block is drawn that far back — the same shift `block_origin` is along
+        // the flow, and the only two the tile makes.
+        let cross_origin = task.span.cross_start as f32;
+        let (origin_x, origin_y) = mode.to_screen(block_origin, margin + inset - cross_origin);
         let origin = windows_numerics::Vector2 {
             X: origin_x,
             Y: origin_y,
@@ -2162,6 +2239,7 @@ fn draw_tile(
             inset,
             indent: typography.indent_step(),
             line_extent: line_extent as f32,
+            line_origin: cross_origin,
             font_size: typography.font_size,
         };
         draw_line_ornaments(&target, &brush, &task.block, &task.lines, &page);
@@ -2465,9 +2543,14 @@ pub struct TextEngine {
     /// The logical lines each block covers, as an index into `line_styles`.
     /// One entry per block, in reading order.
     block_lines: Vec<Range<usize>>,
-    /// The pane's extent along the line axis: its height in vertical writing,
-    /// its width in horizontal writing. Every measurement depends on it.
-    line_extent: u32,
+    /// How long a line may be, as the caller asked for it (要件 9). Every
+    /// measurement depends on it.
+    fit: LineFit,
+    /// How wide the page turned out to be, across the flow. **The same as the
+    /// extent when the line is wrapped**, and the longest line the document
+    /// holds (margins and indents included) when it is not — the reader scrolls
+    /// across that, so it is what everything drawn in pixels is measured by.
+    page_extent: u32,
     typography: Typography,
     margin: f32,
     plan: BlockLayoutPlan,
@@ -2655,7 +2738,7 @@ impl TextEngine {
     /// The pane's extent along the line axis: pane height in vertical writing,
     /// pane width in horizontal writing.
     pub fn line_extent(&self) -> u32 {
-        self.line_extent.max(1)
+        self.page_extent.max(1)
     }
 
     pub fn utf16_len(&self) -> u32 {
@@ -2682,20 +2765,24 @@ impl TextEngine {
             .unwrap_or(0)
     }
 
+    /// How far a tile reaches across the flow (要件 9).
+    ///
+    /// **The whole page while the page fits a pane**, which is every wrapped
+    /// document and exactly what a tile was before this existed. A page wider
+    /// than that is cut, and then only the slices the pane is showing are drawn.
+    pub fn tile_cross_size(&self) -> u32 {
+        self.line_extent().min(MAX_TILE_CROSS)
+    }
+
     /// How far a tile reaches along the flow axis, keeping the pixels per tile
     /// roughly constant as the window grows or shrinks.
     pub fn tile_flow_size(&self) -> u32 {
-        (TILE_TARGET_PIXELS / self.line_extent()).clamp(MIN_TILE_FLOW_SIZE, MAX_TILE_FLOW_SIZE)
+        (TILE_TARGET_PIXELS / self.tile_cross_size()).clamp(MIN_TILE_FLOW_SIZE, MAX_TILE_FLOW_SIZE)
     }
 
     /// True when the engine already describes exactly this text and geometry.
-    pub fn matches(
-        &self,
-        styled: StyledText<'_>,
-        line_extent: u32,
-        typography: &Typography,
-    ) -> bool {
-        self.line_extent == line_extent
+    pub fn matches(&self, styled: StyledText<'_>, fit: LineFit, typography: &Typography) -> bool {
+        self.fit == fit
             && self.typography == *typography
             && self.text == styled.text
             && self.line_styles == styled.lines
@@ -2709,18 +2796,21 @@ impl TextEngine {
     pub fn update(
         &mut self,
         styled: StyledText<'_>,
-        line_extent: u32,
+        fit: LineFit,
         typography: &Typography,
     ) -> Result<UpdateCost> {
-        let line_extent = line_extent.max(1);
+        let fit = match fit {
+            LineFit::Extent(extent) => LineFit::Extent(extent.max(1)),
+            LineFit::Free => LineFit::Free,
+        };
         let typography = Typography {
             font_size: typography.font_size.max(1.0),
             ..typography.clone()
         };
-        if self.matches(styled, line_extent, &typography) {
+        if self.matches(styled, fit, &typography) {
             return Ok(UpdateCost::default());
         }
-        if self.line_extent != line_extent || self.typography != typography {
+        if self.fit != fit || self.typography != typography {
             // Both feed into every measurement, so nothing cached survives. The
             // wrap positions go too: they are keyed by the geometry, so the old
             // entries would simply never be hit again.
@@ -2732,10 +2822,10 @@ impl TextEngine {
         let text = styled.text;
         let mode = self.mode;
         let margin = margin_for(typography.font_size);
-        let line_box = (line_extent as f32 - margin * 2.0).max(1.0);
+        let line_box = fit.line_box(margin, 0.0);
         // The split is charged in line space, so it needs the geometry: the same
         // pane at a different line extent wraps differently and cuts elsewhere.
-        let cells = cells_per_line(line_extent, &typography);
+        let cells = cells_per_line(fit.charged_extent(), &typography);
         // The same spec, in a form a task can carry. One spec covers the whole
         // update and holds a family name for the body, one for code and one per
         // heading level, so it is shared rather than cloned per task.
@@ -2755,7 +2845,7 @@ impl TextEngine {
         let page = WrapPage {
             typography: spec.clone(),
             mode,
-            line_extent,
+            line_extent: fit.charged_extent(),
             line_box,
         };
         let answered = self.wrap_answers(&asking.asked, &page, styled, cells, &typography)?;
@@ -2784,7 +2874,7 @@ impl TextEngine {
         // one.
         let block_boxes = spans
             .iter()
-            .map(|span| (line_box - block_inset(span, &typography)).max(1.0))
+            .map(|span| fit.line_box(margin, block_inset(span, &typography)))
             .collect::<Vec<f32>>();
         // 要件 7.3.2: **the one thing here that text and arithmetic cannot
         // decide.** A table's column is as wide as the widest cell anywhere in
@@ -2854,7 +2944,7 @@ impl TextEngine {
                     continue;
                 }
 
-                let extent = block_extent(span, line_extent, &typography);
+                let extent = block_extent(span, fit.charged_extent(), &typography);
                 let max_flow_size = block_flow_bound(block_styled, extent, &typography);
                 measured.blocks += 1;
                 measured.utf16 += span.utf16_len();
@@ -2974,7 +3064,24 @@ impl TextEngine {
         self.line_markers = styled.markers.to_vec();
         self.source_line = styled.source_line;
         self.block_lines = block_lines;
-        self.line_extent = line_extent;
+        self.fit = fit;
+        // 要件 9: how wide the page came out. A wrapped line makes it the extent
+        // it was given; a free one makes it the longest line the document holds,
+        // each block's own indent counted with it and the margins around the
+        // whole. **Taken from the measurements rather than from the layouts**,
+        // so a block that came out of the cache counts the same as one just
+        // measured.
+        self.page_extent = match fit {
+            LineFit::Extent(extent) => extent,
+            LineFit::Free => {
+                let reach = spans
+                    .iter()
+                    .zip(&measures)
+                    .map(|(span, measure)| measure.line_reach + block_inset(span, &typography))
+                    .fold(0.0_f32, f32::max);
+                (reach + margin * 2.0).ceil().max(1.0) as u32
+            }
+        };
         self.typography = typography;
         self.margin = margin;
         Ok(measured)
@@ -3176,7 +3283,7 @@ impl TextEngine {
     /// here the layout the block was placed by.
     fn block_line_box(&self, span: &BlockSpan) -> f32 {
         let inset = block_inset(span, &self.typography);
-        (self.line_extent as f32 - self.margin * 2.0 - inset).max(1.0)
+        self.fit.line_box(self.margin, inset)
     }
 
     /// Every range one block sets, and the marks that stand over its whole
@@ -3350,14 +3457,30 @@ impl TextEngine {
     }
 
     /// The tiles the viewport needs, cut out of the blocks it crosses.
+    ///
+    /// **Both axes**, because the page may be wider than the pane (要件 9): the
+    /// flow pair says how far down the document the pane is looking, the other
+    /// how far across the page.
     pub fn visible_tiles(
         &self,
         viewport_flow: f32,
         visible_flow: f32,
         prefetch: u32,
+        viewport_across: f32,
+        visible_across: f32,
     ) -> Vec<TileSpan> {
-        self.plan
-            .visible_tiles(viewport_flow, visible_flow, self.tile_flow_size(), prefetch)
+        self.plan.visible_tiles(
+            viewport_flow,
+            visible_flow,
+            self.tile_flow_size(),
+            prefetch,
+            CrossSlices {
+                extent: self.line_extent(),
+                tile_size: self.tile_cross_size(),
+                viewport: viewport_across,
+                visible: visible_across,
+            },
+        )
     }
 
     /// The parcels the requested tiles are drawn from.
@@ -3379,6 +3502,7 @@ impl TextEngine {
         // expensive thing in a draw. A fixed surface is built once per pane
         // extent; a shorter tile simply leaves the far end of it unread.
         let surface_size = self.tile_flow_size();
+        let surface_cross = self.tile_cross_size();
         let block_count = self.plan.blocks.len();
         // One spec for the whole batch, shared rather than cloned per tile: it
         // carries a family name for the body, one for code and one per heading
@@ -3421,8 +3545,9 @@ impl TextEngine {
                     typography: spec.clone(),
                     mode: self.mode,
                     margin: self.margin,
-                    line_extent: self.line_extent,
+                    line_extent: self.line_extent(),
                     surface_size,
+                    surface_cross,
                     underline,
                 }
             })
@@ -3488,7 +3613,11 @@ impl TextEngine {
         let mut hasher = DefaultHasher::new();
         tile.sub_index.hash(&mut hasher);
         tile.flow_size.hash(&mut hasher);
-        self.line_extent.hash(&mut hasher);
+        // 要件 9: which slice across the page this is. Two slices of one block
+        // hold different words, so they are different tiles.
+        tile.cross_start.hash(&mut hasher);
+        tile.cross_size.hash(&mut hasher);
+        self.line_extent().hash(&mut hasher);
         hash_typography(&self.typography, &mut hasher);
         hash_colours(&self.typography, &mut hasher);
         // Two panes showing the same text at the same size draw different
@@ -4483,8 +4612,17 @@ fn measure_block(
         )
     };
 
+    // 要件 9: how far the longest line reached across the flow. **The layout's
+    // own metrics**, which are in screen terms like every other box DirectWrite
+    // reports — so which of the two is the line axis is the mode's business.
+    let mut text_metrics = DWRITE_TEXT_METRICS::default();
+    // SAFETY: the layout is alive for the call and the struct is plain data.
+    unsafe { layout.GetMetrics(&mut text_metrics)? };
+    let (_, line_reach) = mode.to_axes(text_metrics.width, text_metrics.height);
+
     Ok(BlockMeasure {
         flow_size,
+        line_reach,
         content_flow_start,
         max_flow_size,
         lines: lines.into(),
@@ -4535,7 +4673,7 @@ mod tests {
     ) -> TextEngine {
         let mut engine = TextEngine::new(mode);
         engine
-            .update(styled, LINE_EXTENT, typography)
+            .update(styled, LineFit::Extent(LINE_EXTENT), typography)
             .expect("DirectWrite block measurement");
         engine
     }
@@ -4543,7 +4681,11 @@ mod tests {
     /// Re-lay out an existing engine with no styling and the default spec.
     fn update_plain(engine: &mut TextEngine, text: &str) -> UpdateCost {
         engine
-            .update(StyledText::plain(text), LINE_EXTENT, &plain())
+            .update(
+                StyledText::plain(text),
+                LineFit::Extent(LINE_EXTENT),
+                &plain(),
+            )
             .expect("DirectWrite block measurement")
     }
 
@@ -5079,7 +5221,13 @@ mod tests {
         let styled = StyledText::marked(&preview.text, &styles, preview.marks())
             .with_markers(preview.markers());
         let mut engine = engine_set(WritingMode::Vertical, styled, &plain());
-        let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let tiles = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
 
         // **A lighter threshold than the rule's.** A stroke a little over one
         // pixel wide lands on two of them when it falls between their centres,
@@ -5165,7 +5313,7 @@ mod tests {
             .with_markers(active.markers())
             .with_source_line(active.active_line());
         engine
-            .update(styled, LINE_EXTENT, &plain())
+            .update(styled, LineFit::Extent(LINE_EXTENT), &plain())
             .expect("DirectWrite block measurement");
         let after = line_axis_at(&mut engine, mode, &text, "とちり");
         assert!(
@@ -5222,7 +5370,13 @@ mod tests {
     /// across a page and a column of it down a column — the one place in these
     /// tests where the two directions are not the same arithmetic.
     fn rules_across(engine: &mut TextEngine, mode: WritingMode) -> Vec<usize> {
-        let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let tiles = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
         let mut found = Vec::new();
         let mut drawn = DrawnTiles::default();
         engine
@@ -5304,7 +5458,13 @@ mod tests {
         // The first row of pixels holding a glyph. **Rows the rules run along
         // are passed over**: where two rules cross, the paper is painted twice
         // and comes out as dark as ink.
-        let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let tiles = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
         let mut first_glyph = usize::MAX;
         let mut drawn = DrawnTiles::default();
         engine
@@ -5377,7 +5537,13 @@ mod tests {
         let styled = StyledText::marked(&preview.text, &styles, preview.marks())
             .with_markers(preview.markers());
         let mut engine = engine_set(WritingMode::Horizontal, styled, &plain());
-        let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let tiles = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
 
         // The longest unbroken run of ink along one row of pixels. **The
         // threshold is the lighter one** for the reason the column rules' test
@@ -5916,7 +6082,13 @@ mod tests {
         let text = "表示領域の周辺だけを描画する\n".repeat(60);
         let mut engine = engine_for(&text, 22.0);
         assert!(engine.block_count() > 1, "the sample must span many blocks");
-        let all = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let all = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
         assert!(all.len() > 2, "the sample must produce several tiles");
         let tile = all[1];
 
@@ -5937,6 +6109,48 @@ mod tests {
         assert_eq!(bytes, width as usize * height as usize * 4);
     }
 
+    /// 要件 9: a line the writer did not let wrap is longer than the pane, so
+    /// the page is cut across the flow as well — and the slice past the first
+    /// has to hold what is past it. **A missing offset draws the head of the
+    /// line twice; a doubled one draws blank paper.**
+    #[test]
+    fn a_slice_past_the_first_holds_the_far_end_of_the_line() {
+        let text = "あ".repeat(200);
+        let mut engine = TextEngine::new(WritingMode::Horizontal);
+        engine
+            .update(StyledText::plain(&text), LineFit::Free, &plain())
+            .expect("free layout");
+        assert!(
+            engine.line_extent() > MAX_TILE_CROSS,
+            "the sample must be wider than one slice: {}",
+            engine.line_extent()
+        );
+
+        // A pane looking at the far end of the line.
+        let far = engine.line_extent() as f32 - 600.0;
+        let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0, -far, 600.0);
+        assert!(
+            tiles.iter().all(|tile| tile.cross_index > 0),
+            "the near slice is not wanted at the far end: {tiles:?}"
+        );
+
+        let mut drawn = DrawnTiles::default();
+        engine
+            .render_tiles(&tiles[..1], None, &mut drawn)
+            .expect("far slice render");
+        let (span, width, height, pixels) = &drawn.tiles[0];
+        assert_eq!(
+            (*width, *height),
+            (span.cross_size, span.flow_size),
+            "a horizontal tile is its slice wide and its flow extent tall"
+        );
+        let paper = &pixels[0..4];
+        assert!(
+            pixels.chunks_exact(4).any(|point| point != paper),
+            "the far slice holds ink"
+        );
+    }
+
     /// The horizontal tile is the same slice turned a quarter: as wide as the
     /// pane and as tall as the tile reaches along the flow axis.
     #[test]
@@ -5944,7 +6158,13 @@ mod tests {
         let text = "横書きのタイルを描画する行です。\n".repeat(60);
         let mut engine = engine_in(WritingMode::Horizontal, &text, 22.0);
         assert!(engine.block_count() > 1, "the sample must span many blocks");
-        let all = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let all = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
         assert!(all.len() > 2, "the sample must produce several tiles");
         let tile = all[1];
 
@@ -6406,7 +6626,13 @@ mod tests {
         let mut engine = engine_for("全角：ＡＢＣ１２３\n半角：ABC123\n句読点。（）「」", 24.0);
 
         // A short document is one block, and that block is one tile.
-        let all = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let all = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
         assert_eq!(all.len(), 1);
         let mut drawn = DrawnTiles::default();
         engine
@@ -6439,7 +6665,13 @@ mod tests {
             let styled = StyledText::marked(&preview.text, &styles, preview.marks())
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Horizontal, styled, &plain());
-            let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+            let tiles = engine.visible_tiles(
+                0.0,
+                engine.total_flow_size() as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
             let mut drawn = DrawnTiles::default();
             engine
                 .render_tiles(&tiles, None, &mut drawn)
@@ -6502,7 +6734,13 @@ mod tests {
         );
 
         // Block 0 holds the first paragraph and sits at the far right.
-        let all = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let all = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
         let edited_tile = *all.first().expect("a tile at the right edge");
         let distant_tile = *all.last().expect("a tile at the left edge");
         assert_ne!(
@@ -6573,7 +6811,13 @@ mod tests {
             .map(|index| block_text(&engine, index))
             .collect::<Vec<_>>();
         let before = engine
-            .visible_tiles(0.0, engine.total_flow_size() as f32, 0)
+            .visible_tiles(
+                0.0,
+                engine.total_flow_size() as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            )
             .into_iter()
             .map(|tile| (tile, engine.tile_signature(tile, None)))
             .collect::<Vec<_>>();
@@ -6600,7 +6844,13 @@ mod tests {
              {width_before}px then {}px",
             engine.total_flow_size()
         );
-        let after = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0);
+        let after = engine.visible_tiles(
+            0.0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
 
         // Only blocks whose text genuinely survived are claimed here, so that a
         // boundary that did shift shows up as a missing survivor below rather
@@ -6890,7 +7140,7 @@ mod tests {
         let text = format!("{}\n", "あ".repeat(3_000));
         let mut engine = TextEngine::new(WritingMode::Vertical);
         engine
-            .update(StyledText::plain(&text), 1_000, &huge)
+            .update(StyledText::plain(&text), LineFit::Extent(1_000), &huge)
             .expect("a very long paragraph must lay out");
 
         assert!(

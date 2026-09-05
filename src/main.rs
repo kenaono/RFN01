@@ -33,7 +33,9 @@ use std::{
 
 use buffer::{DocumentFile, ExternalChange};
 use diag::DiagLog;
-use directwrite_render::{CaretGeometry, SelectionRect, TextEngine, TileSink, WritingMode};
+use directwrite_render::{
+    CaretGeometry, LineFit, SelectionRect, TextEngine, TileSink, WritingMode,
+};
 use document::{DocumentCounts, PreviewDocument, caret_place};
 use kill_ring::{KillAction, KillRing};
 use pane_layout::{Layout, Rect, Split, Towards, neighbour};
@@ -5952,6 +5954,9 @@ const SHEET_NUMBERS: usize = 6 + MAX_HEADING_LEVEL;
 /// line in the document. Until they are cut across the flow as well, a sheet
 /// set to `0` is laid out like the pane, and the panel does not offer it.
 const WRAP_CHARACTERS: i32 = 1;
+/// And set to "do not wrap at all" (要件 9). The third value is `2`, the pane's
+/// own width.
+const WRAP_NEVER: i32 = 0;
 const SHEET_COLOURS: usize = 2 + MAX_HEADING_LEVEL;
 const SHEET_FONTS: usize = 2 + MAX_HEADING_LEVEL;
 /// Where the paper sits among a sheet's colours: after the body ink and the six
@@ -6839,27 +6844,32 @@ impl PaneId {
         if self.is_right() { "v" } else { "h" }
     }
 
-    /// How long a line may be: the pane's extent across the flow — a vertical
-    /// pane sets its columns into its height, a horizontal one its lines into
-    /// its width — or the width the writer named, whichever is shorter (要件 9).
+    /// How long a line in this pane may be (要件 9): the pane's own extent
+    /// across the flow — a vertical pane sets its columns into its height, a
+    /// horizontal one its lines into its width — or the width the writer named,
+    /// or nothing at all.
     ///
-    /// **Never wider than the pane**: a line that does not fit cannot be
-    /// written on. So the setting only ever makes the sheet narrower, and a
-    /// pane split down to nothing still holds a document.
-    fn line_extent_px(self, window: &AppWindow, typography: &Typography) -> u32 {
+    /// **The pane is not a bound on the other two.** A width the pane cannot
+    /// show is shown by scrolling across it, because a line length that the
+    /// pane silently overruled would be a setting nobody could check.
+    fn line_fit(self, window: &AppWindow, typography: &Typography) -> LineFit {
         let vertical = self.vertical(window);
-        let across = self.shown_across_flow(window);
-        let pane = if vertical {
-            usable_preview_height(across)
-        } else {
-            usable_horizontal_width(across)
-        };
         let sheet = usize::from(vertical);
-        if Setting::WrapMode.read(window, sheet) != WRAP_CHARACTERS {
-            return pane;
+        match Setting::WrapMode.read(window, sheet) {
+            WRAP_NEVER => LineFit::Free,
+            WRAP_CHARACTERS => {
+                let asked = Setting::WrapChars.read(window, sheet).max(1) as u32;
+                LineFit::Extent(text_blocks::line_extent_for_cells(asked, typography))
+            }
+            _ => {
+                let across = self.shown_across_flow(window);
+                LineFit::Extent(if vertical {
+                    usable_preview_height(across)
+                } else {
+                    usable_horizontal_width(across)
+                })
+            }
         }
-        let asked = Setting::WrapChars.read(window, sheet).max(1) as u32;
-        text_blocks::line_extent_for_cells(asked, typography)
     }
 
     /// How far the laid-out document reaches across the flow, as the pane was
@@ -7030,23 +7040,26 @@ impl PaneId {
 
     /// Where one rendered slice sits. A vertical tile is as tall as the pane and
     /// stacked along x; a horizontal one spans the pane and is stacked along y.
-    fn tile(vertical: bool, span: TileSpan, line_extent: u32, source: Image) -> PreviewTile {
+    fn tile(vertical: bool, span: TileSpan, source: Image) -> PreviewTile {
         let flow_start = span.flow_start as i32;
         let flow_size = span.flow_size as i32;
-        let line_extent = line_extent as i32;
+        // 要件 9: where this slice sits across the page. A page that fits its
+        // pane is one slice starting at nothing, which is what every tile was.
+        let cross_start = span.cross_start as i32;
+        let cross_size = span.cross_size as i32;
         if vertical {
             PreviewTile {
                 x: flow_start,
-                y: 0,
+                y: cross_start,
                 width: flow_size,
-                height: line_extent,
+                height: cross_size,
                 source,
             }
         } else {
             PreviewTile {
-                x: 0,
+                x: cross_start,
                 y: flow_start,
-                width: line_extent,
+                width: cross_size,
                 height: flow_size,
                 source,
             }
@@ -7311,6 +7324,10 @@ impl RenderCache {
     ) -> windows::core::Result<(usize, usize, usize, usize)> {
         let scroll = id.scroll(window);
         let shown_flow = id.shown_flow(window);
+        // 要件 9: and where the pane is looking across the flow, which is only
+        // ever anywhere but the near edge when the line is longer than the pane.
+        let scroll_across = id.scroll_across(window);
+        let shown_across = id.shown_across_flow(window);
         // Which way the tiles stack, asked before the cache is borrowed.
         let vertical = id.vertical(window);
         // Taken apart so the engine and the images can be held at once: reaching
@@ -7325,11 +7342,11 @@ impl RenderCache {
         if engine.total_flow_size() == 0 {
             return Ok((0, 0, 0, 0));
         }
-        let line_extent = engine.line_extent();
         // Tiles are cut out of the blocks the viewport crosses. Their size along
         // the flow tracks the pane's extent across it, so a taller window makes
         // tiles narrower rather than making each one costlier to rasterize.
-        let desired = engine.visible_tiles(scroll, shown_flow, prefetch);
+        let desired =
+            engine.visible_tiles(scroll, shown_flow, prefetch, scroll_across, shown_across);
 
         // Keyed by the fingerprint, never by position. The fingerprint names one
         // block's text at one slice of it, so a tile the layout moved is found
@@ -7385,12 +7402,7 @@ impl RenderCache {
             .filter_map(|(span, signature)| {
                 let cached = images.get_mut(signature)?;
                 cached.last_flow = span.flow_start as i32;
-                Some(PaneId::tile(
-                    vertical,
-                    *span,
-                    line_extent,
-                    cached.image.clone(),
-                ))
+                Some(PaneId::tile(vertical, *span, cached.image.clone()))
             })
             .collect::<Vec<_>>();
 
@@ -7664,7 +7676,7 @@ fn lay_out_pane(
     document: &OpenDocument,
     id: PaneId,
     source: &str,
-    line_extent_px: u32,
+    line_fit: LineFit,
     typography: &Typography,
     active_line_start: Option<usize>,
     caret_source_byte: Option<usize>,
@@ -7719,7 +7731,7 @@ fn lay_out_pane(
     let styled = marked
         .with_markers(shown.markers())
         .with_source_line(shown.source_line());
-    let measured = match engine.update(styled, line_extent_px, typography) {
+    let measured = match engine.update(styled, line_fit, typography) {
         Ok(measured) => measured,
         Err(error) => {
             let label = id.label(window);
@@ -7791,7 +7803,7 @@ fn refresh_pane(
     let zoom_percent = id.zoom(window);
     let typography = pane_typography(window, id);
     let font_size = typography.font_size;
-    let line_extent_px = id.line_extent_px(window, &typography);
+    let line_fit = id.line_fit(window, &typography);
     let mut borrowed = cache.borrow_mut();
     // Reborrow once so the field accesses below are disjoint. Going through
     // `RefMut` for each of them would borrow the whole cache every time.
@@ -7803,7 +7815,7 @@ fn refresh_pane(
         document,
         id,
         source,
-        line_extent_px,
+        line_fit,
         &typography,
         active_line_start,
         caret_source_byte,
@@ -8660,7 +8672,7 @@ fn hit_test_pane(
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
     let label = id.label(window);
-    if let Err(error) = engine.update(styled, id.line_extent_px(window, &typography), &typography) {
+    if let Err(error) = engine.update(styled, id.line_fit(window, &typography), &typography) {
         window.set_render_status(format!("{label}整形: NG / {error}").into());
         return None;
     }
@@ -8711,7 +8723,7 @@ fn lay_out_for_caret<'a>(
         .with_source_line(shown.source_line());
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
-    if let Err(error) = engine.update(styled, id.line_extent_px(window, &typography), &typography) {
+    if let Err(error) = engine.update(styled, id.line_fit(window, &typography), &typography) {
         let label = id.label(window);
         window.set_render_status(format!("{label}整形: NG / {error}").into());
         return None;
@@ -10240,7 +10252,7 @@ mod tests {
         engine
             .update(
                 StyledText::plain(text),
-                PREVIEW_HEIGHT,
+                LineFit::Extent(PREVIEW_HEIGHT),
                 &Typography::new(font_size_for(BASE_FONT_SIZE, zoom)),
             )
             .expect("vertical layout");
@@ -10252,7 +10264,7 @@ mod tests {
         engine
             .update(
                 StyledText::plain(text),
-                height,
+                LineFit::Extent(height),
                 &Typography::new(font_size_for(BASE_FONT_SIZE, 100)),
             )
             .expect("vertical layout");
@@ -11212,8 +11224,11 @@ mod tests {
         let span = TileSpan {
             block_index: 0,
             sub_index: 0,
+            cross_index: 0,
             flow_start: 0,
             flow_size: 2,
+            cross_start: 0,
+            cross_size: 1,
         };
         let room = drawn.buffer(span, 2, 1);
         // Two pixels, blue-ish and red-ish, as the bitmap would hold them.
@@ -11558,7 +11573,7 @@ mod tests {
             width > 65_536,
             "the sample must be a genuinely wide document"
         );
-        let tiles = engine.visible_tiles(middle, 640.0, 0);
+        let tiles = engine.visible_tiles(middle, 640.0, 0, 0.0, PREVIEW_HEIGHT as f32);
         assert!(
             tiles.len() <= 3,
             "a 640px viewport needed {} tiles",
@@ -11582,7 +11597,7 @@ mod tests {
         let measured = engine
             .update(
                 StyledText::plain(&text),
-                PREVIEW_HEIGHT,
+                LineFit::Extent(PREVIEW_HEIGHT),
                 &Typography::new(font_size_for(BASE_FONT_SIZE, 100)),
             )
             .expect("repeat update");

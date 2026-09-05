@@ -1017,6 +1017,12 @@ impl TableGrid {
 pub struct BlockMeasure {
     /// How far the drawn lines reach along the flow axis.
     pub flow_size: f32,
+    /// How far the longest of them reaches **across** it, inside the block's own
+    /// box — its indent is not counted, because the box already had it taken
+    /// off. Only a document that is not wrapped needs this: there the page is as
+    /// wide as the longest line, and this is where that width comes from
+    /// (要件 9).
+    pub line_reach: f32,
     /// The first drawn flow coordinate in the block layout's own space.
     pub content_flow_start: f32,
     /// The `maxWidth` the block layout was created with. A layout must be
@@ -1868,8 +1874,53 @@ pub struct TileSpan {
     pub block_index: usize,
     /// Which slice of the block, counted from where the block starts.
     pub sub_index: u32,
+    /// Which slice across the flow, counted from the near edge of the page
+    /// (要件 9). **A page no wider than the pane is one slice**, which is every
+    /// wrapped document and exactly what this was before a line could be longer
+    /// than the pane it is written in.
+    pub cross_index: u32,
     pub flow_start: u32,
     pub flow_size: u32,
+    pub cross_start: u32,
+    pub cross_size: u32,
+}
+
+/// How the page is cut across the flow, and which of it the pane is showing
+/// (要件 9).
+///
+/// **A tile is bounded by construction.** Its flow extent is chosen to keep the
+/// pixels per tile roughly constant, and without this its extent across the flow
+/// was the whole page — which is fine while the page is a pane wide and
+/// impossible once a line may be as long as the writer likes.
+#[derive(Debug, Clone, Copy)]
+pub struct CrossSlices {
+    /// The page's whole extent across the flow.
+    pub extent: u32,
+    /// How far one slice reaches.
+    pub tile_size: u32,
+    /// Where the pane is looking: the scroll offset, zero or negative.
+    pub viewport: f32,
+    /// And how much of it the pane shows.
+    pub visible: f32,
+}
+
+impl CrossSlices {
+    /// The slices the pane is showing, as `(first, last + 1)`.
+    fn shown(&self) -> (u32, u32) {
+        let size = self.tile_size.max(1);
+        let count = self.extent.max(1).div_ceil(size);
+        let (start, end) = visible_flow_range(self.viewport, self.visible, self.extent as f32);
+        let first = (start as u32 / size).min(count - 1);
+        let last = ((end.ceil() as u32).saturating_sub(1) / size).min(count - 1);
+        (first, last + 1)
+    }
+
+    /// Where one slice begins and how far it reaches, held inside the page.
+    fn slice(&self, index: u32) -> (u32, u32) {
+        let size = self.tile_size.max(1);
+        let start = index * size;
+        (start, size.min(self.extent.saturating_sub(start)))
+    }
 }
 
 impl TileSpan {
@@ -1913,8 +1964,13 @@ impl BlockPlacement {
         TileSpan {
             block_index: 0,
             sub_index,
+            // The slice across the flow is not the block's business: every block
+            // is cut the same way there, by the page (`CrossSlices`).
+            cross_index: 0,
             flow_start: start,
             flow_size: end.saturating_sub(start),
+            cross_start: 0,
+            cross_size: 0,
         }
     }
 }
@@ -1934,6 +1990,7 @@ impl BlockLayoutPlan {
         visible_flow: f32,
         tile_flow_size: u32,
         prefetch: u32,
+        across: CrossSlices,
     ) -> Vec<TileSpan> {
         if self.blocks.is_empty() || tile_flow_size == 0 {
             return Vec::new();
@@ -1953,10 +2010,21 @@ impl BlockLayoutPlan {
                     && (tile.flow_start as f32) < view_end
                     && tile.flow_end() as f32 > view_start
                 {
-                    tiles.push(TileSpan {
-                        block_index,
-                        ..tile
-                    });
+                    // 要件 9: and one per slice of the page the pane is showing
+                    // across the flow. **Only the ones on screen** — a line the
+                    // writer has to scroll to see is a line whose far end costs
+                    // nothing until they do.
+                    let (first, end) = across.shown();
+                    for cross_index in first..end {
+                        let (cross_start, cross_size) = across.slice(cross_index);
+                        tiles.push(TileSpan {
+                            block_index,
+                            cross_index,
+                            cross_start,
+                            cross_size,
+                            ..tile
+                        });
+                    }
                 }
             }
         }
@@ -2345,6 +2413,7 @@ mod tests {
     fn measure(flow_size: f32, lines: usize) -> BlockMeasure {
         BlockMeasure {
             flow_size,
+            line_reach: 0.0,
             content_flow_start: 0.0,
             max_flow_size: flow_size,
             lines: (0..lines)
@@ -2365,6 +2434,17 @@ mod tests {
 
     /// Blocks of the given extents, laid out in order. Only the geometry
     /// matters here, so every block gets one throwaway line.
+    /// One slice across the whole page, which is what every wrapped document
+    /// has: the pane is as wide as the page (要件 9).
+    fn one_slice() -> CrossSlices {
+        CrossSlices {
+            extent: 600,
+            tile_size: 600,
+            viewport: 0.0,
+            visible: 600.0,
+        }
+    }
+
     fn plan_of(widths: &[f32], margin: f32, order: FlowOrder) -> BlockLayoutPlan {
         let spans = widths.iter().map(|_| span("", 0, 0)).collect::<Vec<_>>();
         let measures = widths
@@ -3710,6 +3790,7 @@ mod tests {
         let spans = [span(text, 0, 0)];
         let measures = [BlockMeasure {
             flow_size: 100.0,
+            line_reach: 0.0,
             content_flow_start: 400.0,
             max_flow_size: 500.0,
             lines: Arc::from(Vec::new()),
@@ -3751,7 +3832,7 @@ mod tests {
         for order in BOTH_ORDERS {
             // Block 0 is wider than a tile, so it is cut; the other two are not.
             let plan = plan_of(&[2500.0, 1000.0, 700.0], 30.0, order);
-            let all = plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0);
+            let all = plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice());
 
             assert_eq!(
                 all.first().map(|tile| (tile.block_index, tile.sub_index)),
@@ -3793,12 +3874,60 @@ mod tests {
         }
     }
 
+    /// 要件 9: a page wider than the pane is cut across the flow as well, and
+    /// the pane is handed the slices it is showing and no others.
+    #[test]
+    fn a_page_wider_than_the_pane_is_cut_across_the_flow() {
+        let plan = plan_of(&[900.0], 0.0, FlowOrder::Ascending);
+        // A page of 5000 in slices of 2000: 0..2000, 2000..4000, 4000..5000.
+        let across = |viewport: f32| CrossSlices {
+            extent: 5_000,
+            tile_size: 2_000,
+            viewport,
+            visible: 600.0,
+        };
+
+        let near = plan.visible_tiles(0.0, 900.0, 1024, 0, across(0.0));
+        assert_eq!(
+            near.iter().map(|tile| tile.cross_index).collect::<Vec<_>>(),
+            [0],
+            "the near edge shows the first slice alone"
+        );
+        assert_eq!((near[0].cross_start, near[0].cross_size), (0, 2_000));
+
+        // Scrolled to sit across the boundary: both slices are wanted.
+        let both = plan.visible_tiles(0.0, 900.0, 1024, 0, across(-1_800.0));
+        assert_eq!(
+            both.iter().map(|tile| tile.cross_index).collect::<Vec<_>>(),
+            [0, 1]
+        );
+
+        // The last slice is short: a slice never reaches past the page.
+        let far = plan.visible_tiles(0.0, 900.0, 1024, 0, across(-4_400.0));
+        assert_eq!(far.len(), 1);
+        assert_eq!((far[0].cross_start, far[0].cross_size), (4_000, 1_000));
+    }
+
+    /// And the case every wrapped document is: one slice, the whole page.
+    #[test]
+    fn a_page_that_fits_the_pane_is_one_slice() {
+        let plan = plan_of(&[900.0; 3], 0.0, FlowOrder::Ascending);
+        let tiles = plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice());
+
+        assert!(
+            tiles.iter().all(|tile| tile.cross_index == 0
+                && tile.cross_start == 0
+                && tile.cross_size == 600),
+            "every tile covers the page across the flow"
+        );
+    }
+
     #[test]
     fn keeps_only_visible_tiles_for_a_long_document() {
         for order in BOTH_ORDERS {
             let plan = plan_of(&[900.0; 40], 0.0, order);
 
-            let at_start = plan.visible_tiles(0.0, 640.0, 1024, 0);
+            let at_start = plan.visible_tiles(0.0, 640.0, 1024, 0, one_slice());
             assert_eq!(at_start.len(), 1);
             let expected = match order {
                 FlowOrder::Ascending => 0,
@@ -3809,7 +3938,7 @@ mod tests {
                 "the block at the origin end of the flow axis ({order:?})"
             );
 
-            let middle = plan.visible_tiles(-18_000.0, 640.0, 1024, 0);
+            let middle = plan.visible_tiles(-18_000.0, 640.0, 1024, 0, one_slice());
             assert!(middle.len() <= 2);
             assert!(
                 middle
@@ -3835,8 +3964,9 @@ mod tests {
             widths[5] += line;
             let after = plan_of(&widths, 30.0, order);
 
-            let tiles_of =
-                |plan: &BlockLayoutPlan| plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0);
+            let tiles_of = |plan: &BlockLayoutPlan| {
+                plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice())
+            };
             let (before, after) = (tiles_of(&before), tiles_of(&after));
             assert_eq!(before.len(), after.len());
 
@@ -3883,8 +4013,9 @@ mod tests {
             assert_eq!(ahead.flow_start, total - back.flow_end());
         }
 
-        let tiles_of =
-            |plan: &BlockLayoutPlan| plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0);
+        let tiles_of = |plan: &BlockLayoutPlan| {
+            plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice())
+        };
         let (ahead, back) = (tiles_of(&forwards), tiles_of(&backwards));
         assert_eq!(ahead.len(), back.len());
         for (ahead, back) in ahead.iter().zip(&back) {
@@ -3913,8 +4044,8 @@ mod tests {
         for order in BOTH_ORDERS {
             let plan = plan_of(&[900.0; 40], 0.0, order);
 
-            let plain = plan.visible_tiles(-18_000.0, 640.0, 1024, 0);
-            let prefetched = plan.visible_tiles(-18_000.0, 640.0, 1024, 1);
+            let plain = plan.visible_tiles(-18_000.0, 640.0, 1024, 0, one_slice());
+            let prefetched = plan.visible_tiles(-18_000.0, 640.0, 1024, 1, one_slice());
             assert!(prefetched.len() > plain.len());
             assert!(
                 prefetched
@@ -3922,7 +4053,7 @@ mod tests {
                     .all(|tile| tile.flow_end() <= plan.total_flow_size as u32)
             );
             assert!(
-                plan.visible_tiles(0.0, 640.0, 1024, 1)
+                plan.visible_tiles(0.0, 640.0, 1024, 1, one_slice())
                     .iter()
                     .all(|tile| tile.flow_size > 0)
             );

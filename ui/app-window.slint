@@ -1960,10 +1960,12 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // 要件 9: how long a line may be. **Two answers, not three** —
-                // 「折り返さない」 is in the requirement and not yet built, and
-                // a button that does nothing teaches the writer to distrust the
-                // ones that work.
+                // 要件 9: how long a line may be. **Two switches that cannot
+                // both be on**, and neither of them on is the third answer: the
+                // line is not wrapped at all. One value holds all three, so
+                // "both on" is not a state this can reach — and pressing the
+                // one that is on turns it off, which is how the writer says
+                // "neither" without a button for it.
                 HorizontalLayout {
                     spacing: 2px;
 
@@ -1975,22 +1977,38 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
+                    // **The state that is an absence is still named.** With
+                    // neither switch on, a row of unlit buttons reads as a
+                    // setting nobody has made rather than as the setting it is.
+                    if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 0: Text {
+                        text: "not wrapped";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+
                     TextButton {
                         title: "Width";
                         role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
                             ? Role.primary
                             : Role.normal;
                         clicked => {
-                            root.typography-chose(10, 1);
+                            root.typography-chose(10,
+                                root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
+                                    ? 0
+                                    : 1);
                         }
                     }
                     TextButton {
                         title: "Pane";
-                        role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
-                            ? Role.normal
-                            : Role.primary;
+                        role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
+                            ? Role.primary
+                            : Role.normal;
                         clicked => {
-                            root.typography-chose(10, 2);
+                            root.typography-chose(10,
+                                root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
+                                    ? 0
+                                    : 2);
                         }
                     }
                 }
