@@ -3643,6 +3643,7 @@ fn draw_outline(window: &AppWindow, cache: &mut RenderCache, source: &str) {
             depth: i32::from(heading.level).saturating_sub(1),
             folder: false,
             open: false,
+            parent: -1,
         })
         .collect::<Vec<_>>();
     cache.outline_drawn = headings;
@@ -3673,6 +3674,7 @@ fn publish_results(window: &AppWindow, live: &Live) {
             depth: i32::from(row.under_file),
             folder: false,
             open: false,
+            parent: -1,
         })
         .collect::<Vec<_>>();
     // The file commands act on the tree, and nothing here is a row of it.
@@ -3690,6 +3692,7 @@ fn publish_recent(window: &AppWindow, live: &Live) {
             depth: 0,
             folder: false,
             open: false,
+            parent: -1,
         })
         .collect::<Vec<_>>();
     window.set_tree_selected(-1);
@@ -4053,13 +4056,16 @@ fn publish_tree(window: &AppWindow, live: &Live) {
         folder.selected = None;
     }
     window.set_tree_selected(selected.map_or(-1, |at| at as i32));
+    let holders = file_tree::holders(&rows);
     let drawn = rows
         .iter()
-        .map(|row| LeftRow {
+        .zip(&holders)
+        .map(|(row, &parent)| LeftRow {
             name: row.name.clone().into(),
             depth: row.depth as i32,
             folder: row.folder,
             open: row.open,
+            parent,
         })
         .collect::<Vec<_>>();
     let name = root
@@ -4397,12 +4403,12 @@ fn rename_entry(window: &AppWindow, live: &Live, from: &Path) {
 
 /// A row carried through the tree was let go (要件 5.2).
 ///
-/// **The window has already said where it would land**, and this is the same
-/// answer: the row that lit up under the hand is the row named here. Nothing is
-/// asked of the disk about which rows may be given something — a file is not a
-/// place to put anything, and a folder cannot go inside itself — because the
-/// marks the writer was watching were drawn from exactly those two rules
-/// (`file_tree::move_target` states them once more, for the paths).
+/// **The window has already said which folder it would land in**, and this is
+/// that same answer rather than a second one: `onto` is the row the marks lit,
+/// which is the row itself when a folder was pointed at and the folder holding
+/// it when anything else was. Nothing is asked of the disk about where a thing
+/// may go — the rules that decided the marks are the rules
+/// (`file_tree::move_target` states the last of them, for the paths).
 fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
     let Some(root) = live.folder.borrow().root.clone() else {
         return;
@@ -4427,16 +4433,55 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
     let Some(to) = file_tree::move_target(&source, &into) else {
         return;
     };
-    if let Err(error) = move_entry(window, live, &source, &to) {
+    // **A name already taken is a question, not a refusal** (要件 5.2). The
+    // writer aimed at a folder, not at the thing that happens to be in it, so
+    // the answer they have not given yet is whether that thing may go.
+    if to.exists() {
+        let going = entry_name(&to);
+        ask_question(
+            window,
+            live,
+            Question::ReplaceOnMove(source, to),
+            format!(
+                "「{going}」はすでにあります。\n\n\
+                 いまある「{going}」はごみ箱へ移ります。Windowsのごみ箱から戻せます。"
+            ),
+            &["上書きする", "キャンセル"],
+            0,
+        );
+        return;
+    }
+    finish_move(window, live, &source, &to);
+}
+
+/// Put what is already there in the recycle bin, then move (要件 5.2).
+///
+/// **Overwriting is deleting**, and 要件 5.2 says what deleting means here: the
+/// bin, never the void. The move follows only if the bin took it, so a refusal
+/// leaves both the writer's file and the one that was there.
+fn replace_on_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
+    let owner = ime::window_handle(window);
+    if !shell::recycle(owner, to) {
+        window.set_render_status("ごみ箱へ移動できませんでした".into());
+        return;
+    }
+    finish_move(window, live, from, to);
+}
+
+/// Carry out a move that has nothing left to ask (要件 5.2).
+fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
+    if let Err(error) = move_entry(window, live, from, to) {
         let told = format!("移動できません: {error}");
         window.set_render_status(told.into());
         return;
     }
     // The folder it went into is opened, or what was just carried there would
     // not be on screen at all — the same as a file that has just been made.
-    live.folder.borrow_mut().expanded.insert(into.clone());
-    let message = format!("move {} into={}", source.display(), into.display());
-    live.cache.borrow_mut().log_diag("folder", &message);
+    if let Some(into) = to.parent() {
+        live.folder.borrow_mut().expanded.insert(into.to_path_buf());
+        let message = format!("move {} into={}", from.display(), into.display());
+        live.cache.borrow_mut().log_diag("folder", &message);
+    }
     publish_left(window, live);
     write_session(window, live);
 }
@@ -4866,6 +4911,10 @@ enum Question {
     RenameEntry(PathBuf),
     /// The file or folder named, waiting to be told to go (要件 5.2).
     DeleteEntry(PathBuf),
+    /// Something carried onto a name that is already taken (要件 5.2): what is
+    /// being moved, and where it would land. **The order is the same as
+    /// `move_entry`'s**, from and to.
+    ReplaceOnMove(PathBuf, PathBuf),
 }
 
 /// Put a question in front of the writer.
@@ -4998,6 +5047,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         (Question::NewFolder(parent), 0) => make_entry(window, live, &parent, true),
         (Question::RenameEntry(path), 0) => rename_entry(window, live, &path),
         (Question::DeleteEntry(path), 0) => delete_entry(window, live, &path),
+        (Question::ReplaceOnMove(from, to), 0) => replace_on_move(window, live, &from, &to),
         // キャンセル, and every other way out of a question about closing. The
         // run stops here rather than going on to ask about the next tab.
         (Question::CloseTab { .. } | Question::DiscardOnClose { .. }, _) => {

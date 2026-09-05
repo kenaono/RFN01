@@ -116,6 +116,28 @@ fn push_rows(
     }
 }
 
+/// Which row holds each row, by number, and `-1` for the ones the work folder
+/// holds itself (要件 5.2).
+///
+/// **So that a row can name where a thing let go on it would land.** Pointing
+/// at a file means the folder that file is in — the same rule that decides
+/// where a new file is made ([`destination_folder`]) — and the row has to be
+/// able to say which row that is without asking a path anything, because the
+/// rows are drawn by Slint and Slint cannot ask a path what holds it.
+///
+/// The rows are a flattened walk, so the folder holding a row is the nearest
+/// row above it that stands one step further out.
+pub fn holders(rows: &[Row]) -> Vec<i32> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut above: Vec<usize> = Vec::new();
+    for (at, row) in rows.iter().enumerate() {
+        above.truncate(row.depth);
+        out.push(above.last().map_or(-1, |&row| row as i32));
+        above.push(at);
+    }
+    out
+}
+
 /// Why a name cannot be used (要件 5.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameProblem {
@@ -597,6 +619,17 @@ mod tests {
 
     /// A new file lands where the writer is standing: in the folder they have
     /// selected, beside the file they have selected, or in the work folder.
+    #[test]
+    fn every_row_names_the_row_that_holds_it() {
+        let open = expanded(&["/work/章", "/work/章/下書き"]);
+        let rows = rows(Path::new("/work"), &open, &imagined);
+
+        // 章, 第一章.md, 下書き, 断片.md, 資料, はじめに.md — so the work folder
+        // holds the first, the fifth and the sixth; 章 holds the two below it;
+        // 下書き holds the one inside it.
+        assert_eq!(holders(&rows), vec![-1, 0, 0, 2, -1, -1]);
+    }
+
     #[test]
     fn a_folder_does_not_go_inside_itself_or_under_itself() {
         let source = Path::new("/w/notes");

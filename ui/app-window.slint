@@ -45,6 +45,11 @@ export struct LeftRow {
     folder: bool,
     // Whether this folder's contents are in the rows below it.
     open: bool,
+    // Which row holds this one, and -1 for the ones the work folder holds
+    // itself (要件 5.2). **So that a row can say where something let go on it
+    // would land**: pointing at a file means the folder that file is in, and
+    // the row cannot ask a path what holds it. The other panels leave it -1.
+    parent: int,
 }
 
 export component AppWindow inherits Window {
@@ -164,15 +169,20 @@ export component AppWindow inherits Window {
     /// so is what keeps every mark true: a mark that appears and then does
     /// nothing teaches the writer to distrust the ones that do.
     in-out property <int> tree-carry-parent: -1;
-    /// Where the carried row would land: a row's number, `-1` the work folder
-    /// itself, `-2` nowhere. The work folder is the panel's own heading,
+    /// Which row the hand is over: a row's number, `-1` the heading, `-2`
+    /// nowhere. **Where it lands is `tree-drop-into`** — pointing at a file
+    /// means the folder that file is in (要件 5.2), so the two differ whenever
+    /// the writer aims at a folder's contents rather than at its name.
+    property <int> tree-drop-hand: -2;
+    /// The folder the carried row would land in, as a row's number, `-1` the
+    /// work folder itself, `-2` nowhere. The work folder is the panel's own heading,
     /// because that heading **is** the work folder's name — and it is the one
     /// target that is always on screen, which is what a row scrolled out of
     /// sight is not.
-    property <int> tree-drop: -2;
+    property <int> tree-drop-into: -2;
     /// A carry started at this row: Rust answers with `tree-carry-end`.
     callback tree-row-grabbed(int);
-    /// A carried row was let go over `tree-drop` (要件 5.2).
+    /// A carried row was let go into `tree-drop-into` (要件 5.2).
     callback tree-row-dropped(int, int);
     /// 要件 5.2: one line in the diagnostic log for one gesture on a row — the
     /// row, how many moves reached it, whether the press ever did, whether it
@@ -747,13 +757,19 @@ export component AppWindow inherits Window {
                         // order without the two undoing each other.
                         changed under-carry => {
                             if (self.under-carry) {
-                                root.tree-drop = -1;
-                            } else if (root.tree-drop == -1) {
-                                root.tree-drop = -2;
+                                root.tree-drop-hand = -1;
+                                root.tree-drop-into = -1;
+                            } else if (root.tree-drop-hand == -1) {
+                                root.tree-drop-hand = -2;
+                                root.tree-drop-into = -2;
                             }
                         }
+                        // **Lit by any row whose folder is the work folder**,
+                        // not only by the hand being on the heading: a file
+                        // sitting at the top of the tree says "into the work
+                        // folder", and this is where the work folder is drawn.
                         property <bool> receiving: root.tree-carrying
-                            && root.tree-drop == -1;
+                            && root.tree-drop-into == -1;
                         background: self.receiving ? Tok.accent-faint : Tok.chrome-raised;
                         border-width: self.receiving ? 2px : 0px;
                         border-color: Tok.accent;
@@ -885,12 +901,18 @@ export component AppWindow inherits Window {
                                 // drop will happen where it will not. The rows
                                 // from the carried one to
                                 // `tree-carry-end` are what is under it.
+                                // Where something let go on this row would go:
+                                // a folder takes it in, and anything else means
+                                // the folder it is in — the same rule that
+                                // decides where a new file is made (要件 5.2).
+                                property <int> destination: row.folder
+                                    ? index
+                                    : row.parent;
                                 property <bool> takes-carry: root.tree-carrying
                                     && root.left-tab == 0
-                                    && row.folder
-                                    && index != root.tree-carry-parent
-                                    && (index < root.tree-carried-from
-                                        || index >= root.tree-carry-end);
+                                    && self.destination != root.tree-carry-parent
+                                    && (self.destination < root.tree-carried-from
+                                        || self.destination >= root.tree-carry-end);
                                 // Only the flow direction is compared: a row is
                                 // as wide as the panel, and the view above has
                                 // already answered for the other axis. **The
@@ -902,13 +924,22 @@ export component AppWindow inherits Window {
                                     && root.tree-carry-y < self.y + self.height;
                                 changed under-carry => {
                                     if (self.under-carry) {
-                                        root.tree-drop = index;
-                                    } else if (root.tree-drop == index) {
-                                        root.tree-drop = -2;
+                                        root.tree-drop-hand = index;
+                                        root.tree-drop-into = self.destination;
+                                    } else if (root.tree-drop-hand == index) {
+                                        root.tree-drop-hand = -2;
+                                        root.tree-drop-into = -2;
                                     }
                                 }
+                                // **Two marks, because there are two answers.**
+                                // The hand is on this row; what it lands in is
+                                // the folder — and when the writer is pointing
+                                // inside an open folder, that folder is a
+                                // different row (or the heading).
                                 property <bool> receiving: root.tree-carrying
-                                    && root.tree-drop == index;
+                                    && root.tree-drop-into == index;
+                                property <bool> pointed: root.tree-carrying
+                                    && root.tree-drop-hand == index;
                                 // The row in the writer's hand has gone pale,
                                 // the way a carried tab does (要件 6.5): it
                                 // stays where it is, because the tree is not
@@ -920,7 +951,7 @@ export component AppWindow inherits Window {
                                 // The selected row is the one the file commands
                                 // act on (要件 5.2), so it has to be visible
                                 // which one it is.
-                                background: self.receiving
+                                background: self.receiving || self.pointed
                                     ? Tok.accent-faint
                                     : (index == root.tree-selected
                                         ? Tok.accent-soft
@@ -989,7 +1020,7 @@ export component AppWindow inherits Window {
                                                 tree-row.moves,
                                                 tree-row.pressing,
                                                 tree-row.carrying-self,
-                                                root.tree-drop,
+                                                root.tree-drop-into,
                                                 false);
                                             if (tree-row.carrying-self) {
                                                 // **Asked first, put down
@@ -997,10 +1028,12 @@ export component AppWindow inherits Window {
                                                 // the drop means, and Rust is
                                                 // told it before the marks it
                                                 // was drawn from are cleared.
-                                                root.tree-row-dropped(index, root.tree-drop);
+                                                root.tree-row-dropped(
+                                                    index, root.tree-drop-into);
                                                 root.tree-carrying = false;
                                                 root.tree-carried-from = -1;
-                                                root.tree-drop = -2;
+                                                root.tree-drop-hand = -2;
+                                                root.tree-drop-into = -2;
                                             } else if (tree-row.pressing) {
                                                 root.left-row-activated(index);
                                                 root.focus-generation += 1;
@@ -1013,12 +1046,13 @@ export component AppWindow inherits Window {
                                                 tree-row.moves,
                                                 tree-row.pressing,
                                                 tree-row.carrying-self,
-                                                root.tree-drop,
+                                                root.tree-drop-into,
                                                 true);
                                             if (tree-row.carrying-self) {
                                                 root.tree-carrying = false;
                                                 root.tree-carried-from = -1;
-                                                root.tree-drop = -2;
+                                                root.tree-drop-hand = -2;
+                                                root.tree-drop-into = -2;
                                             }
                                             tree-row.pressing = false;
                                             tree-row.carrying-self = false;
@@ -1043,7 +1077,8 @@ export component AppWindow inherits Window {
                                                 || entry.mouse-y < tree-row.press-y - 4px)) {
                                             tree-row.carrying-self = true;
                                             root.tree-carried-from = index;
-                                            root.tree-drop = -2;
+                                            root.tree-drop-hand = -2;
+                                            root.tree-drop-into = -2;
                                             // Rust answers with how far the
                                             // rows under this one reach, and
                                             // answering costs no redraw.
