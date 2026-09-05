@@ -315,6 +315,12 @@ export component AppWindow inherits Window {
     callback pane-selection-end(int, float, float);
     callback pane-select-all(int);
     callback pane-scroll-changed(int, float);
+    /// 要件 8.5: the pane was told to move the view, and this is where it
+    /// actually went. **Two numbers because they can differ**: a `Flickable`
+    /// holds its viewport inside what the content allows, so a scroll asked for
+    /// before the new document's size reached the view is a scroll that lands
+    /// somewhere else.
+    callback pane-scroll-applied(int, float, float);
     callback pane-resized(int);
     callback pane-text-input(int, string);
     callback pane-tab(int);
@@ -1310,6 +1316,12 @@ export component AppWindow inherits Window {
                         ime-buffer <=> pane.ime-buffer;
                         scroll-x <=> pane.scroll-x;
                         scroll-y <=> pane.scroll-y;
+                        scroll-to-x: pane.scroll-x;
+                        scroll-to-y: pane.scroll-y;
+                        scroll-generation: pane.scroll-generation;
+                        scroll-applied(to, now) => {
+                            root.pane-scroll-applied(pane.id, to, now);
+                        }
                         shown-width <=> pane.shown-width;
                         shown-height <=> pane.shown-height;
                         focus-generation: root.focus-generation;

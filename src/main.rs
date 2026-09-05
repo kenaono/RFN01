@@ -1834,10 +1834,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // (ペイン分割設計 5).
     let weak = window.as_weak();
     let cache = render_cache.clone();
-    window.on_pane_scroll_changed(move |pane, _| {
+    window.on_pane_scroll_changed(move |pane, offset| {
         if let Some(window) = weak.upgrade() {
-            refresh_after_scroll(&window, &cache, PaneId::from_index(pane));
+            refresh_after_scroll(&window, &cache, PaneId::from_index(pane), offset);
         }
+    });
+
+    // 要件 8.5: where the view actually went when it was told to move.
+    let cache = render_cache.clone();
+    window.on_pane_scroll_applied(move |pane, asked, went| {
+        let id = PaneId::from_index(pane);
+        let told = format!("apply to={asked:.0} went={went:.0}");
+        cache
+            .borrow_mut()
+            .log_diag(&format!("scroll.{}", id.diag_suffix()), &told);
     });
 
     // Resizing changes how long a line may be — a column's height on one side,
@@ -6899,6 +6909,9 @@ impl PaneId {
     }
 
     fn set_scroll_across(self, window: &AppWindow, offset: f32) {
+        if (offset - self.scroll_across(window)).abs() < 0.5 {
+            return;
+        }
         let vertical = self.vertical(window);
         self.update_screen(window, |screen| {
             if vertical {
@@ -6906,6 +6919,9 @@ impl PaneId {
             } else {
                 screen.scroll_x = offset;
             }
+            // The same count as the other axis: one move is one event, and the
+            // pane follows both from it.
+            screen.scroll_generation += 1;
         });
     }
 
@@ -6945,7 +6961,24 @@ impl PaneId {
         }
     }
 
+    /// Move the view along the flow, and tell the pane to follow (要件 8.5).
+    ///
+    /// **Telling it is a separate act from writing it down.** `Flickable` drops
+    /// the binding that would have carried the value the first time the writer
+    /// presses inside it (`items/flickable.rs`), so what actually moves the view
+    /// is the count changing — and a count raised for a value the pane already
+    /// has would send it to where it is on every notch of the wheel.
     fn set_scroll(self, window: &AppWindow, offset: f32) {
+        if (offset - self.scroll(window)).abs() < 0.5 {
+            return;
+        }
+        self.record_scroll(window, offset);
+        self.update_screen(window, |screen| screen.scroll_generation += 1);
+    }
+
+    /// Write down where the pane says it has gone. **The other direction**: the
+    /// pane moved itself, and recording that is not a command.
+    fn record_scroll(self, window: &AppWindow, offset: f32) {
         let vertical = self.vertical(window);
         self.update_screen(window, |screen| {
             if vertical {
@@ -7321,7 +7354,7 @@ impl RenderCache {
         window: &AppWindow,
         id: PaneId,
         prefetch: u32,
-    ) -> windows::core::Result<(usize, usize, usize, usize)> {
+    ) -> windows::core::Result<(usize, usize, usize, usize, usize)> {
         let scroll = id.scroll(window);
         let shown_flow = id.shown_flow(window);
         // 要件 9: and where the pane is looking across the flow, which is only
@@ -7340,7 +7373,7 @@ impl RenderCache {
             uploaded_bytes,
         } = graphics;
         if engine.total_flow_size() == 0 {
-            return Ok((0, 0, 0, 0));
+            return Ok((0, 0, 0, 0, 0));
         }
         // Tiles are cut out of the blocks the viewport crosses. Their size along
         // the flow tracks the pane's extent across it, so a taller window makes
@@ -7422,7 +7455,12 @@ impl RenderCache {
 
         let tile_count = tiles.len();
         id.set_tiles(window, tiles);
-        Ok((tile_count, rendered, reused, spare_held))
+        // **What was asked for, beside what was placed.** A tile whose image is
+        // not in the cache when the placement runs is dropped without a word
+        // (`images.get_mut`), and a pane missing one shows paper where its text
+        // should be — which looks exactly like a document that has not been
+        // drawn yet. The two numbers differing is the only sign from outside.
+        Ok((tile_count, keyed.len(), rendered, reused, spare_held))
     }
 
     /// Re-cut the selection rectangles for what the pane now shows.
@@ -7973,7 +8011,7 @@ fn refresh_pane(
     }
     let stats_ms = elapsed_ms(stats_started);
 
-    let (tile_count, rendered, tiles_reused, spare_held) = match tiles {
+    let (tile_count, tile_want, rendered, tiles_reused, spare_held) = match tiles {
         Ok(counts) => counts,
         Err(error) => {
             let label = id.label(window);
@@ -8088,7 +8126,7 @@ fn refresh_pane(
         &format!(
             "content={content_flow} extent={line_extent} shown={shown_flow:.0} \
              viewport={viewport_flow:.0} scroll={scroll:.0} hold={hold} blocks={blocks} \
-             measured={measured} tiles={tile_count} new={rendered} caret={caret_at} \
+             measured={measured} tiles={tile_count}/{tile_want} new={rendered} caret={caret_at} \
              preview={preview} mode={mode} split={split} zoom={zoom_percent}",
             // 要件 8.5: where the view is being held, if it is. **Written down
             // because a view in the wrong place says nothing about why** — a
@@ -8183,29 +8221,51 @@ fn apply_pane_geometry(
 /// No tile is regenerated unless the viewport reached one it does not hold, and
 /// the selection is re-cut because its rectangles are clipped to what is on
 /// screen. This is a hit test over the visible blocks only.
-fn refresh_after_scroll(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id: PaneId) {
+fn refresh_after_scroll(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    offset: f32,
+) {
     let started = Instant::now();
     let label = id.label(window);
+    // **Where the pane says it is, not where its row says it is.** The row is
+    // written by the two-way binding and this is raised by the `changed`
+    // handler, and nothing orders those two against each other — reading the
+    // row first cuts tiles for where the pane was a moment ago, which leaves
+    // the newly uncovered strip with no tile until something else redraws it.
+    id.record_scroll(window, offset);
     let mut cache = cache.borrow_mut();
     // **The writer has scrolled, so this is where they want to look now**
     // (要件 8.5). The other way a hold ends is the caret moving, which the
     // layout pass notices for itself (`ViewAnchor`).
     cache.pane(id).view.top_anchor = None;
     let drawn = cache.refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
-    match drawn {
-        Ok((count, new, _, _)) if new > 0 => {
-            let ms = elapsed_ms(started);
-            let line = format!("{label}遅延スクロール: {count}枚{new}新 / {ms:.1}ms");
-            window.set_render_status(line.into());
+    let placed = match &drawn {
+        Ok((count, want, new, _, _)) => {
+            if *new > 0 {
+                let ms = elapsed_ms(started);
+                let line = format!("{label}遅延スクロール: {count}枚{new}新 / {ms:.1}ms");
+                window.set_render_status(line.into());
+            }
+            format!("tiles={count}/{want} new={new}")
         }
-        Ok(_) => {}
         Err(error) => {
             let line = format!("{label}遅延タイル: NG / {error}");
             window.set_render_status(line.into());
+            "tiles=-".to_owned()
         }
-    }
+    };
     if let Err(error) = cache.refresh_pane_selection(window, id) {
         window.set_render_status(format!("{label}選択座標: NG / {error}").into());
+    }
+    // **Only when something was drawn.** A wheel raises one of these every few
+    // pixels, and a line per notch buries the run that mattered.
+    if drawn.map(|counts| counts.2).unwrap_or(0) > 0 {
+        cache.log_diag(
+            &format!("scroll.{}", id.diag_suffix()),
+            &format!("at={offset:.0} {placed}"),
+        );
     }
 }
 

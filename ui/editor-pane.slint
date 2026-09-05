@@ -107,6 +107,10 @@ export struct PaneScreen {
     ime-buffer: string,
     scroll-x: length,
     scroll-y: length,
+    // Bumped by Rust whenever it means to move the view (要件 8.5): restoring a
+    // tab, following the caret, opening a file. **A count rather than a flag**,
+    // because two moves in a row have to be two events.
+    scroll-generation: int,
     shown-width: length,
     shown-height: length,
 }
@@ -167,6 +171,32 @@ export component EditorPane inherits Rectangle {
     // which one its parent cares about. The unused one stays at zero.
     in-out property <length> scroll-x: 0px;
     in-out property <length> scroll-y: 0px;
+    /// 要件 8.5: Rust has moved the view, and the pane has to follow.
+    ///
+    /// **Assigned, not left to the binding.** `Flickable` drops the binding on
+    /// its `viewport-x`/`viewport-y` the first time the writer presses inside it
+    /// — `remove_binding()` in `i-slint-core/items/flickable.rs`, there to stop
+    /// an animation — so from that press onwards nothing Rust writes reaches the
+    /// view. Which is why restoring the scroll worked at startup and stopped
+    /// working the moment the pane had been clicked in: opening a file then left
+    /// the pane where the last document had been, showing the middle of the new
+    /// one or blank paper past its end.
+    ///
+    /// **Where to go is its own pair of properties**, not `scroll-x`/`scroll-y`.
+    /// Those two are two-way with the view, which is the very connection that
+    /// gets dropped; these are Rust's alone and are only ever read here.
+    in property <length> scroll-to-x;
+    in property <length> scroll-to-y;
+    in property <int> scroll-generation;
+    callback scroll-applied(float, float);
+    function take-scroll() {
+        scroll.viewport-x = root.scroll-to-x;
+        scroll.viewport-y = root.scroll-to-y;
+        root.scroll-applied(root.scroll-to-y / 1px, scroll.viewport-y / 1px);
+    }
+    changed scroll-generation => {
+        root.take-scroll();
+    }
     // What the pane actually shows, reported back so Rust can decide how much
     // of the document to lay out.
     in-out property <length> shown-width: 640px;
