@@ -2125,6 +2125,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
     let sheet_fonts = Rc::new(VecModel::from(vec![SharedString::new(); 2 * SHEET_FONTS]));
     reset_settings(&numbers, &palette, &sheet_fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
     window.set_sheet_numbers(ModelRc::from(numbers.clone()));
     window.set_palette(ModelRc::from(palette.clone()));
     window.set_sheet_fonts(ModelRc::from(sheet_fonts.clone()));
@@ -2152,6 +2153,25 @@ fn main() -> Result<(), slint::PlatformError> {
         };
         if let Some(window) = weak.upgrade() {
             step_setting(&window, &steps, setting, by);
+            schedule_relayout(&window, &states, &cache, &timer);
+        }
+    });
+
+    // 要件 9: a setting whose values are a choice rather than a quantity —
+    // the same door as `typography-step`, told what to be instead of by how
+    // much to move.
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    let timer = spec_timer.clone();
+    let chosen = numbers.clone();
+    window.on_typography_chose(move |setting, value| {
+        let Some(setting) = Setting::from_index(setting) else {
+            return;
+        };
+        if let Some(window) = weak.upgrade() {
+            let (low, high) = setting.range();
+            setting.write(&chosen, shown_sheet(&window), value.clamp(low, high));
             schedule_relayout(&window, &states, &cache, &timer);
         }
     });
@@ -5917,7 +5937,21 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// One model each rather than a property per value — the panel draws them as
 /// rows of the same shape, and the engine reads whichever sheet the pane it is
 /// setting belongs to.
-const SHEET_NUMBERS: usize = 4 + MAX_HEADING_LEVEL;
+/// How many numbers one sheet holds (要件 9).
+///
+/// **The window is told this rather than knowing it** (`sheet-stride`): the
+/// panel reads the model by `sheet * stride + row`, and when this grew from 10
+/// to 12 the two places that had written the absolute row instead were missed —
+/// the vertical pane then took its page margin from the line height. One
+/// definition, sent over.
+const SHEET_NUMBERS: usize = 6 + MAX_HEADING_LEVEL;
+/// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
+/// two values are `2`, the pane's own width, and `0`, not wrapping at all —
+/// **which is written down and not yet built**: tiles are cut along the flow
+/// only, so a line that never wraps would want one tile as wide as the longest
+/// line in the document. Until they are cut across the flow as well, a sheet
+/// set to `0` is laid out like the pane, and the panel does not offer it.
+const WRAP_CHARACTERS: i32 = 1;
 const SHEET_COLOURS: usize = 2 + MAX_HEADING_LEVEL;
 const SHEET_FONTS: usize = 2 + MAX_HEADING_LEVEL;
 /// Where the paper sits among a sheet's colours: after the body ink and the six
@@ -6001,6 +6035,14 @@ enum Setting {
     LineAdvance,
     CharAdvance,
     PageMargin,
+    /// How long a line may be (要件 9): the pane's width, or a width the writer
+    /// names in body characters. **Both sheets have their own** — a comfortable
+    /// line is a different length written down the page than across it.
+    WrapMode,
+    /// That width, in characters of body text. Read only when `WrapMode` is
+    /// `WRAP_CHARACTERS`, and kept when it is not, so that turning the setting
+    /// off and on again does not lose the number.
+    WrapChars,
     /// One heading level, 0 being H1.
     Heading(usize),
 }
@@ -6014,6 +6056,10 @@ impl Setting {
             2 => Some(Self::CharAdvance),
             3 => Some(Self::PageMargin),
             4..=9 => Some(Self::Heading(index as usize - 4)),
+            // **Added after the headings**, so that the number every existing
+            // row is named by stays the number it was.
+            10 => Some(Self::WrapMode),
+            11 => Some(Self::WrapChars),
             _ => None,
         }
     }
@@ -6025,6 +6071,8 @@ impl Setting {
             Self::CharAdvance => 2,
             Self::PageMargin => 3,
             Self::Heading(level) => 4 + level.min(MAX_HEADING_LEVEL - 1),
+            Self::WrapMode => 4 + MAX_HEADING_LEVEL,
+            Self::WrapChars => 5 + MAX_HEADING_LEVEL,
         }
     }
 
@@ -6032,6 +6080,8 @@ impl Setting {
     fn step(self) -> i32 {
         match self {
             Self::BodySize => 1,
+            Self::WrapMode => 1,
+            Self::WrapChars => 2,
             Self::PageMargin => 4,
             Self::CharAdvance => 5,
             Self::Heading(_) => 5,
@@ -6048,6 +6098,8 @@ impl Setting {
             Self::LineAdvance => (70, 400),
             Self::CharAdvance => (-20, 100),
             Self::PageMargin => (0, 160),
+            Self::WrapMode => (0, 2),
+            Self::WrapChars => (10, 200),
             Self::Heading(_) => (50, 400),
         }
     }
@@ -6058,6 +6110,12 @@ impl Setting {
             Self::LineAdvance => 100,
             Self::CharAdvance => 0,
             Self::PageMargin => 12,
+            // The pane, which is what the editor did before the setting existed.
+            Self::WrapMode => 2,
+            // 40 characters of body text: a line a reader's eye can come back
+            // from without losing its place, and the length a page of Japanese
+            // prose is usually set to.
+            Self::WrapChars => 40,
             Self::Heading(level) => HEADING_DEFAULTS.get(level).copied().unwrap_or(100),
         }
     }
@@ -6088,6 +6146,8 @@ impl Setting {
             Self::LineAdvance => "line-advance",
             Self::CharAdvance => "char-advance",
             Self::PageMargin => "page-margin",
+            Self::WrapMode => "wrap-mode",
+            Self::WrapChars => "wrap-chars",
             Self::Heading(0) => "h1",
             Self::Heading(1) => "h2",
             Self::Heading(2) => "h3",
@@ -6779,16 +6839,64 @@ impl PaneId {
         if self.is_right() { "v" } else { "h" }
     }
 
-    /// The pane's extent across the flow, which is how long a line may be: a
-    /// vertical pane sets its columns into its height, a horizontal one its
-    /// lines into its width.
-    fn line_extent_px(self, window: &AppWindow) -> u32 {
+    /// How long a line may be: the pane's extent across the flow — a vertical
+    /// pane sets its columns into its height, a horizontal one its lines into
+    /// its width — or the width the writer named, whichever is shorter (要件 9).
+    ///
+    /// **Never wider than the pane**: a line that does not fit cannot be
+    /// written on. So the setting only ever makes the sheet narrower, and a
+    /// pane split down to nothing still holds a document.
+    fn line_extent_px(self, window: &AppWindow, typography: &Typography) -> u32 {
+        let vertical = self.vertical(window);
         let across = self.shown_across_flow(window);
-        if self.vertical(window) {
+        let pane = if vertical {
             usable_preview_height(across)
         } else {
             usable_horizontal_width(across)
+        };
+        let sheet = usize::from(vertical);
+        if Setting::WrapMode.read(window, sheet) != WRAP_CHARACTERS {
+            return pane;
         }
+        let asked = Setting::WrapChars.read(window, sheet).max(1) as u32;
+        text_blocks::line_extent_for_cells(asked, typography)
+    }
+
+    /// How far the laid-out document reaches across the flow, as the pane was
+    /// last told (`set_content_size`).
+    ///
+    /// **The number the sheet is drawn at**, read back rather than worked out
+    /// again, so that chasing the caret across cannot aim at a rectangle other
+    /// than the one the reader is looking at.
+    fn content_across(self, window: &AppWindow) -> f32 {
+        let screen = self.screen(window);
+        if self.vertical(window) {
+            screen.content_height as f32
+        } else {
+            screen.content_width as f32
+        }
+    }
+
+    /// The scroll across the flow — the axis the pane only has to move when the
+    /// line is longer than the pane is wide (要件 9).
+    fn scroll_across(self, window: &AppWindow) -> f32 {
+        let screen = self.screen(window);
+        if self.vertical(window) {
+            screen.scroll_y
+        } else {
+            screen.scroll_x
+        }
+    }
+
+    fn set_scroll_across(self, window: &AppWindow, offset: f32) {
+        let vertical = self.vertical(window);
+        self.update_screen(window, |screen| {
+            if vertical {
+                screen.scroll_y = offset;
+            } else {
+                screen.scroll_x = offset;
+            }
+        });
     }
 
     /// How much of the flow the pane shows, **erring high**. This decides which
@@ -7683,7 +7791,7 @@ fn refresh_pane(
     let zoom_percent = id.zoom(window);
     let typography = pane_typography(window, id);
     let font_size = typography.font_size;
-    let line_extent_px = id.line_extent_px(window);
+    let line_extent_px = id.line_extent_px(window, &typography);
     let mut borrowed = cache.borrow_mut();
     // Reborrow once so the field accesses below are disjoint. Going through
     // `RefMut` for each of them would borrow the whole cache every time.
@@ -8035,6 +8143,25 @@ fn apply_pane_geometry(
         ),
     );
     id.set_scroll(window, scroll);
+    // 要件 9: the line may be longer than the pane is wide — the writer named a
+    // length — and then the caret has to be chased across the flow as well.
+    // **The same rule and the same arithmetic**: which axis is the flow is the
+    // only thing that differs, and a caret that has run off the side is off the
+    // screen exactly as one that has run off the end. When the sheet fits, the
+    // content is no larger than the viewport and this answers zero.
+    let (caret_across, across_size) = if id.vertical(window) {
+        (caret.y, caret.height)
+    } else {
+        (caret.x, caret.width)
+    };
+    let across = caret_visible_scroll(
+        id.scroll_across(window),
+        id.shown_across_flow(window),
+        id.content_across(window),
+        caret_across,
+        across_size,
+    );
+    id.set_scroll_across(window, across);
     let (ime_x, ime_y) = ime_candidate_anchor(&caret, id.vertical(window));
     id.set_ime_anchor(window, ime_x, ime_y, &caret);
 }
@@ -8533,7 +8660,7 @@ fn hit_test_pane(
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
     let label = id.label(window);
-    if let Err(error) = engine.update(styled, id.line_extent_px(window), &typography) {
+    if let Err(error) = engine.update(styled, id.line_extent_px(window, &typography), &typography) {
         window.set_render_status(format!("{label}整形: NG / {error}").into());
         return None;
     }
@@ -8584,7 +8711,7 @@ fn lay_out_for_caret<'a>(
         .with_source_line(shown.source_line());
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
-    if let Err(error) = engine.update(styled, id.line_extent_px(window), &typography) {
+    if let Err(error) = engine.update(styled, id.line_extent_px(window, &typography), &typography) {
         let label = id.label(window);
         window.set_render_status(format!("{label}整形: NG / {error}").into());
         return None;

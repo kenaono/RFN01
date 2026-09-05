@@ -361,6 +361,18 @@ export component AppWindow inherits Window {
     /// 3 column gap, 4 to 9 the six heading levels. One callback rather than
     /// one each, the way `tree-command` carries the file commands.
     callback typography-step(int, int);
+    /// 要件 9: a setting given a value outright rather than stepped, for the
+    /// ones whose values are a choice and not a quantity.
+    callback typography-chose(int, int);
+    /// How many numbers one sheet holds in `sheet-numbers` (要件 9).
+    ///
+    /// **Rust owns it** (`SHEET_NUMBERS`) and sets it here, because the model is
+    /// laid out by Rust and the window only reads it. It was a literal in a
+    /// dozen places until adding two settings moved every row: the ones written
+    /// as `sheet * 10` were all found, and the two written as the absolute row
+    /// they landed on were not — so the vertical pane took its page margin from
+    /// the line height and stood 100px off the top of its column.
+    in-out property <int> sheet-stride: 12;
     /// The picker is about to open for one of the four families (要件 9): Rust
     /// reads the system's list if it has not yet, and says which family is the
     /// one set now. **Called before `show`**, so the list is there to draw.
@@ -1255,9 +1267,10 @@ export component AppWindow inherits Window {
                         page-background: pane.vertical
                             ? root.palette[15]
                             : root.palette[7];
-                        page-margin: (pane.vertical
-                            ? root.sheet-numbers[13]
-                            : root.sheet-numbers[3]) * 1px;
+                        // **The pane picks the sheet, not the panel**: this is
+                        // the margin of the direction this pane is writing in.
+                        page-margin: root.sheet-numbers[
+                            (pane.vertical ? 1 : 0) * root.sheet-stride + 3] * 1px;
                         // **One pane says it, not both.** A failure is about the
                         // document rather than about a direction, and saying it
                         // twice reads as two failures.
@@ -1795,7 +1808,7 @@ export component AppWindow inherits Window {
                 // numbers are what the callbacks carry.
                 TextRow {
                     label: "Body";
-                    value: root.sheet-numbers[root.sheet * 10] + " px";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride] + " px";
                     shown: root.palette[root.sheet * 8 + 0];
                     family: root.sheet-fonts[root.sheet * 8 + 0];
                     stepped(by) => {
@@ -1812,7 +1825,7 @@ export component AppWindow inherits Window {
 
                 TextRow {
                     label: "H1";
-                    value: root.sheet-numbers[root.sheet * 10 + 4] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 4] + "%";
                     shown: root.palette[root.sheet * 8 + 1];
                     family: root.sheet-fonts[root.sheet * 8 + 1];
                     stepped(by) => {
@@ -1829,7 +1842,7 @@ export component AppWindow inherits Window {
 
                 TextRow {
                     label: "H2";
-                    value: root.sheet-numbers[root.sheet * 10 + 5] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 5] + "%";
                     shown: root.palette[root.sheet * 8 + 2];
                     family: root.sheet-fonts[root.sheet * 8 + 2];
                     stepped(by) => {
@@ -1846,7 +1859,7 @@ export component AppWindow inherits Window {
 
                 TextRow {
                     label: "H3";
-                    value: root.sheet-numbers[root.sheet * 10 + 6] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 6] + "%";
                     shown: root.palette[root.sheet * 8 + 3];
                     family: root.sheet-fonts[root.sheet * 8 + 3];
                     stepped(by) => {
@@ -1863,7 +1876,7 @@ export component AppWindow inherits Window {
 
                 TextRow {
                     label: "H4";
-                    value: root.sheet-numbers[root.sheet * 10 + 7] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 7] + "%";
                     shown: root.palette[root.sheet * 8 + 4];
                     family: root.sheet-fonts[root.sheet * 8 + 4];
                     stepped(by) => {
@@ -1880,7 +1893,7 @@ export component AppWindow inherits Window {
 
                 TextRow {
                     label: "H5";
-                    value: root.sheet-numbers[root.sheet * 10 + 8] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 8] + "%";
                     shown: root.palette[root.sheet * 8 + 5];
                     family: root.sheet-fonts[root.sheet * 8 + 5];
                     stepped(by) => {
@@ -1897,7 +1910,7 @@ export component AppWindow inherits Window {
 
                 TextRow {
                     label: "H6";
-                    value: root.sheet-numbers[root.sheet * 10 + 9] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 9] + "%";
                     shown: root.palette[root.sheet * 8 + 6];
                     family: root.sheet-fonts[root.sheet * 8 + 6];
                     stepped(by) => {
@@ -1925,7 +1938,7 @@ export component AppWindow inherits Window {
                 // it is.
                 StepRow {
                     label: root.sheet == 0 ? "Line height" : "Column gap";
-                    value: root.sheet-numbers[root.sheet * 10 + 1] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 1] + "%";
                     stepped(by) => {
                         root.typography-step(1, by);
                     }
@@ -1933,7 +1946,7 @@ export component AppWindow inherits Window {
 
                 StepRow {
                     label: "Char advance";
-                    value: root.sheet-numbers[root.sheet * 10 + 2] + "%";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 2] + "%";
                     stepped(by) => {
                         root.typography-step(2, by);
                     }
@@ -1941,9 +1954,55 @@ export component AppWindow inherits Window {
 
                 StepRow {
                     label: "Page margin";
-                    value: root.sheet-numbers[root.sheet * 10 + 3] + " px";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 3] + " px";
                     stepped(by) => {
                         root.typography-step(3, by);
+                    }
+                }
+
+                // 要件 9: how long a line may be. **Two answers, not three** —
+                // 「折り返さない」 is in the requirement and not yet built, and
+                // a button that does nothing teaches the writer to distrust the
+                // ones that work.
+                HorizontalLayout {
+                    spacing: 2px;
+
+                    Text {
+                        text: "Wrap";
+                        color: Tok.ink;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    TextButton {
+                        title: "Width";
+                        role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
+                            ? Role.primary
+                            : Role.normal;
+                        clicked => {
+                            root.typography-chose(10, 1);
+                        }
+                    }
+                    TextButton {
+                        title: "Pane";
+                        role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
+                            ? Role.normal
+                            : Role.primary;
+                        clicked => {
+                            root.typography-chose(10, 2);
+                        }
+                    }
+                }
+
+                // In characters of body text, because that is what a line
+                // length means: the number stays true when the body size or the
+                // zoom changes, and a width in pixels would not.
+                if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1: StepRow {
+                    label: "Line length";
+                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 11] + " chars";
+                    stepped(by) => {
+                        root.typography-step(11, by);
                     }
                 }
 

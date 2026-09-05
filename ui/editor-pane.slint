@@ -992,6 +992,16 @@ export component EditorPane inherits Rectangle {
                 page := Rectangle {
                     width: root.content-width * 1px;
                     height: root.content-height * 1px;
+                    // 要件 9: when the line is shorter than the pane — the
+                    // writer set a line length — the sheet stands in the middle
+                    // of it rather than against one edge. **The whole of
+                    // centring is here**: the tiles, the selection, the caret,
+                    // the IME's anchor and the pointer that reports back are all
+                    // inside this rectangle, so they are in the document's own
+                    // coordinates whatever this one is. Moving the sheet instead
+                    // of each of them is why none of them had to learn about it.
+                    x: root.vertical ? 0px : max(0px, (parent.width - self.width) / 2);
+                    y: root.vertical ? max(0px, (parent.height - self.height) / 2) : 0px;
                     background: root.page-background;
                     border-width: ime-input.has-focus ? 2px : 0px;
                     border-color: Tok.accent;

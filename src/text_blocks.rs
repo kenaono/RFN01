@@ -1134,6 +1134,18 @@ pub fn cells_per_line(line_extent: u32, typography: &Typography) -> u32 {
     (usable / advance).floor().max(1.0) as u32
 }
 
+/// The line extent that holds exactly `cells` characters of body text (要件 9).
+///
+/// **The inverse of [`cells_per_line`]**, so that a width the writer gives in
+/// characters and a width the engine is given in pixels mean the same thing.
+/// Characters rather than pixels is the whole point: the number stays true when
+/// the body size or the zoom changes, and a pixel width would not.
+pub fn line_extent_for_cells(cells: u32, typography: &Typography) -> u32 {
+    let advance = typography.cell_advance();
+    let padding = typography.font_size.max(1.0) * 3.0;
+    (cells.max(1) as f32 * advance + padding).ceil() as u32
+}
+
 /// The flow space one logical line is charged, in cells of body line space.
 ///
 /// A heading is charged twice over, and the two are different quantities. It
@@ -2988,6 +3000,25 @@ mod tests {
             loose * 3 <= tight * 2 + 1,
             "{tight} cells became {loose} at half a size of extra advance"
         );
+    }
+
+    /// 要件 9: a width given in characters and a width in pixels have to mean
+    /// the same thing, whatever the body is set to.
+    #[test]
+    fn a_line_length_in_characters_holds_that_many_characters() {
+        let plain = plain_typography();
+        let spaced = Typography {
+            character_spacing: 0.5,
+            font_size: 24.0,
+            ..plain.clone()
+        };
+
+        for asked in [1, 10, 40, 200] {
+            for spec in [&plain, &spaced] {
+                let extent = line_extent_for_cells(asked, spec);
+                assert_eq!(cells_per_line(extent, spec), asked, "at {asked} cells");
+            }
+        }
     }
 
     /// What a hanging indent would cost is the items that wrap, not the items
