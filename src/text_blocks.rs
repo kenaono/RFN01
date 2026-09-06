@@ -1508,7 +1508,12 @@ pub fn split_blocks(
         // being accumulated is closed first, so the long line starts one of its
         // own: a cut position inside it is a line start only for text that
         // begins where the layout began.
-        if line_cells > BLOCK_MAX_CELLS {
+        //
+        // **Never a table row** (要件 7.3.2): a row cut in half is two rows,
+        // and each half would be measured into columns of its own. A row long
+        // enough to reach here is a wide table, and a wide table is what 要件 9
+        // lets run off the side of the pane.
+        if line_cells > BLOCK_MAX_CELLS && !style.kind.is_table() {
             if block_byte_start < byte_cursor {
                 blocks.push(BlockSpan {
                     byte_start: block_byte_start,
@@ -1581,7 +1586,21 @@ pub fn split_blocks(
         // different widths — the seam would be visible in every row, not only
         // at the cut (技術検証 7.7).
         let may_end = !style.kind.is_code() && !style.kind.is_table();
-        if block_cells >= BLOCK_MAX_CELLS
+        // **And the cap does not hold a table back either** (2026-09-06). A
+        // fence is capped because a cut inside one costs a seam and nothing
+        // more; a table cut anywhere is a second table — its own widest cells,
+        // its own header row — so a 25-row table came out as five tables of
+        // different shapes stacked on each other. The size cap buys nothing
+        // here in exchange: the columns are a function of every row, so half a
+        // table costs what measuring the whole of it costs, and the cut only
+        // adds a second measurement of the other half.
+        //
+        // **This is the one block whose size the document decides.** A table
+        // the writer keeps growing keeps one block growing with it; that is
+        // what 要件 7.3.2 asks for, and no cut can be put back without the
+        // seam coming with it.
+        let capped = !style.kind.is_table();
+        if (capped && block_cells >= BLOCK_MAX_CELLS)
             || (block_cells >= BLOCK_MIN_CELLS && may_end && ends_a_block(body, line_cells))
         {
             blocks.push(BlockSpan {
@@ -2692,6 +2711,45 @@ mod tests {
             assert!(
                 block.byte_start <= opened || block.byte_start >= closed,
                 "a block began at {} inside the table {opened}..{closed}",
+                block.byte_start
+            );
+        }
+    }
+
+    /// **And neither does the size cap** (要件 7.3.2, 2026-09-06). This is the
+    /// boundary the guard above did not hold back, and it is the one a real
+    /// table meets: a 25-row chapter table came out of the editor as five
+    /// tables of different widths stacked on each other, each reading its own
+    /// first row as a header. A table cut anywhere is a second table.
+    #[test]
+    fn the_size_cap_does_not_fall_inside_a_table() {
+        let typography = plain_typography();
+        let row = LineStyle::of_kind(LineKind::TableRow);
+        // Rows wide enough to wrap, so the table passes `BLOCK_MAX_CELLS`
+        // several times over — which is what a table of ordinary prose cells
+        // does at any pane width a person writes in.
+        let wide = format!("| {} |", "あ".repeat(CELLS as usize * 2));
+        let charged = line_cells(wide.encode_utf16().count() as u32, CELLS, &typography, row);
+        let rows = (BLOCK_MAX_CELLS / charged + 4).max(4) as usize;
+
+        let mut text = String::from("| 見出し |\n| --- |\n");
+        let mut levels = vec![row, LineStyle::of_kind(LineKind::TableRule)];
+        let opened = 0;
+        for _ in 0..rows {
+            text.push_str(&wide);
+            text.push('\n');
+            levels.push(row);
+        }
+        let closed = text.len();
+        text.push_str("本文\n");
+        levels.push(LineStyle::default());
+
+        let blocks = split_with(StyledText::new(&text, &levels), &typography);
+
+        for block in &blocks {
+            assert!(
+                block.byte_start <= opened || block.byte_start >= closed,
+                "a block began at {} inside the table {opened}..{closed} ({rows} rows)",
                 block.byte_start
             );
         }

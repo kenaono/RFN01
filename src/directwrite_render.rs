@@ -2330,8 +2330,10 @@ enum PoolAnswer {
 /// **One queue per thread rather than one shared queue**, because a shared
 /// `Receiver` has to sit behind a lock, and a thread blocked on that lock while
 /// holding it is every other thread's problem. Blocks are bounded in size
-/// (`BLOCK_MAX_CELLS`), so dealing them round-robin divides the work evenly
-/// enough without any of that.
+/// (`BLOCK_MAX_CELLS`) wherever there is a boundary to cut at, so dealing them
+/// round-robin divides the work evenly enough without any of that. A paragraph
+/// with no break in it and a table (要件 7.3.2) are the two that can be larger,
+/// and neither can be cut without changing what is on the page.
 ///
 /// **The same threads do both jobs.** They exist for what they keep — a
 /// DirectWrite factory and the font cache behind it (7.3) — and that is the
