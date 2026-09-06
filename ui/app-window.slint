@@ -350,6 +350,8 @@ export component AppWindow inherits Window {
     callback pane-below-scrolled(int, float);
     callback pane-below-selection(int, float, float, int);
     callback pane-below-sent(int);
+    /// 要件 11.3 の手つきで下段へ移る（true）／本文へ戻る（false）。
+    callback pane-below-focus(int, bool);
     /// A shell wrote something. **Rung from its reading thread**, so it says
     /// only that: which pane, and what changed, are decided on this side.
     callback terminal-woken();
@@ -1463,6 +1465,8 @@ export component AppWindow inherits Window {
                         below-selection-update(x, y) => { root.pane-below-selection(pane.id, x, y, 1); }
                         below-selection-end(x, y) => { root.pane-below-selection(pane.id, x, y, 2); }
                         below-sent => { root.pane-below-sent(pane.id); }
+                        below-entered => { root.pane-below-focus(pane.id, true); }
+                        below-left => { root.pane-below-focus(pane.id, false); }
                         tab-pressed => { root.pane-tab(pane.id); }
                         preedit-changed(text) => { root.pane-preedit-changed(pane.id, text); }
                         backspace-pressed => { root.pane-backspace(pane.id); }

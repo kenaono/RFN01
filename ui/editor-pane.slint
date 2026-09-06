@@ -261,6 +261,10 @@ export component EditorPane inherits Rectangle {
     callback below-toggled();
     /// Send the draft to the shell above it.
     callback below-sent();
+    /// 要件 11.3 の手つきで、下段へ移る／下段から戻る。**同じCtrl+Altの矢印**で、
+    /// 下段が無ければこれまでどおり隣のペインへ行く。
+    callback below-entered();
+    callback below-left();
 
     in property <[PreviewTile]> tiles;
     in property <[PreviewSelectionRect]> selection-rects;
@@ -1356,6 +1360,33 @@ export component EditorPane inherits Rectangle {
                                     root.below-toggled();
                                     return accept;
                                 }
+                                // 要件 11.3 と追加要件 Terminal: **フォーカスの
+                                // 移動はシェルより先。**Ctrl+Altの矢印は
+                                // どのペインで押しても同じ意味でなければならず、
+                                // シェルに渡してしまうと端末のタブだけ効かない。
+                                if (root.terminal && event.modifiers.control
+                                    && event.modifiers.alt) {
+                                    if (event.text == Key.DownArrow && root.below-kind != 0) {
+                                        root.below-entered();
+                                        return accept;
+                                    }
+                                    if (event.text == Key.LeftArrow) {
+                                        root.focus-moved(0);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.RightArrow) {
+                                        root.focus-moved(1);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.UpArrow) {
+                                        root.focus-moved(2);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.DownArrow) {
+                                        root.focus-moved(3);
+                                        return accept;
+                                    }
+                                }
                                 if (root.terminal) {
                                     // 要件 11.2: **`Ctrl+V` is left to the
                                     // field.** It fills itself from the
@@ -1381,6 +1412,14 @@ export component EditorPane inherits Rectangle {
                                     // it.
                                     if (event.modifiers.control && event.text == "`") {
                                         root.below-toggled();
+                                        return accept;
+                                    }
+                                    // **下段があるなら、下はそちら。**無ければ
+                                    // 下の行が隣のペインへ運ぶ（要件 11.3）。
+                                    if (event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.DownArrow
+                                        && root.below-kind != 0) {
+                                        root.below-entered();
                                         return accept;
                                     }
                                     // Enter is handled here rather than left to the
@@ -1743,6 +1782,24 @@ export component EditorPane inherits Rectangle {
                             root.below-toggled();
                             return accept;
                         }
+                        if (event.modifiers.control && event.modifiers.alt) {
+                            if (event.text == Key.UpArrow) {
+                                root.below-left();
+                                return accept;
+                            }
+                            if (event.text == Key.LeftArrow) {
+                                root.focus-moved(0);
+                                return accept;
+                            }
+                            if (event.text == Key.RightArrow) {
+                                root.focus-moved(1);
+                                return accept;
+                            }
+                            if (event.text == Key.DownArrow) {
+                                root.focus-moved(3);
+                                return accept;
+                            }
+                        }
                         root.below-key(
                             event.text,
                             key-number(event.text),
@@ -1813,6 +1870,11 @@ export component EditorPane inherits Rectangle {
                             // over several lines before it is run.
                             if (event.modifiers.control && event.text == Key.Return) {
                                 root.below-sent();
+                                return accept;
+                            }
+                            if (event.modifiers.control && event.modifiers.alt
+                                && event.text == Key.UpArrow) {
+                                root.below-left();
                                 return accept;
                             }
                             reject

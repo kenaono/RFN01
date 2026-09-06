@@ -2945,6 +2945,24 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 要件 11.3 の手つきで上下に移る（追加要件 Terminal）。
+    let weak = window.as_weak();
+    window.on_pane_below_focus(move |pane, into| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            if into {
+                // **The strip takes the keyboard by being asked for it**, the
+                // same way the panes do: a count the element watches, because
+                // an element created focused never sees a change (6.11).
+                id.update_screen(&window, |screen| {
+                    screen.below_focus_generation += 1;
+                });
+            } else {
+                restore_editor_focus(&window);
+            }
+        }
+    });
+
     let weak = window.as_weak();
     let below_live = live.clone();
     window.on_pane_below_sent(move |pane| {
@@ -3272,10 +3290,33 @@ struct PaneTab {
     /// learn about. What it has instead is this, and one question — is it
     /// `Some` — is the whole of the difference.
     terminal: Option<Rc<RefCell<TerminalSession>>>,
+    /// The strip along the foot of the pane while this tab is in front
+    /// (追加要件 Terminal).
+    ///
+    /// **On the tab, not on the pane** (書き手の報告, 2026-09-06). Held by the
+    /// pane, opening a draft under a shell opened a terminal under every
+    /// document beside it: the flag was shared and the *kind* followed whatever
+    /// tab was in front. What is under a document is that document's.
+    below: TabBelow,
     /// How *this pane* is looking at that document. Another pane showing the
     /// same file has a tab of its own, with a caret and a scroll of its own
     /// (要件 7.6).
     view: TabView,
+}
+
+/// What one tab has along the foot of its pane (追加要件 Terminal).
+#[derive(Clone, Default)]
+struct TabBelow {
+    open: bool,
+    /// The shell down there, when this tab is a document.
+    ///
+    /// **Kept while the strip is closed**, because closing a panel is not
+    /// abandoning the command running in it.
+    shell: Option<Rc<RefCell<TerminalSession>>>,
+    /// What the writer has written in the draft, when this tab is a shell.
+    draft: String,
+    /// How tall they dragged it. Zero means "the height it opens at".
+    height: f32,
 }
 
 impl PaneTab {
@@ -3289,6 +3330,7 @@ impl PaneTab {
             document,
             view: TabView::for_pane(window, id),
             terminal: None,
+            below: TabBelow::default(),
         }
     }
 }
@@ -3563,13 +3605,22 @@ impl Live {
             let mut borrowed = self.cache.borrow_mut();
             let pane = borrowed.pane(id);
             pane.terminal = tab.terminal.as_ref().map(TerminalView::sharing);
-            // **The strip's kind follows the tab in front.** A document has a
-            // shell under it and a shell has a draft; switching tabs switches
-            // which of the two is down there, and the shell in the strip goes
-            // on running either way.
+            // **The strip belongs to the tab**, so it arrives with it: what was
+            // open under this tab is open again, at the height it was left at,
+            // with the shell that was running in it (書き手の報告, 2026-09-06).
+            pane.below = tab.below.shell.as_ref().map(TerminalView::sharing);
+            pane.below_open = tab.below.open;
+            pane.below_height = if tab.below.height > 0.0 {
+                tab.below.height
+            } else {
+                TERMINAL_BELOW_HEIGHT
+            };
             (below_kind(pane), pane.below_height)
         };
-        id.update_screen(window, |screen| screen.terminal = showing_shell);
+        id.update_screen(window, |screen| {
+            screen.terminal = showing_shell;
+            screen.below_draft = tab.below.draft.as_str().into();
+        });
         id.set_below(window, kind, height);
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
         id.set_scroll(window, tab.view.scroll);
@@ -3661,6 +3712,7 @@ fn open_session(
                 // a process that ended when the editor did, so a restored
                 // terminal tab would be a name with nothing behind it.
                 terminal: None,
+                below: TabBelow::default(),
             });
         }
         let strip = &mut strips[id.index() as usize];
@@ -3682,6 +3734,7 @@ fn open_session(
                 ..TabView::for_pane(window, focused)
             },
             terminal: None,
+            below: TabBelow::default(),
         });
     }
     for id in PaneId::all(window) {
@@ -3781,6 +3834,7 @@ fn open_without_session(
                     ..TabView::for_pane(window, here)
                 },
                 terminal: None,
+                below: TabBelow::default(),
             })
             .collect(),
         active: 0,
@@ -4010,6 +4064,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                         ..TabView::default()
                     },
                     terminal: None,
+                    below: TabBelow::default(),
                 });
                 strip.tabs.len() - 1
             }
@@ -5470,11 +5525,36 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
         .into_iter()
         .map(|id| live.capture_view(window, id))
         .collect::<Vec<_>>();
+    // The strip's own state, taken while the cache is not otherwise borrowed
+    // (追加要件 Terminal).
+    let strips_below = PaneId::all(window)
+        .into_iter()
+        .map(|id| {
+            let mut borrowed = live.cache.borrow_mut();
+            let pane = borrowed.pane(id);
+            (
+                pane.below_open,
+                pane.below_height,
+                pane.below.as_ref().map(|shell| shell.session.clone()),
+                id.screen(window).below_draft.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut tabs = live.tabs.borrow_mut();
-    for (id, view) in PaneId::all(window).into_iter().zip(views) {
+    for ((id, view), below) in PaneId::all(window).into_iter().zip(views).zip(strips_below) {
         let strip = tabs.of_mut(id);
         if let Some(tab) = strip.tabs.get_mut(strip.active) {
             tab.view = view;
+            let (open, height, shell, draft) = below;
+            tab.below.open = open;
+            tab.below.height = height;
+            // **The draft is the tab's**, and it is only ever the tab's when
+            // the tab is a shell; a document's strip has no draft to keep.
+            if tab.terminal.is_some() {
+                tab.below.draft = draft;
+            } else {
+                tab.below.shell = shell;
+            }
         }
     }
 }
@@ -9559,8 +9639,38 @@ fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
         "terminal",
         &format!("below pane={} kind={kind} open={open}", id.log_name()),
     );
+    store_below_on_tab(window, live, id);
     if kind == 1 {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
+    }
+}
+
+/// Write the strip's state back onto the tab in front (追加要件 Terminal).
+///
+/// **The pane holds it while it is on screen; the tab holds it between times.**
+/// Same as everything else about a view (要件 7.6).
+fn store_below_on_tab(window: &AppWindow, live: &Live, id: PaneId) {
+    let (open, height, shell) = {
+        let mut borrowed = live.cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        (
+            pane.below_open,
+            pane.below_height,
+            pane.below.as_ref().map(|view| view.session.clone()),
+        )
+    };
+    let draft = id.screen(window).below_draft.to_string();
+    let mut tabs = live.tabs.borrow_mut();
+    let strip = tabs.of_mut(id);
+    let active = strip.active;
+    if let Some(tab) = strip.tabs.get_mut(active) {
+        tab.below.open = open;
+        tab.below.height = height;
+        if tab.terminal.is_some() {
+            tab.below.draft = draft;
+        } else {
+            tab.below.shell = shell;
+        }
     }
 }
 
@@ -9578,6 +9688,7 @@ fn resize_below(window: &AppWindow, live: &Live, id: PaneId, height: f32) {
         below_kind(pane)
     };
     id.set_below(window, kind, height);
+    store_below_on_tab(window, live, id);
     if kind == 1 {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
     }
@@ -9612,6 +9723,7 @@ fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
         }
     }
     id.update_screen(window, |screen| screen.below_draft = SharedString::new());
+    store_below_on_tab(window, live, id);
     refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
 }
 
