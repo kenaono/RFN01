@@ -98,6 +98,11 @@ impl Layout {
     }
 
     /// Two panes, evenly divided.
+    ///
+    /// **Only the tests build one this way now** (2026-09-06). An arrangement
+    /// the writer sees is one pane that has been divided, however many times —
+    /// which is `divide`, not this.
+    #[cfg(test)]
     pub fn divided(split: Split, first: usize, second: usize) -> Self {
         Layout::Divided {
             split,
@@ -165,6 +170,27 @@ impl Layout {
                     return true;
                 }
                 first.remove(pane) || second.remove(pane)
+            }
+        }
+    }
+
+    /// Close the numbering behind a pane that has gone.
+    ///
+    /// **A pane's number is its row of the window's pane model**
+    /// (ペイン分割設計 5), and a model has no holes — so taking pane `k` out
+    /// moves every pane after it down one, here and in every list indexed the
+    /// same way. Called straight after [`remove`](Layout::remove), which is the
+    /// only thing that can leave a gap.
+    pub fn renumber_above(&mut self, gone: usize) {
+        match self {
+            Layout::Pane(pane) => {
+                if *pane > gone {
+                    *pane -= 1;
+                }
+            }
+            Layout::Divided { first, second, .. } => {
+                first.renumber_above(gone);
+                second.renumber_above(gone);
             }
         }
     }
@@ -763,5 +789,94 @@ mod tests {
         assert_eq!(Towards::from_index(3), Some(Towards::Down));
         assert_eq!(Towards::from_index(4), None);
         assert_eq!(Towards::from_index(-1), None);
+    }
+
+    /// 要件 6.4: **a pane may be divided however deep it sits.** Dividing the
+    /// right-hand pane of a side-by-side pair leaves the left one whole and
+    /// splits only the right, which is the whole of what "そのペインが分割される"
+    /// asks for.
+    #[test]
+    fn dividing_one_pane_leaves_the_others_whole() {
+        let mut layout = Layout::divided(Split::SideBySide, 0, 1);
+        assert!(layout.divide(1, Split::Stacked, 2));
+        assert_eq!(layout.panes(), vec![0, 1, 2]);
+
+        let (placed, _) = layout.place(Rect::new(0.0, 0.0, 900.0, 600.0));
+        let rect = |pane: usize| {
+            placed
+                .iter()
+                .find(|(found, _)| *found == pane)
+                .map(|(_, rect)| *rect)
+                .expect("every pane is placed")
+        };
+        // The left pane still reaches from the top to the bottom; the right
+        // half is the one cut in two.
+        assert_eq!(rect(0).height, 600.0);
+        assert!(rect(1).x > rect(0).x + rect(0).width - 1.0);
+        assert_eq!(rect(1).x, rect(2).x);
+        assert!(rect(2).y > rect(1).y);
+    }
+
+    /// **A pane's number is its row**, so taking one out closes the numbering
+    /// behind it (ペイン分割設計 5). Without this a model row and the pane it
+    /// draws would drift apart the first time a middle pane went.
+    #[test]
+    fn removing_a_pane_closes_the_numbering_behind_it() {
+        let mut layout = Layout::divided(Split::SideBySide, 0, 1);
+        assert!(layout.divide(1, Split::Stacked, 2));
+        assert!(layout.remove(1));
+        layout.renumber_above(1);
+        assert_eq!(layout.panes(), vec![0, 1]);
+    }
+
+    /// And the numbering is closed however deep the gap was.
+    #[test]
+    fn renumbering_reaches_every_leaf() {
+        let mut layout = Layout::divided(Split::SideBySide, 0, 3);
+        assert!(layout.divide(3, Split::Stacked, 4));
+        layout.renumber_above(1);
+        assert_eq!(layout.panes(), vec![0, 2, 3]);
+    }
+
+    /// 要件 6.4: **a swap changes places with the pane the writer points at**,
+    /// by the same rule the arrow keys move focus by (要件 11.3). The menu
+    /// leaves out a direction there is nothing in, so what this holds is that
+    /// the two questions have the same answer.
+    #[test]
+    fn a_swap_reaches_the_pane_the_arrows_would() {
+        let mut layout = Layout::divided(Split::SideBySide, 0, 1);
+        assert!(layout.divide(1, Split::Stacked, 2));
+        let (placed, _) = layout.place(Rect::new(0.0, 0.0, 900.0, 600.0));
+
+        // The left pane faces both of the right-hand pair, and takes the one
+        // it shares the most edge with; neither of them has anything above or
+        // below it but the other.
+        assert_eq!(neighbour(&placed, 0, Towards::Left), None);
+        assert!(neighbour(&placed, 0, Towards::Right).is_some());
+        assert_eq!(neighbour(&placed, 1, Towards::Left), Some(0));
+        assert_eq!(neighbour(&placed, 1, Towards::Down), Some(2));
+        assert_eq!(neighbour(&placed, 2, Towards::Up), Some(1));
+        assert_eq!(neighbour(&placed, 2, Towards::Right), None);
+
+        // And a swap along one of those puts each where the other was.
+        let before = |pane: usize| {
+            placed
+                .iter()
+                .find(|(found, _)| *found == pane)
+                .map(|(_, rect)| *rect)
+                .expect("placed")
+        };
+        layout.swap(1, 2);
+        let (after, _) = layout.place(Rect::new(0.0, 0.0, 900.0, 600.0));
+        let now = |pane: usize| {
+            after
+                .iter()
+                .find(|(found, _)| *found == pane)
+                .map(|(_, rect)| *rect)
+                .expect("placed")
+        };
+        assert_eq!(now(1), before(2));
+        assert_eq!(now(2), before(1));
+        assert_eq!(now(0), before(0), "the pane nobody swapped stays put");
     }
 }

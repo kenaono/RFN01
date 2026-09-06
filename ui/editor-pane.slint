@@ -56,7 +56,7 @@ export struct PreviewSelectionRect {
 // field — come back through a two-way binding, which the compiler turns into a
 // write to this model rather than to a copy of the row.
 export struct PaneScreen {
-    // Which pane this is, in `editor-mode`'s numbering: 0 horizontal, 1
+    // Which pane this is: its row of the window's pane model, counted from 0
     // vertical. **The callbacks carry this rather than the row's position**, so
     // that a model holding only the panes on screen still names them the same.
     id: int,
@@ -102,6 +102,16 @@ export struct PaneScreen {
     // half of the window, and a tab brought out in front of it is read at the
     // same distance as the one before it.
     zoom: int,
+    // Which way this pane has a neighbour to change places with (要件 6.4).
+    //
+    // **Worked out from the rectangles, by the same rule the arrow keys use**
+    // (`pane_layout::neighbour`), and written here so the menu can leave out a
+    // direction there is nothing in. A row that does nothing looks exactly like
+    // a row that is broken.
+    swap-left: bool,
+    swap-right: bool,
+    swap-up: bool,
+    swap-down: bool,
 
     // Written by the pane, read by Rust.
     ime-buffer: string,
@@ -119,6 +129,17 @@ export component EditorPane inherits Rectangle {
     // Which way the document flows. Everything that differs between the two
     // panes is decided by this and nothing else.
     in property <bool> vertical;
+    /// Whether this is the pane holding the keyboard (要件 6.3).
+    ///
+    /// **Only so the strip can say which tab is being written in.** Everything
+    /// else about focus is Slint's own (`takes-focus`), and asking twice would
+    /// be two opinions about one thing — so this is read, never set.
+    in property <bool> focused;
+    // Which way there is a pane to change places with (要件 6.4), from the row.
+    in property <bool> swap-left;
+    in property <bool> swap-right;
+    in property <bool> swap-up;
+    in property <bool> swap-down;
 
     in property <color> page-background;
     // What to say above the paper when something went wrong. Empty the rest of
@@ -252,8 +273,10 @@ export component EditorPane inherits Rectangle {
     /// the focused pane once instead of every row saying so.
     callback menu-opened();
     callback split-requested(bool);
-    callback swap-requested();
-    callback close-split-requested();
+    /// Change places with the pane in a direction (要件 6.4): 0 left, 1 right,
+    /// 2 up, 3 down — the numbering the arrow keys already use (要件 11.3).
+    callback swap-requested(int);
+    callback close-others-requested();
     callback save-as-requested();
     /// Show this document's file in Explorer (要件 5.2).
     callback reveal-requested();
@@ -445,6 +468,11 @@ export component EditorPane inherits Rectangle {
                         title: tab.title;
                         edited: tab.edited;
                         current: index == root.active-tab;
+                        // 要件 6.3: the tab being written in. **Both halves** —
+                        // the pane has the keyboard and this is the tab in
+                        // front of it — because either alone names a tab
+                        // nobody is typing into.
+                        focused: root.focused && index == root.active-tab;
                         paper: root.page-background;
                         carrying: root.carrying;
                         carry-x: root.carry-x;
@@ -716,18 +744,52 @@ export component EditorPane inherits Rectangle {
                                 root.split-requested(false);
                             }
                         }
-                        MenuRow {
-                            title: "Swap Panes";
+                        // 要件 6.4: 編集ペインの入れ替え。**One row per
+                        // direction there is a pane in**, so the writer picks
+                        // the place rather than a rule picking it for them.
+                        //
+                        // **The callback first, the close afterwards.** A row
+                        // with an `if` on it is a repeated element (技術検証
+                        // 6.24), and closing the menu takes away the very row
+                        // whose handler is running.
+                        if root.swap-left: MenuRow {
+                            title: "Swap Left";
                             activated => {
+                                root.swap-requested(0);
                                 pane-menu.close();
-                                root.swap-requested();
+                            }
+                        }
+                        if root.swap-right: MenuRow {
+                            title: "Swap Right";
+                            activated => {
+                                root.swap-requested(1);
+                                pane-menu.close();
+                            }
+                        }
+                        if root.swap-up: MenuRow {
+                            title: "Swap Up";
+                            activated => {
+                                root.swap-requested(2);
+                                pane-menu.close();
+                            }
+                        }
+                        if root.swap-down: MenuRow {
+                            title: "Swap Down";
+                            activated => {
+                                root.swap-requested(3);
+                                pane-menu.close();
                             }
                         }
                         MenuRow {
-                            title: "Close Split";
+                            // 要件 6.4: bring the arrangement back to this pane
+                            // alone. **The other panes' tabs come here** — a
+                            // pane is never taken away from under the tabs it
+                            // holds, which is why there is no row for closing
+                            // this one: a pane goes when its last tab does.
+                            title: "Close Other Panes";
                             activated => {
                                 pane-menu.close();
-                                root.close-split-requested();
+                                root.close-others-requested();
                             }
                         }
                         MenuSep { }

@@ -143,6 +143,15 @@ export component Tab inherits Rectangle {
     in property <string> title;
     in property <bool> edited;
     in property <bool> current;
+    /// This is the tab being written in: the one in front of the pane that has
+    /// the keyboard (要件 6.3).
+    ///
+    /// **The accent is what says "the keyboard is here"** — that is what this
+    /// palette keeps it for. Every pane's front tab used to wear it, so with
+    /// more than two panes on screen nothing said which one the writer was in.
+    /// Now the front tab of the other panes says only "this is the one in
+    /// front", in a line that carries no accent at all.
+    in property <bool> focused;
     /// The paper of the pane this strip belongs to, so that the tab in front is
     /// the top edge of the page rather than a shape sitting above it. The two
     /// panes do not have the same paper (要件 7.2 縦書き／横書き), so it is
@@ -264,7 +273,7 @@ export component Tab inherits Rectangle {
     if root.current: Rectangle {
         y: 0;
         height: 2px;
-        background: Tok.accent;
+        background: root.focused ? Tok.accent : Tok.rule-strong;
     }
 
     HorizontalLayout {
@@ -276,7 +285,11 @@ export component Tab inherits Rectangle {
 
         Text {
             text: root.title;
-            color: root.current ? Tok.ink-strong : Tok.ink-muted;
+            // Three steps, not two: the tab being written in, the tab in front
+            // of some other pane, and the rest.
+            color: root.focused
+                ? Tok.accent-strong
+                : (root.current ? Tok.ink-strong : Tok.ink-muted);
             font-size: 13px;
             overflow: elide;
             vertical-alignment: center;

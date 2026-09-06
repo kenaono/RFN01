@@ -170,8 +170,6 @@ const TILE_CACHE_LIMIT: usize = 6;
 /// of the same refresh; what is left over waits for the next one. Each is about
 /// two megabytes, and allocating that costs more than drawing it (技術検証 7.8).
 const SPARE_TILE_BUFFERS: usize = 16;
-const HORIZONTAL_MODE: i32 = 0;
-const VERTICAL_MODE: i32 = 1;
 /// Every refresh writes one line here — beside the executable, like the trace
 /// (see [`diag::beside_executable`]). The status bar is a single unwrapped line
 /// in a half-width pane, so anything past the first few figures is clipped; this
@@ -530,38 +528,85 @@ struct EditorState {
 /// needs both: one to move the caret in, one to keep in step over the shared
 /// document (要件 7.6). Cloned into every editing callback, which is why the
 /// panes each hold an `Rc` rather than the state itself.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct PaneStates {
-    /// Indexed by [`PaneId::index`], which is the order of [`PaneId::ALL`].
-    states: [Rc<RefCell<EditorState>>; 2],
-    /// The document each pane has in front of it. **Asked at the moment it is
-    /// needed, never held**: a pane can be showing a different document by the
-    /// time a timer fires.
-    showing: [Rc<RefCell<Rc<OpenDocument>>>; 2],
+    /// One slot per pane, indexed by [`PaneId::index`].
+    ///
+    /// **Shared rather than copied**, so that the clone every callback holds is
+    /// the same list: a pane added by a split has to be visible to callbacks
+    /// that were registered before it existed (要件 6.4).
+    slots: Rc<RefCell<Vec<PaneSlot>>>,
+}
+
+/// One pane's own state, and the document it has in front of it.
+#[derive(Clone)]
+struct PaneSlot {
+    state: Rc<RefCell<EditorState>>,
+    /// **Asked at the moment it is needed, never held**: a pane can be showing
+    /// a different document by the time a timer fires.
+    showing: Rc<RefCell<Rc<OpenDocument>>>,
 }
 
 impl PaneStates {
-    /// Every pane starts on the same document, which is what 要件 6.4 says a
-    /// new pane opens with.
+    /// The editor's first pane, on the document it opened with (要件 6.3).
     fn new(document: &Rc<OpenDocument>) -> Self {
-        Self {
-            states: Default::default(),
-            showing: PaneId::ALL.map(|_| Rc::new(RefCell::new(document.clone()))),
+        let states = Self::default();
+        states.add(document);
+        states
+    }
+
+    /// Make room for a pane. **The new pane is the last**, which is the number
+    /// a split hands out.
+    fn add(&self, document: &Rc<OpenDocument>) {
+        self.slots.borrow_mut().push(PaneSlot {
+            state: Rc::new(RefCell::new(EditorState::default())),
+            showing: Rc::new(RefCell::new(document.clone())),
+        });
+    }
+
+    /// Take a pane out, and **close the numbering behind it**.
+    ///
+    /// Every pane after it moves down one, which is what keeps a pane's number
+    /// and its row of the window's model the same thing (ペイン分割設計 5). The
+    /// callers renumber the layout tree and the tab strips in the same breath.
+    fn remove(&self, id: PaneId) {
+        let mut slots = self.slots.borrow_mut();
+        let at = id.index() as usize;
+        if at < slots.len() {
+            slots.remove(at);
         }
     }
 
-    fn of(&self, id: PaneId) -> &Rc<RefCell<EditorState>> {
-        &self.states[id.index() as usize]
+    fn count(&self) -> usize {
+        self.slots.borrow().len()
+    }
+
+    fn of(&self, id: PaneId) -> Rc<RefCell<EditorState>> {
+        let slots = self.slots.borrow();
+        match slots.get(id.index() as usize) {
+            Some(slot) => slot.state.clone(),
+            // A pane number that names nothing arrives with a keystroke, and a
+            // keystroke must not be able to stop the editor. An unshared state
+            // takes the edit nowhere, which is what a pane that is not there
+            // should do with one.
+            None => Rc::new(RefCell::new(EditorState::default())),
+        }
     }
 
     /// What this pane is showing.
     fn document(&self, id: PaneId) -> Rc<OpenDocument> {
-        self.showing[id.index() as usize].borrow().clone()
+        let slots = self.slots.borrow();
+        let slot = slots.get(id.index() as usize).or(slots.first());
+        slot.map(|slot| slot.showing.borrow().clone())
+            .expect("the editing area always holds one pane (要件 6.3)")
     }
 
     /// Put a document in front of this pane.
     fn show(&self, id: PaneId, document: &Rc<OpenDocument>) {
-        *self.showing[id.index() as usize].borrow_mut() = document.clone();
+        let slots = self.slots.borrow();
+        if let Some(slot) = slots.get(id.index() as usize) {
+            *slot.showing.borrow_mut() = document.clone();
+        }
     }
 
     /// Whether two panes are looking at the same document.
@@ -954,7 +999,7 @@ const PACE_MAX: Duration = Duration::from_millis(200);
 struct RenderCache {
     /// Indexed by [`PaneId::index`], like everything else that has one of
     /// something per pane.
-    panes: [Pane; 2],
+    panes: Vec<Pane>,
     /// Shared with the rendering notifier, which runs between refreshes.
     frames: Rc<RefCell<FrameProbe>>,
     /// How long the last push of the source text into the horizontal pane took.
@@ -964,8 +1009,9 @@ struct RenderCache {
     /// This run's trace. Kept beside the perf log rather than inside it: one is
     /// about cost and the other about what happened (see `diag.rs`).
     diag: DiagLog,
-    /// How each pane is keeping up with a run of keystrokes.
-    pace: [EditPace; 2],
+    /// How each pane is keeping up with a run of keystrokes. Indexed the same
+    /// way, and grown and shrunk with `panes`.
+    pace: Vec<EditPace>,
     /// The outline the left pane is currently showing (要件 7.7).
     ///
     /// **Kept only to know when not to draw it again.** Replacing a repeater's
@@ -978,17 +1024,16 @@ struct RenderCache {
 impl Default for RenderCache {
     fn default() -> Self {
         Self {
-            // The arrangement the editor opens in: the left pane horizontal,
-            // the right one vertical. Neither is fixed that way any more.
-            panes: [
-                Pane::new(WritingMode::Horizontal),
-                Pane::new(WritingMode::Vertical),
-            ],
+            // 要件 6.3: the editing area is one pane at the least, and that is
+            // what an editor with nothing restored opens as. It draws the way
+            // the tab in front of it says, so the mode it starts in is the
+            // tab's business rather than the pane's.
+            panes: vec![Pane::new(WritingMode::Horizontal)],
             frames: Rc::default(),
             source_push_ms: None,
             perf_log: PerfLog::default(),
             diag: DiagLog::default(),
-            pace: Default::default(),
+            pace: vec![EditPace::default()],
             outline_drawn: Vec::new(),
         }
     }
@@ -1093,7 +1138,7 @@ fn perf_log_header(window: &AppWindow) -> String {
     // The horizontal pane's spec, because the header is one line and the two
     // panes may be set differently (要件 9). What it is for is the font size
     // and the build profile.
-    let here = PaneId::Horizontal;
+    let here = PaneId::FIRST;
     let typography = pane_typography(window, here);
     let profile = if cfg!(debug_assertions) {
         "debug"
@@ -1114,24 +1159,49 @@ fn perf_log_header(window: &AppWindow) -> String {
 
 fn main() -> Result<(), slint::PlatformError> {
     let window = AppWindow::new()?;
+    // 要件 8.5: the arrangement comes back — which pane held which tabs, in
+    // what order, in which of the four modes, and how the area was divided.
+    // Nothing there is a first run, and something unreadable is a session from
+    // another build. Neither is worth a word on screen: the editor opens the
+    // way it would have anyway.
+    //
+    // **Read before the panes are published** (2026-09-06). It is the session
+    // that says how many panes there are, and a row nobody wrote is a pane
+    // nobody can be in.
+    let session = app_data::app_directory()
+        .as_deref()
+        .and_then(app_data::read_session);
     // The panes, published before anything can read one. Each row carries its
     // own number and direction; everything else in it is either what a refresh
     // has put there or what the pane itself reports once it exists.
-    let rows = PaneId::ALL.map(PaneId::initial_screen);
-    window.set_panes(ModelRc::new(VecModel::from(rows.to_vec())));
+    //
+    // 要件 6.3: **one pane at the least.** A session that named none, or that
+    // could not be read, opens the way a first run does.
+    //
+    // **The tree and the list have to agree.** A pane the tree does not name
+    // gets no area, and a pane with no area is a strip of tabs nobody can
+    // reach; a leaf naming a pane that does not exist is an empty rectangle.
+    // Either way the session is one from another build, and the editor opens
+    // on one pane — with every tab the session held gathered into it, because
+    // an arrangement that cannot be restored is still somebody's work.
+    let restored_panes = session
+        .as_ref()
+        .map(|session| {
+            let named = Layout::decode(&session.layout)
+                .map(|layout| layout.panes())
+                .unwrap_or_default();
+            let agrees = named.len() == session.panes.len()
+                && (0..named.len()).all(|pane| named.contains(&pane));
+            if agrees { named.len() } else { 1 }
+        })
+        .unwrap_or(1)
+        .clamp(1, MAX_PANES);
+    publish_panes(&window, restored_panes);
     // 要件 8.1: whatever was being edited when the last run ended comes back
     // before anything is drawn, so the first thing on screen is the writer's
     // own text rather than something they have to clear away first.
     let restored = restore_tabs(&window);
     let was_restored = !restored.is_empty();
-    // 要件 8.5: the arrangement comes back too — which pane held which tabs, in
-    // what order, in which of the four modes, and how the area was divided.
-    // Nothing there is a first run, and something unreadable is a session from
-    // another build. Neither is worth a word on screen: the editor opens the
-    // way it would have anyway.
-    let session = app_data::app_directory()
-        .as_deref()
-        .and_then(app_data::read_session);
     // 要件 7.7: what was opened most recently, carried across runs with the
     // rest of the arrangement.
     let remembered = match &session {
@@ -1163,7 +1233,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // rather than something that jumps once. A pane the session says nothing
     // about arrives as 0, which `zoom_from` reads as the default.
     if let Some(session) = &session {
-        for (id, stored) in PaneId::ALL.into_iter().zip(session.panes.iter()) {
+        for (id, stored) in PaneId::all(&window).into_iter().zip(session.panes.iter()) {
             id.set_zoom(&window, stored.zoom);
         }
     }
@@ -1184,11 +1254,25 @@ fn main() -> Result<(), slint::PlatformError> {
     // is in front.
     window.set_document_edited(opening.text.edited());
     show_document_title(&window, &opening.file.borrow());
-    // One caret per pane, and what each pane has in front of it. Neither pane
-    // follows the other's caret, and every callback a pane raises reaches its
+    // One caret per pane, and what each pane has in front of it. No pane
+    // follows another's caret, and every callback a pane raises reaches its
     // own state and its own document through here.
+    //
+    // **As many as the window has rows** (2026-09-06). Both of these start with
+    // one pane in them — that is what an editor with nothing restored is — and
+    // a restored session may have more. They used to be left at one, and then
+    // every pane read the first pane's state and drew with the first pane's
+    // engine: four panes showing one document, and the caret of three of them
+    // going nowhere. **Nothing said so**, because both of these answer a number
+    // they do not hold with the pane they do (a stale number arrives with a
+    // keystroke and must not stop the editor), so the fault only surfaced when
+    // closing the tabs of four panes took the list of states below zero.
     let pane_states = PaneStates::new(&opening);
     let render_cache = Rc::new(RefCell::new(RenderCache::default()));
+    for _ in 1..PaneId::count(&window) {
+        pane_states.add(&opening);
+        render_cache.borrow_mut().add_pane(WritingMode::Horizontal);
+    }
     // **Every pane starts on its own tab** (要件 8.5).
     //
     // The states above are made from one document because that is what
@@ -1203,7 +1287,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // was in. The positions are rounded to character boundaries first — they
     // were written by another run, and nothing says the text is the same length
     // now (6.7's rule, applied across runs rather than across panes).
-    for id in PaneId::ALL {
+    for id in PaneId::all(&window) {
         let Some(tab) = tab_list.borrow().of(id).current().cloned() else {
             continue;
         };
@@ -1275,6 +1359,10 @@ fn main() -> Result<(), slint::PlatformError> {
         .perf_log
         .start(&perf_log_header(&window));
     let diag_started = render_cache.borrow_mut().diag.start();
+    // **From here on, a panic says so in the log.** The editor has no console
+    // to print to, so without this the file simply stopped and the last line
+    // before the stop was all there was to go on.
+    render_cache.borrow().diag.catch_panics();
     let diag_path = {
         let cache = render_cache.borrow();
         match cache.diag.path() {
@@ -1288,7 +1376,7 @@ fn main() -> Result<(), slint::PlatformError> {
         &format!(
             "started={started} profile={profile} file={diag_path} \
              window={width}x{height} scale={scale:.2} mode={mode} split={split} \
-             zoom={zoom}/{other_zoom} limit={MAX_DOCUMENT_CHARACTERS}",
+             zoom={zoom} limit={MAX_DOCUMENT_CHARACTERS}",
             started = diag_started.stamp(),
             profile = if cfg!(debug_assertions) {
                 "debug"
@@ -1298,12 +1386,15 @@ fn main() -> Result<(), slint::PlatformError> {
             width = size.width,
             height = size.height,
             scale = window.window().scale_factor(),
-            mode = window.get_editor_mode(),
-            split = u8::from(window.get_split_view()),
-            // Both panes' (要件 9). A session line that named one number
-            // would say nothing about the pane the writer was not in.
-            zoom = PaneId::Horizontal.zoom(&window),
-            other_zoom = PaneId::Vertical.zoom(&window),
+            mode = focused_pane(&window).index(),
+            split = PaneId::count(&window),
+            // Every pane's (要件 9). A session line that named one number
+            // would say nothing about the panes the writer was not in.
+            zoom = PaneId::all(&window)
+                .iter()
+                .map(|id| id.zoom(&window).to_string())
+                .collect::<Vec<String>>()
+                .join(","),
         ),
     );
     // 要件 7.3.2: what an inline object does to the line it stands in, measured
@@ -1368,7 +1459,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .log_perf(&format!("frame probe unavailable: {error:?}"));
     }
 
-    for id in [PaneId::Vertical, PaneId::Horizontal] {
+    for id in PaneId::all(&window) {
         refresh_pane(
             &window,
             &render_cache,
@@ -1539,14 +1630,14 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_editor_area_resized(move || {
         if let Some(window) = weak.upgrade() {
             place_panes(&window, &area_layout.borrow());
-            for id in PaneId::ALL {
+            for id in PaneId::all(&window) {
                 if !id.is_shown(&window) {
                     continue;
                 }
                 let showing = area_states.document(id);
                 let source = showing.text.borrow().clone();
                 let state = area_states.of(id);
-                refresh_pane_from_state(&window, &area_cache, &showing, id, state, &source);
+                refresh_pane_from_state(&window, &area_cache, &showing, id, &state, &source);
             }
         }
     });
@@ -1589,26 +1680,60 @@ fn main() -> Result<(), slint::PlatformError> {
     // Back to one pane, and it is the one the writer is in. The other pane's
     // tabs are untouched: a strip belongs to its pane whether or not the pane is
     // on screen.
+    // 要件 6.4: bring the arrangement back to this pane alone.
+    //
+    // **The other panes' tabs come here rather than closing.** A pane holding
+    // tabs is never taken away underneath them — that is why 要件 6.4 removes a
+    // pane when its *last tab* closes, and why the pane menu has no way to
+    // close a pane that still has some. Collapsing gathers instead.
     let weak = window.as_weak();
     let undivide_live = live.clone();
-    window.on_undivide_requested(move || {
-        if let Some(window) = weak.upgrade() {
-            let here = focused_pane(&window);
-            undivide_away(&window, &undivide_live, here.other());
-        }
+    window.on_close_others_requested(move || {
+        let weak = weak.clone();
+        let live = undivide_live.clone();
+        // **Put off to the next tick**, like every tab command and for the same
+        // reason (6.18): taking panes away destroys repeater instances, and the
+        // menu row that asked is inside one of them.
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                close_other_panes(&window, &live, focused_pane(&window));
+            }
+        });
     });
 
     // 要件 6.4: 編集ペインの入れ替え。The arrangement stays and the panes move,
     // so everything each pane holds — its tabs, its carets — goes with it.
     let weak = window.as_weak();
     let swap_live = live.clone();
-    window.on_swap_requested(move || {
+    window.on_swap_requested(move |towards| {
         if let Some(window) = weak.upgrade() {
+            let Some(towards) = Towards::from_index(towards) else {
+                return;
+            };
             let here = focused_pane(&window);
+            // **The pane that way**, by the rule the arrow keys already use
+            // (要件 11.3). Two panes had no question to answer — the other one
+            // was the only candidate — and with a list the answer has to be
+            // something the writer can see: the pane they are pointing at.
+            let placed = placed_panes(&window);
+            let Some(next) = neighbour(&placed, here.index() as usize, towards) else {
+                return;
+            };
             swap_live
                 .layout
                 .borrow_mut()
-                .swap(here.index() as usize, here.other().index() as usize);
+                .swap(here.index() as usize, next);
+            // **The keyboard goes with the pane, not with the place.** What
+            // moved is this pane, and the writer is in it.
+            window.set_focused_pane(next as i32);
+            swap_live.cache.borrow_mut().log_diag(
+                "layout",
+                &format!(
+                    "swap {}<->{} {towards:?}",
+                    here.log_name(),
+                    PaneId::from_index(next as i32).log_name()
+                ),
+            );
             after_layout_change(&window, &swap_live);
         }
     });
@@ -1853,10 +1978,14 @@ fn main() -> Result<(), slint::PlatformError> {
     // Resizing changes how long a line may be — a column's height on one side,
     // a line's width on the other — and with it every block measurement.
     // Dragging a window edge produces a change per frame, so the relayout waits
-    // for the drag to stop. **One timer per pane**, because the split divider
-    // resizes both at once and a shared timer would let the second cancel the
-    // first.
-    let timers = [Rc::new(Timer::default()), Rc::new(Timer::default())];
+    // for the drag to stop. **One timer per pane**, because a divider resizes
+    // the panes on both sides of it at once and a shared timer would let the
+    // second cancel the first.
+    //
+    // **A list, grown as panes arrive** (2026-09-06). It was an array of two,
+    // which is what a third pane found: the pane number is an index here like
+    // everywhere else, and this was the one place still holding a pair.
+    let timers: Rc<RefCell<Vec<Rc<Timer>>>> = Rc::default();
     let reveal_timer = Rc::new(Timer::default());
     let weak = window.as_weak();
     let states = pane_states.clone();
@@ -1866,13 +1995,19 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = weak.clone();
         let states = states.clone();
         let cache = cache.clone();
-        let timer = &timers[id.index() as usize];
+        let timer = {
+            let mut timers = timers.borrow_mut();
+            while timers.len() <= id.index() as usize {
+                timers.push(Rc::new(Timer::default()));
+            }
+            timers[id.index() as usize].clone()
+        };
         timer.start(TimerMode::SingleShot, RESIZE_SETTLE, move || {
             if let Some(window) = weak.upgrade() {
                 let started = Instant::now();
                 let showing = states.document(id);
                 let source = showing.text.borrow().clone();
-                refresh_pane_from_state(&window, &cache, &showing, id, states.of(id), &source);
+                refresh_pane_from_state(&window, &cache, &showing, id, &states.of(id), &source);
                 let (extent, blocks, tile_flow) = {
                     let mut cache = cache.borrow_mut();
                     let engine = &cache.pane(id).graphics.engine;
@@ -1905,7 +2040,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 SelectionPhase::Begin
             };
             let state = states.of(id);
-            update_pane_selection(&window, &document, state, &cache, id, x, y, phase);
+            update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
         }
     });
 
@@ -1918,7 +2053,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let document = states.document(id);
             let state = states.of(id);
             let phase = SelectionPhase::Update;
-            update_pane_selection(&window, &document, state, &cache, id, x, y, phase);
+            update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
         }
     });
 
@@ -1931,7 +2066,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let document = states.document(id);
             let state = states.of(id);
             let phase = SelectionPhase::End;
-            update_pane_selection(&window, &document, state, &cache, id, x, y, phase);
+            update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
         }
     });
 
@@ -1967,7 +2102,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             let state = states.of(id);
-            set_pane_preedit(&window, id, &document, state, &cache, text.as_str());
+            set_pane_preedit(&window, id, &document, &state, &cache, text.as_str());
         }
     });
 
@@ -2006,7 +2141,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &window,
                 id,
                 &document,
-                state,
+                &state,
                 &cache,
                 &reveal,
                 direction,
@@ -2028,7 +2163,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &window,
                 id,
                 &document,
-                state,
+                &state,
                 &cache,
                 &reveal,
                 to_end,
@@ -2038,36 +2173,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    let weak = window.as_weak();
-    let mode_live = live.clone();
-    window.on_view_mode_requested(move |requested_mode| {
-        if let Some(window) = weak.upgrade() {
-            let shown = PaneId::from_index(requested_mode);
-            let panes = mode_live.layout.borrow().panes();
-            if panes.len() == 1 && panes[0] == shown.index() as usize {
-                return;
-            }
-            // Which pane the caret comes from, decided before anything moves:
-            // whichever had the keyboard.
-            let from = focused_pane(&window);
-            // Only from a pane that was looking at the same document. A byte
-            // offset means nothing in another text (6.7), and carrying one
-            // across would put the caret inside a character of a document
-            // nobody was reading.
-            if from != shown && mode_live.states.same_document(from, shown) {
-                let showing = mode_live.states.document(shown);
-                let source = showing.text.borrow().clone();
-                let states = &mode_live.states;
-                carry_caret_between_panes(states.of(from), states.of(shown), &source);
-            }
-            mode_live.cache.borrow_mut().log_diag(
-                "mode",
-                &format!("to={} from={}", shown.log_name(), from.log_name()),
-            );
-            show_only(&window, &mode_live, shown);
-        }
-    });
-
+    // 要件 6.4: 「フォーカス中の編集ペインを、右方向または下方向へ分割できる」。
+    // **The focused pane is divided, wherever it sits** — the pane keeps its
+    // half and the new one takes the other, which is all the tree has ever
+    // done (`Layout::divide`).
     let weak = window.as_weak();
     let divide_live = live.clone();
     window.on_divide_requested(move |side_by_side| {
@@ -2077,27 +2186,7 @@ fn main() -> Result<(), slint::PlatformError> {
             } else {
                 Split::Stacked
             };
-            let here = focused_pane(&window);
-            let other = here.other();
-            {
-                let mut layout = divide_live.layout.borrow_mut();
-                let this = here.index() as usize;
-                let new = other.index() as usize;
-                if layout.panes().len() > 1 {
-                    // Both panes are already on screen, so this turns the
-                    // arrangement rather than adding a pane. **Two is all there
-                    // are** until the panes themselves are a list; the tree is
-                    // ready for more, nothing else is yet.
-                    *layout = Layout::divided(split, this, new);
-                } else {
-                    layout.divide(this, split, new);
-                }
-            }
-            // Placed before the pane is filled, so that the tab it opens is laid
-            // out into the area it will have rather than the one it had.
-            place_panes(&window, &divide_live.layout.borrow());
-            open_same_file_in(&window, &divide_live, other, here);
-            after_layout_change(&window, &divide_live);
+            divide_pane(&window, &divide_live, focused_pane(&window), split);
         }
     });
 
@@ -2313,7 +2402,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let document = states.document(id);
             id.set_shows_preview(&window, !id.shows_preview(&window));
             let source = document.text.borrow().clone();
-            refresh_pane_from_state(&window, &cache, &document, id, states.of(id), &source);
+            refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
         }
     });
 
@@ -2333,7 +2422,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // layout that has just stopped existing.
             states.of(id).borrow_mut().preferred_line = None;
             let source = document.text.borrow().clone();
-            refresh_pane_from_state(&window, &cache, &document, id, states.of(id), &source);
+            refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
         }
     });
 
@@ -2344,7 +2433,7 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
-            select_whole_document(&window, &document, states.of(id), &cache, id);
+            select_whole_document(&window, &document, &states.of(id), &cache, id);
         }
     });
 
@@ -2594,7 +2683,7 @@ fn replace_document(
     // because no position in the old text means anything in the new one (6.7),
     // and the beginning is a different scroll on each side because the flows
     // run opposite ways. A pane looking at another file is not involved.
-    for id in PaneId::ALL {
+    for id in PaneId::all(window) {
         if Rc::ptr_eq(&states.document(id), document) {
             *states.of(id).borrow_mut() = EditorState::default();
             id.set_scroll(window, 0.0);
@@ -2648,13 +2737,16 @@ struct TabView {
 impl TabView {
     /// A view of a document nobody has looked at through this pane yet.
     ///
-    /// The vertical pane opens on the formatted text and the horizontal one on
-    /// the source. That pairing is what the four modes start from, and it is
-    /// the only thing about a fresh view that depends on which pane it is.
-    fn for_pane(id: PaneId) -> Self {
+    /// **The pane's own direction, whatever it is now** (2026-09-06). A fresh
+    /// view used to open 縦書き in the right-hand pane and 横書き in the left,
+    /// which was the last thing about a tab that a pane's *number* decided. A
+    /// pane draws the way the tab in front of it says (要件 7.2), so a new tab
+    /// opening the way the pane is already set is the only answer that does not
+    /// make the pane jump when the tab arrives.
+    fn for_pane(window: &AppWindow, id: PaneId) -> Self {
         Self {
-            vertical: id.is_right(),
-            preview: id.is_right(),
+            vertical: id.vertical(window),
+            preview: id.shows_preview(window),
             ..Self::default()
         }
     }
@@ -2678,16 +2770,16 @@ impl PaneTab {
     }
 
     /// A tab showing a document this pane has not looked at yet.
-    fn showing(id: PaneId, document: Rc<OpenDocument>) -> Self {
+    fn showing(window: &AppWindow, id: PaneId, document: Rc<OpenDocument>) -> Self {
         Self {
             document,
-            view: TabView::for_pane(id),
+            view: TabView::for_pane(window, id),
         }
     }
 }
 
 /// One pane's strip (要件 6.3: 各編集ペインは独立したタブ列を持つ).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct PaneTabs {
     tabs: Vec<PaneTab>,
     /// Which of them the pane is showing. Always a position in `tabs`: the
@@ -2782,17 +2874,49 @@ fn close_run_positions(count: usize, active: usize, keep_active: bool) -> Vec<us
 /// else.
 struct Tabs {
     /// Indexed by [`PaneId::index`], like everything else that has one of
-    /// something per pane.
-    panes: [PaneTabs; 2],
+    /// something per pane. **One entry per pane and no more**: a strip nobody
+    /// can see is tabs nobody can reach (要件 6.3).
+    panes: Vec<PaneTabs>,
 }
 
 impl Tabs {
+    /// One pane's strip.
+    ///
+    /// **The last strip rather than a panic** for a number that names nothing:
+    /// pane numbers arrive from the window, and one left over from an
+    /// arrangement that has already changed must not be able to stop the
+    /// editor. There is always a strip to answer with — 要件 6.3 keeps one pane
+    /// alive whatever else happens.
+    fn at(&self, at: usize) -> usize {
+        at.min(self.panes.len().saturating_sub(1))
+    }
+
     fn of(&self, id: PaneId) -> &PaneTabs {
-        &self.panes[id.index() as usize]
+        &self.panes[self.at(id.index() as usize)]
     }
 
     fn of_mut(&mut self, id: PaneId) -> &mut PaneTabs {
-        &mut self.panes[id.index() as usize]
+        let at = self.at(id.index() as usize);
+        &mut self.panes[at]
+    }
+
+    /// Make room for a pane, at the end, which is the number a split hands out.
+    fn add(&mut self, strip: PaneTabs) {
+        self.panes.push(strip);
+    }
+
+    fn count(&self) -> usize {
+        self.panes.len()
+    }
+
+    /// Take a pane's strip out, closing the numbering behind it.
+    fn remove(&mut self, id: PaneId) -> PaneTabs {
+        let at = id.index() as usize;
+        if at < self.panes.len() {
+            self.panes.remove(at)
+        } else {
+            PaneTabs::default()
+        }
     }
 }
 
@@ -2927,7 +3051,7 @@ impl Live {
         id.set_shows_preview(window, tab.view.preview);
         let state = self.states.of(id);
         let source = document.text.borrow().clone();
-        refresh_pane_from_state(window, &self.cache, document, id, state, &source);
+        refresh_pane_from_state(window, &self.cache, document, id, &state, &source);
     }
 }
 
@@ -2965,11 +3089,19 @@ fn open_session(
         return open_without_session(window, restored);
     };
     let mut placed: Vec<Rc<OpenDocument>> = Vec::new();
-    let mut strips = PaneId::ALL.map(|_| PaneTabs {
-        tabs: Vec::new(),
-        active: 0,
-    });
-    for (id, stored) in PaneId::ALL.into_iter().zip(session.panes.iter()) {
+    // **As many strips as the window has panes**, which is what the session's
+    // own list said before the rows were published (要件 6.3, 8.5).
+    let mut strips = PaneId::all(window)
+        .iter()
+        .map(|_| PaneTabs::default())
+        .collect::<Vec<PaneTabs>>();
+    // **Every stored strip lands somewhere.** Usually one for one, but a
+    // session whose arrangement could not be restored has more strips than
+    // there are panes, and the tabs of the ones past the end go into the last
+    // pane rather than being dropped.
+    let last = PaneId(strips.len() as u32 - 1);
+    for (position, stored) in session.panes.iter().enumerate() {
+        let id = PaneId::from_index(position as i32).min(last);
         for tab in &stored.tabs {
             let Some(document) = document_for(window, tab, &restored, &placed) else {
                 continue;
@@ -2996,9 +3128,10 @@ fn open_session(
         let strip = &mut strips[id.index() as usize];
         strip.active = stored.active.min(strip.tabs.len().saturating_sub(1));
     }
+
     // A work copy the session does not name is still somebody's unsaved work.
     // It goes in front of the writer rather than being left on disk unopened.
-    let focused = PaneId::from_index(session.focused);
+    let focused = PaneId::from_index(session.focused).min(PaneId(strips.len() as u32 - 1));
     for (document, state) in &restored {
         if placed.iter().any(|held| Rc::ptr_eq(held, document)) {
             continue;
@@ -3008,24 +3141,32 @@ fn open_session(
             document: document.clone(),
             view: TabView {
                 state: state.clone(),
-                ..TabView::for_pane(focused)
+                ..TabView::for_pane(window, focused)
             },
         });
     }
-    for id in PaneId::ALL {
+    for id in PaneId::all(window) {
         if strips[id.index() as usize].tabs.is_empty() {
             let number = next_untitled_number(&taken_numbers(&strips));
             let empty = OpenDocument::untitled(number, window.as_weak());
             strips[id.index() as usize]
                 .tabs
-                .push(PaneTab::showing(id, empty));
+                .push(PaneTab::showing(window, id, empty));
         }
     }
+    // **Every pane the tree names has to exist**, and every pane that exists
+    // has to be somewhere in the tree: a row nobody draws is a strip of tabs
+    // the writer cannot reach, and a leaf naming nothing is an empty rectangle.
+    // A session that fails either is one from another build, and the editor
+    // opens on the focused pane alone rather than saying so.
+    let panes = strips.len();
     let layout = Layout::decode(&session.layout)
-        .filter(|layout| layout.panes().iter().all(|pane| *pane < PaneId::ALL.len()))
+        .filter(|layout| {
+            let named = layout.panes();
+            named.len() == panes && (0..panes).all(|pane| named.contains(&pane))
+        })
         .unwrap_or_else(|| Layout::single(focused.index() as usize));
     window.set_focused_pane(focused.index());
-    window.set_editor_mode(focused.index());
     (Tabs { panes: strips }, layout)
 }
 
@@ -3061,7 +3202,7 @@ fn document_for(
 }
 
 /// Every untitled number the strips are holding.
-fn taken_numbers(strips: &[PaneTabs; 2]) -> Vec<u32> {
+fn taken_numbers(strips: &[PaneTabs]) -> Vec<u32> {
     strips
         .iter()
         .flat_map(|strip| strip.tabs.iter())
@@ -3088,29 +3229,22 @@ fn open_without_session(
         restored
     };
     let here = focused_pane(window);
-    let strips = PaneId::ALL.map(|id| {
-        let tabs = if id == here {
-            documents
-                .iter()
-                .map(|(document, state)| PaneTab {
-                    document: document.clone(),
-                    view: TabView {
-                        state: state.clone(),
-                        ..TabView::for_pane(id)
-                    },
-                })
-                .collect()
-        } else {
-            vec![PaneTab {
-                document: documents[0].0.clone(),
+    // **One pane** (要件 6.3). Nothing was restored, so there is no arrangement
+    // to come back to, and an editor that opened divided would be dividing on
+    // its own account.
+    let strips = vec![PaneTabs {
+        tabs: documents
+            .iter()
+            .map(|(document, state)| PaneTab {
+                document: document.clone(),
                 view: TabView {
-                    state: documents[0].1.clone(),
-                    ..TabView::for_pane(id)
+                    state: state.clone(),
+                    ..TabView::for_pane(window, here)
                 },
-            }]
-        };
-        PaneTabs { tabs, active: 0 }
-    });
+            })
+            .collect(),
+        active: 0,
+    }];
     (
         Tabs { panes: strips },
         Layout::single(here.index() as usize),
@@ -3120,7 +3254,7 @@ fn open_without_session(
 /// What is on screen, in the form the session keeps it (要件 8.5).
 fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
     let tabs = live.tabs.borrow();
-    let panes = PaneId::ALL
+    let panes = PaneId::all(window)
         .iter()
         .map(|id| {
             let strip = tabs.of(*id);
@@ -3350,18 +3484,40 @@ fn after_layout_change(window: &AppWindow, live: &Live) {
         let layout = live.layout.borrow();
         place_panes(window, &layout);
     }
+    // **The four lists indexed by pane number have to be the same length**
+    // (2026-09-06). Every one of them answers a number it does not hold with
+    // the pane it does — a stale number arrives with a keystroke and must not
+    // be able to stop the editor — so a list left short reads as a pane quietly
+    // sharing another's state, and nothing says so until something else falls
+    // over. It cost a crash in `Close All Tabs` whose real cause was at
+    // start-up, four panes earlier. Three places change the count (start-up,
+    // `divide_pane`, `remove_pane`); this is where they are checked.
+    {
+        let panes = PaneId::count(window);
+        let states = live.states.count();
+        let strips = live.tabs.borrow().count();
+        let engines = live.cache.borrow().panes.len();
+        if states != panes || strips != panes || engines != panes {
+            live.cache.borrow_mut().log_diag(
+                "layout",
+                &format!(
+                    "mismatch panes={panes} states={states} strips={strips} engines={engines}"
+                ),
+            );
+        }
+    }
     // **A pane that has just come on screen brings its strip with it.** Its
     // tabs are in its own list and nowhere else until they are published, so a
     // pane could otherwise appear with a document and no tabs above it.
     publish_tabs(window, live);
-    for id in PaneId::ALL {
+    for id in PaneId::all(window) {
         if !id.is_shown(window) {
             continue;
         }
         let showing = live.states.document(id);
         let source = showing.text.borrow().clone();
         let state = live.states.of(id);
-        refresh_pane_from_state(window, &live.cache, &showing, id, state, &source);
+        refresh_pane_from_state(window, &live.cache, &showing, id, &state, &source);
     }
 }
 
@@ -3400,7 +3556,7 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
-    let caret = id.caret_byte(state, &source);
+    let caret = id.caret_byte(&state, &source);
     // Forwards from the caret, which after a find sits at the end of the match
     // — so the next one is found rather than the same one again. Backwards from
     // where the selection begins, for the same reason in the other direction.
@@ -3447,7 +3603,7 @@ fn show_source_range(
         state.active_line_start = Some(source_line_start(source, end));
         state.preferred_line = None;
     }
-    refresh_pane_from_state(window, &live.cache, &document, id, state, source);
+    refresh_pane_from_state(window, &live.cache, &document, id, &state, source);
 }
 
 /// Replace what a search found, and go to the next one (要件 7.7).
@@ -3521,7 +3677,8 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     *document.text.borrow_mut() = next.clone();
     let caret = at + inserted;
     {
-        let mut state = live.states.of(id).borrow_mut();
+        let state = live.states.of(id);
+        let mut state = state.borrow_mut();
         state.caret_source_byte = Some(caret);
         state.selection_anchor_source_byte = Some(caret);
         state.active_line_start = Some(source_line_start(&next, caret));
@@ -4199,7 +4356,7 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
             preview: id.shows_preview(window),
             ..TabView::default()
         },
-        ..PaneTab::showing(id, document)
+        ..PaneTab::showing(window, id, document)
     };
     add_tab(window, live, id, tab);
     // Recorded once it is open, so a file that could not be read does not sit
@@ -4596,6 +4753,38 @@ fn delete_entry(window: &AppWindow, live: &Live, path: &Path) {
 /// whether a pane is showing reads its row's width, so the tree is the only
 /// place the arrangement is decided (要件 6.4) and nothing has to be kept in
 /// step with it.
+/// The most panes an arrangement may hold.
+///
+/// **Not a product limit** — 要件 6.4 puts none, and `MIN_PANE` is what really
+/// stops a window being divided further. This only keeps a session file that
+/// says something impossible from asking for a million rows before anything
+/// has had a chance to look at it.
+const MAX_PANES: usize = 64;
+
+/// Make the window's pane model hold exactly `count` rows (要件 6.3).
+///
+/// A row appended here opens as horizontal source text; a pane made by a split
+/// is told what to show straight afterwards, because it opens as a copy of the
+/// tab it was split from (要件 6.4).
+fn publish_panes(window: &AppWindow, count: usize) {
+    let count = count.clamp(1, MAX_PANES);
+    let panes = window.get_panes();
+    let Some(rows) = panes.as_any().downcast_ref::<VecModel<PaneScreen>>() else {
+        // Nothing published yet: this is the first list there has been.
+        let made = (0..count)
+            .map(|row| PaneId(row as u32).initial_screen(false, false))
+            .collect::<Vec<PaneScreen>>();
+        window.set_panes(ModelRc::new(VecModel::from(made)));
+        return;
+    };
+    while rows.row_count() > count {
+        rows.remove(rows.row_count() - 1);
+    }
+    while rows.row_count() < count {
+        rows.push(PaneId(rows.row_count() as u32).initial_screen(false, false));
+    }
+}
+
 fn place_panes(window: &AppWindow, layout: &Layout) {
     let (placed, boundaries) = layout.place(editor_area(window));
     // **Everything the window believes about the arrangement is set here**, so
@@ -4603,17 +4792,17 @@ fn place_panes(window: &AppWindow, layout: &Layout) {
     // that restored two panes without this said "not split" until something
     // else happened to change the arrangement — and then *both* panes answered
     // a request for the keyboard, so the pane the writer was in was whichever
-    // one moved last.
-    window.set_split_view(placed.len() > 1);
+    // one moved last. The flag itself is gone (2026-09-06): **the pane model's
+    // own length says how many panes there are**, and a second opinion about
+    // that is exactly what went stale.
     let focused = PaneId::from_index(window.get_focused_pane());
     let on_screen = placed
         .iter()
         .any(|(pane, _)| *pane == focused.index() as usize);
     if !on_screen && let Some((first, _)) = placed.first() {
         window.set_focused_pane(*first as i32);
-        window.set_editor_mode(*first as i32);
     }
-    for id in PaneId::ALL {
+    for id in PaneId::all(window) {
         let found = placed
             .iter()
             .find(|(pane, _)| *pane == id.index() as usize)
@@ -4624,6 +4813,26 @@ fn place_panes(window: &AppWindow, layout: &Layout) {
             screen.y = found.y;
             screen.width = found.width;
             screen.height = found.height;
+        });
+    }
+    // 要件 6.4: which ways each pane has somebody to change places with. Done
+    // here because this is where the rectangles are, and **the menu leaves out
+    // a direction there is nothing in** — a row that does nothing looks exactly
+    // like a row that is broken.
+    let neighbours = placed
+        .iter()
+        .map(|(pane, _)| {
+            let ways = [Towards::Left, Towards::Right, Towards::Up, Towards::Down]
+                .map(|towards| neighbour(&placed, *pane, towards).is_some());
+            (*pane, ways)
+        })
+        .collect::<Vec<(usize, [bool; 4])>>();
+    for (pane, ways) in neighbours {
+        PaneId::from_index(pane as i32).update_screen(window, |screen| {
+            screen.swap_left = ways[0];
+            screen.swap_right = ways[1];
+            screen.swap_up = ways[2];
+            screen.swap_down = ways[3];
         });
     }
     let drawn = boundaries
@@ -4637,6 +4846,24 @@ fn place_panes(window: &AppWindow, layout: &Layout) {
         })
         .collect::<Vec<_>>();
     publish_boundaries(window, drawn);
+}
+
+/// Where every pane on screen is, as `neighbour` wants it (要件 6.4, 11.3).
+///
+/// **Read back from the rows rather than placed again.** The rectangles the
+/// panes are drawn in are the ones in the model; laying the tree out a second
+/// time to answer "what is beside me" would be a second opinion about a thing
+/// the writer can already see.
+fn placed_panes(window: &AppWindow) -> Vec<(usize, Rect)> {
+    PaneId::all(window)
+        .iter()
+        .filter(|id| id.is_shown(window))
+        .map(|id| {
+            let screen = id.screen(window);
+            let rect = Rect::new(screen.x, screen.y, screen.width, screen.height);
+            (id.index() as usize, rect)
+        })
+        .collect()
 }
 
 /// Which pane the writer is in.
@@ -4653,7 +4880,13 @@ fn focused_pane(window: &AppWindow) -> PaneId {
     if remembered.is_shown(window) {
         remembered
     } else {
-        remembered.other()
+        // **The first pane that is on screen.** There is always one — 要件 6.3
+        // keeps the editing area from being empty — and which it is matters
+        // less than that the answer names a pane the writer can be in.
+        PaneId::all(window)
+            .into_iter()
+            .find(|id| id.is_shown(window))
+            .unwrap_or(PaneId::FIRST)
     }
 }
 
@@ -4664,9 +4897,12 @@ fn focused_pane(window: &AppWindow) -> PaneId {
 fn sync_active_tab(window: &AppWindow, live: &Live) {
     // Every pane, not only the focused one: each has its own caret in its own
     // tab, and the one being written back may not be the one being written in.
-    let views = PaneId::ALL.map(|id| live.capture_view(window, id));
+    let views = PaneId::all(window)
+        .into_iter()
+        .map(|id| live.capture_view(window, id))
+        .collect::<Vec<_>>();
     let mut tabs = live.tabs.borrow_mut();
-    for (id, view) in PaneId::ALL.into_iter().zip(views) {
+    for (id, view) in PaneId::all(window).into_iter().zip(views) {
         let strip = tabs.of_mut(id);
         if let Some(tab) = strip.tabs.get_mut(strip.active) {
             tab.view = view;
@@ -4680,7 +4916,7 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
 /// and it is the focused pane's — the one whose tabs the buttons above would
 /// act on. Moving them inside the panes is the next step (ペイン分割設計 6).
 fn publish_tabs(window: &AppWindow, live: &Live) {
-    let strips = PaneId::ALL.map(|id| {
+    let strips = PaneId::all(window).into_iter().map(|id| {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
         let infos = strip
@@ -4695,7 +4931,7 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
             .collect::<Vec<_>>();
         (infos, strip.active as i32)
     });
-    for (id, (infos, active)) in PaneId::ALL.into_iter().zip(strips) {
+    for (id, (infos, active)) in PaneId::all(window).into_iter().zip(strips) {
         id.update_screen(window, |screen| {
             screen.tabs = ModelRc::new(VecModel::from(infos));
             screen.active_tab = active;
@@ -4813,11 +5049,12 @@ fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, 
     // The keyboard follows the tab: it is in front of the pane it landed in,
     // and that is where the writer put it.
     window.set_focused_pane(other.index());
-    window.set_editor_mode(other.index());
     if emptied && live.layout.borrow().panes().len() > 1 {
-        // 要件 6.4, and the same event `finish_close` handles: a pane with
-        // nothing in it comes off screen, keeping its empty strip.
-        undivide_away(window, live, id);
+        // 要件 6.4: a pane whose last tab has closed is taken out of the
+        // arrangement, and its area goes to the pane beside it. **Nothing is
+        // stranded** — the strip was empty, which is the whole reason this is
+        // the only way a pane goes.
+        remove_pane(window, live, id);
     } else if emptied {
         refill_strip(window, live, id);
     }
@@ -4896,7 +5133,7 @@ fn new_tab(window: &AppWindow, live: &Live, id: PaneId) {
             preview: id.shows_preview(window),
             ..TabView::default()
         },
-        ..PaneTab::showing(id, document)
+        ..PaneTab::showing(window, id, document)
     };
     add_tab(window, live, id, tab);
 }
@@ -5254,9 +5491,10 @@ fn finish_close(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
         .log_diag("tab", &format!("close pane={} at={index}", id.log_name()));
     if emptied && live.layout.borrow().panes().len() > 1 {
         // 要件 6.4: あるペインのタブをすべて閉じるとその分割を解除する。**The
-        // pane is not gone**, only off screen with an empty strip; dividing
-        // again brings it back with whatever is put in it.
-        undivide_away(window, live, id);
+        // pane is gone**, and with it its row, its strip and its engine; the
+        // panes after it move down one number. Nothing is lost with it, because
+        // the strip it took away was empty.
+        remove_pane(window, live, id);
         publish_tabs(window, live);
         return;
     }
@@ -5270,35 +5508,220 @@ fn finish_close(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
     publish_tabs(window, live);
 }
 
-/// Give the whole editing area to one pane.
-///
-/// **What the 左ペイン／右ペイン buttons do**: not a mode any more, just an
-/// arrangement with one pane in it. The others keep their tabs and come back
-/// with them when the area is divided again.
-fn show_only(window: &AppWindow, live: &Live, id: PaneId) {
-    *live.layout.borrow_mut() = Layout::single(id.index() as usize);
-    window.set_focused_pane(id.index());
-    window.set_editor_mode(id.index());
-    after_layout_change(window, live);
-}
-
 /// Take a pane off screen, giving its area to the rest (要件 6.4).
 ///
 /// **The pane is not gone** — it keeps its tabs, its carets and its scroll, and
 /// dividing again brings all of it back. What it loses is a place to be drawn.
-fn undivide_away(window: &AppWindow, live: &Live, id: PaneId) {
+fn remove_pane(window: &AppWindow, live: &Live, id: PaneId) {
+    if PaneId::count(window) <= 1 {
+        return;
+    }
     {
         let mut layout = live.layout.borrow_mut();
         if !layout.remove(id.index() as usize) {
             return;
         }
+        // **A pane's number is its row of the window's model**, and a model has
+        // no holes, so every pane after this one moves down — here, in the
+        // states, in the strips, in the render cache and in the rows
+        // themselves. All five are closed in this one place, because a number
+        // that means one pane in one list and another in the next is the kind
+        // of fault that shows up as somebody else's text.
+        layout.renumber_above(id.index() as usize);
     }
-    let remaining = {
-        let layout = live.layout.borrow();
-        layout.panes().first().copied().unwrap_or(0) as i32
+    live.states.remove(id);
+    live.tabs.borrow_mut().remove(id);
+    live.cache.borrow_mut().remove_pane(id);
+    drop_pane_row(window, id);
+    // **A まとめて閉じる already under way is renumbered too** (要件 6.3). Its
+    // queue holds pane numbers, and a run that empties one pane before reaching
+    // the next would otherwise close tabs in whichever pane inherited the
+    // number — the same fault as a stale row, arriving one event loop later.
+    if let Some(run) = live.close_run.borrow_mut().as_mut() {
+        run.left.retain(|(pane, _)| *pane != id);
+        for (pane, _) in run.left.iter_mut() {
+            if *pane > id {
+                *pane = PaneId(pane.0 - 1);
+            }
+        }
+    }
+    // The keyboard cannot stay with a pane that has gone. It goes to whichever
+    // pane took the area over, which is the one now standing where this was.
+    let focused = PaneId::from_index(window.get_focused_pane());
+    let landed = match focused.cmp(&id) {
+        std::cmp::Ordering::Less => focused,
+        // The pane that was here is gone; the numbering has closed over it, so
+        // this number now names the pane that took its place.
+        std::cmp::Ordering::Equal => PaneId(id.0.min(PaneId::count(window) as u32 - 1)),
+        std::cmp::Ordering::Greater => PaneId(focused.0 - 1),
     };
-    window.set_focused_pane(remaining);
-    window.set_editor_mode(remaining);
+    window.set_focused_pane(landed.index());
+    live.cache.borrow_mut().log_diag(
+        "layout",
+        &format!("pane gone={} left={}", id.log_name(), PaneId::count(window)),
+    );
+    after_layout_change(window, live);
+}
+
+/// Take one row out of the window's pane model, closing the numbering behind it.
+///
+/// **One row goes and the rest are renumbered in place**, for the reason
+/// `publish_panes` gives: the panes that stay must not be built again.
+fn drop_pane_row(window: &AppWindow, id: PaneId) {
+    let panes = window.get_panes();
+    let Some(rows) = panes.as_any().downcast_ref::<VecModel<PaneScreen>>() else {
+        return;
+    };
+    let at = id.index() as usize;
+    if at >= rows.row_count() || rows.row_count() <= 1 {
+        return;
+    }
+    rows.remove(at);
+    // **A row's number is its position**, and the positions after the gap have
+    // all moved down one.
+    for row in at..rows.row_count() {
+        let Some(mut screen) = rows.row_data(row) else {
+            continue;
+        };
+        screen.id = row as i32;
+        rows.set_row_data(row, screen);
+    }
+}
+
+/// Divide a pane, putting a new one to its right or below it (要件 6.4).
+///
+/// **Only this pane is divided**, however deep it sits: its area becomes the
+/// two, and every other pane keeps what it had. The new pane opens showing the
+/// same file, which is what 要件 6.4 asks a new pane to start with.
+fn divide_pane(window: &AppWindow, live: &Live, here: PaneId, split: Split) {
+    let room = here.screen(window);
+    let across = match split {
+        Split::SideBySide => room.width,
+        Split::Stacked => room.height,
+    };
+    // **A pane thinner than this is not a pane** (`MIN_PANE`). Refused with a
+    // word rather than silently, because a menu row that does nothing looks
+    // exactly like one that is broken.
+    if (across - pane_layout::DIVIDER) / 2.0 < pane_layout::MIN_PANE {
+        window.set_render_status("分割: これ以上は狭くなりすぎます".into());
+        return;
+    }
+    if PaneId::count(window) >= MAX_PANES {
+        window.set_render_status("分割: ペインが多すぎます".into());
+        return;
+    }
+    let new = PaneId(PaneId::count(window) as u32);
+    {
+        // **Tried before anything is added.** A pane number the tree does not
+        // hold cannot be divided, and half-adding one would leave a row with
+        // no place on screen.
+        let mut layout = live.layout.borrow_mut();
+        if !layout.divide(here.index() as usize, split, new.index() as usize) {
+            return;
+        }
+    }
+    // The pane exists as a value before it exists on screen: the row is what
+    // makes it drawable, and everything indexed by pane number has to be as
+    // long as the rows are before one is published.
+    live.states.add(&live.states.document(here));
+    live.tabs.borrow_mut().add(PaneTabs::default());
+    live.cache.borrow_mut().add_pane(if here.vertical(window) {
+        WritingMode::Vertical
+    } else {
+        WritingMode::Horizontal
+    });
+    publish_panes(window, new.index() as usize + 1);
+    new.update_screen(window, |screen| {
+        // The new pane opens the way the one it came from is set, because the
+        // tab it opens with is a copy of that pane's (要件 6.4, 7.2).
+        screen.vertical = here.vertical(window);
+        screen.preview = here.shows_preview(window);
+        screen.zoom = here.zoom(window);
+    });
+    // Placed before the pane is filled, so that the tab it opens is laid out
+    // into the area it will have rather than the one it had.
+    place_panes(window, &live.layout.borrow());
+    open_same_file_in(window, live, new, here);
+    // **The writer keeps their place.** The new pane opens on the same file
+    // (要件 6.4), and a pane showing the same text with the caret back at the
+    // top is a pane the writer has to find their way in again.
+    if live.states.same_document(here, new) {
+        let source = live.states.document(new).text.borrow().clone();
+        carry_caret_between_panes(&live.states.of(here), &live.states.of(new), &source);
+    }
+    // **The keyboard goes to the new pane.** Splitting again then adds a third
+    // beside the second, which is what "右にペインが増える" reads as; leaving
+    // the keyboard behind would divide the same pane over and over instead.
+    window.set_focused_pane(new.index());
+    live.cache.borrow_mut().log_diag(
+        "layout",
+        &format!(
+            "pane new={} from={} split={split:?} panes={}",
+            new.log_name(),
+            here.log_name(),
+            PaneId::count(window)
+        ),
+    );
+    after_layout_change(window, live);
+}
+
+/// Bring the arrangement back to one pane, keeping this one (要件 6.4).
+///
+/// **The other panes' tabs come here.** A pane is never taken away from under
+/// the tabs it holds — 要件 6.4 removes a pane when its last tab closes, and
+/// the pane menu offers no way to close one that still has some — so gathering
+/// is the only way to collapse that keeps that promise. A document already open
+/// here arrives as nothing, because a strip holds one tab per document.
+fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
+    // **Every pane to go is named before any of them does** (2026-09-06). The
+    // first version asked "which pane is not `here`" once per turn of a loop,
+    // and `here` is a number: as soon as a lower-numbered pane went, the
+    // numbering closed and that name meant a different pane — the second turn
+    // picked the writer's own. It took the pane apart underneath the menu that
+    // had asked for it.
+    let others = here.others(window);
+    if others.is_empty() {
+        return;
+    }
+    // **Emptied rather than removed here.** `remove_pane` takes each strip out
+    // itself, and taking one out twice would take the wrong one the second
+    // time — the numbering closes as soon as one goes.
+    let carried = {
+        let mut tabs = live.tabs.borrow_mut();
+        others
+            .iter()
+            .map(|other| std::mem::take(&mut tabs.of_mut(*other).tabs))
+            .collect::<Vec<Vec<PaneTab>>>()
+    };
+    // **From the far end**, so that the panes still to go keep the numbers they
+    // were named by. `here` is the only number that moves, and it moves once
+    // for every pane below it that goes.
+    let mut here = here;
+    for other in others.iter().rev() {
+        remove_pane(window, live, *other);
+        if *other < here {
+            here = PaneId(here.0 - 1);
+        }
+    }
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(here);
+        for tab in carried.into_iter().flatten() {
+            // 要件 6.3: one tab per document in a strip. The pane the writer is
+            // in almost always already holds what is coming — a split opens the
+            // new pane on the same file (要件 6.4) — and two tabs with one name
+            // is a strip nobody can read.
+            if !strip
+                .tabs
+                .iter()
+                .any(|held| Rc::ptr_eq(&held.document, &tab.document))
+            {
+                strip.tabs.push(tab);
+            }
+        }
+    }
+    window.set_focused_pane(here.index());
+    publish_tabs(window, live);
     after_layout_change(window, live);
 }
 
@@ -5318,7 +5741,7 @@ fn refill_strip(window: &AppWindow, live: &Live, id: PaneId) {
     let number = next_untitled_number(&taken);
     let empty = OpenDocument::untitled(number, window.as_weak());
     let strip = tabs.of_mut(id);
-    strip.tabs.push(PaneTab::showing(id, empty));
+    strip.tabs.push(PaneTab::showing(window, id, empty));
     strip.active = 0;
 }
 
@@ -5403,8 +5826,8 @@ fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDocumen
     // position. The focused pane is asked first, because that is where the
     // writer is.
     let focused = focused_pane(window);
-    let showing = [focused, focused.other()]
-        .into_iter()
+    let showing = std::iter::once(focused)
+        .chain(PaneId::all(window))
         .find(|id| Rc::ptr_eq(&live.states.document(*id), document));
     let caret = showing.and_then(|id| live.states.of(id).borrow().caret_source_byte);
     let copy = app_data::WorkCopy {
@@ -5794,7 +6217,7 @@ fn open_document(window: &AppWindow, live: &Live) {
                     preview: id.shows_preview(window),
                     ..TabView::default()
                 },
-                ..PaneTab::showing(id, document)
+                ..PaneTab::showing(window, id, document)
             };
             add_tab(window, live, id, tab);
             // 要件 7.7: opened through the dialog counts the same as opened
@@ -6462,7 +6885,7 @@ fn relayout_panes(window: &AppWindow, states: &PaneStates, cache: &Rc<RefCell<Re
     // coordinate in a layout that is about to stop existing, and a pane that
     // comes back holding one would step the caret to a line by the old
     // measurements.
-    for id in PaneId::ALL {
+    for id in PaneId::all(window) {
         states.of(id).borrow_mut().preferred_line = None;
     }
     // The spec decides the layout on every side, so a change re-measures
@@ -6471,12 +6894,12 @@ fn relayout_panes(window: &AppWindow, states: &PaneStates, cache: &Rc<RefCell<Re
     // refresh writes the status line, and the horizontal pane's is the one that
     // has always been left standing (`draw_edit` keeps the same rule).
     let mut bytes = 0;
-    for id in PaneId::ALL.into_iter().rev() {
+    for id in PaneId::all(window).into_iter().rev() {
         if id.is_shown(window) {
             let document = states.document(id);
             let source = document.text.borrow().clone();
             bytes = source.len();
-            refresh_pane_from_state(window, cache, &document, id, states.of(id), &source);
+            refresh_pane_from_state(window, cache, &document, id, &states.of(id), &source);
         }
     }
     // Logged as its own kind of line. A keystroke re-measures one block; this
@@ -6485,18 +6908,22 @@ fn relayout_panes(window: &AppWindow, states: &PaneStates, cache: &Rc<RefCell<Re
     // 要件 9: the settings are the app's and outlive the run. Written here
     // because everything that changes one of them asks for this relayout.
     save_settings(window, cache);
-    // The focused pane's spec, because the line is one line. **Both zooms**
-    // though: 要件 9 gives each pane its own, and the wheel magnifies the pane
+    // The focused pane's spec, because the line is one line. **Every pane's
+    // zoom** though: 要件 9 gives each its own, and the wheel magnifies the pane
     // it is over rather than the one holding the keyboard — a line naming one
     // number would leave out the pane that just changed.
     let here = focused_pane(window);
     let typography = pane_typography(window, here);
+    let zooms = PaneId::all(window)
+        .iter()
+        .map(|id| id.zoom(window).to_string())
+        .collect::<Vec<String>>()
+        .join(",");
     cache.borrow_mut().log_perf(&format!(
-        "relayout total={total:.2} zoom={zoom}/{other_zoom} font={font:.1} \
+        "relayout total={total:.2} zoom={zoom} font={font:.1} \
          space={space:.2} lead={lead:.2} head={head:.2} bytes={bytes}",
         total = elapsed_ms(started),
-        zoom = here.zoom(window),
-        other_zoom = here.other().zoom(window),
+        zoom = zooms,
         font = typography.font_size,
         space = typography.character_spacing,
         lead = typography.line_spacing,
@@ -6640,28 +7067,44 @@ fn directwrite_status() -> String {
 /// (ペイン分割設計 5), the accessors below are reads and writes of one row of
 /// it, and everything that has one of something per pane — the states, the
 /// views a tab keeps, the model itself — is indexed by [`PaneId::index`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PaneId {
-    Vertical,
-    Horizontal,
-}
+///
+/// **A number, and nothing else** (要件 6.3, 2026-09-06). It was two named
+/// panes, and every name in it was a second opinion about something the layout
+/// tree already knew: which pane is on the right, which of them is "the other
+/// one", which draws downward. The tree says where a pane is; the tab in front
+/// of it says which way it draws; and this says only which pane it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PaneId(u32);
 
 impl PaneId {
-    /// Every pane, left to right.
-    ///
-    /// **The order the pane model's rows are in**, so a row's position, the
-    /// `id` inside it and this array cannot drift apart. Everything that has
-    /// one of something per pane is built by mapping over this.
-    const ALL: [PaneId; 2] = [PaneId::Horizontal, PaneId::Vertical];
+    /// The pane an editor with no split has. **Always exists**: 要件 6.3 says
+    /// the editing area is one or more panes, so there is no arrangement
+    /// without this one in it.
+    const FIRST: PaneId = PaneId(0);
 
-    /// Whether this is the right-hand pane.
+    /// Every pane that exists, in order.
     ///
-    /// **Identity, not direction.** A pane draws whichever way the tab in front
-    /// of it says (要件 7.2), which is [`vertical`](PaneId::vertical); this is
-    /// only which of the two panes it is, and it is what the numbering, the log
-    /// names and the split share are built on.
-    fn is_right(self) -> bool {
-        self == PaneId::Vertical
+    /// **The window's own model is the count.** A pane is a row of it — that is
+    /// what makes it a thing on screen — so nothing else can hold a second
+    /// opinion about how many there are. Everything with one of something per
+    /// pane is built by mapping over this.
+    fn all(window: &AppWindow) -> Vec<PaneId> {
+        (0..window.get_panes().row_count() as u32)
+            .map(PaneId)
+            .collect()
+    }
+
+    /// How many panes exist.
+    fn count(window: &AppWindow) -> usize {
+        window.get_panes().row_count()
+    }
+
+    /// Every pane but this one.
+    fn others(self, window: &AppWindow) -> Vec<PaneId> {
+        Self::all(window)
+            .into_iter()
+            .filter(|id| *id != self)
+            .collect()
     }
 
     /// Which way this pane is drawing now.
@@ -6672,28 +7115,11 @@ impl PaneId {
         self.screen(window).vertical
     }
 
-    /// The pane that is not this one.
-    ///
-    /// An edit needs it: the other pane is showing the same document and has
-    /// to be brought along (要件 7.6). **This is where two panes are assumed**,
-    /// and 段階3 turns it into "every other pane showing this document".
-    fn other(self) -> Self {
-        if self.is_right() {
-            PaneId::Horizontal
-        } else {
-            PaneId::Vertical
-        }
-    }
-
     /// The pane's number, left to right across the window. **The same numbering
     /// as `editor-mode`**, so the two cannot drift apart, and the row this pane
     /// will be once the panes are a model (ペイン分割設計 5).
     fn index(self) -> i32 {
-        if self.is_right() {
-            VERTICAL_MODE
-        } else {
-            HORIZONTAL_MODE
-        }
+        self.0 as i32
     }
 
     /// The pane a number from the UI names.
@@ -6702,11 +7128,7 @@ impl PaneId {
     /// number arrives with a keystroke, and a keystroke must not be able to
     /// stop the editor.
     fn from_index(index: i32) -> Self {
-        if index == VERTICAL_MODE {
-            PaneId::Vertical
-        } else {
-            PaneId::Horizontal
-        }
+        PaneId(index.max(0) as u32)
     }
 
     /// This pane's row of the window's pane model.
@@ -6740,14 +7162,18 @@ impl PaneId {
     /// The sizes are the same fallbacks the layout uses until the pane reports
     /// its own, so the first refresh works against one set of numbers whether
     /// or not the pane exists yet.
-    fn initial_screen(self) -> PaneScreen {
+    ///
+    /// **`vertical` and `preview` are given rather than worked out** (要件 7.2,
+    /// 2026-09-06). They used to come from which of the two panes this was,
+    /// which was the last place a pane's number decided how it draws. A pane
+    /// draws the way the tab in front of it says, and a pane made by a split
+    /// opens with a copy of the tab it was split from (要件 6.4) — so what a
+    /// new row starts as is the splitting pane's business, not its number's.
+    fn initial_screen(self, vertical: bool, preview: bool) -> PaneScreen {
         PaneScreen {
             id: self.index(),
-            vertical: self.is_right(),
-            // The vertical pane opens on the formatted text and the horizontal
-            // one on the source, which is where the four modes are counted from
-            // (`TabView::for_pane` says the same thing about a tab).
-            preview: self.is_right(),
+            vertical,
+            preview,
             zoom: ZOOM_DEFAULT,
             content_width: 640,
             content_height: 520,
@@ -6826,32 +7252,19 @@ impl PaneId {
         }
     }
 
-    /// How the performance log names this pane's lines. The two names are older
-    /// than the panes being one code path, and README lists them.
-    fn perf_kind(self) -> &'static str {
-        if self.is_right() {
-            "refresh"
-        } else {
-            "horizontal"
-        }
-    }
-
-    /// How an edit's log line names the pane it was made in. Not [`perf_kind`],
-    /// which names a *refresh* line and carries an older name for the vertical
-    /// one.
+    /// How the logs name this pane's lines.
     ///
-    /// [`perf_kind`]: PaneId::perf_kind
-    fn log_name(self) -> &'static str {
-        if self.is_right() {
-            "vertical"
-        } else {
-            "horizontal"
-        }
+    /// **The pane's number** (2026-09-06). The names used to be `refresh` and
+    /// `horizontal`, from the two panes the editor had; with a pane list there
+    /// is no pair to name, and a line has to say which of N it came from.
+    /// README carries the new names.
+    fn log_name(self) -> String {
+        format!("pane{}", self.0)
     }
 
-    /// How the diagnostic log tells this pane's lines from the other's.
-    fn diag_suffix(self) -> &'static str {
-        if self.is_right() { "v" } else { "h" }
+    /// How the diagnostic log tells this pane's lines from the others'.
+    fn diag_suffix(self) -> String {
+        format!("p{}", self.0)
     }
 
     /// How long a line in this pane may be (要件 9): the pane's own extent
@@ -7223,18 +7636,21 @@ impl PaneId {
         // **Only a pane showing this document follows the edit** (要件 7.6).
         // Another pane may be looking at another file, where these positions
         // mean nothing (6.7) and this text is not the text it is drawing.
-        let other = self.other();
-        let follows = states.same_document(self, other);
-        // **The other pane's caret follows the edit whether or not anything is
-        // drawn now.** A position is about the text, and the text has changed;
-        // holding this back with the drawing would leave that pane's caret
-        // pointing at where the text used to be.
-        if follows {
-            carry_state_across(states.of(other), change, source);
+        //
+        // **Every one of them, not "the other one"** (2026-09-06). With two
+        // panes there was one candidate and the question never had to be asked
+        // of a list; a document open in three panes has to move in all three.
+        //
+        // **Their carets follow the edit whether or not anything is drawn
+        // now.** A position is about the text, and the text has changed;
+        // holding this back with the drawing would leave those carets pointing
+        // at where the text used to be.
+        for other in self.followers(window, states) {
+            carry_state_across(&states.of(other), change, source);
         }
         let owed = {
             let mut borrowed = cache.borrow_mut();
-            let pace = &mut borrowed.pace[self.index() as usize];
+            let pace = borrowed.pace_of(self);
             pace.held += 1;
             pace.owed()
         };
@@ -7247,7 +7663,7 @@ impl PaneId {
         let started = Instant::now();
         self.draw_both(window, states, cache, document, source, Some(caret));
         let took = elapsed_ms(started);
-        cache.borrow_mut().pace[self.index() as usize].drew(took);
+        cache.borrow_mut().pace_of(self).drew(took);
     }
 
     /// This pane and, if it is showing the same document, the other one.
@@ -7265,13 +7681,13 @@ impl PaneId {
         source: &str,
         caret: Option<usize>,
     ) {
-        let other = self.other();
-        let follows = states.same_document(self, other);
-        // **The right-hand pane's refresh writes the status line**, so it goes
-        // last and its numbers are the ones left standing. Which pane, not
-        // which direction: both may be running the same way now.
-        if follows && self.is_right() {
-            draw_followed_edit(window, other, states.of(other), cache, document, source);
+        // **The followers first, and the pane that was typed in last.**
+        // A refresh writes the status line, and the line left standing has to
+        // be the one about the pane the writer is in. The rule used to be
+        // "the right-hand pane goes last", which was the same rule while there
+        // were two panes and one of them always had the keyboard.
+        for other in self.followers(window, states) {
+            draw_followed_edit(window, other, &states.of(other), cache, document, source);
         }
         match caret {
             Some(caret) => refresh_pane(
@@ -7285,11 +7701,18 @@ impl PaneId {
                 PaneSelection::default(),
                 "",
             ),
-            None => refresh_pane_from_state(window, cache, document, self, states.of(self), source),
+            None => {
+                refresh_pane_from_state(window, cache, document, self, &states.of(self), source)
+            }
         }
-        if follows && !self.is_right() {
-            draw_followed_edit(window, other, states.of(other), cache, document, source);
-        }
+    }
+
+    /// Every other pane showing the same document (要件 7.6).
+    fn followers(self, window: &AppWindow, states: &PaneStates) -> Vec<PaneId> {
+        self.others(window)
+            .into_iter()
+            .filter(|other| states.same_document(self, *other))
+            .collect()
     }
 }
 
@@ -7307,7 +7730,7 @@ fn schedule_catch_up(
 ) {
     {
         let mut borrowed = cache.borrow_mut();
-        let pace = &mut borrowed.pace[id.index() as usize];
+        let pace = borrowed.pace_of(id);
         if pace.waiting {
             return;
         }
@@ -7316,7 +7739,7 @@ fn schedule_catch_up(
     let weak = window.as_weak();
     let states = states.clone();
     let cache = cache.clone();
-    let timer = cache.borrow().pace[id.index() as usize].timer.clone();
+    let timer = cache.borrow_mut().pace_of(id).timer.clone();
     timer.start(TimerMode::SingleShot, owed, move || {
         let Some(window) = weak.upgrade() else {
             return;
@@ -7328,7 +7751,7 @@ fn schedule_catch_up(
         let started = Instant::now();
         id.draw_both(&window, &states, &cache, &document, &source, None);
         let took = elapsed_ms(started);
-        cache.borrow_mut().pace[id.index() as usize].drew(took);
+        cache.borrow_mut().pace_of(id).drew(took);
     });
 }
 
@@ -7336,7 +7759,33 @@ impl RenderCache {
     /// The pane an id names. **The only place the two are told apart by
     /// anything other than a [`PaneId`].**
     fn pane(&mut self, id: PaneId) -> &mut Pane {
-        &mut self.panes[id.index() as usize]
+        let at = (id.index() as usize).min(self.panes.len().saturating_sub(1));
+        &mut self.panes[at]
+    }
+
+    /// How this pane is keeping up with a run of keystrokes (`EditPace`).
+    ///
+    /// **The last pane's rather than a panic** for a number that names nothing,
+    /// like every other list indexed by pane: a stale number arrives with a
+    /// keystroke and must not be able to stop the editor.
+    fn pace_of(&mut self, id: PaneId) -> &mut EditPace {
+        let at = (id.index() as usize).min(self.pace.len().saturating_sub(1));
+        &mut self.pace[at]
+    }
+
+    /// Make room for a pane, at the end, which is the number a split hands out.
+    fn add_pane(&mut self, mode: WritingMode) {
+        self.panes.push(Pane::new(mode));
+        self.pace.push(EditPace::default());
+    }
+
+    /// Take a pane out, closing the numbering behind it.
+    fn remove_pane(&mut self, id: PaneId) {
+        let at = id.index() as usize;
+        if at < self.panes.len() && self.panes.len() > 1 {
+            self.panes.remove(at);
+            self.pace.remove(at);
+        }
     }
 
     /// Render the tiles the viewport needs and drop the ones it no longer does.
@@ -7605,7 +8054,7 @@ fn view_top(
     let document = states.document(id);
     let source = document.text.borrow().clone();
     let state = states.of(id);
-    let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
+    let active_line_start = PaneId::revealed_line(id.vertical(window), &state, &source);
     // The near edge of the view, in the content's own coordinates. The flow
     // axis is x where the text runs down the page and y where it runs
     // across; the other axis is the head of the line, which is where a line
@@ -8070,13 +8519,15 @@ fn refresh_pane(
     // them too, because horizontal-only display could otherwise not be measured
     // at all — no line was written there, so no frame was ever counted (7.5).
     let frame = cache.frames.borrow_mut().take();
-    // One status line for two panes, and **the right-hand one owns it** — which
-    // pane, not which direction: in Split both refresh on the same keystroke,
-    // so letting each write would leave the line flickering between two sets of
-    // numbers. Short enough to survive an unwrapped half-width pane; the full
-    // breakdown goes to the log, where nothing is clipped and both panes have
-    // their own line.
-    if id.is_right() {
+    // One status line for every pane, and **the focused one owns it**
+    // (2026-09-06). Panes showing the same document all refresh on the same
+    // keystroke, so letting each write would leave the line flickering between
+    // as many sets of numbers as there are panes. The rule used to be "the
+    // right-hand pane", which was the same rule while there were two of them
+    // and the writer was always in one. Short enough to survive an unwrapped
+    // narrow pane; the full breakdown goes to the log, where nothing is clipped
+    // and every pane has a line of its own.
+    if id == focused_pane(window) {
         window.set_render_status(
             format!("縦書き {total_ms:.1}ms / tiles {tiles_ms:.1}ms {tile_count}枚{rendered}新 / 横 {push_ms:.1}ms")
                 .into(),
@@ -8084,7 +8535,7 @@ fn refresh_pane(
     }
     // Taken before the line is built: the log borrows the cache for the whole
     // of it.
-    let held = cache.pace[id.index() as usize].take_held();
+    let held = cache.pace_of(id).take_held();
     cache.log_perf(&format!(
         "{kind} total={total_ms:.2} preview={preview_ms:.2} layout={layout_ms:.2} \
          geom={geometry_ms:.2} tiles={tiles_ms:.2} stats={stats_ms:.2} push={push_ms:.2} \
@@ -8102,15 +8553,15 @@ fn refresh_pane(
          tiles_shown={tile_count} tiles_new={rendered}/{tiles_reused} spare={spare_held} \
          rects={rects} font={font_size:.1} \
          space={space:.2} lead={lead:.2} head={head:.2} preedit={preedit_chars}",
-        kind = id.perf_kind(),
+        kind = id.log_name(),
         // How many edits this draw is carrying (`EditPace`). One is the
         // ordinary case; more means a held key was outrunning the drawing.
         held = held,
-        // Which panes are alive. Without this the log cannot tell a slow frame
-        // caused by the horizontal pane from one caused by a large document,
-        // because the two arrive together.
-        split = u8::from(window.get_split_view()),
-        mode = window.get_editor_mode(),
+        // How many panes are alive, and which one has the keyboard. Without
+        // these the log cannot tell a slow frame caused by another pane from
+        // one caused by a large document, because the two arrive together.
+        split = PaneId::count(window),
+        mode = focused_pane(window).index(),
         space = typography.character_spacing,
         lead = typography.line_spacing,
         head = typography.size_scale(1),
@@ -8137,8 +8588,8 @@ fn refresh_pane(
                 None => "-".to_owned(),
             },
             preview = u8::from(id.shows_preview(window)),
-            mode = window.get_editor_mode(),
-            split = u8::from(window.get_split_view()),
+            mode = focused_pane(window).index(),
+            split = PaneId::count(window),
         ),
     );
 }
@@ -9204,8 +9655,9 @@ fn insert_pane_text(
     // second and larger feature, and no requirement asks for it; doing it here
     // would hide it behind an ordinary keystroke.
     let rectangle = {
-        let state = states.of(id).borrow();
-        state.rectangular
+        let state = states.of(id);
+        let rectangular = state.borrow().rectangular;
+        rectangular
     };
     let rectangle = rectangle.then(|| selected_runs(cache, id));
     if let Some(ranges) = rectangle
@@ -9222,7 +9674,7 @@ fn insert_pane_text(
         window.set_render_status(over_limit_message(&input).into());
         return;
     }
-    let caret = id.caret_byte(state, &source);
+    let caret = id.caret_byte(&state, &source);
     let selection = selection_source_range(&state.borrow());
     // What the change took out, for the undo that puts it back (要件 7.1).
     // Read before the text moves, because afterwards there is nowhere to read
@@ -9242,7 +9694,7 @@ fn insert_pane_text(
         // a decision about the editor, not part of putting the panes on one
         // path.
         let line = source_line_start(&source, caret);
-        let revealed = PaneId::revealed_line(id.vertical(window), state, &source).unwrap_or(line);
+        let revealed = PaneId::revealed_line(id.vertical(window), &state, &source).unwrap_or(line);
         let mut borrowed = cache.borrow_mut();
         let slot = &mut borrowed.pane(id).view.preview_slot;
         let preview = slot.get(&source, Some(revealed));
@@ -9280,7 +9732,7 @@ fn insert_pane_text(
     let stored_ms = elapsed_ms(stored);
     id.draw_edit(window, states, cache, document, &source, next, change);
     let name = id.log_name();
-    log_edit(cache, name, &source, started, cloned_ms, stored_ms);
+    log_edit(cache, &name, &source, started, cloned_ms, stored_ms);
 }
 
 /// Delete the grapheme cluster beside a pane's caret, or its selection.
@@ -9351,7 +9803,7 @@ fn toggle_mark(
 ) {
     let state = states.of(id);
     let source = document.text.borrow().clone();
-    let caret = id.caret_byte(state, &source);
+    let caret = id.caret_byte(&state, &source);
     let marking = {
         let mut state = state.borrow_mut();
         // **The other shape restarts it rather than stopping it.** A writer who
@@ -9373,7 +9825,7 @@ fn toggle_mark(
             id.log_name()
         ),
     );
-    refresh_pane_from_state(window, cache, document, id, state, &source);
+    refresh_pane_from_state(window, cache, document, id, &state, &source);
 }
 
 /// The Kill Ring, and where its last yank landed (要件 11.4・11.6).
@@ -9424,7 +9876,7 @@ fn kill_ring_action(
     match what {
         KillAction::ToLineEnd => {
             let source = document.text.borrow().clone();
-            let caret = id.caret_byte(state, &source);
+            let caret = id.caret_byte(&state, &source);
             let end = line_end_to_kill(&source, caret);
             if end <= caret {
                 return;
@@ -9511,7 +9963,7 @@ fn standing_yank(
         return None;
     }
     let state = states.of(id);
-    let caret = id.caret_byte(state, &source);
+    let caret = id.caret_byte(&state, &source);
     (caret == end).then_some((last.at, end))
 }
 
@@ -9590,20 +10042,12 @@ fn move_focus(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, from: PaneId
     let Some(towards) = Towards::from_index(towards) else {
         return;
     };
-    let placed: Vec<(usize, Rect)> = PaneId::ALL
-        .iter()
-        .filter(|id| id.is_shown(window))
-        .map(|id| {
-            let screen = id.screen(window);
-            let rect = Rect::new(screen.x, screen.y, screen.width, screen.height);
-            (id.index() as usize, rect)
-        })
-        .collect();
+    let placed = placed_panes(window);
     let landed = neighbour(&placed, from.index() as usize, towards)
         .map(|pane| PaneId::from_index(pane as i32));
     // **Logged whether or not it moved.** "The key did nothing" and "the key
     // never arrived" look the same on screen, and only one of them is a bug.
-    let arriving = landed.map_or("-", PaneId::log_name);
+    let arriving = landed.map_or_else(|| "-".to_owned(), PaneId::log_name);
     cache.borrow_mut().log_diag(
         "layout",
         &format!(
@@ -9677,8 +10121,8 @@ fn delete_adjacent_grapheme(
 ) {
     let state = states.of(id);
     let source = document.text.borrow().clone();
-    let caret = id.caret_byte(state, &source);
-    let revealed = PaneId::revealed_line(id.vertical(window), state, &source);
+    let caret = id.caret_byte(&state, &source);
+    let revealed = PaneId::revealed_line(id.vertical(window), &state, &source);
     // What one character is belongs to the text being shown, not to the
     // Markdown behind it (技術検証 3.12), so this asks the same text the pane
     // laid out.
@@ -10371,11 +10815,11 @@ mod tests {
     #[test]
     fn renders_only_the_panes_the_tree_names() {
         let area = pane_layout::Rect::new(0.0, 0.0, 800.0, 600.0);
-        let alone = Layout::single(PaneId::Vertical.index() as usize);
+        let alone = Layout::single(PaneId(2).index() as usize);
         let (placed, boundaries) = alone.place(area);
 
         assert_eq!(placed.len(), 1);
-        assert_eq!(placed[0].0, PaneId::Vertical.index() as usize);
+        assert_eq!(placed[0].0, PaneId(2).index() as usize);
         assert!(boundaries.is_empty());
     }
 
@@ -10624,7 +11068,7 @@ mod tests {
     fn a_pane_rounds_its_caret_down_to_a_character_start() {
         let source = "あいうえお";
         let inside = 4; // The middle of 'い', which occupies bytes 3..6.
-        for id in [PaneId::Vertical, PaneId::Horizontal] {
+        for id in [PaneId::FIRST, PaneId(1), PaneId(7)] {
             let state = editor_state(Some(inside), None);
             assert_eq!(id.caret_byte(&state, source), 3, "{id:?}");
             let state = editor_state(Some(9_999), None);
@@ -10655,11 +11099,12 @@ mod tests {
         assert_eq!(zoom_from(ZOOM_MIN - ZOOM_STEP), ZOOM_MIN);
     }
 
-    /// A new pane opens at the size the writer left nothing about, and both
-    /// panes open the same — the zoom is per pane, not per direction.
+    /// A new pane opens at the size the writer left nothing about, and every
+    /// pane opens the same — the zoom is per pane, not per direction.
     #[test]
     fn a_pane_opens_at_the_default_zoom() {
-        for row in PaneId::ALL.map(PaneId::initial_screen) {
+        for pane in 0..4_u32 {
+            let row = PaneId(pane).initial_screen(false, false);
             assert_eq!(zoom_from(row.zoom), ZOOM_DEFAULT, "{row:?}");
         }
     }
@@ -10671,13 +11116,17 @@ mod tests {
     /// [`PaneId::index`]: PaneId::index
     #[test]
     fn a_pane_row_sits_at_the_position_its_number_names() {
-        let rows = PaneId::ALL.map(PaneId::initial_screen);
+        let rows = (0..5_u32)
+            .map(|pane| PaneId(pane).initial_screen(false, false))
+            .collect::<Vec<PaneScreen>>();
 
         for (position, row) in rows.iter().enumerate() {
             assert_eq!(row.id as usize, position, "{row:?}");
         }
-        assert!(!rows[0].vertical);
-        assert!(rows[1].vertical);
+        // **A row's number says nothing about how it draws** (要件 7.2): that
+        // comes from the tab in front of it, and a new pane is told what to
+        // show by the pane it was split from.
+        assert!(rows.iter().all(|row| !row.vertical));
     }
 
     #[test]
@@ -11172,33 +11621,19 @@ mod tests {
         assert_eq!(history.redo_into(&mut replaced), None, "and so is the rest");
     }
 
-    /// A tab keeps one view per pane, and a fresh one opens each pane in the
-    /// mode that pane starts from (要件 7.2).
-    ///
-    /// The vertical pane on the formatted text and the horizontal one on the
-    /// source is the arrangement the four modes are counted from, and it is
-    /// the whole of what a fresh view knows about which pane it belongs to.
+    /// A pane's number and its row are the same thing, both ways round
+    /// (ペイン分割設計 5). A number that did not survive the round trip would
+    /// send a keystroke to the pane beside the one it was typed in.
     #[test]
-    fn a_fresh_view_opens_each_pane_in_its_own_starting_mode() {
-        for id in PaneId::ALL {
-            let view = TabView::for_pane(id);
-            assert_eq!(view.vertical, id.is_right(), "{id:?}");
-            assert_eq!(view.preview, id.is_right(), "{id:?}");
-            assert_eq!(view.scroll, 0.0, "{id:?}");
-            assert_eq!(view.state.caret_source_byte, None, "{id:?}");
+    fn a_pane_number_is_its_row() {
+        for position in 0..8_i32 {
+            let id = PaneId::from_index(position);
+            assert_eq!(id.index(), position, "{id:?}");
         }
-    }
-
-    /// Everything with one of something per pane is indexed the same way, so
-    /// these three have to agree: the array's order, the pane's own number, and
-    /// the row it is published in.
-    #[test]
-    fn every_per_pane_collection_is_in_pane_order() {
-        for (position, id) in PaneId::ALL.into_iter().enumerate() {
-            assert_eq!(id.index() as usize, position, "{id:?}");
-            assert_eq!(id.other().other(), id, "{id:?}");
-            assert_ne!(id.other(), id, "{id:?}");
-        }
+        // A number from the window that names nothing sensible is the first
+        // pane, which always exists (要件 6.3) — never a panic, because these
+        // arrive with keystrokes.
+        assert_eq!(PaneId::from_index(-1), PaneId::FIRST);
     }
 
     /// The bound that stops 6.16 from happening again when the area is divided.

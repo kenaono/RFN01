@@ -62,13 +62,10 @@ export component AppWindow inherits Window {
     min-width: 640px;
     min-height: 400px;
 
-    in-out property <int> editor-mode: 1;
-    in-out property <bool> split-view: false;
-    // Every pane, in `editor-mode`'s numbering: row 0 is the horizontal one,
-    // row 1 the vertical one. **One row is one pane's whole view of the
-    // document** — its tiles, its caret, its scroll — so the panes below are
-    // one repeated element rather than two copies of the same bindings, and a
-    // third pane is a third row (ペイン分割設計 5).
+    // Every pane, in pane-number order: row N is pane N. **One row is one
+    // pane's whole view of the document** — its tiles, its caret, its scroll —
+    // so the panes below are one repeated element rather than a copy of the
+    // same bindings per pane, and an Nth pane is an Nth row (ペイン分割設計 5).
     //
     // in-out because some of the fields are written by the pane itself; the
     // rest are written from Rust.
@@ -305,11 +302,10 @@ export component AppWindow inherits Window {
     /// label to decide would break the first time a label is reworded.
     in property <int> question-danger: -1;
 
-    // Everything a pane raises. **The first argument is always which pane**: 0
-    // is the horizontal one, 1 the vertical one, the same numbering as
-    // `editor-mode`. Rust turns it back into a `PaneId` and nothing else tells
-    // the two apart, so a repeater only has to pass its `index` here instead of
-    // a literal (ペイン分割設計 5).
+    // Everything a pane raises. **The first argument is always which pane** —
+    // its row of `panes`, counted from 0. Rust turns it back into a `PaneId`
+    // and nothing else tells the panes apart, so a repeater only has to pass
+    // its `index` here instead of a literal (ペイン分割設計 5).
     callback pane-selection-start(int, float, float, bool);
     callback pane-selection-update(int, float, float);
     callback pane-selection-end(int, float, float);
@@ -347,13 +343,14 @@ export component AppWindow inherits Window {
     callback pane-kill(int, int);
     /// Start selecting in a pane, or stop (要件 11.4 の`Ctrl+Space`).
     callback pane-mark-toggled(int, bool);
-    callback view-mode-requested(int);
     /// Divide the focused pane, right or down (要件 6.4). True is right.
     callback divide-requested(bool);
-    /// Put the two panes back into one, keeping the focused one.
-    callback undivide-requested();
-    /// Put the panes in each other's places (要件 6.4).
-    callback swap-requested();
+    /// Bring the arrangement back to the focused pane, gathering the tabs of
+    /// the panes that go into it (要件 6.4).
+    callback close-others-requested();
+    /// Change the focused pane's place with the pane in a direction (要件 6.4):
+    /// 0 left, 1 right, 2 up, 3 down — the numbering 要件 11.3's arrows use.
+    callback swap-requested(int);
     // True when the pane taking input runs vertically. The IME lays its own
     // windows out from this, so it has to be told when focus moves.
     callback ime-vertical-requested(bool);
@@ -612,23 +609,6 @@ export component AppWindow inherits Window {
                             activated => {
                                 app-menu.close();
                                 typography-panel.show();
-                            }
-                        }
-                        MenuSep { }
-                        MenuRow {
-                            title: "Show Left Pane";
-                            activated => {
-                                app-menu.close();
-                                root.view-mode-requested(0);
-                                root.focus-generation += 1;
-                            }
-                        }
-                        MenuRow {
-                            title: "Show Right Pane";
-                            activated => {
-                                app-menu.close();
-                                root.view-mode-requested(1);
-                                root.focus-generation += 1;
                             }
                         }
                     }
@@ -1267,6 +1247,17 @@ export component AppWindow inherits Window {
                         height: parent.height;
 
                         vertical: pane.vertical;
+                        // 要件 6.3: which pane the writer is in. The same flag
+                        // `takes-focus` below reads, so the tab that looks
+                        // focused and the pane that takes the keyboard cannot
+                        // disagree.
+                        focused: pane.id == root.focused-pane;
+                        // 要件 6.4: which ways this pane has somebody to change
+                        // places with. Rust works it out where it places them.
+                        swap-left: pane.swap-left;
+                        swap-right: pane.swap-right;
+                        swap-up: pane.swap-up;
+                        swap-down: pane.swap-down;
                         background: pane.vertical ? Tok.paper-alt : Tok.paper;
                         // 要件 9: this pane's sheet — the paper and the margin
                         // are that direction's, like everything else on it.
@@ -1466,12 +1457,13 @@ export component AppWindow inherits Window {
                             root.divide-requested(right);
                             root.focus-generation += 1;
                         }
-                        swap-requested => {
-                            root.swap-requested();
+                        swap-requested(towards) => {
+                            root.focused-pane = pane.id;
+                            root.swap-requested(towards);
                             root.focus-generation += 1;
                         }
-                        close-split-requested => {
-                            root.undivide-requested();
+                        close-others-requested => {
+                            root.close-others-requested();
                             root.focus-generation += 1;
                         }
                         save-as-requested => {
@@ -1685,9 +1677,12 @@ export component AppWindow inherits Window {
                     arrangement := Text {
                         x: 21px;
                         y: (parent.height - self.height) / 2;
-                        text: root.split-view
-                            ? "Split"
-                            : (root.editor-mode == 0 ? "Left pane" : "Right pane");
+                        // 要件 6.3: how many panes the editing area is
+                        // divided into. A name for each of two panes could not
+                        // survive the third.
+                        text: root.panes.length > 1
+                            ? "Panes: " + root.panes.length
+                            : "One pane";
                         color: Tok.ink-muted;
                         font-size: 12px;
                     }

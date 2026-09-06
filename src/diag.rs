@@ -171,6 +171,47 @@ impl DiagLog {
         self.path.as_deref()
     }
 
+    /// Send panics to this run's log, wherever they happen (2026-09-06).
+    ///
+    /// **A panic used to leave nothing behind.** The editor draws its own
+    /// window, so there is no console for the default hook to print to: the log
+    /// simply stopped, and the last line before the stop was all anyone had —
+    /// which meant reading it and guessing what the next line would have been.
+    /// Now the last line says what happened.
+    ///
+    /// **Written straight to the path rather than through this struct.** A hook
+    /// has to be `Send + Sync` and outlive everything, and the log lives in an
+    /// `Rc<RefCell<…>>` on the UI thread; the panic may also be *inside* a
+    /// borrow of it, which is a case a second borrow would turn into a second
+    /// panic. Opening the file again is the one way in that cannot make things
+    /// worse.
+    ///
+    /// Called once, after [`start`](DiagLog::start). Best effort throughout:
+    /// the process is ending either way, and a hook that panicked would take
+    /// the message with it.
+    pub fn catch_panics(&self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let started = self.started;
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Ok(mut file) = OpenOptions::new().append(true).open(&path) {
+                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                let at = match info.location() {
+                    Some(place) => format!("{}:{}", place.file(), place.line()),
+                    None => "-".to_owned(),
+                };
+                // The message as the panic wrote it, on one line: a log where
+                // one kind of line can be pulled out with a grep stays that way
+                // only if every line is one line.
+                let said = info.to_string().replace(['\n', '\r'], " ");
+                let _ = writeln!(file, "+{elapsed:11.3} panic at={at} said={said}");
+            }
+            previous(info);
+        }));
+    }
+
     /// One line: the milliseconds since the run began, what kind of event it
     /// is, and its fields.
     ///
@@ -247,5 +288,37 @@ mod tests {
         assert_ne!(first, second);
         let _ = fs::remove_file(&first);
         let _ = fs::remove_file(&second);
+    }
+
+    /// **A panic reaches the log** (2026-09-06). The editor draws its own
+    /// window and has no console, so before this a panic left nothing behind
+    /// but a log that stopped — and the last line before a stop says what was
+    /// happening, never what went wrong.
+    ///
+    /// The hook is process-wide, so this puts back whatever was there before.
+    #[test]
+    fn a_panic_is_written_to_this_run_s_log() {
+        let mut log = DiagLog::default();
+        log.start();
+        let Some(path) = log.path().map(Path::to_path_buf) else {
+            // No place to write beside the executable; nothing to hold.
+            return;
+        };
+        log.write("before", "kind=ordinary");
+
+        let restore = std::panic::take_hook();
+        std::panic::set_hook(restore);
+        log.catch_panics();
+        let caught = std::panic::catch_unwind(|| panic!("見えない失敗"));
+        let _ = std::panic::take_hook();
+        assert!(caught.is_err(), "the panic still unwinds");
+
+        let written = fs::read_to_string(&path).expect("the log is readable");
+        let last = written.lines().last().expect("a line was written");
+        assert!(last.contains("panic"), "{written}");
+        assert!(last.contains("見えない失敗"), "{written}");
+        // One line, so a grep still pulls out one kind of event whole.
+        assert_eq!(written.lines().count(), 2, "{written}");
+        let _ = fs::remove_file(&path);
     }
 }
