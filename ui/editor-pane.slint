@@ -2028,7 +2028,16 @@ export component EditorPane inherits Rectangle {
                 vertical-stretch: 0;
                 height: root.below-height;
                 background: root.page-background;
-                clip: true;
+                // **切り取らない。**Slintはキーが来るたびに「焦点の要素は
+                // 見えているか」を確かめ、見えていなければ焦点を捨てる
+                // （`WindowInner::process_key_input`。`is_visible()`は祖先の
+                // clipまで見る）。隠し欄はカーソルの1行下に立つので、最下行では
+                // この箱の外へ出る——切り取っていると、そこで**焦点ごと落ちて
+                // 二度と入らない**（書き手の報告、2026-09-06）。ペインの側が
+                // 切り取っていないから最下行でも打てる、というのがその証拠だった。
+                //
+                // 中身がはみ出す心配は無い：帯は`rows × line ≤ below-height`に
+                // 収まるように作ってある。
 
                 // The shell under a document. Drawn from the same images the
                 // pane above is drawn from, and read by the same keys.
