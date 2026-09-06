@@ -75,6 +75,7 @@ use windows::{
     core::{BOOL, Error, HSTRING, IUnknown, Interface, Ref, Result, implement, w},
 };
 
+use crate::terminal::{Attrs as CellAttrs, Color as CellColor, Line as CellLine, character_width};
 use crate::text_blocks::{
     Align, AskedLine, BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, CrossSlices,
     DEFAULT_INK, Emphasis, FlowOrder, GridCell, LineInfo, LineKind, LineMarker, LineOrnament,
@@ -346,6 +347,12 @@ struct Graphics {
     /// line spacing and the family (要件 9). Everything else typography asks
     /// for is set per range on the layout, because it varies within a block.
     formats: HashMap<(u32, u32, WritingMode, String), IDWriteTextFormat>,
+    /// The terminal's formats (追加要件 Terminal), keyed by size, family and
+    /// weight. **Kept apart from the document's**: a terminal's format has no
+    /// writing mode to speak of and no line spacing — a cell grid decides its
+    /// own line advance — so it shares nothing with the ones above but the
+    /// factory that made them.
+    cell_formats: HashMap<(u32, String, bool), IDWriteTextFormat>,
     target: Option<RenderTargetCache>,
     _apartment: Option<ComApartment>,
 }
@@ -372,6 +379,7 @@ impl Graphics {
                 d2d: D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?,
                 wic: CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?,
                 formats: HashMap::new(),
+                cell_formats: HashMap::new(),
                 target: None,
                 _apartment: apartment,
             })
@@ -7346,5 +7354,509 @@ mod tests {
         assert_eq!(block_local_range(10, 20, 15, 40), Some((5, 5)));
         assert_eq!(block_local_range(10, 20, 20, 30), None);
         assert_eq!(block_local_range(10, 20, 0, 10), None);
+    }
+}
+
+/// The terminal's cells (追加要件 Terminal).
+///
+/// **The same stack, a different layout.** Direct2D, DirectWrite, the render
+/// target and the pixels handed to Slint are the document's; what is not shared
+/// is the arrangement — a terminal has no blocks, no wrapping and no measuring,
+/// because every cell is exactly where its row and column say (技術検証 9.4).
+///
+/// Nothing in the binary calls this until the pane does, the same as
+/// [`crate::pty`]; the allow goes when the pane arrives.
+#[allow(dead_code)]
+pub mod cells {
+    use super::*;
+
+    // --- the terminal's cells (追加要件 Terminal) ---------------------------------
+    //
+    // **The same stack, a different layout.** Direct2D, DirectWrite, the render
+    // target and the pixels handed to Slint are the document's; what is not shared
+    // is the arrangement — a terminal has no blocks, no wrapping and no measuring,
+    // because every cell is exactly where its row and column say (技術検証 9.4).
+
+    /// How a terminal is set (要件 9 will own these; the defaults are here).
+    #[derive(Clone, Debug)]
+    pub struct TerminalLook {
+        /// A monospaced family. Anything else lays out fine and lines up wrong.
+        pub family: String,
+        pub font_size: f32,
+        /// Multiplier on the font's own line height. **Terminals are set tight** —
+        /// the grid is the reading aid, not the leading.
+        pub line_spacing: f32,
+        pub paper: [f32; 3],
+        pub ink: [f32; 3],
+        /// The 16 named colours, in the order SGR gives them: black, red, green,
+        /// yellow, blue, magenta, cyan, white, then the bright eight.
+        pub palette: [[f32; 3]; 16],
+    }
+
+    /// The 16 colours, mixed for this editor's ivory paper rather than for a black
+    /// screen: **the same hues, brought down far enough to be read on paper.**
+    const TERMINAL_PALETTE: [[f32; 3]; 16] = [
+        [0.20, 0.19, 0.18], // black — the paper's ink, near enough
+        [0.70, 0.16, 0.16], // red
+        [0.18, 0.45, 0.20], // green
+        [0.63, 0.45, 0.09], // yellow
+        [0.16, 0.32, 0.66], // blue
+        [0.53, 0.22, 0.62], // magenta
+        [0.11, 0.45, 0.48], // cyan
+        [0.42, 0.40, 0.37], // white (the dim one)
+        [0.42, 0.40, 0.37], // bright black
+        [0.83, 0.26, 0.24],
+        [0.24, 0.58, 0.27],
+        [0.76, 0.57, 0.15],
+        [0.24, 0.44, 0.80],
+        [0.65, 0.32, 0.74],
+        [0.16, 0.57, 0.60],
+        [0.20, 0.19, 0.18], // bright white — ink again, so bold text stays read
+    ];
+
+    impl Default for TerminalLook {
+        fn default() -> Self {
+            Self {
+                family: crate::text_blocks::DEFAULT_CODE_FONT.to_owned(),
+                font_size: 15.0,
+                line_spacing: 1.0,
+                paper: crate::text_blocks::DEFAULT_PAPER,
+                ink: DEFAULT_INK,
+                palette: TERMINAL_PALETTE,
+            }
+        }
+    }
+
+    /// One cell's size in pixels. **Everything about a terminal's geometry is these
+    /// two numbers**: how many columns fit, where a click lands, what the shell is
+    /// told its screen is.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub struct CellSize {
+        pub advance: f32,
+        pub line: f32,
+    }
+
+    impl CellSize {
+        /// The columns and rows a pane of this size holds. **At least one of each**:
+        /// a console of no size is one no program can draw on.
+        pub fn grid_for(&self, width: f32, height: f32) -> (usize, usize) {
+            let columns = (width / self.advance.max(1.0)).floor().max(1.0) as usize;
+            let rows = (height / self.line.max(1.0)).floor().max(1.0) as usize;
+            (columns, rows)
+        }
+    }
+
+    /// Measure the font the terminal is set in.
+    ///
+    /// **Measured, not assumed.** A family's advance is its own business, and the
+    /// writer chooses the family (要件 9). Ten digits are measured rather than one
+    /// character, so the answer is not one glyph's rounding.
+    pub fn terminal_cell_size(look: &TerminalLook) -> Result<CellSize> {
+        with_graphics(|graphics| {
+            let format = graphics.cell_format(look, false)?;
+            let utf16 = "0000000000".encode_utf16().collect::<Vec<u16>>();
+            // SAFETY: the buffer and the format outlive the call.
+            let layout = unsafe {
+                graphics
+                    .dwrite
+                    .CreateTextLayout(&utf16, &format, f32::MAX, f32::MAX)?
+            };
+            // SAFETY: the layout is alive for the call.
+            let metrics = unsafe {
+                let mut metrics = DWRITE_TEXT_METRICS::default();
+                layout.GetMetrics(&mut metrics)?;
+                metrics
+            };
+            let advance = (metrics.widthIncludingTrailingWhitespace / 10.0).max(1.0);
+            let line = (metrics.height * look.line_spacing.max(0.5)).max(1.0);
+            // **The advance is not rounded.** A run of cells is drawn as one string,
+            // so the font's own advance and the column pitch have to be the same
+            // number — round the pitch up and every character in the run lands a
+            // fraction of a pixel further left than its column, which by the end of
+            // a line is several columns' worth and puts a TUI's frame out of true.
+            // The line advance is rounded, because rows are drawn one at a time and
+            // nothing accumulates across them.
+            Ok(CellSize {
+                advance,
+                line: line.ceil(),
+            })
+        })
+    }
+
+    impl Graphics {
+        fn cell_format(&mut self, look: &TerminalLook, bold: bool) -> Result<IDWriteTextFormat> {
+            let size = look.font_size.max(1.0);
+            let key = (size.to_bits(), look.family.clone(), bold);
+            if let Some(format) = self.cell_formats.get(&key) {
+                return Ok(format.clone());
+            }
+            let family = HSTRING::from(look.family.as_str());
+            let weight = if bold {
+                DWRITE_FONT_WEIGHT_BOLD
+            } else {
+                DWRITE_FONT_WEIGHT_NORMAL
+            };
+            // SAFETY: the factory outlives this struct and the name outlives the call.
+            let format = unsafe {
+                self.dwrite.CreateTextFormat(
+                    &family,
+                    None,
+                    weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size,
+                    w!("ja-JP"),
+                )?
+            };
+            self.cell_formats.insert(key, format.clone());
+            Ok(format)
+        }
+    }
+
+    /// A colour the shell named, as pixels.
+    ///
+    /// **The 256-colour cube is arithmetic, not a table** — 16 named, then a 6×6×6
+    /// cube, then 24 greys. Writing the table out would be 240 numbers nobody could
+    /// check.
+    fn cell_colour(colour: CellColor, look: &TerminalLook, foreground: bool) -> [f32; 3] {
+        match colour {
+            CellColor::Default => {
+                if foreground {
+                    look.ink
+                } else {
+                    look.paper
+                }
+            }
+            CellColor::Rgb(red, green, blue) => [
+                red as f32 / 255.0,
+                green as f32 / 255.0,
+                blue as f32 / 255.0,
+            ],
+            CellColor::Indexed(index) => match index {
+                0..=15 => look.palette[index as usize],
+                16..=231 => {
+                    let index = index - 16;
+                    let step = |value: u8| {
+                        if value == 0 {
+                            0.0
+                        } else {
+                            (55.0 + value as f32 * 40.0) / 255.0
+                        }
+                    };
+                    [step(index / 36), step((index % 36) / 6), step(index % 6)]
+                }
+                _ => {
+                    let grey = (8 + (index as u32 - 232) * 10) as f32 / 255.0;
+                    [grey, grey, grey]
+                }
+            },
+        }
+    }
+
+    /// A run of cells drawn in one go: same attributes, and none of them wide.
+    struct CellRun {
+        column: usize,
+        columns: usize,
+        text: String,
+        attrs: CellAttrs,
+    }
+
+    /// Cut one row into runs.
+    ///
+    /// **Only plain ASCII joins a run; everything else is drawn one cell at a
+    /// time.** A run is laid out by DirectWrite with the font's own advances, and
+    /// the only font whose advance is the cell is the monospaced one the terminal
+    /// was set in. The moment a character falls back to another family — a kanji, a
+    /// box-drawing rule, an arrow — the run drifts out of its columns by the
+    /// difference, and a TUI's frame stops meeting itself. Placed by its own
+    /// column, a glyph of any width lands where the grid says it does.
+    ///
+    /// The spike drew `┌──┬──┐` with its uprights out of true before this rule was
+    /// here, which is how the rule was found.
+    fn cell_runs(line: &CellLine) -> Vec<CellRun> {
+        let mut runs: Vec<CellRun> = Vec::new();
+        for (column, cell) in line.cells.iter().enumerate() {
+            if cell.trailing {
+                continue;
+            }
+            let wide = character_width(cell.text) == 2;
+            let plain = |text: char| text.is_ascii() && !text.is_ascii_control();
+            let joins = plain(cell.text)
+                && !wide
+                && runs.last().is_some_and(|run| {
+                    run.attrs == cell.attrs
+                        && run.column + run.columns == column
+                        && run.text.chars().next_back().is_some_and(plain)
+                });
+            if joins {
+                let run = runs.last_mut().expect("checked above");
+                run.text.push(cell.text);
+                run.columns += 1;
+            } else {
+                runs.push(CellRun {
+                    column,
+                    columns: if wide { 2 } else { 1 },
+                    text: cell.text.to_string(),
+                    attrs: cell.attrs,
+                });
+            }
+        }
+        runs
+    }
+
+    /// Draw a terminal screen into `into` (BGRA, `width` × `height`).
+    ///
+    /// `cursor` is where the block caret goes, if it is showing. **The rows are
+    /// given rather than the screen** so that the same drawing serves the
+    /// scrollback, which is the same cells one screenful earlier.
+    pub fn draw_terminal(
+        lines: &[CellLine],
+        cursor: Option<(usize, usize)>,
+        look: &TerminalLook,
+        cell: CellSize,
+        into: &mut [u8],
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        with_graphics(|graphics| {
+            let plain = graphics.cell_format(look, false)?;
+            let bold = graphics.cell_format(look, true)?;
+            let (target, brush, bitmap) = {
+                let cache = graphics.render_target(width, height)?;
+                (
+                    cache.target.clone(),
+                    cache.brush.clone(),
+                    cache.bitmap.clone(),
+                )
+            };
+            // SAFETY: the target, brush and bitmap live as long as the cache entry,
+            // and BeginDraw/EndDraw are paired below.
+            unsafe {
+                target.BeginDraw();
+                target.Clear(Some(&colour(look.paper)));
+            }
+            for (row, line) in lines.iter().enumerate() {
+                let top = row as f32 * cell.line;
+                if top >= height as f32 {
+                    break;
+                }
+                for run in cell_runs(line) {
+                    let left = run.column as f32 * cell.advance;
+                    let right = left + run.columns as f32 * cell.advance;
+                    let rect = D2D_RECT_F {
+                        left,
+                        top,
+                        right,
+                        bottom: top + cell.line,
+                    };
+                    // 反転（SGR 7）は色を入れ替えるだけ。**解決してから入れ替える**
+                    // ので、既定の紙と墨も正しく裏返る。
+                    let mut foreground = cell_colour(run.attrs.foreground, look, true);
+                    let mut background = cell_colour(run.attrs.background, look, false);
+                    if run.attrs.reverse {
+                        std::mem::swap(&mut foreground, &mut background);
+                    }
+                    if run.attrs.faint {
+                        for channel in &mut foreground {
+                            *channel = *channel * 0.6 + look.paper[0] * 0.4;
+                        }
+                    }
+                    // SAFETY: the brush belongs to the target and the rect is read
+                    // before the call returns.
+                    unsafe {
+                        if background != look.paper {
+                            brush.SetColor(&colour(background));
+                            target.FillRectangle(&rect, &brush);
+                        }
+                        if run.attrs.hidden || run.text.trim().is_empty() {
+                            if run.attrs.underline {
+                                brush.SetColor(&colour(foreground));
+                                let line_rect = D2D_RECT_F {
+                                    top: top + cell.line - 2.0,
+                                    bottom: top + cell.line - 1.0,
+                                    ..rect
+                                };
+                                target.FillRectangle(&line_rect, &brush);
+                            }
+                            continue;
+                        }
+                        brush.SetColor(&colour(foreground));
+                        let utf16 = run.text.encode_utf16().collect::<Vec<u16>>();
+                        let format = if run.attrs.bold { &bold } else { &plain };
+                        // **A cell is not a line box.** The rectangle is the run's
+                        // own columns, so a glyph wider than its cell is clipped to
+                        // where the grid says it ends rather than pushing the row.
+                        target.DrawText(
+                            &utf16,
+                            format,
+                            &rect,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                        if run.attrs.underline {
+                            let line_rect = D2D_RECT_F {
+                                top: top + cell.line - 2.0,
+                                bottom: top + cell.line - 1.0,
+                                ..rect
+                            };
+                            target.FillRectangle(&line_rect, &brush);
+                        }
+                    }
+                }
+            }
+            if let Some((row, column)) = cursor {
+                let left = column as f32 * cell.advance;
+                let top = row as f32 * cell.line;
+                let rect = D2D_RECT_F {
+                    left,
+                    top,
+                    right: left + cell.advance,
+                    bottom: top + cell.line,
+                };
+                let under = lines
+                    .get(row)
+                    .and_then(|line| line.cells.get(column))
+                    .map(|cell| cell.text)
+                    .unwrap_or(' ');
+                // SAFETY: as above.
+                unsafe {
+                    brush.SetColor(&colour(look.ink));
+                    target.FillRectangle(&rect, &brush);
+                    if under != ' ' {
+                        // **The character under the block is drawn back in the
+                        // paper's colour**, so the caret never hides what it is on.
+                        brush.SetColor(&colour(look.paper));
+                        let utf16 = under.to_string().encode_utf16().collect::<Vec<u16>>();
+                        target.DrawText(
+                            &utf16,
+                            &plain,
+                            &rect,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
+                }
+            }
+            // SAFETY: paired with BeginDraw above.
+            unsafe { target.EndDraw(None, None)? };
+
+            let stride = width * 4;
+            let needed = stride as usize * height as usize;
+            let Some(pixels) = into.get_mut(..needed) else {
+                return Err(Error::new(
+                    E_FAIL,
+                    "the terminal buffer is smaller than the terminal",
+                ));
+            };
+            let rect = WICRect {
+                X: 0,
+                Y: 0,
+                Width: width as i32,
+                Height: height as i32,
+            };
+            // SAFETY: the rectangle lies inside the bitmap and the buffer matches
+            // the stride and height asked for.
+            unsafe {
+                let source: IWICBitmapSource = bitmap.cast()?;
+                source.CopyPixels(&rect, stride, pixels)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::cells::*;
+    use crate::terminal::Terminal;
+
+    /// The pixel columns that hold ink, as clusters of adjacent columns.
+    fn ink_columns(pixels: &[u8], width: u32, rows: std::ops::Range<u32>) -> Vec<(u32, u32)> {
+        let mut columns: Vec<u32> = Vec::new();
+        for row in rows {
+            for column in 0..width {
+                let at = ((row * width + column) * 4) as usize;
+                let (blue, green, red) = (pixels[at], pixels[at + 1], pixels[at + 2]);
+                if blue < 140 && green < 140 && red < 140 && !columns.contains(&column) {
+                    columns.push(column);
+                }
+            }
+        }
+        columns.sort_unstable();
+        let mut clusters: Vec<(u32, u32)> = Vec::new();
+        for column in columns {
+            match clusters.last_mut() {
+                Some(last) if column == last.1 + 1 => last.1 = column,
+                _ => clusters.push((column, column)),
+            }
+        }
+        clusters
+    }
+
+    fn draw(it: &Terminal, look: &TerminalLook, cell: CellSize) -> (Vec<u8>, u32, u32) {
+        let width = (it.screen.columns() as f32 * cell.advance).ceil() as u32;
+        let height = (it.screen.rows() as f32 * cell.line).ceil() as u32;
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        draw_terminal(
+            it.screen.lines(),
+            None,
+            look,
+            cell,
+            &mut pixels,
+            width,
+            height,
+        )
+        .expect("draw the terminal");
+        (pixels, width, height)
+    }
+
+    /// **The one thing a terminal cannot get slightly wrong.**
+    ///
+    /// A run of cells is handed to DirectWrite as a string, and it lays that
+    /// string out with the font's advances rather than with the grid's. If the
+    /// two differ at all, the difference multiplies by the length of the run —
+    /// so the last character of a 40-column run has to land exactly where the
+    /// same character lands when it is the only thing on its line.
+    #[test]
+    fn a_long_run_lands_on_the_same_columns_as_a_single_character() {
+        let look = TerminalLook::default();
+        let cell = terminal_cell_size(&look).expect("measure the cell");
+        let mut it = Terminal::new(48, 3);
+        it.feed(b"########################################\r\n");
+        it.feed(b"\x1b[40G#");
+        let (pixels, width, _) = draw(&it, &look, cell);
+        let row = cell.line as u32;
+        let in_run = *ink_columns(&pixels, width, 0..row)
+            .last()
+            .expect("the run drew something");
+        let alone = ink_columns(&pixels, width, row..row * 2);
+        assert_eq!(
+            alone.len(),
+            1,
+            "only one character was written on the second line"
+        );
+        assert_eq!(
+            in_run, alone[0],
+            "the 40th character of a run drifted out of its column"
+        );
+    }
+
+    /// Reverse video (SGR 7) is the shell's way of showing a selection, and it
+    /// has to paint the cell, not just the glyph.
+    #[test]
+    fn reverse_video_paints_the_cell_behind_the_character() {
+        let look = TerminalLook::default();
+        let cell = terminal_cell_size(&look).expect("measure the cell");
+        let mut it = Terminal::new(8, 2);
+        it.feed(b"\x1b[7m  \x1b[m");
+        let (pixels, width, _) = draw(&it, &look, cell);
+        let corner = ((1 * width + 1) * 4) as usize;
+        let (blue, green, red) = (pixels[corner], pixels[corner + 1], pixels[corner + 2]);
+        assert!(
+            blue < 140 && green < 140 && red < 140,
+            "the cell behind reversed spaces is still paper ({red},{green},{blue})"
+        );
     }
 }
