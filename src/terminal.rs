@@ -37,7 +37,7 @@ use std::collections::VecDeque;
 /// and which green that is belongs to the display settings (要件9), not to the
 /// stream. Keeping the name means a palette change repaints correctly instead of
 /// needing the last screenful re-parsed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Color {
     #[default]
     Default,
@@ -46,7 +46,7 @@ pub enum Color {
 }
 
 /// Everything about a cell except which character it holds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Attrs {
     pub foreground: Color,
     pub background: Color,
@@ -69,7 +69,7 @@ pub struct Attrs {
 /// cells: the character sits in the first and the second is a [`Cell::trailing`]
 /// spacer. **The spacer is a real cell**, not an absence — the cursor can be put
 /// on it, and erasing either half has to clear both.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Cell {
     pub text: char,
     pub attrs: Attrs,
@@ -102,7 +102,7 @@ impl Cell {
 }
 
 /// One row of cells.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Line {
     pub cells: Vec<Cell>,
     /// The line ran off the right edge and continues on the next one.
@@ -205,6 +205,14 @@ pub struct Screen {
     modes: Modes,
     title: String,
     replies: Vec<u8>,
+    /// Sequences that arrived and were not acted on, each with a count.
+    ///
+    /// **This is what answers "the screen is wrong".** A terminal that meets
+    /// something it does not implement draws something plausible and wrong, and
+    /// from the outside that looks exactly like a bug in the drawing. Written
+    /// down, the question becomes a list. Bounded, because an unimplemented
+    /// sequence in a redraw loop arrives thousands of times.
+    unhandled: Vec<(String, u32)>,
     /// Bumped whenever anything visible changes, so a pane can tell in one
     /// comparison whether it has to draw. **Cheaper than diffing the grid** and
     /// exactly as accurate for the question "is what I drew still current".
@@ -230,6 +238,7 @@ impl Screen {
             modes: Modes::default(),
             title: String::new(),
             replies: Vec::new(),
+            unhandled: Vec::new(),
             revision: 0,
         }
     }
@@ -282,6 +291,25 @@ impl Screen {
     /// The row as a reader sees it. For tests and for copying.
     pub fn row_text(&self, row: usize) -> String {
         self.lines.get(row).map(Line::text).unwrap_or_default()
+    }
+
+    /// What arrived that this does not implement, most common first.
+    pub fn unhandled(&self) -> Vec<(String, u32)> {
+        let mut seen = self.unhandled.clone();
+        seen.sort_by(|left, right| right.1.cmp(&left.1));
+        seen
+    }
+
+    fn note_unhandled(&mut self, what: String) {
+        if let Some(entry) = self.unhandled.iter_mut().find(|(seen, _)| *seen == what) {
+            entry.1 += 1;
+            return;
+        }
+        // A cap, so that a stream of nonsense cannot grow this without bound.
+        // The first sixteen are the ones worth reading anyway.
+        if self.unhandled.len() < 16 {
+            self.unhandled.push((what, 1));
+        }
     }
 
     fn touch(&mut self) {
@@ -740,7 +768,7 @@ impl Screen {
             1049 => self.use_alternate_screen(on),
             2004 => self.modes.bracketed_paste = on,
             9001 => self.modes.win32_input = on,
-            _ => {}
+            _ => self.note_unhandled(format!("CSI ?{mode}{}", if on { 'h' } else { 'l' })),
         }
     }
 
@@ -975,9 +1003,9 @@ impl Parser {
             }
             b'M' => screen.reverse_index(),
             b'c' => screen.reset(),
-            // `ESC =` / `ESC >` (keypad modes) and anything else: nothing here
-            // has a screen to change.
-            _ => {}
+            // `ESC =` / `ESC >` (keypad modes) change nothing on the screen.
+            b'=' | b'>' | b'\\' => {}
+            other => screen.note_unhandled(format!("ESC {}", char::from(other))),
         }
     }
 
@@ -1104,7 +1132,12 @@ impl Parser {
                     _ => screen.tab_stops[column] = false,
                 }
             }
-            _ => {}
+            final_byte => screen.note_unhandled(format!(
+                "CSI {}{}{}",
+                self.private.map(char::from).unwrap_or(' '),
+                self.intermediate.map(char::from).unwrap_or(' '),
+                char::from(final_byte)
+            )),
         }
     }
 

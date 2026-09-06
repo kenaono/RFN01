@@ -271,3 +271,54 @@ mod tests {
         assert!(seen, "what it printed before exiting is gone");
     }
 }
+
+#[cfg(test)]
+mod running_a_program {
+    use super::*;
+    use std::time::Instant;
+
+    /// **道具**：本物の全画面プログラムを走らせて、升目に何が立ったかと、
+    /// 解析器が知らなかった列を出す。
+    ///
+    /// 「画面が崩れる」に答えるのはこれである——崩れているのが升目なのか
+    /// 描画なのかは、升目を字で見れば分かる。`#[ignore]`は本物のシェルが
+    /// 要るからで、遅いからではない。
+    ///
+    /// ```text
+    /// PTY_SHELL="wsl.exe -- vim /etc/hostname" PTY_COLUMNS=80 PTY_ROWS=24 \
+    ///   cargo test --offline a_full_screen_program -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn a_full_screen_program_lands_on_the_screen() {
+        let command =
+            std::env::var("PTY_SHELL").unwrap_or_else(|_| "wsl.exe -- top -n 2 -d 1 -b".to_owned());
+        let columns: usize = std::env::var("PTY_COLUMNS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(100);
+        let rows: usize = std::env::var("PTY_ROWS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(30);
+        let patience: u64 = std::env::var("PTY_WAIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8);
+        let mut session =
+            TerminalSession::start(&command, columns, rows, || {}).expect("open the shell");
+        let waited = Instant::now();
+        while waited.elapsed() < Duration::from_secs(patience) {
+            session.wait(Duration::from_millis(200));
+        }
+        println!("--- {columns}x{rows} {command} ---");
+        for row in 0..rows {
+            println!("{row:>3}|{}", session.screen().row_text(row));
+        }
+        println!("--- cursor {:?} ---", session.screen().cursor());
+        println!("--- unhandled ---");
+        for (what, times) in session.screen().unhandled() {
+            println!("  {what} ×{times}");
+        }
+    }
+}

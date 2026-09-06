@@ -48,6 +48,7 @@ use slint::{
     Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
 use std::collections::{BTreeSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use terminal::{Key as TerminalKey, Modifiers as TerminalModifiers};
 use terminal_session::TerminalSession;
 use text_blocks::{
@@ -65,6 +66,12 @@ slint::include_modules!();
 /// current directory, and **starts it if it is not running** — which is what the
 /// requirement asks for, done by the thing that knows how.
 const TERMINAL_SHELL: &str = "wsl.exe";
+
+/// How long the window waits before drawing what a shell wrote.
+///
+/// **One frame.** Long enough that a burst of output is drawn once, short
+/// enough that nobody sees the wait.
+const TERMINAL_FRAME_MS: u64 = 16;
 
 /// What a terminal tab is called. **The shell, not 無題** — the document behind
 /// it is a stand-in nobody is writing in.
@@ -914,7 +921,34 @@ struct Pane {
     /// (要件 7.2's four modes belong to the tab), so a pane has to be able to
     /// change, and this is what it is changing from.
     mode: WritingMode,
+    /// The shell's screen, drawn in bands of rows (追加要件 Terminal).
+    ///
+    /// **A terminal repaints everywhere at once, and most of it is unchanged.**
+    /// One image of the whole screen costs 15ms to draw and 9MB to hand to the
+    /// renderer at the size a maximized pane asks for — and that is paid per
+    /// chunk of output, which is far more often than once a frame. Cut into
+    /// bands and keyed by what is in them, a keystroke redraws the one band it
+    /// touched.
+    terminal_bands: TerminalBands,
 }
+
+/// The images a terminal pane is showing, and the geometry they were drawn for.
+#[derive(Default)]
+struct TerminalBands {
+    /// Columns, rows and the cell size. **Any of them moving invalidates every
+    /// band**, because each of them changes where every cell is.
+    shape: Option<(usize, usize, u32, u32)>,
+    /// One per band: what was in it when it was drawn, and the image of it.
+    bands: Vec<(u64, Image)>,
+}
+
+/// How many rows one band holds.
+///
+/// **Eight is a compromise between two costs.** A band is the smallest thing
+/// that can be redrawn, so fewer rows means less work per keystroke; but every
+/// band is an image the renderer uploads on its own, and a screen cut into
+/// eighty of them is eighty textures for a scroll that changes all of them.
+const TERMINAL_BAND_ROWS: usize = 8;
 
 impl Pane {
     fn new(mode: WritingMode) -> Self {
@@ -923,6 +957,7 @@ impl Pane {
             view: PaneView::default(),
             mode,
             terminal: None,
+            terminal_bands: TerminalBands::default(),
         }
     }
 
@@ -2582,12 +2617,34 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // **Rung from the reading thread** (要件 2), and all it says is that
     // something arrived.
+    //
+    // **Not drawn on the spot.** A program redrawing itself sends its frame in
+    // whatever pieces the pipe hands over, and drawing at each of them costs a
+    // frame's work for a fraction of a frame's change — and shows the half of
+    // the picture that has arrived. One wait of a frame's length gathers the
+    // rest, and `drain` applies all of it before anything is drawn.
     let weak = window.as_weak();
     let woken_live = live.clone();
+    let paint = Rc::new(Timer::default());
+    let painting = Rc::new(Cell::new(false));
     window.on_terminal_woken(move || {
-        if let Some(window) = weak.upgrade() {
-            refresh_terminal_panes(&window, &woken_live);
+        if painting.get() {
+            return;
         }
+        painting.set(true);
+        let weak = weak.clone();
+        let live = woken_live.clone();
+        let painting = painting.clone();
+        paint.start(
+            TimerMode::SingleShot,
+            Duration::from_millis(TERMINAL_FRAME_MS),
+            move || {
+                painting.set(false);
+                if let Some(window) = weak.upgrade() {
+                    refresh_terminal_panes(&window, &live);
+                }
+            },
+        );
     });
 
     let weak = window.as_weak();
@@ -8511,9 +8568,13 @@ fn lay_out_pane(
 /// **The pane is told its size in cells before anything is drawn**, because the
 /// shell draws for the screen it was told about: a prompt redrawn for 80 columns
 /// on a pane that holds 60 wraps in the wrong place, and nothing later can undo
-/// it. Then everything waiting is applied, and the whole grid is drawn as one
-/// image — a terminal has no blocks to cut tiles from, and its cells change
-/// everywhere at once (a scroll moves every row).
+/// it. Then everything waiting is applied.
+///
+/// **The drawing is by bands, and a band nothing touched is not drawn.** A full
+/// screen at the size of a maximized pane costs 15ms and nine megabytes of
+/// texture (measured, 181×85); paying that for every chunk of output is what
+/// makes a program that redraws itself look broken rather than slow. Each band
+/// is keyed by what is in it, so a keystroke redraws one.
 fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id: PaneId) {
     let Some(session) = cache.borrow_mut().pane(id).terminal.clone() else {
         return;
@@ -8526,52 +8587,106 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
     let mut session = session.borrow_mut();
     session.resize(columns, rows);
     session.drain();
+    let screen = session.screen();
     let width = (columns as f32 * cell.advance).ceil().max(1.0) as u32;
-    let height = (rows as f32 * cell.line).ceil().max(1.0) as u32;
-    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    let line = cell.line.max(1.0);
     // 要件 7.1 の意味でのキャレットではない。**シェルが隠せと言えば隠す**もので、
     // 全画面のプログラムは自分で消して自分で描く。
-    let cursor = session.screen().modes().cursor_visible.then(|| {
-        let at = session.screen().cursor();
+    let cursor = screen.modes().cursor_visible.then(|| {
+        let at = screen.cursor();
         (at.row, at.column)
     });
-    let drawn = cells::draw_terminal(
-        session.screen().lines(),
-        cursor,
-        &look,
-        cell,
-        pixels.make_mut_bytes(),
-        width,
-        height,
-    );
-    if let Err(error) = drawn {
-        cache
-            .borrow_mut()
-            .log_diag("terminal", &format!("draw pane={} {error}", id.log_name()));
-        return;
+
+    let shape = (columns, rows, cell.advance.to_bits(), cell.line.to_bits());
+    {
+        let mut borrowed = cache.borrow_mut();
+        let bands = &mut borrowed.pane(id).terminal_bands;
+        if bands.shape != Some(shape) {
+            bands.shape = Some(shape);
+            bands.bands.clear();
+        }
+        bands
+            .bands
+            .resize(rows.div_ceil(TERMINAL_BAND_ROWS), (0, Image::default()));
     }
-    // The bitmap holds BGRA and Slint wants RGBA, swapped where it lies for the
-    // reason the tiles swap theirs.
-    for four in pixels.make_mut_bytes().chunks_exact_mut(4) {
-        four.swap(0, 2);
-    }
-    let image = Image::from_rgba8(pixels);
-    id.set_tiles(
-        window,
-        vec![PreviewTile {
+
+    let mut tiles: Vec<PreviewTile> = Vec::new();
+    for band in 0..rows.div_ceil(TERMINAL_BAND_ROWS) {
+        let first = band * TERMINAL_BAND_ROWS;
+        let last = (first + TERMINAL_BAND_ROWS).min(rows);
+        let lines = &screen.lines()[first..last.min(screen.lines().len())];
+        if lines.is_empty() {
+            continue;
+        }
+        let inside = cursor.filter(|(row, _)| (first..last).contains(row));
+        let signature = {
+            let mut hasher = DefaultHasher::new();
+            lines.hash(&mut hasher);
+            inside
+                .map(|(row, column)| (row - first, column))
+                .hash(&mut hasher);
+            hasher.finish()
+        };
+        let height = (lines.len() as f32 * line).ceil().max(1.0) as u32;
+        let held = {
+            let mut borrowed = cache.borrow_mut();
+            borrowed.pane(id).terminal_bands.bands.get(band).cloned()
+        };
+        let image = match held {
+            // **The same cells drawn the same way**: nothing to do but place it
+            // again, which costs one property assignment.
+            Some((was, image)) if was == signature && image.size().width == width => image,
+            _ => {
+                let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+                let painted = cells::draw_terminal(
+                    lines,
+                    inside.map(|(row, column)| (row - first, column)),
+                    &look,
+                    cell,
+                    pixels.make_mut_bytes(),
+                    width,
+                    height,
+                );
+                if let Err(error) = painted {
+                    cache
+                        .borrow_mut()
+                        .log_diag("terminal", &format!("draw pane={} {error}", id.log_name()));
+                    return;
+                }
+                // The bitmap holds BGRA and Slint wants RGBA, swapped where it
+                // lies for the reason the document's tiles swap theirs.
+                for four in pixels.make_mut_bytes().chunks_exact_mut(4) {
+                    four.swap(0, 2);
+                }
+                let image = Image::from_rgba8(pixels);
+                if let Some(slot) = cache
+                    .borrow_mut()
+                    .pane(id)
+                    .terminal_bands
+                    .bands
+                    .get_mut(band)
+                {
+                    *slot = (signature, image.clone());
+                }
+                image
+            }
+        };
+        tiles.push(PreviewTile {
             x: 0,
-            y: 0,
+            y: (first as f32 * line) as i32,
             width: width as i32,
             height: height as i32,
             source: image,
-        }],
-    );
+        });
+    }
+    let height = (rows as f32 * line).ceil().max(1.0) as i32;
+    id.set_tiles(window, tiles);
     id.set_selection(window, &[]);
     id.set_caret(window, None);
     id.update_screen(window, |screen| {
         screen.terminal = true;
         screen.content_width = width as i32;
-        screen.content_height = height as i32;
+        screen.content_height = height;
     });
 }
 
