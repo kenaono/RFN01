@@ -1,5 +1,6 @@
 import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo } from "editor-pane.slint";
+import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
 import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
 import { QuickDraft } from "quick-draft.slint";
@@ -404,6 +405,10 @@ export component AppWindow inherits Window {
     /// the keyboard, and neither is "the window".
     callback pane-zoom(int, int);
     callback pane-zoom-reset(int);
+    /// 追加要件 2026-09-06: the zoom, straight to a number (the bar in the
+    /// status bar). **A percentage, not notches** — the bar knows where it was
+    /// put, and turning that into steps and back would round twice.
+    callback pane-zoom-set(int, int);
     /// Move one of 要件 9's numbers. **The first argument says which**, in the
     /// order the panel draws them: 0 body size, 1 line height, 2 char spacing,
     /// 3 column gap, 4 to 9 the six heading levels. One callback rather than
@@ -884,18 +889,70 @@ export component AppWindow inherits Window {
                                     root.focus-generation += 1;
                                 }
                             }
+                            // 追加要件 2026-09-06: **the `+` asks what kind**,
+                            // the same three-way question the tab strip's `+`
+                            // asks — a file, a shell, or a folder.
                             if root.work-folder != "": IconButton {
                                 icon: Icons.plus;
-                                tip: "New File";
+                                tip: "New";
                                 clicked => {
-                                    root.tree-command(0);
+                                    tree-plus-menu.show();
                                 }
                             }
+                            // **Not inside an `if`.** A conditional element is
+                            // a repeater, and nothing outside a repeater can
+                            // reach an id inside it (技術検証 6.24) — the button
+                            // above would have no menu to open. A popup takes no
+                            // room, so standing here always costs nothing.
+                            tree-plus-menu := PopupWindow {
+                                x: -150px;
+                                y: 26px;
+                                width: 220px;
+                                close-policy: close-on-click-outside;
+
+                                MenuFrame {
+                                    width: 220px;
+
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        spacing: 1px;
+
+                                        MenuRow {
+                                            title: "New File…";
+                                            activated => {
+                                                tree-plus-menu.close();
+                                                root.tree-command(0);
+                                            }
+                                        }
+                                        MenuRow {
+                                            title: "New Terminal";
+                                            activated => {
+                                                tree-plus-menu.close();
+                                                root.terminal-requested(0);
+                                                root.focus-generation += 1;
+                                            }
+                                        }
+                                        MenuRow {
+                                            title: "New Folder…";
+                                            activated => {
+                                                tree-plus-menu.close();
+                                                root.tree-command(1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // **The folder button opens a folder** (追加要件
+                            // 2026-09-06). Making a folder moved into the `+`
+                            // beside it, where the other two "new" rows are; a
+                            // button that made one and a button that opened one
+                            // wore the same icon and did opposite things.
                             if root.work-folder != "": IconButton {
                                 icon: Icons.folder;
-                                tip: "New Folder";
+                                tip: "Open Folder";
                                 clicked => {
-                                    root.tree-command(1);
+                                    root.work-folder-requested();
+                                    root.focus-generation += 1;
                                 }
                             }
                         }
@@ -1806,12 +1863,87 @@ export component AppWindow inherits Window {
                 // 要件 9: the zoom belongs to a pane now, so the bar shows
                 // the focused pane's — the bar is about what the writer is
                 // working in, the same as the counts to its left.
-                Text {
-                    text: root.panes[root.focused-pane].zoom + "%";
-                    color: Tok.ink-muted;
-                    font-size: 12px;
-                    vertical-alignment: center;
+                // 追加要件 2026-09-06: **the number opens the bar that moves
+                // it.** It was a readout; a writer who wants 130% had to press
+                // Ctrl+= three times or find the pane's menu.
+                Rectangle {
+                    width: zoom-text.preferred-width + 12px;
                     horizontal-stretch: 0;
+                    background: zoom-touch.has-hover ? Tok.chrome-raised : transparent;
+                    border-radius: 4px;
+
+                    zoom-text := Text {
+                        x: 6px;
+                        y: (parent.height - self.height) / 2;
+                        text: root.panes[root.focused-pane].zoom + "%";
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                    }
+
+                    zoom-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            zoom-menu.show();
+                        }
+                    }
+                }
+
+                zoom-menu := PopupWindow {
+                    // Above the bar it hangs from, and to the left of the edge:
+                    // the status bar is at the foot of the window, so a popup
+                    // below it would be off the screen.
+                    x: -168px;
+                    y: -74px;
+                    width: 224px;
+                    close-policy: close-on-click-outside;
+
+                    MenuFrame {
+                        width: 224px;
+
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 6px;
+
+                            HorizontalLayout {
+                                Text {
+                                    text: "Zoom";
+                                    color: Tok.ink-muted;
+                                    font-size: 12px;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: root.panes[root.focused-pane].zoom + "%";
+                                    color: Tok.ink;
+                                    font-size: 12px;
+                                    horizontal-stretch: 0;
+                                }
+                            }
+
+                            Slider {
+                                minimum: 50;
+                                maximum: 240;
+                                value: root.panes[root.focused-pane].zoom;
+                                // **Ten at a time**, the step the keys and the
+                                // wheel already move by (要件 11.5): the same
+                                // number should be reachable whichever way the
+                                // writer moves it.
+                                moved(percent) => {
+                                    root.pane-zoom-set(
+                                        root.focused-pane,
+                                        round(percent / 10) * 10);
+                                }
+                            }
+
+                            TextButton {
+                                title: "Reset to 100%";
+                                clicked => {
+                                    zoom-menu.close();
+                                    root.pane-zoom-reset(root.focused-pane);
+                                    root.focus-generation += 1;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // How the editing area is divided, in the one place that is

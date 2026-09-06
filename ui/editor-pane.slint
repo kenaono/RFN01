@@ -737,13 +737,57 @@ export component EditorPane inherits Rectangle {
                 HorizontalLayout {
                     spacing: 2px;
 
+                    // 追加要件 2026-09-06: **the `+` asks what kind.** A tab is
+                    // three things now — a file, a shell, or one already on
+                    // disk — and a button that could only make one of them
+                    // would be a button that has to be explained.
                     IconButton {
                         icon: Icons.plus;
                         tip: "New Tab";
                         clicked => {
-                            root.new-tab-requested();
+                            root.menu-opened();
+                            plus-menu.show();
                         }
                     }
+                    plus-menu := PopupWindow {
+                        x: -180px;
+                        y: 26px;
+                        width: 220px;
+                        close-policy: close-on-click-outside;
+
+                        MenuFrame {
+                            width: 220px;
+
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 1px;
+
+                                MenuRow {
+                                    title: "New File";
+                                    activated => {
+                                        plus-menu.close();
+                                        root.new-tab-requested();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "New Terminal";
+                                    activated => {
+                                        plus-menu.close();
+                                        root.terminal-requested();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "Open File…";
+                                    shortcut: "Ctrl+O";
+                                    activated => {
+                                        plus-menu.close();
+                                        root.open-file-requested();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     IconButton {
                         icon: Icons.down;
                         tip: "All Tabs";

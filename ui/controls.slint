@@ -1036,3 +1036,71 @@ export component MenuFrame inherits Rectangle {
 
     @children
 }
+
+/// A bar the writer drags a number along (追加要件 2026-09-06: 右下の倍率).
+///
+/// **Built here rather than taken from `std-widgets`.** Everything in this
+/// window is drawn from `Tok`, and a widget carrying the system's own style
+/// would be the one thing on screen that belongs to a different design.
+export component Slider inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <float> value: 50;
+    /// The writer moved it. **Reported rather than applied** — what the number
+    /// means belongs to whoever asked for the bar.
+    callback moved(float);
+
+    height: 22px;
+    // The travel is the track minus the handle: the handle's own width is the
+    // part of the bar it can never reach past.
+    property <length> grip: 14px;
+    property <float> span: max(0.001, root.maximum - root.minimum);
+    property <float> fraction: clamp((root.value - root.minimum) / root.span, 0.0, 1.0);
+
+    Rectangle {
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        width: parent.width;
+        background: Tok.rule;
+        border-radius: 2px;
+
+        Rectangle {
+            x: 0;
+            width: parent.width * root.fraction;
+            height: parent.height;
+            background: Tok.accent-soft;
+            border-radius: 2px;
+        }
+    }
+
+    Rectangle {
+        x: (parent.width - root.grip) * root.fraction;
+        y: (parent.height - root.grip) / 2;
+        width: root.grip;
+        height: root.grip;
+        border-radius: root.grip / 2;
+        background: touch.pressed || touch.has-hover ? Tok.accent-strong : Tok.accent;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        // **The press moves it too**, so a writer can put the number where they
+        // are pointing rather than having to find the handle first.
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left
+                && event.kind == PointerEventKind.down) {
+                root.moved(root.at(self.mouse-x));
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.moved(root.at(self.mouse-x));
+            }
+        }
+    }
+
+    pure function at(x: length) -> float {
+        return root.minimum
+            + root.span * clamp((x - root.grip / 2) / max(1px, root.width - root.grip), 0.0, 1.0);
+    }
+}

@@ -2548,6 +2548,17 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
+    window.on_pane_zoom_set(move |pane, percent| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            zoom_pane(&window, &states, &cache, &timer, id, percent);
+        }
+    });
+
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    let timer = spec_timer.clone();
     window.on_pane_zoom_reset(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
