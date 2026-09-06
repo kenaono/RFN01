@@ -3157,10 +3157,15 @@ impl Live {
         // The direction first: everything below is in a screen axis, and which
         // axis that is comes from the tab (要件 7.2).
         set_pane_direction(window, &self.cache, id, tab.view.vertical);
-        // **What the pane is showing, told to the pane.** Every path that draws
-        // reaches `refresh_pane`, and none of them carries a tab; this is the
-        // one place a tab and a pane are both in hand (追加要件 Terminal).
+        // **What the pane is showing, told to the pane — twice, because two
+        // sides ask.** Every path that draws reaches `refresh_pane` and none of
+        // them carries a tab, so the render cache is told; and the keyboard is
+        // the window's, so the row is told as well. Saying it in only one of
+        // them is what made the first terminal draw its prompt and then send
+        // every key to the document behind it (追加要件 Terminal).
+        let showing_shell = tab.terminal.is_some();
         self.cache.borrow_mut().pane(id).terminal = tab.terminal.clone();
+        id.update_screen(window, |screen| screen.terminal = showing_shell);
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
         id.set_scroll(window, tab.view.scroll);
         // The passage this tab was left at. **A tab switch has the same problem
@@ -8564,6 +8569,7 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
     id.set_selection(window, &[]);
     id.set_caret(window, None);
     id.update_screen(window, |screen| {
+        screen.terminal = true;
         screen.content_width = width as i32;
         screen.content_height = height as i32;
     });
@@ -8687,7 +8693,19 @@ fn send_terminal_key(
         alt,
         control,
     };
-    session.borrow_mut().send_key(key, modifiers);
+    let sent = {
+        let mut session = session.borrow_mut();
+        session.send_key(key, modifiers);
+        session.screen().modes()
+    };
+    live.cache.borrow_mut().log_diag(
+        "terminal",
+        &format!(
+            "key pane={} code={code} ctrl={control} alt={alt} shift={shift} app_keys={}",
+            id.log_name(),
+            sent.application_cursor_keys
+        ),
+    );
     refresh_terminal_pane(window, &live.cache, id);
 }
 
