@@ -1151,6 +1151,213 @@ impl Terminal {
     }
 }
 
+// --- the other direction: keys to bytes ------------------------------------
+
+/// A key as the pane knows it, before it is anything the shell can read.
+///
+/// **The pane must not encode keys itself.** What a key becomes depends on modes
+/// the *shell* set (`ESC[?1h` changes every arrow key), and those live here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Key {
+    Char(char),
+    Enter,
+    Tab,
+    Backspace,
+    Escape,
+    Up,
+    Down,
+    Right,
+    Left,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    Delete,
+    /// F1 is 1.
+    Function(u8),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub control: bool,
+}
+
+impl Modifiers {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn control() -> Self {
+        Self {
+            control: true,
+            ..Self::default()
+        }
+    }
+
+    /// The number a CSI sequence carries to say which modifiers were held.
+    /// **1 means none**, and the three bits are added to it.
+    fn code(self) -> u8 {
+        1 + u8::from(self.shift) + 2 * u8::from(self.alt) + 4 * u8::from(self.control)
+    }
+
+    fn any(self) -> bool {
+        self.shift || self.alt || self.control
+    }
+}
+
+/// What to send up the pty for a keystroke.
+///
+/// **Alt is a prefix, not a modifier**: historically the terminal sent `ESC`
+/// and then the key, and every shell still reads it that way — which is also
+/// why `Alt` and pressing Escape first are the same thing to the program.
+pub fn encode_key(key: Key, modifiers: Modifiers, modes: Modes) -> Vec<u8> {
+    let mut out = Vec::new();
+    let alt_prefix = |out: &mut Vec<u8>| {
+        if modifiers.alt {
+            out.push(0x1b);
+        }
+    };
+    match key {
+        Key::Char(text) => {
+            alt_prefix(&mut out);
+            if modifiers.control {
+                if let Some(byte) = control_byte(text) {
+                    out.push(byte);
+                    return out;
+                }
+            }
+            let mut buffer = [0_u8; 4];
+            out.extend_from_slice(text.encode_utf8(&mut buffer).as_bytes());
+        }
+        Key::Enter => {
+            alt_prefix(&mut out);
+            // **`\r`, not `\n`.** The shell's line discipline turns the return
+            // into a newline; sending the newline is sending what the shell was
+            // about to produce, and programs reading raw see a key nobody pressed.
+            out.push(b'\r');
+        }
+        Key::Tab => {
+            if modifiers.shift {
+                out.extend_from_slice(b"\x1b[Z");
+            } else {
+                alt_prefix(&mut out);
+                out.push(b'\t');
+            }
+        }
+        Key::Backspace => {
+            alt_prefix(&mut out);
+            // DEL, which is what every unix terminal has sent for decades;
+            // `stty erase` is set to match it.
+            out.push(if modifiers.control { 0x08 } else { 0x7f });
+        }
+        Key::Escape => {
+            alt_prefix(&mut out);
+            out.push(0x1b);
+        }
+        Key::Up | Key::Down | Key::Right | Key::Left | Key::Home | Key::End => {
+            let final_byte = match key {
+                Key::Up => b'A',
+                Key::Down => b'B',
+                Key::Right => b'C',
+                Key::Left => b'D',
+                Key::Home => b'H',
+                _ => b'F',
+            };
+            if modifiers.any() {
+                // With a modifier the sequence always takes the CSI form, even
+                // in application mode: `ESC O` has nowhere to put the number.
+                out.extend_from_slice(format!("\x1b[1;{}", modifiers.code()).as_bytes());
+                out.push(final_byte);
+            } else if modes.application_cursor_keys {
+                out.extend_from_slice(b"\x1bO");
+                out.push(final_byte);
+            } else {
+                out.extend_from_slice(b"\x1b[");
+                out.push(final_byte);
+            }
+        }
+        Key::Insert | Key::Delete | Key::PageUp | Key::PageDown => {
+            let number = match key {
+                Key::Insert => 2,
+                Key::Delete => 3,
+                Key::PageUp => 5,
+                _ => 6,
+            };
+            out.extend_from_slice(&tilde_sequence(number, modifiers));
+        }
+        Key::Function(number) => {
+            let sequence: Vec<u8> = match number {
+                1..=4 if !modifiers.any() => {
+                    let mut bytes = b"\x1bO".to_vec();
+                    bytes.push(b'P' + (number - 1));
+                    bytes
+                }
+                1..=4 => {
+                    let mut bytes = format!("\x1b[1;{}", modifiers.code()).into_bytes();
+                    bytes.push(b'P' + (number - 1));
+                    bytes
+                }
+                5..=12 => {
+                    // The numbers are not contiguous, and never have been.
+                    let code = [15, 17, 18, 19, 20, 21, 23, 24][(number - 5) as usize];
+                    tilde_sequence(code, modifiers)
+                }
+                _ => Vec::new(),
+            };
+            out.extend_from_slice(&sequence);
+        }
+    }
+    out
+}
+
+fn tilde_sequence(number: u16, modifiers: Modifiers) -> Vec<u8> {
+    if modifiers.any() {
+        format!("\x1b[{};{}~", number, modifiers.code()).into_bytes()
+    } else {
+        format!("\x1b[{number}~").into_bytes()
+    }
+}
+
+/// The control character a letter makes when Ctrl is held.
+fn control_byte(text: char) -> Option<u8> {
+    let code = text as u32;
+    match text {
+        'a'..='z' => Some((code - 0x60) as u8),
+        'A'..='Z' => Some((code - 0x40) as u8),
+        '@' | ' ' => Some(0),
+        '[' => Some(0x1b),
+        '\\' => Some(0x1c),
+        ']' => Some(0x1d),
+        '^' => Some(0x1e),
+        '_' | '/' => Some(0x1f),
+        '?' => Some(0x7f),
+        _ => None,
+    }
+}
+
+/// Text pasted into the pane, in the form the shell asked to receive it.
+///
+/// **Bracketed paste is what stops a pasted newline from running a command.**
+/// With the markers the shell knows the text was pasted and holds it; without
+/// them — and the shell says which by turning `ESC[?2004h` on and off — every
+/// line break in the clipboard is a return key.
+pub fn encode_paste(text: &str, modes: Modes) -> Vec<u8> {
+    // A paste carries the line endings of wherever it came from; the shell
+    // wants returns.
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    if modes.bracketed_paste {
+        let mut out = b"\x1b[200~".to_vec();
+        out.extend_from_slice(text.as_bytes());
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        text.into_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1414,6 +1621,127 @@ mod tests {
             it.screen.revision(),
             settled,
             "a bell does not repaint anything"
+        );
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn modes() -> Modes {
+        Modes::default()
+    }
+
+    #[test]
+    fn a_letter_is_itself_and_ctrl_makes_it_a_control_code() {
+        assert_eq!(encode_key(Key::Char('a'), Modifiers::none(), modes()), b"a");
+        assert_eq!(
+            encode_key(Key::Char('c'), Modifiers::control(), modes()),
+            vec![0x03],
+            "Ctrl+C is the interrupt, and it is one byte"
+        );
+        assert_eq!(
+            encode_key(Key::Char('C'), Modifiers::control(), modes()),
+            vec![0x03],
+            "the shift key does not change which control code it is"
+        );
+    }
+
+    #[test]
+    fn alt_is_an_escape_in_front() {
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::none()
+        };
+        assert_eq!(encode_key(Key::Char('f'), alt, modes()), b"\x1bf");
+    }
+
+    #[test]
+    fn a_japanese_character_goes_as_the_utf8_it_is() {
+        assert_eq!(
+            encode_key(Key::Char('あ'), Modifiers::none(), modes()),
+            "あ".as_bytes()
+        );
+    }
+
+    #[test]
+    fn return_sends_a_carriage_return_and_not_a_newline() {
+        assert_eq!(encode_key(Key::Enter, Modifiers::none(), modes()), b"\r");
+    }
+
+    #[test]
+    fn the_arrows_change_shape_when_the_shell_asks_them_to() {
+        let mut modes = modes();
+        assert_eq!(encode_key(Key::Up, Modifiers::none(), modes), b"\x1b[A");
+        modes.application_cursor_keys = true;
+        assert_eq!(
+            encode_key(Key::Up, Modifiers::none(), modes),
+            b"\x1bOA",
+            "`ESC[?1h` — and a shell's line editor reads only this form"
+        );
+        let control = Modifiers::control();
+        assert_eq!(
+            encode_key(Key::Right, control, modes),
+            b"\x1b[1;5C",
+            "with a modifier there is a number to carry, so it is CSI either way"
+        );
+    }
+
+    #[test]
+    fn the_keys_above_the_arrows_keep_their_old_numbers() {
+        assert_eq!(
+            encode_key(Key::PageUp, Modifiers::none(), modes()),
+            b"\x1b[5~"
+        );
+        assert_eq!(
+            encode_key(Key::Delete, Modifiers::none(), modes()),
+            b"\x1b[3~"
+        );
+        assert_eq!(
+            encode_key(Key::Function(1), Modifiers::none(), modes()),
+            b"\x1bOP"
+        );
+        assert_eq!(
+            encode_key(Key::Function(5), Modifiers::none(), modes()),
+            b"\x1b[15~",
+            "F5 is 15, not 16 — the numbers were never contiguous"
+        );
+        assert_eq!(
+            encode_key(Key::Function(12), Modifiers::none(), modes()),
+            b"\x1b[24~"
+        );
+    }
+
+    #[test]
+    fn shift_and_tab_is_a_key_of_its_own() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::none()
+        };
+        assert_eq!(encode_key(Key::Tab, shift, modes()), b"\x1b[Z");
+    }
+
+    #[test]
+    fn backspace_sends_delete() {
+        assert_eq!(
+            encode_key(Key::Backspace, Modifiers::none(), modes()),
+            vec![0x7f]
+        );
+    }
+
+    #[test]
+    fn a_paste_is_wrapped_only_while_the_shell_is_reading_it_that_way() {
+        let mut modes = modes();
+        assert_eq!(
+            encode_paste("ls\nls\n", modes),
+            b"ls\rls\r".to_vec(),
+            "without the markers a pasted newline runs the command"
+        );
+        modes.bracketed_paste = true;
+        assert_eq!(
+            encode_paste("ls\r\nls", modes),
+            b"\x1b[200~ls\rls\x1b[201~".to_vec()
         );
     }
 }
