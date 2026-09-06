@@ -110,6 +110,18 @@ export struct PaneScreen {
     // **The pane draws the same way either way** — one image and no caret of
     // its own — so this changes nothing here but what the keyboard does.
     terminal: bool,
+    // 追加要件 Terminal: what stands along the foot of this pane. 0 nothing,
+    // 1 a shell under a document, 2 a draft under a shell. **A number rather
+    // than two flags**: the two can never both be there, because which one it
+    // is follows from what the tab in front is.
+    below-kind: int,
+    below-height: length,
+    below-tiles: [PreviewTile],
+    // The draft's text, written at both ends: the writer types into it and
+    // Rust reads it when it is sent.
+    below-draft: string,
+    // Bumped by Rust when the strip should take the keyboard.
+    below-focus-generation: int,
     // How much this pane magnifies the text, as a percentage (要件 9).
     // **Per pane, not per tab**: it is how close the writer is sitting to this
     // half of the window, and a tab brought out in front of it is read at the
@@ -230,6 +242,25 @@ export component EditorPane inherits Rectangle {
     /// input rather than deleting a character. Sorting that out per key here
     /// would be the editor deciding what a shell means.
     in property <bool> terminal: false;
+    /// 追加要件 Terminal: the strip along the foot of the pane. 0 nothing, 1 a
+    /// shell under a document, 2 a draft under a shell.
+    in property <int> below-kind: 0;
+    in property <length> below-height: 200px;
+    in property <[PreviewTile]> below-tiles;
+    in-out property <string> below-draft;
+    in property <int> below-focus-generation;
+    /// A keystroke for the shell in the strip.
+    callback below-key(string, int, bool, bool, bool);
+    callback below-scrolled(float);
+    callback below-selection-start(float, float);
+    callback below-selection-update(float, float);
+    callback below-selection-end(float, float);
+    /// The writer dragged the boundary: how tall the strip should be now.
+    callback below-resized(length);
+    /// 追加要件 Terminal: open or close the strip (`Ctrl+\``).
+    callback below-toggled();
+    /// Send the draft to the shell above it.
+    callback below-sent();
 
     in property <[PreviewTile]> tiles;
     in property <[PreviewSelectionRect]> selection-rects;
@@ -870,6 +901,18 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         MenuSep { }
+                        // 追加要件 Terminal: **the strip along the foot.** Which
+                        // of the two it is follows from the tab in front, so the
+                        // row says which one the writer will get.
+                        MenuRow {
+                            title: root.terminal ? "Editor Below" : "Terminal Below";
+                            shortcut: "Ctrl+`";
+                            activated => {
+                                pane-menu.close();
+                                root.below-toggled();
+                            }
+                        }
+                        MenuSep { }
                         MenuRow {
                             title: "Typography…";
                             activated => {
@@ -1112,6 +1155,7 @@ export component EditorPane inherits Rectangle {
             }
 
             scroll := ScrollView {
+                vertical-stretch: 1;
                 horizontal-scrollbar-policy: as-needed;
                 vertical-scrollbar-policy: as-needed;
                 viewport-x <=> root.scroll-x;
@@ -1307,6 +1351,11 @@ export component EditorPane inherits Rectangle {
                                 // applies to it: those rows are the editor's
                                 // shortcuts, and the same chords mean other
                                 // things on the other side of the pipe.
+                                if (root.terminal && event.modifiers.control
+                                    && event.text == "`") {
+                                    root.below-toggled();
+                                    return accept;
+                                }
                                 if (root.terminal) {
                                     // 要件 11.2: **`Ctrl+V` is left to the
                                     // field.** It fills itself from the
@@ -1327,6 +1376,13 @@ export component EditorPane inherits Rectangle {
                                     return accept;
                                 }
                                 if self.preedit-text == "" && self.text == "" {
+                                    // 追加要件 Terminal: the strip along the
+                                    // foot, on the key every terminal uses for
+                                    // it.
+                                    if (event.modifiers.control && event.text == "`") {
+                                        root.below-toggled();
+                                        return accept;
+                                    }
                                     // Enter is handled here rather than left to the
                                     // field, so a line break is inserted exactly
                                     // once whatever a multi-line TextInput would do
@@ -1624,6 +1680,155 @@ export component EditorPane inherits Rectangle {
                     }
                 }
             }
+
+            // 追加要件 Terminal: **the strip along the foot of the pane.** A
+            // shell under a document, or a draft under a shell — which one it
+            // is follows from the tab in front, so the pane is told a number
+            // rather than asked to work it out.
+            //
+            // Outside the scroll view on purpose: what is down here does not
+            // move when the document above it is scrolled.
+            if root.below-kind != 0: Rectangle {
+                vertical-stretch: 0;
+                height: 5px;
+                background: divider.has-hover || divider.pressed ? Tok.rule-strong : Tok.rule;
+
+                divider := TouchArea {
+                    mouse-cursor: ns-resize;
+                    // **The height is the pane's to keep**, so the drag is
+                    // reported rather than applied: dragging up makes the strip
+                    // taller, which is why the delta is subtracted.
+                    moved => {
+                        if (self.pressed) {
+                            root.below-resized(root.below-height - (self.mouse-y - self.pressed-y));
+                        }
+                    }
+                }
+            }
+
+            if root.below-kind != 0: Rectangle {
+                vertical-stretch: 0;
+                height: root.below-height;
+                background: root.page-background;
+                clip: true;
+
+                // The shell under a document. Drawn from the same images the
+                // pane above is drawn from, and read by the same keys.
+                if root.below-kind == 1: FocusScope {
+                    width: parent.width;
+                    height: parent.height;
+                    focus-on-click: true;
+
+                    // 6.11: an element is born in the state it is created with,
+                    // so the focus is taken at `init` as well as on the bump.
+                    property <int> generation: root.below-focus-generation;
+                    changed generation => {
+                        self.focus();
+                    }
+                    init => {
+                        self.focus();
+                    }
+
+                    for tile in root.below-tiles: Image {
+                        x: tile.x * 1px;
+                        y: tile.y * 1px;
+                        width: tile.width * 1px;
+                        height: tile.height * 1px;
+                        source: tile.source;
+                        image-fit: fill;
+                    }
+
+                    key-pressed(event) => {
+                        if (event.modifiers.control && event.text == "`") {
+                            root.below-toggled();
+                            return accept;
+                        }
+                        root.below-key(
+                            event.text,
+                            key-number(event.text),
+                            event.modifiers.control,
+                            event.modifiers.alt,
+                            event.modifiers.shift);
+                        accept
+                    }
+
+                    below-pointer := TouchArea {
+                        mouse-cursor: text;
+                        scroll-event(event) => {
+                            root.below-scrolled(
+                                event.delta-y != 0px ? event.delta-y / 1px : event.delta-x / 1px);
+                            accept
+                        }
+                        pointer-event(event) => {
+                            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                root.below-selection-start(self.mouse-x / 1px, self.mouse-y / 1px);
+                            } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                root.below-selection-end(self.mouse-x / 1px, self.mouse-y / 1px);
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.below-selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
+                            }
+                        }
+                    }
+                }
+
+                // The draft under a shell (追加要件 Terminal: サブEditor).
+                // **A plain field, like Quick Draft's own** — what is wanted
+                // here is somewhere to compose a command, not a second copy of
+                // the editor.
+                if root.below-kind == 2: Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: Tok.paper;
+
+                    draft := TextInput {
+                        x: 8px;
+                        y: 6px;
+                        width: parent.width - 16px;
+                        height: parent.height - 12px;
+                        text <=> root.below-draft;
+                        font-family: "Consolas";
+                        font-size: 14px;
+                        color: Tok.doc-ink;
+                        single-line: false;
+                        wrap: word-wrap;
+
+                        property <int> generation: root.below-focus-generation;
+                        changed generation => {
+                            self.focus();
+                        }
+                        init => {
+                            self.focus();
+                        }
+
+                        key-pressed(event) => {
+                            if (event.modifiers.control && event.text == "`") {
+                                root.below-toggled();
+                                return accept;
+                            }
+                            // **Ctrl+Enter sends it.** Enter alone is a line
+                            // break: a draft is where a command is composed
+                            // over several lines before it is run.
+                            if (event.modifiers.control && event.text == Key.Return) {
+                                root.below-sent();
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+
+                    if root.below-draft == "": Text {
+                        x: 10px;
+                        y: 8px;
+                        text: "Ctrl+Enter で上の端末へ送ります";
+                        color: Tok.ink-faint;
+                        font-size: 12px;
+                    }
+                }
+            }
+
         }
     }
 }

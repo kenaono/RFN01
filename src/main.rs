@@ -950,40 +950,84 @@ struct Pane {
     ///
     /// **Held by the pane as well as by the tab** because this is what the
     /// refresh reaches: every path that draws a pane goes through
-    /// [`refresh_pane`], and none of them carries a tab. Shared rather than
-    /// copied — carrying the tab to another pane carries the running shell.
-    terminal: Option<Rc<RefCell<TerminalSession>>>,
+    /// [`refresh_pane`], and none of them carries a tab.
+    terminal: Option<TerminalView>,
+    /// The shell along the foot of this pane (追加要件 Terminal: サブTerminal).
+    ///
+    /// **Only under a document.** A pane already showing a shell has a draft
+    /// down there instead, and a draft is text the window keeps.
+    below: Option<TerminalView>,
+    /// Whether the strip is showing at all.
+    ///
+    /// **Kept apart from what is in it**: closing the strip must not end the
+    /// shell in it, because a shell closed by putting a panel away takes its
+    /// running command with it.
+    below_open: bool,
+    below_height: f32,
     /// The direction this pane's engine was built for.
     ///
     /// **A pane no longer *is* a direction.** The tab in front of it decides
     /// (要件 7.2's four modes belong to the tab), so a pane has to be able to
     /// change, and this is what it is changing from.
     mode: WritingMode,
-    /// The shell's screen, drawn in bands of rows (追加要件 Terminal).
+}
+
+/// One shell being shown, and everything about how it is being looked at.
+///
+/// **Two of these can be on one pane** — the tab's own, and the one along the
+/// foot of a pane showing a document — so none of it can live on the pane.
+struct TerminalView {
+    /// Shared rather than copied: carrying the tab to another pane carries the
+    /// running shell.
+    session: Rc<RefCell<TerminalSession>>,
+    /// The screen, drawn in bands of rows.
     ///
     /// **A terminal repaints everywhere at once, and most of it is unchanged.**
     /// One image of the whole screen costs 15ms to draw and 9MB to hand to the
     /// renderer at the size a maximized pane asks for — and that is paid per
-    /// chunk of output, which is far more often than once a frame. Cut into
-    /// bands and keyed by what is in them, a keystroke redraws the one band it
-    /// touched.
-    terminal_bands: TerminalBands,
-    /// How far back through the scrollback this pane is looking, in rows
-    /// (追加要件 Terminal). **Zero is the bottom**, which is where a terminal
-    /// lives; anything else means the writer is reading something that has
-    /// already gone by.
-    terminal_view: usize,
-    /// What the writer has selected with the mouse (追加要件 Terminal).
+    /// chunk of output, far more often than once a frame. Cut into bands and
+    /// keyed by what is in them, a keystroke redraws the one band it touched.
+    bands: TerminalBands,
+    /// What the writer has selected with the mouse.
     ///
     /// **In rows counted from the start of the history**, so that output
     /// arriving underneath does not move it and scrolling does not lose it.
-    terminal_selection: Option<TerminalSelection>,
+    selection: Option<TerminalSelection>,
+    /// How far back through the scrollback this is looking, in rows. **Zero is
+    /// the bottom**, which is where a terminal lives; anything else means the
+    /// writer is reading something that has already gone by.
+    looking: usize,
     /// How much scrollback there was at the last refresh.
     ///
     /// **Because a view held back has to hold still.** Output arriving while
     /// the writer reads pushes rows into the history behind them; counted from
     /// the bottom, the same number would show different lines every time.
-    terminal_history: usize,
+    history: usize,
+}
+
+impl TerminalView {
+    fn new(session: TerminalSession) -> Self {
+        Self::sharing(&Rc::new(RefCell::new(session)))
+    }
+
+    fn sharing(session: &Rc<RefCell<TerminalSession>>) -> Self {
+        Self {
+            session: session.clone(),
+            bands: TerminalBands::default(),
+            selection: None,
+            looking: 0,
+            history: 0,
+        }
+    }
+}
+
+/// Which of a pane's two shells something is about (追加要件 Terminal).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TerminalSpot {
+    /// The tab in front of the pane.
+    Front,
+    /// The strip along the foot of it.
+    Below,
 }
 
 /// The images a terminal pane is showing, and the geometry they were drawn for.
@@ -1041,6 +1085,15 @@ impl TerminalSelection {
     }
 }
 
+/// How tall the strip opens (追加要件 Terminal), before anybody drags it.
+///
+/// **Ten rows and a little**: enough to read a command's answer without asking
+/// the document above it to give up half the page.
+const TERMINAL_BELOW_HEIGHT: f32 = 200.0;
+
+/// The least the strip can be dragged to, and the most.
+const TERMINAL_BELOW_RANGE: (f32, f32) = (60.0, 900.0);
+
 /// How many rows one band holds.
 ///
 /// **Eight is a compromise between two costs.** A band is the smallest thing
@@ -1056,10 +1109,17 @@ impl Pane {
             view: PaneView::default(),
             mode,
             terminal: None,
-            terminal_bands: TerminalBands::default(),
-            terminal_selection: None,
-            terminal_view: 0,
-            terminal_history: 0,
+            below: None,
+            below_open: false,
+            below_height: TERMINAL_BELOW_HEIGHT,
+        }
+    }
+
+    /// One of this pane's two shells, if it has that one.
+    fn shell(&mut self, spot: TerminalSpot) -> Option<&mut TerminalView> {
+        match spot {
+            TerminalSpot::Front => self.terminal.as_mut(),
+            TerminalSpot::Below => self.below.as_mut(),
         }
     }
 
@@ -2280,20 +2340,26 @@ fn main() -> Result<(), slint::PlatformError> {
             // The keys themselves never reach here — the pane sends those
             // straight on — but what an IME hands over arrives by this door
             // like any other text (追加要件 Terminal).
-            let shell = cache.borrow_mut().pane(id).terminal.clone();
+            let shell = cache
+                .borrow_mut()
+                .pane(id)
+                .terminal
+                .as_ref()
+                .map(|shell| shell.session.clone());
             if let Some(session) = shell {
                 session.borrow_mut().paste(text);
                 {
                     let mut borrowed = cache.borrow_mut();
-                    let pane = borrowed.pane(id);
-                    pane.terminal_view = 0;
-                    pane.terminal_selection = None;
+                    if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Front) {
+                        shell.looking = 0;
+                        shell.selection = None;
+                    }
                 }
                 // **The field is emptied here.** It holds what was pasted, and
                 // left alone it would hand the whole of it over again with the
                 // next paste (the editing paths empty it for the same reason).
                 id.set_ime_buffer(&window, "");
-                refresh_terminal_pane(&window, &cache, id);
+                refresh_terminal(&window, &cache, id, TerminalSpot::Front);
                 return;
             }
             let document = states.document(id);
@@ -2732,6 +2798,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &window,
                 &key_live,
                 PaneId::from_index(pane),
+                TerminalSpot::Front,
                 text.as_str(),
                 number,
                 control,
@@ -2745,7 +2812,91 @@ fn main() -> Result<(), slint::PlatformError> {
     let scroll_live = live.clone();
     window.on_pane_terminal_scrolled(move |pane, delta| {
         if let Some(window) = weak.upgrade() {
-            scroll_terminal(&window, &scroll_live, PaneId::from_index(pane), delta);
+            scroll_terminal(
+                &window,
+                &scroll_live,
+                PaneId::from_index(pane),
+                TerminalSpot::Front,
+                delta,
+            );
+        }
+    });
+
+    // 追加要件 Terminal: the strip along the foot of a pane.
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_toggled(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            toggle_below(&window, &below_live, PaneId::from_index(pane));
+        }
+    });
+
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_resized(move |pane, height| {
+        if let Some(window) = weak.upgrade() {
+            resize_below(&window, &below_live, PaneId::from_index(pane), height);
+        }
+    });
+
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_key(move |pane, text, number, control, alt, shift| {
+        if let Some(window) = weak.upgrade() {
+            send_terminal_key(
+                &window,
+                &below_live,
+                PaneId::from_index(pane),
+                TerminalSpot::Below,
+                text.as_str(),
+                number,
+                control,
+                alt,
+                shift,
+            );
+        }
+    });
+
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_scrolled(move |pane, delta| {
+        if let Some(window) = weak.upgrade() {
+            scroll_terminal(
+                &window,
+                &below_live,
+                PaneId::from_index(pane),
+                TerminalSpot::Below,
+                delta,
+            );
+        }
+    });
+
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_selection(move |pane, x, y, phase| {
+        if let Some(window) = weak.upgrade() {
+            let phase = match phase {
+                0 => SelectionPhase::Begin,
+                1 => SelectionPhase::Update,
+                _ => SelectionPhase::End,
+            };
+            select_in_terminal(
+                &window,
+                &below_live.cache,
+                PaneId::from_index(pane),
+                TerminalSpot::Below,
+                x,
+                y,
+                phase,
+            );
+        }
+    });
+
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_sent(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            send_draft(&window, &below_live, PaneId::from_index(pane));
         }
     });
 
@@ -3355,8 +3506,18 @@ impl Live {
         // them is what made the first terminal draw its prompt and then send
         // every key to the document behind it (追加要件 Terminal).
         let showing_shell = tab.terminal.is_some();
-        self.cache.borrow_mut().pane(id).terminal = tab.terminal.clone();
+        let (kind, height) = {
+            let mut borrowed = self.cache.borrow_mut();
+            let pane = borrowed.pane(id);
+            pane.terminal = tab.terminal.as_ref().map(TerminalView::sharing);
+            // **The strip's kind follows the tab in front.** A document has a
+            // shell under it and a shell has a draft; switching tabs switches
+            // which of the two is down there, and the shell in the strip goes
+            // on running either way.
+            (below_kind(pane), pane.below_height)
+        };
         id.update_screen(window, |screen| screen.terminal = showing_shell);
+        id.set_below(window, kind, height);
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
         id.set_scroll(window, tab.view.scroll);
         // The passage this tab was left at. **A tab switch has the same problem
@@ -7941,6 +8102,22 @@ impl PaneId {
         self.update_screen(window, |screen| screen.tiles = model);
     }
 
+    /// The images of the strip along the foot of the pane (追加要件 Terminal).
+    fn set_below_tiles(self, window: &AppWindow, tiles: Vec<PreviewTile>) {
+        let model = ModelRc::new(VecModel::from(tiles));
+        self.update_screen(window, |screen| screen.below_tiles = model);
+    }
+
+    /// What the strip is and how tall it stands. **0 is nothing, 1 a shell
+    /// under a document, 2 a draft under a shell** — the same numbering the
+    /// pane reads.
+    fn set_below(self, window: &AppWindow, kind: i32, height: f32) {
+        self.update_screen(window, |screen| {
+            screen.below_kind = kind;
+            screen.below_height = height;
+        });
+    }
+
     fn set_selection(self, window: &AppWindow, rects: &[SelectionRect]) {
         let rects = rects
             .iter()
@@ -8697,7 +8874,7 @@ fn lay_out_pane(
 /// Slint property they wrote. That difference is behind [`PaneId`] now, and goes
 /// altogether when the panes become a model (ペイン分割設計 5.2).
 #[allow(clippy::too_many_arguments)]
-/// Draw one pane that is showing a shell (追加要件 Terminal).
+/// Draw one of a pane's shells (追加要件 Terminal).
 ///
 /// **The pane is told its size in cells before anything is drawn**, because the
 /// shell draws for the screen it was told about: a prompt redrawn for 80 columns
@@ -8709,34 +8886,52 @@ fn lay_out_pane(
 /// texture (measured, 181×85); paying that for every chunk of output is what
 /// makes a program that redraws itself look broken rather than slow. Each band
 /// is keyed by what is in it, so a keystroke redraws one.
-fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id: PaneId) {
-    let Some(session) = cache.borrow_mut().pane(id).terminal.clone() else {
+fn refresh_terminal(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    spot: TerminalSpot,
+) {
+    let Some(session) = cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|shell| shell.session.clone())
+    else {
         return;
     };
     let look = cells::TerminalLook::default();
     let Ok(cell) = cells::terminal_cell_size(&look) else {
         return;
     };
-    let (columns, rows) = cell.grid_for(id.shown_width(window), id.shown_height(window));
+    // **The strip is as wide as the pane and as tall as it was dragged**; the
+    // tab's own shell has the whole of it.
+    let extent = match spot {
+        TerminalSpot::Front => id.shown_height(window),
+        TerminalSpot::Below => cache.borrow_mut().pane(id).below_height,
+    };
+    let (columns, rows) = cell.grid_for(id.shown_width(window), extent);
     let mut session = session.borrow_mut();
     session.resize(columns, rows);
     session.drain();
     let screen = session.screen();
 
-    // **What the pane is looking at**: the last `rows` of the history and the
-    // screen together, moved back by however far the writer has scrolled. A
-    // view held back holds still while output arrives — the rows it is showing
-    // are pushed further into the history, and the count follows them.
+    // **What this shell is being looked at from**: the last `rows` of the
+    // history and the screen together, moved back by however far the writer has
+    // scrolled. A view held back holds still while output arrives — the rows it
+    // shows are pushed further into the history, and the count follows them.
     let history = screen.scrollback().len();
     let looking = {
         let mut borrowed = cache.borrow_mut();
-        let pane = borrowed.pane(id);
-        if pane.terminal_view > 0 {
-            pane.terminal_view += history.saturating_sub(pane.terminal_history);
+        let Some(shell) = borrowed.pane(id).shell(spot) else {
+            return;
+        };
+        if shell.looking > 0 {
+            shell.looking += history.saturating_sub(shell.history);
         }
-        pane.terminal_history = history;
-        pane.terminal_view = pane.terminal_view.min(history);
-        pane.terminal_view
+        shell.history = history;
+        shell.looking = shell.looking.min(history);
+        shell.looking
     };
     let visible: Vec<&crate::terminal::Line> = (0..rows)
         .filter_map(|row| {
@@ -8763,7 +8958,10 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
     let top = history.saturating_sub(looking);
     let picked: Vec<Option<(usize, usize)>> = {
         let mut borrowed = cache.borrow_mut();
-        let selection = borrowed.pane(id).terminal_selection;
+        let selection = borrowed
+            .pane(id)
+            .shell(spot)
+            .and_then(|shell| shell.selection);
         (0..visible.len())
             .map(|row| selection.and_then(|picked| picked.columns_in(top + row, columns)))
             .collect()
@@ -8772,12 +8970,15 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
     let shape = (columns, rows, cell.advance.to_bits(), cell.line.to_bits());
     {
         let mut borrowed = cache.borrow_mut();
-        let bands = &mut borrowed.pane(id).terminal_bands;
-        if bands.shape != Some(shape) {
-            bands.shape = Some(shape);
-            bands.bands.clear();
+        let Some(shell) = borrowed.pane(id).shell(spot) else {
+            return;
+        };
+        if shell.bands.shape != Some(shape) {
+            shell.bands.shape = Some(shape);
+            shell.bands.bands.clear();
         }
-        bands
+        shell
+            .bands
             .bands
             .resize(rows.div_ceil(TERMINAL_BAND_ROWS), (0, Image::default()));
     }
@@ -8808,7 +9009,10 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
         let height = (lines.len() as f32 * line).ceil().max(1.0) as u32;
         let held = {
             let mut borrowed = cache.borrow_mut();
-            borrowed.pane(id).terminal_bands.bands.get(band).cloned()
+            borrowed
+                .pane(id)
+                .shell(spot)
+                .and_then(|shell| shell.bands.bands.get(band).cloned())
         };
         let image = match held {
             // **The same cells drawn the same way**: nothing to do but place it
@@ -8816,8 +9020,8 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
             Some((was, image)) if was == signature && image.size().width == width => image,
             _ => {
                 let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-                // Copied only for the band being drawn: the eight rows this
-                // one holds, and never the screenful.
+                // Copied only for the band being drawn: the eight rows this one
+                // holds, and never the screenful.
                 let band_lines: Vec<crate::terminal::Line> =
                     lines.iter().map(|line| (*line).clone()).collect();
                 let painted = cells::draw_terminal(
@@ -8845,9 +9049,8 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
                 if let Some(slot) = cache
                     .borrow_mut()
                     .pane(id)
-                    .terminal_bands
-                    .bands
-                    .get_mut(band)
+                    .shell(spot)
+                    .and_then(|shell| shell.bands.bands.get_mut(band))
                 {
                     *slot = (signature, image.clone());
                 }
@@ -8862,15 +9065,20 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
             source: image,
         });
     }
-    let height = (rows as f32 * line).ceil().max(1.0) as i32;
-    id.set_tiles(window, tiles);
-    id.set_selection(window, &[]);
-    id.set_caret(window, None);
-    id.update_screen(window, |screen| {
-        screen.terminal = true;
-        screen.content_width = width as i32;
-        screen.content_height = height;
-    });
+    match spot {
+        TerminalSpot::Front => {
+            let height = (rows as f32 * line).ceil().max(1.0) as i32;
+            id.set_tiles(window, tiles);
+            id.set_selection(window, &[]);
+            id.set_caret(window, None);
+            id.update_screen(window, |screen| {
+                screen.terminal = true;
+                screen.content_width = width as i32;
+                screen.content_height = height;
+            });
+        }
+        TerminalSpot::Below => id.set_below_tiles(window, tiles),
+    }
 }
 
 /// A tab that is a shell (追加要件 Terminal), in the pane the writer is in.
@@ -8890,40 +9098,9 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
             .collect();
         next_untitled_number(&taken)
     };
-    // The size is corrected on the first refresh, when the pane's own extent is
-    // known; starting at something ordinary means the shell's first prompt is
-    // not drawn for a screen of one column.
-    let look = cells::TerminalLook::default();
-    let cell = cells::terminal_cell_size(&look).unwrap_or(cells::CellSize {
-        advance: 8.0,
-        line: 18.0,
-    });
-    let (columns, rows) = cell.grid_for(id.shown_width(window), id.shown_height(window));
-    let weak = window.as_weak();
-    let wake = move || {
-        // **One ring, on the window's own thread.** What to draw and how is
-        // decided over there; this side is a reading thread and may not touch
-        // any of it (要件 2).
-        let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
+    let Some(session) = start_shell(window, live, id, shell, id.shown_height(window)) else {
+        return;
     };
-    let session = match TerminalSession::start(shell.name(), shell.command(), columns, rows, wake) {
-        Ok(session) => session,
-        Err(error) => {
-            live.cache
-                .borrow_mut()
-                .log_diag("terminal", &format!("open {} {error}", shell.command()));
-            window.set_render_status(format!("{}を開けませんでした: {error}", shell.name()).into());
-            return;
-        }
-    };
-    live.cache.borrow_mut().log_diag(
-        "terminal",
-        &format!(
-            "open pane={} {} {columns}x{rows}",
-            id.log_name(),
-            shell.command()
-        ),
-    );
     let document = OpenDocument::untitled(number, window.as_weak());
     let tab = PaneTab {
         view: TabView {
@@ -8937,7 +9114,53 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
     add_tab(window, live, id, tab);
 }
 
-/// Send one keystroke to the shell in front of this pane (追加要件 Terminal).
+/// Start a shell for a pane, sized to the space it will be drawn in.
+///
+/// **The size is worked out before the shell exists**, because the first thing
+/// it does is draw a prompt for the screen it was told about.
+fn start_shell(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    shell: TerminalShell,
+    extent: f32,
+) -> Option<TerminalSession> {
+    let look = cells::TerminalLook::default();
+    let cell = cells::terminal_cell_size(&look).unwrap_or(cells::CellSize {
+        advance: 8.0,
+        line: 18.0,
+    });
+    let (columns, rows) = cell.grid_for(id.shown_width(window), extent);
+    let weak = window.as_weak();
+    let wake = move || {
+        // **One ring, on the window's own thread.** What to draw and how is
+        // decided over there; this side is a reading thread and may not touch
+        // any of it (要件 2).
+        let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
+    };
+    match TerminalSession::start(shell.name(), shell.command(), columns, rows, wake) {
+        Ok(session) => {
+            live.cache.borrow_mut().log_diag(
+                "terminal",
+                &format!(
+                    "open pane={} {} {columns}x{rows}",
+                    id.log_name(),
+                    shell.command()
+                ),
+            );
+            Some(session)
+        }
+        Err(error) => {
+            live.cache
+                .borrow_mut()
+                .log_diag("terminal", &format!("open {} {error}", shell.command()));
+            window.set_render_status(format!("{}を開けませんでした: {error}", shell.name()).into());
+            None
+        }
+    }
+}
+
+/// Send one keystroke to one of a pane's shells (追加要件 Terminal).
 ///
 /// **The pane does not decide what a key means.** Which bytes an arrow is
 /// depends on modes the shell set, so the key is named here and encoded in
@@ -8946,36 +9169,43 @@ fn send_terminal_key(
     window: &AppWindow,
     live: &Live,
     id: PaneId,
+    spot: TerminalSpot,
     text: &str,
     code: i32,
     control: bool,
     alt: bool,
     shift: bool,
 ) {
-    let Some(session) = live.cache.borrow_mut().pane(id).terminal.clone() else {
+    let Some(session) = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|shell| shell.session.clone())
+    else {
         return;
     };
+    // 要件 11.2. **`Ctrl+Shift+C`, because `Ctrl+C` is the interrupt** — the one
+    // chord a shell cannot be asked to give up. The pair is what every terminal
+    // uses, and pasting comes back the other way: `Ctrl+V` is left to the pane's
+    // own field, which fills it and hands the text over as typing.
+    if control && shift && text.eq_ignore_ascii_case("c") {
+        copy_terminal_selection(window, live, id, spot);
+        return;
+    }
     let Some(key) = named_key(code, text, control) else {
         return;
     };
-    // 要件 11.2. **`Ctrl+Shift+C`, because `Ctrl+C` is the interrupt** — the
-    // one chord a shell cannot be asked to give up. The pair is what every
-    // terminal uses, and pasting comes back the other way: `Ctrl+V` is left to
-    // the pane's own field, which fills it and hands the text over as typing.
-    if control && shift && text.eq_ignore_ascii_case("c") {
-        copy_terminal_selection(window, live, id);
-        return;
-    }
-
-    // **Typing puts the writer back at the bottom**, which is where what they
-    // type will appear. Every terminal does this, and the reason is that the
-    // alternative — typing into a screen you cannot see — has no use.
     {
+        // **Typing puts the writer back at the bottom**, which is where what
+        // they type will appear. Every terminal does this, and the reason is
+        // that the alternative — typing into a screen you cannot see — has no
+        // use. The selection goes with it: the screen is about to change.
         let mut borrowed = live.cache.borrow_mut();
-        let pane = borrowed.pane(id);
-        pane.terminal_view = 0;
-        // The screen is about to change under it.
-        pane.terminal_selection = None;
+        if let Some(shell) = borrowed.pane(id).shell(spot) {
+            shell.looking = 0;
+            shell.selection = None;
+        }
     }
     let modifiers = TerminalModifiers {
         shift,
@@ -8990,13 +9220,13 @@ fn send_terminal_key(
     live.cache.borrow_mut().log_diag(
         "terminal",
         &format!(
-            "key pane={} code={code} u={:04x} ctrl={control} alt={alt} shift={shift} app_keys={}",
+            "key pane={} spot={spot:?} code={code} u={:04x} ctrl={control} alt={alt} shift={shift} app_keys={}",
             id.log_name(),
             text.chars().next().map(u32::from).unwrap_or(0),
             sent.application_cursor_keys
         ),
     );
-    refresh_terminal_pane(window, &live.cache, id);
+    refresh_terminal(window, &live.cache, id, spot);
 }
 
 /// Which key the window says was pressed, or `None` for one the shell should
@@ -9037,8 +9267,8 @@ fn named_key(code: i32, text: &str, control: bool) -> Option<TerminalKey> {
             }
             // **Ctrl+C arrives as the control code it already is.** Named back
             // into the letter, because what the shell is sent is decided in one
-            // place — otherwise Ctrl+C would be encoded here and every other
-            // key over there.
+            // place — otherwise Ctrl+C would be encoded here and every other key
+            // over there.
             let named = if control && (character as u32) < 0x20 {
                 char::from_u32(character as u32 + 0x60).unwrap_or(character)
             } else {
@@ -9050,13 +9280,19 @@ fn named_key(code: i32, text: &str, control: bool) -> Option<TerminalKey> {
     Some(key)
 }
 
-/// Look further back through what the shell has written, or nearer the bottom
+/// Look further back through what a shell has written, or nearer the bottom
 /// (追加要件 Terminal).
 ///
 /// **The wheel moves rows, not pixels.** A terminal has no half-lines to stop
 /// on, and stopping on one would put every glyph a fraction out of its cell.
-fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, delta: f32) {
-    let Some(session) = live.cache.borrow_mut().pane(id).terminal.clone() else {
+fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSpot, delta: f32) {
+    let Some(session) = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|shell| shell.session.clone())
+    else {
         return;
     };
     let history = session.borrow().screen().scrollback().len();
@@ -9069,16 +9305,17 @@ fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, delta: f32) {
     let rows = ((delta.abs() / line).round() as usize).max(1);
     {
         let mut borrowed = live.cache.borrow_mut();
-        let pane = borrowed.pane(id);
-        pane.terminal_view = if delta > 0.0 {
-            // The wheel's positive direction is "towards the start", which is
-            // further back through the history.
-            (pane.terminal_view + rows).min(history)
-        } else {
-            pane.terminal_view.saturating_sub(rows)
-        };
+        if let Some(shell) = borrowed.pane(id).shell(spot) {
+            shell.looking = if delta > 0.0 {
+                // The wheel's positive direction is "towards the start", which
+                // is further back through the history.
+                (shell.looking + rows).min(history)
+            } else {
+                shell.looking.saturating_sub(rows)
+            };
+        }
     }
-    refresh_terminal_pane(window, &live.cache, id);
+    refresh_terminal(window, &live.cache, id, spot);
 }
 
 /// Pick out cells with the mouse (追加要件 Terminal).
@@ -9090,55 +9327,70 @@ fn select_in_terminal(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
     id: PaneId,
+    spot: TerminalSpot,
     x: f32,
     y: f32,
     phase: SelectionPhase,
 ) {
-    let Some(session) = cache.borrow_mut().pane(id).terminal.clone() else {
+    let Some(session) = cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|shell| shell.session.clone())
+    else {
         return;
     };
     let look = cells::TerminalLook::default();
     let Ok(cell) = cells::terminal_cell_size(&look) else {
         return;
     };
-    let (columns, rows) = cell.grid_for(id.shown_width(window), id.shown_height(window));
+    let extent = match spot {
+        TerminalSpot::Front => id.shown_height(window),
+        TerminalSpot::Below => cache.borrow_mut().pane(id).below_height,
+    };
+    let (columns, rows) = cell.grid_for(id.shown_width(window), extent);
     let (history, looking) = {
         let history = session.borrow().screen().scrollback().len();
-        let looking = cache.borrow_mut().pane(id).terminal_view;
+        let looking = cache
+            .borrow_mut()
+            .pane(id)
+            .shell(spot)
+            .map(|shell| shell.looking)
+            .unwrap_or(0);
         (history, looking)
     };
     let top = history.saturating_sub(looking);
     let row = top + ((y.max(0.0) / cell.line) as usize).min(rows.saturating_sub(1));
-    // **One past the last column is a place too**: a drag that ends past the
-    // end of a line means the whole line, which is what dragging down a screen
-    // of output has to mean.
+    // **One past the last column is a place too**: a drag that ends past the end
+    // of a line means the whole line, which is what dragging down a screen of
+    // output has to mean.
     let column = ((x.max(0.0) / cell.advance).round() as usize).min(columns);
     {
         let mut borrowed = cache.borrow_mut();
-        let pane = borrowed.pane(id);
+        let Some(shell) = borrowed.pane(id).shell(spot) else {
+            return;
+        };
         match phase {
             SelectionPhase::Begin => {
-                pane.terminal_selection = Some(TerminalSelection {
+                shell.selection = Some(TerminalSelection {
                     anchor: (row, column),
                     head: (row, column),
                 });
             }
             SelectionPhase::Extend | SelectionPhase::Update | SelectionPhase::End => {
-                if let Some(selection) = &mut pane.terminal_selection {
+                if let Some(selection) = &mut shell.selection {
                     selection.head = (row, column);
                 }
             }
         }
         // A click that picked nothing takes the last selection away with it.
         if matches!(phase, SelectionPhase::End)
-            && pane
-                .terminal_selection
-                .is_some_and(TerminalSelection::is_empty)
+            && shell.selection.is_some_and(TerminalSelection::is_empty)
         {
-            pane.terminal_selection = None;
+            shell.selection = None;
         }
     }
-    refresh_terminal_pane(window, cache, id);
+    refresh_terminal(window, cache, id, spot);
 }
 
 /// What the writer picked out, as text (追加要件 Terminal・要件 11.2).
@@ -9181,11 +9433,16 @@ fn terminal_selection_text(session: &TerminalSession, selection: TerminalSelecti
 }
 
 /// 要件 11.2 for a shell: hand what is picked out to the clipboard.
-fn copy_terminal_selection(window: &AppWindow, live: &Live, id: PaneId) {
-    let Some(session) = live.cache.borrow_mut().pane(id).terminal.clone() else {
-        return;
+fn copy_terminal_selection(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSpot) {
+    let picked = {
+        let mut borrowed = live.cache.borrow_mut();
+        borrowed.pane(id).shell(spot).and_then(|shell| {
+            shell
+                .selection
+                .map(|selection| (shell.session.clone(), selection))
+        })
     };
-    let Some(selection) = live.cache.borrow_mut().pane(id).terminal_selection else {
+    let Some((session, selection)) = picked else {
         return;
     };
     let text = terminal_selection_text(&session.borrow(), selection);
@@ -9197,7 +9454,115 @@ fn copy_terminal_selection(window: &AppWindow, live: &Live, id: PaneId) {
     }
 }
 
-/// Every pane showing a shell, drawn again (追加要件 Terminal).
+/// Which strip this pane can have, from what is in front of it (追加要件
+/// Terminal). 0 nothing, 1 a shell under a document, 2 a draft under a shell.
+fn below_kind(pane: &mut Pane) -> i32 {
+    if !pane.below_open {
+        return 0;
+    }
+    if pane.terminal.is_some() { 2 } else { 1 }
+}
+
+/// Open or close the strip along the foot of a pane (追加要件 Terminal).
+///
+/// **Closing does not end the shell in it.** A panel put away is not a command
+/// abandoned, and the writer who opens it again expects to find what they left.
+fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
+    let (open, needs_shell) = {
+        let mut borrowed = live.cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        pane.below_open = !pane.below_open;
+        (
+            pane.below_open,
+            pane.below_open && pane.terminal.is_none() && pane.below.is_none(),
+        )
+    };
+    if needs_shell {
+        // The strip under a document is a shell, and it is the default one —
+        // the writer chose a pane, not a distribution.
+        let height = live.cache.borrow_mut().pane(id).below_height;
+        let Some(session) = start_shell(window, live, id, TerminalShell::Wsl, height) else {
+            live.cache.borrow_mut().pane(id).below_open = false;
+            return;
+        };
+        live.cache.borrow_mut().pane(id).below = Some(TerminalView::new(session));
+    }
+    let (kind, height) = {
+        let mut borrowed = live.cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        (below_kind(pane), pane.below_height)
+    };
+    id.set_below(window, kind, height);
+    if open {
+        // **The keyboard follows the strip.** Opening it to type into it and
+        // then having to click is a gesture with a hole in the middle.
+        id.update_screen(window, |screen| {
+            screen.below_focus_generation += 1;
+        });
+    } else {
+        restore_editor_focus(window);
+    }
+    live.cache.borrow_mut().log_diag(
+        "terminal",
+        &format!("below pane={} kind={kind} open={open}", id.log_name()),
+    );
+    if kind == 1 {
+        refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
+    }
+}
+
+/// The writer dragged the boundary above the strip.
+fn resize_below(window: &AppWindow, live: &Live, id: PaneId, height: f32) {
+    let (least, most) = TERMINAL_BELOW_RANGE;
+    // The pane has to keep something of itself: a strip dragged over the whole
+    // of it would leave the document with nothing.
+    let most = most.min(id.shown_height(window) + live.cache.borrow_mut().pane(id).below_height);
+    let height = height.clamp(least, most.max(least));
+    let kind = {
+        let mut borrowed = live.cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        pane.below_height = height;
+        below_kind(pane)
+    };
+    id.set_below(window, kind, height);
+    if kind == 1 {
+        refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
+    }
+}
+
+/// 追加要件 Terminal: send the draft to the shell the pane is showing.
+///
+/// **With the return.** What is written down there is a command, and a command
+/// handed over without the key that runs it is a command half sent.
+fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
+    let text = id.screen(window).below_draft.to_string();
+    if text.trim().is_empty() {
+        return;
+    }
+    let Some(session) = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .shell(TerminalSpot::Front)
+        .map(|shell| shell.session.clone())
+    else {
+        return;
+    };
+    {
+        let mut session = session.borrow_mut();
+        session.paste(text.trim_end());
+        session.send_key(TerminalKey::Enter, TerminalModifiers::none());
+    }
+    {
+        let mut borrowed = live.cache.borrow_mut();
+        if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Front) {
+            shell.looking = 0;
+        }
+    }
+    refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
+}
+
+/// Every shell on screen, drawn again (追加要件 Terminal).
 ///
 /// **Rung by the reading thread**, which knows only that bytes arrived. Which
 /// pane they belong to is a question for this side, and asking every pane is
@@ -9206,7 +9571,10 @@ fn copy_terminal_selection(window: &AppWindow, live: &Live, id: PaneId) {
 fn refresh_terminal_panes(window: &AppWindow, live: &Live) {
     for id in PaneId::all(window) {
         if live.cache.borrow_mut().pane(id).terminal.is_some() {
-            refresh_terminal_pane(window, &live.cache, id);
+            refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
+        }
+        if below_kind(live.cache.borrow_mut().pane(id)) == 1 {
+            refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
         }
     }
 }
@@ -9228,8 +9596,15 @@ fn refresh_pane(
     // here rather than at each of the twenty callers, because what they all
     // have in common is that they end up here.
     if cache.borrow_mut().pane(id).terminal.is_some() {
-        refresh_terminal_pane(window, cache, id);
+        refresh_terminal(window, cache, id, TerminalSpot::Front);
         return;
+    }
+    // The strip along the foot, if this pane is showing one, is drawn whatever
+    // the document above it is doing (追加要件 Terminal). **Only when it is a
+    // shell**: a shell held behind a draft goes on running, and drawing it
+    // would be drawing something nobody can see.
+    if below_kind(cache.borrow_mut().pane(id)) == 1 {
+        refresh_terminal(window, cache, id, TerminalSpot::Below);
     }
     let refresh_started = Instant::now();
     // Read once and logged: how far this pane is magnified is half of why a
@@ -10204,7 +10579,7 @@ fn update_pane_selection(
     // **A shell has no document to hit-test.** What a drag over one picks out
     // is cells, and where they are is arithmetic (追加要件 Terminal).
     if cache.borrow_mut().pane(id).terminal.is_some() {
-        select_in_terminal(window, cache, id, x, y, phase);
+        select_in_terminal(window, cache, id, TerminalSpot::Front, x, y, phase);
         return;
     }
     let drag_started = Instant::now();

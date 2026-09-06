@@ -343,6 +343,13 @@ export component AppWindow inherits Window {
     callback pane-terminal-key(int, string, int, bool, bool, bool);
     /// The wheel over a shell (追加要件 Terminal).
     callback pane-terminal-scrolled(int, float);
+    /// The strip along the foot of a pane (追加要件 Terminal).
+    callback pane-below-toggled(int);
+    callback pane-below-resized(int, length);
+    callback pane-below-key(int, string, int, bool, bool, bool);
+    callback pane-below-scrolled(int, float);
+    callback pane-below-selection(int, float, float, int);
+    callback pane-below-sent(int);
     /// A shell wrote something. **Rung from its reading thread**, so it says
     /// only that: which pane, and what changed, are decided on this side.
     callback terminal-woken();
@@ -1439,6 +1446,23 @@ export component AppWindow inherits Window {
                         terminal-scrolled(delta) => {
                             root.pane-terminal-scrolled(pane.id, delta);
                         }
+                        below-kind: pane.below-kind;
+                        below-height: pane.below-height;
+                        below-tiles: pane.below-tiles;
+                        below-draft <=> pane.below-draft;
+                        below-focus-generation: pane.below-focus-generation;
+                        below-toggled => { root.pane-below-toggled(pane.id); }
+                        below-resized(height) => { root.pane-below-resized(pane.id, height); }
+                        below-key(text, number, ctrl, alt, shift) => {
+                            root.pane-below-key(pane.id, text, number, ctrl, alt, shift);
+                        }
+                        below-scrolled(delta) => { root.pane-below-scrolled(pane.id, delta); }
+                        // **One callback for the three phases**, told apart by
+                        // the number: 0 begins, 1 drags, 2 lets go.
+                        below-selection-start(x, y) => { root.pane-below-selection(pane.id, x, y, 0); }
+                        below-selection-update(x, y) => { root.pane-below-selection(pane.id, x, y, 1); }
+                        below-selection-end(x, y) => { root.pane-below-selection(pane.id, x, y, 2); }
+                        below-sent => { root.pane-below-sent(pane.id); }
                         tab-pressed => { root.pane-tab(pane.id); }
                         preedit-changed(text) => { root.pane-preedit-changed(pane.id, text); }
                         backspace-pressed => { root.pane-backspace(pane.id); }
