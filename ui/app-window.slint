@@ -339,6 +339,13 @@ export component AppWindow inherits Window {
     callback pane-scroll-applied(int, float, float);
     callback pane-resized(int);
     callback pane-text-input(int, string);
+    /// One keystroke for the shell in front of a pane (追加要件 Terminal).
+    callback pane-terminal-key(int, string, int, bool, bool, bool);
+    /// A shell wrote something. **Rung from its reading thread**, so it says
+    /// only that: which pane, and what changed, are decided on this side.
+    callback terminal-woken();
+    /// 追加要件 Terminal: open a shell in the pane the writer is in.
+    callback terminal-requested();
     callback pane-tab(int);
     callback pane-preedit-changed(int, string);
     callback pane-backspace(int);
@@ -641,6 +648,14 @@ export component AppWindow inherits Window {
                                 activated => {
                                     recent-menu.show();
                                     app-menu.close();
+                                }
+                            }
+                            MenuRow {
+                                title: "New Terminal";
+                                activated => {
+                                    app-menu.close();
+                                    root.terminal-requested();
+                                    root.focus-generation += 1;
                                 }
                             }
                             MenuRow {
@@ -1378,6 +1393,10 @@ export component AppWindow inherits Window {
                         selection-end(x, y) => { root.pane-selection-end(pane.id, x, y); }
                         select-all => { root.pane-select-all(pane.id); }
                         text-input(text) => { root.pane-text-input(pane.id, text); }
+                        terminal: pane.terminal;
+                        terminal-key(text, number, ctrl, alt, shift) => {
+                            root.pane-terminal-key(pane.id, text, number, ctrl, alt, shift);
+                        }
                         tab-pressed => { root.pane-tab(pane.id); }
                         preedit-changed(text) => { root.pane-preedit-changed(pane.id, text); }
                         backspace-pressed => { root.pane-backspace(pane.id); }

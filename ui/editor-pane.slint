@@ -106,6 +106,10 @@ export struct PaneScreen {
     // than as its source: half of the four modes (要件 7.2). **Per pane per
     // tab**, which is why it is here and not on the window.
     preview: bool,
+    // Whether the tab in front of this pane is a shell (追加要件 Terminal).
+    // **The pane draws the same way either way** — one image and no caret of
+    // its own — so this changes nothing here but what the keyboard does.
+    terminal: bool,
     // How much this pane magnifies the text, as a percentage (要件 9).
     // **Per pane, not per tab**: it is how close the writer is sitting to this
     // half of the window, and a tab brought out in front of it is read at the
@@ -135,6 +139,38 @@ export struct PaneScreen {
 }
 
 export component EditorPane inherits Rectangle {
+    /// Which key this is, as a number `terminal.rs` knows (追加要件 Terminal).
+    /// 0 is "an ordinary character", and then the text is what matters.
+    pure function key-number(text: string) -> int {
+        return text == Key.UpArrow ? 1
+            : text == Key.DownArrow ? 2
+            : text == Key.RightArrow ? 3
+            : text == Key.LeftArrow ? 4
+            : text == Key.Home ? 5
+            : text == Key.End ? 6
+            : text == Key.PageUp ? 7
+            : text == Key.PageDown ? 8
+            : text == Key.Delete ? 9
+            : text == Key.Insert ? 10
+            : text == Key.Backspace ? 11
+            : text == Key.Tab ? 12
+            : text == Key.Return ? 13
+            : text == Key.Escape ? 14
+            : text == Key.F1 ? 20
+            : text == Key.F2 ? 21
+            : text == Key.F3 ? 22
+            : text == Key.F4 ? 23
+            : text == Key.F5 ? 24
+            : text == Key.F6 ? 25
+            : text == Key.F7 ? 26
+            : text == Key.F8 ? 27
+            : text == Key.F9 ? 28
+            : text == Key.F10 ? 29
+            : text == Key.F11 ? 30
+            : text == Key.F12 ? 31
+            : 0;
+    }
+
     // Which way the document flows. Everything that differs between the two
     // panes is decided by this and nothing else.
     in property <bool> vertical;
@@ -178,6 +214,13 @@ export component EditorPane inherits Rectangle {
     in property <int> find-generation;
     in property <int> active-tab: 0;
     in property <bool> preview: false;
+    /// The tab in front of this pane is a shell (追加要件 Terminal).
+    ///
+    /// **Then the keyboard belongs to the shell**, all of it: Ctrl+C interrupts
+    /// rather than copies, Tab completes rather than indents, and Ctrl+D ends
+    /// input rather than deleting a character. Sorting that out per key here
+    /// would be the editor deciding what a shell means.
+    in property <bool> terminal: false;
 
     in property <[PreviewTile]> tiles;
     in property <[PreviewSelectionRect]> selection-rects;
@@ -244,6 +287,10 @@ export component EditorPane inherits Rectangle {
     callback selection-end(float, float);
     callback select-all();
     callback text-input(string);
+    /// One keystroke for the shell: the text, which key it was, and the
+    /// modifiers. **The name, not the bytes** — what an arrow key becomes
+    /// depends on modes the shell set, and those are Rust's to read.
+    callback terminal-key(string, int, bool, bool, bool);
     callback tab-pressed();
     callback preedit-changed(string);
     callback backspace-pressed();
@@ -1243,6 +1290,19 @@ export component EditorPane inherits Rectangle {
                                 root.preedit-changed(self.preedit-text);
                             }
                             key-pressed(event) => {
+                                // **A shell takes every key.** Nothing below
+                                // applies to it: those rows are the editor's
+                                // shortcuts, and the same chords mean other
+                                // things on the other side of the pipe.
+                                if (root.terminal) {
+                                    root.terminal-key(
+                                        event.text,
+                                        key-number(event.text),
+                                        event.modifiers.control,
+                                        event.modifiers.alt,
+                                        event.modifiers.shift);
+                                    return accept;
+                                }
                                 if self.preedit-text == "" && self.text == "" {
                                     // Enter is handled here rather than left to the
                                     // field, so a line break is inserted exactly

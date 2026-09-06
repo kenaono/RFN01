@@ -37,7 +37,7 @@ use std::{
 use buffer::{DocumentFile, ExternalChange};
 use diag::DiagLog;
 use directwrite_render::{
-    CaretGeometry, LineFit, SelectionRect, TextEngine, TileSink, WritingMode,
+    CaretGeometry, LineFit, SelectionRect, TextEngine, TileSink, WritingMode, cells,
 };
 use document::{DocumentCounts, PreviewDocument, caret_place};
 use kill_ring::{KillAction, KillRing};
@@ -48,6 +48,8 @@ use slint::{
     Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
 use std::collections::{BTreeSet, VecDeque};
+use terminal::{Key as TerminalKey, Modifiers as TerminalModifiers};
+use terminal_session::TerminalSession;
 use text_blocks::{
     DEFAULT_BODY_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_FONT, DEFAULT_INK, DEFAULT_PAPER,
     Emphasis, LineMarker, MAX_HEADING_LEVEL, StyledText, TileSpan, Typography, visible_flow_range,
@@ -56,6 +58,17 @@ use unicode_segmentation::UnicodeSegmentation;
 use writer::FileWriter;
 
 slint::include_modules!();
+
+/// The shell a new terminal tab opens (追加要件 Terminal: 既定はWSL2).
+///
+/// `wsl.exe` with nothing after it opens the default distribution in the
+/// current directory, and **starts it if it is not running** — which is what the
+/// requirement asks for, done by the thing that knows how.
+const TERMINAL_SHELL: &str = "wsl.exe";
+
+/// What a terminal tab is called. **The shell, not 無題** — the document behind
+/// it is a stand-in nobody is writing in.
+const TERMINAL_TAB_NAME: &str = "WSL";
 
 const SAMPLE_MARKDOWN: &str = r#"# 縦書きライブ編集の技術検証
 
@@ -887,6 +900,14 @@ struct ViewAnchor {
 struct Pane {
     graphics: PaneGraphics,
     view: PaneView,
+    /// The shell this pane is showing, if the tab in front of it is one
+    /// (追加要件 Terminal).
+    ///
+    /// **Held by the pane as well as by the tab** because this is what the
+    /// refresh reaches: every path that draws a pane goes through
+    /// [`refresh_pane`], and none of them carries a tab. Shared rather than
+    /// copied — carrying the tab to another pane carries the running shell.
+    terminal: Option<Rc<RefCell<TerminalSession>>>,
     /// The direction this pane's engine was built for.
     ///
     /// **A pane no longer *is* a direction.** The tab in front of it decides
@@ -901,6 +922,7 @@ impl Pane {
             graphics: PaneGraphics::new(mode),
             view: PaneView::default(),
             mode,
+            terminal: None,
         }
     }
 
@@ -920,7 +942,13 @@ impl Pane {
         if self.mode == mode {
             return false;
         }
+        // **The shell survives the rebuild.** What is thrown away here is the
+        // engine and everything measured in the old direction; a running
+        // process is none of that, and dropping it would close the console and
+        // kill the shell for a change of writing mode.
+        let terminal = self.terminal.take();
         *self = Pane::new(mode);
+        self.terminal = terminal;
         true
     }
 }
@@ -2110,8 +2138,18 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_text_input(move |pane, text| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            let document = states.document(id);
             let text = text.as_str();
+            // **A conversion committed into a shell is typing, not editing.**
+            // The keys themselves never reach here — the pane sends those
+            // straight on — but what an IME hands over arrives by this door
+            // like any other text (追加要件 Terminal).
+            let shell = cache.borrow_mut().pane(id).terminal.clone();
+            if let Some(session) = shell {
+                session.borrow_mut().paste(text);
+                refresh_terminal_pane(&window, &cache, id);
+                return;
+            }
+            let document = states.document(id);
             insert_pane_text(&window, id, &document, &states, &cache, text, false);
         }
     });
@@ -2514,6 +2552,44 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 追加要件 Terminal. **Opened in the pane the writer is in**, like every
+    // other new tab: which pane is the writer's business and they said it by
+    // clicking.
+    let weak = window.as_weak();
+    let terminal_live = live.clone();
+    window.on_terminal_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            new_terminal_tab(&window, &terminal_live, focused_pane(&window));
+        }
+    });
+
+    let weak = window.as_weak();
+    let key_live = live.clone();
+    window.on_pane_terminal_key(move |pane, text, number, control, alt, shift| {
+        if let Some(window) = weak.upgrade() {
+            send_terminal_key(
+                &window,
+                &key_live,
+                PaneId::from_index(pane),
+                text.as_str(),
+                number,
+                control,
+                alt,
+                shift,
+            );
+        }
+    });
+
+    // **Rung from the reading thread** (要件 2), and all it says is that
+    // something arrived.
+    let weak = window.as_weak();
+    let woken_live = live.clone();
+    window.on_terminal_woken(move || {
+        if let Some(window) = weak.upgrade() {
+            refresh_terminal_panes(&window, &woken_live);
+        }
+    });
+
     let weak = window.as_weak();
     let file_live = live.clone();
     window.on_open_file_requested(move || {
@@ -2792,6 +2868,15 @@ struct PaneTab {
     /// longer takes the text out of the pane and switching back no longer puts
     /// it in, so a switch costs the relayout and nothing else.
     document: Rc<OpenDocument>,
+    /// The shell, when this tab is a terminal (追加要件 Terminal: TAB一つが
+    /// Terminalのウィンドウになる).
+    ///
+    /// **A terminal tab still carries a document**, empty and untitled. Every
+    /// path that closes, carries, counts or saves a tab reaches for one, and a
+    /// terminal that had none would be a second kind of tab for all of them to
+    /// learn about. What it has instead is this, and one question — is it
+    /// `Some` — is the whole of the difference.
+    terminal: Option<Rc<RefCell<TerminalSession>>>,
     /// How *this pane* is looking at that document. Another pane showing the
     /// same file has a tab of its own, with a caret and a scroll of its own
     /// (要件 7.6).
@@ -2808,6 +2893,7 @@ impl PaneTab {
         Self {
             document,
             view: TabView::for_pane(window, id),
+            terminal: None,
         }
     }
 }
@@ -3071,6 +3157,10 @@ impl Live {
         // The direction first: everything below is in a screen axis, and which
         // axis that is comes from the tab (要件 7.2).
         set_pane_direction(window, &self.cache, id, tab.view.vertical);
+        // **What the pane is showing, told to the pane.** Every path that draws
+        // reaches `refresh_pane`, and none of them carries a tab; this is the
+        // one place a tab and a pane are both in hand (追加要件 Terminal).
+        self.cache.borrow_mut().pane(id).terminal = tab.terminal.clone();
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
         id.set_scroll(window, tab.view.scroll);
         // The passage this tab was left at. **A tab switch has the same problem
@@ -3157,6 +3247,10 @@ fn open_session(
                     vertical: tab.vertical,
                     preview: tab.preview,
                 },
+                // A session remembers documents. **A shell is not one** — it is
+                // a process that ended when the editor did, so a restored
+                // terminal tab would be a name with nothing behind it.
+                terminal: None,
             });
         }
         let strip = &mut strips[id.index() as usize];
@@ -3177,6 +3271,7 @@ fn open_session(
                 state: state.clone(),
                 ..TabView::for_pane(window, focused)
             },
+            terminal: None,
         });
     }
     for id in PaneId::all(window) {
@@ -3275,6 +3370,7 @@ fn open_without_session(
                     state: state.clone(),
                     ..TabView::for_pane(window, here)
                 },
+                terminal: None,
             })
             .collect(),
         active: 0,
@@ -3295,7 +3391,16 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
             app_data::SessionPane {
                 active: strip.active,
                 zoom: id.zoom(window),
-                tabs: strip.tabs.iter().map(session_tab).collect(),
+                // **A shell is not written down** (追加要件 Terminal). The
+                // process ends with the editor, so a remembered terminal tab
+                // would come back as its stand-in document — an empty 無題
+                // nobody asked for.
+                tabs: strip
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.terminal.is_none())
+                    .map(session_tab)
+                    .collect(),
             }
         })
         .collect();
@@ -3494,6 +3599,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                         preview: like.shows_preview(window),
                         ..TabView::default()
                     },
+                    terminal: None,
                 });
                 strip.tabs.len() - 1
             }
@@ -4977,13 +5083,18 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
             .iter()
             .map(|tab| TabInfo {
                 // Every name and marker is read from the document. There is no
-                // second copy to be fresher than the list any more.
-                title: tab.document.file.borrow().title().into(),
-                edited: tab.document.text.edited(),
+                // second copy to be fresher than the list any more — except a
+                // terminal, whose document is an empty stand-in and whose name
+                // is the shell it is running (追加要件 Terminal).
+                title: match &tab.terminal {
+                    Some(_) => TERMINAL_TAB_NAME.into(),
+                    None => tab.document.file.borrow().title().into(),
+                },
+                edited: tab.terminal.is_none() && tab.document.text.edited(),
                 // 追加要件 2026-09-06: only a tab standing for a file has a
                 // name on disk to change. 無題1 reads like a name on screen,
                 // and nothing is filed under it.
-                renamable: tab.document.file.borrow().path().is_some(),
+                renamable: tab.terminal.is_none() && tab.document.file.borrow().path().is_some(),
                 stem_length: stem_length(&tab.document.file.borrow().title()),
             })
             .collect::<Vec<_>>();
@@ -8390,6 +8501,210 @@ fn lay_out_pane(
 /// Slint property they wrote. That difference is behind [`PaneId`] now, and goes
 /// altogether when the panes become a model (ペイン分割設計 5.2).
 #[allow(clippy::too_many_arguments)]
+/// Draw one pane that is showing a shell (追加要件 Terminal).
+///
+/// **The pane is told its size in cells before anything is drawn**, because the
+/// shell draws for the screen it was told about: a prompt redrawn for 80 columns
+/// on a pane that holds 60 wraps in the wrong place, and nothing later can undo
+/// it. Then everything waiting is applied, and the whole grid is drawn as one
+/// image — a terminal has no blocks to cut tiles from, and its cells change
+/// everywhere at once (a scroll moves every row).
+fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id: PaneId) {
+    let Some(session) = cache.borrow_mut().pane(id).terminal.clone() else {
+        return;
+    };
+    let look = cells::TerminalLook::default();
+    let Ok(cell) = cells::terminal_cell_size(&look) else {
+        return;
+    };
+    let (columns, rows) = cell.grid_for(id.shown_width(window), id.shown_height(window));
+    let mut session = session.borrow_mut();
+    session.resize(columns, rows);
+    session.drain();
+    let width = (columns as f32 * cell.advance).ceil().max(1.0) as u32;
+    let height = (rows as f32 * cell.line).ceil().max(1.0) as u32;
+    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    // 要件 7.1 の意味でのキャレットではない。**シェルが隠せと言えば隠す**もので、
+    // 全画面のプログラムは自分で消して自分で描く。
+    let cursor = session.screen().modes().cursor_visible.then(|| {
+        let at = session.screen().cursor();
+        (at.row, at.column)
+    });
+    let drawn = cells::draw_terminal(
+        session.screen().lines(),
+        cursor,
+        &look,
+        cell,
+        pixels.make_mut_bytes(),
+        width,
+        height,
+    );
+    if let Err(error) = drawn {
+        cache
+            .borrow_mut()
+            .log_diag("terminal", &format!("draw pane={} {error}", id.log_name()));
+        return;
+    }
+    // The bitmap holds BGRA and Slint wants RGBA, swapped where it lies for the
+    // reason the tiles swap theirs.
+    for four in pixels.make_mut_bytes().chunks_exact_mut(4) {
+        four.swap(0, 2);
+    }
+    let image = Image::from_rgba8(pixels);
+    id.set_tiles(
+        window,
+        vec![PreviewTile {
+            x: 0,
+            y: 0,
+            width: width as i32,
+            height: height as i32,
+            source: image,
+        }],
+    );
+    id.set_selection(window, &[]);
+    id.set_caret(window, None);
+    id.update_screen(window, |screen| {
+        screen.content_width = width as i32;
+        screen.content_height = height as i32;
+    });
+}
+
+/// A tab that is a shell (追加要件 Terminal), in the pane the writer is in.
+///
+/// **The default is WSL**, which is what the requirement says and what the
+/// writer works in. `wsl.exe` starts the distribution if it is not running, so
+/// there is nothing here to do about that.
+fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId) {
+    sync_active_tab(window, live);
+    let number = {
+        let tabs = live.tabs.borrow();
+        let taken: Vec<u32> = tabs
+            .panes
+            .iter()
+            .flat_map(|strip| strip.tabs.iter())
+            .map(|tab| tab.document.file.borrow().untitled_number())
+            .collect();
+        next_untitled_number(&taken)
+    };
+    // The size is corrected on the first refresh, when the pane's own extent is
+    // known; starting at something ordinary means the shell's first prompt is
+    // not drawn for a screen of one column.
+    let look = cells::TerminalLook::default();
+    let cell = cells::terminal_cell_size(&look).unwrap_or(cells::CellSize {
+        advance: 8.0,
+        line: 18.0,
+    });
+    let (columns, rows) = cell.grid_for(id.shown_width(window), id.shown_height(window));
+    let weak = window.as_weak();
+    let wake = move || {
+        // **One ring, on the window's own thread.** What to draw and how is
+        // decided over there; this side is a reading thread and may not touch
+        // any of it (要件 2).
+        let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
+    };
+    let session = match TerminalSession::start(TERMINAL_SHELL, columns, rows, wake) {
+        Ok(session) => session,
+        Err(error) => {
+            live.cache
+                .borrow_mut()
+                .log_diag("terminal", &format!("open {TERMINAL_SHELL} {error}"));
+            window.set_render_status(format!("端末を開けませんでした: {error}").into());
+            return;
+        }
+    };
+    live.cache.borrow_mut().log_diag(
+        "terminal",
+        &format!(
+            "open pane={} {TERMINAL_SHELL} {columns}x{rows}",
+            id.log_name()
+        ),
+    );
+    let document = OpenDocument::untitled(number, window.as_weak());
+    let tab = PaneTab {
+        view: TabView {
+            vertical: false,
+            preview: false,
+            ..TabView::default()
+        },
+        terminal: Some(Rc::new(RefCell::new(session))),
+        ..PaneTab::showing(window, id, document)
+    };
+    add_tab(window, live, id, tab);
+}
+
+/// Send one keystroke to the shell in front of this pane (追加要件 Terminal).
+///
+/// **The pane does not decide what a key means.** Which bytes an arrow is
+/// depends on modes the shell set, so the key is named here and encoded in
+/// `terminal`, where those modes live.
+fn send_terminal_key(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    text: &str,
+    code: i32,
+    control: bool,
+    alt: bool,
+    shift: bool,
+) {
+    let Some(session) = live.cache.borrow_mut().pane(id).terminal.clone() else {
+        return;
+    };
+    let key = match code {
+        1 => TerminalKey::Up,
+        2 => TerminalKey::Down,
+        3 => TerminalKey::Right,
+        4 => TerminalKey::Left,
+        5 => TerminalKey::Home,
+        6 => TerminalKey::End,
+        7 => TerminalKey::PageUp,
+        8 => TerminalKey::PageDown,
+        9 => TerminalKey::Delete,
+        10 => TerminalKey::Insert,
+        11 => TerminalKey::Backspace,
+        12 => TerminalKey::Tab,
+        13 => TerminalKey::Enter,
+        14 => TerminalKey::Escape,
+        20..=31 => TerminalKey::Function((code - 19) as u8),
+        _ => {
+            let Some(character) = text.chars().next() else {
+                return;
+            };
+            // **Ctrl+C arrives as the control code it already is.** Named back
+            // into the letter, because what the shell is sent is decided in one
+            // place — otherwise Ctrl+C would be encoded here and every other
+            // key over there.
+            let named = if control && (character as u32) < 0x20 {
+                char::from_u32(character as u32 + 0x60).unwrap_or(character)
+            } else {
+                character
+            };
+            TerminalKey::Char(named)
+        }
+    };
+    let modifiers = TerminalModifiers {
+        shift,
+        alt,
+        control,
+    };
+    session.borrow_mut().send_key(key, modifiers);
+    refresh_terminal_pane(window, &live.cache, id);
+}
+
+/// Every pane showing a shell, drawn again (追加要件 Terminal).
+///
+/// **Rung by the reading thread**, which knows only that bytes arrived. Which
+/// pane they belong to is a question for this side, and asking every pane is
+/// cheaper than carrying an answer across a thread that could be stale by the
+/// time it lands.
+fn refresh_terminal_panes(window: &AppWindow, live: &Live) {
+    for id in PaneId::all(window) {
+        if live.cache.borrow_mut().pane(id).terminal.is_some() {
+            refresh_terminal_pane(window, &live.cache, id);
+        }
+    }
+}
+
 fn refresh_pane(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
@@ -8401,6 +8716,15 @@ fn refresh_pane(
     selection: PaneSelection,
     preedit: &str,
 ) {
+    // **A pane showing a shell is not laying anything out** (追加要件
+    // Terminal). None of what follows applies: there is no document to measure,
+    // no wrapping to search and no caret of the editor's to place. The check is
+    // here rather than at each of the twenty callers, because what they all
+    // have in common is that they end up here.
+    if cache.borrow_mut().pane(id).terminal.is_some() {
+        refresh_terminal_pane(window, cache, id);
+        return;
+    }
     let refresh_started = Instant::now();
     // Read once and logged: how far this pane is magnified is half of why a
     // draw cost what it did, and the two panes may be set differently now.
