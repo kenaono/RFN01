@@ -2036,6 +2036,28 @@ export component EditorPane inherits Rectangle {
                     width: parent.width;
                     height: parent.height;
 
+                    // **The keyboard is taken one turn after this exists.**
+                    // Taking it inside `init` is too early for the IME: Slint
+                    // turns the conversion on when a field *takes* the focus,
+                    // and a field taking it while it is being built never gets
+                    // that far — the keys arrive and the conversion does not
+                    // (書き手の報告, 2026-09-06). A timer of no length is one
+                    // turn of the event loop, by which time the strip is a
+                    // thing on screen.
+                    init => {
+                        grab.running = true;
+                    }
+
+                    grab := Timer {
+                        interval: 1ms;
+                        running: false;
+                        triggered => {
+                            self.running = false;
+                            below-ime.clear-focus();
+                            below-ime.focus();
+                        }
+                    }
+
                     for tile in root.below-tiles: Image {
                         x: tile.x * 1px;
                         y: tile.y * 1px;
@@ -2068,14 +2090,20 @@ export component EditorPane inherits Rectangle {
                         text-cursor-width: 0px;
                         single-line: false;
 
-                        // 6.11: an element is born in the state it is created
-                        // with, so the focus is taken at `init` as well as on
-                        // the bump.
+                        // **Focused on the bump, never at `init`** (書き手の
+                        // 報告, 2026-09-06: 下段で文字が入らない). Slint turns
+                        // the IME on when a text field takes the focus — and a
+                        // field that takes it while it is being created never
+                        // gets that far, so the keys arrive and the conversion
+                        // does not. The strip is opened by a bump, so the bump
+                        // is enough on its own.
+                        //
+                        // **Let go first, then take it.** Taking focus that is
+                        // already held raises nothing, and it is the raising
+                        // that turns the IME on.
                         property <int> generation: root.below-focus-generation;
                         changed generation => {
-                            self.focus();
-                        }
-                        init => {
+                            self.clear-focus();
                             self.focus();
                         }
                         // **変換中は触らない。**この欄はシェルのカーソルに
@@ -2157,7 +2185,11 @@ export component EditorPane inherits Rectangle {
                             } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
                                 root.below-selection-end(self.mouse-x / 1px, self.mouse-y / 1px);
                                 // The keyboard follows the hand, as it does in
-                                // the pane above.
+                                // the pane above — **and it is put down before
+                                // it is picked up**, so that the field raises a
+                                // focus event even when it already had it, and
+                                // the IME is turned on again with it.
+                                below-ime.clear-focus();
                                 below-ime.focus();
                             }
                         }
