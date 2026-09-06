@@ -7615,10 +7615,15 @@ pub mod cells {
     /// `cursor` is where the block caret goes, if it is showing. **The rows are
     /// given rather than the screen** so that the same drawing serves the
     /// scrollback, which is the same cells one screenful earlier.
+    /// `preedit` is what the IME is composing: drawn at the cursor and
+    /// underlined, and **not in the grid** — the shell has not been told about
+    /// it and must not be until it is committed, so it is painted over whatever
+    /// is underneath.
     pub fn draw_terminal(
         lines: &[CellLine],
         selection: &[Option<(usize, usize)>],
         cursor: Option<(usize, usize)>,
+        preedit: &str,
         look: &TerminalLook,
         cell: CellSize,
         into: &mut [u8],
@@ -7716,7 +7721,57 @@ pub mod cells {
                     }
                 }
             }
-            if let Some((row, column)) = cursor {
+            if let (Some((row, column)), false) = (cursor, preedit.is_empty()) {
+                // **変換中の字はカーソルの場所に立つ**——自分の紙の上に、下線つきで。
+                // どの端末もその2つで「まだ行に入っていない」と言う。
+                let top = row as f32 * cell.line;
+                let cells: usize = preedit.chars().map(character_width).sum();
+                let left = column as f32 * cell.advance;
+                let right = (left + cells as f32 * cell.advance).min(width as f32);
+                let rect = D2D_RECT_F {
+                    left,
+                    top,
+                    right,
+                    bottom: top + cell.line,
+                };
+                // SAFETY: the brush belongs to the target, and each rectangle is
+                // read before the call it is given to returns.
+                unsafe {
+                    brush.SetColor(&colour(look.paper));
+                    target.FillRectangle(&rect, &brush);
+                    brush.SetColor(&colour(look.ink));
+                    let mut at = column;
+                    for text in preedit.chars() {
+                        let step = character_width(text).max(1);
+                        let left = at as f32 * cell.advance;
+                        if left >= width as f32 {
+                            break;
+                        }
+                        let glyph = D2D_RECT_F {
+                            left,
+                            top,
+                            right: left + step as f32 * cell.advance,
+                            bottom: top + cell.line,
+                        };
+                        let utf16 = text.to_string().encode_utf16().collect::<Vec<u16>>();
+                        target.DrawText(
+                            &utf16,
+                            &plain,
+                            &glyph,
+                            &brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                        at += step;
+                    }
+                    let underline = D2D_RECT_F {
+                        top: top + cell.line - 2.0,
+                        bottom: top + cell.line - 1.0,
+                        ..rect
+                    };
+                    target.FillRectangle(&underline, &brush);
+                }
+            } else if let Some((row, column)) = cursor {
                 let left = column as f32 * cell.advance;
                 let top = row as f32 * cell.line;
                 let rect = D2D_RECT_F {
@@ -7814,6 +7869,7 @@ mod terminal_tests {
             it.screen.lines(),
             &[],
             None,
+            "",
             look,
             cell,
             &mut pixels,
@@ -7870,6 +7926,7 @@ mod terminal_tests {
             it.screen.lines(),
             &[Some((2, 5))],
             None,
+            "",
             &look,
             cell,
             &mut pixels,
@@ -7891,6 +7948,42 @@ mod terminal_tests {
         assert!(
             blue > 200 && green > 200 && red > 200,
             "選ばれていないセルは紙のまま ({red},{green},{blue})"
+        );
+    }
+
+    /// 追加要件 Terminal: 変換中の字はカーソルの場所に、下線つきで立つ。
+    #[test]
+    fn a_composition_stands_at_the_cursor_and_is_underlined() {
+        let look = TerminalLook::default();
+        let cell = terminal_cell_size(&look).expect("measure the cell");
+        let mut it = Terminal::new(12, 1);
+        it.feed(b"ab");
+        let width = (12.0 * cell.advance).ceil() as u32;
+        let height = cell.line as u32;
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        draw_terminal(
+            it.screen.lines(),
+            &[],
+            Some((0, 2)),
+            "あい",
+            &look,
+            cell,
+            &mut pixels,
+            width,
+            height,
+        )
+        .expect("draw");
+        let inked = |x: u32, y: u32| {
+            let at = ((y * width + x) * 4) as usize;
+            pixels[at] < 160 && pixels[at + 1] < 160 && pixels[at + 2] < 160
+        };
+        let under = height - 2;
+        // **2桁目から4セル**（全角2文字）に下線が引かれ、その手前には無い。
+        assert!(inked((2.5 * cell.advance) as u32, under), "下線がある");
+        assert!(inked((5.5 * cell.advance) as u32, under), "4セルぶん続く");
+        assert!(
+            !inked((1.5 * cell.advance) as u32, under),
+            "変換の手前には引かれない"
         );
     }
 

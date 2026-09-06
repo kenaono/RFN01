@@ -1056,6 +1056,13 @@ struct TerminalView {
     /// the writer reads pushes rows into the history behind them; counted from
     /// the bottom, the same number would show different lines every time.
     history: usize,
+    /// What the IME is composing, before it is anything the shell has heard of
+    /// (要件 7.2's problem, in a terminal).
+    ///
+    /// **Drawn by us, at the cursor.** A conversion is not typing yet — the
+    /// shell must not see it, and the writer must — so it lives here until it
+    /// is committed and only then goes up the pipe as text.
+    preedit: String,
 }
 
 impl TerminalView {
@@ -1070,6 +1077,7 @@ impl TerminalView {
             selection: None,
             looking: 0,
             history: 0,
+            preedit: String::new(),
         }
     }
 }
@@ -2438,6 +2446,23 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_preedit_changed(move |pane, text| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
+            // **A conversion over a shell is not the document's** (追加要件
+            // Terminal). It is drawn in the grid at the cursor and goes up the
+            // pipe only when it is committed, which arrives as ordinary text.
+            let composing = {
+                let mut borrowed = cache.borrow_mut();
+                match borrowed.pane(id).shell(TerminalSpot::Front) {
+                    Some(shell) => {
+                        shell.preedit = text.to_string();
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if composing {
+                refresh_terminal(&window, &cache, id, TerminalSpot::Front);
+                return;
+            }
             let document = states.document(id);
             let state = states.of(id);
             set_pane_preedit(&window, id, &document, &state, &cache, text.as_str());
@@ -3655,6 +3680,12 @@ impl Live {
             screen.below_draft = tab.below.draft.as_str().into();
         });
         id.set_below(window, kind, height);
+        // **A strip restored open has no shell in it yet** (要件 8.5 puts the
+        // arrangement back, not the processes). The one it needs is started
+        // here, when the tab is actually in front of somebody.
+        if kind == 1 && self.cache.borrow_mut().pane(id).below.is_none() {
+            open_below_shell(window, self, id);
+        }
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
         id.set_scroll(window, tab.view.scroll);
         // The passage this tab was left at. **A tab switch has the same problem
@@ -3745,7 +3776,14 @@ fn open_session(
                 // a process that ended when the editor did, so a restored
                 // terminal tab would be a name with nothing behind it.
                 terminal: None,
-                below: TabBelow::default(),
+                // **The strip comes back empty and opens itself when the tab
+                // does.** Starting a shell for every restored tab at once would
+                // be a dozen processes for a window showing one of them.
+                below: TabBelow {
+                    open: tab.below,
+                    height: tab.below_height as f32,
+                    ..TabBelow::default()
+                },
             });
         }
         let strip = &mut strips[id.index() as usize];
@@ -3984,6 +4022,10 @@ fn session_tab(tab: &PaneTab) -> app_data::SessionTab {
         top: tab.view.top,
         caret: tab.view.state.caret_source_byte,
         anchor: tab.view.state.selection_anchor_source_byte,
+        // 追加要件 Terminal: the strip is part of the arrangement, so it is part
+        // of what 要件 8.5 puts back.
+        below: tab.below.open,
+        below_height: tab.below.height as i32,
     }
 }
 
@@ -9164,6 +9206,12 @@ fn refresh_terminal(
         let at = screen.cursor();
         (at.row, at.column)
     });
+    let preedit = cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|shell| shell.preedit.clone())
+        .unwrap_or_default();
 
     // Which columns of each visible row the writer has picked out.
     let top = history.saturating_sub(looking);
@@ -9215,6 +9263,15 @@ fn refresh_terminal(
             inside
                 .map(|(row, column)| (row - first, column))
                 .hash(&mut hasher);
+            // **The band holding the cursor is also the band the conversion is
+            // drawn in**, so what is being composed is part of what that band
+            // looks like.
+            if inside.is_some() {
+                preedit.hash(&mut hasher);
+            }
+            if inside.is_some() {
+                preedit.hash(&mut hasher);
+            }
             hasher.finish()
         };
         let height = (lines.len() as f32 * line).ceil().max(1.0) as u32;
@@ -9239,6 +9296,7 @@ fn refresh_terminal(
                     &band_lines,
                     picked_here,
                     inside.map(|(row, column)| (row - first, column)),
+                    &preedit,
                     &look,
                     cell,
                     pixels.make_mut_bytes(),
@@ -9282,6 +9340,18 @@ fn refresh_terminal(
             id.set_tiles(window, tiles);
             id.set_selection(window, &[]);
             id.set_caret(window, None);
+            // **Where the conversion window opens** (要件 7.2). The hidden
+            // field is what Windows asks, and it has to stand where the writing
+            // is or the candidates appear in the corner of the pane.
+            if let Some((row, column)) = cursor {
+                let caret = CaretGeometry {
+                    x: column as f32 * cell.advance,
+                    y: row as f32 * line,
+                    width: cell.advance,
+                    height: line,
+                };
+                id.set_ime_anchor(window, caret.x, caret.y, &caret);
+            }
             id.update_screen(window, |screen| {
                 screen.terminal = true;
                 screen.content_width = width as i32;
@@ -9688,15 +9758,9 @@ fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
             pane.below_open && pane.terminal.is_none() && pane.below.is_none(),
         )
     };
-    if needs_shell {
-        // The strip under a document is a shell, and it is the default one —
-        // the writer chose a pane, not a distribution.
-        let height = live.cache.borrow_mut().pane(id).below_height;
-        let Some(session) = start_shell(window, live, id, TerminalShell::Wsl, height) else {
-            live.cache.borrow_mut().pane(id).below_open = false;
-            return;
-        };
-        live.cache.borrow_mut().pane(id).below = Some(TerminalView::new(session));
+    if needs_shell && !open_below_shell(window, live, id) {
+        live.cache.borrow_mut().pane(id).below_open = false;
+        return;
     }
     let (kind, height) = {
         let mut borrowed = live.cache.borrow_mut();
@@ -9721,6 +9785,20 @@ fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
     if kind == 1 {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
     }
+}
+
+/// Start the shell that stands in a pane's strip (追加要件 Terminal).
+///
+/// **The default one**: the writer asked for a terminal under what they are
+/// writing, not for a distribution.
+fn open_below_shell(window: &AppWindow, live: &Live, id: PaneId) -> bool {
+    let height = live.cache.borrow_mut().pane(id).below_height;
+    let Some(session) = start_shell(window, live, id, TerminalShell::Wsl, height) else {
+        return false;
+    };
+    live.cache.borrow_mut().pane(id).below = Some(TerminalView::new(session));
+    store_below_on_tab(window, live, id);
+    true
 }
 
 /// Write the strip's state back onto the tab in front (追加要件 Terminal).

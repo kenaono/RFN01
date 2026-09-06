@@ -349,6 +349,7 @@ mod running_a_program {
                 session.screen().lines(),
                 &[],
                 Some((at.row, at.column)),
+                "",
                 &look,
                 cell,
                 &mut pixels,

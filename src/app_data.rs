@@ -99,6 +99,14 @@ pub struct SessionTab {
     pub top: Option<usize>,
     pub caret: Option<usize>,
     pub anchor: Option<usize>,
+    /// 追加要件 Terminal: whether the strip along the foot of the pane was open
+    /// while this tab was in front, and how tall the writer had dragged it.
+    ///
+    /// **The shell itself is not remembered** — it ended when the editor did.
+    /// What comes back is the arrangement: the strip opens again, with a shell
+    /// started when the tab comes to the front.
+    pub below: bool,
+    pub below_height: i32,
 }
 
 /// One pane's strip, as the session remembers it.
@@ -214,6 +222,13 @@ pub fn encode_session(session: &Session) -> String {
             if let Some(top) = tab.top {
                 out.push_str(&format!("top: {top}\n"));
             }
+            if tab.below || tab.below_height > 0 {
+                out.push_str(&format!(
+                    "below: {} {}\n",
+                    u8::from(tab.below),
+                    tab.below_height
+                ));
+            }
         }
     }
     out
@@ -292,6 +307,12 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "anchor" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.anchor = value.parse().ok();
+            }
+            "below" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                let mut fields = value.split(' ');
+                tab.below = fields.next() == Some("1");
+                tab.below_height = fields.next().and_then(|it| it.parse().ok()).unwrap_or(0);
             }
             // A field this build does not know is from a later one, and the
             // rest of the arrangement is still worth having.
@@ -885,6 +906,31 @@ mod tests {
             caret: Some(3),
             text: text.to_owned(),
         }
+    }
+
+    /// 追加要件 Terminal: **the strip is part of the arrangement too.**
+    ///
+    /// The shell in it is not — it ended with the editor — so what comes back
+    /// is that it was open, and how tall.
+    #[test]
+    fn a_session_remembers_the_strip_along_the_foot() {
+        let mut opened = session();
+        if let Some(pane) = opened.panes.first_mut() {
+            if let Some(tab) = pane.tabs.first_mut() {
+                tab.below = true;
+                tab.below_height = 260;
+            }
+        }
+        let read = decode_session(&encode_session(&opened)).expect("decodes");
+        let tab = &read.panes[0].tabs[0];
+        assert!(tab.below);
+        assert_eq!(tab.below_height, 260);
+
+        // **A session written before this build says nothing about it**, and a
+        // strip nobody asked for is a strip that stays shut.
+        let read = decode_session(&encode_session(&session())).expect("decodes");
+        assert!(!read.panes[0].tabs[0].below);
+        assert_eq!(read.panes[0].tabs[0].below_height, 0);
     }
 
     /// 要件 8.5: **the screen is part of the arrangement.** A window put on
