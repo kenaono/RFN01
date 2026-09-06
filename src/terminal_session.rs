@@ -1,0 +1,273 @@
+//! One shell, its screen, and the thread that reads it (要件 2・追加要件 Terminal).
+//!
+//! **This is the whole of what connects the two halves.** [`crate::pty`] knows
+//! Windows and nothing else; [`crate::terminal`] knows VT and nothing else; the
+//! pane knows neither. What is left over is the part that has to be true at
+//! once: **output arrives when the shell feels like it**, and the window has to
+//! stay answerable while it does.
+//!
+//! The shape is [`crate::searcher`]'s, for the same reasons. The thread is given
+//! a handle it owns and a way to wake the window; it hands back bytes it owns.
+//! No DirectWrite, no COM, no Slint — so 技術検証 7.3's open question about
+//! laying text out on several threads still does not arise here.
+//!
+//! **The reading thread never touches the screen.** It could: the grid is plain
+//! data. But then a repaint would have to lock it, and the cost of being wrong
+//! about that lock is a window that stops. Bytes go over a channel and the
+//! window applies them where it already owns everything else.
+
+// Unwired until the pane exists, exactly as in [`crate::pty`].
+#![allow(dead_code)]
+
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::thread;
+use std::time::Duration;
+
+use crate::pty::Pty;
+use crate::terminal::{Key, Modifiers, Screen, Terminal, encode_key, encode_paste};
+
+/// How much is read at once. **A screenful of coloured text is a few KB**, and
+/// a program printing a large file will simply come back around the loop.
+const CHUNK: usize = 8192;
+
+/// A running shell and the screen it is writing on.
+pub struct TerminalSession {
+    pty: Pty,
+    terminal: Terminal,
+    output: Receiver<Vec<u8>>,
+    /// The shell has exited. **The screen stays** — what it last said is often
+    /// the reason it exited.
+    finished: bool,
+}
+
+impl TerminalSession {
+    /// Start `command` on a screen `columns` by `rows`.
+    ///
+    /// `wake` is called from the reading thread every time bytes arrive, and
+    /// means only "there is something to collect". Applying it is
+    /// [`Self::drain`], on the thread that owns the window.
+    pub fn start(
+        command: &str,
+        columns: usize,
+        rows: usize,
+        wake: impl Fn() + Send + 'static,
+    ) -> windows::core::Result<Self> {
+        let mut pty = Pty::open(command, columns as u16, rows as u16)?;
+        let reader = pty
+            .take_reader()
+            .expect("a freshly opened pty still has its reader");
+        let (sender, output) = channel::<Vec<u8>>();
+        let spawned = thread::Builder::new()
+            .name("rfnedit-terminal".to_owned())
+            .spawn(move || {
+                let mut buffer = vec![0_u8; CHUNK];
+                loop {
+                    // **Blocking, and that is the point**: nothing here spins,
+                    // and a shell that says nothing for an hour costs nothing.
+                    let read = match reader.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    if sender.send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            });
+        if spawned.is_err() {
+            // Without the thread there is no terminal — reading on the window's
+            // thread is exactly what must not happen.
+            return Err(windows::core::Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                "the terminal's reading thread could not be started",
+            ));
+        }
+        Ok(Self {
+            pty,
+            terminal: Terminal::new(columns, rows),
+            output,
+            finished: false,
+        })
+    }
+
+    pub fn screen(&self) -> &Screen {
+        &self.terminal.screen
+    }
+
+    /// The shell has exited and everything it wrote has been applied.
+    ///
+    /// **The pipe does not say this** (see [`Pty::exited`]): a pseudo console
+    /// holds the far end open until we close it, so waiting for end-of-file
+    /// waits forever. The process is asked instead, and only once a drain has
+    /// found nothing left — otherwise the pane would be told the shell is gone
+    /// while its last line was still on its way.
+    pub fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Apply everything that has arrived. `true` if the screen changed.
+    ///
+    /// **Everything waiting is applied before one repaint**, which is what
+    /// makes a program printing thousands of lines cost the window a frame
+    /// rather than a frame per line.
+    pub fn drain(&mut self) -> bool {
+        let before = self.terminal.screen.revision();
+        let mut applied = 0_usize;
+        let mut closed = false;
+        loop {
+            match self.output.try_recv() {
+                Ok(chunk) => {
+                    self.terminal.feed(&chunk);
+                    applied += 1;
+                }
+                Err(TryRecvError::Empty) => break,
+                // The reading thread stopped, which with a pseudo console means
+                // we closed the console — not that the shell exited.
+                Err(TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        self.answer();
+        if applied == 0 && (closed || self.pty.exited()) {
+            self.finished = true;
+        }
+        self.terminal.screen.revision() != before
+    }
+
+    /// Wait for the shell to say something, then apply it. **For tests and for
+    /// nothing else** — the window is woken, it does not wait.
+    pub fn wait(&mut self, patience: Duration) -> bool {
+        match self.output.recv_timeout(patience) {
+            Ok(chunk) => {
+                self.terminal.feed(&chunk);
+                self.drain();
+                true
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.drain();
+                false
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.finished = true;
+                false
+            }
+        }
+    }
+
+    /// Send back what the shell asked for (cursor position, what we are).
+    ///
+    /// **A question left unanswered is a program left waiting**, so this
+    /// happens on every drain rather than when somebody thinks to do it.
+    fn answer(&mut self) {
+        let replies = self.terminal.screen.take_replies();
+        if !replies.is_empty() {
+            let _ = self.pty.write(&replies);
+        }
+    }
+
+    pub fn send_key(&mut self, key: Key, modifiers: Modifiers) {
+        let bytes = encode_key(key, modifiers, self.terminal.screen.modes());
+        self.send(&bytes);
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        let bytes = encode_paste(text, self.terminal.screen.modes());
+        self.send(&bytes);
+    }
+
+    /// Write bytes as they are. The pane uses this for what it has already
+    /// encoded; everything else should go through [`Self::send_key`].
+    pub fn send(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let _ = self.pty.write(bytes);
+    }
+
+    /// The pane changed size (要件 6.4).
+    ///
+    /// **Both halves have to be told, and the order matters.** The screen is
+    /// resized first so that what arrives in answer — a shell redrawing its
+    /// prompt for the new width — lands on a grid that is already the right
+    /// shape.
+    pub fn resize(&mut self, columns: usize, rows: usize) {
+        if columns == self.terminal.screen.columns() && rows == self.terminal.screen.rows() {
+            return;
+        }
+        self.terminal.screen.resize(columns, rows);
+        let _ = self.pty.resize(columns as u16, rows as u16);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// The three layers, a real shell, and no window (追加要件 Terminal).
+    ///
+    /// **`#[ignore]` because it needs a shell**, not because it is slow — it
+    /// takes about a second. `PTY_SHELL` chooses one; the default is 要件's
+    /// default. Run it with
+    /// `cargo test --offline a_shell_answers -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn a_shell_answers_onto_the_screen() {
+        let command = std::env::var("PTY_SHELL").unwrap_or_else(|_| "wsl.exe".to_owned());
+        let mut session = TerminalSession::start(&command, 80, 25, || {}).expect("open the shell");
+
+        // The prompt. **Waiting for the screen to say something is the honest
+        // test** — how many reads that takes is the shell's business.
+        let waited = Instant::now();
+        while waited.elapsed() < Duration::from_secs(10) && session.screen().row_text(0).is_empty()
+        {
+            session.wait(Duration::from_millis(200));
+        }
+        let prompt = session.screen().row_text(0);
+        assert!(!prompt.is_empty(), "no prompt in 10s from {command}");
+        println!("prompt: {prompt}");
+
+        for byte in b"echo RFN-SESSION-OK" {
+            session.send_key(Key::Char(*byte as char), Modifiers::none());
+        }
+        session.send_key(Key::Enter, Modifiers::none());
+
+        let waited = Instant::now();
+        let mut answered = false;
+        while waited.elapsed() < Duration::from_secs(10) && !answered {
+            session.wait(Duration::from_millis(200));
+            // **The line the shell echoed and the line it printed are both on
+            // the screen**, so the answer is the second one.
+            let hits = (0..session.screen().rows())
+                .filter(|row| session.screen().row_text(*row) == "RFN-SESSION-OK")
+                .count();
+            answered = hits >= 1;
+        }
+        for row in 0..6 {
+            println!("{row}: {}", session.screen().row_text(row));
+        }
+        assert!(answered, "the shell's answer never reached the screen");
+
+        session.send_key(Key::Char('d'), Modifiers::control());
+    }
+
+    /// A command that ends says so, and what it printed is still there.
+    #[test]
+    #[ignore]
+    fn a_shell_that_exits_leaves_its_last_words_on_the_screen() {
+        let mut session = TerminalSession::start("cmd.exe /c echo BYE-FROM-CONPTY", 80, 25, || {})
+            .expect("open the shell");
+        let waited = Instant::now();
+        while waited.elapsed() < Duration::from_secs(10) && !session.finished() {
+            session.wait(Duration::from_millis(200));
+            session.drain();
+        }
+        assert!(session.finished(), "the shell never closed the pipe");
+        let seen = (0..session.screen().rows())
+            .map(|row| session.screen().row_text(row))
+            .any(|text| text.contains("BYE-FROM-CONPTY"));
+        assert!(seen, "what it printed before exiting is gone");
+    }
+}

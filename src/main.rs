@@ -17,6 +17,7 @@ mod quick_draft;
 mod searcher;
 mod shell;
 mod terminal;
+mod terminal_session;
 mod text_blocks;
 #[cfg(test)]
 mod vertical_layout;

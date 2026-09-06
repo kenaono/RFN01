@@ -219,6 +219,19 @@ impl Pty {
         unsafe { ResizePseudoConsole(self.console, size) }
     }
 
+    /// The shell has exited.
+    ///
+    /// **The pipe cannot answer this.** A pseudo console holds its own end of
+    /// the output pipe until it is closed, so end-of-file arrives when *we* let
+    /// go of the console — never when the shell does. What says the shell is
+    /// gone is the process, and only the process.
+    pub fn exited(&self) -> bool {
+        let waited = unsafe {
+            windows::Win32::System::Threading::WaitForSingleObject(self.process.raw(), 0)
+        };
+        waited == windows::Win32::Foundation::WAIT_OBJECT_0
+    }
+
     pub fn pid(&self) -> u32 {
         self.pid
     }
