@@ -260,7 +260,9 @@ export component EditorPane inherits Rectangle {
     in-out property <string> below-buffer;
     /// What the IME is composing over the strip's shell, and what it committed.
     callback below-preedit(string);
-    callback below-text(string);
+    callback below-text(string, bool);
+    /// Whether what is arriving came out of a conversion.
+    property <bool> below-composing: false;
     /// A keystroke for the shell in the strip.
     callback below-key(string, int, bool, bool, bool);
     callback below-scrolled(float);
@@ -342,7 +344,11 @@ export component EditorPane inherits Rectangle {
     callback selection-update(float, float);
     callback selection-end(float, float);
     callback select-all();
-    callback text-input(string);
+    /// Text arriving through the hidden field: what was typed, pasted, or
+    /// committed out of a conversion. **The flag says which** — a conversion is
+    /// typing, and a shell shows pasted text highlighted until the next key
+    /// (書き手の報告, 2026-09-06: 確定した単語が選択状態になる).
+    callback text-input(string, bool);
     /// One keystroke for the shell: the text, which key it was, and the
     /// modifiers. **The name, not the bytes** — what an arrow key becomes
     /// depends on modes the shell set, and those are Rust's to read.
@@ -812,6 +818,11 @@ export component EditorPane inherits Rectangle {
                         icon: Icons.horizontal;
                         tip: "Horizontal";
                         checked: !root.vertical;
+                        // 追加要件 2026-09-06: **a shell has one direction.**
+                        // The grid is rows of cells across; there is nothing
+                        // here for 要件 7.2's other mode to mean, so the two
+                        // buttons are dimmed rather than left to do nothing.
+                        enabled: !root.terminal;
                         clicked => {
                             if (root.vertical) {
                                 root.direction-toggled();
@@ -822,6 +833,7 @@ export component EditorPane inherits Rectangle {
                         icon: Icons.vertical;
                         tip: "Vertical";
                         checked: root.vertical;
+                        enabled: !root.terminal;
                         clicked => {
                             if (!root.vertical) {
                                 root.direction-toggled();
@@ -1447,7 +1459,7 @@ export component EditorPane inherits Rectangle {
                                     root.had-preedit = false;
                                     root.commit-just-finished = true;
                                     commit-reset.start();
-                                    root.text-input(self.text);
+                                    root.text-input(self.text, true);
                                 } else if root.commit-just-finished && self.text == "\n" {
                                     // The Enter that ended a conversion, arriving as
                                     // a line break now that the field accepts them.
@@ -1457,7 +1469,7 @@ export component EditorPane inherits Rectangle {
                                     commit-reset.stop();
                                     self.text = "";
                                 } else {
-                                    root.text-input(self.text);
+                                    root.text-input(self.text, false);
                                 }
                             }
                             accepted => {
@@ -1465,7 +1477,7 @@ export component EditorPane inherits Rectangle {
                                     root.commit-just-finished = false;
                                     commit-reset.stop();
                                 } else {
-                                    root.text-input("\n");
+                                    root.text-input("\n", false);
                                 }
                             }
                             changed preedit-text => {
@@ -1701,7 +1713,7 @@ export component EditorPane inherits Rectangle {
                                             reject
                                         }
                                     } else if event.text == Key.Return {
-                                        root.text-input("\n");
+                                        root.text-input("\n", false);
                                         accept
                                     } else if event.text == Key.Backspace {
                                         root.backspace-pressed();
@@ -2082,11 +2094,15 @@ export component EditorPane inherits Rectangle {
                                 self.set-selection-offsets(0, 0);
                             }
                         }
-                        changed preedit-text => {
-                            root.below-preedit(self.preedit-text);
-                        }
                         edited => {
-                            root.below-text(self.text);
+                            root.below-text(self.text, self.preedit-text == "" && root.below-composing);
+                            root.below-composing = false;
+                        }
+                        changed preedit-text => {
+                            if (self.preedit-text != "") {
+                                root.below-composing = true;
+                            }
+                            root.below-preedit(self.preedit-text);
                         }
 
                     key-pressed(event) => {

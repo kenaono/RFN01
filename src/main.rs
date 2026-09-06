@@ -2401,7 +2401,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
-    window.on_pane_text_input(move |pane, text| {
+    window.on_pane_text_input(move |pane, text, committed| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let text = text.as_str();
@@ -2416,7 +2416,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 .as_ref()
                 .map(|shell| shell.session.clone());
             if let Some(session) = shell {
-                session.borrow_mut().paste(text);
+                // **A conversion is typing; the clipboard is a paste.** The
+                // difference is the bracketed-paste markers, and a shell shows
+                // what arrives between them highlighted until the next key.
+                if committed {
+                    session.borrow_mut().type_text(text);
+                } else {
+                    session.borrow_mut().paste(text);
+                }
                 {
                     let mut borrowed = cache.borrow_mut();
                     if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Front) {
@@ -2802,6 +2809,12 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_direction_toggled(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
+            // 追加要件 2026-09-06: **a shell has one direction.** The buttons
+            // are dimmed over one, and the answer is the same wherever else the
+            // ask could come from.
+            if cache.borrow_mut().pane(id).terminal.is_some() {
+                return;
+            }
             let document = states.document(id);
             set_pane_direction(&window, &cache, id, !id.vertical(&window));
             // The anchor the up and down keys hold on to is a coordinate in the
@@ -3059,7 +3072,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let weak = window.as_weak();
     let below_live = live.clone();
-    window.on_pane_below_text(move |pane, text| {
+    window.on_pane_below_text(move |pane, text, committed| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let session = below_live
@@ -3071,7 +3084,11 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(session) = session else {
                 return;
             };
-            session.borrow_mut().paste(text.as_str());
+            if committed {
+                session.borrow_mut().type_text(text.as_str());
+            } else {
+                session.borrow_mut().paste(text.as_str());
+            }
             {
                 let mut borrowed = below_live.cache.borrow_mut();
                 if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Below) {
@@ -9428,7 +9445,18 @@ fn refresh_terminal(
                 // along — the same offset the document uses.
                 let (x, y) = ime_candidate_anchor(&caret, false);
                 let x = x.clamp(0.0, (width as f32 - cell.advance).max(0.0));
-                let y = y.clamp(0.0, (id.shown_height(window) - line).max(0.0));
+                // **On the last rows it goes above instead** (書き手の報告,
+                // 2026-09-06: 最下行で重なる). There is no room below, so
+                // Windows turns the list upwards and hangs it from the field —
+                // and a field one line *under* the caret is a list drawn over
+                // the line being typed. Standing it at the top of the caret's
+                // own row leaves that row showing, which is the row that
+                // matters: a prompt is written on the last one.
+                let y = if y + line <= id.shown_height(window) {
+                    y
+                } else {
+                    caret.y
+                };
                 id.set_ime_anchor(window, x, y, &caret);
             }
             id.update_screen(window, |screen| {
@@ -9461,7 +9489,9 @@ fn refresh_terminal(
                 // instead, which is where the candidates should open anyway.
                 let strip = cache.borrow_mut().pane(id).below_height;
                 let x = x.clamp(0.0, (width as f32 - cell.advance).max(0.0));
-                let y = y.clamp(0.0, (strip - line).max(0.0));
+                // The strip's prompt is on its last row nearly always, so this
+                // is the case rather than the exception here.
+                let y = if y + line <= strip { y } else { caret.y };
                 id.update_screen(window, |screen| {
                     screen.below_caret_x = x;
                     screen.below_caret_y = y;
@@ -9705,19 +9735,11 @@ fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSp
             };
         }
     }
-    live.cache.borrow_mut().log_diag(
-        "terminal",
-        &format!(
-            "scroll pane={} spot={spot:?} delta={delta:.0} rows={rows} back={}",
-            id.log_name(),
-            live.cache
-                .borrow_mut()
-                .pane(id)
-                .shell(spot)
-                .map(|shell| shell.looking)
-                .unwrap_or(0)
-        ),
-    );
+    // **The number is read before the log line is written.** Reading it inside
+    // the `format!` borrows the cache a second time while the borrow that is
+    // writing the line is still held, and a `RefCell` says so by ending the
+    // program — which is what every turn of the wheel did (書き手の報告,
+    // 2026-09-06「スクロールすると強制終了しました」).
     let back = live
         .cache
         .borrow_mut()

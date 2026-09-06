@@ -182,6 +182,18 @@ impl TerminalSession {
         self.send(&bytes);
     }
 
+    /// Text the writer produced at the keyboard — a conversion committed, a
+    /// character typed (追加要件 Terminal).
+    ///
+    /// **Not a paste.** A shell shows pasted text highlighted until the next
+    /// key (bracketed paste is what tells it to), so a word committed out of an
+    /// IME would arrive selected — which is what the writer saw. Typing is
+    /// typing: the bytes go as they are.
+    pub fn type_text(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        self.send(text.as_bytes());
+    }
+
     pub fn paste(&mut self, text: &str) {
         let bytes = encode_paste(text, self.terminal.screen.modes());
         self.send(&bytes);

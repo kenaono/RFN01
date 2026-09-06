@@ -82,6 +82,11 @@ export component IconButton inherits Rectangle {
     in property <string> icon;
     in property <string> tip;
     in property <bool> checked: false;
+    /// Dimmed and deaf. **For a button whose command means nothing here** —
+    /// 追加要件 2026-09-06 turns the two writing directions off over a shell,
+    /// and a button that looks alive and does nothing is worse than one that
+    /// says it is not.
+    in property <bool> enabled: true;
     /// Square, and 26px unless something it has to sit inside is smaller — a
     /// tree row is 24px, and a button taller than its row overlaps the rows
     /// either side of it.
@@ -91,9 +96,10 @@ export component IconButton inherits Rectangle {
     width: root.size;
     height: root.size;
     border-radius: 5px;
+    opacity: root.enabled ? 1.0 : 0.4;
     background: root.checked
         ? Tok.accent-soft
-        : (touch.has-hover ? Tok.chrome-sunken : transparent);
+        : (touch.has-hover && root.enabled ? Tok.chrome-sunken : transparent);
 
     // A child with no x/y sits at the corner, not in the middle, so the two
     // are said here rather than left to the default.
@@ -105,6 +111,7 @@ export component IconButton inherits Rectangle {
     }
 
     touch := TouchArea {
+        enabled: root.enabled;
         clicked => {
             root.clicked();
         }

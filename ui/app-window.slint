@@ -339,7 +339,9 @@ export component AppWindow inherits Window {
     /// somewhere else.
     callback pane-scroll-applied(int, float, float);
     callback pane-resized(int);
-    callback pane-text-input(int, string);
+    /// 文字が入ってきた。**変換から確定したものかどうか**まで言う——シェルへは
+    /// 貼り付けではなく打鍵として渡すため。
+    callback pane-text-input(int, string, bool);
     /// One keystroke for the shell in front of a pane (追加要件 Terminal).
     callback pane-terminal-key(int, string, int, bool, bool, bool);
     /// The wheel over a shell (追加要件 Terminal).
@@ -353,7 +355,7 @@ export component AppWindow inherits Window {
     callback pane-below-sent(int);
     /// 要件 7.2 の変換、下段のシェルの上で。
     callback pane-below-preedit(int, string);
-    callback pane-below-text(int, string);
+    callback pane-below-text(int, string, bool);
     /// 要件 11.3 の手つきで下段へ移る（true）／本文へ戻る（false）。
     callback pane-below-focus(int, bool);
     /// 追加要件 2026-09-06: the right button's rows that the window answers.
@@ -1503,7 +1505,9 @@ export component AppWindow inherits Window {
                         selection-update(x, y) => { root.pane-selection-update(pane.id, x, y); }
                         selection-end(x, y) => { root.pane-selection-end(pane.id, x, y); }
                         select-all => { root.pane-select-all(pane.id); }
-                        text-input(text) => { root.pane-text-input(pane.id, text); }
+                        text-input(text, committed) => {
+                            root.pane-text-input(pane.id, text, committed);
+                        }
                         terminal: pane.terminal;
                         terminal-key(text, number, ctrl, alt, shift) => {
                             root.pane-terminal-key(pane.id, text, number, ctrl, alt, shift);
@@ -1532,7 +1536,9 @@ export component AppWindow inherits Window {
                         below-caret-y: pane.below-caret-y;
                         below-buffer <=> pane.below-buffer;
                         below-preedit(text) => { root.pane-below-preedit(pane.id, text); }
-                        below-text(text) => { root.pane-below-text(pane.id, text); }
+                        below-text(text, committed) => {
+                            root.pane-below-text(pane.id, text, committed);
+                        }
                         quick-draft-requested => { root.quick-draft-requested(); }
                         close-clean-tabs => { root.pane-close-clean(pane.id); }
                         copy-path-requested(index) => { root.pane-copy-path(pane.id, index); }
