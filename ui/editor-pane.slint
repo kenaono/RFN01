@@ -142,7 +142,16 @@ export component EditorPane inherits Rectangle {
     /// Which key this is, as a number `terminal.rs` knows (追加要件 Terminal).
     /// 0 is "an ordinary character", and then the text is what matters.
     pure function key-number(text: string) -> int {
-        return text == Key.UpArrow ? 1
+        // **修飾キーそのものは打鍵ではない。**Slintはそれらを`U+0010`〜`U+0018`の
+        // 文字として渡してくるので、名前を付けずに落とすと`Ctrl+P`のバイトとして
+        // シェルへ行く（Shiftを押すと履歴が戻った）。-1は「何も送らない」。
+        return text == Key.Shift || text == Key.ShiftR
+                || text == Key.Control || text == Key.ControlR
+                || text == Key.Alt || text == Key.AltGr
+                || text == Key.CapsLock
+                || text == Key.Meta || text == Key.MetaR ? -1
+            : text == Key.Backtab ? 12
+            : text == Key.UpArrow ? 1
             : text == Key.DownArrow ? 2
             : text == Key.RightArrow ? 3
             : text == Key.LeftArrow ? 4

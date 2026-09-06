@@ -8656,6 +8656,41 @@ fn send_terminal_key(
     let Some(session) = live.cache.borrow_mut().pane(id).terminal.clone() else {
         return;
     };
+    let Some(key) = named_key(code, text, control) else {
+        return;
+    };
+    let modifiers = TerminalModifiers {
+        shift,
+        alt,
+        control,
+    };
+    let sent = {
+        let mut session = session.borrow_mut();
+        session.send_key(key, modifiers);
+        session.screen().modes()
+    };
+    live.cache.borrow_mut().log_diag(
+        "terminal",
+        &format!(
+            "key pane={} code={code} u={:04x} ctrl={control} alt={alt} shift={shift} app_keys={}",
+            id.log_name(),
+            text.chars().next().map(u32::from).unwrap_or(0),
+            sent.application_cursor_keys
+        ),
+    );
+    refresh_terminal_pane(window, &live.cache, id);
+}
+
+/// Which key the window says was pressed, or `None` for one the shell should
+/// never hear about (追加要件 Terminal).
+///
+/// **A modifier key is not a keystroke.** Slint hands them over as characters —
+/// Shift is `U+0010`, Control `U+0011` — and sent as text they are `Ctrl+P` and
+/// `Ctrl+Q`, which is why the first terminal walked back through the history
+/// every time Shift was touched. There is no ambiguity to weigh: winit gives the
+/// *logical* key, so `Ctrl+Q` arrives as `q` with the modifier flag set, never
+/// as `U+0011`.
+fn named_key(code: i32, text: &str, control: bool) -> Option<TerminalKey> {
     let key = match code {
         1 => TerminalKey::Up,
         2 => TerminalKey::Down,
@@ -8672,10 +8707,16 @@ fn send_terminal_key(
         13 => TerminalKey::Enter,
         14 => TerminalKey::Escape,
         20..=31 => TerminalKey::Function((code - 19) as u8),
+        // The window has already decided this one is not for the shell.
+        number if number < 0 => return None,
         _ => {
-            let Some(character) = text.chars().next() else {
-                return;
-            };
+            let character = text.chars().next()?;
+            // A second net under the window's: a key with no name and no text
+            // of its own — the Windows key, a function key past F12 — arrives
+            // as a private-use character that means nothing to a shell.
+            if matches!(character as u32, 0x10..=0x18 | 0xe000..=0xf8ff) {
+                return None;
+            }
             // **Ctrl+C arrives as the control code it already is.** Named back
             // into the letter, because what the shell is sent is decided in one
             // place — otherwise Ctrl+C would be encoded here and every other
@@ -8688,25 +8729,7 @@ fn send_terminal_key(
             TerminalKey::Char(named)
         }
     };
-    let modifiers = TerminalModifiers {
-        shift,
-        alt,
-        control,
-    };
-    let sent = {
-        let mut session = session.borrow_mut();
-        session.send_key(key, modifiers);
-        session.screen().modes()
-    };
-    live.cache.borrow_mut().log_diag(
-        "terminal",
-        &format!(
-            "key pane={} code={code} ctrl={control} alt={alt} shift={shift} app_keys={}",
-            id.log_name(),
-            sent.application_cursor_keys
-        ),
-    );
-    refresh_terminal_pane(window, &live.cache, id);
+    Some(key)
 }
 
 /// Every pane showing a shell, drawn again (追加要件 Terminal).
@@ -12603,5 +12626,42 @@ mod tests {
             "clipping to the viewport should keep the rectangle count small, got {}",
             rects.len()
         );
+    }
+
+    /// 追加要件 Terminal: **修飾キーそのものは打鍵ではない。**
+    ///
+    /// これを取りこぼすと、Shiftを押しただけで`Ctrl+P`（履歴をひとつ戻る）が
+    /// シェルへ飛ぶ——最初の端末で実際にそうなった。
+    #[test]
+    fn a_modifier_key_is_not_a_keystroke() {
+        // 窓が名前を付けられなかったと言ってきた場合。
+        assert_eq!(named_key(-1, "\u{10}", false), None);
+        // 番号が付かずに文字として来た場合も、同じ答えでなければならない。
+        assert_eq!(named_key(0, "\u{10}", false), None, "Shift");
+        assert_eq!(named_key(0, "\u{11}", true), None, "Control");
+        assert_eq!(named_key(0, "\u{12}", false), None, "Alt");
+        assert_eq!(named_key(0, "\u{17}", false), None, "Windows key");
+        assert_eq!(named_key(0, "\u{f710}", false), None, "F13 と、その先");
+        assert_eq!(named_key(0, "", false), None, "文字を持たないキー");
+    }
+
+    #[test]
+    fn ctrl_and_a_letter_is_that_letter() {
+        // winitは論理キーを渡すので、Ctrlを押していても文字は`c`のまま来る。
+        assert_eq!(named_key(0, "c", true), Some(TerminalKey::Char('c')));
+        // 制御文字の形で来ても同じところへ着く（バイトにするのは`terminal.rs`）。
+        assert_eq!(named_key(0, "\u{3}", true), Some(TerminalKey::Char('c')));
+    }
+
+    #[test]
+    fn the_keys_with_names_keep_them() {
+        assert_eq!(named_key(13, "\n", false), Some(TerminalKey::Enter));
+        assert_eq!(named_key(1, "\u{f700}", false), Some(TerminalKey::Up));
+        assert_eq!(named_key(12, "\t", false), Some(TerminalKey::Tab));
+        assert_eq!(
+            named_key(24, "\u{f708}", false),
+            Some(TerminalKey::Function(5))
+        );
+        assert_eq!(named_key(0, "あ", false), Some(TerminalKey::Char('あ')));
     }
 }
