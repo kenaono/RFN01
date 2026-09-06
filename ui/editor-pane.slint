@@ -122,6 +122,12 @@ export struct PaneScreen {
     below-draft: string,
     // Bumped by Rust when the strip should take the keyboard.
     below-focus-generation: int,
+    // Where the strip's own hidden field stands, so Windows opens the
+    // conversion where the writing is (要件 7.2).
+    below-caret-x: float,
+    below-caret-y: float,
+    // What that field holds. Written at both ends, like the pane's own.
+    below-buffer: string,
     // How much this pane magnifies the text, as a percentage (要件 9).
     // **Per pane, not per tab**: it is how close the writer is sitting to this
     // half of the window, and a tab brought out in front of it is read at the
@@ -249,6 +255,12 @@ export component EditorPane inherits Rectangle {
     in property <[PreviewTile]> below-tiles;
     in-out property <string> below-draft;
     in property <int> below-focus-generation;
+    in property <float> below-caret-x;
+    in property <float> below-caret-y;
+    in-out property <string> below-buffer;
+    /// What the IME is composing over the strip's shell, and what it committed.
+    callback below-preedit(string);
+    callback below-text(string);
     /// A keystroke for the shell in the strip.
     callback below-key(string, int, bool, bool, bool);
     callback below-scrolled(float);
@@ -1999,20 +2011,9 @@ export component EditorPane inherits Rectangle {
 
                 // The shell under a document. Drawn from the same images the
                 // pane above is drawn from, and read by the same keys.
-                if root.below-kind == 1: FocusScope {
+                if root.below-kind == 1: Rectangle {
                     width: parent.width;
                     height: parent.height;
-                    focus-on-click: true;
-
-                    // 6.11: an element is born in the state it is created with,
-                    // so the focus is taken at `init` as well as on the bump.
-                    property <int> generation: root.below-focus-generation;
-                    changed generation => {
-                        self.focus();
-                    }
-                    init => {
-                        self.focus();
-                    }
 
                     for tile in root.below-tiles: Image {
                         x: tile.x * 1px;
@@ -2022,6 +2023,49 @@ export component EditorPane inherits Rectangle {
                         source: tile.source;
                         image-fit: fill;
                     }
+
+                    // **The strip has a hidden field of its own** (書き手の
+                    // 報告, 2026-09-06: 下段でIMEが起動しない). A `FocusScope`
+                    // takes keys but no conversion: Windows composes into a text
+                    // field, and without one there is nothing for the IME to
+                    // open on. This is the pane's own arrangement, one storey
+                    // down.
+                    below-ime := TextInput {
+                        x: root.below-caret-x * 1px;
+                        y: root.below-caret-y * 1px;
+                        width: 1px;
+                        height: max(root.below-height / 12, 12px);
+                        text <=> root.below-buffer;
+                        font-family: "Yu Gothic UI";
+                        font-size: 1px;
+                        color: transparent;
+                        selection-foreground-color: transparent;
+                        selection-background-color: transparent;
+                        text-cursor-width: 0px;
+                        single-line: false;
+
+                        // 6.11: an element is born in the state it is created
+                        // with, so the focus is taken at `init` as well as on
+                        // the bump.
+                        property <int> generation: root.below-focus-generation;
+                        changed generation => {
+                            self.focus();
+                        }
+                        init => {
+                            self.focus();
+                        }
+                        changed x => {
+                            self.set-selection-offsets(0, 0);
+                        }
+                        changed y => {
+                            self.set-selection-offsets(0, 0);
+                        }
+                        changed preedit-text => {
+                            root.below-preedit(self.preedit-text);
+                        }
+                        edited => {
+                            root.below-text(self.text);
+                        }
 
                     key-pressed(event) => {
                         if (event.modifiers.control && event.text == "`") {
@@ -2046,6 +2090,12 @@ export component EditorPane inherits Rectangle {
                                 return accept;
                             }
                         }
+                        // 要件 11.2: `Ctrl+V` is left to the field, which
+                        // fills itself and hands the text over as typing.
+                        if (event.modifiers.control
+                            && (event.text == "v" || event.text == "V")) {
+                            return reject;
+                        }
                         root.below-key(
                             event.text,
                             key-number(event.text),
@@ -2053,6 +2103,7 @@ export component EditorPane inherits Rectangle {
                             event.modifiers.alt,
                             event.modifiers.shift);
                         accept
+                    }
                     }
 
                     below-pointer := TouchArea {
@@ -2067,6 +2118,9 @@ export component EditorPane inherits Rectangle {
                                 root.below-selection-start(self.mouse-x / 1px, self.mouse-y / 1px);
                             } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
                                 root.below-selection-end(self.mouse-x / 1px, self.mouse-y / 1px);
+                                // The keyboard follows the hand, as it does in
+                                // the pane above.
+                                below-ime.focus();
                             }
                         }
                         moved => {

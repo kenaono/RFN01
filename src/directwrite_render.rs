@@ -353,6 +353,10 @@ struct Graphics {
     /// own line advance — so it shares nothing with the ones above but the
     /// factory that made them.
     cell_formats: HashMap<(u32, String, bool), IDWriteTextFormat>,
+    /// The terminal's cell size, and what it was measured for (追加要件
+    /// Terminal). **Every wheel notch and every chunk of output asks for it**,
+    /// and building a layout to answer is the same work each time.
+    cell_size: Option<((u32, String), cells::CellSize)>,
     target: Option<RenderTargetCache>,
     _apartment: Option<ComApartment>,
 }
@@ -380,6 +384,7 @@ impl Graphics {
                 wic: CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?,
                 formats: HashMap::new(),
                 cell_formats: HashMap::new(),
+                cell_size: None,
                 target: None,
                 _apartment: apartment,
             })
@@ -7453,6 +7458,12 @@ pub mod cells {
     /// character, so the answer is not one glyph's rounding.
     pub fn terminal_cell_size(look: &TerminalLook) -> Result<CellSize> {
         with_graphics(|graphics| {
+            let key = (look.font_size.to_bits(), look.family.clone());
+            if let Some((held, size)) = &graphics.cell_size {
+                if *held == key {
+                    return Ok(*size);
+                }
+            }
             let format = graphics.cell_format(look, false)?;
             let utf16 = "0000000000".encode_utf16().collect::<Vec<u16>>();
             // SAFETY: the buffer and the format outlive the call.
@@ -7476,10 +7487,12 @@ pub mod cells {
             // a line is several columns' worth and puts a TUI's frame out of true.
             // The line advance is rounded, because rows are drawn one at a time and
             // nothing accumulates across them.
-            Ok(CellSize {
+            let size = CellSize {
                 advance,
                 line: line.ceil(),
-            })
+            };
+            graphics.cell_size = Some((key, size));
+            Ok(size)
         })
     }
 

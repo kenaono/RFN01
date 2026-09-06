@@ -351,6 +351,9 @@ export component AppWindow inherits Window {
     callback pane-below-scrolled(int, float);
     callback pane-below-selection(int, float, float, int);
     callback pane-below-sent(int);
+    /// 要件 7.2 の変換、下段のシェルの上で。
+    callback pane-below-preedit(int, string);
+    callback pane-below-text(int, string);
     /// 要件 11.3 の手つきで下段へ移る（true）／本文へ戻る（false）。
     callback pane-below-focus(int, bool);
     /// 追加要件 2026-09-06: the right button's rows that the window answers.
@@ -1525,6 +1528,11 @@ export component AppWindow inherits Window {
                         below-selection-update(x, y) => { root.pane-below-selection(pane.id, x, y, 1); }
                         below-selection-end(x, y) => { root.pane-below-selection(pane.id, x, y, 2); }
                         below-sent => { root.pane-below-sent(pane.id); }
+                        below-caret-x: pane.below-caret-x;
+                        below-caret-y: pane.below-caret-y;
+                        below-buffer <=> pane.below-buffer;
+                        below-preedit(text) => { root.pane-below-preedit(pane.id, text); }
+                        below-text(text) => { root.pane-below-text(pane.id, text); }
                         quick-draft-requested => { root.quick-draft-requested(); }
                         close-clean-tabs => { root.pane-close-clean(pane.id); }
                         copy-path-requested(index) => { root.pane-copy-path(pane.id, index); }

@@ -1097,8 +1097,16 @@ struct TerminalBands {
     /// Columns, rows and the cell size. **Any of them moving invalidates every
     /// band**, because each of them changes where every cell is.
     shape: Option<(usize, usize, u32, u32)>,
-    /// One per band: what was in it when it was drawn, and the image of it.
-    bands: Vec<(u64, Image)>,
+    /// The bands, **keyed by where they sit in the history** rather than by
+    /// where they are on screen.
+    ///
+    /// **That is what makes scrolling cheap** (書き手の報告, 2026-09-06:
+    /// スクロールが遅い). Keyed by position on screen, moving the view by one
+    /// row changes the content of every band and the whole screenful is drawn
+    /// again — 15ms and nine megabytes per notch of the wheel. Keyed by the
+    /// rows themselves, a scroll leaves every band it did not uncover alone,
+    /// and only the two half-bands at the edges are redrawn.
+    bands: BTreeMap<usize, (u64, Image)>,
 }
 
 /// Two corners of what the writer has selected in a shell (追加要件 Terminal).
@@ -3018,6 +3026,50 @@ fn main() -> Result<(), slint::PlatformError> {
             } else {
                 restore_editor_focus(&window);
             }
+        }
+    });
+
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_preedit(move |pane, text| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            {
+                let mut borrowed = below_live.cache.borrow_mut();
+                let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Below) else {
+                    return;
+                };
+                shell.preedit = text.to_string();
+            }
+            refresh_terminal(&window, &below_live.cache, id, TerminalSpot::Below);
+        }
+    });
+
+    let weak = window.as_weak();
+    let below_live = live.clone();
+    window.on_pane_below_text(move |pane, text| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let session = below_live
+                .cache
+                .borrow_mut()
+                .pane(id)
+                .shell(TerminalSpot::Below)
+                .map(|shell| shell.session.clone());
+            let Some(session) = session else {
+                return;
+            };
+            session.borrow_mut().paste(text.as_str());
+            {
+                let mut borrowed = below_live.cache.borrow_mut();
+                if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Below) {
+                    shell.looking = 0;
+                    shell.selection = None;
+                }
+            }
+            // The field is emptied here, for the reason the pane's own is.
+            id.update_screen(&window, |screen| screen.below_buffer = SharedString::new());
+            refresh_terminal(&window, &below_live.cache, id, TerminalSpot::Below);
         }
     });
 
@@ -9186,18 +9238,13 @@ fn refresh_terminal(
         shell.looking = shell.looking.min(history);
         shell.looking
     };
-    let visible: Vec<&crate::terminal::Line> = (0..rows)
-        .filter_map(|row| {
-            // Counting the history as the rows before the screen, `history +
-            // row` is the bottom of the screen with nothing scrolled back.
-            let at = (history + row).saturating_sub(looking);
-            if at < history {
-                screen.scrollback().get(at)
-            } else {
-                screen.line(at - history)
-            }
-        })
-        .collect();
+    // Where the view starts in the history, and what the writer has picked out.
+    let top = history.saturating_sub(looking);
+    let selection = cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .and_then(|shell| shell.selection);
     let width = (columns as f32 * cell.advance).ceil().max(1.0) as u32;
     let line = cell.line.max(1.0);
     // 要件 7.1 の意味でのキャレットではない。**シェルが隠せと言えば隠す**もので、
@@ -9213,19 +9260,6 @@ fn refresh_terminal(
         .map(|shell| shell.preedit.clone())
         .unwrap_or_default();
 
-    // Which columns of each visible row the writer has picked out.
-    let top = history.saturating_sub(looking);
-    let picked: Vec<Option<(usize, usize)>> = {
-        let mut borrowed = cache.borrow_mut();
-        let selection = borrowed
-            .pane(id)
-            .shell(spot)
-            .and_then(|shell| shell.selection);
-        (0..visible.len())
-            .map(|row| selection.and_then(|picked| picked.columns_in(top + row, columns)))
-            .collect()
-    };
-
     let shape = (columns, rows, cell.advance.to_bits(), cell.line.to_bits());
     {
         let mut borrowed = cache.borrow_mut();
@@ -9236,39 +9270,60 @@ fn refresh_terminal(
             shell.bands.shape = Some(shape);
             shell.bands.bands.clear();
         }
-        shell
-            .bands
-            .bands
-            .resize(rows.div_ceil(TERMINAL_BAND_ROWS), (0, Image::default()));
     }
 
+    // **The bands are cut out of the history, not out of the view.** A band is
+    // whichever rows fall in one stretch of `TERMINAL_BAND_ROWS`, counted from
+    // the start of the history, so scrolling slides the view across bands that
+    // are already drawn. The two at the edges are cut short by the view, and
+    // they are the only ones a scroll has to draw again.
+    let total = history + rows;
+    let first_band = top / TERMINAL_BAND_ROWS;
+    let last_band = (top + rows).div_ceil(TERMINAL_BAND_ROWS);
     let mut tiles: Vec<PreviewTile> = Vec::new();
-    for band in 0..rows.div_ceil(TERMINAL_BAND_ROWS) {
-        let first = band * TERMINAL_BAND_ROWS;
-        let last = (first + TERMINAL_BAND_ROWS).min(rows);
-        let lines = &visible[first..last.min(visible.len())];
+    let mut wanted: Vec<usize> = Vec::new();
+    for band in first_band..last_band {
+        let from = (band * TERMINAL_BAND_ROWS).max(top);
+        let to = ((band + 1) * TERMINAL_BAND_ROWS).min(top + rows).min(total);
+        if to <= from {
+            continue;
+        }
+        wanted.push(band);
+        let lines: Vec<&crate::terminal::Line> = (from..to)
+            .filter_map(|at| {
+                if at < history {
+                    screen.scrollback().get(at)
+                } else {
+                    screen.line(at - history)
+                }
+            })
+            .collect();
         if lines.is_empty() {
             continue;
         }
         // **The caret belongs to the screen**, so it is only anywhere at all
         // when the pane is looking at the bottom.
-        let inside = cursor.filter(|(row, _)| looking == 0 && (first..last).contains(row));
-        let picked_here = &picked[first..last.min(picked.len())];
+        let inside = cursor.filter(|(row, _)| {
+            let at = history + row;
+            looking == 0 && (from..to).contains(&at)
+        });
+        let picked: Vec<Option<(usize, usize)>> = (from..to)
+            .map(|at| selection.and_then(|picked| picked.columns_in(at, columns)))
+            .collect();
         let signature = {
             let mut hasher = DefaultHasher::new();
-            for line in lines {
+            for line in &lines {
                 line.hash(&mut hasher);
             }
-            picked_here.hash(&mut hasher);
+            picked.hash(&mut hasher);
+            // The trim, so a band the view cuts short is not mistaken for the
+            // same band whole.
+            (from, to).hash(&mut hasher);
             inside
-                .map(|(row, column)| (row - first, column))
+                .map(|(row, column)| (history + row - from, column))
                 .hash(&mut hasher);
             // **The band holding the cursor is also the band the conversion is
-            // drawn in**, so what is being composed is part of what that band
-            // looks like.
-            if inside.is_some() {
-                preedit.hash(&mut hasher);
-            }
+            // drawn in**, so what is being composed is part of how it looks.
             if inside.is_some() {
                 preedit.hash(&mut hasher);
             }
@@ -9280,7 +9335,7 @@ fn refresh_terminal(
             borrowed
                 .pane(id)
                 .shell(spot)
-                .and_then(|shell| shell.bands.bands.get(band).cloned())
+                .and_then(|shell| shell.bands.bands.get(&band).cloned())
         };
         let image = match held {
             // **The same cells drawn the same way**: nothing to do but place it
@@ -9288,14 +9343,14 @@ fn refresh_terminal(
             Some((was, image)) if was == signature && image.size().width == width => image,
             _ => {
                 let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-                // Copied only for the band being drawn: the eight rows this one
+                // Copied only for the band being drawn: the rows this one
                 // holds, and never the screenful.
                 let band_lines: Vec<crate::terminal::Line> =
                     lines.iter().map(|line| (*line).clone()).collect();
                 let painted = cells::draw_terminal(
                     &band_lines,
-                    picked_here,
-                    inside.map(|(row, column)| (row - first, column)),
+                    &picked,
+                    inside.map(|(row, column)| (history + row - from, column)),
                     &preedit,
                     &look,
                     cell,
@@ -9315,25 +9370,26 @@ fn refresh_terminal(
                     four.swap(0, 2);
                 }
                 let image = Image::from_rgba8(pixels);
-                if let Some(slot) = cache
-                    .borrow_mut()
-                    .pane(id)
-                    .shell(spot)
-                    .and_then(|shell| shell.bands.bands.get_mut(band))
-                {
-                    *slot = (signature, image.clone());
+                if let Some(shell) = cache.borrow_mut().pane(id).shell(spot) {
+                    shell.bands.bands.insert(band, (signature, image.clone()));
                 }
                 image
             }
         };
         tiles.push(PreviewTile {
             x: 0,
-            y: (first as f32 * line) as i32,
+            y: ((from - top) as f32 * line) as i32,
             width: width as i32,
             height: height as i32,
             source: image,
         });
     }
+    // **What is not on screen is not worth keeping.** A screenful of bands is a
+    // few megabytes; a session's scrollback would be hundreds.
+    if let Some(shell) = cache.borrow_mut().pane(id).shell(spot) {
+        shell.bands.bands.retain(|band, _| wanted.contains(band));
+    }
+
     match spot {
         TerminalSpot::Front => {
             let height = (rows as f32 * line).ceil().max(1.0) as i32;
@@ -9350,7 +9406,12 @@ fn refresh_terminal(
                     width: cell.advance,
                     height: line,
                 };
-                id.set_ime_anchor(window, caret.x, caret.y, &caret);
+                // **Past the cell, not on it** (書き手の報告, 2026-09-06: 候補の
+                // 窓が入力位置に重なって見えない). Windows opens the candidate
+                // list at the field, so the field stands one cell down and one
+                // along — the same offset the document uses.
+                let (x, y) = ime_candidate_anchor(&caret, false);
+                id.set_ime_anchor(window, x, y, &caret);
             }
             id.update_screen(window, |screen| {
                 screen.terminal = true;
@@ -9358,7 +9419,24 @@ fn refresh_terminal(
                 screen.content_height = height;
             });
         }
-        TerminalSpot::Below => id.set_below_tiles(window, tiles),
+        TerminalSpot::Below => {
+            id.set_below_tiles(window, tiles);
+            // Where the strip's own hidden field stands, so a conversion opens
+            // over the writing rather than in the corner (要件 7.2).
+            if let Some((row, column)) = cursor {
+                let caret = CaretGeometry {
+                    x: column as f32 * cell.advance,
+                    y: row as f32 * line,
+                    width: cell.advance,
+                    height: line,
+                };
+                let (x, y) = ime_candidate_anchor(&caret, false);
+                id.update_screen(window, |screen| {
+                    screen.below_caret_x = x;
+                    screen.below_caret_y = y;
+                });
+            }
+        }
     }
 }
 
@@ -9596,6 +9674,33 @@ fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSp
             };
         }
     }
+    live.cache.borrow_mut().log_diag(
+        "terminal",
+        &format!(
+            "scroll pane={} spot={spot:?} delta={delta:.0} rows={rows} back={}",
+            id.log_name(),
+            live.cache
+                .borrow_mut()
+                .pane(id)
+                .shell(spot)
+                .map(|shell| shell.looking)
+                .unwrap_or(0)
+        ),
+    );
+    let back = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|shell| shell.looking)
+        .unwrap_or(0);
+    live.cache.borrow_mut().log_diag(
+        "terminal",
+        &format!(
+            "scroll pane={} spot={spot:?} delta={delta:.0} rows={rows} back={back}",
+            id.log_name()
+        ),
+    );
     refresh_terminal(window, &live.cache, id, spot);
 }
 
