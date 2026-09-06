@@ -312,6 +312,22 @@ impl Screen {
         }
     }
 
+    /// What a cell becomes when it is erased.
+    ///
+    /// **The background travels; nothing else does.** Erasing with the pen the
+    /// program happens to be holding is how a screen ends up ruled from edge to
+    /// edge: `vim` sets underline for one word, clears the screen a moment
+    /// later, and every blank cell it made is underlined — 181 columns of rule
+    /// on 85 rows (2026-09-06, the writer saw exactly that). What a program does
+    /// mean by erasing is the colour behind the text, which is why every
+    /// terminal carries that one and no more.
+    fn erased(&self) -> Attrs {
+        Attrs {
+            background: self.pen.background,
+            ..Attrs::default()
+        }
+    }
+
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
@@ -329,6 +345,8 @@ impl Screen {
         if self.cursor.pending_wrap || self.cursor.column + width > self.columns {
             self.wrap_line();
         }
+        // **The pen itself here**: this is the cell being written, not one
+        // being cleared.
         let attrs = self.pen;
         let row = self.cursor.row;
         let column = self.cursor.column;
@@ -363,7 +381,7 @@ impl Screen {
     /// **Leaving the orphan would shift the row by one cell** for as long as it
     /// stayed.
     fn clear_pair_at(&mut self, row: usize, column: usize) {
-        let attrs = self.pen;
+        let attrs = self.erased();
         let cells = &mut self.lines[row].cells;
         if cells[column].trailing && column > 0 {
             cells[column - 1] = Cell::blank(attrs);
@@ -456,7 +474,7 @@ impl Screen {
                 }
             }
             self.lines
-                .insert(bottom, Line::blank(self.columns, self.pen));
+                .insert(bottom, Line::blank(self.columns, self.erased()));
         }
         self.touch();
     }
@@ -466,13 +484,14 @@ impl Screen {
         let count = count.min(bottom - top + 1);
         for _ in 0..count {
             self.lines.remove(bottom);
-            self.lines.insert(top, Line::blank(self.columns, self.pen));
+            self.lines
+                .insert(top, Line::blank(self.columns, self.erased()));
         }
         self.touch();
     }
 
     fn erase_in_display(&mut self, mode: u16) {
-        let attrs = self.pen;
+        let attrs = self.erased();
         let (row, column) = (self.cursor.row, self.cursor.column);
         match mode {
             0 => {
@@ -503,7 +522,7 @@ impl Screen {
     }
 
     fn erase_in_line(&mut self, mode: u16) {
-        let attrs = self.pen;
+        let attrs = self.erased();
         let column = self.cursor.column;
         let columns = self.columns;
         let cells = &mut self.lines[self.cursor.row].cells;
@@ -520,7 +539,7 @@ impl Screen {
     }
 
     fn erase_cells(&mut self, count: usize) {
-        let attrs = self.pen;
+        let attrs = self.erased();
         let column = self.cursor.column;
         let end = (column + count.max(1)).min(self.columns);
         for cell in &mut self.lines[self.cursor.row].cells[column..end] {
@@ -530,7 +549,7 @@ impl Screen {
     }
 
     fn insert_cells(&mut self, count: usize) {
-        let attrs = self.pen;
+        let attrs = self.erased();
         let column = self.cursor.column;
         let columns = self.columns;
         let cells = &mut self.lines[self.cursor.row].cells;
@@ -542,7 +561,7 @@ impl Screen {
     }
 
     fn delete_cells(&mut self, count: usize) {
-        let attrs = self.pen;
+        let attrs = self.erased();
         let column = self.cursor.column;
         let columns = self.columns;
         let cells = &mut self.lines[self.cursor.row].cells;
@@ -558,7 +577,7 @@ impl Screen {
         if self.cursor.row < top || self.cursor.row > bottom {
             return;
         }
-        let attrs = self.pen;
+        let attrs = self.erased();
         for _ in 0..count.max(1).min(bottom - self.cursor.row + 1) {
             self.lines.remove(bottom);
             self.lines
@@ -572,7 +591,7 @@ impl Screen {
         if self.cursor.row < top || self.cursor.row > bottom {
             return;
         }
-        let attrs = self.pen;
+        let attrs = self.erased();
         for _ in 0..count.max(1).min(bottom - self.cursor.row + 1) {
             self.lines.remove(self.cursor.row);
             self.lines.insert(bottom, Line::blank(self.columns, attrs));
@@ -1104,7 +1123,13 @@ impl Parser {
                     screen.set_mode(private, mode, on);
                 }
             }
-            b'm' => {
+            // **`ESC[?4m` is not SGR 4.** A private marker makes a sequence
+            // somebody else's; read as an attribute it turns the pen underlined
+            // and nothing ever turns it off, so every space printed afterwards
+            // carries a rule — 181 columns of it on every one of 85 rows, which
+            // is what the writer saw with `vim` and with `claude` (2026-09-06).
+            // conhost sends this one right after `ESC[2J`.
+            b'm' if self.private.is_none() => {
                 let groups = std::mem::take(&mut self.groups);
                 screen.select_graphic_rendition(&groups);
                 self.groups = groups;
@@ -1562,6 +1587,47 @@ mod tests {
         it.feed(b"\x1b[2;3Hxyz\x1b[2J");
         assert_eq!(it.screen.row_text(1), "");
         assert_eq!((it.screen.cursor().row, it.screen.cursor().column), (1, 5));
+    }
+
+    /// 書き手の報告（2026-09-06）：vimでもclaudeでも横罫線がたくさん入る。
+    ///
+    /// **実際に来ていたバイト列で書いてある。**`vim`を181×85で走らせて捕まえた
+    /// もので、`ESC[2J`の直後に`ESC[?4m`が来る。私用マーカ付きのそれをSGR 4と
+    /// 読むと、以後に印字される空白がすべて下線つきになる。
+    #[test]
+    fn a_private_marker_does_not_make_a_sequence_an_attribute() {
+        let mut it = terminal(10, 3);
+        it.feed(b"\x1b[2J\x1b[?4m\x1b[?25lKN01\x1b[K");
+        let letter = it.screen.line(0).unwrap().cells[0];
+        assert_eq!(letter.text, 'K');
+        assert!(!letter.attrs.underline, "`ESC[?4m`は下線ではない");
+        assert_eq!(
+            it.screen.unhandled().first().map(|(what, _)| what.as_str()),
+            Some("CSI ? m"),
+            "読まなかったことは記録に残る"
+        );
+    }
+
+    /// **消した跡はペンを持たない。**
+    ///
+    /// 罫線の件（`a_private_marker_does_not_make_a_sequence_an_attribute`）を
+    /// 追いかける途中で見つけた別件で、原因ではなかったが直っていない理由も無い
+    /// ——下線や反転を持ったまま画面を消せば、空白のすべてがそれを着る。
+    #[test]
+    fn erasing_does_not_carry_the_pen_into_the_blanks() {
+        let mut it = terminal(10, 3);
+        it.feed(b"\x1b[4;7;1munderlined\x1b[2;1H\x1b[2J");
+        let blank = it.screen.line(0).unwrap().cells[0];
+        assert!(!blank.attrs.underline, "下線は消した跡には残らない");
+        assert!(!blank.attrs.reverse);
+        assert!(!blank.attrs.bold);
+        // **背景だけは残る。**プログラムが「消す」で意味しているのは字の後ろの色で、
+        // それが残らないと塗り分けた画面が消えるたびに紙へ戻る。
+        it.feed(b"\x1b[41m\x1b[2J");
+        assert_eq!(
+            it.screen.line(0).unwrap().cells[0].attrs.background,
+            Color::Indexed(1)
+        );
     }
 
     #[test]

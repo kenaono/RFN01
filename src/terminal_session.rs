@@ -316,6 +316,39 @@ mod running_a_program {
             println!("{row:>3}|{}", session.screen().row_text(row));
         }
         println!("--- cursor {:?} ---", session.screen().cursor());
+        if let Ok(path) = std::env::var("TERMINAL_PNG") {
+            use crate::directwrite_render::cells;
+            let look = cells::TerminalLook::default();
+            let cell = cells::terminal_cell_size(&look).expect("measure");
+            let width = (columns as f32 * cell.advance).ceil() as u32;
+            let height = (rows as f32 * cell.line).ceil() as u32;
+            let mut pixels = vec![0_u8; (width * height * 4) as usize];
+            let at = session.screen().cursor();
+            cells::draw_terminal(
+                session.screen().lines(),
+                Some((at.row, at.column)),
+                &look,
+                cell,
+                &mut pixels,
+                width,
+                height,
+            )
+            .expect("draw");
+            std::fs::write(&path, &pixels).expect("write");
+            println!("wrote {path} {width}x{height}");
+        }
+        println!("--- underlined blanks per row ---");
+        for row in 0..rows.min(session.screen().rows()) {
+            let line = session.screen().line(row).expect("row");
+            let marked = line
+                .cells
+                .iter()
+                .filter(|cell| cell.attrs.underline && cell.text == ' ')
+                .count();
+            if marked > 0 {
+                println!("  row {row}: {marked} underlined blanks");
+            }
+        }
         println!("--- unhandled ---");
         for (what, times) in session.screen().unhandled() {
             println!("  {what} ×{times}");
