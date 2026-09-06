@@ -344,8 +344,12 @@ export component AppWindow inherits Window {
     /// A shell wrote something. **Rung from its reading thread**, so it says
     /// only that: which pane, and what changed, are decided on this side.
     callback terminal-woken();
-    /// 追加要件 Terminal: open a shell in the pane the writer is in.
-    callback terminal-requested();
+    /// 追加要件 Terminal: open a shell in the pane the writer is in. The number
+    /// is which shell, as a position in `terminal-shells`.
+    callback terminal-requested(int);
+    /// The shells a terminal tab can be opened on (追加要件 Terminal). **Named
+    /// by Rust**, because the list is what can actually be started.
+    in property <[string]> terminal-shells;
     callback pane-tab(int);
     callback pane-preedit-changed(int, string);
     callback pane-backspace(int);
@@ -652,10 +656,14 @@ export component AppWindow inherits Window {
                             }
                             MenuRow {
                                 title: "New Terminal";
+                                // The mark a submenu carries, in the column the
+                                // shortcuts use — the same one Recent Folders
+                                // has. **Shown first, closed second**, for the
+                                // reason written there.
+                                shortcut: "▸";
                                 activated => {
+                                    shell-menu.show();
                                     app-menu.close();
-                                    root.terminal-requested();
-                                    root.focus-generation += 1;
                                 }
                             }
                             MenuRow {
@@ -706,6 +714,35 @@ export component AppWindow inherits Window {
                 // shows this one, which is how `Typography…` already opens a panel
                 // from a menu. It stands in the same place, so the list appears
                 // where the writer was looking.
+                // 追加要件 Terminal: which shell the new tab runs. **A list
+                // rather than two rows**, because the writer will meet the same
+                // choice again in the `+` button and it should read the same
+                // way in both places.
+                shell-menu := PopupWindow {
+                    x: 40px;
+                    y: 4px;
+                    width: 264px;
+                    close-policy: close-on-click-outside;
+
+                    MenuFrame {
+                        width: 264px;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 1px;
+
+                            for shell[index] in root.terminal-shells: MenuRow {
+                                title: shell;
+                                activated => {
+                                    root.terminal-requested(index);
+                                    shell-menu.close();
+                                    root.focus-generation += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 recent-menu := PopupWindow {
                     x: 40px;
                     y: 4px;

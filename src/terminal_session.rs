@@ -32,6 +32,10 @@ const CHUNK: usize = 8192;
 
 /// A running shell and the screen it is writing on.
 pub struct TerminalSession {
+    /// What to call this shell on its tab. **The shell's name, not the
+    /// command** — `wsl.exe --cd . -- bash -l` is a command; `WSL` is what the
+    /// writer chose.
+    name: String,
     pty: Pty,
     terminal: Terminal,
     output: Receiver<Vec<u8>>,
@@ -47,6 +51,7 @@ impl TerminalSession {
     /// means only "there is something to collect". Applying it is
     /// [`Self::drain`], on the thread that owns the window.
     pub fn start(
+        name: &str,
         command: &str,
         columns: usize,
         rows: usize,
@@ -83,11 +88,16 @@ impl TerminalSession {
             ));
         }
         Ok(Self {
+            name: name.to_owned(),
             pty,
             terminal: Terminal::new(columns, rows),
             output,
             finished: false,
         })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn screen(&self) -> &Screen {
@@ -216,7 +226,8 @@ mod tests {
     #[ignore]
     fn a_shell_answers_onto_the_screen() {
         let command = std::env::var("PTY_SHELL").unwrap_or_else(|_| "wsl.exe".to_owned());
-        let mut session = TerminalSession::start(&command, 80, 25, || {}).expect("open the shell");
+        let mut session =
+            TerminalSession::start("test", &command, 80, 25, || {}).expect("open the shell");
 
         // The prompt. **Waiting for the screen to say something is the honest
         // test** — how many reads that takes is the shell's business.
@@ -257,8 +268,9 @@ mod tests {
     #[test]
     #[ignore]
     fn a_shell_that_exits_leaves_its_last_words_on_the_screen() {
-        let mut session = TerminalSession::start("cmd.exe /c echo BYE-FROM-CONPTY", 80, 25, || {})
-            .expect("open the shell");
+        let mut session =
+            TerminalSession::start("test", "cmd.exe /c echo BYE-FROM-CONPTY", 80, 25, || {})
+                .expect("open the shell");
         let waited = Instant::now();
         while waited.elapsed() < Duration::from_secs(10) && !session.finished() {
             session.wait(Duration::from_millis(200));
@@ -306,10 +318,19 @@ mod running_a_program {
             .and_then(|value| value.parse().ok())
             .unwrap_or(8);
         let mut session =
-            TerminalSession::start(&command, columns, rows, || {}).expect("open the shell");
+            TerminalSession::start("test", &command, columns, rows, || {}).expect("open the shell");
         let waited = Instant::now();
         while waited.elapsed() < Duration::from_secs(patience) {
             session.wait(Duration::from_millis(200));
+        }
+        // 打ってみる（`PTY_TYPE`）。**入力側の文字コードはこれでしか分からない。**
+        if let Ok(typed) = std::env::var("PTY_TYPE") {
+            session.paste(&typed);
+            session.send_key(Key::Enter, Modifiers::none());
+            let waited = Instant::now();
+            while waited.elapsed() < Duration::from_secs(patience) {
+                session.wait(Duration::from_millis(200));
+            }
         }
         println!("--- {columns}x{rows} {command} ---");
         for row in 0..rows {

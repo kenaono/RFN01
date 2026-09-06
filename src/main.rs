@@ -60,22 +60,60 @@ use writer::FileWriter;
 
 slint::include_modules!();
 
-/// The shell a new terminal tab opens (追加要件 Terminal: 既定はWSL2).
+/// What a terminal tab can be running (追加要件 Terminal: WSL2とPowerShell、
+/// 既定はWSL2).
 ///
-/// `wsl.exe` with nothing after it opens the default distribution in the
-/// current directory, and **starts it if it is not running** — which is what the
-/// requirement asks for, done by the thing that knows how.
-const TERMINAL_SHELL: &str = "wsl.exe";
+/// **Two, and the writer picks one when they open the tab.** The requirement
+/// names these and says which is the default; the list lives here rather than in
+/// the window, so the menu is built out of what can actually be started.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TerminalShell {
+    /// `wsl.exe` with nothing after it opens the default distribution in the
+    /// current directory, and **starts it if it is not running** — which is
+    /// what the requirement asks for, done by the thing that knows how.
+    Wsl,
+    PowerShell,
+}
+
+impl TerminalShell {
+    /// **The default first.** The menu is built in this order, and 追加要件 says
+    /// the first is where a writer who does not choose ends up.
+    const ALL: [TerminalShell; 2] = [TerminalShell::Wsl, TerminalShell::PowerShell];
+
+    /// What a tab of this shell is called. **The shell, not 無題** — the
+    /// document behind it is a stand-in nobody is writing in.
+    fn name(self) -> &'static str {
+        match self {
+            TerminalShell::Wsl => "WSL",
+            TerminalShell::PowerShell => "PowerShell",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            TerminalShell::Wsl => "wsl.exe",
+            // **No logo.** A terminal opened to run something should not spend
+            // its first second printing a banner.
+            TerminalShell::PowerShell => "powershell.exe -NoLogo",
+        }
+    }
+
+    /// The shell a number from the menu names. **Anything unexpected is the
+    /// default**, for the reason every other number arriving from the window is
+    /// bounded rather than trusted.
+    fn at(index: i32) -> Self {
+        Self::ALL
+            .get(index.max(0) as usize)
+            .copied()
+            .unwrap_or(TerminalShell::Wsl)
+    }
+}
 
 /// How long the window waits before drawing what a shell wrote.
 ///
 /// **One frame.** Long enough that a burst of output is drawn once, short
 /// enough that nobody sees the wait.
 const TERMINAL_FRAME_MS: u64 = 16;
-
-/// What a terminal tab is called. **The shell, not 無題** — the document behind
-/// it is a stand-in nobody is writing in.
-const TERMINAL_TAB_NAME: &str = "WSL";
 
 const SAMPLE_MARKDOWN: &str = r#"# 縦書きライブ編集の技術検証
 
@@ -2587,14 +2625,28 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 追加要件 Terminal: the shells the menu offers, in the order they are
+    // defined — the first is the default.
+    window.set_terminal_shells(ModelRc::new(VecModel::from(
+        TerminalShell::ALL
+            .iter()
+            .map(|shell| SharedString::from(shell.name()))
+            .collect::<Vec<_>>(),
+    )));
+
     // 追加要件 Terminal. **Opened in the pane the writer is in**, like every
     // other new tab: which pane is the writer's business and they said it by
     // clicking.
     let weak = window.as_weak();
     let terminal_live = live.clone();
-    window.on_terminal_requested(move || {
+    window.on_terminal_requested(move |shell| {
         if let Some(window) = weak.upgrade() {
-            new_terminal_tab(&window, &terminal_live, focused_pane(&window));
+            new_terminal_tab(
+                &window,
+                &terminal_live,
+                focused_pane(&window),
+                TerminalShell::at(shell),
+            );
         }
     });
 
@@ -5149,7 +5201,7 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                 // terminal, whose document is an empty stand-in and whose name
                 // is the shell it is running (追加要件 Terminal).
                 title: match &tab.terminal {
-                    Some(_) => TERMINAL_TAB_NAME.into(),
+                    Some(session) => session.borrow().name().into(),
                     None => tab.document.file.borrow().title().into(),
                 },
                 edited: tab.terminal.is_none() && tab.document.text.edited(),
@@ -8695,7 +8747,7 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
 /// **The default is WSL**, which is what the requirement says and what the
 /// writer works in. `wsl.exe` starts the distribution if it is not running, so
 /// there is nothing here to do about that.
-fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId) {
+fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
     sync_active_tab(window, live);
     let number = {
         let tabs = live.tabs.borrow();
@@ -8723,21 +8775,22 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId) {
         // any of it (要件 2).
         let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
     };
-    let session = match TerminalSession::start(TERMINAL_SHELL, columns, rows, wake) {
+    let session = match TerminalSession::start(shell.name(), shell.command(), columns, rows, wake) {
         Ok(session) => session,
         Err(error) => {
             live.cache
                 .borrow_mut()
-                .log_diag("terminal", &format!("open {TERMINAL_SHELL} {error}"));
-            window.set_render_status(format!("端末を開けませんでした: {error}").into());
+                .log_diag("terminal", &format!("open {} {error}", shell.command()));
+            window.set_render_status(format!("{}を開けませんでした: {error}", shell.name()).into());
             return;
         }
     };
     live.cache.borrow_mut().log_diag(
         "terminal",
         &format!(
-            "open pane={} {TERMINAL_SHELL} {columns}x{rows}",
-            id.log_name()
+            "open pane={} {} {columns}x{rows}",
+            id.log_name(),
+            shell.command()
         ),
     );
     let document = OpenDocument::untitled(number, window.as_weak());
