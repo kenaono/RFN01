@@ -2672,16 +2672,26 @@ fn layout_key(text: &str, runs: &[StyleRun], typography: &Typography, line_box: 
 
 /// Identifies a measurement. Same layout, but the last block of the document
 /// keeps a trailing empty line the others give up, so it measures differently.
+///
+/// **Takes the layout key rather than making one** (2026-09-06). Every block
+/// wants both keys, and hashing its text is the whole cost of either — asking
+/// for them separately hashed the document twice on every keystroke.
 fn measure_key(
-    text: &str,
-    runs: &[StyleRun],
-    typography: &Typography,
-    line_box: f32,
+    layout: u64,
     keep_trailing_empty_line: bool,
+    table_source_line: Option<usize>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
-    layout_key(text, runs, typography, line_box).hash(&mut hasher);
+    layout.hash(&mut hasher);
     keep_trailing_empty_line.hash(&mut hasher);
+    // 要件 7.3.1 と 7.3.2: **which row of a table the caret is on**, and only
+    // for a table. Everywhere else the active line has already changed the
+    // runs — nothing is put over it, so its boxes are gone — but a table's
+    // boxes are not made from the runs at all: they are the widths
+    // `measure_table` works out, and a row reads the same either way (a bar is
+    // a bar). Without this the caret could walk into a row and the grid the
+    // cache hands back would still be the one that covers its bars.
+    table_source_line.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -2884,28 +2894,11 @@ impl TextEngine {
         // measured first, in one pass, and what comes back is ordinary style
         // runs. A document with no table in it asks for nothing and never wakes
         // the graphics at all (技術検証 7.7).
+        // The tables the cache has nothing for, gathered in the pass below and
+        // measured together afterwards — **one `with_graphics` for all of
+        // them**, which is what the pre-pass this replaced was for.
         let last_index = spans.len().saturating_sub(1);
-        let mut table_measures: Vec<Option<BlockMeasure>> = vec![None; spans.len()];
-        if styled.lines.iter().any(|line| line.kind.is_table()) {
-            with_graphics(|graphics| {
-                for (index, span) in spans.iter().enumerate() {
-                    let block_styled = block_styling(styled, span, &block_lines[index]);
-                    let laid = measure_table(
-                        graphics,
-                        block_styled,
-                        &typography,
-                        mode,
-                        block_boxes[index],
-                        index == last_index,
-                    )?;
-                    if let Some((grid, mut measure)) = laid {
-                        measure.grid = Some(Arc::new(grid));
-                        table_measures[index] = Some(measure);
-                    }
-                }
-                Ok(())
-            })?;
-        }
+        let mut table_tasks: Vec<usize> = Vec::new();
 
         // **Deciding what to measure needs no graphics at all.** Which blocks
         // the cache already answers, what ranges each one sets, how wide its box
@@ -2913,27 +2906,34 @@ impl TextEngine {
         // measuring is what lets the measuring go somewhere else.
         {
             for (index, span) in spans.iter().enumerate() {
-                // 要件 7.3.2: **a table's block is already measured.** It is
-                // not one layout, so there is nothing here for it to be — see
-                // `measure_table`.
-                if let Some(measure) = table_measures[index].take() {
-                    measures[index] = Some(measure);
-                    continue;
-                }
                 let block_text = &text[span.byte_start..span.byte_end];
                 let block_styled = block_styling(styled, span, &block_lines[index]);
 
                 let runs = style_runs(block_styled);
                 let keep_trailing_empty_line = index == last_index;
                 let block_box = block_boxes[index];
-                let key = measure_key(
-                    block_text,
-                    &runs,
-                    &typography,
-                    block_box,
-                    keep_trailing_empty_line,
-                );
+                // 要件 7.3.2: **a table is measured like every other block, and
+                // that is the point** (2026-09-06). It used to be measured
+                // ahead of this loop, outside the cache, so **every table in
+                // the document was re-measured on every keystroke** — a cell
+                // laid out per cell per table per key, wherever the writer was
+                // typing. Measured: 1.13ms per 25-row table, so a plan with 16
+                // of them cost 19.3ms of a keystroke against 1.3ms with none.
+                // A table's columns are a function of its own block's text,
+                // the spec, the mode and the box — the same four the key
+                // already carries — plus the row the caret is on, which is why
+                // `measure_key` takes it.
+                // **The same test `tables` makes**, both halves of it: a
+                // source pane sets a table as text, bars and all (要件 7.3.1),
+                // so there is no grid there to measure.
+                let table = block_styled.is_preview()
+                    && block_styled.lines.iter().any(|line| line.kind.is_table());
                 let block_layout = layout_key(block_text, &runs, &typography, block_box);
+                let key = measure_key(
+                    block_layout,
+                    keep_trailing_empty_line,
+                    table.then(|| block_styled.source_line).flatten(),
+                );
                 live_measure_keys.insert(key);
                 live_layout_keys.insert(block_layout);
                 if let Some(cached) = self.measures.get(&key)
@@ -2946,8 +2946,6 @@ impl TextEngine {
                     continue;
                 }
 
-                let extent = block_extent(span, fit.charged_extent(), &typography);
-                let max_flow_size = block_flow_bound(block_styled, extent, &typography);
                 measured.blocks += 1;
                 measured.utf16 += span.utf16_len();
                 pending.insert(
@@ -2958,6 +2956,16 @@ impl TextEngine {
                         keep_trailing_empty_line,
                     },
                 );
+                // **A table is not one layout**, so there is no `MeasureTask`
+                // it could be and nothing to hand a thread: its cells are laid
+                // out one at a time, and only DirectWrite on this thread can
+                // say how wide a cell is (技術検証 7.7).
+                if table {
+                    table_tasks.push(index);
+                    continue;
+                }
+                let extent = block_extent(span, fit.charged_extent(), &typography);
+                let max_flow_size = block_flow_bound(block_styled, extent, &typography);
                 tasks.push(MeasureTask {
                     index,
                     text: block_text.to_owned(),
@@ -2969,6 +2977,42 @@ impl TextEngine {
                     keep_trailing_empty_line,
                 });
             }
+        }
+
+        // 要件 7.3.2: **the tables that changed, and only those.** One
+        // `with_graphics` for all of them, and a document whose tables are
+        // where they were never wakes the graphics at all — which is what a
+        // keystroke somewhere else in the document is.
+        if !table_tasks.is_empty() {
+            with_graphics(|graphics| {
+                for index in &table_tasks {
+                    let index = *index;
+                    let span = &spans[index];
+                    let block_styled = block_styling(styled, span, &block_lines[index]);
+                    let (grid, mut measure) = measure_table(
+                        graphics,
+                        block_styled,
+                        &typography,
+                        mode,
+                        block_boxes[index],
+                        index == last_index,
+                    )?
+                    .expect("a block whose lines are a table holds one (`tables`)");
+                    measure.grid = Some(Arc::new(grid));
+                    if let Some(slot) = pending.get(&index) {
+                        fresh_measures.push((
+                            slot.measure_key,
+                            MeasuredBlock {
+                                text: text[span.byte_start..span.byte_end].to_owned(),
+                                keep_trailing_empty_line: slot.keep_trailing_empty_line,
+                                measure: measure.clone(),
+                            },
+                        ));
+                    }
+                    measures[index] = Some(measure);
+                }
+                Ok(())
+            })?;
         }
 
         // **On the threads only when there is enough to divide** (要件 2). A
@@ -5622,6 +5666,99 @@ mod tests {
             plain().font_size
         );
         let _ = short;
+    }
+
+    /// 要件 7.3.2: **a keystroke somewhere else does not re-measure a table**
+    /// (2026-09-06).
+    ///
+    /// Tables used to be measured ahead of the cache, so every table in the
+    /// document was laid out cell by cell on every keystroke wherever the
+    /// writer was typing — 1.13ms per 25-row table, 19.3ms of a keystroke for a
+    /// plan holding sixteen of them. **The grid is the same `Arc`**, which says
+    /// the measurement was not merely equal but never taken again.
+    #[test]
+    fn a_keystroke_away_from_a_table_does_not_measure_it() {
+        let table = "| 章 | 場面 | 視点 |\n| --- | --- | --- |\n\
+                     | 第1章 | No.1 | 少年 |\n| 第2章 | No.2 | 隊 |\n";
+        let head = "書き出しの段落。\n\n";
+        let source = format!("{head}{table}\n終わりの段落。\n");
+        let lay_out = |engine: &mut TextEngine, source: &str| {
+            let (preview, styles) = preview_of(source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            engine
+                .update(styled, LineFit::Extent(LINE_EXTENT), &plain())
+                .expect("update")
+        };
+
+        let mut engine = TextEngine::new(WritingMode::Horizontal);
+        lay_out(&mut engine, &source);
+        let before = engine
+            .plan
+            .blocks
+            .iter()
+            .find_map(|block| block.grid.clone())
+            .expect("the table was measured");
+
+        // One character typed in the paragraph above the table.
+        let edited = source.replacen("書き出し", "書き出しの", 1);
+        let cost = lay_out(&mut engine, &edited);
+        let after = engine
+            .plan
+            .blocks
+            .iter()
+            .find_map(|block| block.grid.clone())
+            .expect("the table is still there");
+
+        assert_eq!(cost.blocks, 1, "only the edited paragraph is measured");
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "the table was measured again for a keystroke outside it"
+        );
+    }
+
+    /// 要件 7.3.1: **but the caret walking into a row does measure it again.**
+    ///
+    /// A row reads the same either way — a bar is a bar — so the block's text
+    /// and its runs are identical, and the boxes that cover the bars are not
+    /// made from the runs but from what `measure_table` works out. Nothing in
+    /// the key would carry it, which is why `measure_key` takes the row.
+    #[test]
+    fn the_caret_walking_into_a_row_measures_the_table_again() {
+        let source = "| 短 | いろは |\n| --- | --- |\n| とても長い見出しの語 | にほへ |\n";
+        let styles = crate::document::line_styles(source);
+        let lay_out = |engine: &mut TextEngine, row: Option<usize>| {
+            let preview = crate::document::PreviewDocument::from_source(source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers())
+                .with_source_line(row);
+            engine
+                .update(styled, LineFit::Extent(LINE_EXTENT), &plain())
+                .expect("update")
+        };
+
+        let mut engine = TextEngine::new(WritingMode::Horizontal);
+        lay_out(&mut engine, None);
+        let quiet = engine
+            .plan
+            .blocks
+            .iter()
+            .find_map(|block| block.grid.clone())
+            .expect("the table was measured");
+
+        let cost = lay_out(&mut engine, Some(2));
+        let active = engine
+            .plan
+            .blocks
+            .iter()
+            .find_map(|block| block.grid.clone())
+            .expect("the table is still there");
+
+        assert_eq!(cost.blocks, 1, "the table is measured again");
+        assert!(
+            !Arc::ptr_eq(&quiet, &active),
+            "the caret moved into a row and the grid did not change"
+        );
     }
 
     /// 要件 7.3.1: **a source pane sets a table as text**, bars and all — the

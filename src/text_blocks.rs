@@ -1453,7 +1453,12 @@ pub fn split_blocks(
         // rather than sliced off by length so the hash of the document's last
         // line does not change when something is appended after it.
         let body = line.trim_end_matches('\n');
-        let characters = body.encode_utf16().count() as u32;
+        // **Counted by subtraction, not by walking the line again.** Only `\n`
+        // was trimmed and it is one byte and one UTF-16 unit, so what came off
+        // is the same number in both. Walking twice cost a second pass over the
+        // whole document on every keystroke, and the split already walks it
+        // once (2026-09-06).
+        let characters = line_units - (line.len() - body.len()) as u32;
         // Charge for whole lines, so a blank line costs a line like any other,
         // and for the heading size, so a heading costs what it takes up.
         let index = line_index;
