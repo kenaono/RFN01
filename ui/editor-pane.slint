@@ -300,6 +300,10 @@ export component EditorPane inherits Rectangle {
     /// modifiers. **The name, not the bytes** — what an arrow key becomes
     /// depends on modes the shell set, and those are Rust's to read.
     callback terminal-key(string, int, bool, bool, bool);
+    /// The wheel over a shell (追加要件 Terminal): how far, in pixels, positive
+    /// towards what was written earlier. **Rust turns it into rows** — a
+    /// terminal has no half-lines to stop on.
+    callback terminal-scrolled(float);
     callback tab-pressed();
     callback preedit-changed(string);
     callback backspace-pressed();
@@ -1526,6 +1530,18 @@ export component EditorPane inherits Rectangle {
                                     if (notch != 0px) {
                                         root.zoom-stepped(notch > 0px ? 1 : -1);
                                     }
+                                    return accept;
+                                }
+                                // **A shell has its own history to move
+                                // through** (追加要件 Terminal), and it is not
+                                // the pane's scroll: what is on the screen is
+                                // everything the pane holds, and the rest has
+                                // already gone by.
+                                if (root.terminal) {
+                                    root.terminal-scrolled(
+                                        event.delta-y != 0px
+                                            ? event.delta-y / 1px
+                                            : event.delta-x / 1px);
                                     return accept;
                                 }
                                 if (root.vertical) {

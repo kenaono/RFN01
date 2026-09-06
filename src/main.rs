@@ -968,6 +968,17 @@ struct Pane {
     /// bands and keyed by what is in them, a keystroke redraws the one band it
     /// touched.
     terminal_bands: TerminalBands,
+    /// How far back through the scrollback this pane is looking, in rows
+    /// (追加要件 Terminal). **Zero is the bottom**, which is where a terminal
+    /// lives; anything else means the writer is reading something that has
+    /// already gone by.
+    terminal_view: usize,
+    /// How much scrollback there was at the last refresh.
+    ///
+    /// **Because a view held back has to hold still.** Output arriving while
+    /// the writer reads pushes rows into the history behind them; counted from
+    /// the bottom, the same number would show different lines every time.
+    terminal_history: usize,
 }
 
 /// The images a terminal pane is showing, and the geometry they were drawn for.
@@ -996,6 +1007,8 @@ impl Pane {
             mode,
             terminal: None,
             terminal_bands: TerminalBands::default(),
+            terminal_view: 0,
+            terminal_history: 0,
         }
     }
 
@@ -2664,6 +2677,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 alt,
                 shift,
             );
+        }
+    });
+
+    let weak = window.as_weak();
+    let scroll_live = live.clone();
+    window.on_pane_terminal_scrolled(move |pane, delta| {
+        if let Some(window) = weak.upgrade() {
+            scroll_terminal(&window, &scroll_live, PaneId::from_index(pane), delta);
         }
     });
 
@@ -8640,6 +8661,34 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
     session.resize(columns, rows);
     session.drain();
     let screen = session.screen();
+
+    // **What the pane is looking at**: the last `rows` of the history and the
+    // screen together, moved back by however far the writer has scrolled. A
+    // view held back holds still while output arrives — the rows it is showing
+    // are pushed further into the history, and the count follows them.
+    let history = screen.scrollback().len();
+    let looking = {
+        let mut borrowed = cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        if pane.terminal_view > 0 {
+            pane.terminal_view += history.saturating_sub(pane.terminal_history);
+        }
+        pane.terminal_history = history;
+        pane.terminal_view = pane.terminal_view.min(history);
+        pane.terminal_view
+    };
+    let visible: Vec<&crate::terminal::Line> = (0..rows)
+        .filter_map(|row| {
+            // Counting the history as the rows before the screen, `history +
+            // row` is the bottom of the screen with nothing scrolled back.
+            let at = (history + row).saturating_sub(looking);
+            if at < history {
+                screen.scrollback().get(at)
+            } else {
+                screen.line(at - history)
+            }
+        })
+        .collect();
     let width = (columns as f32 * cell.advance).ceil().max(1.0) as u32;
     let line = cell.line.max(1.0);
     // 要件 7.1 の意味でのキャレットではない。**シェルが隠せと言えば隠す**もので、
@@ -8666,14 +8715,18 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
     for band in 0..rows.div_ceil(TERMINAL_BAND_ROWS) {
         let first = band * TERMINAL_BAND_ROWS;
         let last = (first + TERMINAL_BAND_ROWS).min(rows);
-        let lines = &screen.lines()[first..last.min(screen.lines().len())];
+        let lines = &visible[first..last.min(visible.len())];
         if lines.is_empty() {
             continue;
         }
-        let inside = cursor.filter(|(row, _)| (first..last).contains(row));
+        // **The caret belongs to the screen**, so it is only anywhere at all
+        // when the pane is looking at the bottom.
+        let inside = cursor.filter(|(row, _)| looking == 0 && (first..last).contains(row));
         let signature = {
             let mut hasher = DefaultHasher::new();
-            lines.hash(&mut hasher);
+            for line in lines {
+                line.hash(&mut hasher);
+            }
             inside
                 .map(|(row, column)| (row - first, column))
                 .hash(&mut hasher);
@@ -8690,8 +8743,12 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
             Some((was, image)) if was == signature && image.size().width == width => image,
             _ => {
                 let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+                // Copied only for the band being drawn: the eight rows this
+                // one holds, and never the screenful.
+                let band_lines: Vec<crate::terminal::Line> =
+                    lines.iter().map(|line| (*line).clone()).collect();
                 let painted = cells::draw_terminal(
-                    lines,
+                    &band_lines,
                     inside.map(|(row, column)| (row - first, column)),
                     &look,
                     cell,
@@ -8827,6 +8884,10 @@ fn send_terminal_key(
     let Some(key) = named_key(code, text, control) else {
         return;
     };
+    // **Typing puts the writer back at the bottom**, which is where what they
+    // type will appear. Every terminal does this, and the reason is that the
+    // alternative — typing into a screen you cannot see — has no use.
+    live.cache.borrow_mut().pane(id).terminal_view = 0;
     let modifiers = TerminalModifiers {
         shift,
         alt,
@@ -8898,6 +8959,37 @@ fn named_key(code: i32, text: &str, control: bool) -> Option<TerminalKey> {
         }
     };
     Some(key)
+}
+
+/// Look further back through what the shell has written, or nearer the bottom
+/// (追加要件 Terminal).
+///
+/// **The wheel moves rows, not pixels.** A terminal has no half-lines to stop
+/// on, and stopping on one would put every glyph a fraction out of its cell.
+fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, delta: f32) {
+    let Some(session) = live.cache.borrow_mut().pane(id).terminal.clone() else {
+        return;
+    };
+    let history = session.borrow().screen().scrollback().len();
+    let look = cells::TerminalLook::default();
+    let line = cells::terminal_cell_size(&look)
+        .map(|cell| cell.line)
+        .unwrap_or(18.0);
+    // Whole rows, and at least one: a notch that moved nothing would read as a
+    // wheel that is not working.
+    let rows = ((delta.abs() / line).round() as usize).max(1);
+    {
+        let mut borrowed = live.cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        pane.terminal_view = if delta > 0.0 {
+            // The wheel's positive direction is "towards the start", which is
+            // further back through the history.
+            (pane.terminal_view + rows).min(history)
+        } else {
+            pane.terminal_view.saturating_sub(rows)
+        };
+    }
+    refresh_terminal_pane(window, &live.cache, id);
 }
 
 /// Every pane showing a shell, drawn again (追加要件 Terminal).
