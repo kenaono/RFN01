@@ -1406,11 +1406,20 @@ export component EditorPane inherits Rectangle {
                             // cursor changes, so the first conversion after a click
                             // opened where the caret used to be (技術検証 7.2).
                             // Touching the cursor here asks for it to be sent again.
+                            // **Never while a conversion is up.** Over a
+                            // document the caret moves when the writer moves
+                            // it; over a shell it moves with every line the
+                            // shell prints, and re-reporting the position
+                            // starts the conversion over each time.
                             changed x => {
-                                self.set-selection-offsets(0, 0);
+                                if (self.preedit-text == "") {
+                                    self.set-selection-offsets(0, 0);
+                                }
                             }
                             changed y => {
-                                self.set-selection-offsets(0, 0);
+                                if (self.preedit-text == "") {
+                                    self.set-selection-offsets(0, 0);
+                                }
                             }
                             changed has-focus => {
                                 if self.has-focus {
@@ -2033,8 +2042,11 @@ export component EditorPane inherits Rectangle {
                     below-ime := TextInput {
                         x: root.below-caret-x * 1px;
                         y: root.below-caret-y * 1px;
+                        // A line's worth, near enough: what matters is that
+                        // the field is somewhere the IME can put a composition,
+                        // not that it is any particular size.
                         width: 1px;
-                        height: max(root.below-height / 12, 12px);
+                        height: 16px;
                         text <=> root.below-buffer;
                         font-family: "Yu Gothic UI";
                         font-size: 1px;
@@ -2054,11 +2066,21 @@ export component EditorPane inherits Rectangle {
                         init => {
                             self.focus();
                         }
+                        // **変換中は触らない。**この欄はシェルのカーソルに
+                        // ついて動くので、出力があるたびに位置が変わる——
+                        // 文書のキャレットが滅多に動かないのとはそこが違う。
+                        // 位置を報告し直すたびに変換が仕切り直しになり、
+                        // 打った字がどこにも入らなくなる（書き手の報告、
+                        // 2026-09-06「途中で入力が出来なくなりました」）。
                         changed x => {
-                            self.set-selection-offsets(0, 0);
+                            if (self.preedit-text == "") {
+                                self.set-selection-offsets(0, 0);
+                            }
                         }
                         changed y => {
-                            self.set-selection-offsets(0, 0);
+                            if (self.preedit-text == "") {
+                                self.set-selection-offsets(0, 0);
+                            }
                         }
                         changed preedit-text => {
                             root.below-preedit(self.preedit-text);

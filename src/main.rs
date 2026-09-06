@@ -2428,6 +2428,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 // left alone it would hand the whole of it over again with the
                 // next paste (the editing paths empty it for the same reason).
                 id.set_ime_buffer(&window, "");
+                cache.borrow_mut().log_diag(
+                    "terminal",
+                    &format!("typed pane={} spot=Front len={}", id.log_name(), text.len()),
+                );
                 refresh_terminal(&window, &cache, id, TerminalSpot::Front);
                 return;
             }
@@ -3041,6 +3045,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 };
                 shell.preedit = text.to_string();
             }
+            below_live.cache.borrow_mut().log_diag(
+                "terminal",
+                &format!(
+                    "preedit pane={} spot=Below len={}",
+                    id.log_name(),
+                    text.len()
+                ),
+            );
             refresh_terminal(&window, &below_live.cache, id, TerminalSpot::Below);
         }
     });
@@ -3067,6 +3079,10 @@ fn main() -> Result<(), slint::PlatformError> {
                     shell.selection = None;
                 }
             }
+            below_live.cache.borrow_mut().log_diag(
+                "terminal",
+                &format!("typed pane={} spot=Below len={}", id.log_name(), text.len()),
+            );
             // The field is emptied here, for the reason the pane's own is.
             id.update_screen(&window, |screen| screen.below_buffer = SharedString::new());
             refresh_terminal(&window, &below_live.cache, id, TerminalSpot::Below);
@@ -9399,7 +9415,7 @@ fn refresh_terminal(
             // **Where the conversion window opens** (要件 7.2). The hidden
             // field is what Windows asks, and it has to stand where the writing
             // is or the candidates appear in the corner of the pane.
-            if let Some((row, column)) = cursor {
+            if let (Some((row, column)), true) = (cursor, preedit.is_empty()) {
                 let caret = CaretGeometry {
                     x: column as f32 * cell.advance,
                     y: row as f32 * line,
@@ -9411,6 +9427,8 @@ fn refresh_terminal(
                 // list at the field, so the field stands one cell down and one
                 // along — the same offset the document uses.
                 let (x, y) = ime_candidate_anchor(&caret, false);
+                let x = x.clamp(0.0, (width as f32 - cell.advance).max(0.0));
+                let y = y.clamp(0.0, (id.shown_height(window) - line).max(0.0));
                 id.set_ime_anchor(window, x, y, &caret);
             }
             id.update_screen(window, |screen| {
@@ -9423,7 +9441,11 @@ fn refresh_terminal(
             id.set_below_tiles(window, tiles);
             // Where the strip's own hidden field stands, so a conversion opens
             // over the writing rather than in the corner (要件 7.2).
-            if let Some((row, column)) = cursor {
+            //
+            // **Held still while one is up.** The shell's cursor moves with
+            // every line it prints, and a field that moves under a conversion
+            // takes the conversion with it.
+            if let (Some((row, column)), true) = (cursor, preedit.is_empty()) {
                 let caret = CaretGeometry {
                     x: column as f32 * cell.advance,
                     y: row as f32 * line,
@@ -9431,6 +9453,15 @@ fn refresh_terminal(
                     height: line,
                 };
                 let (x, y) = ime_candidate_anchor(&caret, false);
+                // **Held inside the strip.** The prompt lives on its last row,
+                // so the field — which stands one cell *past* the caret — falls
+                // outside a strip that clips, and a field nobody can place is a
+                // field the IME cannot compose in (書き手の報告, 2026-09-06:
+                // 下段で日本語が打てない). Clamped, it stands at the edge
+                // instead, which is where the candidates should open anyway.
+                let strip = cache.borrow_mut().pane(id).below_height;
+                let x = x.clamp(0.0, (width as f32 - cell.advance).max(0.0));
+                let y = y.clamp(0.0, (strip - line).max(0.0));
                 id.update_screen(window, |screen| {
                     screen.below_caret_x = x;
                     screen.below_caret_y = y;
