@@ -1208,13 +1208,23 @@ impl Pane {
         if self.mode == mode {
             return false;
         }
-        // **The shell survives the rebuild.** What is thrown away here is the
-        // engine and everything measured in the old direction; a running
-        // process is none of that, and dropping it would close the console and
-        // kill the shell for a change of writing mode.
+        // **The shells survive the rebuild — both of them.** What is thrown
+        // away here is the engine and everything measured in the old direction;
+        // a running process is none of that.
+        //
+        // **The strip was not on this list, and that was the bug** (書き手の
+        // 報告, 2026-09-06「一度入らなくなると二度と入りません」). Changing the
+        // writing direction dropped the shell along the foot of the pane while
+        // the window went on showing the strip: the keys had somewhere to go
+        // and nothing to reach, so they vanished, and nothing ever put it back.
         let terminal = self.terminal.take();
+        let below = self.below.take();
+        let (open, height) = (self.below_open, self.below_height);
         *self = Pane::new(mode);
         self.terminal = terminal;
+        self.below = below;
+        self.below_open = open;
+        self.below_height = height;
         true
     }
 }
@@ -9606,6 +9616,13 @@ fn send_terminal_key(
         .shell(spot)
         .map(|shell| shell.session.clone())
     else {
+        // **A key with nowhere to go is written down.** Dropped in silence, it
+        // is a terminal that has stopped answering with nothing anywhere to say
+        // why — which is exactly how long the last one took to find.
+        live.cache.borrow_mut().log_diag(
+            "terminal",
+            &format!("key pane={} spot={spot:?} with no shell", id.log_name()),
+        );
         return;
     };
     // 要件 11.2. **`Ctrl+Shift+C`, because `Ctrl+C` is the interrupt** — the one
@@ -10087,6 +10104,15 @@ fn refresh_pane(
     // would be drawing something nobody can see.
     if below_kind(cache.borrow_mut().pane(id)) == 1 {
         refresh_terminal(window, cache, id, TerminalSpot::Below);
+    }
+    // **A strip showing with nothing behind it is a hole**, and the writer
+    // cannot see that it is one: it looks like a terminal that has stopped
+    // answering. Whatever left it that way, one is started here.
+    if below_kind(cache.borrow_mut().pane(id)) == 1 && cache.borrow_mut().pane(id).below.is_none() {
+        cache.borrow_mut().log_diag(
+            "terminal",
+            &format!("below pane={} lost its shell", id.log_name()),
+        );
     }
     let refresh_started = Instant::now();
     // Read once and logged: how far this pane is magnified is half of why a
