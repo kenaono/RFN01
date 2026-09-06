@@ -134,6 +134,92 @@ export component IconButton inherits Rectangle {
     }
 }
 
+// A line of text the writer types into.
+//
+// The same builtin `TextInput` a `LineEdit` is made of — the cursor, the
+// selection and every editing key are Slint's — inside a box drawn in `Tok`,
+// for the same reason `TextButton` exists.
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text <=> input.text;
+    // A one-way binding, not `<=>`: the input's own `has-focus` is read-only,
+    // and a two-way binding needs both ends to be writable.
+    out property <bool> has-focus: input.has-focus;
+    callback accepted();
+    callback edited();
+    /// Escape, which a field has to pass on rather than swallow: the bar it
+    /// sits in is what closes (要件 6.7).
+    callback escaped();
+    /// A key the field is asked about before the text gets it. Return `accept`
+    /// to take it; the default is `reject`, which is what an unanswered
+    /// callback returns, so a field nobody asks about behaves as before.
+    ///
+    /// **This is how a shortcut still works while the writer is typing in the
+    /// field it opened** — `Ctrl+F` in the find box is the same key it was in
+    /// the document, and the key handler above the field never sees it.
+    callback shortcut(event: KeyEvent) -> EventResult;
+
+    height: 28px;
+    background: Tok.paper;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: input.has-focus ? Tok.accent : Tok.rule-strong;
+    // A click anywhere in the box, including the padding either side of the
+    // text, is a click in the field.
+    forward-focus: input;
+
+    /// Called by whoever raised the bar this field is in.
+    public function take-focus() {
+        input.focus();
+    }
+
+    /// Put the keyboard here with `count` characters already selected from the
+    /// start, so that typing replaces them (追加要件 2026-09-06). Renaming
+    /// `Part01設計.md` means changing `Part01設計`, and a field that selected
+    /// the whole thing would ask for `.md` to be typed again.
+    public function take-focus-selecting(count: int) {
+        input.focus();
+        input.set-selection-offsets(0, count);
+    }
+
+    // Under the input, so the pointer reaches the text rather than this.
+    if root.text == "": Text {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        text: root.placeholder;
+        color: Tok.ink-faint;
+        font-size: 13px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    input := TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        font-size: 13px;
+        color: Tok.ink;
+        selection-background-color: Tok.accent-soft;
+        selection-foreground-color: Tok.ink-strong;
+        vertical-alignment: center;
+        single-line: true;
+        accepted => {
+            root.accepted();
+        }
+        edited => {
+            root.edited();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.escaped();
+                return accept;
+            }
+            return root.shortcut(event);
+        }
+    }
+}
+
 // One tab in one pane's strip (要件 6.3).
 //
 // **A tab is as wide as its name.** It was made to shrink instead, once, so
@@ -199,6 +285,17 @@ export component Tab inherits Rectangle {
     in property <length> carry-x: 0px;
     /// This is the tab being carried, so it is drawn as having left its place.
     in property <bool> carried: false;
+    /// 追加要件 2026-09-06: this tab stands for a file, so its name is one the
+    /// writer can change. A buffer that has never been saved has no name on
+    /// disk to change, and holding one down does nothing.
+    in property <bool> renamable;
+    /// How much of the title is the name without its extension, in characters.
+    /// **Worked out where the name is** (Rust), because Slint cannot look for
+    /// the last dot in a string.
+    in property <int> stem-length;
+    /// The name the writer typed into the tab. **Raised on Enter only** — a
+    /// rename moves a file, and losing focus is not somebody saying yes.
+    callback renamed(string);
     /// Which edge of this tab the carried one would come to rest against:
     /// -1 the leading edge, 1 the trailing edge, 0 neither. **An edge rather
     /// than a tab**, because what the writer is choosing is a gap.
@@ -239,6 +336,32 @@ export component Tab inherits Rectangle {
     property <bool> pressing: false;
     property <length> press-x;
     property <bool> carrying-self: false;
+    /// The press has already been taken as a rename, so the release must not
+    /// also be taken as a choice.
+    property <bool> renaming: false;
+    /// 追加要件 2026-09-06: the name is being typed **in the tab itself**.
+    ///
+    /// **The tab owns this**, and nothing outside has to be told: one tab is
+    /// edited at a time because one press starts it, and the strip is
+    /// republished when the rename lands (which builds these elements again and
+    /// so clears it). Escape and losing the keyboard both put it back.
+    property <bool> editing: false;
+
+    // 追加要件 2026-09-06: **a press that stays still and stays down is a
+    // rename.** Half a second, and only while the press is neither a carry nor
+    // over already: `running` is a binding, so the conditions that end it are
+    // written into the binding rather than assigned from inside the handler.
+    hold := Timer {
+        interval: 500ms;
+        running: root.pressing
+            && root.renamable
+            && !root.carrying-self
+            && !root.renaming;
+        triggered => {
+            root.renaming = true;
+            root.editing = true;
+        }
+    }
 
     // `init` as well as the changes, for the reason 6.11 records elsewhere: a
     // tab that is in front from the moment it is created never raises a change
@@ -283,7 +406,39 @@ export component Tab inherits Rectangle {
         background: root.focused ? Tok.accent : Tok.rule-strong;
     }
 
+    // 追加要件 2026-09-06: **the name is changed where it is written.** A
+    // dialog for a name that is already on screen asks the writer to look
+    // somewhere else to change what they were looking at.
+    if root.editing: Field {
+        width: parent.width;
+        height: parent.height;
+        // **From `init`, because the element is created already editing** and
+        // so never raises a change to say it started (6.11's rule). Its id is
+        // not reachable from outside either: an `if` compiles to a repeater
+        // (技術検証 6.24), and nothing outside a repeater can name what is in
+        // it — which is why the timer above only sets the flag.
+        init => {
+            self.text = root.title;
+            self.take-focus-selecting(root.stem-length);
+        }
+        accepted => {
+            root.editing = false;
+            root.renamed(self.text);
+        }
+        escaped => {
+            root.editing = false;
+        }
+        // **Losing the keyboard cancels.** A click elsewhere is the writer
+        // going somewhere else, not agreeing to move a file.
+        changed has-focus => {
+            if (!self.has-focus) {
+                root.editing = false;
+            }
+        }
+    }
+
     HorizontalLayout {
+        visible: !root.editing;
         padding-left: 11px;
         // Room for the cross, which is not in this layout: it has to be
         // declared after the touch area below to be clickable at all.
@@ -330,6 +485,7 @@ export component Tab inherits Rectangle {
             if (event.kind == PointerEventKind.down) {
                 root.pressing = true;
                 root.carrying-self = false;
+                root.renaming = false;
                 root.press-x = touch.mouse-x;
             }
             if (event.kind == PointerEventKind.up) {
@@ -338,7 +494,10 @@ export component Tab inherits Rectangle {
                         root.absolute-position.x + touch.mouse-x,
                         root.absolute-position.y + touch.mouse-y);
                     root.carry-ended();
-                } else if (root.pressing) {
+                } else if (root.pressing && !root.renaming) {
+                    // **Not after a rename.** The question is already up, and
+                    // a tab switch under it would move the pane out from
+                    // beneath the name being typed.
                     root.chosen();
                 }
                 root.pressing = false;
@@ -492,82 +651,6 @@ export component TextButton inherits Rectangle {
     }
 }
 
-// A line of text the writer types into.
-//
-// The same builtin `TextInput` a `LineEdit` is made of — the cursor, the
-// selection and every editing key are Slint's — inside a box drawn in `Tok`,
-// for the same reason `TextButton` exists.
-export component Field inherits Rectangle {
-    in property <string> placeholder;
-    in-out property <string> text <=> input.text;
-    // A one-way binding, not `<=>`: the input's own `has-focus` is read-only,
-    // and a two-way binding needs both ends to be writable.
-    out property <bool> has-focus: input.has-focus;
-    callback accepted();
-    callback edited();
-    /// Escape, which a field has to pass on rather than swallow: the bar it
-    /// sits in is what closes (要件 6.7).
-    callback escaped();
-    /// A key the field is asked about before the text gets it. Return `accept`
-    /// to take it; the default is `reject`, which is what an unanswered
-    /// callback returns, so a field nobody asks about behaves as before.
-    ///
-    /// **This is how a shortcut still works while the writer is typing in the
-    /// field it opened** — `Ctrl+F` in the find box is the same key it was in
-    /// the document, and the key handler above the field never sees it.
-    callback shortcut(event: KeyEvent) -> EventResult;
-
-    height: 28px;
-    background: Tok.paper;
-    border-radius: 5px;
-    border-width: 1px;
-    border-color: input.has-focus ? Tok.accent : Tok.rule-strong;
-    // A click anywhere in the box, including the padding either side of the
-    // text, is a click in the field.
-    forward-focus: input;
-
-    /// Called by whoever raised the bar this field is in.
-    public function take-focus() {
-        input.focus();
-    }
-
-    // Under the input, so the pointer reaches the text rather than this.
-    if root.text == "": Text {
-        x: 8px;
-        width: parent.width - 16px;
-        height: parent.height;
-        text: root.placeholder;
-        color: Tok.ink-faint;
-        font-size: 13px;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-
-    input := TextInput {
-        x: 8px;
-        width: parent.width - 16px;
-        height: parent.height;
-        font-size: 13px;
-        color: Tok.ink;
-        selection-background-color: Tok.accent-soft;
-        selection-foreground-color: Tok.ink-strong;
-        vertical-alignment: center;
-        single-line: true;
-        accepted => {
-            root.accepted();
-        }
-        edited => {
-            root.edited();
-        }
-        key-pressed(event) => {
-            if (event.text == Key.Escape) {
-                root.escaped();
-                return accept;
-            }
-            return root.shortcut(event);
-        }
-    }
-}
 
 // The mark on a setting that only does something in one writing direction
 // (要件 9): `H` for horizontal, `V` for vertical.

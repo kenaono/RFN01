@@ -31,6 +31,15 @@ export struct PreviewTile {
 export struct TabInfo {
     title: string,
     edited: bool,
+    // 追加要件 2026-09-06: whether this tab stands for a file on disk, and so
+    // has a name the writer can change by holding the tab down. **Told rather
+    // than guessed from the title**: 無題1 is a name like any other on screen,
+    // and only the document knows whether anything is filed under it.
+    renamable: bool,
+    // How many characters of the title are the name without its extension
+    // (追加要件 2026-09-06). Renaming selects that much, so that typing
+    // replaces the name and leaves the extension.
+    stem-length: int,
 }
 
 export struct PreviewSelectionRect {
@@ -287,6 +296,9 @@ export component EditorPane inherits Rectangle {
     callback zoom-stepped(int);
     callback zoom-reset-requested();
     callback close-active-tab();
+    /// 追加要件 2026-09-06: a tab was held down, which means "change this
+    /// file's name" (要件 5.2's rename, reached from the strip).
+    callback tab-renamed(int, string);
     /// Close every tab in the window but the one in front of this pane, or
     /// every one (要件 6.3). **すべて means the window, not this strip**: the
     /// pane the menu hangs from decides one thing only, which tab is kept.
@@ -488,8 +500,13 @@ export component EditorPane inherits Rectangle {
                             || root.carried-from == index
                             ? 0
                             : (root.carried-from > index ? -1 : 1);
+                        renamable: tab.renamable;
+                        stem-length: tab.stem-length;
                         chosen => {
                             root.tab-selected(index);
+                        }
+                        renamed(name) => {
+                            root.tab-renamed(index, name);
                         }
                         closed => {
                             root.tab-closed(index);

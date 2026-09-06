@@ -1551,6 +1551,29 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     });
 
+    // 追加要件 2026-09-06: a name was typed into a tab.
+    //
+    // **The same act the tree's rename is** (要件 5.2): `move_entry` moves the
+    // file, brings every open document that pointed at it along, and re-titles
+    // the tabs. What is new is only where the name was typed.
+    let weak = window.as_weak();
+    let tab_live = live.clone();
+    window.on_pane_tab_renamed(move |pane, index, typed| {
+        let index = index.max(0) as usize;
+        let id = PaneId::from_index(pane);
+        let typed = typed.to_string();
+        let weak = weak.clone();
+        let live = tab_live.clone();
+        // Put off to the next tick, like every other tab command: renaming
+        // republishes the strip, and the field the name was typed into is
+        // inside the row that gets rebuilt (6.18).
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                rename_tab(&window, &live, id, index, &typed);
+            }
+        });
+    });
+
     let weak = window.as_weak();
     let tab_live = live.clone();
     window.on_pane_tab_closed(move |pane, index| {
@@ -4954,6 +4977,11 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                 // second copy to be fresher than the list any more.
                 title: tab.document.file.borrow().title().into(),
                 edited: tab.document.text.edited(),
+                // 追加要件 2026-09-06: only a tab standing for a file has a
+                // name on disk to change. 無題1 reads like a name on screen,
+                // and nothing is filed under it.
+                renamable: tab.document.file.borrow().path().is_some(),
+                stem_length: stem_length(&tab.document.file.borrow().title()),
             })
             .collect::<Vec<_>>();
         (infos, strip.active as i32)
@@ -5750,6 +5778,65 @@ fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
     window.set_focused_pane(here.index());
     publish_tabs(window, live);
     after_layout_change(window, live);
+}
+
+/// How much of a file's name is the name without its extension, in characters
+/// (追加要件 2026-09-06).
+///
+/// **The last dot, and never the first character**: `.gitignore` is a name that
+/// begins with a dot rather than an extension with nothing in front of it. A
+/// name with no dot at all is all stem.
+///
+/// Counted in characters rather than bytes, because what it is handed to is a
+/// text field's selection and a field counts what it shows.
+fn stem_length(title: &str) -> i32 {
+    let characters = title.chars().count();
+    title
+        .char_indices()
+        .filter(|(at, character)| *character == '.' && *at > 0)
+        .next_back()
+        .map(|(at, _)| title[..at].chars().count())
+        .unwrap_or(characters) as i32
+}
+
+/// Give the file a tab stands for the name typed into that tab
+/// (追加要件 2026-09-06, 要件 5.2).
+///
+/// **The same rules as the tree's rename**, and the same act: `check_name`
+/// first, then `move_entry`, which brings every open document along and
+/// re-titles the tabs. What is new is only where the name was typed.
+fn rename_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, typed: &str) {
+    let Some(tab) = live.tabs.borrow().of(id).tabs.get(index).cloned() else {
+        return;
+    };
+    let path = tab.document.file.borrow().path().map(Path::to_path_buf);
+    let Some(path) = path else {
+        // Nothing is filed under 無題1, so there is nothing to rename. **Said
+        // rather than ignored**: the press was held on purpose, and a gesture
+        // that does nothing without a word looks broken.
+        window.set_render_status("名前の変更: 先に保存してください".into());
+        return;
+    };
+    if typed == entry_name(&path) {
+        return;
+    }
+    let name = match file_tree::check_name(typed) {
+        Ok(name) => name,
+        Err(problem) => {
+            window.set_render_status(problem.message().into());
+            return;
+        }
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let to = parent.join(name);
+    if let Err(error) = move_entry(window, live, &path, &to) {
+        window.set_render_status(format!("名前を変えられません: {error}").into());
+        return;
+    }
+    publish_left(window, live);
+    write_session(window, live);
 }
 
 /// Put an empty document in a strip that has nothing left in it.
@@ -10889,6 +10976,31 @@ mod tests {
 
         assert_eq!(text, "前方    方");
         assert_eq!(caret, "前方    ".len());
+    }
+
+    /// 追加要件 2026-09-06: renaming a tab selects the name without its
+    /// extension, so that typing replaces the name and leaves the `.md`.
+    ///
+    /// **The last dot, and never the first character**: `.gitignore` is a name
+    /// that begins with a dot, not an extension with nothing in front of it.
+    #[test]
+    fn a_rename_selects_the_name_without_its_extension() {
+        assert_eq!(
+            stem_length("Part01設計.md"),
+            "Part01設計".chars().count() as i32
+        );
+        assert_eq!(
+            stem_length("notes.tar.gz"),
+            "notes.tar".chars().count() as i32
+        );
+        // No extension: all of it is the name.
+        assert_eq!(stem_length("README"), 6);
+        assert_eq!(stem_length("無題1"), 3);
+        // A dotfile is a name, not an empty one with an extension.
+        assert_eq!(stem_length(".gitignore"), 10);
+        assert_eq!(stem_length(""), 0);
+        // **Characters, not bytes**, because a text field counts what it shows.
+        assert_eq!(stem_length("あいう.md"), 3);
     }
 
     #[test]

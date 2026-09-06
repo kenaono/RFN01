@@ -426,6 +426,9 @@ export component AppWindow inherits Window {
     /// else a pane raises; the position is in that pane's own strip.
     callback pane-tab-selected(int, int);
     callback pane-tab-closed(int, int);
+    /// 追加要件 2026-09-06: a tab was held down — change the name of the file
+    /// it stands for (要件 5.2).
+    callback pane-tab-renamed(int, int, string);
     /// 要件 6.5: which pane's strip a tab was carried out of, from where in it,
     /// which place in that same strip it was over, and where the hand let go.
     ///
@@ -1434,6 +1437,15 @@ export component AppWindow inherits Window {
                             root.focused-pane = pane.id;
                             root.pane-tab-closed(pane.id, index);
                             root.focus-generation += 1;
+                        }
+                        tab-renamed(index, name) => {
+                            root.focused-pane = pane.id;
+                            root.pane-tab-renamed(pane.id, index, name);
+                            // **No focus generation.** The question that opens
+                            // takes the keyboard for its name field, and
+                            // handing it back to the pane in the same frame is
+                            // the fight 要件 5.2's four name commands already
+                            // record.
                         }
                         // Whether the hand is over this pane. The rectangle
                         // is the one Rust placed it in, so this and the pane
