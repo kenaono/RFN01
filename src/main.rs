@@ -12,6 +12,7 @@ mod find;
 mod ime;
 mod kill_ring;
 mod pane_layout;
+mod pty;
 mod quick_draft;
 mod searcher;
 mod shell;

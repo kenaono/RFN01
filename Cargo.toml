@@ -19,6 +19,22 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
+    # 追加要件 2026-09-06: the terminal. ConPTY (`CreatePseudoConsole`), the
+    # pipes its two ends are, and the process attribute that hands a child the
+    # console. **Features of a crate already vendored**, so nothing is fetched
+    # and `--offline` still resolves — the same bargain every other feature
+    # here was added under.
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    # `CreatePipe` and `CreateProcessW` both take security attributes, so the
+    # bindings for them are behind this even when nothing is passed.
+    "Win32_Security",
+    # `ReadFile`/`WriteFile`: a pipe end is a file handle like any other. Both
+    # take an `OVERLAPPED`, so their bindings sit behind `Win32_System_IO` even
+    # when the reads are the blocking kind.
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     # The clipboard (要件 11.2) and the moveable block it hands over. Features
     # of a crate already vendored, so no new package is fetched.
     "Win32_System_DataExchange",
