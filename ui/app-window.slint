@@ -352,6 +352,9 @@ export component AppWindow inherits Window {
     callback pane-below-sent(int);
     /// 要件 11.3 の手つきで下段へ移る（true）／本文へ戻る（false）。
     callback pane-below-focus(int, bool);
+    /// 追加要件 2026-09-06: the right button's rows that the window answers.
+    callback pane-close-clean(int);
+    callback pane-copy-path(int, int);
     /// A shell wrote something. **Rung from its reading thread**, so it says
     /// only that: which pane, and what changed, are decided on this side.
     callback terminal-woken();
@@ -1465,6 +1468,13 @@ export component AppWindow inherits Window {
                         below-selection-update(x, y) => { root.pane-below-selection(pane.id, x, y, 1); }
                         below-selection-end(x, y) => { root.pane-below-selection(pane.id, x, y, 2); }
                         below-sent => { root.pane-below-sent(pane.id); }
+                        quick-draft-requested => { root.quick-draft-requested(); }
+                        close-clean-tabs => { root.pane-close-clean(pane.id); }
+                        copy-path-requested(index) => { root.pane-copy-path(pane.id, index); }
+                        open-file-requested => { root.open-file-requested(); }
+                        // The strip's own menu opens the default shell: the
+                        // writer asked for a terminal, not for a distribution.
+                        terminal-requested => { root.terminal-requested(0); }
                         below-entered => { root.pane-below-focus(pane.id, true); }
                         below-left => { root.pane-below-focus(pane.id, false); }
                         tab-pressed => { root.pane-tab(pane.id); }

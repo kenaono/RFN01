@@ -433,6 +433,30 @@ export component EditorPane inherits Rectangle {
     /// every move extends the selection the way Shift does. **True asks for a
     /// rectangle** (`Ctrl+Shift+Space`, 要件 7.1).
     callback mark-toggled(bool);
+    /// 要件 12: the quick draft, asked for from the pane's own menu (追加要件
+    /// 2026-09-06の右クリックメニュー). **Forwarded, not opened here** — the
+    /// window holds the draft, as it holds the folder and the panes.
+    callback quick-draft-requested();
+    /// Where the right button was pressed, in this pane's own coordinates.
+    property <length> context-x;
+    property <length> context-y;
+    /// The tab the strip's menu is about, and where that menu opens.
+    property <int> tab-menu-target: -1;
+    property <length> tab-menu-x;
+    property <length> tab-menu-y;
+    /// Bumped for the tab that should start renaming (see `Tab::rename-asked`).
+    property <int> rename-token;
+    /// 追加要件 2026-09-06: close every tab nothing is waiting to be saved from.
+    callback close-clean-tabs();
+    /// 追加要件 2026-09-06: the path of the file in a tab, to the clipboard.
+    callback copy-path-requested(int);
+    /// Open a file, asked for from the strip's own menu.
+    callback open-file-requested();
+    /// A new shell in this pane, asked for from the strip's own menu.
+    callback terminal-requested();
+    /// Where the strip's own menu opens (the band beside the tabs).
+    property <length> strip-menu-x;
+    property <length> strip-menu-y;
     /// Escape was pressed and this pane had nothing open to close. **True if
     /// the window closed something of its own** — the app menu, or the
     /// typography panel — so that the key is not passed on twice.
@@ -600,6 +624,17 @@ export component EditorPane inherits Rectangle {
                         chosen => {
                             root.tab-selected(index);
                         }
+                        rename-asked: root.tab-menu-target == index ? root.rename-token : 0;
+                        menu-asked(x, y) => {
+                            // **Chosen first.** Every row below acts on the tab
+                            // in front, so the tab under the pointer has to be
+                            // that one before the menu is up.
+                            root.tab-selected(index);
+                            root.tab-menu-target = index;
+                            root.tab-menu-x = x - root.absolute-position.x;
+                            root.tab-menu-y = y - root.absolute-position.y;
+                            tab-menu.show();
+                        }
                         renamed(name) => {
                             root.tab-renamed(index, name);
                         }
@@ -653,6 +688,30 @@ export component EditorPane inherits Rectangle {
                         // that grows taller should take it along.
                         height: 28px;
                         background: Tok.accent;
+                    }
+
+                    // 追加要件 2026-09-06: **the band beside the tabs answers the
+                    // right button.** It is inside the strip rather than behind
+                    // it, because the tabs and this share one scrolling
+                    // viewport and only the element that has the space can be
+                    // sure it is the one being pointed at.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 24px;
+
+                        TouchArea {
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.right
+                                    && event.kind == PointerEventKind.down) {
+                                    root.strip-menu-x = self.absolute-position.x
+                                        + self.mouse-x - root.absolute-position.x;
+                                    root.strip-menu-y = self.absolute-position.y
+                                        + self.mouse-y - root.absolute-position.y;
+                                    root.menu-opened();
+                                    strip-menu.show();
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1664,6 +1723,19 @@ export component EditorPane inherits Rectangle {
                                 accept
                             }
                             pointer-event(event) => {
+                                // 追加要件 2026-09-06: **the right button opens
+                                // the pane's own menu where the pointer is.**
+                                // The rows are the ⋮ menu's plus the ones a
+                                // hand on the text wants: what is selected, and
+                                // what is beside the pane.
+                                if event.button == PointerEventButton.right
+                                    && event.kind == PointerEventKind.down {
+                                    root.context-x = self.mouse-x;
+                                    root.context-y = self.mouse-y;
+                                    root.menu-opened();
+                                    context-menu.show();
+                                    return;
+                                }
                                 if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
                                     root.dragging = true;
                                     root.selection-start(
@@ -1687,6 +1759,136 @@ export component EditorPane inherits Rectangle {
                             moved => {
                                 if root.dragging && self.pressed {
                                     root.selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
+                                }
+                            }
+                        }
+
+                        // 追加要件 2026-09-06: the right button's menu. Declared
+                        // here so that `ime-input` is already in scope — Slint
+                        // has no forward references, and Paste is the field's
+                        // own doing (it is the one thing on this side that can
+                        // read the clipboard).
+                        context-menu := PopupWindow {
+                            x: root.context-x;
+                            y: root.context-y;
+                            width: 264px;
+                            close-policy: close-on-click-outside;
+
+                            MenuFrame {
+                                width: 264px;
+
+                                VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 1px;
+
+                                    MenuRow {
+                                        title: "Cut";
+                                        shortcut: "Ctrl+X";
+                                        activated => {
+                                            context-menu.close();
+                                            root.copy-requested(true);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Copy";
+                                        shortcut: "Ctrl+C";
+                                        activated => {
+                                            context-menu.close();
+                                            root.copy-requested(false);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Paste";
+                                        shortcut: "Ctrl+V";
+                                        activated => {
+                                            context-menu.close();
+                                            // **The field pastes, and what it
+                                            // takes comes in as typing** — the
+                                            // same road every paste travels.
+                                            ime-input.focus();
+                                            ime-input.paste();
+                                        }
+                                    }
+                                    MenuSep { }
+                                    MenuRow {
+                                        title: "Start Selection";
+                                        shortcut: "Ctrl+Space";
+                                        activated => {
+                                            context-menu.close();
+                                            root.mark-toggled(false);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Start Rectangle Selection";
+                                        shortcut: "Ctrl+Shift+Space";
+                                        activated => {
+                                            context-menu.close();
+                                            root.mark-toggled(true);
+                                        }
+                                    }
+                                    MenuSep { }
+                                    MenuRow {
+                                        title: root.terminal ? "Editor Below" : "Terminal Below";
+                                        shortcut: "Ctrl+`";
+                                        activated => {
+                                            context-menu.close();
+                                            root.below-toggled();
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Quick Draft…";
+                                        activated => {
+                                            context-menu.close();
+                                            root.quick-draft-requested();
+                                        }
+                                    }
+                                    MenuSep { }
+                                    MenuRow {
+                                        title: "Split Right";
+                                        activated => {
+                                            context-menu.close();
+                                            root.split-requested(true);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Split Down";
+                                        activated => {
+                                            context-menu.close();
+                                            root.split-requested(false);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Close Other Panes";
+                                        activated => {
+                                            context-menu.close();
+                                            root.close-others-requested();
+                                        }
+                                    }
+                                    MenuSep { }
+                                    MenuRow {
+                                        title: "Zoom In";
+                                        shortcut: "Ctrl+=";
+                                        activated => {
+                                            context-menu.close();
+                                            root.zoom-stepped(1);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Zoom Out";
+                                        shortcut: "Ctrl+-";
+                                        activated => {
+                                            context-menu.close();
+                                            root.zoom-stepped(-1);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Reset Zoom";
+                                        shortcut: "Ctrl+0";
+                                        activated => {
+                                            context-menu.close();
+                                            root.zoom-reset-requested();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1893,4 +2095,148 @@ export component EditorPane inherits Rectangle {
 
         }
     }
+
+    // 追加要件 2026-09-06: **the right button on a tab.** Every row acts on the
+    // tab in front, and the press that opened this made that tab the one in
+    // front — so the menu says nothing about which tab it is about, because
+    // there is only ever one it could be.
+    tab-menu := PopupWindow {
+        x: root.tab-menu-x;
+        y: root.tab-menu-y;
+        width: 264px;
+        close-policy: close-on-click-outside;
+
+        MenuFrame {
+            width: 264px;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+
+                MenuRow {
+                    title: "Close";
+                    shortcut: "Ctrl+W";
+                    activated => {
+                        tab-menu.close();
+                        root.close-active-tab();
+                    }
+                }
+                MenuRow {
+                    title: "Close Others";
+                    activated => {
+                        tab-menu.close();
+                        root.close-other-tabs();
+                    }
+                }
+                MenuRow {
+                    title: "Close Clean";
+                    activated => {
+                        tab-menu.close();
+                        root.close-clean-tabs();
+                    }
+                }
+                MenuSep { }
+                MenuRow {
+                    title: "Rename";
+                    activated => {
+                        // **The count is bumped after the menu is closed**, so
+                        // the field that appears takes the keyboard from a menu
+                        // that has already let go of it.
+                        tab-menu.close();
+                        root.rename-token += 1;
+                    }
+                }
+                MenuRow {
+                    title: "Copy Path";
+                    activated => {
+                        tab-menu.close();
+                        root.copy-path-requested(root.tab-menu-target);
+                    }
+                }
+                MenuSep { }
+                MenuRow {
+                    title: "Save";
+                    shortcut: "Ctrl+S";
+                    activated => {
+                        tab-menu.close();
+                        root.save-requested();
+                    }
+                }
+                MenuRow {
+                    title: "Save As…";
+                    shortcut: "Ctrl+Shift+S";
+                    activated => {
+                        tab-menu.close();
+                        root.save-as-requested();
+                    }
+                }
+            }
+        }
+    }
+
+    // 追加要件 2026-09-06: **the right button on the band beside the tabs.**
+    // What is asked for there is a tab, not a tab's business — so the rows are
+    // the ones that make one, and the ones that take them away.
+    strip-menu := PopupWindow {
+        x: root.strip-menu-x;
+        y: root.strip-menu-y;
+        width: 264px;
+        close-policy: close-on-click-outside;
+
+        MenuFrame {
+            width: 264px;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+
+                MenuRow {
+                    title: "New File";
+                    activated => {
+                        strip-menu.close();
+                        root.new-tab-requested();
+                    }
+                }
+                MenuRow {
+                    title: "New Terminal";
+                    activated => {
+                        strip-menu.close();
+                        root.terminal-requested();
+                    }
+                }
+                MenuRow {
+                    title: "Open File…";
+                    shortcut: "Ctrl+O";
+                    activated => {
+                        strip-menu.close();
+                        root.open-file-requested();
+                    }
+                }
+                MenuSep { }
+                MenuRow {
+                    title: "Close";
+                    shortcut: "Ctrl+W";
+                    activated => {
+                        strip-menu.close();
+                        root.close-active-tab();
+                    }
+                }
+                MenuRow {
+                    title: "Close All";
+                    activated => {
+                        strip-menu.close();
+                        root.close-all-tabs();
+                    }
+                }
+                MenuRow {
+                    title: "Close Clean";
+                    activated => {
+                        strip-menu.close();
+                        root.close-clean-tabs();
+                    }
+                }
+            }
+        }
+    }
+
 }

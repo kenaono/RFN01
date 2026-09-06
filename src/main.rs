@@ -2945,6 +2945,28 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 追加要件 2026-09-06: the right button's rows.
+    let weak = window.as_weak();
+    let clean_live = live.clone();
+    window.on_pane_close_clean(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            close_clean_tabs(&window, &clean_live, PaneId::from_index(pane));
+        }
+    });
+
+    let weak = window.as_weak();
+    let path_live = live.clone();
+    window.on_pane_copy_path(move |pane, index| {
+        if let Some(window) = weak.upgrade() {
+            copy_tab_path(
+                &window,
+                &path_live,
+                PaneId::from_index(pane),
+                index.max(0) as usize,
+            );
+        }
+    });
+
     // 要件 11.3 の手つきで上下に移る（追加要件 Terminal）。
     let weak = window.as_weak();
     window.on_pane_below_focus(move |pane, into| {
@@ -6077,6 +6099,51 @@ fn start_close_run(window: &AppWindow, live: &Live, id: PaneId, keep_active: boo
     };
     *live.close_run.borrow_mut() = Some(CloseRun { left });
     advance_close_run(window, live);
+}
+
+/// 追加要件 2026-09-06: close every tab in this pane with nothing waiting to be
+/// saved from it.
+///
+/// **A shell is not a clean tab.** Nothing about it is waiting to be saved, but
+/// closing one ends whatever is running in it — which is the opposite of what a
+/// row called "clean" is for.
+fn close_clean_tabs(window: &AppWindow, live: &Live, id: PaneId) {
+    let left = {
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(id);
+        strip
+            .tabs
+            .iter()
+            .filter(|tab| tab.terminal.is_none() && !tab.document.text.edited())
+            .map(|tab| (id, tab.document()))
+            .collect::<VecDeque<_>>()
+    };
+    if left.is_empty() {
+        window.set_render_status("閉じられるタブはありません".into());
+        return;
+    }
+    *live.close_run.borrow_mut() = Some(CloseRun { left });
+    advance_close_run(window, live);
+}
+
+/// 追加要件 2026-09-06: the path of the file a tab stands for, to the clipboard.
+fn copy_tab_path(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
+    let path = {
+        let tabs = live.tabs.borrow();
+        tabs.of(id)
+            .tabs
+            .get(index)
+            .and_then(|tab| tab.document.file.borrow().path().map(Path::to_path_buf))
+    };
+    // **A tab that stands for nothing on disk has no path to give.** 無題1 reads
+    // like a name on screen and is filed under nothing.
+    let Some(path) = path else {
+        window.set_render_status("このタブにはまだ保存先がありません".into());
+        return;
+    };
+    if !clipboard::put_text(ime::window_handle(window), &path.display().to_string()) {
+        window.set_render_status("クリップボードへ渡せませんでした".into());
+    }
 }
 
 /// Close the tabs of the run until one of them has to ask something.

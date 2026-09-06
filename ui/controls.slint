@@ -273,6 +273,15 @@ export component Tab inherits Rectangle {
     callback dropped(length, length);
     /// The pointer is inside this tab while another one is being carried.
     callback pointed-at();
+    /// 追加要件 2026-09-06: the right button, with where it was pressed in the
+    /// window's own coordinates — the menu opens where the hand is.
+    callback menu-asked(length, length);
+    /// Start renaming from somewhere else (the right button's menu).
+    ///
+    /// **A count rather than a call**, because a tab is a repeated element and
+    /// nothing outside a repeater can reach into one (技術検証 6.24). The strip
+    /// bumps this for the one tab it means, and only that tab sees a change.
+    in property <int> rename-asked;
     /// The carry is over, whether it ended in a drop or was taken away. **Any
     /// carry that starts raises exactly one of these**, so what is drawn during
     /// one is always cleared.
@@ -351,6 +360,13 @@ export component Tab inherits Rectangle {
     // rename.** Half a second, and only while the press is neither a carry nor
     // over already: `running` is a binding, so the conditions that end it are
     // written into the binding rather than assigned from inside the handler.
+    changed rename-asked => {
+        if (root.renamable && root.rename-asked > 0) {
+            root.renaming = true;
+            root.editing = true;
+        }
+    }
+
     hold := Timer {
         interval: 500ms;
         running: root.pressing
@@ -479,6 +495,13 @@ export component Tab inherits Rectangle {
         // out of the same press, so the press is followed here rather than
         // being asked about afterwards.
         pointer-event(event) => {
+            if (event.button == PointerEventButton.right
+                && event.kind == PointerEventKind.down) {
+                root.menu-asked(
+                    root.absolute-position.x + touch.mouse-x,
+                    root.absolute-position.y + touch.mouse-y);
+                return;
+            }
             if (event.button != PointerEventButton.left) {
                 return;
             }
