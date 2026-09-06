@@ -973,6 +973,11 @@ struct Pane {
     /// lives; anything else means the writer is reading something that has
     /// already gone by.
     terminal_view: usize,
+    /// What the writer has selected with the mouse (追加要件 Terminal).
+    ///
+    /// **In rows counted from the start of the history**, so that output
+    /// arriving underneath does not move it and scrolling does not lose it.
+    terminal_selection: Option<TerminalSelection>,
     /// How much scrollback there was at the last refresh.
     ///
     /// **Because a view held back has to hold still.** Output arriving while
@@ -991,6 +996,51 @@ struct TerminalBands {
     bands: Vec<(u64, Image)>,
 }
 
+/// Two corners of what the writer has selected in a shell (追加要件 Terminal).
+///
+/// **Where the drag began and where it is now**, not a normalized rectangle: a
+/// selection dragged upwards is the same selection dragged downwards, and which
+/// end moves is the writer's business.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct TerminalSelection {
+    anchor: (usize, usize),
+    head: (usize, usize),
+}
+
+impl TerminalSelection {
+    /// The two corners in reading order.
+    fn ordered(self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// The columns of `row` that are inside this selection, if any.
+    ///
+    /// **A selection runs like text, not like a rectangle**: a drag across three
+    /// rows takes the end of the first, all of the second and the start of the
+    /// third — which is what copying a wrapped command line has to mean.
+    fn columns_in(self, row: usize, columns: usize) -> Option<(usize, usize)> {
+        let ((first_row, first_column), (last_row, last_column)) = self.ordered();
+        if row < first_row || row > last_row {
+            return None;
+        }
+        let from = if row == first_row { first_column } else { 0 };
+        let to = if row == last_row {
+            last_column.min(columns)
+        } else {
+            columns
+        };
+        (from < to).then_some((from, to))
+    }
+
+    fn is_empty(self) -> bool {
+        self.anchor == self.head
+    }
+}
+
 /// How many rows one band holds.
 ///
 /// **Eight is a compromise between two costs.** A band is the smallest thing
@@ -1007,6 +1057,7 @@ impl Pane {
             mode,
             terminal: None,
             terminal_bands: TerminalBands::default(),
+            terminal_selection: None,
             terminal_view: 0,
             terminal_history: 0,
         }
@@ -2232,6 +2283,16 @@ fn main() -> Result<(), slint::PlatformError> {
             let shell = cache.borrow_mut().pane(id).terminal.clone();
             if let Some(session) = shell {
                 session.borrow_mut().paste(text);
+                {
+                    let mut borrowed = cache.borrow_mut();
+                    let pane = borrowed.pane(id);
+                    pane.terminal_view = 0;
+                    pane.terminal_selection = None;
+                }
+                // **The field is emptied here.** It holds what was pasted, and
+                // left alone it would hand the whole of it over again with the
+                // next paste (the editing paths empty it for the same reason).
+                id.set_ime_buffer(&window, "");
                 refresh_terminal_pane(&window, &cache, id);
                 return;
             }
@@ -8698,6 +8759,16 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
         (at.row, at.column)
     });
 
+    // Which columns of each visible row the writer has picked out.
+    let top = history.saturating_sub(looking);
+    let picked: Vec<Option<(usize, usize)>> = {
+        let mut borrowed = cache.borrow_mut();
+        let selection = borrowed.pane(id).terminal_selection;
+        (0..visible.len())
+            .map(|row| selection.and_then(|picked| picked.columns_in(top + row, columns)))
+            .collect()
+    };
+
     let shape = (columns, rows, cell.advance.to_bits(), cell.line.to_bits());
     {
         let mut borrowed = cache.borrow_mut();
@@ -8722,11 +8793,13 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
         // **The caret belongs to the screen**, so it is only anywhere at all
         // when the pane is looking at the bottom.
         let inside = cursor.filter(|(row, _)| looking == 0 && (first..last).contains(row));
+        let picked_here = &picked[first..last.min(picked.len())];
         let signature = {
             let mut hasher = DefaultHasher::new();
             for line in lines {
                 line.hash(&mut hasher);
             }
+            picked_here.hash(&mut hasher);
             inside
                 .map(|(row, column)| (row - first, column))
                 .hash(&mut hasher);
@@ -8749,6 +8822,7 @@ fn refresh_terminal_pane(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, i
                     lines.iter().map(|line| (*line).clone()).collect();
                 let painted = cells::draw_terminal(
                     &band_lines,
+                    picked_here,
                     inside.map(|(row, column)| (row - first, column)),
                     &look,
                     cell,
@@ -8884,10 +8958,25 @@ fn send_terminal_key(
     let Some(key) = named_key(code, text, control) else {
         return;
     };
+    // 要件 11.2. **`Ctrl+Shift+C`, because `Ctrl+C` is the interrupt** — the
+    // one chord a shell cannot be asked to give up. The pair is what every
+    // terminal uses, and pasting comes back the other way: `Ctrl+V` is left to
+    // the pane's own field, which fills it and hands the text over as typing.
+    if control && shift && text.eq_ignore_ascii_case("c") {
+        copy_terminal_selection(window, live, id);
+        return;
+    }
+
     // **Typing puts the writer back at the bottom**, which is where what they
     // type will appear. Every terminal does this, and the reason is that the
     // alternative — typing into a screen you cannot see — has no use.
-    live.cache.borrow_mut().pane(id).terminal_view = 0;
+    {
+        let mut borrowed = live.cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        pane.terminal_view = 0;
+        // The screen is about to change under it.
+        pane.terminal_selection = None;
+    }
     let modifiers = TerminalModifiers {
         shift,
         alt,
@@ -8990,6 +9079,122 @@ fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, delta: f32) {
         };
     }
     refresh_terminal_pane(window, &live.cache, id);
+}
+
+/// Pick out cells with the mouse (追加要件 Terminal).
+///
+/// **The rows are counted from the start of the history**, not from the top of
+/// the screen: output arriving while a selection stands would otherwise carry it
+/// up the screen, and scrolling back would lose it.
+fn select_in_terminal(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    x: f32,
+    y: f32,
+    phase: SelectionPhase,
+) {
+    let Some(session) = cache.borrow_mut().pane(id).terminal.clone() else {
+        return;
+    };
+    let look = cells::TerminalLook::default();
+    let Ok(cell) = cells::terminal_cell_size(&look) else {
+        return;
+    };
+    let (columns, rows) = cell.grid_for(id.shown_width(window), id.shown_height(window));
+    let (history, looking) = {
+        let history = session.borrow().screen().scrollback().len();
+        let looking = cache.borrow_mut().pane(id).terminal_view;
+        (history, looking)
+    };
+    let top = history.saturating_sub(looking);
+    let row = top + ((y.max(0.0) / cell.line) as usize).min(rows.saturating_sub(1));
+    // **One past the last column is a place too**: a drag that ends past the
+    // end of a line means the whole line, which is what dragging down a screen
+    // of output has to mean.
+    let column = ((x.max(0.0) / cell.advance).round() as usize).min(columns);
+    {
+        let mut borrowed = cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        match phase {
+            SelectionPhase::Begin => {
+                pane.terminal_selection = Some(TerminalSelection {
+                    anchor: (row, column),
+                    head: (row, column),
+                });
+            }
+            SelectionPhase::Extend | SelectionPhase::Update | SelectionPhase::End => {
+                if let Some(selection) = &mut pane.terminal_selection {
+                    selection.head = (row, column);
+                }
+            }
+        }
+        // A click that picked nothing takes the last selection away with it.
+        if matches!(phase, SelectionPhase::End)
+            && pane
+                .terminal_selection
+                .is_some_and(TerminalSelection::is_empty)
+        {
+            pane.terminal_selection = None;
+        }
+    }
+    refresh_terminal_pane(window, cache, id);
+}
+
+/// What the writer picked out, as text (追加要件 Terminal・要件 11.2).
+///
+/// **A wrapped line is one line.** The screen broke it because the pane is that
+/// wide; pasting it back with a newline in the middle would run half a command.
+fn terminal_selection_text(session: &TerminalSession, selection: TerminalSelection) -> String {
+    let screen = session.screen();
+    let history = screen.scrollback().len();
+    let (first, last) = selection.ordered();
+    let mut text = String::new();
+    for row in first.0..=last.0 {
+        let Some(line) = (if row < history {
+            screen.scrollback().get(row)
+        } else {
+            screen.line(row - history)
+        }) else {
+            continue;
+        };
+        let Some((from, to)) = selection.columns_in(row, line.cells.len()) else {
+            continue;
+        };
+        let mut taken = String::new();
+        for cell in &line.cells[from..to.min(line.cells.len())] {
+            if !cell.trailing {
+                taken.push(cell.text);
+            }
+        }
+        // Trailing blanks are the paper the terminal is written on, not spaces
+        // anybody typed.
+        while taken.ends_with(' ') {
+            taken.pop();
+        }
+        text.push_str(&taken);
+        if row < last.0 && !line.wrapped {
+            text.push('\n');
+        }
+    }
+    text
+}
+
+/// 要件 11.2 for a shell: hand what is picked out to the clipboard.
+fn copy_terminal_selection(window: &AppWindow, live: &Live, id: PaneId) {
+    let Some(session) = live.cache.borrow_mut().pane(id).terminal.clone() else {
+        return;
+    };
+    let Some(selection) = live.cache.borrow_mut().pane(id).terminal_selection else {
+        return;
+    };
+    let text = terminal_selection_text(&session.borrow(), selection);
+    if text.is_empty() {
+        return;
+    }
+    if !clipboard::put_text(ime::window_handle(window), &text) {
+        window.set_render_status("クリップボードへ渡せませんでした".into());
+    }
 }
 
 /// Every pane showing a shell, drawn again (追加要件 Terminal).
@@ -9996,6 +10201,12 @@ fn update_pane_selection(
     y: f32,
     phase: SelectionPhase,
 ) {
+    // **A shell has no document to hit-test.** What a drag over one picks out
+    // is cells, and where they are is arithmetic (追加要件 Terminal).
+    if cache.borrow_mut().pane(id).terminal.is_some() {
+        select_in_terminal(window, cache, id, x, y, phase);
+        return;
+    }
     let drag_started = Instant::now();
     let source = document.text.borrow().clone();
     let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
@@ -12923,5 +13134,56 @@ mod tests {
             Some(TerminalKey::Function(5))
         );
         assert_eq!(named_key(0, "あ", false), Some(TerminalKey::Char('あ')));
+    }
+
+    /// 追加要件 Terminal: **選択は矩形ではなく文の形**をしている。
+    #[test]
+    fn a_selection_takes_the_end_of_one_row_and_the_start_of_another() {
+        let across = TerminalSelection {
+            anchor: (1, 5),
+            head: (3, 2),
+        };
+        assert_eq!(across.columns_in(0, 80), None);
+        assert_eq!(
+            across.columns_in(1, 80),
+            Some((5, 80)),
+            "最初の行は途中から末尾まで"
+        );
+        assert_eq!(across.columns_in(2, 80), Some((0, 80)), "間の行は丸ごと");
+        assert_eq!(
+            across.columns_in(3, 80),
+            Some((0, 2)),
+            "最後の行は頭から途中まで"
+        );
+        assert_eq!(across.columns_in(4, 80), None);
+
+        // **上へ引いても下へ引いても同じ選択である。**
+        let upwards = TerminalSelection {
+            anchor: (3, 2),
+            head: (1, 5),
+        };
+        for row in 0..5 {
+            assert_eq!(upwards.columns_in(row, 80), across.columns_in(row, 80));
+        }
+    }
+
+    #[test]
+    fn a_selection_inside_one_row_is_just_those_columns() {
+        let one = TerminalSelection {
+            anchor: (2, 7),
+            head: (2, 3),
+        };
+        assert_eq!(one.columns_in(2, 80), Some((3, 7)));
+        assert!(!one.is_empty());
+        let none = TerminalSelection {
+            anchor: (2, 3),
+            head: (2, 3),
+        };
+        assert_eq!(
+            none.columns_in(2, 80),
+            None,
+            "掴んだだけでは何も選ばれていない"
+        );
+        assert!(none.is_empty());
     }
 }

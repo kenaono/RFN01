@@ -1308,6 +1308,16 @@ export component EditorPane inherits Rectangle {
                                 // shortcuts, and the same chords mean other
                                 // things on the other side of the pipe.
                                 if (root.terminal) {
+                                    // 要件 11.2: **`Ctrl+V` is left to the
+                                    // field.** It fills itself from the
+                                    // clipboard and hands the text over as
+                                    // typing, which is exactly what a paste
+                                    // into a shell is — and it is the one way
+                                    // this side can read the clipboard at all.
+                                    if (event.modifiers.control
+                                        && (event.text == "v" || event.text == "V")) {
+                                        return reject;
+                                    }
                                     root.terminal-key(
                                         event.text,
                                         key-number(event.text),

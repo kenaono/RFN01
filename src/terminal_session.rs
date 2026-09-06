@@ -347,6 +347,7 @@ mod running_a_program {
             let at = session.screen().cursor();
             cells::draw_terminal(
                 session.screen().lines(),
+                &[],
                 Some((at.row, at.column)),
                 &look,
                 cell,

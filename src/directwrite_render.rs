@@ -7553,12 +7553,14 @@ pub mod cells {
         }
     }
 
-    /// A run of cells drawn in one go: same attributes, and none of them wide.
+    /// A run of cells drawn in one go: same attributes, same selectedness, and
+    /// none of them wide.
     struct CellRun {
         column: usize,
         columns: usize,
         text: String,
         attrs: CellAttrs,
+        selected: bool,
     }
 
     /// Cut one row into runs.
@@ -7573,7 +7575,9 @@ pub mod cells {
     ///
     /// The spike drew `┌──┬──┐` with its uprights out of true before this rule was
     /// here, which is how the rule was found.
-    fn cell_runs(line: &CellLine) -> Vec<CellRun> {
+    fn cell_runs(line: &CellLine, selection: Option<(usize, usize)>) -> Vec<CellRun> {
+        let selected =
+            |column: usize| selection.is_some_and(|(from, to)| (from..to).contains(&column));
         let mut runs: Vec<CellRun> = Vec::new();
         for (column, cell) in line.cells.iter().enumerate() {
             if cell.trailing {
@@ -7585,6 +7589,7 @@ pub mod cells {
                 && !wide
                 && runs.last().is_some_and(|run| {
                     run.attrs == cell.attrs
+                        && run.selected == selected(column)
                         && run.column + run.columns == column
                         && run.text.chars().next_back().is_some_and(plain)
                 });
@@ -7598,6 +7603,7 @@ pub mod cells {
                     columns: if wide { 2 } else { 1 },
                     text: cell.text.to_string(),
                     attrs: cell.attrs,
+                    selected: selected(column),
                 });
             }
         }
@@ -7611,6 +7617,7 @@ pub mod cells {
     /// scrollback, which is the same cells one screenful earlier.
     pub fn draw_terminal(
         lines: &[CellLine],
+        selection: &[Option<(usize, usize)>],
         cursor: Option<(usize, usize)>,
         look: &TerminalLook,
         cell: CellSize,
@@ -7640,7 +7647,7 @@ pub mod cells {
                 if top >= height as f32 {
                     break;
                 }
-                for run in cell_runs(line) {
+                for run in cell_runs(line, selection.get(row).copied().flatten()) {
                     let left = run.column as f32 * cell.advance;
                     let right = left + run.columns as f32 * cell.advance;
                     let rect = D2D_RECT_F {
@@ -7653,7 +7660,11 @@ pub mod cells {
                     // ので、既定の紙と墨も正しく裏返る。
                     let mut foreground = cell_colour(run.attrs.foreground, look, true);
                     let mut background = cell_colour(run.attrs.background, look, false);
-                    if run.attrs.reverse {
+                    // **Selected cells are drawn the way the shell draws its
+                    // own selection**: the two colours change places. Two
+                    // reversals cancel, which is right — a cell the program
+                    // already reversed is shown unreversed when it is picked.
+                    if run.attrs.reverse != run.selected {
                         std::mem::swap(&mut foreground, &mut background);
                     }
                     if run.attrs.faint {
@@ -7801,6 +7812,7 @@ mod terminal_tests {
         let mut pixels = vec![0_u8; (width * height * 4) as usize];
         draw_terminal(
             it.screen.lines(),
+            &[],
             None,
             look,
             cell,
@@ -7840,6 +7852,45 @@ mod terminal_tests {
         assert_eq!(
             in_run, alone[0],
             "the 40th character of a run drifted out of its column"
+        );
+    }
+
+    /// 追加要件 Terminal: 選んだセルは色が入れ替わる。
+    #[test]
+    fn a_selected_cell_swaps_its_colours() {
+        let look = TerminalLook::default();
+        let cell = terminal_cell_size(&look).expect("measure the cell");
+        let mut it = Terminal::new(8, 1);
+        it.feed(b"abcdefgh");
+        let width = (8.0 * cell.advance).ceil() as u32;
+        let height = cell.line as u32;
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        // 3桁目から5桁目までを選ぶ。
+        draw_terminal(
+            it.screen.lines(),
+            &[Some((2, 5))],
+            None,
+            &look,
+            cell,
+            &mut pixels,
+            width,
+            height,
+        )
+        .expect("draw");
+        let ink_at = |column: usize| {
+            let x = (column as f32 * cell.advance + cell.advance * 0.5) as u32;
+            let at = ((1 * width + x) * 4) as usize;
+            (pixels[at], pixels[at + 1], pixels[at + 2])
+        };
+        let (blue, green, red) = ink_at(3);
+        assert!(
+            blue < 140 && green < 140 && red < 140,
+            "選ばれたセルの背景は墨で塗られる ({red},{green},{blue})"
+        );
+        let (blue, green, red) = ink_at(6);
+        assert!(
+            blue > 200 && green > 200 && red > 200,
+            "選ばれていないセルは紙のまま ({red},{green},{blue})"
         );
     }
 
