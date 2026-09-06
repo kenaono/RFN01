@@ -9585,10 +9585,11 @@ fn resize_below(window: &AppWindow, live: &Live, id: PaneId, height: f32) {
 
 /// 追加要件 Terminal: send the draft to the shell the pane is showing.
 ///
-/// **With the return, and the draft is emptied behind it.** What is written
-/// down there is a command: handed over without the key that runs it, it is
-/// half sent; left in the box afterwards, it is in the way of the next one
-/// (書き手の指摘, 2026-09-06).
+/// **The text and nothing else.** It lands at the prompt as if it had been
+/// typed, and what happens next is the writer's — they can read it, change it,
+/// and press Return when they mean it (書き手の指摘, 2026-09-06: 「lsのままで
+/// 実行は行われないはず」). The draft is emptied behind it, because what has
+/// been sent is in the way of what comes next.
 fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
     let text = id.screen(window).below_draft.to_string();
     if text.trim().is_empty() {
@@ -9603,11 +9604,7 @@ fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
     else {
         return;
     };
-    {
-        let mut session = session.borrow_mut();
-        session.paste(text.trim_end());
-        session.send_key(TerminalKey::Enter, TerminalModifiers::none());
-    }
+    session.borrow_mut().paste(text.trim_end());
     {
         let mut borrowed = live.cache.borrow_mut();
         if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Front) {
@@ -10056,6 +10053,17 @@ fn refresh_after_scroll(
     id: PaneId,
     offset: f32,
 ) {
+    // **A shell has no document to cut tiles from** (追加要件 Terminal). This is
+    // the one path that draws a pane without going through [`refresh_pane`], so
+    // it is also the one place the check had to be repeated — and the cost of
+    // leaving it out was a terminal that opened showing the file from the tab
+    // beside it, until a click redrew it (書き手の報告, 2026-09-06). Opening a
+    // terminal changes the pane's content size, the pane reports a scroll, and
+    // this drew the document straight over it.
+    if cache.borrow_mut().pane(id).terminal.is_some() {
+        refresh_terminal(window, cache, id, TerminalSpot::Front);
+        return;
+    }
     let started = Instant::now();
     let label = id.label(window);
     // **Where the pane says it is, not where its row says it is.** The row is
