@@ -73,12 +73,24 @@ enum TerminalShell {
     /// what the requirement asks for, done by the thing that knows how.
     Wsl,
     PowerShell,
+    /// PowerShell 7, when it is on the machine.
+    ///
+    /// **Offered because of what it reads, not what it runs.** Windows
+    /// PowerShell decodes a file with no BOM in the ANSI code page, so
+    /// `Get-Content` of a UTF-8 document comes out as mojibake before it
+    /// reaches any terminal (technical検証9.4 measured both in one screen).
+    /// PowerShell 7 reads UTF-8 by default.
+    PowerShell7,
 }
 
 impl TerminalShell {
     /// **The default first.** The menu is built in this order, and 追加要件 says
     /// the first is where a writer who does not choose ends up.
-    const ALL: [TerminalShell; 2] = [TerminalShell::Wsl, TerminalShell::PowerShell];
+    const ALL: [TerminalShell; 3] = [
+        TerminalShell::Wsl,
+        TerminalShell::PowerShell,
+        TerminalShell::PowerShell7,
+    ];
 
     /// What a tab of this shell is called. **The shell, not 無題** — the
     /// document behind it is a stand-in nobody is writing in.
@@ -86,6 +98,35 @@ impl TerminalShell {
         match self {
             TerminalShell::Wsl => "WSL",
             TerminalShell::PowerShell => "PowerShell",
+            TerminalShell::PowerShell7 => "PowerShell 7",
+        }
+    }
+
+    /// The program this shell is, as a file to look for.
+    fn program(self) -> &'static str {
+        match self {
+            TerminalShell::Wsl => "wsl.exe",
+            TerminalShell::PowerShell => "powershell.exe",
+            TerminalShell::PowerShell7 => "pwsh.exe",
+        }
+    }
+
+    /// The shells this machine actually has.
+    ///
+    /// **A row that opens nothing looks exactly like a row that is broken**, so
+    /// a shell that is not installed is not offered. If the search finds
+    /// nothing at all — a `PATH` this cannot read — the whole list is offered
+    /// rather than none of it, because a message the writer can read beats a
+    /// menu with no rows.
+    fn offered() -> Vec<TerminalShell> {
+        let found: Vec<TerminalShell> = Self::ALL
+            .into_iter()
+            .filter(|shell| on_path(shell.program()))
+            .collect();
+        if found.is_empty() {
+            Self::ALL.to_vec()
+        } else {
+            found
         }
     }
 
@@ -95,6 +136,7 @@ impl TerminalShell {
             // **No logo.** A terminal opened to run something should not spend
             // its first second printing a banner.
             TerminalShell::PowerShell => "powershell.exe -NoLogo",
+            TerminalShell::PowerShell7 => "pwsh.exe -NoLogo",
         }
     }
 
@@ -102,11 +144,22 @@ impl TerminalShell {
     /// default**, for the reason every other number arriving from the window is
     /// bounded rather than trusted.
     fn at(index: i32) -> Self {
-        Self::ALL
+        Self::offered()
             .get(index.max(0) as usize)
             .copied()
             .unwrap_or(TerminalShell::Wsl)
     }
+}
+
+/// Whether a program is somewhere on `PATH`.
+///
+/// **A few `stat` calls, and only when a terminal is opened or the menu is
+/// built.** Asking Windows to run it would be the other way of finding out, and
+/// that costs a process.
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+    })
 }
 
 /// How long the window waits before drawing what a shell wrote.
@@ -2768,7 +2821,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // 追加要件 Terminal: the shells the menu offers, in the order they are
     // defined — the first is the default.
     window.set_terminal_shells(ModelRc::new(VecModel::from(
-        TerminalShell::ALL
+        TerminalShell::offered()
             .iter()
             .map(|shell| SharedString::from(shell.name()))
             .collect::<Vec<_>>(),
@@ -9532,8 +9585,10 @@ fn resize_below(window: &AppWindow, live: &Live, id: PaneId, height: f32) {
 
 /// 追加要件 Terminal: send the draft to the shell the pane is showing.
 ///
-/// **With the return.** What is written down there is a command, and a command
-/// handed over without the key that runs it is a command half sent.
+/// **With the return, and the draft is emptied behind it.** What is written
+/// down there is a command: handed over without the key that runs it, it is
+/// half sent; left in the box afterwards, it is in the way of the next one
+/// (書き手の指摘, 2026-09-06).
 fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
     let text = id.screen(window).below_draft.to_string();
     if text.trim().is_empty() {
@@ -9559,6 +9614,7 @@ fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
             shell.looking = 0;
         }
     }
+    id.update_screen(window, |screen| screen.below_draft = SharedString::new());
     refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
 }
 
