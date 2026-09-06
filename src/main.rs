@@ -9443,20 +9443,22 @@ fn refresh_terminal(
                 // 窓が入力位置に重なって見えない). Windows opens the candidate
                 // list at the field, so the field stands one cell down and one
                 // along — the same offset the document uses.
+                // **One line below the caret, even past the foot of the pane**
+                // (書き手の報告, 2026-09-06: 最下行でまだ重なる). The candidate
+                // list opens downwards from the field, so a field held inside
+                // the pane is a list drawn over the row being typed — and the
+                // row being typed is the last one nearly always, because that
+                // is where a prompt is. Below the pane there is the status bar
+                // and then the edge of the window; the list opens over those,
+                // which hide nothing anybody is reading. **Clipping is not
+                // placement**: the field is invisible either way, and where it
+                // is reported from is what Windows uses.
                 let (x, y) = ime_candidate_anchor(&caret, false);
                 let x = x.clamp(0.0, (width as f32 - cell.advance).max(0.0));
-                // **On the last rows it goes above instead** (書き手の報告,
-                // 2026-09-06: 最下行で重なる). There is no room below, so
-                // Windows turns the list upwards and hangs it from the field —
-                // and a field one line *under* the caret is a list drawn over
-                // the line being typed. Standing it at the top of the caret's
-                // own row leaves that row showing, which is the row that
-                // matters: a prompt is written on the last one.
-                let y = if y + line <= id.shown_height(window) {
-                    y
-                } else {
-                    caret.y
-                };
+                // At most one line past the foot, which is as far as it ever
+                // needs to go — beyond that is off the window, and a field
+                // nobody can place is one the IME has nowhere to open on.
+                let y = y.min(id.shown_height(window) + line);
                 id.set_ime_anchor(window, x, y, &caret);
             }
             id.update_screen(window, |screen| {
@@ -9487,11 +9489,12 @@ fn refresh_terminal(
                 // field the IME cannot compose in (書き手の報告, 2026-09-06:
                 // 下段で日本語が打てない). Clamped, it stands at the edge
                 // instead, which is where the candidates should open anyway.
-                let strip = cache.borrow_mut().pane(id).below_height;
+                // Below the caret's row, past the foot of the strip if that is
+                // where it falls: the list has to open somewhere that is not
+                // the line being typed (see the pane's own anchor above).
                 let x = x.clamp(0.0, (width as f32 - cell.advance).max(0.0));
-                // The strip's prompt is on its last row nearly always, so this
-                // is the case rather than the exception here.
-                let y = if y + line <= strip { y } else { caret.y };
+                let strip = cache.borrow_mut().pane(id).below_height;
+                let y = y.min(strip + line);
                 id.update_screen(window, |screen| {
                     screen.below_caret_x = x;
                     screen.below_caret_y = y;

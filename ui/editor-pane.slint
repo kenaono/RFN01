@@ -2054,11 +2054,11 @@ export component EditorPane inherits Rectangle {
                     below-ime := TextInput {
                         x: root.below-caret-x * 1px;
                         y: root.below-caret-y * 1px;
-                        // A line's worth, near enough: what matters is that
-                        // the field is somewhere the IME can put a composition,
-                        // not that it is any particular size.
-                        width: 1px;
-                        height: 16px;
+                        // **A cell's worth.** Windows opens the candidate list
+                        // under the area the field reports, so an area the size
+                        // of one row is a list that starts below that row.
+                        width: 8px;
+                        height: 18px;
                         text <=> root.below-buffer;
                         font-family: "Yu Gothic UI";
                         font-size: 1px;
