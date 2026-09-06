@@ -53,7 +53,19 @@ export struct LeftRow {
 }
 
 export component AppWindow inherits Window {
-    title: "Editor - 横書き・縦書き切り替え検証";
+    // The document in front, then the editor's name. It said
+    // 「Editor - 横書き・縦書き切り替え検証」 until 2026-09-06, which was the
+    // title of the technical validation this grew out of — true once, and a
+    // title bar is the one place a writer reads the name of what they are in.
+    // `RFN Edit` is the name the editor already writes on disk
+    // (`%LOCALAPPDATA%\RFN Edit\`, `RFN-EDIT-SESSION`).
+    title: root.document-title + " - RFN Edit";
+    // 追加要件 2026-09-06: 紫背景に編集器の頭文字（`RE` — RFN Edit）。
+    // The title bar and the task bar
+    // read this. **Not the file's icon in Explorer** — that is a resource
+    // compiled into the executable, which needs a build dependency this
+    // repository does not vendor; `ui/icon.png` is the drawing either would use.
+    icon: @image-url("icon.png");
     // preferred-*, not width/height: setting width and height on a Window makes
     // it a fixed size the window manager enforces, which is why the window could
     // not be resized at all. These give the same starting size and still resize.
@@ -88,6 +100,14 @@ export component AppWindow inherits Window {
     in property <[LeftRow]> left-rows;
     in property <string> work-folder;
     in-out property <bool> tree-open: true;
+    // 追加要件 2026-09-06: how wide the left pane is, in pixels.
+    //
+    // **A number rather than a length**, because it crosses to Rust for the
+    // session (要件 8.5) and comes back the same way. The bounds are here and
+    // in `tree_width_from` — the drag holds it and a stored value is held to
+    // the same, so a session cannot put the panel where the pointer could not
+    // bring it back from.
+    in-out property <float> tree-width: 260;
     // Which of Explorer, 検索 and 履歴 is showing: 0, 1, 2 (要件 6.2). **Rust
     // holds it**, because the rows it puts in `left-rows` have to agree with
     // it, and a click means something different in each.
@@ -465,191 +485,6 @@ export component AppWindow inherits Window {
     VerticalBox {
         spacing: 0px;
 
-        // The one toolbar.
-        //
-        // It used to be 44px of labelled buttons with a second 40px row of
-        // typography controls underneath, because a Japanese label is as wide
-        // as its longest word and there were fifteen of them. What each of
-        // those buttons did now lives in the menu, so the bar is as tall as an
-        // icon and holds the two things that are neither a file command nor a
-        // property of one pane: the menu itself, and whether the sidebar is
-        // showing.
-        //
-        // The pane-scoped rows below — the splits, the zoom, and Save with it —
-        // are here only until the tab strip grows its own menu. They belong to
-        // the pane the pointer is in, and a window-wide menu cannot say which
-        // one that is; today they act on the focused pane, which is why "Show
-        // Left Pane" still has to exist.
-        Rectangle {
-            height: 34px;
-            background: Tok.chrome;
-
-            IconButton {
-                x: 6px;
-                y: 4px;
-                icon: Icons.menu;
-                tip: "Menu";
-                clicked => {
-                    app-menu.show();
-                }
-            }
-
-            IconButton {
-                x: 34px;
-                y: 4px;
-                icon: Icons.sidebar;
-                tip: "Sidebar";
-                checked: root.tree-open;
-                clicked => {
-                    root.tree-open = !root.tree-open;
-                    root.focus-generation += 1;
-                }
-            }
-
-            // Declared here so its position is read against the bar. A popup is
-            // its own layer, so it is drawn over the panes without the window
-            // having to hold it last the way the question overlay does.
-            //
-            // `close-on-click-outside` is the whole of "click away to dismiss".
-            // Escape is not wired yet: a FocusScope in here would take the
-            // keyboard, and clicking away closes the popup without running any
-            // of our code, so there would be no moment left to hand the
-            // keyboard back to the pane.
-            app-menu := PopupWindow {
-                x: 6px;
-                y: 32px;
-                width: 264px;
-                close-policy: close-on-click-outside;
-
-                MenuFrame {
-                    width: 264px;
-
-                    VerticalLayout {
-                        padding: 6px;
-                        spacing: 1px;
-
-                        MenuRow {
-                            title: "Open File…";
-                            shortcut: "Ctrl+O"; activated => {
-                                app-menu.close();
-                                root.open-file-requested();
-                                root.focus-generation += 1;
-                            }
-                        }
-                        MenuRow {
-                            title: "Open Folder…";
-                            activated => {
-                                app-menu.close();
-                                root.work-folder-requested();
-                                root.focus-generation += 1;
-                            }
-                        }
-                        // Nothing to go back to on a first run, and a row that
-                        // opens an empty menu is a row that lies.
-                        if root.recent-folders.length > 0: MenuRow {
-                            title: "Recent Folders";
-                            // The mark a submenu carries, in the column the
-                            // shortcuts use. There is no key for this one.
-                            shortcut: "▸";
-                            // **Shown first, closed second**, which is the
-                            // opposite of every plain row above and the same
-                            // as the tab list's rows. An `if` compiles to a
-                            // repeater, so this row is a repeated element:
-                            // closing the menu takes the element whose handler
-                            // is running with it, and the line after it never
-                            // runs. Written the other way round the row is
-                            // there, the menu closes, and nothing opens.
-                            activated => {
-                                recent-menu.show();
-                                app-menu.close();
-                            }
-                        }
-                        MenuRow {
-                            title: "Quick Draft…";
-                            activated => {
-                                app-menu.close();
-                                root.quick-draft-requested();
-                                root.focus-generation += 1;
-                            }
-                        }
-                        MenuSep { }
-                        MenuRow {
-                            title: "Save All";
-                            activated => {
-                                app-menu.close();
-                                root.save-all-requested();
-                                root.focus-generation += 1;
-                            }
-                        }
-                        MenuSep { }
-                        MenuRow {
-                            title: "Find in File…";
-                            shortcut: "Ctrl+F"; activated => {
-                                app-menu.close();
-                                root.find-pane = root.focused-pane;
-                                root.find-replacing = false;
-                                root.find-open = true;
-                                root.find-generation += 1;
-                                root.focus-generation += 1;
-                            }
-                        }
-                        MenuRow {
-                            title: "Find in Folder…";
-                            activated => {
-                                app-menu.close();
-                                root.tree-open = true;
-                                root.left-tab = 1;
-                                root.left-tab-chosen(1);
-                                root.focus-generation += 1;
-                            }
-                        }
-                        MenuSep { }
-                        MenuRow {
-                            title: "Typography…";
-                            activated => {
-                                app-menu.close();
-                                typography-panel.show();
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 要件 5.1: the folders worked in before this one. A menu of its
-            // own rather than a submenu — the row above closes `app-menu` and
-            // shows this one, which is how `Typography…` already opens a panel
-            // from a menu. It stands in the same place, so the list appears
-            // where the writer was looking.
-            recent-menu := PopupWindow {
-                x: 6px;
-                y: 32px;
-                width: 264px;
-                close-policy: close-on-click-outside;
-
-                MenuFrame {
-                    width: 264px;
-
-                    VerticalLayout {
-                        padding: 6px;
-                        spacing: 1px;
-
-                        for folder[index] in root.recent-folders: MenuRow {
-                            title: folder;
-                            // **Chosen first, closed second**, for the reason
-                            // the tab list gives: these rows are a repeater
-                            // inside the popup, and closing first takes the
-                            // element whose handler is running with it.
-                            activated => {
-                                root.recent-folder-chosen(index);
-                                recent-menu.close();
-                                root.focus-generation += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // 要件 6.1: the left pane, the editing area and the status bar. The
         // left pane is the writer's way into the work folder (要件 6.2) and can
         // be put away when the writing needs the width.
@@ -666,16 +501,39 @@ export component AppWindow inherits Window {
                 width: 40px;
                 background: Tok.chrome-raised;
 
+                // **The whole of the window's own chrome is this rail**
+                // (2026-09-06). There was a 34px bar above everything holding
+                // two buttons — the menu, and whether the panel was showing.
+                // The menu belongs at the head of the rail as readily as
+                // anywhere, and the second button was saying something the four
+                // below it can say by themselves: pressing the panel you are
+                // already in puts it away. A row that holds two buttons costs a
+                // row of the document.
+                //
                 // (40 - 26) / 2 on x, so the button sits in the middle of the
                 // rail; 30px apart down it.
                 IconButton {
                     x: 7px;
                     y: 4px;
+                    icon: Icons.menu;
+                    tip: "Menu";
+                    clicked => {
+                        app-menu.show();
+                    }
+                }
+
+                // **Pressing the panel already showing puts it away**, which is
+                // what the sidebar button used to be for. Nothing is lost by
+                // closing it: the rail stays, and which of the four the writer
+                // was in stays with it.
+                IconButton {
+                    x: 7px;
+                    y: 40px;
                     icon: Icons.folder;
                     tip: "Explorer";
                     checked: root.tree-open && root.left-tab == 0;
                     clicked => {
-                        root.tree-open = true;
+                        root.tree-open = !(root.tree-open && root.left-tab == 0);
                         root.left-tab = 0;
                         root.left-tab-chosen(0);
                         root.focus-generation += 1;
@@ -684,12 +542,12 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 34px;
+                    y: 70px;
                     icon: Icons.search;
                     tip: "Search";
                     checked: root.tree-open && root.left-tab == 1;
                     clicked => {
-                        root.tree-open = true;
+                        root.tree-open = !(root.tree-open && root.left-tab == 1);
                         root.left-tab = 1;
                         root.left-tab-chosen(1);
                         root.focus-generation += 1;
@@ -698,12 +556,12 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 64px;
+                    y: 100px;
                     icon: Icons.history;
                     tip: "History";
                     checked: root.tree-open && root.left-tab == 2;
                     clicked => {
-                        root.tree-open = true;
+                        root.tree-open = !(root.tree-open && root.left-tab == 2);
                         root.left-tab = 2;
                         root.left-tab-chosen(2);
                         root.focus-generation += 1;
@@ -712,21 +570,173 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 94px;
+                    y: 130px;
                     icon: Icons.outline;
                     tip: "Outline";
                     checked: root.tree-open && root.left-tab == 3;
                     clicked => {
-                        root.tree-open = true;
+                        root.tree-open = !(root.tree-open && root.left-tab == 3);
                         root.left-tab = 3;
                         root.left-tab-chosen(3);
+                        root.focus-generation += 1;
+                    }
+                }
+
+                // Declared here so its position is read against the rail. A popup is
+                // its own layer, so it is drawn over the panes without the window
+                // having to hold it last the way the question overlay does.
+                //
+                // `close-on-click-outside` is the whole of "click away to dismiss".
+                // Escape is not wired yet: a FocusScope in here would take the
+                // keyboard, and clicking away closes the popup without running any
+                // of our code, so there would be no moment left to hand the
+                // keyboard back to the pane.
+                app-menu := PopupWindow {
+                    x: 40px;
+                    y: 4px;
+                    width: 264px;
+                    close-policy: close-on-click-outside;
+
+                    MenuFrame {
+                        width: 264px;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 1px;
+
+                            MenuRow {
+                                title: "Open File…";
+                                shortcut: "Ctrl+O"; activated => {
+                                    app-menu.close();
+                                    root.open-file-requested();
+                                    root.focus-generation += 1;
+                                }
+                            }
+                            MenuRow {
+                                title: "Open Folder…";
+                                activated => {
+                                    app-menu.close();
+                                    root.work-folder-requested();
+                                    root.focus-generation += 1;
+                                }
+                            }
+                            // Nothing to go back to on a first run, and a row that
+                            // opens an empty menu is a row that lies.
+                            if root.recent-folders.length > 0: MenuRow {
+                                title: "Recent Folders";
+                                // The mark a submenu carries, in the column the
+                                // shortcuts use. There is no key for this one.
+                                shortcut: "▸";
+                                // **Shown first, closed second**, which is the
+                                // opposite of every plain row above and the same
+                                // as the tab list's rows. An `if` compiles to a
+                                // repeater, so this row is a repeated element:
+                                // closing the menu takes the element whose handler
+                                // is running with it, and the line after it never
+                                // runs. Written the other way round the row is
+                                // there, the menu closes, and nothing opens.
+                                activated => {
+                                    recent-menu.show();
+                                    app-menu.close();
+                                }
+                            }
+                            MenuRow {
+                                title: "Quick Draft…";
+                                activated => {
+                                    app-menu.close();
+                                    root.quick-draft-requested();
+                                    root.focus-generation += 1;
+                                }
+                            }
+                            MenuSep { }
+                            MenuRow {
+                                title: "Save All";
+                                activated => {
+                                    app-menu.close();
+                                    root.save-all-requested();
+                                    root.focus-generation += 1;
+                                }
+                            }
+                            MenuSep { }
+                            MenuRow {
+                                title: "Find in File…";
+                                shortcut: "Ctrl+F"; activated => {
+                                    app-menu.close();
+                                    root.find-pane = root.focused-pane;
+                                    root.find-replacing = false;
+                                    root.find-open = true;
+                                    root.find-generation += 1;
+                                    root.focus-generation += 1;
+                                }
+                            }
+                            MenuRow {
+                                title: "Find in Folder…";
+                                activated => {
+                                    app-menu.close();
+                                    root.tree-open = true;
+                                    root.left-tab = 1;
+                                    root.left-tab-chosen(1);
+                                    root.focus-generation += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 要件 5.1: the folders worked in before this one. A menu of its
+                // own rather than a submenu — the row above closes `app-menu` and
+                // shows this one, which is how `Typography…` already opens a panel
+                // from a menu. It stands in the same place, so the list appears
+                // where the writer was looking.
+                recent-menu := PopupWindow {
+                    x: 40px;
+                    y: 4px;
+                    width: 264px;
+                    close-policy: close-on-click-outside;
+
+                    MenuFrame {
+                        width: 264px;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 1px;
+
+                            for folder[index] in root.recent-folders: MenuRow {
+                                title: folder;
+                                // **Chosen first, closed second**, for the reason
+                                // the tab list gives: these rows are a repeater
+                                // inside the popup, and closing first takes the
+                                // element whose handler is running with it.
+                                activated => {
+                                    root.recent-folder-chosen(index);
+                                    recent-menu.close();
+                                    root.focus-generation += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 追加要件 2026-09-06: **everything that is set for the whole
+                // editor is behind this one button**, and it stands at the foot
+                // of the rail rather than among the four above it — those four
+                // choose what the panel beside them shows, and this one opens
+                // something else entirely. The writer asked for it in the
+                // bottom-left corner, which is where the rail ends.
+                IconButton {
+                    x: 7px;
+                    y: parent.height - self.height - 7px;
+                    icon: Icons.settings;
+                    tip: "Settings";
+                    clicked => {
+                        typography-panel.show();
                         root.focus-generation += 1;
                     }
                 }
             }
 
             if root.tree-open: Rectangle {
-                width: 220px;
+                width: root.tree-width * 1px;
                 background: Tok.chrome;
 
                 VerticalLayout {
@@ -1196,6 +1206,38 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // 追加要件 2026-09-06: the edge the writer drags to make the left
+            // pane wider or narrower.
+            //
+            // **The same shape as the boundaries between panes** — a wide grab
+            // area with a thin line drawn inside it, thickening under the
+            // pointer — because it is the same gesture and the hand should not
+            // have to learn it twice. **A delta, not a position**: the layout
+            // moves this element under the pointer, so `mouse-x` comes back to
+            // `pressed-x` and the next event reports only what is new (the pane
+            // boundaries say the same thing above).
+            if root.tree-open: Rectangle {
+                width: 9px;
+                background: transparent;
+
+                Rectangle {
+                    x: tree-grab.has-hover || tree-grab.pressed ? 3px : 4px;
+                    width: tree-grab.has-hover || tree-grab.pressed ? 3px : 1px;
+                    height: parent.height;
+                    background: tree-grab.has-hover || tree-grab.pressed
+                        ? Tok.accent
+                        : Tok.rule;
+                }
+
+                tree-grab := TouchArea {
+                    mouse-cursor: ew-resize;
+                    moved => {
+                        root.tree-width = max(160, min(640,
+                            root.tree-width + (self.mouse-x - self.pressed-x) / 1px));
                     }
                 }
             }

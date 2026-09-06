@@ -138,6 +138,11 @@ pub struct Session {
     pub folder: Option<PathBuf>,
     pub expanded: Vec<PathBuf>,
     pub tree_shown: bool,
+    /// How wide the left pane is, in pixels (追加要件 2026-09-06). **Zero when
+    /// nothing said**, which the window reads as its own default — the same
+    /// rule the zoom uses, and for the same reason: a pane 0 wide is not a
+    /// width anybody chose.
+    pub tree_width: u32,
     /// The files opened most recently, newest first (要件 7.7). Kept with the
     /// session rather than with the work folder, because it is a list of what
     /// the writer did and not of what the folder holds.
@@ -174,6 +179,7 @@ pub fn encode_session(session: &Session) -> String {
     }
     out.push_str(&format!("focused: {}\n", session.focused));
     out.push_str(&format!("tree: {}\n", u8::from(session.tree_shown)));
+    out.push_str(&format!("tree-width: {}\n", session.tree_width));
     if let Some(folder) = &session.folder {
         out.push_str(&format!("folder: {}\n", folder.display()));
     }
@@ -241,6 +247,7 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "focused" => session.focused = value.parse().ok()?,
             "zoom" => window_zoom = value.parse().ok()?,
             "tree" => session.tree_shown = value == "1",
+            "tree-width" => session.tree_width = value.parse().unwrap_or(0),
             "folder" => session.folder = Some(PathBuf::from(value)),
             "expanded" => session.expanded.push(PathBuf::from(value)),
             "recent" => session.recent.push(PathBuf::from(value)),
@@ -734,6 +741,7 @@ mod tests {
             folder: Some(PathBuf::from("D:\\書きかけ")),
             expanded: vec![PathBuf::from("D:\\書きかけ\\章")],
             tree_shown: true,
+            tree_width: 260,
             recent: vec![
                 PathBuf::from("D:\\書きかけ\\第一章.md"),
                 PathBuf::from("D:\\書きかけ\\年表.txt"),

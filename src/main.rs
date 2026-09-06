@@ -1228,6 +1228,14 @@ fn main() -> Result<(), slint::PlatformError> {
         None => WorkFolder::default(),
     };
     window.set_tree_open(session.as_ref().is_none_or(|session| session.tree_shown));
+    // 追加要件 2026-09-06: the width the writer dragged the left pane to. A
+    // session that says nothing says 0, which is not a width anybody chose —
+    // the window keeps its own default then (the same rule the zoom uses).
+    if let Some(width) = session.as_ref().map(|session| session.tree_width)
+        && width > 0
+    {
+        window.set_tree_width(tree_width_from(width));
+    }
     // 要件 9: the zoom each pane was left at. **Before the tabs are opened**,
     // so the first thing drawn is already the size the writer was reading at
     // rather than something that jumps once. A pane the session says nothing
@@ -3275,6 +3283,8 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         folder: folder.root.clone(),
         expanded: folder.expanded.iter().cloned().collect(),
         tree_shown: window.get_tree_open(),
+        // 追加要件 2026-09-06: and how wide the writer left it.
+        tree_width: (window.get_tree_width() / 1.0) as u32,
         recent: live.recent.borrow().clone(),
         folders: live.recent_folders.borrow().clone(),
     }
@@ -4761,6 +4771,14 @@ fn delete_entry(window: &AppWindow, live: &Live, path: &Path) {
 /// has had a chance to look at it.
 const MAX_PANES: usize = 64;
 
+/// How narrow and how wide the left pane may be dragged (追加要件 2026-09-06).
+///
+/// The floor is a file name's worth: a tree narrower than that shows depth and
+/// no name. The ceiling is there because the writing is the point — a left pane
+/// that can take the window is one the writer has to put back.
+const TREE_WIDTH_MIN: f32 = 160.0;
+const TREE_WIDTH_MAX: f32 = 640.0;
+
 /// Make the window's pane model hold exactly `count` rows (要件 6.3).
 ///
 /// A row appended here opens as horizontal source text; a pane made by a split
@@ -4864,6 +4882,15 @@ fn placed_panes(window: &AppWindow) -> Vec<(usize, Rect)> {
             (id.index() as usize, rect)
         })
         .collect()
+}
+
+/// A stored left-pane width, held to what the writer can drag it to.
+///
+/// **The same bounds the drag uses** (`ui/app-window.slint`), because a session
+/// from another build — or one hand-edited — must not be able to put the panel
+/// somewhere the pointer cannot bring it back from.
+fn tree_width_from(stored: u32) -> f32 {
+    (stored as f32).clamp(TREE_WIDTH_MIN, TREE_WIDTH_MAX)
 }
 
 /// Which pane the writer is in.
