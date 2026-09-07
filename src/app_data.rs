@@ -144,6 +144,11 @@ pub struct Session {
     /// The work folder, and the folders inside it the writer had open
     /// (要件 5.1, 8.5).
     pub folder: Option<PathBuf>,
+    /// Which folder the full-text search walks, when it is not the whole work
+    /// folder (要件 7.7、2026-09-07追加). **`None` means the work folder**,
+    /// rather than a copy of it — the two would drift apart the moment another
+    /// folder is opened.
+    pub search_folder: Option<PathBuf>,
     pub expanded: Vec<PathBuf>,
     pub tree_shown: bool,
     /// How wide the left pane is, in pixels (追加要件 2026-09-06). **Zero when
@@ -190,6 +195,9 @@ pub fn encode_session(session: &Session) -> String {
     out.push_str(&format!("tree-width: {}\n", session.tree_width));
     if let Some(folder) = &session.folder {
         out.push_str(&format!("folder: {}\n", folder.display()));
+    }
+    if let Some(folder) = &session.search_folder {
+        out.push_str(&format!("search: {}\n", folder.display()));
     }
     for open in &session.expanded {
         out.push_str(&format!("expanded: {}\n", open.display()));
@@ -264,6 +272,7 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "tree" => session.tree_shown = value == "1",
             "tree-width" => session.tree_width = value.parse().unwrap_or(0),
             "folder" => session.folder = Some(PathBuf::from(value)),
+            "search" => session.search_folder = Some(PathBuf::from(value)),
             "expanded" => session.expanded.push(PathBuf::from(value)),
             "recent" => session.recent.push(PathBuf::from(value)),
             "visited" => session.folders.push(PathBuf::from(value)),
@@ -760,6 +769,7 @@ mod tests {
             maximized: false,
             focused: 1,
             folder: Some(PathBuf::from("D:\\書きかけ")),
+            search_folder: Some(PathBuf::from("D:\\書きかけ\\章")),
             expanded: vec![PathBuf::from("D:\\書きかけ\\章")],
             tree_shown: true,
             tree_width: 260,

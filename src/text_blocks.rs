@@ -115,6 +115,15 @@ pub struct Typography {
     /// same way, one value per level. A level set to the body's ink simply
     /// looks like body text, which is what every level starts as.
     pub heading_ink: [[f32; 3]; MAX_HEADING_LEVEL],
+    /// Whether the page carries its line numbers beside it (要件 9、2026-09-07
+    /// 追加).
+    ///
+    /// **A number on the spec, because it moves the text.** The numbers stand
+    /// in the page's own margin, so turning them on widens it — which is a
+    /// measurement, not a colour, and everything laid out at the old width has
+    /// to be laid out again. Keeping it here is what makes that happen: two
+    /// specs that differ by this are not the same page and never were.
+    pub line_numbers: bool,
 }
 
 /// What the editor sets text in until the writer says otherwise (要件 9).
@@ -162,6 +171,7 @@ impl Typography {
             ink: DEFAULT_INK,
             paper: DEFAULT_PAPER,
             heading_ink: [DEFAULT_INK; MAX_HEADING_LEVEL],
+            line_numbers: false,
         }
     }
 

@@ -16,14 +16,14 @@
 //! are drawn in the window itself (`question-open` in `app-window.slint`), which
 //! also keeps them clear of 6.18.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
-    IFileDialog, IShellItem, SIGDN_FILESYSPATH,
+    IFileDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
 };
 use windows::core::{HSTRING, w};
 
@@ -81,13 +81,42 @@ pub fn open_document(owner: Owner) -> Option<PathBuf> {
 /// "browse for folder" here: the old one of those is the tree with no address
 /// bar and no typing, and nobody wants it.
 pub fn open_folder(owner: Owner) -> Option<PathBuf> {
+    open_folder_from(owner, None, w!("作業フォルダを開く"))
+}
+
+/// The same dialog, opened inside a folder the caller names (要件 7.7).
+///
+/// **Where the writer already is, rather than where the shell last was.**
+/// Narrowing a search to a chapter and then to a section is walking down a
+/// tree; a dialog that starts over at the desktop each time makes the second
+/// step as long as the first.
+pub fn open_folder_at(owner: Owner, start: Option<&Path>) -> Option<PathBuf> {
+    open_folder_from(owner, start, w!("検索するフォルダ"))
+}
+
+fn open_folder_from(
+    owner: Owner,
+    start: Option<&Path>,
+    title: windows::core::PCWSTR,
+) -> Option<PathBuf> {
     // SAFETY: as in `open_document`.
     unsafe {
         let created = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER);
         let dialog: IFileDialog = created.ok()?;
-        let _ = dialog.SetTitle(w!("作業フォルダを開く"));
+        let _ = dialog.SetTitle(title);
         if let Ok(options) = dialog.GetOptions() {
             let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PICKFOLDERS);
+        }
+        // **A folder that has gone is not an error here.** The dialog opens
+        // wherever the shell would have opened it, which is the same answer as
+        // asking for no folder at all.
+        if let Some(start) = start {
+            let path = HSTRING::from(start.as_os_str());
+            let item: windows::core::Result<IShellItem> =
+                SHCreateItemFromParsingName(&path, None::<&windows::Win32::System::Com::IBindCtx>);
+            if let Ok(item) = item {
+                let _ = dialog.SetFolder(&item);
+            }
         }
         dialog.Show(owner).ok()?;
         let item = dialog.GetResult().ok()?;

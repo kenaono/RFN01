@@ -1531,6 +1531,13 @@ fn main() -> Result<(), slint::PlatformError> {
             // Nothing is selected at startup: a selection is where the writer
             // last put their hand, and they have not put it anywhere yet.
             selected: None,
+            // 要件 7.7: **a folder that has gone is no scope at all.** The same
+            // rule the work folder above follows — nothing watches the disk
+            // between two runs.
+            searching: session
+                .search_folder
+                .clone()
+                .filter(|folder| folder.is_dir()),
         },
         None => WorkFolder::default(),
     };
@@ -2187,6 +2194,30 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_folder_search_requested(move || {
         if let Some(window) = weak.upgrade() {
             search_work_folder(&window, &search_live);
+        }
+    });
+
+    // 要件 7.7（2026-09-07追加）: which folder that search walks. **The dialog
+    // opens where the search stands now**, so narrowing twice walks down rather
+    // than starting over from the disk.
+    let weak = window.as_weak();
+    let scope_live = live.clone();
+    window.on_search_folder_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            let owner = ime::window_handle(&window);
+            let from = scope_live.folder.borrow().searched_root();
+            let Some(chosen) = file_dialog::open_folder_at(owner, from.as_deref()) else {
+                return;
+            };
+            search_in_folder(&window, &scope_live, Some(chosen));
+        }
+    });
+
+    let weak = window.as_weak();
+    let scope_live = live.clone();
+    window.on_search_folder_reset(move || {
+        if let Some(window) = weak.upgrade() {
+            search_in_folder(&window, &scope_live, None);
         }
     });
 
@@ -4155,6 +4186,7 @@ fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         focused: focused_pane(window).index(),
         panes,
         folder: folder.root.clone(),
+        search_folder: folder.searching.clone(),
         expanded: folder.expanded.iter().cloned().collect(),
         tree_shown: window.get_tree_open(),
         // 追加要件 2026-09-06: and how wide the writer left it.
@@ -4641,6 +4673,21 @@ struct WorkFolder {
     /// reason. Cleared when what it named is no longer among the rows — a
     /// command on something the writer cannot see is a command on nothing.
     selected: Option<PathBuf>,
+    /// Which folder the full-text search walks (要件 7.7、2026-09-07追加).
+    ///
+    /// **`None` is the work folder itself**, and it is written that way rather
+    /// than as a copy of `root`: opening another folder would otherwise leave
+    /// the search pointing into the one before it, which is the kind of filter
+    /// a writer finds by wondering where their words went. Opening a work
+    /// folder clears it for the same reason.
+    searching: Option<PathBuf>,
+}
+
+impl WorkFolder {
+    /// Where a folder-wide search starts.
+    fn searched_root(&self) -> Option<PathBuf> {
+        self.searching.clone().or_else(|| self.root.clone())
+    }
 }
 
 /// Which of the left pane's three things is showing (要件 6.2).
@@ -4653,6 +4700,16 @@ enum LeftTab {
 }
 
 impl LeftTab {
+    /// The number the window holds for this one.
+    fn index(self) -> i32 {
+        match self {
+            Self::Explorer => 0,
+            Self::Search => 1,
+            Self::Recent => 2,
+            Self::Outline => 3,
+        }
+    }
+
     /// The number the window holds, in the order the tabs are drawn.
     fn from_index(index: i32) -> Self {
         match index {
@@ -4683,12 +4740,52 @@ struct ResultRow {
 /// name and how far in it sits — so which panel is showing is the only thing
 /// that decides what a click on one means (`activate_left_row`).
 fn publish_left(window: &AppWindow, live: &Live) {
+    show_searched_folder(window, live);
     match LeftTab::from_index(window.get_left_tab()) {
         LeftTab::Explorer => publish_tree(window, live),
         LeftTab::Search => publish_results(window, live),
         LeftTab::Recent => publish_recent(window, live),
         LeftTab::Outline => publish_outline(window, live),
     }
+}
+
+/// Say which folder a search would walk (要件 7.7、2026-09-07追加).
+///
+/// **The name, not the path.** A path long enough to hold a chapter's folder is
+/// longer than the panel, and what the writer needs from it is which of the
+/// folders they can see they have narrowed to. The whole path is the tooltip.
+fn show_searched_folder(window: &AppWindow, live: &Live) {
+    let folder = live.folder.borrow();
+    let scoped = folder.searching.is_some();
+    let told = match folder.searched_root() {
+        Some(root) => entry_name(&root),
+        None => "作業フォルダがありません".to_owned(),
+    };
+    let path = folder
+        .searched_root()
+        .map(|root| root.display().to_string())
+        .unwrap_or_default();
+    window.set_search_folder(told.into());
+    window.set_search_folder_path(path.into());
+    window.set_search_folder_scoped(scoped);
+}
+
+/// Narrow the folder-wide search to one folder, or widen it back (要件 7.7).
+fn search_in_folder(window: &AppWindow, live: &Live, chosen: Option<PathBuf>) {
+    live.folder.borrow_mut().searching = chosen.clone();
+    show_searched_folder(window, live);
+    write_session(window, live);
+    live.cache.borrow_mut().log_diag(
+        "search",
+        &match &chosen {
+            Some(path) => format!("scope path={}", path.display()),
+            None => "scope whole".to_owned(),
+        },
+    );
+    // **The list on screen answers the old folder**, so it is asked again —
+    // and asking with an empty field clears it, which is what the writer would
+    // otherwise be left staring at.
+    search_work_folder(window, live);
 }
 
 /// Draw the headings of the document in front of the writer (要件 7.7).
@@ -4942,6 +5039,10 @@ fn open_work_folder(window: &AppWindow, live: &Live, chosen: &Path) {
         let mut folder = live.folder.borrow_mut();
         folder.root = Some(chosen.to_path_buf());
         folder.expanded.clear();
+        // 要件 7.7: **絞り込みは、絞り込んだフォルダと一緒に去る。**別の作業
+        // フォルダを開いたのに検索だけ前のフォルダを歩いていたら、書き手は
+        // 「言葉がどこへ行ったのか」を探すことになる。
+        folder.searching = None;
     }
     remember_folder(live, chosen);
     publish_folder_history(window, live);
@@ -4995,7 +5096,7 @@ const HITS_PER_FILE: usize = 50;
 /// differs.
 fn search_work_folder(window: &AppWindow, live: &Live) {
     let needle = window.get_folder_needle().to_string();
-    let Some(root) = live.folder.borrow().root.clone() else {
+    let Some(root) = live.folder.borrow().searched_root() else {
         window.set_folder_status("作業フォルダがありません".into());
         return;
     };
@@ -5343,6 +5444,12 @@ enum TreeCommand {
     Duplicate,
     Delete,
     Reveal,
+    /// 要件 7.7（2026-09-07追加）: 全文検索をこのフォルダだけにする。
+    ///
+    /// **The gesture belongs to the tree.** Narrowing a search means naming a
+    /// folder, and the folders are on screen already — sending the writer to a
+    /// file dialog to point at one they can see is the long way round.
+    SearchIn,
 }
 
 impl TreeCommand {
@@ -5355,6 +5462,7 @@ impl TreeCommand {
             3 => Some(Self::Duplicate),
             4 => Some(Self::Delete),
             5 => Some(Self::Reveal),
+            6 => Some(Self::SearchIn),
             _ => None,
         }
     }
@@ -5462,6 +5570,22 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
                 return;
             };
             shell::reveal(&path);
+        }
+        TreeCommand::SearchIn => {
+            // **A file names its folder.** The row the writer pressed is the
+            // one they mean, and what a search can be given is a folder — the
+            // one holding that file is the only reading of it.
+            let into = match selected {
+                Some(path) if path.is_dir() => Some(path),
+                Some(path) => path.parent().map(Path::to_path_buf),
+                None => None,
+            };
+            let Some(into) = into else {
+                return;
+            };
+            search_in_folder(window, live, Some(into));
+            window.set_left_tab(LeftTab::Search.index());
+            publish_left(window, live);
         }
     }
 }
@@ -7522,6 +7646,9 @@ fn typography_for(
     let base = font_size_for(number(Setting::BodySize), zoom_percent);
     let mut spec = Typography::new(base);
     spec.line_spacing = percent(number(Setting::LineAdvance));
+    // 要件 9（2026-09-07追加）: the numbers widen the page's own margin, so this
+    // travels with the spec that decides that margin.
+    spec.line_numbers = number(Setting::LineNumbers) != 0;
     spec.character_spacing = percent(number(Setting::CharAdvance));
     for (level, scale) in spec.heading_scale.iter_mut().enumerate() {
         *scale = percent(number(Setting::Heading(level)));
@@ -7592,7 +7719,7 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// to 12 the two places that had written the absolute row instead were missed —
 /// the vertical pane then took its page margin from the line height. One
 /// definition, sent over.
-const SHEET_NUMBERS: usize = 6 + MAX_HEADING_LEVEL;
+const SHEET_NUMBERS: usize = 7 + MAX_HEADING_LEVEL;
 /// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
 /// two values are `2`, the pane's own width, and `0`, not wrapping at all —
 /// **which is written down and not yet built**: tiles are cut along the flow
@@ -7696,6 +7823,13 @@ enum Setting {
     WrapChars,
     /// One heading level, 0 being H1.
     Heading(usize),
+    /// Whether the page carries its line numbers (要件 9、2026-09-07追加).
+    ///
+    /// **On the sheet, like every other thing about how the page is set.** It
+    /// is offered on the horizontal sheet alone: the numbers stand in the
+    /// margin at the head of each line, which in vertical writing is the top
+    /// edge of the pane — a different drawing, and one nobody has asked for.
+    LineNumbers,
 }
 
 impl Setting {
@@ -7711,6 +7845,7 @@ impl Setting {
             // row is named by stays the number it was.
             10 => Some(Self::WrapMode),
             11 => Some(Self::WrapChars),
+            12 => Some(Self::LineNumbers),
             _ => None,
         }
     }
@@ -7724,6 +7859,7 @@ impl Setting {
             Self::Heading(level) => 4 + level.min(MAX_HEADING_LEVEL - 1),
             Self::WrapMode => 4 + MAX_HEADING_LEVEL,
             Self::WrapChars => 5 + MAX_HEADING_LEVEL,
+            Self::LineNumbers => 6 + MAX_HEADING_LEVEL,
         }
     }
 
@@ -7732,6 +7868,7 @@ impl Setting {
         match self {
             Self::BodySize => 1,
             Self::WrapMode => 1,
+            Self::LineNumbers => 1,
             Self::WrapChars => 2,
             Self::PageMargin => 4,
             Self::CharAdvance => 5,
@@ -7750,6 +7887,7 @@ impl Setting {
             Self::CharAdvance => (-20, 100),
             Self::PageMargin => (0, 160),
             Self::WrapMode => (0, 2),
+            Self::LineNumbers => (0, 1),
             Self::WrapChars => (10, 200),
             Self::Heading(_) => (50, 400),
         }
@@ -7767,6 +7905,9 @@ impl Setting {
             // from without losing its place, and the length a page of Japanese
             // prose is usually set to.
             Self::WrapChars => 40,
+            // Off: a page of prose is not a program, and the writer asks for
+            // the numbers when they want them.
+            Self::LineNumbers => 0,
             Self::Heading(level) => HEADING_DEFAULTS.get(level).copied().unwrap_or(100),
         }
     }
@@ -7798,6 +7939,7 @@ impl Setting {
             Self::CharAdvance => "char-advance",
             Self::PageMargin => "page-margin",
             Self::WrapMode => "wrap-mode",
+            Self::LineNumbers => "line-numbers",
             Self::WrapChars => "wrap-chars",
             Self::Heading(0) => "h1",
             Self::Heading(1) => "h2",
