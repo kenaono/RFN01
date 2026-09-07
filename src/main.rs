@@ -1741,6 +1741,15 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
     publish_tabs(&window, &live);
+    // 書き手の報告 2026-09-07: **どのペインも、いま見ているものが最初の場所。**
+    // 復元はタブを直接並べるので、ここで書き入れておかないと最初の`戻る`が
+    // 起動時のファイルへ帰れない。
+    for id in PaneId::all(&window) {
+        let showing = live.tabs.borrow().of(id).current().cloned();
+        if let Some(tab) = showing {
+            note_navigation(&live, id, &tab);
+        }
+    }
     // Nothing is on screen until the tree has handed out an area. The window
     // reports its own the moment the editing area exists, and this is the state
     // until then.
@@ -2122,6 +2131,36 @@ fn main() -> Result<(), slint::PlatformError> {
                 activate_left_row(&window, &live, index);
             }
         });
+    });
+
+    let weak = window.as_weak();
+    let kept_live = live.clone();
+    // 書き手の報告 2026-09-07: **二度目のクリックは決定。**開くのは一度目が
+    // 済ませているので、ここに残るのは「このタブは置いておく」の一言だけ。
+    window.on_left_row_kept(move |_index| {
+        let weak = weak.clone();
+        let live = kept_live.clone();
+        // 一度目のクリックが仕掛けた`Timer`より後に走らなければ、まだ無い
+        // タブに旗を立てることになる。0の単発は入れた順に走る。
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                let id = focused_pane(&window);
+                let tabs = live.tabs.borrow();
+                if let Some(tab) = tabs.of(id).current() {
+                    tab.provisional.set(false);
+                }
+                drop(tabs);
+                publish_tabs(&window, &live);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let navigate_live = live.clone();
+    window.on_pane_navigate(move |pane, forward| {
+        if let Some(window) = weak.upgrade() {
+            navigate(&window, &navigate_live, PaneId::from_index(pane), forward);
+        }
     });
 
     // 要件 6.2: which of the left pane's three things is showing. Rust holds
@@ -3117,6 +3156,24 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = window.as_weak();
+    let drafted = window.as_weak();
+    // 書き手の報告 2026-09-07: the strip draws the draft's own lines behind the
+    // field, and only this side can cut a string into lines.
+    window.on_pane_below_draft_edited(move |pane, text| {
+        let Some(window) = drafted.upgrade() else {
+            return;
+        };
+        let id = PaneId::from_index(pane);
+        let lines = ModelRc::new(VecModel::from(draft_lines(text.as_str())));
+        // **欄が持っている字をそのまま行にも書く。**行だけ書き戻すと、双方向の
+        // 束縛がまだ届いていない場合に、こちらが読んだ古い字を欄へ押し返して
+        // しまう——打った一字が消える形の壊れ方になる。
+        id.update_screen(&window, |screen| {
+            screen.below_draft = text.clone();
+            screen.below_draft_lines = lines.clone();
+        });
+    });
+
     let below_live = live.clone();
     window.on_pane_below_sent(move |pane| {
         if let Some(window) = weak.upgrade() {
@@ -3286,7 +3343,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 path.display()
             ),
         );
-        open_path_in_pane(&window, &live, opening_pane, &path);
+        open_path_in_pane(&window, &live, opening_pane, &path, Opening::Kept);
     }
 
     let outcome = window.run();
@@ -3455,6 +3512,31 @@ struct PaneTab {
     /// same file has a tab of its own, with a caret and a scroll of its own
     /// (要件 7.6).
     view: TabView,
+    /// Whether this tab is only being looked through (書き手の報告 2026-09-07).
+    ///
+    /// **A row clicked in the left panel is a question, not a decision.** A
+    /// writer walking a folder to find something opened a tab per file and
+    /// ended up with a strip they had to clear by hand; one tab now serves the
+    /// whole walk, and the next row takes its place. It stops being one the
+    /// moment the writer means it — a second click on the row, or the first
+    /// character typed into it.
+    ///
+    /// **A `Cell`, so that `publish_tabs` can put it down.** Publishing the
+    /// strips is where the unsaved marker is read, and that is the same moment
+    /// this is answered; it holds the strips by a shared borrow, and taking a
+    /// mutable one there is the borrow every path into it would have to be
+    /// checked against.
+    provisional: Cell<bool>,
+}
+
+/// Whether a file being opened gets a tab that stays (書き手の報告 2026-09-07).
+#[derive(Clone, Copy, PartialEq)]
+enum Opening {
+    /// The writer asked for this file by name — the dialog, the command line,
+    /// a row opened twice. It gets a tab of its own.
+    Kept,
+    /// The writer is walking a list. One tab serves the walk.
+    Peeked,
 }
 
 /// What one tab has along the foot of its pane (追加要件 Terminal).
@@ -3484,7 +3566,17 @@ impl PaneTab {
             view: TabView::for_pane(window, id),
             terminal: None,
             below: TabBelow::default(),
+            provisional: Cell::new(false),
         }
+    }
+
+    /// Whether the next file clicked in a list would take this tab's place.
+    ///
+    /// **Edited is kept, whatever the flag says.** The flag is put down when
+    /// the strips are published, and this is asked in between: a tab holding
+    /// work is not one to write over.
+    fn is_provisional(&self) -> bool {
+        self.provisional.get() && self.terminal.is_none() && !self.document.text.edited()
     }
 }
 
@@ -3496,7 +3588,26 @@ struct PaneTabs {
     /// strip is never empty, because a pane with no tab has nothing to show and
     /// nowhere to type.
     active: usize,
+    /// The documents this pane has stood in front of, oldest first
+    /// (書き手の報告 2026-09-07).
+    ///
+    /// **Documents, not tab numbers.** A number means a different tab the
+    /// moment one is closed or carried, and the walk this list is for closes
+    /// tabs as it goes: the file a writer wants to go back to is often the one
+    /// whose tab was just written over. Holding the `Rc` keeps it readable —
+    /// it is the same document, so going back to it shares the text with
+    /// anything else showing it (要件 7.6).
+    history: Vec<Rc<OpenDocument>>,
+    /// Where in that list the pane is standing. Everything after it is what
+    /// 進む would reach; a move anywhere else cuts it off.
+    at: usize,
 }
+
+/// How many places one pane remembers going (書き手の報告 2026-09-07).
+///
+/// **A walk, not a life.** Each place holds its document open, so the number is
+/// also how many closed files the window can be keeping in memory.
+const NAVIGATION_PLACES: usize = 16;
 
 impl PaneTabs {
     /// The tab this pane is showing, if it has one.
@@ -3770,10 +3881,8 @@ impl Live {
             };
             (below_kind(pane), pane.below_height)
         };
-        id.update_screen(window, |screen| {
-            screen.terminal = showing_shell;
-            screen.below_draft = tab.below.draft.as_str().into();
-        });
+        id.update_screen(window, |screen| screen.terminal = showing_shell);
+        show_draft(window, id, &tab.below.draft);
         id.set_below(window, kind, height);
         // **A strip restored open has no shell in it yet** (要件 8.5 puts the
         // arrangement back, not the processes). The one it needs is started
@@ -3867,6 +3976,7 @@ fn open_session(
                     vertical: tab.vertical,
                     preview: tab.preview,
                 },
+                provisional: Cell::new(false),
                 // A session remembers documents. **A shell is not one** — it is
                 // a process that ended when the editor did, so a restored
                 // terminal tab would be a name with nothing behind it.
@@ -3901,6 +4011,7 @@ fn open_session(
             },
             terminal: None,
             below: TabBelow::default(),
+            provisional: Cell::new(false),
         });
     }
     for id in PaneId::all(window) {
@@ -4001,9 +4112,11 @@ fn open_without_session(
                 },
                 terminal: None,
                 below: TabBelow::default(),
+                provisional: Cell::new(false),
             })
             .collect(),
         active: 0,
+        ..PaneTabs::default()
     }];
     (
         Tabs { panes: strips },
@@ -4235,6 +4348,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                     },
                     terminal: None,
                     below: TabBelow::default(),
+                    provisional: Cell::new(false),
                 });
                 strip.tabs.len() - 1
             }
@@ -4705,7 +4819,7 @@ fn open_result(window: &AppWindow, live: &Live, index: usize) {
     let Some(found) = live.results.borrow().get(index).cloned() else {
         return;
     };
-    open_path_in_focused_pane(window, live, &found.path);
+    open_path_in_focused_pane(window, live, &found.path, Opening::Peeked);
     let id = focused_pane(window);
     let document = live.states.document(id);
     let showing = document.file.borrow().path() == Some(found.path.as_path());
@@ -4725,7 +4839,7 @@ fn open_remembered(window: &AppWindow, live: &Live, index: usize) {
     let Some(path) = live.recent.borrow().get(index).cloned() else {
         return;
     };
-    open_path_in_focused_pane(window, live, &path);
+    open_path_in_focused_pane(window, live, &path, Opening::Peeked);
     // Opening it moves it to the top, so the list under the writer's hand has
     // changed and has to be drawn again.
     publish_left(window, live);
@@ -5067,7 +5181,7 @@ fn activate_tree_row(window: &AppWindow, live: &Live, index: usize) {
         write_session(window, live);
         return;
     }
-    open_path_in_focused_pane(window, live, &path);
+    open_path_in_focused_pane(window, live, &path, Opening::Peeked);
     publish_left(window, live);
 }
 
@@ -5086,8 +5200,8 @@ fn pick_tree_row(live: &Live, index: usize) {
 }
 
 /// Put a file in front of the writer, opening it only if it is not open already.
-fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path) {
-    open_path_in_pane(window, live, focused_pane(window), path);
+fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, opening: Opening) {
+    open_path_in_pane(window, live, focused_pane(window), path, opening);
 }
 
 /// The same, into a pane the caller names.
@@ -5097,19 +5211,33 @@ fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path) {
 /// answers for the pane that is *not* about to be in front. A file named on the
 /// command line went to the hidden pane and looked like it had not opened at
 /// all.
-fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
-    let held = {
+fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, opening: Opening) {
+    let (held, peeked) = {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
-        strip
+        let held = strip
             .tabs
             .iter()
-            .position(|tab| tab.document.file.borrow().path() == Some(path))
+            .position(|tab| tab.document.file.borrow().path() == Some(path));
+        // **仮のタブは1枚だけ**（書き手の報告 2026-09-07）。位置は毎回数え直す
+        // ——タブは並び替えられるし閉じられるので、覚えた番号は次の瞬間には
+        // 別のタブを指している（6.4で3度やった間違い）。
+        let peeked = strip.tabs.iter().position(PaneTab::is_provisional);
+        (held, peeked)
     };
     if let Some(index) = held {
         // 要件 7.7: bringing a file forward is opening it, tab or no tab.
         remember_recent(live, path);
+        if opening == Opening::Kept {
+            let tabs = live.tabs.borrow();
+            if let Some(tab) = tabs.of(id).tabs.get(index) {
+                tab.provisional.set(false);
+            }
+        }
         switch_to_tab(window, live, id, index);
+        // **切り替えは同じタブなら何もしない**ので、傾いた字を立てるための
+        // 描き直しはこちらから頼む。
+        publish_tabs(window, live);
         return;
     }
     // Open somewhere else in the window is still the same document, and 要件 7.6
@@ -5133,12 +5261,43 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
             preview: id.shows_preview(window),
             ..TabView::default()
         },
+        provisional: Cell::new(opening == Opening::Peeked),
         ..PaneTab::showing(window, id, document)
     };
-    add_tab(window, live, id, tab);
+    match peeked {
+        Some(index) if opening == Opening::Peeked => replace_tab(window, live, id, index, tab),
+        _ => add_tab(window, live, id, tab),
+    }
     // Recorded once it is open, so a file that could not be read does not sit
     // in the history as though it had been (要件 7.7).
     remember_recent(live, path);
+}
+
+/// Put a file in the tab the pane is only looking through (書き手の報告 2026-09-07).
+///
+/// **A close and an open in one step, and it can lose nothing**: the tab it
+/// writes over is provisional, and a tab holding unsaved work stopped being
+/// provisional at the first character (`is_provisional`). It keeps the tab's
+/// place in the strip, which is the whole point — the strip does not grow, and
+/// the file the writer is walking towards stays under the same finger.
+fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, tab: PaneTab) {
+    write_work_copy_now(window, live);
+    sync_active_tab(window, live);
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(id);
+        if index >= strip.tabs.len() {
+            return;
+        }
+        strip.tabs[index] = tab.clone();
+        strip.active = index;
+    }
+    live.cache
+        .borrow_mut()
+        .log_diag("tab", &format!("peek pane={} at={index}", id.log_name()));
+    live.show_tab(window, id, &tab);
+    note_navigation(live, id, &tab);
+    publish_tabs(window, live);
 }
 
 /// The files named on the command line, in the order they were named.
@@ -5338,7 +5497,7 @@ fn make_entry(window: &AppWindow, live: &Live, parent: &Path, folder: bool) {
     // A new file is opened in the pane the writer is in: making one is how a
     // note starts, and the step to it is not one they meant to take.
     if !folder {
-        open_path_in_focused_pane(window, live, &path);
+        open_path_in_focused_pane(window, live, &path, Opening::Kept);
     }
     publish_left(window, live);
     write_session(window, live);
@@ -5741,21 +5900,32 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
         let infos = strip
             .tabs
             .iter()
-            .map(|tab| TabInfo {
-                // Every name and marker is read from the document. There is no
-                // second copy to be fresher than the list any more — except a
-                // terminal, whose document is an empty stand-in and whose name
-                // is the shell it is running (追加要件 Terminal).
-                title: match &tab.terminal {
-                    Some(session) => session.borrow().name().into(),
-                    None => tab.document.file.borrow().title().into(),
-                },
-                edited: tab.terminal.is_none() && tab.document.text.edited(),
-                // 追加要件 2026-09-06: only a tab standing for a file has a
-                // name on disk to change. 無題1 reads like a name on screen,
-                // and nothing is filed under it.
-                renamable: tab.terminal.is_none() && tab.document.file.borrow().path().is_some(),
-                stem_length: stem_length(&tab.document.file.borrow().title()),
+            .map(|tab| {
+                // **編集の始まったタブは、もう覗いているだけではない**
+                // （書き手の報告 2026-09-07）。ここが不変の借りしか持たないので
+                // 旗は`Cell`にしてある。最初の一字で`set_edited`がこの publish を
+                // 呼ぶので、傾いた字が立つのはその瞬間。
+                if tab.provisional.get() && tab.document.text.edited() {
+                    tab.provisional.set(false);
+                }
+                TabInfo {
+                    // Every name and marker is read from the document. There is no
+                    // second copy to be fresher than the list any more — except a
+                    // terminal, whose document is an empty stand-in and whose name
+                    // is the shell it is running (追加要件 Terminal).
+                    title: match &tab.terminal {
+                        Some(session) => session.borrow().name().into(),
+                        None => tab.document.file.borrow().title().into(),
+                    },
+                    edited: tab.terminal.is_none() && tab.document.text.edited(),
+                    // 追加要件 2026-09-06: only a tab standing for a file has a
+                    // name on disk to change. 無題1 reads like a name on screen,
+                    // and nothing is filed under it.
+                    renamable: tab.terminal.is_none()
+                        && tab.document.file.borrow().path().is_some(),
+                    stem_length: stem_length(&tab.document.file.borrow().title()),
+                    provisional: tab.is_provisional(),
+                }
             })
             .collect::<Vec<_>>();
         (infos, strip.active as i32)
@@ -5775,6 +5945,114 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
     // where the strips change. A boundary dragged without touching a strip is
     // caught by the write on the way out.
     write_session(window, live);
+}
+
+/// Write down that a pane is standing in front of this tab (書き手の報告 2026-09-07).
+///
+/// **The place it is already at is not a new place**, which is what lets 戻る
+/// and 進む move without cutting off the way they came: they put `at` where
+/// they are going first, and this then finds nothing to record.
+///
+/// A shell is not a place. Its document is an empty stand-in (`PaneTab`), and
+/// going back to one would open an empty untitled tab rather than the terminal.
+fn note_navigation(live: &Live, id: PaneId, tab: &PaneTab) {
+    if tab.terminal.is_some() {
+        return;
+    }
+    let mut tabs = live.tabs.borrow_mut();
+    let strip = tabs.of_mut(id);
+    let standing = strip
+        .history
+        .get(strip.at)
+        .is_some_and(|held| Rc::ptr_eq(held, &tab.document));
+    if standing {
+        return;
+    }
+    strip.history.truncate(strip.at + 1);
+    strip.history.push(tab.document.clone());
+    while strip.history.len() > NAVIGATION_PLACES {
+        strip.history.remove(0);
+    }
+    strip.at = strip.history.len() - 1;
+}
+
+/// 戻る and 進む: the file this pane was looking at before, or after
+/// (書き手の報告 2026-09-07).
+///
+/// **The document is still here even when its tab is not.** A walk through a
+/// folder writes over one provisional tab again and again, so the way back
+/// almost always leads to a tab that no longer exists; the history holds the
+/// document itself, and a tab for it is opened again — provisional, because
+/// coming back to look is still looking.
+fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
+    let step = {
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(id);
+        stepped_place(strip.history.len(), strip.at, forward)
+            .map(|next| (next, strip.history[next].clone()))
+    };
+    let Some((next, document)) = step else {
+        return told_no_way(window, forward);
+    };
+    let (held, peeked) = {
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(id);
+        (
+            strip
+                .tabs
+                .iter()
+                .position(|tab| Rc::ptr_eq(&tab.document, &document)),
+            strip.tabs.iter().position(PaneTab::is_provisional),
+        )
+    };
+    // **Where it is going, written down before it goes.** Every road out of
+    // here records the arrival, and one that found `at` still on the place
+    // being left would cut off everything ahead of it.
+    live.tabs.borrow_mut().of_mut(id).at = next;
+    live.cache.borrow_mut().log_diag(
+        "tab",
+        &format!(
+            "navigate pane={} to={next} forward={forward} open={}",
+            id.log_name(),
+            u8::from(held.is_some())
+        ),
+    );
+    match held {
+        Some(index) => {
+            switch_to_tab(window, live, id, index);
+            publish_tabs(window, live);
+        }
+        None => {
+            let tab = PaneTab {
+                provisional: Cell::new(true),
+                ..PaneTab::showing(window, id, document)
+            };
+            match peeked {
+                Some(index) => replace_tab(window, live, id, index, tab),
+                None => add_tab(window, live, id, tab),
+            }
+        }
+    }
+}
+
+/// Which place 戻る or 進む lands on, or `None` at either end of the walk.
+fn stepped_place(places: usize, at: usize, forward: bool) -> Option<usize> {
+    let next = if forward {
+        at.checked_add(1)?
+    } else {
+        at.checked_sub(1)?
+    };
+    (next < places).then_some(next)
+}
+
+/// There is nothing that way (書き手の報告 2026-09-07).
+fn told_no_way(window: &AppWindow, forward: bool) {
+    let told = if forward {
+        "これより先はありません"
+    } else {
+        "これより前はありません"
+    };
+    window.set_render_status(told.into());
 }
 
 /// Show another tab in one pane (要件 6.3).
@@ -5802,6 +6080,7 @@ fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
         .borrow_mut()
         .log_diag("tab", &format!("switch pane={} to={index}", id.log_name()));
     live.show_tab(window, id, &incoming);
+    note_navigation(live, id, &incoming);
     publish_tabs(window, live);
 }
 
@@ -5935,6 +6214,7 @@ fn add_tab(window: &AppWindow, live: &Live, id: PaneId, tab: PaneTab) {
         .borrow_mut()
         .log_diag("tab", &format!("add pane={} at={index}", id.log_name()));
     live.show_tab(window, id, &tab);
+    note_navigation(live, id, &tab);
     publish_tabs(window, live);
 }
 
@@ -10035,9 +10315,48 @@ fn resize_below(window: &AppWindow, live: &Live, id: PaneId, height: f32) {
 /// and press Return when they mean it (書き手の指摘, 2026-09-06: 「lsのままで
 /// 実行は行われないはず」). The draft is emptied behind it, because what has
 /// been sent is in the way of what comes next.
+/// The draft cut into the lines the strip draws (書き手の報告 2026-09-07).
+///
+/// **Everything in the draft is sent, so everything in it is coloured**
+/// (書き手の報告 2026-09-07・4回目). Which is more than pedantry: `ls` and
+/// `ls` with a return look the same on screen and do different things — one
+/// waits at the prompt, one runs — and the difference is *the empty line under
+/// it*. Colouring that line is the only thing on screen that can say so, now
+/// that the newline has no character of its own. The last line of `ls\n` holds
+/// nothing and is still part of what goes.
+///
+/// An empty draft colours nothing, because nothing is what it would send.
+fn draft_lines(draft: &str) -> Vec<DraftLine> {
+    let sent = !draft.is_empty();
+    let mut lines = Vec::new();
+    let mut at = 0;
+    for piece in draft.split('\n') {
+        let end = at + piece.len();
+        lines.push(DraftLine {
+            // The carriage return of a pasted CRLF is not a character the
+            // writer put there, and drawing it would push the rule a column
+            // out.
+            text: piece.trim_end_matches('\r').into(),
+            sent,
+            breaks: end < draft.len(),
+        });
+        at = end + 1;
+    }
+    lines
+}
+
+/// Put a draft, and the lines it is made of, in front of one pane.
+fn show_draft(window: &AppWindow, id: PaneId, draft: &str) {
+    let lines = ModelRc::new(VecModel::from(draft_lines(draft)));
+    id.update_screen(window, |screen| {
+        screen.below_draft = draft.into();
+        screen.below_draft_lines = lines.clone();
+    });
+}
+
 fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
     let text = id.screen(window).below_draft.to_string();
-    if text.trim().is_empty() {
+    if text.is_empty() {
         return;
     }
     let Some(session) = live
@@ -10049,14 +10368,21 @@ fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
     else {
         return;
     };
-    session.borrow_mut().paste(text.trim_end());
+    // **打ったものが、打ったとおりに行く**（書き手の報告 2026-09-07）。末尾を
+    // 落としていたので、下書きの終わりに置いた改行——上のコマンドを走らせる、
+    // まさにその一打——だけが届かなかった。改行を置くかどうかは書き手が決める。
+    //
+    // **貼り付けではなく打鍵として送る**（同・3回目）。`paste`は括弧付き貼り付け
+    // の印を付けるので、シェルは受け取ったものを読まずに抱える——`ls`と改行を
+    // 送ってもプロンプトが下がるだけで走らなかったのはそれ。
+    session.borrow_mut().send(&terminal::encode_typing(&text));
     {
         let mut borrowed = live.cache.borrow_mut();
         if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Front) {
             shell.looking = 0;
         }
     }
-    id.update_screen(window, |screen| screen.below_draft = SharedString::new());
+    show_draft(window, id, "");
     store_below_on_tab(window, live, id);
     refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
 }
@@ -11137,13 +11463,22 @@ fn update_pane_selection(
     );
     let selection = {
         let mut state = state.borrow_mut();
-        if phase == SelectionPhase::Begin || state.selection_anchor_source_byte.is_none() {
+        // **A standing mark answers the mouse too** (書き手の報告 2026-09-07).
+        // 要件 11.4's mark is a Shift nobody is holding, and a Shift that only
+        // the arrow keys could extend was half a key: the writer who asked for
+        // a selection and then pointed at where it should end had said the
+        // whole of it. So the press keeps the anchor the mark dropped — the
+        // rectangle with it (要件 7.1) — and the release puts the mark down,
+        // which is what makes the *next* click plain again and so the way to
+        // let a selection go.
+        let held = state.mark && phase != SelectionPhase::Extend;
+        if !held && (phase == SelectionPhase::Begin || state.selection_anchor_source_byte.is_none())
+        {
             state.selection_anchor_source_byte = Some(hit);
-            // A writer taking hold of the selection with the mouse is not the
-            // writer who left a mark standing (要件 11.4), nor the one who
-            // asked for a rectangle (要件 7.1).
-            state.mark = false;
             state.rectangular = false;
+        }
+        if phase == SelectionPhase::End {
+            state.mark = false;
         }
         state.caret_source_byte = Some(hit);
         // Only the vertical pane keeps the revealed line: the horizontal one
@@ -11634,8 +11969,9 @@ fn undo_in_pane(
 /// **It is a Shift the writer does not have to hold.** While the mark is on,
 /// every move extends the selection; pressing the key again puts it down and
 /// leaves the selection where it stands, so the same key both starts and stops.
-/// An edit or a click ends it too, because either one answers the selection
-/// that was being made.
+/// An edit ends it too, and so does a **click**, which first extends the
+/// selection to where it landed (`update_pane_selection`): either one answers
+/// the selection that was being made.
 ///
 /// Turning it on drops the anchor at the caret so that the first move already
 /// has something to extend from, and turning it off collapses nothing — what
@@ -11672,6 +12008,16 @@ fn toggle_mark(
             id.log_name()
         ),
     );
+    // **The one thing on screen that says the mark is standing.** Nothing else
+    // changes when it goes on — the caret sits where it sat — and a writer who
+    // cannot tell reads the next arrow key as the feature not working
+    // (書き手の報告 2026-09-07).
+    let told = match (marking, rectangular) {
+        (false, _) => "選択終了",
+        (true, false) => "選択開始：矢印かクリックで選ぶ範囲を決めます",
+        (true, true) => "矩形選択開始：矢印かクリックで選ぶ範囲を決めます",
+    };
+    window.set_render_status(told.into());
     refresh_pane_from_state(window, cache, document, id, &state, &source);
 }
 
@@ -14079,5 +14425,41 @@ mod tests {
             "掴んだだけでは何も選ばれていない"
         );
         assert!(none.is_empty());
+    }
+
+    /// 書き手の報告 2026-09-07: `ls`と`ls`＋改行は、色の付く行数で見分ける。
+    #[test]
+    fn the_draft_marks_the_lines_that_would_be_sent() {
+        let marked = |draft: &str| -> Vec<(String, bool, bool)> {
+            draft_lines(draft)
+                .iter()
+                .map(|line| (line.text.to_string(), line.sent, line.breaks))
+                .collect()
+        };
+        assert_eq!(marked("ls"), vec![("ls".to_owned(), true, false)]);
+        assert_eq!(
+            marked("ls\n"),
+            vec![("ls".to_owned(), true, true), (String::new(), true, false),],
+            "末尾の改行は、その下の行に色が付くことで見える"
+        );
+    }
+
+    /// 書き手の報告 2026-09-07: 端では止まる。
+    #[test]
+    fn a_walk_stops_at_both_ends_of_what_it_remembers() {
+        assert_eq!(stepped_place(3, 1, false), Some(0));
+        assert_eq!(stepped_place(3, 1, true), Some(2));
+        assert_eq!(stepped_place(3, 0, false), None, "これより前は無い");
+        assert_eq!(stepped_place(3, 2, true), None, "これより先は無い");
+        assert_eq!(stepped_place(0, 0, false), None);
+        assert_eq!(stepped_place(0, 0, true), None, "まだどこにも行っていない");
+    }
+
+    #[test]
+    fn an_empty_draft_has_one_line_and_sends_none_of_it() {
+        let lines = draft_lines("");
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].sent, "送るものが無いのだから色も付かない");
+        assert!(!lines[0].breaks);
     }
 }

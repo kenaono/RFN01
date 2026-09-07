@@ -1403,9 +1403,7 @@ fn control_byte(text: char) -> Option<u8> {
 /// them — and the shell says which by turning `ESC[?2004h` on and off — every
 /// line break in the clipboard is a return key.
 pub fn encode_paste(text: &str, modes: Modes) -> Vec<u8> {
-    // A paste carries the line endings of wherever it came from; the shell
-    // wants returns.
-    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    let text = returns_only(text);
     if modes.bracketed_paste {
         let mut out = b"\x1b[200~".to_vec();
         out.extend_from_slice(text.as_bytes());
@@ -1414,6 +1412,27 @@ pub fn encode_paste(text: &str, modes: Modes) -> Vec<u8> {
     } else {
         text.into_bytes()
     }
+}
+
+/// Text sent as though the writer had typed it (追加要件 Terminal: `Ctrl+Enter`).
+///
+/// **Not a paste, and that is the whole difference** (書き手の報告 2026-09-07).
+/// The draft goes over as keystrokes, so it carries no bracketed-paste markers:
+/// with them the shell holds what arrives instead of reading it, which is why
+/// `ls` and a return moved the prompt down a line and ran nothing. Without
+/// them a return is the return key, and the line runs — which is what the
+/// writer asked for by putting it there.
+pub fn encode_typing(text: &str) -> Vec<u8> {
+    returns_only(text).into_bytes()
+}
+
+/// Line endings as the shell's line editor wants them.
+///
+/// **`\r`, not `\n`** — the same rule [`encode_key`] follows for the return
+/// key. What arrives here comes from a text field, where a line ends the way
+/// Windows or the writer's clipboard says it does.
+fn returns_only(text: &str) -> String {
+    text.replace("\r\n", "\r").replace('\n', "\r")
 }
 
 #[cfg(test)]
@@ -1841,6 +1860,20 @@ mod key_tests {
         assert_eq!(
             encode_paste("ls\r\nls", modes),
             b"\x1b[200~ls\rls\x1b[201~".to_vec()
+        );
+    }
+
+    /// 書き手の報告 2026-09-07: `ls`と改行を送っても走らず、プロンプトだけが
+    /// 下がっていた。括りが付いていたので、シェルは読まずに抱えていた。
+    #[test]
+    fn what_is_typed_over_carries_no_paste_markers() {
+        let mut modes = modes();
+        modes.bracketed_paste = true;
+        assert_eq!(encode_typing("ls\n"), b"ls\r".to_vec());
+        assert_ne!(
+            encode_typing("ls\n"),
+            encode_paste("ls\n", modes),
+            "貼り付けは抱えさせ、打鍵は走らせる"
         );
     }
 }

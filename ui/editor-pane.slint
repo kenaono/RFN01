@@ -40,6 +40,26 @@ export struct TabInfo {
     // (追加要件 2026-09-06). Renaming selects that much, so that typing
     // replaces the name and leaves the extension.
     stem-length: int,
+    // 書き手の報告 2026-09-07: whether this tab is only being looked through,
+    // and so is the one the next file clicked in the left panel would take the
+    // place of. **Drawn in italics**, the way a book sets a word it is only
+    // mentioning.
+    provisional: bool,
+}
+
+// One line of the draft that stands under a shell (書き手の報告 2026-09-07).
+//
+// **Cut by Rust, because only Rust knows where the sending stops.** `Ctrl+Enter`
+// trims the end off the draft before it hands it over, so the blank lines a
+// writer leaves under a command are not part of what runs — and until now
+// nothing on screen said so.
+export struct DraftLine {
+    text: string,
+    // Whether this line is inside what `Ctrl+Enter` would send.
+    sent: bool,
+    // Whether a newline follows it. The last line has none unless the writer
+    // left one there, and that is the one the writer most needs to see.
+    breaks: bool,
 }
 
 export struct PreviewSelectionRect {
@@ -120,6 +140,9 @@ export struct PaneScreen {
     // The draft's text, written at both ends: the writer types into it and
     // Rust reads it when it is sent.
     below-draft: string,
+    // The same text cut into lines, with what would be sent marked out
+    // (書き手の報告 2026-09-07).
+    below-draft-lines: [DraftLine],
     // Bumped by Rust when the strip should take the keyboard.
     below-focus-generation: int,
     // Where the strip's own hidden field stands, so Windows opens the
@@ -254,6 +277,12 @@ export component EditorPane inherits Rectangle {
     in property <length> below-height: 200px;
     in property <[PreviewTile]> below-tiles;
     in-out property <string> below-draft;
+    in property <[DraftLine]> below-draft-lines;
+    // What the writer has just typed into the draft, so Rust can cut it into
+    // lines again. **The field is asked rather than watched**: the two-way
+    // binding puts the text in the model row either way, and nothing on this
+    // side can split a string.
+    callback below-draft-edited(string);
     in property <int> below-focus-generation;
     in property <float> below-caret-x;
     in property <float> below-caret-y;
@@ -273,6 +302,9 @@ export component EditorPane inherits Rectangle {
     callback below-resized(length);
     /// 追加要件 Terminal: open or close the strip (`Ctrl+\``).
     callback below-toggled();
+    /// 書き手の報告 2026-09-07: 戻る（false）と進む（true）。**ブラウザと同じ
+    /// 手つき**——左パネルの一覧を歩くと、見てきたファイルは順に並ぶ。
+    callback navigate-requested(bool);
     /// Send the draft to the shell above it.
     callback below-sent();
     /// 要件 11.3 の手つきで、下段へ移る／下段から戻る。**同じCtrl+Altの矢印**で、
@@ -616,6 +648,7 @@ export component EditorPane inherits Rectangle {
                     for tab[index] in root.tabs: Tab {
                         title: tab.title;
                         edited: tab.edited;
+                        provisional: tab.provisional;
                         current: index == root.active-tab;
                         // 要件 6.3: the tab being written in. **Both halves** —
                         // the pane has the keyboard and this is the tab in
@@ -1698,6 +1731,18 @@ export component EditorPane inherits Rectangle {
                                         && event.text == Key.DownArrow {
                                         root.focus-moved(3);
                                         accept
+                                    // 書き手の報告 2026-09-07: 戻ると進む。
+                                    // **矢印の行より前**——下の行は修飾キーを
+                                    // 見ないので、ここを通さないとキャレットが
+                                    // 動くだけになる。
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && event.text == Key.LeftArrow {
+                                        root.navigate-requested(false);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && event.text == Key.RightArrow {
+                                        root.navigate-requested(true);
+                                        accept
                                     } else if event.text == Key.Escape {
                                         // The way out of a menu (要件 6.7).
                                         // **Handled here rather than inside the
@@ -1917,6 +1962,23 @@ export component EditorPane inherits Rectangle {
                                         activated => {
                                             context-menu.close();
                                             root.quick-draft-requested();
+                                        }
+                                    }
+                                    MenuSep { }
+                                    MenuRow {
+                                        title: "Back";
+                                        shortcut: "Alt+←";
+                                        activated => {
+                                            context-menu.close();
+                                            root.navigate-requested(false);
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "Forward";
+                                        shortcut: "Alt+→";
+                                        activated => {
+                                            context-menu.close();
+                                            root.navigate-requested(true);
                                         }
                                     }
                                     MenuSep { }
@@ -2217,55 +2279,158 @@ export component EditorPane inherits Rectangle {
                 if root.below-kind == 2: Rectangle {
                     width: parent.width;
                     height: parent.height;
-                    background: Tok.paper;
+                    // **切り取るのはここだけ。**行数が帯の高さを越えたとき、
+                    // 下書きは上へ動いて見えている外へ出る。焦点の規則
+                    // （上の箱の注記）に触れないのは、欄そのものが必ず帯と
+                    // 重なっているから——`is_visible`は切り取り矩形と要素の
+                    // 矩形が交わるかを見る。
+                    clip: true;
 
-                    draft := TextInput {
-                        x: 8px;
-                        y: 6px;
-                        width: parent.width - 16px;
-                        height: parent.height - 12px;
-                        text <=> root.below-draft;
-                        font-family: "Consolas";
-                        font-size: 14px;
-                        color: Tok.doc-ink;
-                        single-line: false;
-                        wrap: word-wrap;
+                    sheet := Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
 
-                        property <int> generation: root.below-focus-generation;
-                        changed generation => {
-                            self.focus();
+                        // 一行の送り。**測って出す**——行の帯は欄の行に乗って
+                        // いなければ嘘になるので、二行ぶんの高さの半分を字体
+                        // 自身から取る。
+                        property <length> row-height: ruler-probe.preferred-height / 2;
+                        // 内容をどれだけ上へ押しやっているか。欄は自分では
+                        // 動かない（Slintの`TextInput`の注記）ので、キャレットを
+                        // 見失わないようこちらが追う。**横は折り返すので要らない。**
+                        property <length> pan-y: 0;
+                        // 字を組む幅。帯も欄も同じこれで組むから、同じところで
+                        // 折り返す。
+                        property <length> text-width: max(sheet.width - 16px, 40px);
+
+                        ruler-probe := Text {
+                            text: "M\nM";
+                            font-family: "Consolas";
+                            font-size: 14px;
+                            visible: false;
                         }
-                        init => {
-                            self.focus();
+
+                        // 書き手の報告 2026-09-07: **どこまで送られるかを見せる。**
+                        // 送られる行に薄い色を敷き、改行のあるところに`↵`を置く。
+                        //
+                        // **折り返しは残す**（書き手の指摘 2026-09-07——折り返さ
+                        // ないのは使いにくい）。折り返す以上「1行＝1段」ではないので、
+                        // 行の高さは**その行を同じ幅・同じ折り返しで組んだ`Text`に
+                        // 訊く**。それを縦に積めば、欄が自分で折り返した段と同じ
+                        // ところに帯が来る——どちらもSlintの同じ組版を通るから。
+                        bands := VerticalLayout {
+                            x: 8px;
+                            y: 6px - sheet.pan-y;
+                            width: sheet.text-width;
+                            alignment: start;
+                            spacing: 0px;
+
+                            for line in root.below-draft-lines: Rectangle {
+                                // **高さを自分で言う。**帯は矩形で、矩形は中身の
+                                // 大きさを親へ伝えない（伝えるのはレイアウトだけ）
+                                // ので、書かなければ高さ0になる。書いた高さは
+                                // レイアウトが上書きしない。
+                                height: flow.preferred-height;
+                                background: line.sent ? Tok.accent-faint : transparent;
+
+                                flow := Text {
+                                    x: 0;
+                                    y: 0;
+                                    width: sheet.text-width;
+                                    // **空の行にも一字置く。**組む字が無ければ
+                                    // 高さも0で、空行の帯だけ潰れて以降の行が
+                                    // すべて上へずれる。透明なので見えない。
+                                    text: line.text == "" ? " " : line.text;
+                                    wrap: word-wrap;
+                                    font-family: "Consolas";
+                                    font-size: 14px;
+                                    color: transparent;
+                                }
+
+                                // 改行は**罫で言う**（書き手の報告 2026-09-07・
+                                // 3回目）。字としての`¶`はあきらめた——折り返した
+                                // 行だけ印が無いのは、印が無いことより悪い。
+                                //
+                                // **どこで折り返したかを知っているのはSlintだけ**で、
+                                // こちらは行の段数しか訊けない。だから字の終わりは
+                                // 指せず、指せない場所に印を置くのもやめた。段の下の
+                                // 罫なら、折り返した行でも折り返さない行でも、
+                                // 同じ場所に同じものが出る。
+                                if line.breaks: Rectangle {
+                                    x: 0;
+                                    y: flow.preferred-height - 1px;
+                                    width: sheet.text-width;
+                                    height: 1px;
+                                    background: Tok.rule;
+                                }
+                            }
                         }
 
-                        key-pressed(event) => {
-                            if (event.modifiers.control && event.text == "`") {
-                                root.below-toggled();
-                                return accept;
+                        draft := TextInput {
+                            x: 8px;
+                            y: 6px - sheet.pan-y;
+                            // **帯と同じ幅で組む。**高さは行が増えれば伸び、
+                            // 溢れた分は`pan-y`が運ぶ。
+                            width: sheet.text-width;
+                            height: max(sheet.height - 12px,
+                                bands.preferred-height + sheet.row-height);
+                            text <=> root.below-draft;
+                            font-family: "Consolas";
+                            font-size: 14px;
+                            color: Tok.doc-ink;
+                            single-line: false;
+                            wrap: word-wrap;
+                            edited => {
+                                root.below-draft-edited(self.text);
                             }
-                            // **Ctrl+Enter sends it.** Enter alone is a line
-                            // break: a draft is where a command is composed
-                            // over several lines before it is run.
-                            if (event.modifiers.control && event.text == Key.Return) {
-                                root.below-sent();
-                                return accept;
+                            // キャレットを窓の中に留める。「見えている端から
+                            // 一行ぶん内側」。
+                            cursor-position-changed(at) => {
+                                if (at.y + sheet.row-height - sheet.pan-y > sheet.height - 12px) {
+                                    sheet.pan-y = at.y + sheet.row-height - sheet.height + 12px;
+                                }
+                                if (at.y < sheet.pan-y) {
+                                    sheet.pan-y = at.y;
+                                }
                             }
-                            if (event.modifiers.control && event.modifiers.alt
-                                && event.text == Key.UpArrow) {
-                                root.below-left();
-                                return accept;
-                            }
-                            reject
-                        }
-                    }
 
-                    if root.below-draft == "": Text {
-                        x: 10px;
-                        y: 8px;
-                        text: "Ctrl+Enter で上の端末へ送ります";
-                        color: Tok.ink-faint;
-                        font-size: 12px;
+                            property <int> generation: root.below-focus-generation;
+                            changed generation => {
+                                self.focus();
+                            }
+                            init => {
+                                self.focus();
+                            }
+
+                            key-pressed(event) => {
+                                if (event.modifiers.control && event.text == "`") {
+                                    root.below-toggled();
+                                    return accept;
+                                }
+                                // **Ctrl+Enter sends it.** Enter alone is a line
+                                // break: a draft is where a command is composed
+                                // over several lines before it is run.
+                                if (event.modifiers.control && event.text == Key.Return) {
+                                    root.below-sent();
+                                    return accept;
+                                }
+                                if (event.modifiers.control && event.modifiers.alt
+                                    && event.text == Key.UpArrow) {
+                                    root.below-left();
+                                    return accept;
+                                }
+                                reject
+                            }
+                        }
+
+                        if root.below-draft == "": Text {
+                            x: 10px;
+                            y: 8px;
+                            text: "Ctrl+Enter で上の端末へ送ります";
+                            color: Tok.ink-faint;
+                            font-size: 12px;
+                        }
                     }
                 }
             }

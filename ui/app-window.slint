@@ -127,6 +127,9 @@ export component AppWindow inherits Window {
     /// A row was clicked. What that does belongs to the panel showing:
     /// a folder opens or closes, a file is opened, a search result is gone to.
     callback left-row-activated(int);
+    // 書き手の報告 2026-09-07: **二度目のクリックは「これを開いておく」。**
+    // 一度のクリックは覗くだけで、次に選んだファイルがそのタブを取る。
+    callback left-row-kept(int);
     callback work-folder-requested();
     /// The work folders opened before this one, newest first (要件 5.1).
     /// Names with the folder that holds them, the way the 履歴 panel names a
@@ -353,6 +356,8 @@ export component AppWindow inherits Window {
     callback pane-below-scrolled(int, float);
     callback pane-below-selection(int, float, float, int);
     callback pane-below-sent(int);
+    callback pane-below-draft-edited(int, string);
+    callback pane-navigate(int, bool);
     /// 要件 7.2 の変換、下段のシェルの上で。
     callback pane-below-preedit(int, string);
     callback pane-below-text(int, string, bool);
@@ -1197,6 +1202,9 @@ export component AppWindow inherits Window {
                                             tree-row.carrying-self = false;
                                         }
                                     }
+                                    double-clicked => {
+                                        root.left-row-kept(index);
+                                    }
                                     moved => {
                                         tree-row.moves += 1;
                                         if (!tree-row.pressing || root.left-tab != 0) {
@@ -1519,8 +1527,15 @@ export component AppWindow inherits Window {
                         below-height: pane.below-height;
                         below-tiles: pane.below-tiles;
                         below-draft <=> pane.below-draft;
+                        below-draft-lines: pane.below-draft-lines;
+                        below-draft-edited(text) => {
+                            root.pane-below-draft-edited(pane.id, text);
+                        }
                         below-focus-generation: pane.below-focus-generation;
                         below-toggled => { root.pane-below-toggled(pane.id); }
+                        navigate-requested(forward) => {
+                            root.pane-navigate(pane.id, forward);
+                        }
                         below-resized(height) => { root.pane-below-resized(pane.id, height); }
                         below-key(text, number, ctrl, alt, shift) => {
                             root.pane-below-key(pane.id, text, number, ctrl, alt, shift);
@@ -1900,60 +1915,65 @@ export component AppWindow inherits Window {
                             zoom-menu.show();
                         }
                     }
-                }
 
-                zoom-menu := PopupWindow {
-                    // Above the bar it hangs from, and to the left of the edge:
-                    // the status bar is at the foot of the window, so a popup
-                    // below it would be off the screen.
-                    x: -168px;
-                    y: -74px;
-                    width: 224px;
-                    close-policy: close-on-click-outside;
+                    // 書き手の報告 2026-09-07: **数の真上に立てる。**It hung from
+                    // the row rather than from the number — a popup inside a
+                    // layout is not laid out, so its corner was the *bar's*
+                    // corner and the panel came up at the far left, an inch of
+                    // window away from what had been clicked. Sitting inside
+                    // the number's own box makes the two coordinates the same
+                    // question, and standing the bar up keeps the whole thing
+                    // as narrow as the number under it.
+                    zoom-menu := PopupWindow {
+                        x: (parent.width - 76px) / 2;
+                        // **Told rather than measured.** The panel has to sit
+                        // clear of the number it came from, and a popup asked
+                        // for its own height while it is deciding where to be
+                        // is a question in a circle: 8+16+6+150+6+28+8.
+                        y: -228px;
+                        width: 76px;
+                        height: 222px;
+                        close-policy: close-on-click-outside;
 
-                    MenuFrame {
-                        width: 224px;
+                        MenuFrame {
+                            width: 76px;
+                            height: 222px;
 
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 6px;
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 6px;
 
-                            HorizontalLayout {
-                                Text {
-                                    text: "Zoom";
-                                    color: Tok.ink-muted;
-                                    font-size: 12px;
-                                    horizontal-stretch: 1;
-                                }
                                 Text {
                                     text: root.panes[root.focused-pane].zoom + "%";
                                     color: Tok.ink;
                                     font-size: 12px;
-                                    horizontal-stretch: 0;
+                                    horizontal-alignment: center;
                                 }
-                            }
 
-                            Slider {
-                                minimum: 50;
-                                maximum: 240;
-                                value: root.panes[root.focused-pane].zoom;
-                                // **Ten at a time**, the step the keys and the
-                                // wheel already move by (要件 11.5): the same
-                                // number should be reachable whichever way the
-                                // writer moves it.
-                                moved(percent) => {
-                                    root.pane-zoom-set(
-                                        root.focused-pane,
-                                        round(percent / 10) * 10);
+                                Slider {
+                                    vertical: true;
+                                    minimum: 50;
+                                    maximum: 240;
+                                    value: root.panes[root.focused-pane].zoom;
+                                    // **Ten at a time**, the step the keys and
+                                    // the wheel already move by (要件 11.5):
+                                    // the same number should be reachable
+                                    // whichever way the writer moves it.
+                                    moved(percent) => {
+                                        root.pane-zoom-set(
+                                            root.focused-pane,
+                                            round(percent / 10) * 10);
+                                    }
                                 }
-                            }
 
-                            TextButton {
-                                title: "Reset to 100%";
-                                clicked => {
-                                    zoom-menu.close();
-                                    root.pane-zoom-reset(root.focused-pane);
-                                    root.focus-generation += 1;
+                                TextButton {
+                                    title: "100%";
+                                    wide: true;
+                                    clicked => {
+                                        zoom-menu.close();
+                                        root.pane-zoom-reset(root.focused-pane);
+                                        root.focus-generation += 1;
+                                    }
                                 }
                             }
                         }

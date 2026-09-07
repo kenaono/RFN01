@@ -309,6 +309,10 @@ export component Tab inherits Rectangle {
     /// **Worked out where the name is** (Rust), because Slint cannot look for
     /// the last dot in a string.
     in property <int> stem-length;
+    /// 書き手の報告 2026-09-07: this tab is only being looked through, and the
+    /// next file clicked in the left panel takes its place. **Italics** — the
+    /// one thing a strip of names can say without taking any width.
+    in property <bool> provisional;
     /// The name the writer typed into the tab. **Raised on Enter only** — a
     /// rename moves a file, and losing focus is not somebody saying yes.
     callback renamed(string);
@@ -475,6 +479,7 @@ export component Tab inherits Rectangle {
             color: root.focused
                 ? Tok.accent-strong
                 : (root.current ? Tok.ink-strong : Tok.ink-muted);
+            font-italic: root.provisional;
             font-size: 13px;
             overflow: elide;
             vertical-alignment: center;
@@ -1053,11 +1058,15 @@ export component Slider inherits Rectangle {
     in property <float> minimum: 0;
     in property <float> maximum: 100;
     in property <float> value: 50;
+    /// 追加要件 2026-09-07: stand it up. **The larger number is at the top** —
+    /// a zoom is something a writer turns *up*, and a bar that grew downwards
+    /// would answer the word with its opposite.
+    in property <bool> vertical: false;
     /// The writer moved it. **Reported rather than applied** — what the number
     /// means belongs to whoever asked for the bar.
     callback moved(float);
 
-    height: 22px;
+    height: root.vertical ? 150px : 22px;
     // The travel is the track minus the handle: the handle's own width is the
     // part of the bar it can never reach past.
     property <length> grip: 14px;
@@ -1065,24 +1074,32 @@ export component Slider inherits Rectangle {
     property <float> fraction: clamp((root.value - root.minimum) / root.span, 0.0, 1.0);
 
     Rectangle {
-        y: (parent.height - 4px) / 2;
-        height: 4px;
-        width: parent.width;
+        x: root.vertical ? (parent.width - 4px) / 2 : 0;
+        y: root.vertical ? 0 : (parent.height - 4px) / 2;
+        width: root.vertical ? 4px : parent.width;
+        height: root.vertical ? parent.height : 4px;
         background: Tok.rule;
         border-radius: 2px;
 
+        // **What is filled in is the part below the handle** when the bar
+        // stands up, so the ink grows the way the number does.
         Rectangle {
             x: 0;
-            width: parent.width * root.fraction;
-            height: parent.height;
+            y: root.vertical ? parent.height * (1.0 - root.fraction) : 0;
+            width: root.vertical ? parent.width : parent.width * root.fraction;
+            height: root.vertical ? parent.height * root.fraction : parent.height;
             background: Tok.accent-soft;
             border-radius: 2px;
         }
     }
 
     Rectangle {
-        x: (parent.width - root.grip) * root.fraction;
-        y: (parent.height - root.grip) / 2;
+        x: root.vertical
+            ? (parent.width - root.grip) / 2
+            : (parent.width - root.grip) * root.fraction;
+        y: root.vertical
+            ? (parent.height - root.grip) * (1.0 - root.fraction)
+            : (parent.height - root.grip) / 2;
         width: root.grip;
         height: root.grip;
         border-radius: root.grip / 2;
@@ -1096,12 +1113,12 @@ export component Slider inherits Rectangle {
         pointer-event(event) => {
             if (event.button == PointerEventButton.left
                 && event.kind == PointerEventKind.down) {
-                root.moved(root.at(self.mouse-x));
+                root.moved(root.vertical ? root.up-at(self.mouse-y) : root.at(self.mouse-x));
             }
         }
         moved => {
             if (self.pressed) {
-                root.moved(root.at(self.mouse-x));
+                root.moved(root.vertical ? root.up-at(self.mouse-y) : root.at(self.mouse-x));
             }
         }
     }
@@ -1109,5 +1126,10 @@ export component Slider inherits Rectangle {
     pure function at(x: length) -> float {
         return root.minimum
             + root.span * clamp((x - root.grip / 2) / max(1px, root.width - root.grip), 0.0, 1.0);
+    }
+
+    pure function up-at(y: length) -> float {
+        return root.minimum + root.span * clamp(
+            1.0 - (y - root.grip / 2) / max(1px, root.height - root.grip), 0.0, 1.0);
     }
 }
