@@ -384,6 +384,10 @@ export component AppWindow inherits Window {
     /// The shells a terminal tab can be opened on (追加要件 Terminal). **Named
     /// by Rust**, because the list is what can actually be started.
     in property <[string]> terminal-shells;
+    /// 追加要件 2026-09-07: **どれが既定か。**接続先を訊かない場所——`＋`のNew Tab、
+    /// タブ列のメニュー、ペインの下段——はすべてこれを起こす。設定にも残る。
+    in-out property <int> default-shell: 0;
+    callback default-shell-chosen(int);
     callback pane-tab(int);
     callback pane-preedit-changed(int, string);
     callback pane-backspace(int);
@@ -501,6 +505,12 @@ export component AppWindow inherits Window {
     callback pane-close-others(int);
     callback pane-close-all(int);
     callback pane-new-tab(int);
+    // 追加要件 2026-09-07: New Tab に立っている三つの言葉のうち二つ。
+    // **前に出ているタブがまだ何でもないなら、そのタブがそれになる**——
+    // 何でもないタブが無ければ、これまでどおり新しいタブを開く。
+    callback pane-new-file(int);
+    callback pane-new-terminal(int, int);
+    callback pane-switch-shell(int, int);
     /// Publish the strips again. Called from Rust when a document's unsaved
     /// marker moves, which is the one change to a strip that does not come from
     /// something the writer did to the strip itself.
@@ -771,10 +781,14 @@ export component AppWindow inherits Window {
 
                             for shell[index] in root.terminal-shells: MenuRow {
                                 title: shell;
+                                // **閉じるのは最後**（2026-09-07）。`close`の
+                                // 後ろに書いたものは、木ごと捨てられた行から
+                                // `root`へ登れずに落ちることがある——下の
+                                // `recent-menu`の注記と同じ話で、順を揃えた。
                                 activated => {
                                     root.terminal-requested(index);
-                                    shell-menu.close();
                                     root.focus-generation += 1;
+                                    shell-menu.close();
                                 }
                             }
                         }
@@ -802,8 +816,8 @@ export component AppWindow inherits Window {
                                 // element whose handler is running with it.
                                 activated => {
                                     root.recent-folder-chosen(index);
-                                    recent-menu.close();
                                     root.focus-generation += 1;
+                                    recent-menu.close();
                                 }
                             }
                         }
@@ -911,21 +925,32 @@ export component AppWindow inherits Window {
                             // 追加要件 2026-09-06: **the `+` asks what kind**,
                             // the same three-way question the tab strip's `+`
                             // asks — a file, a shell, or a folder.
-                            if root.work-folder != "": IconButton {
-                                icon: Icons.plus;
-                                tip: "New";
-                                clicked => {
-                                    tree-plus-menu.show();
+                            // **釦と一緒の箱に入れる**（書き手の指摘 2026-09-07:
+                            // メニューが☰の場所に出る）。popupはレイアウトの
+                            // 子にならないので、行に直に置くと座標の原点が
+                            // 「ボタンの列の左上」——つまり左のレールの隣——に
+                            // なり、`-150px`はそこから更に左＝☰の上へ出ていた。
+                            // 箱の中なら原点はこの釦自身で、真下に置ける。
+                            //
+                            // 釦とpopupを同じ`if`の中へ入れられるのは、両方が
+                            // 同じ要素の中にいるから（技術検証6.24が言うのは
+                            // 「repeaterの外から中のidは掴めない」で、中から
+                            // 中は掴める）。
+                            if root.work-folder != "": Rectangle {
+                                width: 26px;
+                                height: 26px;
+
+                                IconButton {
+                                    icon: Icons.plus;
+                                    tip: "New";
+                                    clicked => {
+                                        tree-plus-menu.show();
+                                    }
                                 }
-                            }
-                            // **Not inside an `if`.** A conditional element is
-                            // a repeater, and nothing outside a repeater can
-                            // reach an id inside it (技術検証 6.24) — the button
-                            // above would have no menu to open. A popup takes no
-                            // room, so standing here always costs nothing.
+
                             tree-plus-menu := PopupWindow {
-                                x: -150px;
-                                y: 26px;
+                                x: 0;
+                                y: 28px;
                                 width: 220px;
                                 close-policy: close-on-click-outside;
 
@@ -936,30 +961,35 @@ export component AppWindow inherits Window {
                                         padding: 6px;
                                         spacing: 1px;
 
+                                        // **頼んでから閉じる**（2026-09-07）。
+                                        // `close`はこの行の立っている木を捨てる
+                                        // ので、後に書いたものは届かないことが
+                                        // ある。
                                         MenuRow {
                                             title: "New File…";
                                             activated => {
-                                                tree-plus-menu.close();
                                                 root.tree-command(0);
+                                                tree-plus-menu.close();
                                             }
                                         }
                                         MenuRow {
                                             title: "New Terminal";
                                             activated => {
-                                                tree-plus-menu.close();
-                                                root.terminal-requested(0);
+                                                root.terminal-requested(root.default-shell);
                                                 root.focus-generation += 1;
+                                                tree-plus-menu.close();
                                             }
                                         }
                                         MenuRow {
                                             title: "New Folder…";
                                             activated => {
-                                                tree-plus-menu.close();
                                                 root.tree-command(1);
+                                                tree-plus-menu.close();
                                             }
                                         }
                                     }
                                 }
+                            }
                             }
                             // **The folder button opens a folder** (追加要件
                             // 2026-09-06). Making a folder moved into the `+`
@@ -1596,6 +1626,9 @@ export component AppWindow inherits Window {
                             root.pane-text-input(pane.id, text, committed);
                         }
                         terminal: pane.terminal;
+                        empty: pane.empty;
+                        terminal-shells: root.terminal-shells;
+                        default-shell: root.default-shell;
                         terminal-key(text, number, ctrl, alt, shift) => {
                             root.pane-terminal-key(pane.id, text, number, ctrl, alt, shift);
                         }
@@ -1639,7 +1672,6 @@ export component AppWindow inherits Window {
                         open-file-requested => { root.open-file-requested(); }
                         // The strip's own menu opens the default shell: the
                         // writer asked for a terminal, not for a distribution.
-                        terminal-requested => { root.terminal-requested(0); }
                         below-entered => { root.pane-below-focus(pane.id, true); }
                         below-left => { root.pane-below-focus(pane.id, false); }
                         tab-pressed => { root.pane-tab(pane.id); }
@@ -1747,6 +1779,21 @@ export component AppWindow inherits Window {
                             // using them is being in it.
                             root.focused-pane = pane.id;
                             root.pane-new-tab(pane.id);
+                            root.focus-generation += 1;
+                        }
+                        new-file-requested => {
+                            root.focused-pane = pane.id;
+                            root.pane-new-file(pane.id);
+                            root.focus-generation += 1;
+                        }
+                        new-terminal-requested(shell) => {
+                            root.focused-pane = pane.id;
+                            root.pane-new-terminal(pane.id, shell);
+                            root.focus-generation += 1;
+                        }
+                        tab-shell-chosen(shell) => {
+                            root.focused-pane = pane.id;
+                            root.pane-switch-shell(pane.id, shell);
                             root.focus-generation += 1;
                         }
                         preview-toggled => {
@@ -2154,7 +2201,7 @@ export component AppWindow inherits Window {
                     spacing: 10px;
 
                     Text {
-                        text: "TYPOGRAPHY";
+                        text: "SETTINGS";
                         color: Tok.ink-muted;
                         font-size: 11px;
                         letter-spacing: 0.9px;
@@ -2176,6 +2223,67 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: 1px;
                     background: Tok.rule;
+                }
+
+                // 追加要件 2026-09-07: **書字方向を持たない設定はここ**、
+                // シートを選ぶより前に。下にあるものはすべてそのシートのもの、
+                // という読み方を壊さないため。
+                Text {
+                    text: "TERMINAL";
+                    color: Tok.ink-faint;
+                    font-size: 10px;
+                    letter-spacing: 0.9px;
+                }
+
+                PickRow {
+                    label: "Default";
+                    value: root.terminal-shells[root.default-shell];
+                    pressed => {
+                        default-shell-menu.show();
+                    }
+                }
+
+                default-shell-menu := PopupWindow {
+                    x: 60px;
+                    y: 78px;
+                    width: 240px;
+                    close-policy: close-on-click-outside;
+
+                    MenuFrame {
+                        width: 240px;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 1px;
+
+                            // **頼んでから閉じる**（書き手の報告 2026-09-07:
+                            // WSL以外に変えられない）。`close`はこのメニューの
+                            // 木を——この行と、行を包む`for`ごと——捨てるので、
+                            // その後で`root`へ登ろうとすると生成されたコードは
+                            // `parent.upgrade()`に失敗し、**黙って何もしない**。
+                            // タブの接続先の一覧で同じことを踏んだ。
+                            for shell[index] in root.terminal-shells: MenuRow {
+                                title: shell;
+                                checked: index == root.default-shell;
+                                activated => {
+                                    root.default-shell-chosen(index);
+                                    default-shell-menu.close();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Tok.rule;
+                }
+
+                Text {
+                    text: "TYPOGRAPHY";
+                    color: Tok.ink-faint;
+                    font-size: 10px;
+                    letter-spacing: 0.9px;
                 }
 
                 // 要件 9: which sheet is being set. **Everything below belongs

@@ -280,9 +280,21 @@ export component Tab inherits Rectangle {
     callback dropped(length, length);
     /// The pointer is inside this tab while another one is being carried.
     callback pointed-at();
-    /// 追加要件 2026-09-06: the right button, with where it was pressed in the
-    /// window's own coordinates — the menu opens where the hand is.
+    /// 追加要件 2026-09-06: the right button, with where it was pressed **in
+    /// the strip's own coordinates**: this tab's x plus where inside it the
+    /// hand is, and the tab's own bottom edge.
+    ///
+    /// **Not the window's** (書き手の報告 2026-09-07・3回目). A window
+    /// coordinate has to be turned back into the pane's before a popup can use
+    /// it, and a menu placed that way came out an inch to the right of the
+    /// hand. The strip stands at the pane's top-left corner, so what is handed
+    /// over here is already in the coordinates the popup is placed in — nothing
+    /// is converted, and nothing can be converted with a stale number. It is
+    /// what the pane's own context menu has always done (`self.mouse-x`,
+    /// straight through).
     callback menu-asked(length, length);
+    /// The same, for the shell a terminal tab is running.
+    callback shell-asked(length, length);
     /// Start renaming from somewhere else (the right button's menu).
     ///
     /// **A count rather than a call**, because a tab is a repeated element and
@@ -305,6 +317,18 @@ export component Tab inherits Rectangle {
     /// writer can change. A buffer that has never been saved has no name on
     /// disk to change, and holding one down does nothing.
     in property <bool> renamable;
+    /// 追加要件 2026-09-07: this tab is a shell, so holding it down offers
+    /// another one. **The same press as a rename** — a tab that cannot be
+    /// renamed is a tab whose long press was doing nothing.
+    in property <bool> switchable;
+    /// Where the pointer was when the press landed, in the strip's coordinates
+    /// (追加要件 2026-09-07).
+    property <length> held-at-x;
+    property <length> held-at-y;
+    /// Whether this press has already opened that menu. **A timer that is still
+    /// running is a timer that fires again**, and the rename case stops itself
+    /// by setting `renaming`; this is the same brake for the other answer.
+    property <bool> asked-shell: false;
     /// How much of the title is the name without its extension, in characters.
     /// **Worked out where the name is** (Rust), because Slint cannot look for
     /// the last dot in a string.
@@ -381,12 +405,18 @@ export component Tab inherits Rectangle {
     hold := Timer {
         interval: 500ms;
         running: root.pressing
-            && root.renamable
+            && (root.renamable || root.switchable)
             && !root.carrying-self
-            && !root.renaming;
+            && !root.renaming
+            && !root.asked-shell;
         triggered => {
-            root.renaming = true;
-            root.editing = true;
+            if (root.switchable) {
+                root.asked-shell = true;
+                root.shell-asked(root.held-at-x, root.held-at-y);
+            } else {
+                root.renaming = true;
+                root.editing = true;
+            }
         }
     }
 
@@ -509,9 +539,7 @@ export component Tab inherits Rectangle {
         pointer-event(event) => {
             if (event.button == PointerEventButton.right
                 && event.kind == PointerEventKind.down) {
-                root.menu-asked(
-                    root.absolute-position.x + touch.mouse-x,
-                    root.absolute-position.y + touch.mouse-y);
+                root.menu-asked(root.x + touch.mouse-x, root.y + root.height);
                 return;
             }
             if (event.button != PointerEventButton.left) {
@@ -521,6 +549,14 @@ export component Tab inherits Rectangle {
                 root.pressing = true;
                 root.carrying-self = false;
                 root.renaming = false;
+                // 追加要件 2026-09-07: **where the hand is, taken now.** The
+                // long press opens the same menu the right button does, so it
+                // is placed by the very expression six lines up — read in the
+                // handler that has it, rather than inside the timer that fires
+                // half a second later.
+                root.asked-shell = false;
+                root.held-at-x = root.x + touch.mouse-x;
+                root.held-at-y = root.y + root.height;
                 root.press-x = touch.mouse-x;
             }
             if (event.kind == PointerEventKind.up) {
@@ -1018,6 +1054,52 @@ export component MenuRow inherits Rectangle {
             if (root.on-release && event.kind == PointerEventKind.up) {
                 root.activated();
             }
+        }
+    }
+}
+
+// 追加要件 2026-09-07: one of the words a New Tab offers.
+//
+// **A link, not a button.** There is nothing else on that page, so a row of
+// framed buttons would be the only thing on it and would read as a dialog
+// asking to be dismissed. What is wanted is the feel of a page with three
+// things written on it, any of which can be pressed.
+export component LinkRow inherits Rectangle {
+    in property <string> title;
+    /// The shortcut that does the same thing, when there is one.
+    in property <string> hint;
+    callback clicked();
+
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover ? Tok.accent-faint : transparent;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+
+        Text {
+            text: root.title;
+            color: touch.has-hover ? Tok.accent-strong : Tok.accent;
+            font-size: 14px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.hint;
+            color: Tok.ink-faint;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
         }
     }
 }

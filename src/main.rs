@@ -2348,6 +2348,54 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 追加要件 2026-09-07: the three words on a New Tab. **`New File` makes
+    // nothing** — the tab is already carrying the untitled document — and
+    // `Open File` is not here at all, because the dialog already opens into
+    // whatever tab is yielding (`open_path_in_pane`).
+    let weak = window.as_weak();
+    let answer_live = live.clone();
+    window.on_pane_new_file(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let asking = answer_live
+                .tabs
+                .borrow()
+                .of(id)
+                .current()
+                .is_some_and(|tab| tab.empty);
+            if asking {
+                answer_new_tab(&window, &answer_live, id, None);
+            } else {
+                new_file_tab(&window, &answer_live, id);
+            }
+        }
+    });
+
+    let weak = window.as_weak();
+    let answer_live = live.clone();
+    let switch_live = live.clone();
+    // 追加要件 2026-09-07: **走っているタブの接続先を替える。**タブはそのまま、
+    // 中のシェルだけが別のものになる——走っていたものは終わる（端末のタブを
+    // 閉じるのと同じ重さで、書き手がそう言ったのだからそうする）。
+    window.on_pane_switch_shell(move |pane, shell| {
+        if let Some(window) = weak.upgrade() {
+            switch_shell(
+                &window,
+                &switch_live,
+                PaneId::from_index(pane),
+                TerminalShell::at(shell),
+            );
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_pane_new_terminal(move |pane, shell| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            open_terminal(&window, &answer_live, id, TerminalShell::at(shell));
+        }
+    });
+
     // The one change to a strip that the writer does not make to the strip
     // itself: a document's unsaved marker moving. `SharedText` knows when that
     // happens but nothing else, so it asks the window, and the window asks
@@ -2481,6 +2529,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    let typed_live = live.clone();
     window.on_pane_text_input(move |pane, text, committed| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
@@ -2522,6 +2571,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 refresh_terminal(&window, &cache, id, TerminalSpot::Front);
                 return;
             }
+            // 追加要件 2026-09-07: **打ち始めたら、そのタブは文書になる。**
+            // New Tab は「何になるか」を訊いているだけで、答えの一つは
+            // 「ここに書く」である。文書は最初からその下にあるので、
+            // 一字目はふつうにそこへ入る。
+            answer_new_tab(&window, &typed_live, id, None);
             let document = states.document(id);
             insert_pane_text(&window, id, &document, &states, &cache, text, false);
         }
@@ -2530,9 +2584,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    let typed_live = live.clone();
     window.on_pane_tab(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
+            answer_new_tab(&window, &typed_live, id, None);
             let document = states.document(id);
             let indent = TAB_INDENT;
             insert_pane_text(&window, id, &document, &states, &cache, indent, true);
@@ -2542,6 +2598,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    let typed_live = live.clone();
     window.on_pane_preedit_changed(move |pane, text| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
@@ -2561,6 +2618,11 @@ fn main() -> Result<(), slint::PlatformError> {
             if composing {
                 refresh_terminal(&window, &cache, id, TerminalSpot::Front);
                 return;
+            }
+            // 変換の途中も文字である（追加要件 2026-09-07）——New Tab の面が
+            // 覆っていると、変換中の字がどこにも見えないことになる。
+            if !text.is_empty() {
+                answer_new_tab(&window, &typed_live, id, None);
             }
             let document = states.document(id);
             let state = states.of(id);
@@ -2713,7 +2775,7 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(directory) = app_data::app_directory()
         && let Some(values) = app_data::read_settings(&directory)
     {
-        apply_settings(&numbers, &palette, &sheet_fonts, &values);
+        apply_settings(&window, &numbers, &palette, &sheet_fonts, &values);
     }
 
     let weak = window.as_weak();
@@ -2971,11 +3033,22 @@ fn main() -> Result<(), slint::PlatformError> {
     // 追加要件 Terminal. **Opened in the pane the writer is in**, like every
     // other new tab: which pane is the writer's business and they said it by
     // clicking.
-    let weak = window.as_weak();
     let terminal_live = live.clone();
+    let weak = window.as_weak();
+    let default_cache = render_cache.clone();
+    // 追加要件 2026-09-07: which shell everything that does not ask opens.
+    window.on_default_shell_chosen(move |shell| {
+        if let Some(window) = weak.upgrade() {
+            let most = TerminalShell::ALL.len() as i32 - 1;
+            window.set_default_shell(shell.clamp(0, most));
+            save_settings(&window, &default_cache);
+        }
+    });
+
+    let weak = window.as_weak();
     window.on_terminal_requested(move |shell| {
         if let Some(window) = weak.upgrade() {
-            new_terminal_tab(
+            open_terminal(
                 &window,
                 &terminal_live,
                 focused_pane(&window),
@@ -3456,7 +3529,17 @@ fn replace_document(
     relayout_panes(window, states, cache);
 }
 
-/// Put the document's name where the writer can see it.
+/// Put the name of what is in front of the writer where they can see it.
+///
+/// **The tab's name, not the document's** (追加要件 2026-09-07). Two kinds of
+/// tab carry an untitled document without being one — a shell, and a tab that
+/// has not been asked what it is — and the window's title bar was announcing
+/// that stand-in as though the writer had made it.
+fn show_tab_title(window: &AppWindow, tab: &PaneTab) {
+    window.set_document_title(tab_title(tab).into());
+}
+
+/// The same, for a document with no tab to hand (startup).
 fn show_document_title(window: &AppWindow, file: &DocumentFile) {
     window.set_document_title(file.title().into());
 }
@@ -3543,6 +3626,18 @@ struct PaneTab {
     /// same file has a tab of its own, with a caret and a scroll of its own
     /// (要件 7.6).
     view: TabView,
+    /// Whether this tab is still asking what it is (追加要件 2026-09-07: New Tab).
+    ///
+    /// **A tab before it is anything.** The `＋` used to ask first — a menu of
+    /// three answers — and only then make the tab; now it makes the tab and the
+    /// tab asks. What stands in it is three words in the middle of the page,
+    /// and every one of them turns it into something: a file, a shell, or
+    /// whatever the writer opens next from anywhere in the window.
+    ///
+    /// **The document under it is already the one a new file would get**, taken
+    /// from the same run of untitled numbers, so `New File` is this flag going
+    /// down and nothing else.
+    empty: bool,
     /// Whether this tab is only being looked through (書き手の報告 2026-09-07).
     ///
     /// **A row clicked in the left panel is a question, not a decision.** A
@@ -3597,8 +3692,21 @@ impl PaneTab {
             view: TabView::for_pane(window, id),
             terminal: None,
             below: TabBelow::default(),
+            empty: false,
             provisional: Cell::new(false),
         }
+    }
+
+    /// Whether opening a file in this pane would take this tab's place rather
+    /// than adding another beside it.
+    ///
+    /// **A tab that has not decided what it is yields to anything** (追加要件
+    /// 2026-09-07), however the file was asked for — that is what makes
+    /// clicking a file in the tree fill the New Tab in front of the writer
+    /// instead of opening a second one beside it. A provisional tab yields only
+    /// to another walk through a list ([`Opening::Peeked`]).
+    fn yields_to(&self, opening: Opening) -> bool {
+        self.empty || (opening == Opening::Peeked && self.is_provisional())
     }
 
     /// Whether the next file clicked in a list would take this tab's place.
@@ -3912,7 +4020,11 @@ impl Live {
             };
             (below_kind(pane), pane.below_height)
         };
-        id.update_screen(window, |screen| screen.terminal = showing_shell);
+        let asking = tab.empty;
+        id.update_screen(window, |screen| {
+            screen.terminal = showing_shell;
+            screen.empty = asking;
+        });
         show_draft(window, id, &tab.below.draft);
         id.set_below(window, kind, height);
         // **A strip restored open has no shell in it yet** (要件 8.5 puts the
@@ -4007,6 +4119,7 @@ fn open_session(
                     vertical: tab.vertical,
                     preview: tab.preview,
                 },
+                empty: tab.empty,
                 provisional: Cell::new(false),
                 // A session remembers documents. **A shell is not one** — it is
                 // a process that ended when the editor did, so a restored
@@ -4042,6 +4155,7 @@ fn open_session(
             },
             terminal: None,
             below: TabBelow::default(),
+            empty: false,
             provisional: Cell::new(false),
         });
     }
@@ -4143,6 +4257,7 @@ fn open_without_session(
                 },
                 terminal: None,
                 below: TabBelow::default(),
+                empty: false,
                 provisional: Cell::new(false),
             })
             .collect(),
@@ -4266,6 +4381,9 @@ fn session_tab(tab: &PaneTab) -> app_data::SessionTab {
         // of what 要件 8.5 puts back.
         below: tab.below.open,
         below_height: tab.below.height as i32,
+        // 追加要件 2026-09-07: a tab that had not been asked yet comes back
+        // asking.
+        empty: tab.empty,
     }
 }
 
@@ -4380,6 +4498,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                     },
                     terminal: None,
                     below: TabBelow::default(),
+                    empty: false,
                     provisional: Cell::new(false),
                 });
                 strip.tabs.len() - 1
@@ -5313,18 +5432,23 @@ fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, openi
 /// command line went to the hidden pane and looked like it had not opened at
 /// all.
 fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, opening: Opening) {
-    let (held, peeked) = {
+    let (held, yielding) = {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
         let held = strip
             .tabs
             .iter()
             .position(|tab| tab.document.file.borrow().path() == Some(path));
-        // **仮のタブは1枚だけ**（書き手の報告 2026-09-07）。位置は毎回数え直す
-        // ——タブは並び替えられるし閉じられるので、覚えた番号は次の瞬間には
-        // 別のタブを指している（6.4で3度やった間違い）。
-        let peeked = strip.tabs.iter().position(PaneTab::is_provisional);
-        (held, peeked)
+        // **場所を譲るタブは1枚だけ**（書き手の報告 2026-09-07、追加要件
+        // 2026-09-07）。位置は毎回数え直す——タブは並び替えられるし閉じられるので、
+        // 覚えた番号は次の瞬間には別のタブを指している（6.4で3度やった間違い）。
+        // **空のタブが先**：まだ何でもないものが開いているなら、そこが開き先である。
+        let yielding = strip
+            .tabs
+            .iter()
+            .position(|tab| tab.empty)
+            .or_else(|| strip.tabs.iter().position(|tab| tab.yields_to(opening)));
+        (held, yielding)
     };
     if let Some(index) = held {
         // 要件 7.7: bringing a file forward is opening it, tab or no tab.
@@ -5365,9 +5489,9 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
         provisional: Cell::new(opening == Opening::Peeked),
         ..PaneTab::showing(window, id, document)
     };
-    match peeked {
-        Some(index) if opening == Opening::Peeked => replace_tab(window, live, id, index, tab),
-        _ => add_tab(window, live, id, tab),
+    match yielding {
+        Some(index) => replace_tab(window, live, id, index, tab),
+        None => add_tab(window, live, id, tab),
     }
     // Recorded once it is open, so a file that could not be read does not sit
     // in the history as though it had been (要件 7.7).
@@ -6036,18 +6160,20 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                     // Every name and marker is read from the document. There is no
                     // second copy to be fresher than the list any more — except a
                     // terminal, whose document is an empty stand-in and whose name
-                    // is the shell it is running (追加要件 Terminal).
-                    title: match &tab.terminal {
-                        Some(session) => session.borrow().name().into(),
-                        None => tab.document.file.borrow().title().into(),
-                    },
-                    edited: tab.terminal.is_none() && tab.document.text.edited(),
+                    // is the shell it is running (追加要件 Terminal), and a tab
+                    // that has not been asked what it is yet (追加要件
+                    // 2026-09-07). **Both carry an untitled document**, and
+                    // neither is one.
+                    title: tab_title(tab).into(),
+                    edited: tab.terminal.is_none() && !tab.empty && tab.document.text.edited(),
                     // 追加要件 2026-09-06: only a tab standing for a file has a
                     // name on disk to change. 無題1 reads like a name on screen,
                     // and nothing is filed under it.
                     renamable: tab.terminal.is_none()
+                        && !tab.empty
                         && tab.document.file.borrow().path().is_some(),
                     stem_length: stem_length(&tab.document.file.borrow().title()),
+                    terminal: tab.terminal.is_some(),
                     provisional: tab.is_provisional(),
                 }
             })
@@ -6055,6 +6181,23 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
         (infos, strip.active as i32)
     });
     for (id, (infos, active)) in PaneId::all(window).into_iter().zip(strips) {
+        // **どの行がシェルかを、窓へ渡したそのままの形で残す**（書き手の報告
+        // 2026-09-07: 切り替えの行が出てこない）。出ない理由が「旗が立って
+        // いない」のか「旗は立っているのに窓が読んでいない」のかは、ここが
+        // 答える。シェルが1つも無い間は黙っている。
+        if infos.iter().any(|info| info.terminal) {
+            let shells: String = infos
+                .iter()
+                .map(|info| if info.terminal { '1' } else { '0' })
+                .collect();
+            live.cache.borrow_mut().log_diag(
+                "tab",
+                &format!(
+                    "strip pane={} active={active} shells={shells}",
+                    id.log_name()
+                ),
+            );
+        }
         id.update_screen(window, |screen| {
             screen.tabs = ModelRc::new(VecModel::from(infos));
             screen.active_tab = active;
@@ -6064,7 +6207,9 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
     // document's, which after a switch is not the one they were last set from.
     let showing = live.active(window);
     window.set_document_edited(showing.text.edited());
-    show_document_title(window, &showing.file.borrow());
+    if let Some(tab) = live.tabs.borrow().of(focused_pane(window)).current() {
+        show_tab_title(window, tab);
+    }
     // **The strips and the arrangement are one thing** (要件 8.5), and this is
     // where the strips change. A boundary dragged without touching a strip is
     // caught by the write on the way out.
@@ -6126,7 +6271,10 @@ fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
                 .tabs
                 .iter()
                 .position(|tab| Rc::ptr_eq(&tab.document, &document)),
-            strip.tabs.iter().position(PaneTab::is_provisional),
+            strip
+                .tabs
+                .iter()
+                .position(|tab| tab.yields_to(Opening::Peeked)),
         )
     };
     // **Where it is going, written down before it goes.** Every road out of
@@ -6178,6 +6326,23 @@ fn told_no_way(window: &AppWindow, forward: bool) {
     };
     window.set_render_status(told.into());
 }
+
+/// What a tab is called on screen.
+///
+/// **Three kinds of tab and one name each**: a shell is called after the shell,
+/// a tab that has not been asked what it is says so, and everything else is its
+/// document. Asked in one place because the strip, the window's title bar and
+/// the list of all tabs must not disagree about it.
+fn tab_title(tab: &PaneTab) -> String {
+    match &tab.terminal {
+        Some(session) => session.borrow().name().to_owned(),
+        None if tab.empty => NEW_TAB_NAME.to_owned(),
+        None => tab.document.file.borrow().title(),
+    }
+}
+
+/// 追加要件 2026-09-07: what a tab is called before it is anything.
+const NEW_TAB_NAME: &str = "New Tab";
 
 /// Show another tab in one pane (要件 6.3).
 fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
@@ -6342,8 +6507,26 @@ fn add_tab(window: &AppWindow, live: &Live, id: PaneId, tab: PaneTab) {
     publish_tabs(window, live);
 }
 
-/// A new empty document (要件 8.4).
+/// A tab that has not been asked what it is yet (追加要件 2026-09-07).
+///
+/// **The `＋` makes the tab and the tab asks the question.** It used to be the
+/// other way round — a menu of three answers, and only then somewhere to look
+/// at the answer — which meant deciding before there was anywhere to decide in.
+/// What opens now is a page with three words on it; the writer may also simply
+/// click a file in the tree, and it fills this tab (`yields_to`).
+///
+/// The document it carries is already the one 要件 8.4 would have given it,
+/// number and all, so `New File` is nothing but putting the flag down.
 fn new_tab(window: &AppWindow, live: &Live, id: PaneId) {
+    open_tab(window, live, id, true);
+}
+
+/// A new empty document (要件 8.4).
+fn new_file_tab(window: &AppWindow, live: &Live, id: PaneId) {
+    open_tab(window, live, id, false);
+}
+
+fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
     sync_active_tab(window, live);
     let number = {
         let tabs = live.tabs.borrow();
@@ -6366,9 +6549,66 @@ fn new_tab(window: &AppWindow, live: &Live, id: PaneId) {
             preview: id.shows_preview(window),
             ..TabView::default()
         },
+        empty,
         ..PaneTab::showing(window, id, document)
     };
     add_tab(window, live, id, tab);
+}
+
+/// The writer answered the New Tab (追加要件 2026-09-07).
+///
+/// **The tab stays where it is.** Nothing is made and nothing is added: with no
+/// shell it is only the page coming down, because the untitled document was
+/// under it all along; with one, the shell moves in beside that document
+/// exactly as it would in a tab of its own.
+///
+/// A tab that has already been answered is left alone, so a writer typing into
+/// a file cannot turn it into something else.
+fn answer_new_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Option<TerminalShell>) {
+    let asking = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.empty);
+    if !asking {
+        return;
+    }
+    // **Started before the strip is touched**: a shell that cannot start leaves
+    // the tab asking rather than half answered.
+    let session = match shell {
+        Some(shell) => {
+            let started = start_shell(window, live, id, shell, id.shown_height(window));
+            let Some(started) = started else {
+                return;
+            };
+            Some(Rc::new(RefCell::new(started)))
+        }
+        None => None,
+    };
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(id);
+        let active = strip.active;
+        let Some(tab) = strip.tabs.get_mut(active) else {
+            return;
+        };
+        tab.empty = false;
+        if session.is_some() {
+            tab.terminal = session;
+            tab.view.vertical = false;
+            tab.view.preview = false;
+        }
+    }
+    let Some(showing) = live.tabs.borrow().of(id).current().cloned() else {
+        return;
+    };
+    live.cache
+        .borrow_mut()
+        .log_diag("tab", &format!("answered pane={}", id.log_name()));
+    live.show_tab(window, id, &showing);
+    note_navigation(live, id, &showing);
+    publish_tabs(window, live);
 }
 
 /// What is left of a 他のタブを閉じる or すべてのタブを閉じる (要件 6.3).
@@ -7062,9 +7302,13 @@ fn rename_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, typed: 
     write_session(window, live);
 }
 
-/// Put an empty document in a strip that has nothing left in it.
+/// Put a New Tab in a strip that has nothing left in it.
 ///
-/// The last pane always has a tab: one with nothing to show has nowhere to type.
+/// The last pane always has a tab: one with nothing to show has nowhere to
+/// type. **It comes back asking** (追加要件 2026-09-07) — the writer closed
+/// everything, and three words offering a file, a shell or a folder is a better
+/// answer to that than a 無題1 nobody asked for. The document under it is that
+/// 無題1 all the same, so the moment they type there is somewhere for it to go.
 /// The number is the smallest free one **across every pane**, because another
 /// strip may be holding 無題1 (要件 8.4).
 fn refill_strip(window: &AppWindow, live: &Live, id: PaneId) {
@@ -7078,7 +7322,10 @@ fn refill_strip(window: &AppWindow, live: &Live, id: PaneId) {
     let number = next_untitled_number(&taken);
     let empty = OpenDocument::untitled(number, window.as_weak());
     let strip = tabs.of_mut(id);
-    strip.tabs.push(PaneTab::showing(window, id, empty));
+    strip.tabs.push(PaneTab {
+        empty: true,
+        ..PaneTab::showing(window, id, empty)
+    });
     strip.active = 0;
 }
 
@@ -8049,8 +8296,19 @@ fn sheet_prefix(name: &str) -> (Option<usize>, &str) {
 }
 
 /// Every display setting as a name and a value (要件 9).
+/// 追加要件 2026-09-07: what a terminal opens as when nobody says otherwise.
+///
+/// **Not one of the sheets' settings** (要件 9 は書字方向ごと): a shell has no
+/// writing direction. It rides in the same file because that file is where what
+/// the editor is set to lives.
+const DEFAULT_SHELL_SETTING: &str = "terminal.default";
+
 fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     let mut values = Vec::new();
+    values.push((
+        DEFAULT_SHELL_SETTING.to_owned(),
+        window.get_default_shell().to_string(),
+    ));
     let palette = window.get_palette();
     let fonts = window.get_sheet_fonts();
     for sheet in 0..2 {
@@ -8081,12 +8339,23 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
 /// install has anyway. Numbers are held to the range their buttons hold them
 /// to, so a hand-edited file cannot set a body size nothing can read.
 fn apply_settings(
+    window: &AppWindow,
     numbers: &VecModel<i32>,
     palette: &VecModel<Color>,
     fonts: &VecModel<SharedString>,
     values: &[(String, String)],
 ) {
     for (written, value) in values {
+        // 追加要件 2026-09-07: the default shell, which belongs to neither
+        // sheet. **Held to the shells this build knows**, so a file naming a
+        // fourth one opens the first.
+        if written == DEFAULT_SHELL_SETTING {
+            if let Ok(shell) = value.parse::<i32>() {
+                let most = TerminalShell::ALL.len() as i32 - 1;
+                window.set_default_shell(shell.clamp(0, most));
+            }
+            continue;
+        }
         let (only, name) = sheet_prefix(written);
         // No prefix is a name from before the sheets, and it meant both.
         let sheets: &[usize] = match only {
@@ -9941,6 +10210,72 @@ fn refresh_terminal(
 /// **The default is WSL**, which is what the requirement says and what the
 /// writer works in. `wsl.exe` starts the distribution if it is not running, so
 /// there is nothing here to do about that.
+/// Put another shell in a terminal tab (追加要件 2026-09-07).
+///
+/// **The tab is not replaced, only what runs in it.** Its place in the strip,
+/// the strip along its foot and the draft in that strip are all the tab's and
+/// none of them is about which shell it was — so a writer who opened the wrong
+/// one holds the tab down and picks the right one, rather than closing it and
+/// starting again where it left off in the order.
+fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
+    // **Logged before anything can turn it down.** The gesture that opens the
+    // list is a long press and the list is drawn by the window, so when nothing
+    // happens the first question is whether the answer ever arrived here
+    // ([[editor-diag-log-answers-it-works-questions]]).
+    live.cache.borrow_mut().log_diag(
+        "tab",
+        &format!("shell asked pane={} {shell:?}", id.log_name()),
+    );
+    let running = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.terminal.is_some());
+    if !running {
+        return;
+    }
+    let Some(session) = start_shell(window, live, id, shell, id.shown_height(window)) else {
+        return;
+    };
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(id);
+        let active = strip.active;
+        let Some(tab) = strip.tabs.get_mut(active) else {
+            return;
+        };
+        // **The old one goes when the last hand lets go of it**, which is here:
+        // the pane's copy is put down below by `show_tab`.
+        tab.terminal = Some(Rc::new(RefCell::new(session)));
+    }
+    let Some(showing) = live.tabs.borrow().of(id).current().cloned() else {
+        return;
+    };
+    live.cache
+        .borrow_mut()
+        .log_diag("tab", &format!("shell pane={} to={shell:?}", id.log_name()));
+    live.show_tab(window, id, &showing);
+    publish_tabs(window, live);
+}
+
+fn open_terminal(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
+    // 追加要件 2026-09-07: **まだ何でもないタブは、それになる。**新しいタブを
+    // 増やさないのは、そのタブが「何になるか」を訊いている最中だからで、
+    // どのメニューから頼まれたかは関係がない。
+    let asking = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.empty);
+    if asking {
+        answer_new_tab(window, live, id, Some(shell));
+    } else {
+        new_terminal_tab(window, live, id, shell);
+    }
+}
+
 fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
     sync_active_tab(window, live);
     let number = {
@@ -10393,7 +10728,11 @@ fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
 /// writing, not for a distribution.
 fn open_below_shell(window: &AppWindow, live: &Live, id: PaneId) -> bool {
     let height = live.cache.borrow_mut().pane(id).below_height;
-    let Some(session) = start_shell(window, live, id, TerminalShell::Wsl, height) else {
+    // 追加要件 2026-09-07: **the writer's default**, not WSL because WSL was
+    // first. The strip has no room to ask and no name to show, so the one thing
+    // it can be right about is being the same shell as everything else.
+    let shell = TerminalShell::at(window.get_default_shell());
+    let Some(session) = start_shell(window, live, id, shell, height) else {
         return false;
     };
     live.cache.borrow_mut().pane(id).below = Some(TerminalView::new(session));

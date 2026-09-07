@@ -257,11 +257,14 @@ export component QuickDraft inherits Window {
                             padding: 6px;
                             spacing: 1px;
 
+                            // **頼んでから閉じる**（2026-09-07）。repeaterの中の
+                            // 行は、`close`が木ごと捨てるので後ろの一行が届か
+                            // ない——タブの一覧が同じ理由で先に直っている。
                             for kept[index] in root.history: MenuRow {
                                 title: kept;
                                 activated => {
-                                    history-menu.close();
                                     root.history-picked(index);
+                                    history-menu.close();
                                 }
                             }
                         }

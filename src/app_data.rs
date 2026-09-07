@@ -107,6 +107,12 @@ pub struct SessionTab {
     /// started when the tab comes to the front.
     pub below: bool,
     pub below_height: i32,
+    /// 追加要件 2026-09-07: whether this tab was still asking what it is.
+    ///
+    /// **Written only when it was**, so a session from a build without this
+    /// reads back exactly as it did — and a tab that had become something is
+    /// restored as that thing rather than as the question it started as.
+    pub empty: bool,
 }
 
 /// One pane's strip, as the session remembers it.
@@ -230,6 +236,9 @@ pub fn encode_session(session: &Session) -> String {
             if let Some(top) = tab.top {
                 out.push_str(&format!("top: {top}\n"));
             }
+            if tab.empty {
+                out.push_str("empty: 1\n");
+            }
             if tab.below || tab.below_height > 0 {
                 out.push_str(&format!(
                     "below: {} {}\n",
@@ -316,6 +325,10 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "anchor" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.anchor = value.parse().ok();
+            }
+            "empty" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                tab.empty = value == "1";
             }
             "below" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;

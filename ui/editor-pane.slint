@@ -1,6 +1,6 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
-import { Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, Tab, TextButton } from "controls.slint";
+import { Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Tab, TextButton } from "controls.slint";
 
 // One editing pane.
 //
@@ -40,6 +40,9 @@ export struct TabInfo {
     // (追加要件 2026-09-06). Renaming selects that much, so that typing
     // replaces the name and leaves the extension.
     stem-length: int,
+    // 追加要件 2026-09-07: whether this tab is a shell. **Holding it down
+    // offers another one** — the press a document tab spends on its name.
+    terminal: bool,
     // 書き手の報告 2026-09-07: whether this tab is only being looked through,
     // and so is the one the next file clicked in the left panel would take the
     // place of. **Drawn in italics**, the way a book sets a word it is only
@@ -130,6 +133,10 @@ export struct PaneScreen {
     // **The pane draws the same way either way** — one image and no caret of
     // its own — so this changes nothing here but what the keyboard does.
     terminal: bool,
+    // Whether the tab in front of this pane has not been asked what it is yet
+    // (追加要件 2026-09-07). The document behind the page is real and empty;
+    // what stands over it is three words.
+    empty: bool,
     // 追加要件 Terminal: what stands along the foot of this pane. 0 nothing,
     // 1 a shell under a document, 2 a draft under a shell. **A number rather
     // than two flags**: the two can never both be there, because which one it
@@ -271,6 +278,20 @@ export component EditorPane inherits Rectangle {
     /// input rather than deleting a character. Sorting that out per key here
     /// would be the editor deciding what a shell means.
     in property <bool> terminal: false;
+    in property <bool> empty: false;
+    /// 追加要件 2026-09-07: New Tab の三つの言葉。
+    ///
+    /// **接続先は New Tab の中でも選べる**（書き手の指摘 2026-09-07）——
+    /// ここでWSL固定にすると、PowerShellを選ぶ道が☰しか無くなり、
+    /// しかもそちらは新しいタブを開いてしまう。並びは窓が持っているもの
+    /// （先頭が既定）をそのまま出す。
+    in property <[string]> terminal-shells;
+    /// 追加要件 2026-09-07: 既定の接続先。**訊かない道はこれを起こす**。
+    in property <int> default-shell;
+    callback new-file-requested();
+    callback new-terminal-requested(int);
+    /// 前に出ている端末のタブの接続先を替える（追加要件 2026-09-07）。
+    callback tab-shell-chosen(int);
     /// 追加要件 Terminal: the strip along the foot of the pane. 0 nothing, 1 a
     /// shell under a document, 2 a draft under a shell.
     in property <int> below-kind: 0;
@@ -494,6 +515,17 @@ export component EditorPane inherits Rectangle {
     property <int> tab-menu-target: -1;
     property <length> tab-menu-x;
     property <length> tab-menu-y;
+
+    // 書き手の報告 2026-09-07（3回目）: **タブのメニューは、渡された座標を
+    // 何にも変換せずに置く。**渡ってくるのは帯（`strip`）の中の座標で、帯は
+    // ペインの左上に立っているから、ペインの座標でもある。ずれていたのは
+    // 窓の座標へ直してから`absolute-position`で戻していたためで、
+    // 変換が2つあれば片方が古いだけで離れる。横に流れているぶんだけは足す。
+    function open-tab-menu(at-x: length, at-y: length) {
+        root.tab-menu-x = at-x + tabs-view.viewport-x;
+        root.tab-menu-y = at-y;
+        tab-menu.show();
+    }
     /// Bumped for the tab that should start renaming (see `Tab::rename-asked`).
     property <int> rename-token;
     /// 追加要件 2026-09-06: close every tab nothing is waiting to be saved from.
@@ -503,7 +535,6 @@ export component EditorPane inherits Rectangle {
     /// Open a file, asked for from the strip's own menu.
     callback open-file-requested();
     /// A new shell in this pane, asked for from the strip's own menu.
-    callback terminal-requested();
     /// Where the strip's own menu opens (the band beside the tabs).
     property <length> strip-menu-x;
     property <length> strip-menu-y;
@@ -671,20 +702,29 @@ export component EditorPane inherits Rectangle {
                             ? 0
                             : (root.carried-from > index ? -1 : 1);
                         renamable: tab.renamable;
+                        switchable: tab.terminal || (index == root.active-tab && root.terminal);
                         stem-length: tab.stem-length;
                         chosen => {
                             root.tab-selected(index);
                         }
                         rename-asked: root.tab-menu-target == index ? root.rename-token : 0;
+                        // 追加要件 2026-09-07: **押し続けると、右ボタンと同じ
+                        // メニューが同じところに出る。**接続先の行はその中に
+                        // ある（書き手の指摘——出るなら右クリックと同じ位置が
+                        // よい）。文書のタブでは同じ press が名前の書き換えに
+                        // なる（そちらは`renamable`）。
+                        shell-asked(x, y) => {
+                            root.tab-selected(index);
+                            root.tab-menu-target = index;
+                            root.open-tab-menu(x, y);
+                        }
                         menu-asked(x, y) => {
                             // **Chosen first.** Every row below acts on the tab
                             // in front, so the tab under the pointer has to be
                             // that one before the menu is up.
                             root.tab-selected(index);
                             root.tab-menu-target = index;
-                            root.tab-menu-x = x - root.absolute-position.x;
-                            root.tab-menu-y = y - root.absolute-position.y;
-                            tab-menu.show();
+                            root.open-tab-menu(x, y);
                         }
                         renamed(name) => {
                             root.tab-renamed(index, name);
@@ -788,54 +828,16 @@ export component EditorPane inherits Rectangle {
                 HorizontalLayout {
                     spacing: 2px;
 
-                    // 追加要件 2026-09-06: **the `+` asks what kind.** A tab is
-                    // three things now — a file, a shell, or one already on
-                    // disk — and a button that could only make one of them
-                    // would be a button that has to be explained.
+                    // 追加要件 2026-09-07: **the `+` makes the tab, and the tab asks.**
+                    // It used to ask first — a menu of three answers before there was
+                    // anywhere to see the answer in. What it opens now is a New Tab
+                    // with those three words standing in the middle of it, and a
+                    // writer who wanted none of them can click a file in the tree.
                     IconButton {
                         icon: Icons.plus;
                         tip: "New Tab";
                         clicked => {
-                            root.menu-opened();
-                            plus-menu.show();
-                        }
-                    }
-                    plus-menu := PopupWindow {
-                        x: -180px;
-                        y: 26px;
-                        width: 220px;
-                        close-policy: close-on-click-outside;
-
-                        MenuFrame {
-                            width: 220px;
-
-                            VerticalLayout {
-                                padding: 6px;
-                                spacing: 1px;
-
-                                MenuRow {
-                                    title: "New File";
-                                    activated => {
-                                        plus-menu.close();
-                                        root.new-tab-requested();
-                                    }
-                                }
-                                MenuRow {
-                                    title: "New Terminal";
-                                    activated => {
-                                        plus-menu.close();
-                                        root.terminal-requested();
-                                    }
-                                }
-                                MenuRow {
-                                    title: "Open File…";
-                                    shortcut: "Ctrl+O";
-                                    activated => {
-                                        plus-menu.close();
-                                        root.open-file-requested();
-                                    }
-                                }
-                            }
+                            root.new-tab-requested();
                         }
                     }
 
@@ -1433,7 +1435,9 @@ export component EditorPane inherits Rectangle {
                         // The caret lies across the writing direction: a bar down
                         // the line in horizontal text, a bar across the column in
                         // vertical text.
-                        if root.caret-visible: Rectangle {
+                        // **何でもないタブには文字を置く場所が無い**ので、
+                        // 点滅する棒も出さない（追加要件 2026-09-07）。
+                        if root.caret-visible && !root.empty: Rectangle {
                             x: root.caret-x * 1px;
                             y: root.caret-y * 1px;
                             width: root.vertical ? max(root.caret-width * 1px, 1px) : 2px;
@@ -2059,6 +2063,65 @@ export component EditorPane inherits Rectangle {
                         }
                     }
                 }
+
+                // 追加要件 2026-09-07: **まだ何でもないタブの面。**中央に三つの
+                // 言葉が立っているだけで、そのどれもがこのタブをそれに変える。
+                // 文書は下にちゃんとあり（空の無題）、Explorerでファイルを選んでも
+                // 開いた先はこのタブになる。
+                //
+                // スクロール面の中に置くのは、そこが「本文の場所」だから
+                // ——中身が空なので視野と viewport は同じ大きさで、動かない。
+                if root.empty: Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: scroll.visible-width;
+                    height: scroll.visible-height;
+                    background: root.page-background;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        HorizontalLayout {
+                            alignment: center;
+
+                            VerticalLayout {
+                                width: 260px;
+                                spacing: 2px;
+
+                                LinkRow {
+                                    title: "New File";
+                                    clicked => {
+                                        root.new-file-requested();
+                                    }
+                                }
+                                LinkRow {
+                                    title: "New Terminal";
+                                    hint: root.terminal-shells[root.default-shell];
+                                    clicked => {
+                                        root.new-terminal-requested(root.default-shell);
+                                    }
+                                }
+                                LinkRow {
+                                    title: "Open File…";
+                                    hint: "Ctrl+O";
+                                    clicked => {
+                                        root.open-file-requested();
+                                    }
+                                }
+
+                                // **四つ目の道は言葉で言う。**左のExplorerで
+                                // ファイルを選べばこのタブが開き先になる、という
+                                // のは押せる行ではないが、知らなければ使えない。
+                                Text {
+                                    text: "or pick a file in the Explorer";
+                                    color: Tok.ink-faint;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // 追加要件 Terminal: **the strip along the foot of the pane.** A
@@ -2477,39 +2540,83 @@ export component EditorPane inherits Rectangle {
                         root.close-clean-tabs();
                     }
                 }
-                MenuSep { }
-                MenuRow {
-                    title: "Rename";
-                    activated => {
-                        // **The count is bumped after the menu is closed**, so
-                        // the field that appears takes the keyboard from a menu
-                        // that has already let go of it.
-                        tab-menu.close();
-                        root.rename-token += 1;
+                // 追加要件 2026-09-07: **端末のタブにはもう一群ある。**長押しでも
+                // 出るが、そちらは押し続ける手つきに慣れが要る——右ボタンは
+                // この窓のどのメニューとも同じに開く。
+                //
+                // `if`の中に`for`を置くのは書ける（逆は書けない——`for`の本体に
+                // `if`は置けない、ペイン分割設計2b）。
+                // **`root.terminal`で訊く。**このメニューが効くのは前に出ている
+                // タブで、`terminal`はまさに「前に出ているタブはシェルか」を
+                // 言う旗である（`Terminal Below`の行がずっとこれで文言を変えて
+                // いる）。一覧の行から数え直すより、窓が直に置いたものを読む。
+                if root.terminal: VerticalLayout {
+                    spacing: 1px;
+
+                    MenuSep { }
+
+                    for shell[index] in root.terminal-shells: MenuRow {
+                        title: "Switch to " + shell;
+                        // **頼んでから閉じる。**`close`はこのメニューの木を捨てる
+                        // ——そこにはこの行自身と、行を包む`for`と`if`が入っている。
+                        // 捨てられた木の中から`root`へ登ろうとすると、生成された
+                        // コードは`parent.upgrade()`に失敗して**黙って何もしない**
+                        // （書き手の報告 2026-09-07：切り替えが動かない。ログには
+                        // 届いた形跡が1行も無かった）。浅い行が同じ書き方で
+                        // 動いていたのは、登る段数が少ないからにすぎない。
+                        activated => {
+                            root.tab-shell-chosen(index);
+                            tab-menu.close();
+                        }
                     }
                 }
-                MenuRow {
-                    title: "Copy Path";
-                    activated => {
-                        tab-menu.close();
-                        root.copy-path-requested(root.tab-menu-target);
+
+                // 追加要件 2026-09-07: **シェルには名前も道も無く、保存する
+                // ものも無い**（書き手の指摘）。文書のタブだけが持つ4行は、
+                // 端末のタブでは出さない——押せる行が何もしないより、
+                // 無いほうがよい。
+                if !root.terminal: VerticalLayout {
+                    spacing: 1px;
+
+                    MenuSep { }
+
+                    MenuRow {
+                        title: "Rename";
+                        activated => {
+                            // **The count is bumped after the menu is closed**,
+                            // so the field that appears takes the keyboard from
+                            // a menu that has already let go of it. 頼むほうを
+                            // 先に書けないのはこの1行だけで、`rename-token`は
+                            // 木を降りずに読める`root`の値だから届く。
+                            root.rename-token += 1;
+                            tab-menu.close();
+                        }
                     }
-                }
-                MenuSep { }
-                MenuRow {
-                    title: "Save";
-                    shortcut: "Ctrl+S";
-                    activated => {
-                        tab-menu.close();
-                        root.save-requested();
+                    MenuRow {
+                        title: "Copy Path";
+                        activated => {
+                            root.copy-path-requested(root.tab-menu-target);
+                            tab-menu.close();
+                        }
                     }
-                }
-                MenuRow {
-                    title: "Save As…";
-                    shortcut: "Ctrl+Shift+S";
-                    activated => {
-                        tab-menu.close();
-                        root.save-as-requested();
+
+                    MenuSep { }
+
+                    MenuRow {
+                        title: "Save";
+                        shortcut: "Ctrl+S";
+                        activated => {
+                            root.save-requested();
+                            tab-menu.close();
+                        }
+                    }
+                    MenuRow {
+                        title: "Save As…";
+                        shortcut: "Ctrl+Shift+S";
+                        activated => {
+                            root.save-as-requested();
+                            tab-menu.close();
+                        }
                     }
                 }
             }
@@ -2532,8 +2639,18 @@ export component EditorPane inherits Rectangle {
                 padding: 6px;
                 spacing: 1px;
 
+                // 追加要件 2026-09-07: **ここは答えを直に選ぶ場所**なので、
+                // New Tab を作って訊き直したりはしない。前に出ているタブが
+                // まだ何でもないなら、そのタブがそれになる。
                 MenuRow {
                     title: "New File";
+                    activated => {
+                        strip-menu.close();
+                        root.new-file-requested();
+                    }
+                }
+                MenuRow {
+                    title: "New Tab";
                     activated => {
                         strip-menu.close();
                         root.new-tab-requested();
@@ -2541,11 +2658,13 @@ export component EditorPane inherits Rectangle {
                 }
                 MenuRow {
                     title: "New Terminal";
+                    shortcut: root.terminal-shells[root.default-shell];
                     activated => {
                         strip-menu.close();
-                        root.terminal-requested();
+                        root.new-terminal-requested(root.default-shell);
                     }
                 }
+
                 MenuRow {
                     title: "Open File…";
                     shortcut: "Ctrl+O";
