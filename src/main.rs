@@ -7825,10 +7825,10 @@ enum Setting {
     Heading(usize),
     /// Whether the page carries its line numbers (要件 9、2026-09-07追加).
     ///
-    /// **On the sheet, like every other thing about how the page is set.** It
-    /// is offered on the horizontal sheet alone: the numbers stand in the
-    /// margin at the head of each line, which in vertical writing is the top
-    /// edge of the pane — a different drawing, and one nobody has asked for.
+    /// **On the sheet, like every other thing about how the page is set**, and
+    /// on both of them: the numbers stand in the margin at the head of each
+    /// line, which is the left edge of a horizontal page and the top of a
+    /// vertical one. Upright either way.
     LineNumbers,
 }
 

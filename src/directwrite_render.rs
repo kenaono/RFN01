@@ -54,12 +54,13 @@ use windows::{
                 DWRITE_INLINE_OBJECT_METRICS, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING,
                 DWRITE_LINE_SPACING_METHOD_PROPORTIONAL, DWRITE_MEASURING_MODE_NATURAL,
                 DWRITE_OVERHANG_METRICS, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_READING_DIRECTION_TOP_TO_BOTTOM,
-                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-                DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
-                DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
-                IDWriteInlineObject_Impl, IDWriteLocalizedStrings, IDWriteTextFormat,
-                IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTextRenderer,
+                DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
+                DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_ALIGNMENT_CENTER,
+                DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS,
+                DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+                IDWriteInlineObject, IDWriteInlineObject_Impl, IDWriteLocalizedStrings,
+                IDWriteTextFormat, IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1,
+                IDWriteTextRenderer,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Imaging::{
@@ -350,7 +351,7 @@ struct Graphics {
     /// The line numbers' format (要件 9、2026-09-07追加), keyed by size and
     /// family. **Its own map**: it is set to the trailing edge of its box, and
     /// an alignment set on a format shared with the body would move the body.
-    number_formats: HashMap<(u32, String), IDWriteTextFormat>,
+    number_formats: HashMap<(u32, String, WritingMode), IDWriteTextFormat>,
     /// The terminal's formats (追加要件 Terminal), keyed by size, family and
     /// weight. **Kept apart from the document's**: a terminal's format has no
     /// writing mode to speak of and no line spacing — a cell grid decides its
@@ -403,14 +404,18 @@ impl Graphics {
     /// they are wide, and the family the writer chose for code is the one they
     /// already picked for exactly that. Always horizontal: the numbers are
     /// drawn beside horizontal text and nowhere else.
-    fn number_format(&mut self, typography: &Typography) -> Result<IDWriteTextFormat> {
-        let size = number_size(typography.font_size);
+    fn number_format(
+        &mut self,
+        typography: &Typography,
+        size: f32,
+        mode: WritingMode,
+    ) -> Result<IDWriteTextFormat> {
         let family = if typography.code_font.is_empty() {
             DEFAULT_CODE_FONT.to_owned()
         } else {
             typography.code_font.clone()
         };
-        let key = (size.to_bits(), family);
+        let key = (size.to_bits(), family, mode);
         if let Some(format) = self.number_formats.get(&key) {
             return Ok(format.clone());
         }
@@ -427,10 +432,26 @@ impl Graphics {
                 w!("ja-JP"),
             )?
         };
+        // **Never told the writing mode.** The digits stand upright in both:
+        // in vertical writing they sit over the head of a column, and a number
+        // turned on its side there is not a number anybody reads.
+        //
+        // What does change is where in its box the number sits — against the
+        // rule and centred on the line, which is a different pair of axes in
+        // each mode.
+        //
         // SAFETY: the format is alive here and for as long as the cache holds it.
         unsafe {
-            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
-            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            match mode {
+                WritingMode::Horizontal => {
+                    format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
+                    format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                }
+                WritingMode::Vertical => {
+                    format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                    format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_FAR)?;
+                }
+            }
         }
         self.number_formats.insert(key, format.clone());
         Ok(format)
@@ -2121,6 +2142,8 @@ struct TileTask {
     typography: Arc<Typography>,
     mode: WritingMode,
     margin: f32,
+    /// The line numbers' column, when there is one (要件 9).
+    numbers: Option<NumberColumn>,
     line_extent: u32,
     /// The box the block is set in on the line axis, its own indent taken off
     /// (要件 7.3.2). The layout has to be rebuilt in it or the block is drawn at
@@ -2224,9 +2247,16 @@ fn draw_tile(
     // 要件 9（2026-09-07追加）: the numbers, in the margin they widened.
     // **Before the text and its ornaments**, like every other thing this tile
     // puts under the words.
-    if typography.line_numbers && mode == WritingMode::Horizontal {
-        let format = graphics.number_format(typography)?;
-        draw_line_numbers(&target, &comment_brush, &format, task, block_origin);
+    if let Some(numbers) = task.numbers {
+        let format = graphics.number_format(typography, numbers.size, mode)?;
+        draw_line_numbers(
+            &target,
+            &comment_brush,
+            &format,
+            task,
+            numbers,
+            block_origin,
+        );
     }
     // 要件 7.3.2: **a table is drawn cell by cell.** It is not one layout, so
     // none of what follows applies to it: no block-wide text, no boxes, no
@@ -2401,36 +2431,45 @@ fn draw_line_numbers(
     brush: &ID2D1SolidColorBrush,
     format: &IDWriteTextFormat,
     task: &TileTask,
+    numbers: NumberColumn,
     block_origin: f32,
 ) {
+    let mode = task.mode;
+    // Where the tile's own near edge sits on the line axis, so that every line
+    // coordinate below is measured from the tile rather than from the page.
     let cross = task.span.cross_start as f32;
-    let air = number_size(task.typography.font_size) * 0.5;
-    let right = task.margin - air - cross;
-    if right <= -cross {
-        return;
-    }
+    let air = numbers.size * 0.5;
+    // **The column stands at the edge of the pane, not against the text**
+    // (書き手の報告 2026-09-07): the numbers were set beside the first
+    // character, where they read as part of the sentence. What separates them
+    // from it is the rule and the whole of the page margin after it.
+    let column = (0.0 - cross, numbers.gutter - air - cross);
     let tile_flow = task.span.flow_size as f32;
+    // The rule along the near edge of the page. **Drawn across the whole tile**
+    // rather than line by line: the tiles of a pane meet, so a stroke that
+    // reaches each end of one reaches the next and the rule comes out unbroken.
+    let stroke = rule_stroke(task.typography.font_size);
+    let at = numbers.gutter - cross;
+    let rule = axis_rect(mode, (0.0, tile_flow), (at, at + stroke));
+    // SAFETY: the brush and the target both outlive the call, and the
+    // rectangle is read before it returns.
+    unsafe { target.FillRectangle(&rule, brush) };
     let opened = opened_lines(
         task.first_line,
         task.block.lines.iter().map(|line| line.newline_len),
     );
     for (line, number) in task.block.lines.iter().zip(opened) {
         let flow = block_origin + line.flow_start;
-        // **Only what this tile holds.** A block taller than a tile is drawn in
-        // several of them, and each one draws the numbers of its own rows.
         let Some(number) = number else {
             continue;
         };
+        // **Only what this tile holds.** A block longer than a tile is drawn in
+        // several of them, and each draws the numbers of its own lines.
         if flow + line.flow_size <= 0.0 || flow >= tile_flow {
             continue;
         }
         let text = number.to_string().encode_utf16().collect::<Vec<u16>>();
-        let rect = D2D_RECT_F {
-            left: -cross,
-            top: flow,
-            right,
-            bottom: flow + line.flow_size,
-        };
+        let rect = axis_rect(mode, (flow, flow + line.flow_size), column);
         // SAFETY: the buffer, the format and the brush all outlive the call,
         // and the rectangle is read before it returns.
         unsafe {
@@ -2443,6 +2482,22 @@ fn draw_line_numbers(
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         }
+    }
+}
+
+/// A rectangle named on the flow and line axes, in whichever screen axes this
+/// mode puts them.
+///
+/// **The same turn `OrnamentPage::rect` makes**, without the page: what is
+/// drawn here is measured from the tile, not from the block inside it.
+fn axis_rect(mode: WritingMode, flow: (f32, f32), line: (f32, f32)) -> D2D_RECT_F {
+    let (left, top) = mode.to_screen(flow.0, line.0);
+    let (right, bottom) = mode.to_screen(flow.1, line.1);
+    D2D_RECT_F {
+        left,
+        top,
+        right,
+        bottom,
     }
 }
 
@@ -2713,6 +2768,14 @@ pub struct TextEngine {
     page_extent: u32,
     typography: Typography,
     margin: f32,
+    /// The line numbers' column, when the writer asked for one (要件 9、
+    /// 2026-09-07追加).
+    ///
+    /// **Part of the margin, not beside it.** The page is set in from both
+    /// edges by the same number wherever it is asked for, and this says how
+    /// much of the near one belongs to the numbers — which is all the drawing
+    /// needs to put them at the edge of the pane rather than against the text.
+    numbers: Option<NumberColumn>,
     plan: BlockLayoutPlan,
     /// Measurements keyed by block text. Unchanged blocks survive every edit.
     measures: HashMap<u64, MeasuredBlock>,
@@ -2875,26 +2938,57 @@ fn margin_for(font_size: f32) -> f32 {
 /// at 100, 1000 and 10000 — three times in a document's life — and that costs a
 /// full relayout, because the line box every block was measured in is the page
 /// less this.
-fn gutter_for(typography: &Typography, text: &str) -> f32 {
+fn number_column(typography: &Typography, mode: WritingMode, text: &str) -> Option<NumberColumn> {
     if !typography.line_numbers {
-        return 0.0;
+        return None;
     }
     let lines = text.matches('\n').count() + 1;
     // Two digits at least: a document of nine lines still wants its numbers to
     // sit under one another rather than against the text.
     let digits = lines.to_string().len().max(2) as f32;
-    let size = number_size(typography.font_size);
-    // 0.62em a digit is the widest a monospace digit runs to; the half after it
-    // is the air between the number and the first character of the line.
-    (digits * size * 0.62 + size * 0.5).round()
+    let column = match mode {
+        // **Across the head of each line**, so the room it needs is the width
+        // of the widest number. 0.62em a digit is the widest a monospace digit
+        // runs to, and the character after it is the air either side of the
+        // column: the page's edge on one side, the rule on the other.
+        WritingMode::Horizontal => {
+            let size = (typography.font_size * 0.72).max(9.0);
+            NumberColumn {
+                size,
+                gutter: (digits * size * 0.62 + size).round(),
+            }
+        }
+        // **Above the head of each column, upright** (書き手の報告 2026-09-07).
+        // The room it needs is one line of digits deep — but the digits run
+        // *across* a column here, so a number wider than the column would reach
+        // over the one beside it. That is what makes the size shrink as the
+        // document grows: a four-figure number is set smaller so that it still
+        // belongs to one column.
+        WritingMode::Vertical => {
+            let across = typography.font_size * typography.line_spacing.max(0.1);
+            let size = (typography.font_size * 0.5)
+                .min(across / (digits * 0.62))
+                .max(7.0);
+            NumberColumn {
+                size,
+                gutter: (size * 1.6).round(),
+            }
+        }
+    };
+    Some(column)
 }
 
-/// How large the numbers themselves are set.
-///
-/// **Smaller than the text, and never too small to read**: they are a
-/// reference, not part of the sentence.
-fn number_size(font_size: f32) -> f32 {
-    (font_size * 0.72).max(9.0)
+/// The line numbers' own column: how large they are set, and how much of the
+/// margin they take (要件 9、2026-09-07追加).
+#[derive(Clone, Copy, Debug)]
+struct NumberColumn {
+    /// **Smaller than the text, and never too small to read**: they are a
+    /// reference, not part of the sentence.
+    size: f32,
+    /// Across the line axis — the width of the column in horizontal writing,
+    /// its depth in vertical writing. Either way it is what the page margin
+    /// grew by.
+    gutter: f32,
 }
 
 /// How far one block's text is set in from the page margin (要件 7.3.2).
@@ -3034,7 +3128,8 @@ impl TextEngine {
         // centred and — far more to the point — keeps every one of the forty
         // places that turn a line coordinate into a screen one reading a single
         // number, exactly as it did before.
-        let margin = margin_for(typography.font_size) + gutter_for(&typography, text);
+        let numbers = number_column(&typography, mode, text);
+        let margin = margin_for(typography.font_size) + numbers.map_or(0.0, |column| column.gutter);
         let line_box = fit.line_box(margin, 0.0);
         // The split is charged in line space, so it needs the geometry: the same
         // pane at a different line extent wraps differently and cuts elsewhere.
@@ -3312,6 +3407,7 @@ impl TextEngine {
         self.source_line = styled.source_line;
         self.block_lines = block_lines;
         self.fit = fit;
+        self.numbers = numbers;
         // 要件 9: how wide the page came out. A wrapped line makes it the extent
         // it was given; a free one makes it the longest line the document holds,
         // each block's own indent counted with it and the margins around the
@@ -3792,6 +3888,7 @@ impl TextEngine {
                     typography: spec.clone(),
                     mode: self.mode,
                     margin: self.margin,
+                    numbers: self.numbers,
                     line_extent: self.line_extent(),
                     surface_size,
                     surface_cross,
@@ -5485,18 +5582,35 @@ mod tests {
     #[test]
     fn the_numbers_take_room_only_when_they_are_shown() {
         let plain = Typography::new(22.0);
-        assert_eq!(gutter_for(&plain, "one\ntwo\n"), 0.0);
+        let across = WritingMode::Horizontal;
+        assert!(number_column(&plain, across, "one\ntwo\n").is_none());
         let numbered = Typography {
             line_numbers: true,
             ..plain.clone()
         };
-        let two_digits = gutter_for(&numbered, "one\ntwo\n");
-        let four_digits = gutter_for(&numbered, &"x\n".repeat(1500));
+        let gutter = |mode, text: &str| {
+            number_column(&numbered, mode, text)
+                .expect("asked for")
+                .gutter
+        };
+        let two_digits = gutter(across, "one\ntwo\n");
+        let four_digits = gutter(across, &"x\n".repeat(1500));
         assert!(two_digits > 0.0);
         assert!(
             four_digits > two_digits,
-            "桁が増えれば溝も広がる: {two_digits} -> {four_digits}"
+            "横書きでは桁が増えれば溝も広がる: {two_digits} -> {four_digits}"
         );
+        // 縦書きの溝は数字の**深さ**なので、桁が増えても深くはならない
+        // ——代わりに字が小さくなって列の幅に収まる。
+        let down = WritingMode::Vertical;
+        assert!(gutter(down, &"x\n".repeat(1500)) <= gutter(down, "one\ntwo\n"));
+        let small = number_column(&numbered, down, &"x\n".repeat(1500))
+            .expect("asked for")
+            .size;
+        let large = number_column(&numbered, down, "one\ntwo\n")
+            .expect("asked for")
+            .size;
+        assert!(small < large, "桁が増えたら小さく組む: {large} -> {small}");
     }
 
     /// 要件 9（2026-09-07追加）: **番号が画素に届いている。**組版が知っていることと
@@ -5504,12 +5618,12 @@ mod tests {
     #[test]
     fn the_line_numbers_reach_the_pixels() {
         let source = "ひとつめの行\nふたつめの行\nみっつめの行\n";
-        let ink_in_margin = |line_numbers: bool| -> u32 {
+        let ink_in_margin = |mode: WritingMode, line_numbers: bool| -> u32 {
             let spec = Typography {
                 line_numbers,
                 ..Typography::new(22.0)
             };
-            let mut engine = engine_set(WritingMode::Horizontal, StyledText::plain(source), &spec);
+            let mut engine = engine_set(mode, StyledText::plain(source), &spec);
             let margin = engine.margin;
             let tiles = engine.visible_tiles(
                 0.0,
@@ -5521,13 +5635,16 @@ mod tests {
             let mut drawn = DrawnTiles::default();
             engine
                 .render_tiles(&tiles, None, &mut drawn)
-                .expect("horizontal tile render");
+                .expect("tile render");
             let mut ink = 0;
-            for (span, width, _, bgra) in &drawn.tiles {
-                for row in bgra.chunks_exact(*width as usize * 4) {
+            for (span, width, height, bgra) in &drawn.tiles {
+                for (y, row) in bgra.chunks_exact(*width as usize * 4).enumerate() {
                     for (x, pixel) in row.chunks_exact(4).enumerate() {
-                        // **紙より暗い画素だけ**、しかも本文が始まる前まで。
-                        let at = span.cross_start as f32 + x as f32;
+                        // 行の軸のどちらが画面のどちらかは書字方向が決める。
+                        // **本文が始まる前だけを見る。**
+                        let (_, line) = mode.to_axes(x as f32, y as f32);
+                        let at = span.cross_start as f32 + line;
+                        let _ = height;
                         if at < margin - 4.0 && pixel[2] < 200 {
                             ink += 1;
                         }
@@ -5536,11 +5653,13 @@ mod tests {
             }
             ink
         };
-        assert_eq!(ink_in_margin(false), 0, "余白は余白のまま");
-        assert!(
-            ink_in_margin(true) > 20,
-            "番号が3つ、余白の中に立っているはず"
-        );
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            assert_eq!(ink_in_margin(mode, false), 0, "余白は余白のまま: {mode:?}");
+            assert!(
+                ink_in_margin(mode, true) > 20,
+                "番号が3つ、余白の中に立っているはず: {mode:?}"
+            );
+        }
     }
 
     /// 要件 7.3.2: **and those rules are drawn.** The same trap the rule under
