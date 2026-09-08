@@ -137,6 +137,11 @@ export struct PaneScreen {
     // (追加要件 2026-09-07). The document behind the page is real and empty;
     // what stands over it is three words.
     empty: bool,
+    /// 要件 7.9（2026-09-08）: この面の**単語チェックモード**の名前。
+    ///
+    /// **モードは文書ごと**（コードエディタの言語モードと同じ粒度）なので、
+    /// タブと一緒に動く。2つのペインが別の作品を開いていれば、別の色分けになる。
+    word-mode: string,
     // 追加要件 Terminal: what stands along the foot of this pane. 0 nothing,
     // 1 a shell under a document, 2 a draft under a shell. **A number rather
     // than two flags**: the two can never both be there, because which one it

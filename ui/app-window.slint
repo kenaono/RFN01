@@ -5,20 +5,18 @@ import { Tok } from "tokens.slint";
 import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
 import { QuickDraft } from "quick-draft.slint";
 
-/// 要件 7.9: 設定画面が出す単語セットの1行。
+/// 要件 7.9: 設定画面が出す語群の1行。
 ///
-/// **数は取り込んだ結果**である。取り込みのときに数えてあり（`WordMarks::build`）、
-/// 画面はそれを読むだけ——数え役は1つ。
-export struct WordSetRow {
+/// **数はモードを建てたときの結果**である（`WordMarks::build`）。画面はそれを
+/// 読むだけ——数え役は1つ。
+export struct WordGroupRow {
     name: string,
     words: int,
-    /// 色を付けられない語の数（他のセットと衝突）。**0でないことが目印**。
+    /// 色を付けられない語の数（同じモードの他の語群と衝突）。**0でないことが目印**。
     conflicts: int,
-    /// 同じセットの中で二度書かれた語の数。色は付くので、掃除の手がかり。
+    /// 同じ語群の中で二度書かれた語の数。色は付くので、掃除の手がかり。
     repeated: int,
-    source: string,
     shown: color,
-    muted: bool,
 }
 
 /// 重複ひとつぶんの言い分（要件 7.9）。
@@ -427,43 +425,47 @@ export component AppWindow inherits Window {
     /// 「設定ファイルへ書き戻すもの」で、書き戻す関数が持っているのは窓だけ
     /// だから、窓が持っている。要件 9 の数・色・書体と同じ置き方。
     in property <[string]> terminal-shell-lines;
-    /// 要件 7.9（2026-09-08）: 取り込んである単語セット。**語は編集器の表の中**に
-    /// あり、設定ファイルにも編集器の外のファイルにも依っていない（書き手の指摘：
-    /// IMEの辞書と同じ）。
-    in property <[WordSetRow]> word-set-rows;
+    /// 要件 7.9（2026-09-08）: **単語チェックモード**（書き手の指摘：ソースの
+    /// 予約語の色分けと同じ考え）。**モードが語群を持ち、語群が色を持つ。**
+    ///
+    /// 選べるモードの名前。**先頭は「なし」**——色分けを止めるのにモードを
+    /// 消す必要は無い（コードエディタの`Plain Text`にあたる）。
+    in property <[string]> word-mode-names;
+    /// 前に出ている文書のモード。**ステータスバーに出る**（要件 10）。
+    in property <string> word-mode;
+    /// この文書のモードを、この名前にする。
+    callback word-mode-chosen(string);
+    /// 設定画面が開いているモード（-1でどれも開いていない）。
+    in-out property <int> word-mode-opened-at: -1;
+    /// その中の語群。
+    in property <[WordGroupRow]> word-group-rows;
+    /// 語の一覧を開いている語群（-1で閉じている）。**開いているものだけ語を窓へ
+    /// 渡す**——数千語を毎回渡さないため。
+    in-out property <int> word-group-opened-at: -1;
+    in property <[string]> word-group-words;
+    /// どのモードへ語群を足すのか（名前を訊いているあいだ覚えておく場所）。
+    in-out property <int> word-group-wanted-in: -1;
     /// 取り込みで見つかった重複。**色を付けられなかったものが先**に並ぶ。
     in property <[WordTroubleRow]> word-troubles;
     /// 全部でいくつ見つかったか（一覧は`SHOWN_TROUBLES`までしか出さない）。
     in property <int> word-trouble-count;
     /// いま重複の一覧を開いているか。
     in-out property <bool> word-troubles-shown: false;
-    /// **語の一覧を開いているセット。**-1で閉じている。開いているものだけ語を
-    /// 窓へ渡す——数千語を毎回渡さないため。
-    in-out property <int> word-set-opened-at: -1;
-    /// そのセットの語。**アプリの中で見て、アプリの中で消せる**（要件 7.9）。
-    in property <[string]> word-set-words;
-    /// セットの名前だけ。**編集面の右ボタンが「どこへ足すか」を並べる**のに使う。
-    in property <[string]> word-set-names;
-    /// そのペインで選んでいる語を、何冊目のセットへ足すか。
+    /// 前に出ている文書のモードの語群の名前。**編集面の右ボタンが「どこへ足すか」を
+    /// 並べる**のに使う。
+    in property <[string]> word-group-names;
+    /// そのペインで選んでいる語を、何番目の語群へ足すか。
     callback pane-word-added(int, int);
-    /// 空のセットを1つ作る。**ファイルは要らない**——辞書は編集器が持つもの。
-    callback word-set-created();
-    /// ファイルを選んで取り込む（あってもよい道）。
-    callback word-set-added();
-    /// 1行1語で書き出す（控えと、他の道具との行き来のため）。
-    callback word-set-exported(int);
-    /// そのセットから語を1つ落とす。
+    /// その語群から語を1つ落とす。
     callback word-removed(int, string);
-    /// もう一度取り込む（取り込み元を読み直す）。
-    callback word-set-reimported(int);
-    /// 何番目のセットの色を選び直すか。
-    callback word-set-colour-picked(int);
-    /// 畳む／戻す。**消すのとは別**——校正の段によって使うセットが違う。
-    callback word-set-muted(int, bool);
-    callback word-set-removed(int);
-    /// そのファイルをこの編集器で開く。**語を足すのはそこでする**——
-    /// ただのテキストなので、専用の編集画面を作らない（要件 3：軽く）。
-    callback word-set-opened(int);
+    callback word-mode-created();
+    callback word-mode-removed(int);
+    callback word-group-created(int);
+    callback word-group-removed(int);
+    callback word-group-colour-picked(int);
+    /// 1行1語のファイルから足す／へ書き出す（**あってもよい道**）。
+    callback word-group-imported(int);
+    callback word-group-exported(int);
     /// 追加要件 2026-09-07: **どれが既定か。**接続先を訊かない場所——`＋`のNew Tab、
     /// タブ列のメニュー、ペインの下段——はすべてこれを起こす。設定にも残る。
     in-out property <int> default-shell: 0;
@@ -1987,7 +1989,7 @@ export component AppWindow inherits Window {
                         focus-moved(towards) => { root.pane-focus-moved(pane.id, towards); }
                         kill-requested(what) => { root.pane-kill(pane.id, what); }
                         // 要件 7.9（2026-09-08）: 選んだ語を単語帳へ。
-                        word-sets: root.word-set-names;
+                        word-sets: root.word-group-names;
                         has-selection: pane.selection-rects.length > 0;
                         word-add-requested(at) => {
                             root.pane-word-added(pane.id, at);
@@ -2134,6 +2136,65 @@ export component AppWindow inherits Window {
                 // The only thing in the row that grows.
                 Rectangle {
                     horizontal-stretch: 1;
+                }
+
+                // 要件 7.9（2026-09-08）: **単語チェックモード。**コードエディタが
+                // 言語モードを出しているのと同じ場所である——いまどのモードかが
+                // 常に見えていて、押せば切り替わる（書き手の指摘：構造として
+                // 「自分の単語チェックモード」があればよい）。
+                //
+                // **モードは文書ごと**なので、前に出ているタブのものが出る。
+                // 倍率の隣にあるのは、どちらも「いま書いているものについての
+                // 設定」だからである。
+                Rectangle {
+                    width: mode-text.preferred-width + 12px;
+                    horizontal-stretch: 0;
+                    background: mode-touch.has-hover ? Tok.chrome-raised : transparent;
+                    border-radius: 4px;
+
+                    mode-text := Text {
+                        x: 6px;
+                        y: (parent.height - self.height) / 2;
+                        text: root.word-mode == "" ? "なし" : root.word-mode;
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                    }
+
+                    mode-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            mode-menu.show();
+                        }
+                    }
+
+                    // **押した数の真上に出す**（倍率と同じ罠を踏まないため、
+                    // 押した釦と同じ箱の中に置く＝技術検証 6.30）。
+                    mode-menu := PopupWindow {
+                        x: 0px;
+                        y: -6px - min(root.word-mode-names.length, 12) * 30px;
+                        width: 200px;
+                        close-policy: close-on-click-outside;
+
+                        MenuFrame {
+                            width: 200px;
+
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 1px;
+
+                                // **頼んでから閉じる**（技術検証 6.24）。
+                                for name in root.word-mode-names: MenuRow {
+                                    title: name;
+                                    checked: name == root.word-mode
+                                        || (root.word-mode == "" && name == "なし");
+                                    activated => {
+                                        root.word-mode-chosen(name);
+                                        mode-menu.close();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // 要件 9: the zoom belongs to a pane now, so the bar shows
@@ -2603,238 +2664,280 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // 要件 7.9（2026-09-08）: **単語セット。**この編集器がいちばん力を
-                // 入れるところの、設定側。**ここに語は無い**——一覧はセットごとの
-                // ファイルに1行1語で入っていて、`Open`でこの編集器が開く。
-                // 語を足すのはそこでする（要件 3：軽く、専用の編集画面を作らない）。
+                // 要件 7.9（2026-09-08）: **単語チェックモード。**書き手の指摘の
+                // とおり、考え方はソースの予約語の色分けと同じ——C言語モードが
+                // 予約語・型・前処理をそれぞれの色で持つように、**モードが語群を
+                // 持ち、語群が色を持つ**。
+                //
+                // **どのモードを使うかはここで決めない。**それは文書ごとの話で、
+                // ステータスバーから選ぶ（要件 10）。ここは中身を作る場所である。
                 if root.settings-tab == 2: VerticalLayout {
                     spacing: 8px;
 
                     Text {
-                        text: "WORD SETS";
+                        text: "MODES";
                         color: Tok.ink-faint;
                         font-size: 10px;
                         letter-spacing: 0.9px;
                     }
 
-                    for row[index] in root.word-set-rows: HorizontalLayout {
+                    for mode[index] in root.word-mode-names: HorizontalLayout {
                         spacing: 6px;
 
-                        // 色見本。押すとWindowsの色ダイアログ（要件 9 と同じ道）。
-                        Rectangle {
-                            width: 24px;
-                            horizontal-stretch: 0;
-
-                            Rectangle {
-                                y: (parent.height - self.height) / 2;
-                                width: 24px;
-                                height: 20px;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
-                                background: row.shown;
-                                // **畳んだセットは色も畳む。**出ていない色を
-                                // そのまま見せると、効いているように読める。
-                                opacity: row.muted ? 0.3 : 1.0;
-
-                                swatch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.word-set-colour-picked(index);
-                                    }
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: row.name;
-                            color: row.muted ? Tok.ink-faint : Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-
-                        // **語数と、色を付けられなかった数。**0でない衝突の数は
-                        // 警告の色で出す——「取り込んだのに色が付かない」の答えが
-                        // ここにあることが、画面から分かるように。
-                        //
-                        // **押すと語の一覧が開く**（要件 7.9）：アプリの中で見て、
-                        // アプリの中で消せることが、辞書ファイルを書き手に管理
-                        // させないということである。
-                        TextButton {
-                            role: Role.quiet;
-                            title: row.conflicts > 0
-                                ? row.words + "語 / 重複" + row.conflicts
-                                : (row.repeated > 0
-                                    ? row.words + "語 (二重" + row.repeated + ")"
-                                    : row.words + "語");
+                        // **先頭の「なし」は作ったモードではない**ので出さない。
+                        if index > 0: TextButton {
+                            wide: true;
+                            title: mode;
+                            role: root.word-mode-opened-at == index - 1
+                                ? Role.primary
+                                : Role.normal;
                             clicked => {
-                                root.word-set-opened-at =
-                                    root.word-set-opened-at == index ? -1 : index;
+                                root.word-group-opened-at = -1;
+                                root.word-mode-opened-at =
+                                    root.word-mode-opened-at == index - 1 ? -1 : index - 1;
                             }
                         }
-
-                        TextButton {
-                            title: row.muted ? "Off" : "On";
-                            role: row.muted ? Role.normal : Role.primary;
-                            clicked => {
-                                root.word-set-muted(index, !row.muted);
-                            }
-                        }
-                        TextButton {
-                            title: "Export…";
-                            clicked => {
-                                root.word-set-exported(index);
-                            }
-                        }
-                        TextButton {
+                        if index > 0: TextButton {
                             title: "×";
                             role: Role.quiet;
                             clicked => {
-                                root.word-set-removed(index);
+                                root.word-mode-removed(index - 1);
                             }
                         }
-                    }
-
-                    // 開いているセットの語。**アプリの中で消せる**（要件 7.9）。
-                    if root.word-set-opened-at >= 0: Rectangle {
-                        height: 152px;
-                        background: Tok.chrome-raised;
-                        border-radius: 6px;
-
-                        ScrollView {
-                            x: 8px;
-                            y: 6px;
-                            width: parent.width - 16px;
-                            height: parent.height - 12px;
-
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 1px;
-
-                                for word in root.word-set-words: HorizontalLayout {
-                                    spacing: 6px;
-
-                                    Text {
-                                        text: word;
-                                        color: Tok.ink;
-                                        font-size: 12px;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                        horizontal-stretch: 1;
-                                    }
-                                    TextButton {
-                                        title: "×";
-                                        role: Role.quiet;
-                                        clicked => {
-                                            root.word-removed(
-                                                root.word-set-opened-at, word);
-                                        }
-                                    }
-                                }
-
-                                if root.word-set-words.length == 0: Text {
-                                    text: "まだ語がありません。本文で語を選んで右ボタン、"
-                                        + "`単語帳へ追加`から入れられます。";
-                                    color: Tok.ink-faint;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                    }
-
-                    if root.word-set-rows.length == 0: Text {
-                        text: "`New Set`でセットを作り、本文で語を選んで右ボタンから足します。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
                     }
 
                     HorizontalLayout {
                         alignment: start;
-                        spacing: 6px;
 
                         TextButton {
-                            title: "New Set";
+                            title: "New Mode";
                             role: Role.primary;
                             clicked => {
-                                root.word-set-created();
-                            }
-                        }
-                        TextButton {
-                            title: "Import…";
-                            clicked => {
-                                root.word-set-added();
-                            }
-                        }
-                        // **重複は畳んで置く。**普段は数だけ見えていればよく、
-                        // 直すときにだけ開く。
-                        if root.word-trouble-count > 0: TextButton {
-                            title: root.word-troubles-shown
-                                ? "重複を閉じる"
-                                : "重複 " + root.word-trouble-count + " 件";
-                            clicked => {
-                                root.word-troubles-shown = !root.word-troubles-shown;
+                                root.word-mode-created();
                             }
                         }
                     }
 
-                    // 要件 7.9: **参照画面。**取り込みで見つかった重複を、書き手の
-                    // 言葉で並べる——どの語が、どこで、色が付いているのかいないのか。
-                    if root.word-troubles-shown: Rectangle {
-                        height: 152px;
-                        background: Tok.chrome-raised;
-                        border-radius: 6px;
+                    if root.word-mode-names.length <= 1: Text {
+                        text: "モードを作り、その中に語群（人物・地名など）を作ります。"
+                            + "文書ごとにモードを選ぶのは下のステータスバーからです。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
 
-                        ScrollView {
-                            x: 8px;
-                            y: 6px;
-                            width: parent.width - 16px;
-                            height: parent.height - 12px;
+                    if root.word-mode-opened-at >= 0: Rectangle {
+                        height: 1px;
+                        background: Tok.rule;
+                    }
 
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 2px;
+                    if root.word-mode-opened-at >= 0: Text {
+                        text: "GROUPS";
+                        color: Tok.ink-faint;
+                        font-size: 10px;
+                        letter-spacing: 0.9px;
+                    }
 
-                                for trouble in root.word-troubles: HorizontalLayout {
-                                    spacing: 6px;
+                    if root.word-mode-opened-at >= 0: VerticalLayout {
+                        spacing: 8px;
 
-                                    Text {
-                                        text: trouble.conflict ? "色なし" : "二重";
-                                        color: trouble.conflict ? Tok.alert : Tok.ink-faint;
-                                        font-size: 11px;
-                                        horizontal-stretch: 0;
-                                        min-width: 44px;
-                                    }
-                                    Text {
-                                        text: trouble.word;
-                                        color: Tok.ink;
-                                        font-size: 12px;
-                                        overflow: elide;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: trouble.told;
-                                        color: Tok.ink-faint;
-                                        font-size: 11px;
-                                        overflow: elide;
-                                        horizontal-stretch: 1;
+                        for row[index] in root.word-group-rows: HorizontalLayout {
+                            spacing: 6px;
+
+                            // 色見本。押すとWindowsの色ダイアログ（要件 9 と同じ道）。
+                            Rectangle {
+                                width: 24px;
+                                horizontal-stretch: 0;
+
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 24px;
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
+                                    background: row.shown;
+
+                                    swatch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.word-group-colour-picked(index);
+                                        }
                                     }
                                 }
+                            }
 
-                                if root.word-trouble-count > root.word-troubles.length: Text {
-                                    text: "ほかに "
-                                        + (root.word-trouble-count - root.word-troubles.length)
-                                        + " 件";
-                                    color: Tok.ink-faint;
-                                    font-size: 11px;
+                            Text {
+                                text: row.name;
+                                color: Tok.ink;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+
+                            // **語数と、色を付けられなかった数。**押すと一覧が開く
+                            // ——アプリの中で見て、アプリの中で消せることが、辞書を
+                            // 書き手に管理させないということである。
+                            TextButton {
+                                role: Role.quiet;
+                                title: row.conflicts > 0
+                                    ? row.words + "語 / 重複" + row.conflicts
+                                    : (row.repeated > 0
+                                        ? row.words + "語 (二重" + row.repeated + ")"
+                                        : row.words + "語");
+                                clicked => {
+                                    root.word-group-opened-at =
+                                        root.word-group-opened-at == index ? -1 : index;
+                                }
+                            }
+                            TextButton {
+                                title: "Import…";
+                                clicked => {
+                                    root.word-group-imported(index);
+                                }
+                            }
+                            TextButton {
+                                title: "Export…";
+                                clicked => {
+                                    root.word-group-exported(index);
+                                }
+                            }
+                            TextButton {
+                                title: "×";
+                                role: Role.quiet;
+                                clicked => {
+                                    root.word-group-removed(index);
+                                }
+                            }
+                        }
+
+                        // 開いている語群の語。**アプリの中で消せる**（要件 7.9）。
+                        if root.word-group-opened-at >= 0: Rectangle {
+                            height: 152px;
+                            background: Tok.chrome-raised;
+                            border-radius: 6px;
+
+                            ScrollView {
+                                x: 8px;
+                                y: 6px;
+                                width: parent.width - 16px;
+                                height: parent.height - 12px;
+
+                                VerticalLayout {
+                                    alignment: start;
+                                    spacing: 1px;
+
+                                    for word in root.word-group-words: HorizontalLayout {
+                                        spacing: 6px;
+
+                                        Text {
+                                            text: word;
+                                            color: Tok.ink;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+                                        TextButton {
+                                            title: "×";
+                                            role: Role.quiet;
+                                            clicked => {
+                                                root.word-removed(
+                                                    root.word-group-opened-at, word);
+                                            }
+                                        }
+                                    }
+
+                                    if root.word-group-words.length == 0: Text {
+                                        text: "まだ語がありません。本文で語を選んで右ボタン、"
+                                            + "`単語帳へ追加`から入れられます。";
+                                        color: Tok.ink-faint;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 6px;
+
+                            TextButton {
+                                title: "New Group";
+                                clicked => {
+                                    root.word-group-created(root.word-mode-opened-at);
+                                }
+                            }
+                            // **重複は畳んで置く。**普段は数だけ見えていればよく、
+                            // 直すときにだけ開く。
+                            if root.word-trouble-count > 0: TextButton {
+                                title: root.word-troubles-shown
+                                    ? "重複を閉じる"
+                                    : "重複 " + root.word-trouble-count + " 件";
+                                clicked => {
+                                    root.word-troubles-shown = !root.word-troubles-shown;
+                                }
+                            }
+                        }
+
+                        // 要件 7.9: **参照画面。**どの語が、どこで、色が付いているのか
+                        // いないのか。
+                        if root.word-troubles-shown: Rectangle {
+                            height: 152px;
+                            background: Tok.chrome-raised;
+                            border-radius: 6px;
+
+                            ScrollView {
+                                x: 8px;
+                                y: 6px;
+                                width: parent.width - 16px;
+                                height: parent.height - 12px;
+
+                                VerticalLayout {
+                                    alignment: start;
+                                    spacing: 2px;
+
+                                    for trouble in root.word-troubles: HorizontalLayout {
+                                        spacing: 6px;
+
+                                        Text {
+                                            text: trouble.conflict ? "色なし" : "二重";
+                                            color: trouble.conflict ? Tok.alert : Tok.ink-faint;
+                                            font-size: 11px;
+                                            horizontal-stretch: 0;
+                                            min-width: 44px;
+                                        }
+                                        Text {
+                                            text: trouble.word;
+                                            color: Tok.ink;
+                                            font-size: 12px;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: trouble.told;
+                                            color: Tok.ink-faint;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+
+                                    if root.word-trouble-count > root.word-troubles.length: Text {
+                                        text: "ほかに "
+                                            + (root.word-trouble-count - root.word-troubles.length)
+                                            + " 件";
+                                        color: Tok.ink-faint;
+                                        font-size: 11px;
+                                    }
                                 }
                             }
                         }
                     }
                 }
+
 
                 // どの面にいても、値はいまのシートのもの——だから帯のすぐ
                 // 下に在る（要件 9）。

@@ -1892,7 +1892,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
-    wiring::wire_word_sets(&window, &live);
+    wiring::wire_word_modes(&window, &live);
 
     let weak = window.as_weak();
     let tab_live = live.clone();
@@ -2324,7 +2324,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
     // 色しか覚えていないので、語はここで初めて手に入る。
-    open_word_sets(&window, &live);
+    open_word_modes(&window, &live);
 
     wiring::wire_typography(
         &window,
@@ -3035,6 +3035,12 @@ impl TabView {
 
 #[derive(Clone)]
 struct PaneTab {
+    /// 要件 7.9（2026-09-08）: この文書の**単語チェックモード**の名前。
+    ///
+    /// **番号ではなく名前。**モードは書き手が作ったり消したりするもので、番号は
+    /// 次の瞬間には別のモードを指している（タブの番号で同じ間違いを3度やった）。
+    /// 無い名前は「なし」として扱われる——間違った色で出るよりよい。
+    word_mode: String,
     /// **The document, not a copy of it.** A tab is a view; switching away no
     /// longer takes the text out of the pane and switching back no longer puts
     /// it in, so a switch costs the relayout and nothing else.
@@ -3122,6 +3128,9 @@ impl PaneTab {
     /// A tab showing a document this pane has not looked at yet.
     fn showing(window: &AppWindow, id: PaneId, document: Rc<OpenDocument>) -> Self {
         Self {
+            // 要件 7.9: **開いた面のモードを継ぐ。**同じ作品の次の章を開いて
+            // 選び直させるのは、書く手を止めることである（要件 3）。
+            word_mode: id.screen(window).word_mode.to_string(),
             document,
             view: TabView::for_pane(window, id),
             terminal: None,
@@ -3455,9 +3464,14 @@ impl Live {
             (below_kind(pane), pane.below_height)
         };
         let asking = tab.empty;
+        let mode_name = tab.word_mode.clone();
         id.update_screen(window, |screen| {
             screen.terminal = showing_shell;
             screen.empty = asking;
+            // 要件 7.9（2026-09-08）: **モードはタブと一緒に動く。**組版はこの
+            // 行から読むので（`lay_out_pane`）、タブを切り替えれば色分けも
+            // 切り替わる——コードエディタで別の言語のファイルへ移るのと同じ。
+            screen.word_mode = mode_name.clone().into();
         });
         show_draft(window, id, &tab.below.draft);
         id.set_below(window, kind, height);
@@ -3584,6 +3598,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
             Some(index) => index,
             None => {
                 strip.tabs.push(PaneTab {
+                    word_mode: id.screen(window).word_mode.to_string(),
                     document,
                     view: TabView {
                         vertical: like.vertical(window),
@@ -5267,6 +5282,9 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
 /// and it is the focused pane's — the one whose tabs the buttons above would
 /// act on. Moving them inside the panes is the next step (ペイン分割設計 6).
 fn publish_tabs(window: &AppWindow, live: &Live) {
+    // 要件 7.9・10: ステータスバーのモードは、前に出ているタブのもの。
+    // **タブが動けばここも動く**ので、publishの入口で一緒に言う。
+    publish_word_mode_of(window, live);
     let strips = PaneId::all(window).into_iter().map(|id| {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
@@ -5778,8 +5796,11 @@ enum Question {
     RenameEntry(PathBuf),
     /// The file or folder named, waiting to be told to go (要件 5.2).
     DeleteEntry(PathBuf),
-    /// 空の単語セットが、名前を待っている（要件 7.9、2026-09-08）。
-    NewWordSet,
+    /// 空のモードが、名前を待っている（要件 7.9、2026-09-08）。
+    NewWordMode,
+    /// 空の語群が、名前を待っている。どのモードのものかは
+    /// `word-group-wanted-in`が持つ。
+    NewWordGroup,
     /// Something carried onto a name that is already taken (要件 5.2): what is
     /// being moved, and where it would land. **The order is the same as
     /// `move_entry`'s**, from and to.
@@ -5947,9 +5968,14 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         (Question::SaveConflict, 0) => overwrite_the_outside_change(window, live),
         (Question::SaveConflict, 1) => reload_from_file(window, live),
         (Question::SaveConflict, 2) => save_document(window, live, true),
-        (Question::NewWordSet, 0) => {
+        (Question::NewWordMode, 0) => {
             let typed = window.get_question_name().to_string();
-            new_word_set(window, live, &typed);
+            new_word_mode(window, live, &typed);
+        }
+        (Question::NewWordGroup, 0) => {
+            let typed = window.get_question_name().to_string();
+            let at = window.get_word_group_wanted_in().max(0) as usize;
+            new_word_group(window, live, at, &typed);
         }
         (Question::NewFile(parent), 0) => make_entry(window, live, &parent, false),
         (Question::NewFolder(parent), 0) => make_entry(window, live, &parent, true),
@@ -7030,148 +7056,197 @@ const TERMINAL_SIZE_SETTING: &str = "terminal.size";
 const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
 
 thread_local! {
-    /// いま効いている単語セットの表と、そこから建てた木（要件 7.9）。
+    /// 書き手が持っているモードぜんぶと、モードごとに建てた木（要件 7.9）。
     ///
     /// **窓の外に置いてある。**Slintのプロパティは任意のRustの値を持てず、しかし
-    /// これは`typography_for`——組版のたびに走る関数——から`Arc`1つの複製で届く
-    /// 必要がある。木を組版のたびに建て直しては、木にした意味が消える。
+    /// これは`refresh_pane`——組版のたびに走る道——から`Arc`1つの複製で届く必要が
+    /// ある。木を組版のたびに建て直しては、木にした意味が消える。
     ///
-    /// **UIスレッドのものである。**書き換えるのは`store_word_sets`だけで、読むのは
-    /// 組版を組み立てる側だけ——どちらも窓のスレッドにいる（要件 2 で外へ出した
-    /// 3本は、どれもここへ触らない）。
-    static LOADED_WORDS: RefCell<Arc<word_marks::WordMarks>> =
-        RefCell::new(Arc::new(word_marks::WordMarks::default()));
+    /// **UIスレッドのものである。**書き換えるのは`hold_word_modes`だけで、読むのは
+    /// 組版を組み立てる側だけ——どちらも窓のスレッドにいる。
+    static WORD_MODES: RefCell<Rc<Vec<Arc<word_marks::WordMarks>>>> =
+        RefCell::new(Rc::new(Vec::new()));
 }
 
-/// いま効いている単語セット。**複製は`Arc`1つぶん。**
-fn loaded_words() -> Arc<word_marks::WordMarks> {
-    LOADED_WORDS.with(|held| held.borrow().clone())
+/// いま持っているモードぜんぶ。**複製は`Rc`1つぶん。**
+fn word_modes() -> Rc<Vec<Arc<word_marks::WordMarks>>> {
+    WORD_MODES.with(|held| held.borrow().clone())
 }
 
-/// 表の1冊を、編集器の中の形へ。**色が読めなければ既定の色**——表が壊れていても
-/// セットごと消えるよりはよい。
-fn set_from_book(book: &app_data::WordBook) -> word_marks::WordSet {
-    word_marks::WordSet {
-        name: book.name.clone(),
-        colour: parse_hex_colour(&book.colour).unwrap_or([0.5, 0.5, 0.5]),
-        muted: book.muted,
-        source: book.source.clone(),
-        words: book.words.clone(),
+/// 名前でモードを引く。**無い名前は「なし」**——モードを消したり名前を変えたり
+/// したあとの文書は、色分けの無い文書になる（間違った色で出るよりよい）。
+fn word_mode_named(name: &str) -> Arc<word_marks::WordMarks> {
+    word_modes()
+        .iter()
+        .find(|marks| marks.mode.name == name)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 表の1つを、編集器の中の形へ。**色が読めなければ既定の色**——表が壊れていても
+/// 語群ごと消えるよりはよい。
+fn mode_from_stored(stored: &app_data::StoredMode) -> word_marks::WordMode {
+    word_marks::WordMode {
+        name: stored.name.clone(),
+        groups: stored
+            .groups
+            .iter()
+            .map(|group| word_marks::WordGroup {
+                name: group.name.clone(),
+                colour: parse_hex_colour(&group.colour).unwrap_or([0.5, 0.5, 0.5]),
+                words: group.words.clone(),
+            })
+            .collect(),
     }
 }
 
-fn book_from_set(set: &word_marks::WordSet) -> app_data::WordBook {
-    app_data::WordBook {
-        name: set.name.clone(),
-        colour: hex_colour(slint_colour(set.colour)),
-        muted: set.muted,
-        source: set.source.clone(),
-        words: set.words.clone(),
+fn stored_from_mode(mode: &word_marks::WordMode) -> app_data::StoredMode {
+    app_data::StoredMode {
+        name: mode.name.clone(),
+        groups: mode
+            .groups
+            .iter()
+            .map(|group| app_data::StoredGroup {
+                name: group.name.clone(),
+                colour: hex_colour(slint_colour(group.colour)),
+                words: group.words.clone(),
+            })
+            .collect(),
     }
 }
 
 /// 表を読んで木を建て、画面へ出す（要件 7.9）。**起動のときに一度。**
-fn open_word_sets(window: &AppWindow, live: &Live) {
-    let books = match app_data::app_directory() {
+fn open_word_modes(window: &AppWindow, live: &Live) {
+    let stored = match app_data::app_directory() {
         Some(directory) => app_data::read_words(&directory),
         None => Vec::new(),
     };
-    let sets: Vec<word_marks::WordSet> = books.iter().map(set_from_book).collect();
-    hold_word_sets(window, live, sets, false);
+    let modes: Vec<word_marks::WordMode> = stored.iter().map(mode_from_stored).collect();
+    hold_word_modes(window, live, modes, false);
 }
 
-/// 表を置き換え、木を建て直し、画面へ出し、必要なら書き出す（要件 7.9）。
+/// モードを置き換え、木を建て直し、画面へ出し、必要なら書き出す（要件 7.9）。
 ///
-/// **どの操作もここを通る**：取り込み、色を変える、畳む、外す。順番を守る場所が
-/// 1つで済み、**重複を数える場所も1つ**になる（`WordMarks::build`）。
-fn hold_word_sets(window: &AppWindow, live: &Live, sets: Vec<word_marks::WordSet>, store: bool) {
+/// **どの操作もここを通る**：モードを作る、語群を作る、語を足す、色を変える、
+/// 取り込む。順番を守る場所が1つで済み、**重複を数える場所も1つ**になる。
+fn hold_word_modes(window: &AppWindow, live: &Live, modes: Vec<word_marks::WordMode>, store: bool) {
     let started = Instant::now();
     let cache = &live.cache;
     if store && let Some(directory) = app_data::app_directory() {
-        let books: Vec<app_data::WordBook> = sets.iter().map(book_from_set).collect();
-        if let Err(error) = app_data::write_words(&directory, &books) {
+        let stored: Vec<app_data::StoredMode> = modes.iter().map(stored_from_mode).collect();
+        if let Err(error) = app_data::write_words(&directory, &stored) {
             cache
                 .borrow_mut()
                 .log_diag("spec", &format!("words not saved error={error}"));
         }
     }
-    let words: usize = sets.iter().map(|set| set.words.len()).sum();
-    let built = Arc::new(word_marks::WordMarks::build(sets));
+    let words: usize = modes.iter().map(word_marks::WordMode::words).sum();
+    let built: Vec<Arc<word_marks::WordMarks>> = modes
+        .into_iter()
+        .map(|mode| Arc::new(word_marks::WordMarks::build(mode)))
+        .collect();
+    let conflicts: usize = built.iter().map(|marks| marks.conflicts()).sum();
     let told = format!(
-        "words sets={} words={words} conflicts={} troubles={} built={:.2}ms",
-        built.sets.len(),
-        built.conflicts(),
-        built.troubles.len(),
+        "words modes={} words={words} conflicts={conflicts} built={:.2}ms",
+        built.len(),
         elapsed_ms(started)
     );
     cache.borrow_mut().log_diag("spec", &told);
-    LOADED_WORDS.with(|held| *held.borrow_mut() = built);
-    publish_word_sets(window);
-    // **色が変わったので描き直す。測り直しはしない**（要件 7.9、2026-09-08）。
-    // 単語セットは`Typography`の外にいるので`matches`が真のままで、`update`は
-    // 何も捨てずに戻る——**動くのはタイルの署名だけ**である。ここを`Typography`の
-    // 中に置いていたときは、色を1つ変えるだけで文書全体が測り直されていた
-    // （書き手の報告：On/Offから反映まで結構かかる）。
+    WORD_MODES.with(|held| *held.borrow_mut() = Rc::new(built));
+    publish_word_modes(window);
+    // **色が変わったので描き直す。測り直しはしない**（要件 7.9）。単語セットは
+    // `Typography`の外にいるので`matches`が真のままで、`update`は何も捨てずに
+    // 戻る——**動くのはタイルの署名だけ**である（技術検証 9.3.1）。
     relayout_panes(window, &live.states, cache);
     window.invoke_republish_tabs();
-    live.cache.borrow_mut().log_diag(
-        "spec",
-        &format!("words shown ms={:.2}", elapsed_ms(started)),
-    );
 }
 
-/// いまの表（画面の操作が手を入れる元）。
-fn word_sets_now() -> Vec<word_marks::WordSet> {
-    loaded_words().sets.clone()
+/// いまのモードぜんぶ（画面の操作が手を入れる元）。
+fn word_modes_now() -> Vec<word_marks::WordMode> {
+    word_modes()
+        .iter()
+        .map(|marks| marks.mode.clone())
+        .collect()
 }
 
-/// 単語セットの並びと、重複の言い分を画面へ（要件 7.9）。
+/// 前に出ているタブのモードの名前。
+fn pane_word_mode(live: &Live, id: PaneId) -> String {
+    let tabs = live.tabs.borrow();
+    tabs.of(id)
+        .current()
+        .map(|tab| tab.word_mode.clone())
+        .unwrap_or_else(|| word_marks::NO_MODE.to_owned())
+}
+
+/// モードと語群を画面へ（要件 7.9）。
 ///
-/// **重複はここで初めて言葉になる。**表に取り込んだときに数えてあり、画面はそれを
-/// 読むだけ——`WordMarks`が唯一の数え役である。
-fn publish_word_sets(window: &AppWindow) {
-    let loaded = loaded_words();
-    let rows: Vec<WordSetRow> = loaded
-        .sets
+/// **重複はここで初めて言葉になる。**モードを建てたときに数えてあり、画面は
+/// それを読むだけ——数え役は`WordMarks`ひとつである。
+fn publish_word_modes(window: &AppWindow) {
+    let modes = word_modes();
+    // **編集面の右ボタンが並べる名前。**前に出ている文書のモードの語群である
+    // ——足す先は、いまその文書に効いているモードの中にしかない。
+    let front = word_mode_named(&window.get_word_mode().to_string());
+    let group_names: Vec<SharedString> = front
+        .mode
+        .groups
+        .iter()
+        .map(|group| SharedString::from(group.name.as_str()))
+        .collect();
+    window.set_word_group_names(ModelRc::new(VecModel::from(group_names)));
+
+    // ステータスバーの選び口。**「なし」が先頭**——色分けを止めるのに、モードを
+    // 消す必要は無い（コードエディタの`Plain Text`にあたる）。
+    let mut names: Vec<SharedString> = vec![word_marks::NO_MODE.into()];
+    names.extend(
+        modes
+            .iter()
+            .map(|marks| SharedString::from(marks.mode.name.as_str())),
+    );
+    window.set_word_mode_names(ModelRc::new(VecModel::from(names)));
+
+    // 設定画面が開いているモード（-1でどれも開いていない）。
+    let opened = window.get_word_mode_opened_at();
+    let Some(marks) = modes.get(opened.max(0) as usize).filter(|_| opened >= 0) else {
+        window.set_word_group_rows(ModelRc::new(VecModel::from(Vec::<WordGroupRow>::new())));
+        window.set_word_troubles(ModelRc::new(VecModel::from(Vec::<WordTroubleRow>::new())));
+        window.set_word_trouble_count(0);
+        window.set_word_group_words(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+        return;
+    };
+
+    let rows: Vec<WordGroupRow> = marks
+        .mode
+        .groups
         .iter()
         .enumerate()
-        .map(|(at, set)| {
-            let told = loaded.troubles_of(at);
+        .map(|(at, group)| {
+            let told = marks.troubles_of(at);
             let conflicts = told
                 .iter()
                 .filter(|trouble| trouble.kind == word_marks::Trouble::Conflict)
                 .count();
-            let repeated = told.len() - conflicts;
-            WordSetRow {
-                name: set.name.clone().into(),
-                words: set.words.len() as i32,
+            WordGroupRow {
+                name: group.name.clone().into(),
+                words: group.words.len() as i32,
                 conflicts: conflicts as i32,
-                repeated: repeated as i32,
-                source: set.source.display().to_string().into(),
-                shown: slint_colour(set.colour),
-                muted: set.muted,
+                repeated: (told.len() - conflicts) as i32,
+                shown: slint_colour(group.colour),
             }
         })
         .collect();
-    window.set_word_set_rows(ModelRc::new(VecModel::from(rows)));
-    // **編集面の右ボタンが並べる名前。**畳んだセットも出す——足すことと、
-    // いま色を出していることは別である。
-    let names: Vec<SharedString> = loaded
-        .sets
-        .iter()
-        .map(|set| SharedString::from(set.name.as_str()))
-        .collect();
-    window.set_word_set_names(ModelRc::new(VecModel::from(names)));
+    window.set_word_group_rows(ModelRc::new(VecModel::from(rows)));
 
-    // **重複の一覧。**セットの番号ではなく名前で言う——書き手が見るのは名前である。
+    // **重複の一覧。**語群の番号ではなく名前で言う——書き手が見るのは名前である。
     let named = |at: &usize| {
-        loaded
-            .sets
+        marks
+            .mode
+            .groups
             .get(*at)
-            .map(|set| set.name.clone())
+            .map(|group| group.name.clone())
             .unwrap_or_default()
     };
-    let troubles: Vec<WordTroubleRow> = loaded
+    let troubles: Vec<WordTroubleRow> = marks
         .troubles
         .iter()
         .take(word_marks::SHOWN_TROUBLES)
@@ -7180,43 +7255,50 @@ fn publish_word_sets(window: &AppWindow) {
             conflict: trouble.kind == word_marks::Trouble::Conflict,
             told: match trouble.kind {
                 word_marks::Trouble::Conflict => trouble
-                    .sets
+                    .groups
                     .iter()
                     .map(named)
                     .collect::<Vec<String>>()
                     .join(" と ")
                     .into(),
-                word_marks::Trouble::Repeated => format!(
-                    "{} の中で二度",
-                    trouble.sets.first().map_or(String::new(), |at| named(at))
-                )
-                .into(),
+                word_marks::Trouble::Repeated => {
+                    let name = trouble.groups.first().map_or(String::new(), |at| named(at));
+                    format!("{name} の中で二度").into()
+                }
             },
         })
         .collect();
     window.set_word_troubles(ModelRc::new(VecModel::from(troubles)));
-    window.set_word_trouble_count(loaded.troubles.len() as i32);
+    window.set_word_trouble_count(marks.troubles.len() as i32);
 
-    // **開いているセットの語**（要件 7.9、2026-09-08）。**アプリの中で見て、
-    // アプリの中で消せる**——書き手が辞書ファイルを管理しなくてよい、という
-    // のがこの機能の形である。開いていないときは空で、数千語を毎回窓へ渡さない。
-    let opened = window.get_word_set_opened_at();
-    let words: Vec<SharedString> = loaded
-        .sets
-        .get(opened.max(0) as usize)
-        .filter(|_| opened >= 0)
-        .map(|set| set.words.iter().map(SharedString::from).collect())
+    // **開いている語群の語だけ**を窓へ渡す——数千語を毎回渡さない。
+    let group = window.get_word_group_opened_at();
+    let words: Vec<SharedString> = marks
+        .mode
+        .groups
+        .get(group.max(0) as usize)
+        .filter(|_| group >= 0)
+        .map(|group| group.words.iter().map(SharedString::from).collect())
         .unwrap_or_default();
-    window.set_word_set_words(ModelRc::new(VecModel::from(words)));
+    window.set_word_group_words(ModelRc::new(VecModel::from(words)));
 }
 
-/// 足すセットに与える色（要件 7.9）。
+/// ステータスバーへ、前に出ているタブのモードを出す（要件 10）。
+///
+/// **コードエディタが言語モードを出しているのと同じ場所**である。いまどのモードか
+/// が常に見えていて、押せば切り替わる。
+fn publish_word_mode_of(window: &AppWindow, live: &Live) {
+    let name = pane_word_mode(live, focused_pane(window));
+    window.set_word_mode(name.into());
+}
+
+/// 足す語群に与える色（要件 7.9）。
 ///
 /// **まだ使っていない色から順に。**同じ色が2つ並ぶと、どちらの色分けを見ているのか
 /// 画面が言えない。並びは要件9の墨と同じ家族から選んである——紙の上で読める濃さで、
 /// 互いに見分けが付く。
-fn next_word_colour(sets: &[word_marks::WordSet]) -> [f32; 3] {
-    const OFFERED: [[f32; 3]; word_marks::MAX_WORD_SETS] = [
+fn next_word_colour(groups: &[word_marks::WordGroup]) -> [f32; 3] {
+    const OFFERED: [[f32; 3]; word_marks::MAX_WORD_GROUPS] = [
         [0.70, 0.16, 0.16], // 紅
         [0.16, 0.32, 0.66], // 藍
         [0.18, 0.45, 0.20], // 緑
@@ -7228,94 +7310,127 @@ fn next_word_colour(sets: &[word_marks::WordSet]) -> [f32; 3] {
     ];
     OFFERED
         .into_iter()
-        .find(|colour| !sets.iter().any(|set| set.colour == *colour))
+        .find(|colour| !groups.iter().any(|group| group.colour == *colour))
         .unwrap_or(OFFERED[0])
 }
 
-/// 空のセットを1つ作る（要件 7.9、2026-09-08）。
+/// 空のモードを1つ作る（要件 7.9）。
 ///
 /// **ファイルは要らない。**辞書は編集器が持つもので、書き手がファイルを管理する
-/// 必要は無い——取り込みは「あってもよい道」であって、始めるための道ではない。
-fn new_word_set(window: &AppWindow, live: &Live, name: &str) {
-    let mut sets = word_sets_now();
-    if sets.len() >= word_marks::MAX_WORD_SETS {
-        let told = format!("単語セットは{}冊までです", word_marks::MAX_WORD_SETS);
+/// 必要は無い。
+fn new_word_mode(window: &AppWindow, live: &Live, name: &str) {
+    let mut modes = word_modes_now();
+    if modes.len() >= word_marks::MAX_WORD_MODES {
+        let told = format!("モードは{}個までです", word_marks::MAX_WORD_MODES);
         window.set_render_status(told.into());
         return;
     }
-    let colour = next_word_colour(&sets);
-    sets.push(word_marks::WordSet {
-        name: name.trim().to_owned(),
-        colour,
-        muted: false,
-        source: PathBuf::new(),
-        words: Vec::new(),
+    let name = name.trim();
+    if name.is_empty() || name == word_marks::NO_MODE {
+        window.set_render_status("その名前は使えません".into());
+        return;
+    }
+    if modes.iter().any(|mode| mode.name == name) {
+        window.set_render_status(format!("「{name}」はもうあります").into());
+        return;
+    }
+    modes.push(word_marks::WordMode {
+        name: name.to_owned(),
+        groups: Vec::new(),
     });
-    hold_word_sets(window, live, sets, true);
+    window.set_word_mode_opened_at(modes.len() as i32 - 1);
+    hold_word_modes(window, live, modes, true);
 }
 
-/// 選んでいる語を、セットへ足す（要件 7.9、2026-09-08）。
+/// 開いているモードへ語群を1つ足す（要件 7.9）。
+fn new_word_group(window: &AppWindow, live: &Live, at: usize, name: &str) {
+    let mut modes = word_modes_now();
+    let Some(mode) = modes.get_mut(at) else {
+        return;
+    };
+    if mode.groups.len() >= word_marks::MAX_WORD_GROUPS {
+        let told = format!("語群は{}つまでです", word_marks::MAX_WORD_GROUPS);
+        window.set_render_status(told.into());
+        return;
+    }
+    let colour = next_word_colour(&mode.groups);
+    mode.groups.push(word_marks::WordGroup {
+        name: name.trim().to_owned(),
+        colour,
+        words: Vec::new(),
+    });
+    hold_word_modes(window, live, modes, true);
+}
+
+/// 選んでいる語を、語群へ足す（要件 7.9）。
 ///
 /// **書きながら足すいちばん普通の道。**書いていて気づいた名前を、その場で、書く手を
 /// 止めずに入れる（要件 3）。一覧を開いて打ち込むのは、その次である。
 ///
 /// **改行をまたぐ選択は語にしない。**語とは1行に収まるもので、段落を丸ごと選んで
 /// 足せてしまうと、その語は本文のどこにも当たらないまま一覧を汚す。
-fn add_word_to_set(window: &AppWindow, live: &Live, at: usize, word: &str) {
+fn add_word_to_group(window: &AppWindow, live: &Live, mode: &str, at: usize, word: &str) {
     let word = word.trim();
     if word.is_empty() || word.contains('\n') {
         window.set_render_status("1行に収まる語だけを足せます".into());
         return;
     }
-    let mut sets = word_sets_now();
-    let Some(set) = sets.get_mut(at) else {
+    let mut modes = word_modes_now();
+    let Some(held) = modes.iter_mut().find(|held| held.name == mode) else {
         return;
     };
-    // **もう入っているなら、足さずに言う。**黙って二度目を入れると、次の取り込みで
-    // 「二重」と言われるだけの語が増える。
-    if set.words.iter().any(|held| held.eq_ignore_ascii_case(word)) {
-        let told = format!("「{word}」は{}にもう入っています", set.name);
+    let Some(group) = held.groups.get_mut(at) else {
+        return;
+    };
+    // **もう入っているなら、足さずに言う。**黙って二度目を入れると、「二重」と
+    // 言われるだけの語が増える。
+    if group
+        .words
+        .iter()
+        .any(|held| held.eq_ignore_ascii_case(word))
+    {
+        let told = format!("「{word}」は{}にもう入っています", group.name);
         window.set_render_status(told.into());
         return;
     }
-    set.words.push(word.to_owned());
-    let name = set.name.clone();
-    hold_word_sets(window, live, sets, true);
+    group.words.push(word.to_owned());
+    let name = group.name.clone();
+    hold_word_modes(window, live, modes, true);
     window.set_render_status(format!("「{word}」を{name}へ足しました").into());
 }
 
-/// セットから語を1つ落とす（要件 7.9）。
-fn remove_word_from_set(window: &AppWindow, live: &Live, at: usize, word: &str) {
-    let mut sets = word_sets_now();
-    let Some(set) = sets.get_mut(at) else {
+/// 語群から語を1つ落とす（要件 7.9）。
+fn remove_word_from_group(window: &AppWindow, live: &Live, mode: usize, at: usize, word: &str) {
+    let mut modes = word_modes_now();
+    let Some(group) = modes.get_mut(mode).and_then(|held| held.groups.get_mut(at)) else {
         return;
     };
-    set.words.retain(|held| held != word);
-    hold_word_sets(window, live, sets, true);
+    group.words.retain(|held| held != word);
+    hold_word_modes(window, live, modes, true);
 }
 
-/// セットを1行1語で書き出す（要件 7.9）。
+/// 語群を1行1語で書き出す（要件 7.9）。
 ///
-/// **控えを取るため、そして他の道具と行き来するため**にある。独自の形式にしないのは
-/// それが値打ちだからで、読むほうと同じ形である。
-fn export_word_set(window: &AppWindow, at: usize) {
-    let sets = word_sets_now();
-    let Some(set) = sets.get(at) else {
+/// **控えを取るため、そして他の道具と行き来するため**にある。独自の形式にしないのが
+/// 値打ちなので、読むほうと同じ形である。
+fn export_word_group(window: &AppWindow, mode: usize, at: usize) {
+    let modes = word_modes_now();
+    let Some(group) = modes.get(mode).and_then(|held| held.groups.get(at)) else {
         return;
     };
     let owner = ime::window_handle(window);
-    let suggested = format!("{}.txt", set.name);
+    let suggested = format!("{}.txt", group.name);
     let Some(target) = file_dialog::save_document_as(owner, &suggested) else {
         return;
     };
-    let mut out = String::with_capacity(set.words.len() * 8);
-    for word in &set.words {
+    let mut out = String::with_capacity(group.words.len() * 8);
+    for word in &group.words {
         out.push_str(word);
         out.push('\n');
     }
     match file_io::write_atomically(&target, out.as_bytes()) {
         Ok(_) => {
-            let told = format!("{}語を書き出しました", set.words.len());
+            let told = format!("{}語を書き出しました", group.words.len());
             window.set_render_status(told.into());
         }
         Err(error) => window.set_render_status(format!("書き出せません: {error}").into()),
@@ -7324,10 +7439,10 @@ fn export_word_set(window: &AppWindow, at: usize) {
 
 /// 取り込み元のファイルを読む（要件 7.9）。
 ///
-/// **読めなければ`None`。**取り込みは書き手が起こす操作なので、黙って空のセットを
+/// **読めなければ`None`。**取り込みは書き手が起こす操作なので、黙って空の語群を
 /// 作るより、読めなかったと言うほうがよい。
 fn read_word_source(path: &Path) -> Option<Vec<String>> {
-    let loaded = file_io::read(path, word_marks::MAX_WORDS_PER_SET * 64).ok()?;
+    let loaded = file_io::read(path, word_marks::MAX_WORDS_PER_GROUP * 64).ok()?;
     Some(word_marks::read_word_file(&loaded.text))
 }
 
@@ -8981,9 +9096,11 @@ fn lay_out_pane(
     let styled = marked
         .with_markers(shown.markers())
         .with_source_line(shown.source_line());
-    // 要件 7.9: **色を付ける語は、組み直しの判定に入らない**（`set_words`）。
-    // 幾何を1画素も動かさないので、変わってもタイルだけが古くなる。
-    engine.set_words(loaded_words());
+    // 要件 7.9: **この面のモードの語を渡す**（`set_words`）。モードは文書ごと
+    // なので、2つのペインが別の作品を開いていれば別の色分けになる。
+    // **組み直しの判定には入らない**——幾何を1画素も動かさないので、変わっても
+    // タイルだけが古くなる（技術検証 9.3.1）。
+    engine.set_words(word_mode_named(&id.screen(window).word_mode));
     let measured = match engine.update(styled, line_fit, typography) {
         Ok(measured) => measured,
         Err(error) => {
@@ -12554,56 +12671,71 @@ mod tests {
         assert_eq!(history, [d, c, a]);
     }
 
-    /// 要件 7.9（2026-09-08）: 表の1冊は、編集器の中の形と往復する。
+    /// 要件 7.9（2026-09-08）: モードは、編集器の中の形と往復する。
     ///
     /// **書き出せて読み戻せなければ、次の起動で書き手の一覧が消える。**
     #[test]
-    fn a_word_book_goes_out_and_comes_back() {
-        let set = word_marks::WordSet {
-            name: "人物".to_owned(),
-            colour: [0.8, 0.2, 0.2],
-            muted: true,
-            source: PathBuf::from("D:\\原稿\\人物.txt"),
-            words: vec!["田中".to_owned(), "佐藤".to_owned()],
+    fn a_word_mode_goes_out_and_comes_back() {
+        let mode = word_marks::WordMode {
+            name: "作品A".to_owned(),
+            groups: vec![
+                word_marks::WordGroup {
+                    name: "人物".to_owned(),
+                    colour: [0.8, 0.2, 0.2],
+                    words: vec!["田中".to_owned(), "佐藤".to_owned()],
+                },
+                word_marks::WordGroup {
+                    name: "地名".to_owned(),
+                    colour: [0.2, 0.2, 0.8],
+                    words: vec!["京都".to_owned()],
+                },
+            ],
         };
-        let written = app_data::encode_words(&[book_from_set(&set)]);
+        let written = app_data::encode_words(&[stored_from_mode(&mode)]);
         let read = app_data::decode_words(&written).expect("decodes");
 
         assert_eq!(read.len(), 1);
-        let back = set_from_book(&read[0]);
-        assert_eq!(back.name, set.name);
-        assert_eq!(back.muted, set.muted);
-        assert_eq!(back.source, set.source);
-        assert_eq!(back.words, set.words);
+        let back = mode_from_stored(&read[0]);
+        assert_eq!(back.name, mode.name);
+        assert_eq!(back.groups.len(), 2);
+        assert_eq!(back.groups[0].name, "人物");
+        assert_eq!(back.groups[0].words, ["田中", "佐藤"]);
+        assert_eq!(back.groups[1].words, ["京都"]);
         // 色は#rrggbbを通るので、1/255まで。
-        for (was, now) in set.colour.iter().zip(back.colour.iter()) {
+        for (was, now) in mode.groups[0]
+            .colour
+            .iter()
+            .zip(back.groups[0].colour.iter())
+        {
             assert!((was - now).abs() < 0.005, "{was} と {now}");
         }
     }
 
-    /// 二冊あっても、語がどちらのものかを取り違えない。
+    /// 二つのモードがあっても、語がどちらのものかを取り違えない。
     #[test]
-    fn two_books_keep_their_own_words() {
-        let one = word_marks::WordSet {
-            name: "人物".to_owned(),
-            colour: [0.8, 0.2, 0.2],
-            muted: false,
-            source: PathBuf::from("D:\\人物.txt"),
-            words: vec!["田中".to_owned()],
+    fn two_modes_keep_their_own_groups() {
+        let one = word_marks::WordMode {
+            name: "作品A".to_owned(),
+            groups: vec![word_marks::WordGroup {
+                name: "人物".to_owned(),
+                colour: [0.8, 0.2, 0.2],
+                words: vec!["田中".to_owned()],
+            }],
         };
-        let other = word_marks::WordSet {
-            name: "地名".to_owned(),
-            colour: [0.2, 0.2, 0.8],
-            muted: false,
-            source: PathBuf::from("D:\\地名.txt"),
-            words: vec!["京都".to_owned(), "奈良".to_owned()],
+        let other = word_marks::WordMode {
+            name: "作品B".to_owned(),
+            groups: vec![word_marks::WordGroup {
+                name: "人物".to_owned(),
+                colour: [0.2, 0.2, 0.8],
+                words: vec!["山田".to_owned(), "伊藤".to_owned()],
+            }],
         };
-        let written = app_data::encode_words(&[book_from_set(&one), book_from_set(&other)]);
+        let written = app_data::encode_words(&[stored_from_mode(&one), stored_from_mode(&other)]);
         let read = app_data::decode_words(&written).expect("decodes");
 
         assert_eq!(read.len(), 2);
-        assert_eq!(read[0].words, ["田中"]);
-        assert_eq!(read[1].words, ["京都", "奈良"]);
+        assert_eq!(read[0].groups[0].words, ["田中"]);
+        assert_eq!(read[1].groups[0].words, ["山田", "伊藤"]);
     }
 
     /// 追加要件 2026-09-08: 接続先の一覧は設定ファイルの行になり、行から

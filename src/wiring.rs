@@ -23,16 +23,17 @@ use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, VecMode
 
 use crate::directwrite_render;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
+use crate::session::write_session;
 use crate::{
-    AppWindow, Live, NO_TARGET, Opening, PaneId, PaneStates, Question, RenderCache, Setting,
-    TreeCommand, activate_left_row, add_word_to_set, ask_for_name, collect_search, colour_row,
-    drop_tree_row, export_word_set, file_dialog, file_tree, find_in_pane, focused_pane, font_name,
-    font_row, go_to_remembered_folder, hold_word_sets, ime, navigate, next_word_colour,
-    open_path_in_focused_pane, open_work_folder, paste_into_tab, paste_targets, pick_tree_row,
-    publish_left, publish_tabs, quick_draft, read_word_source, remove_word_from_set,
-    replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
-    schedule_relayout, search_in_folder, search_work_folder, selected_runs, set_colour, shell,
-    shown_sheet, slint_colour, step_setting, tree_command, word_marks, word_sets_now,
+    AppWindow, Live, NO_TARGET, PaneId, PaneStates, Question, RenderCache, Setting, TreeCommand,
+    activate_left_row, add_word_to_group, ask_for_name, collect_search, colour_row, drop_tree_row,
+    export_word_group, file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
+    go_to_remembered_folder, hold_word_modes, ime, navigate, open_work_folder, pane_word_mode,
+    paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
+    quick_draft, read_word_source, relayout_panes, remove_word_from_group, replace_all_in_pane,
+    replace_in_pane, reset_settings, restore_editor_focus, save_settings, schedule_relayout,
+    search_in_folder, search_work_folder, selected_runs, set_colour, shell, shown_sheet,
+    slint_colour, step_setting, tree_command, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -153,158 +154,70 @@ fn after_terminal_look(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
     window.invoke_terminal_woken();
 }
 
-/// 要件 7.9（2026-09-08）: 単語セット——**この編集器がいちばん力を入れるところ**の
-/// 設定側。
+/// 要件 7.9（2026-09-08）: 単語チェックモード——**書き手が自分で作る「言語モード」**。
 ///
-/// **取り込む形にしてある**（書き手の指摘、IMEの辞書と同じ）。ファイルを指し
-/// っぱなしにするのではなく、読んだ結果を編集器の表へ入れる——**そうしてはじめて、
-/// 重複を数えて画面から参照できる**。元のファイルを直しても、`Re-import`と言う
-/// までは変わらない。
+/// **考え方はソースの予約語の色分けと同じ**（書き手の指摘）。モードが語群を持ち、
+/// 語群が色を持つ。モードは文書ごとで、ステータスバーから切り替える。
 ///
-/// **どの操作も`hold_word_sets`一本を通る**：表を置き換え、重複を数え直し、木を
+/// **どの操作も`hold_word_modes`一本を通る**：表を置き換え、重複を数え直し、木を
 /// 建て直し、画面へ出し、書き出す。順番を守る場所が1つで済む。
-pub fn wire_word_sets(window: &AppWindow, live: &Live) {
-    // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
-    // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
+pub fn wire_word_modes(window: &AppWindow, live: &Live) {
+    // **モードを1つ作る。**ファイルは要らない——辞書は編集器が持つもので、
+    // 書き手がファイルを管理する必要は無い。名前は要件5.2の新規ファイルと
+    // 同じ問い方で訊く。
     let weak = window.as_weak();
     let held = live.clone();
-    window.on_word_set_added(move || {
-        let weak = weak.clone();
-        let held = held.clone();
-        Timer::single_shot(Duration::ZERO, move || {
-            let Some(window) = weak.upgrade() else {
-                return;
-            };
-            let Some(source) = file_dialog::open_word_set(ime::window_handle(&window)) else {
-                return;
-            };
-            let mut sets = word_sets_now();
-            if sets.len() >= word_marks::MAX_WORD_SETS {
-                window.set_render_status(
-                    format!("単語セットは{}冊までです", word_marks::MAX_WORD_SETS).into(),
-                );
-                return;
-            }
-            let Some(words) = read_word_source(&source) else {
-                window.set_render_status("取り込めませんでした".into());
-                return;
-            };
-            // **足したセットの色は、まだ使っていない色から。**同じ色が2つ並ぶと、
-            // どちらの色分けを見ているのか画面が言えない。
-            let colour = next_word_colour(&sets);
-            sets.push(word_marks::WordSet {
-                name: source
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "単語セット".to_owned()),
-                colour,
-                muted: false,
-                source,
-                words,
-            });
-            let taken = sets.last().map_or(0, |set| set.words.len());
-            hold_word_sets(&window, &held, sets, true);
-            window.set_render_status(format!("{taken}語を取り込みました").into());
-        });
-    });
-
-    // **もう一度取り込む。**語は表の中にあるので、元のファイルを直しただけでは
-    // 変わらない——それがIMEの辞書と同じ形であることの、目に見える面である。
-    let weak = window.as_weak();
-    let held = live.clone();
-    window.on_word_set_reimported(move |at| {
+    window.on_word_mode_created(move || {
         if let Some(window) = weak.upgrade() {
-            let mut sets = word_sets_now();
-            let Some(set) = sets.get_mut(at.max(0) as usize) else {
-                return;
-            };
-            let Some(words) = read_word_source(&set.source) else {
-                window.set_render_status("取り込み元を読めませんでした".into());
-                return;
-            };
-            set.words = words;
-            let taken = set.words.len();
-            hold_word_sets(&window, &held, sets, true);
-            window.set_render_status(format!("{taken}語を取り込み直しました").into());
-        }
-    });
-
-    let weak = window.as_weak();
-    let held = live.clone();
-    window.on_word_set_colour_picked(move |at| {
-        let weak = weak.clone();
-        let held = held.clone();
-        Timer::single_shot(Duration::ZERO, move || {
-            let Some(window) = weak.upgrade() else {
-                return;
-            };
-            let mut sets = word_sets_now();
-            let Some(set) = sets.get_mut(at.max(0) as usize) else {
-                return;
-            };
-            let standing = set.colour.map(|channel| (channel * 255.0).round() as u8);
-            let Some(picked) = shell::choose_colour(ime::window_handle(&window), standing) else {
-                return;
-            };
-            set.colour = [
-                picked[0] as f32 / 255.0,
-                picked[1] as f32 / 255.0,
-                picked[2] as f32 / 255.0,
-            ];
-            hold_word_sets(&window, &held, sets, true);
-        });
-    });
-
-    let weak = window.as_weak();
-    let held = live.clone();
-    window.on_word_set_muted(move |at, muted| {
-        if let Some(window) = weak.upgrade() {
-            let mut sets = word_sets_now();
-            let Some(set) = sets.get_mut(at.max(0) as usize) else {
-                return;
-            };
-            set.muted = muted;
-            // **畳めば衝突も消える**（`WordMarks::build`が畳んだセットを見ない）
-            // ので、重複の一覧もここで数え直る。
-            hold_word_sets(&window, &held, sets, true);
-        }
-    });
-
-    let weak = window.as_weak();
-    let held = live.clone();
-    window.on_word_set_removed(move |at| {
-        if let Some(window) = weak.upgrade() {
-            let mut sets = word_sets_now();
-            let at = at.max(0) as usize;
-            if at >= sets.len() {
-                return;
-            }
-            // **取り込み元のファイルには触らない。**表から外すだけで、書き手が
-            // 集めた語はそのまま残る。
-            sets.remove(at);
-            hold_word_sets(&window, &held, sets, true);
-        }
-    });
-
-    // **空のセットを作る。**ファイルは要らない——辞書は編集器が持つもので、
-    // 書き手がファイルを管理する必要は無い（要件 7.9）。名前は他の「作る」と
-    // 同じ問い方で訊く（要件 5.2 の新規ファイルと同じ道具）。
-    let weak = window.as_weak();
-    let held = live.clone();
-    window.on_word_set_created(move || {
-        if let Some(window) = weak.upgrade() {
-            let taken: Vec<String> = word_sets_now().iter().map(|set| set.name.clone()).collect();
-            let mut number = taken.len() + 1;
-            while taken.iter().any(|name| *name == format!("単語帳{number}")) {
-                number += 1;
-            }
+            let taken = word_modes_now().len() + 1;
             ask_for_name(
                 &window,
                 &held,
-                Question::NewWordSet,
-                "新しい単語セットの名前を入れてください。".to_owned(),
-                &format!("単語帳{number}"),
+                Question::NewWordMode,
+                "新しいモードの名前を入れてください。".to_owned(),
+                &format!("モード{taken}"),
             );
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_group_created(move |mode| {
+        if let Some(window) = weak.upgrade() {
+            let taken = word_modes_now()
+                .get(mode.max(0) as usize)
+                .map_or(1, |held| held.groups.len() + 1);
+            window.set_word_group_wanted_in(mode);
+            ask_for_name(
+                &window,
+                &held,
+                Question::NewWordGroup,
+                "新しい語群の名前を入れてください。".to_owned(),
+                &format!("語群{taken}"),
+            );
+        }
+    });
+
+    // 要件 10: **ステータスバーから切り替える。**コードエディタが言語モードを
+    // 出しているのと同じ場所で、**モードは文書ごと**に付く。
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_mode_chosen(move |name| {
+        if let Some(window) = weak.upgrade() {
+            let id = focused_pane(&window);
+            {
+                let mut tabs = held.tabs.borrow_mut();
+                let strip = tabs.of_mut(id);
+                let at = strip.active;
+                if let Some(tab) = strip.tabs.get_mut(at) {
+                    tab.word_mode = name.to_string();
+                }
+            }
+            id.update_screen(&window, |screen| screen.word_mode = name.clone());
+            publish_word_mode_of(&window, &held);
+            // **色が変わったので描き直す。測り直しはしない**（技術検証 9.3.1）。
+            relayout_panes(&window, &held.states, &held.cache);
+            write_session(&window, &held);
         }
     });
 
@@ -323,40 +236,135 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live) {
                 return;
             };
             let word = source[start..end].to_owned();
-            add_word_to_set(&window, &held, at.max(0) as usize, &word);
+            let mode = pane_word_mode(&held, id);
+            add_word_to_group(&window, &held, &mode, at.max(0) as usize, &word);
         }
     });
 
     let weak = window.as_weak();
     let held = live.clone();
-    window.on_word_removed(move |at, word| {
+    window.on_word_removed(move |group, word| {
         if let Some(window) = weak.upgrade() {
-            remove_word_from_set(&window, &held, at.max(0) as usize, &word);
+            let mode = window.get_word_mode_opened_at().max(0) as usize;
+            remove_word_from_group(&window, &held, mode, group.max(0) as usize, &word);
         }
     });
 
+    // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
+    // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
     let weak = window.as_weak();
-    window.on_word_set_exported(move |at| {
+    let held = live.clone();
+    window.on_word_group_colour_picked(move |at| {
         let weak = weak.clone();
+        let held = held.clone();
         Timer::single_shot(Duration::ZERO, move || {
-            if let Some(window) = weak.upgrade() {
-                export_word_set(&window, at.max(0) as usize);
-            }
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            let mode = window.get_word_mode_opened_at().max(0) as usize;
+            let mut modes = word_modes_now();
+            let Some(group) = modes
+                .get_mut(mode)
+                .and_then(|held| held.groups.get_mut(at.max(0) as usize))
+            else {
+                return;
+            };
+            let standing = group.colour.map(|channel| (channel * 255.0).round() as u8);
+            let Some(picked) = shell::choose_colour(ime::window_handle(&window), standing) else {
+                return;
+            };
+            group.colour = [
+                picked[0] as f32 / 255.0,
+                picked[1] as f32 / 255.0,
+                picked[2] as f32 / 255.0,
+            ];
+            hold_word_modes(&window, &held, modes, true);
         });
     });
 
     let weak = window.as_weak();
-    let open_live = live.clone();
-    window.on_word_set_opened(move |at| {
+    let held = live.clone();
+    window.on_word_group_removed(move |at| {
         if let Some(window) = weak.upgrade() {
-            let sets = word_sets_now();
-            let Some(set) = sets.get(at.max(0) as usize) else {
+            let mode = window.get_word_mode_opened_at().max(0) as usize;
+            let mut modes = word_modes_now();
+            let Some(held_mode) = modes.get_mut(mode) else {
                 return;
             };
-            // **ただのテキストなので、ただ開く。**直したら`Re-import`で取り込み直す。
-            let source = set.source.clone();
-            open_path_in_focused_pane(&window, &open_live, &source, Opening::Kept);
+            let at = at.max(0) as usize;
+            if at >= held_mode.groups.len() {
+                return;
+            }
+            held_mode.groups.remove(at);
+            window.set_word_group_opened_at(-1);
+            hold_word_modes(&window, &held, modes, true);
         }
+    });
+
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_mode_removed(move |at| {
+        if let Some(window) = weak.upgrade() {
+            let mut modes = word_modes_now();
+            let at = at.max(0) as usize;
+            if at >= modes.len() {
+                return;
+            }
+            modes.remove(at);
+            window.set_word_mode_opened_at(-1);
+            window.set_word_group_opened_at(-1);
+            // **文書のほうは触らない。**消したモードを指していたタブは「なし」
+            // として扱われる（`word_mode_named`）——名前を書き換えて回るより、
+            // 引けなかったときの答えが1つあるほうが確かである。
+            hold_word_modes(&window, &held, modes, true);
+            publish_word_mode_of(&window, &held);
+        }
+    });
+
+    // **取り込みと書き出しは「あってもよい道」**（要件 7.9）。他の道具で作った
+    // 一覧を持ち込むとき、控えを取るとき、別の機械へ移すときのためにある。
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_group_imported(move |at| {
+        let weak = weak.clone();
+        let held = held.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            let Some(source) = file_dialog::open_word_set(ime::window_handle(&window)) else {
+                return;
+            };
+            let Some(words) = read_word_source(&source) else {
+                window.set_render_status("取り込めませんでした".into());
+                return;
+            };
+            let mode = window.get_word_mode_opened_at().max(0) as usize;
+            let mut modes = word_modes_now();
+            let Some(group) = modes
+                .get_mut(mode)
+                .and_then(|held| held.groups.get_mut(at.max(0) as usize))
+            else {
+                return;
+            };
+            // **足す**（置き換えない）。取り込みは書き手が起こす操作で、いまある
+            // 語を黙って捨てる理由が無い——重なったぶんは「二重」と言われる。
+            let taken = words.len();
+            group.words.extend(words);
+            hold_word_modes(&window, &held, modes, true);
+            window.set_render_status(format!("{taken}語を取り込みました").into());
+        });
+    });
+
+    let weak = window.as_weak();
+    window.on_word_group_exported(move |at| {
+        let weak = weak.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                let mode = window.get_word_mode_opened_at().max(0) as usize;
+                export_word_group(&window, mode, at.max(0) as usize);
+            }
+        });
     });
 }
 

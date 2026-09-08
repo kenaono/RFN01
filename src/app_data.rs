@@ -108,6 +108,11 @@ pub struct SessionTab {
     /// started when the tab comes to the front.
     pub below: bool,
     pub below_height: i32,
+    /// 要件 7.9（2026-09-08）: この文書の単語チェックモードの名前。
+    ///
+    /// **書かないのは「なし」のときだけ**なので、この版より前のセッションは
+    /// 空のまま読まれ、色分けの無い文書として戻る。
+    pub word_mode: String,
     /// 追加要件 2026-09-07: whether this tab was still asking what it is.
     ///
     /// **Written only when it was**, so a session from a build without this
@@ -240,6 +245,11 @@ pub fn encode_session(session: &Session) -> String {
             if tab.empty {
                 out.push_str("empty: 1\n");
             }
+            // 要件 7.9（2026-09-08）: 単語チェックモード。**「なし」なら書かない**
+            // ので、この版より前のセッションは空のまま読まれる。
+            if !tab.word_mode.is_empty() {
+                out.push_str(&format!("mode: {}\n", tab.word_mode));
+            }
             if tab.below || tab.below_height > 0 {
                 out.push_str(&format!(
                     "below: {} {}\n",
@@ -331,6 +341,10 @@ pub fn decode_session(raw: &str) -> Option<Session> {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.empty = value == "1";
             }
+            "mode" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                tab.word_mode = value.to_owned();
+            }
             "below" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 let mut fields = value.split(' ');
@@ -384,48 +398,52 @@ pub fn decode_settings(raw: &str) -> Option<Vec<(String, String)>> {
     Some(values)
 }
 
-/// 要件 7.9（2026-09-08）: 取り込んだ単語セットの表。
+/// 要件 7.9（2026-09-08）: 単語チェックモードの表。
 ///
-/// **編集器が持つ表である**（書き手の指摘、IMEの辞書と同じ考え）。取り込み元の
-/// ファイルを指しっぱなしにするのではなく、**取り込んだ結果をここへ置く**——
-/// そうしてはじめて、重複を数えて画面から参照できる。
+/// **編集器が持つ表である**（書き手の指摘）。書き手はファイルを管理しない——
+/// 語はここにあり、画面から足して、画面から消す。ファイルは出し入れのためだけ。
+///
+/// **形はモード→語群→語**（同日再改訂、書き手の指摘：ソースの予約語の色分けと
+/// 同じ考え）。C言語モードが予約語・型・前処理をそれぞれの色で持つように、
+/// モードが語群を持ち、語群が色を持つ。
 ///
 /// 設定（`settings.rfnsettings`）ではなくこちらに置くのは、**大きさが違う**から
 /// である。設定は数十行で人が読んで直すもの、こちらは数千行になりうる。
 const WORDS_FILE: &str = "words.rfnwords";
-const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 1";
+const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 2";
 
-/// 表の1冊。`word_marks::WordSet`と同じ形だが、**この層は語の意味を知らない**
-/// ——並びとして預かるだけである。
+/// 表の中の1つの語群。`word_marks::WordGroup`と同じ形だが、**この層は語の意味を
+/// 知らない**——並びとして預かるだけである。
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct WordBook {
+pub struct StoredGroup {
     pub name: String,
     /// `#rrggbb`。**文字列のまま持つ**：この層は色を混ぜない。
     pub colour: String,
-    pub muted: bool,
-    /// どこから取り込んだか。もう一度取り込むときの既定の場所。
-    pub source: PathBuf,
     pub words: Vec<String>,
+}
+
+/// 表の中の1つのモード。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StoredMode {
+    pub name: String,
+    pub groups: Vec<StoredGroup>,
 }
 
 /// 表を書き出す。
 ///
-/// **1行1語**（要件 7.9）。`set:`の行のあとに、そのセットの`word:`が続く。
+/// **1行1語**（要件 7.9）。`mode:`の下に`group:`が続き、その下に`word:`が続く。
 /// 人が開いて読める形なのは、この編集器の他の書き出しと同じ方針である。
-pub fn encode_words(books: &[WordBook]) -> String {
+pub fn encode_words(modes: &[StoredMode]) -> String {
     let mut out = String::new();
     out.push_str(WORDS_MAGIC);
     out.push('\n');
-    for book in books {
-        out.push_str(&format!(
-            "set: {} | {} | {} | {}\n",
-            book.name,
-            book.colour,
-            u8::from(book.muted),
-            book.source.display()
-        ));
-        for word in &book.words {
-            out.push_str(&format!("word: {word}\n"));
+    for mode in modes {
+        out.push_str(&format!("mode: {}\n", mode.name));
+        for group in &mode.groups {
+            out.push_str(&format!("group: {} | {}\n", group.name, group.colour));
+            for word in &group.words {
+                out.push_str(&format!("word: {word}\n"));
+            }
         }
     }
     out
@@ -433,12 +451,12 @@ pub fn encode_words(books: &[WordBook]) -> String {
 
 /// 表を読み戻す。**読めなければ`None`**——半分だけ読んだ表は、書き手の一覧を
 /// 半分にしたものである。
-pub fn decode_words(raw: &str) -> Option<Vec<WordBook>> {
+pub fn decode_words(raw: &str) -> Option<Vec<StoredMode>> {
     let mut lines = raw.split('\n');
     if lines.next()? != WORDS_MAGIC {
         return None;
     }
-    let mut books: Vec<WordBook> = Vec::new();
+    let mut modes: Vec<StoredMode> = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -447,43 +465,43 @@ pub fn decode_words(raw: &str) -> Option<Vec<WordBook>> {
             continue;
         };
         match key {
-            "set" => {
-                let mut parts = value.splitn(4, " | ");
-                let name = parts.next().unwrap_or_default().to_owned();
-                let colour = parts.next().unwrap_or_default().to_owned();
-                let muted = parts.next().unwrap_or("0") != "0";
-                let source = PathBuf::from(parts.next().unwrap_or_default());
-                books.push(WordBook {
-                    name,
-                    colour,
-                    muted,
-                    source,
-                    words: Vec::new(),
-                });
+            "mode" => modes.push(StoredMode {
+                name: value.to_owned(),
+                groups: Vec::new(),
+            }),
+            // **モードの無い`group:`は捨てる。**行の順が壊れた表で、どこへ
+            // 入れるか決められない。`word:`も同じ。
+            "group" => {
+                if let Some(mode) = modes.last_mut() {
+                    let (name, colour) = value.split_once(" | ").unwrap_or((value, ""));
+                    mode.groups.push(StoredGroup {
+                        name: name.to_owned(),
+                        colour: colour.to_owned(),
+                        words: Vec::new(),
+                    });
+                }
             }
-            // **セットの無い`word:`は捨てる。**行の順が壊れた表で、語を
-            // どこへ入れるか決められない。
             "word" => {
-                if let Some(book) = books.last_mut() {
-                    book.words.push(value.to_owned());
+                if let Some(group) = modes.last_mut().and_then(|mode| mode.groups.last_mut()) {
+                    group.words.push(value.to_owned());
                 }
             }
             _ => {}
         }
     }
-    Some(books)
+    Some(modes)
 }
 
 /// 表を置く。
-pub fn write_words(directory: &Path, books: &[WordBook]) -> io::Result<PathBuf> {
+pub fn write_words(directory: &Path, modes: &[StoredMode]) -> io::Result<PathBuf> {
     fs::create_dir_all(directory)?;
     let path = directory.join(WORDS_FILE);
-    file_io::write_atomically(&path, encode_words(books).as_bytes())?;
+    file_io::write_atomically(&path, encode_words(modes).as_bytes())?;
     Ok(path)
 }
 
 /// 表を読む。無ければ空。
-pub fn read_words(directory: &Path) -> Vec<WordBook> {
+pub fn read_words(directory: &Path) -> Vec<StoredMode> {
     fs::read_to_string(directory.join(WORDS_FILE))
         .ok()
         .and_then(|raw| decode_words(&raw))
