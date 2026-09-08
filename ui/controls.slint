@@ -666,6 +666,12 @@ export component TextButton inherits Rectangle {
     in property <string> title;
     in property <Role> role: Role.normal;
     in property <bool> enabled: true;
+    /// 長押しで別のことをする釦（書き手の求め 2026-09-08）。
+    ///
+    /// **タブの名前を変えるのと同じ作法**（追加要件 2026-09-06）——半秒押したままに
+    /// すると`held`が出る。同じ意味の操作は同じ手つきであるべきなので、間隔も揃える。
+    in property <bool> holdable: false;
+    callback held();
     /// Fill whatever it is put in, rather than fitting its word. **For a column
     /// of answers**: a question with four of them in Japanese is wider than any
     /// card it fits in, and a row that overflows draws its buttons over the
@@ -714,9 +720,33 @@ export component TextButton inherits Rectangle {
                 : (root.role == Role.quiet ? Tok.ink-muted : Tok.ink));
     }
 
+    /// 長押しが済んだ——**離したときの`clicked`は押下ではない。**
+    property <bool> held-already: false;
+    /// `touch.pressed`を見るための写し。**押し始めで必ず消す**ので、指が釦の外へ
+    /// 出て`clicked`が来なかったときも、次の押下に持ち越さない。
+    property <bool> down: touch.pressed;
+    changed down => {
+        if (root.down) {
+            root.held-already = false;
+        }
+    }
+
+    hold := Timer {
+        interval: 500ms;
+        running: root.holdable && root.down && !root.held-already;
+        triggered => {
+            root.held-already = true;
+            root.held();
+        }
+    }
+
     touch := TouchArea {
         enabled: root.enabled;
         clicked => {
+            // 長押しとして受けたものを、離すときにもう一度押下として受けない。
+            if (root.held-already) {
+                return;
+            }
             root.clicked();
         }
     }

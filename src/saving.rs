@@ -471,6 +471,7 @@ pub fn write_document_to(
     // Taken before the save, because 名前を付けて保存 moves the document to
     // another file and the copy on disk is still under the old name.
     let previous = work_identity(&file.borrow());
+    let saved_to = target.clone();
     let outcome = file.borrow_mut().save_to(target, &text);
     match outcome {
         Ok(()) => {
@@ -481,6 +482,13 @@ pub fn write_document_to(
             // unsaved marker changes with every save.
             publish_tabs(window, live);
             window.set_render_status("保存しました".into());
+            // 単語チェックモード要件 5.4（2026-09-08）: **保存されたのが辞書
+            // そのものなら、そこから読み直す。**書き手が直したのは表であって、
+            // 画面の表と食い違ったまま進むと、次に語を1つ足した拍子に書き手の
+            // 編集が消える。
+            if crate::is_word_file(&saved_to) {
+                crate::adopt_word_file(window, live);
+            }
             cache
                 .borrow_mut()
                 .log_diag("file", &format!("save ok bytes={bytes} path={shown}"));

@@ -26,14 +26,14 @@ use crate::saving::{open_document, reveal_active_document, save_all, save_docume
 use crate::{
     AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, add_word_to_group, close_word_naming, collect_search, colour_row,
-    drop_tree_row, export_word_group, file_dialog, file_tree, find_in_pane, focused_pane,
-    font_name, font_row, go_to_remembered_folder, hold_word_modes, ime, navigate, new_word_group,
-    new_word_mode, open_work_folder, pane_word_mode, paste_into_tab, paste_targets, pick_tree_row,
-    publish_left, publish_tabs, publish_word_mode_of, publish_word_modes, quick_draft,
-    read_word_source, remove_word_from_group, replace_all_in_pane, replace_in_pane, reset_settings,
-    restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
-    selected_runs, set_colour, set_word_mode_of, shell, shown_sheet, slint_colour, step_setting,
-    tree_command, word_modes_now,
+    drop_tree_row, edit_word_file, export_word_group, file_dialog, file_tree, find_in_pane,
+    focused_pane, font_name, font_row, go_to_remembered_folder, hold_word_modes, ime, navigate,
+    new_word_group, new_word_mode, open_work_folder, pane_word_mode, paste_into_tab, paste_targets,
+    pick_tree_row, publish_left, publish_tabs, publish_word_mode_of, publish_word_modes,
+    quick_draft, read_word_source, remove_word_from_group, rename_word_group, rename_word_mode,
+    replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
+    schedule_relayout, search_in_folder, search_work_folder, selected_runs, set_colour,
+    set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -210,6 +210,42 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
         if let Some(window) = weak.upgrade() {
             window.set_word_group_opened_at(at);
             publish_word_modes(&window);
+        }
+    });
+
+    // **長押しで名前を変える**（書き手の求め 2026-09-08、単語チェックモード要件
+    // 7.4）。作るときと同じ欄が同じ場所に出るので、Rustから見れば同じ形の仕事で
+    // ある——できたら畳み、駄目なら理由を欄の下へ返す。
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_mode_renamed(move |at, name| {
+        if let Some(window) = weak.upgrade() {
+            match rename_word_mode(&window, &held, at.max(0) as usize, &name) {
+                Ok(()) => close_word_naming(&window),
+                Err(told) => window.set_word_naming_trouble(told.into()),
+            }
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_group_renamed(move |at, name| {
+        if let Some(window) = weak.upgrade() {
+            let mode = window.get_word_mode_opened_at().max(0) as usize;
+            match rename_word_group(&window, &held, mode, at.max(0) as usize, &name) {
+                Ok(()) => close_word_naming(&window),
+                Err(told) => window.set_word_naming_trouble(told.into()),
+            }
+        }
+    });
+
+    // 単語チェックモード要件 5.4: **辞書そのものをタブで開く。**
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_file_edited(move || {
+        if let Some(window) = weak.upgrade() {
+            close_word_naming(&window);
+            edit_word_file(&window, &held);
         }
     });
 

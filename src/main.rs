@@ -7473,6 +7473,150 @@ fn new_word_group(window: &AppWindow, live: &Live, at: usize, name: &str) -> Res
     Ok(())
 }
 
+/// モードの名前を変える（単語チェックモード要件 7.4、書き手の求め 2026-09-08）。
+///
+/// **文書のモードは切れない。**文書が指しているのは番号であって名前ではない
+/// （同要件 3.2）——名前は書き手が変えるものだから、変えた瞬間に色が消えるのでは
+/// 名前の仕事として重すぎる。**この関数が番号に触らないことが、その約束である。**
+fn rename_word_mode(window: &AppWindow, live: &Live, at: usize, name: &str) -> Result<(), String> {
+    let mut modes = word_modes_now();
+    let name = name.trim();
+    if name.is_empty() || name == word_marks::NO_MODE {
+        return Err("その名前は使えません".to_owned());
+    }
+    if modes
+        .iter()
+        .enumerate()
+        .any(|(index, mode)| index != at && mode.name == name)
+    {
+        return Err(format!("「{name}」はもうあります"));
+    }
+    let Some(mode) = modes.get_mut(at) else {
+        return Err("そのモードはもうありません".to_owned());
+    };
+    if mode.name == name {
+        return Ok(());
+    }
+    mode.name = name.to_owned();
+    hold_word_modes(window, live, modes, true);
+    // ステータスバーとタブのメニューが出している名前も、いまの名前にする。
+    publish_word_mode_of(window, live);
+    Ok(())
+}
+
+/// 語群の名前を変える（同上）。
+fn rename_word_group(
+    window: &AppWindow,
+    live: &Live,
+    mode: usize,
+    at: usize,
+    name: &str,
+) -> Result<(), String> {
+    let mut modes = word_modes_now();
+    let Some(held) = modes.get_mut(mode) else {
+        return Err("先にモードを開いてください".to_owned());
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("その名前は使えません".to_owned());
+    }
+    if held
+        .groups
+        .iter()
+        .enumerate()
+        .any(|(index, group)| index != at && group.name == name)
+    {
+        return Err(format!("「{name}」はもうあります"));
+    }
+    let Some(group) = held.groups.get_mut(at) else {
+        return Err("その語群はもうありません".to_owned());
+    };
+    if group.name == name {
+        return Ok(());
+    }
+    group.name = name.to_owned();
+    hold_word_modes(window, live, modes, true);
+    Ok(())
+}
+
+/// 単語帳のファイルをタブで開く（単語チェックモード要件 5.4、書き手の求め
+/// 2026-09-08）。
+///
+/// **開く前に、いまの表をその場で書く。**書き込みはふだん別のスレッドの行列を
+/// 通る（同要件 4.3）ので、**行列に残っている仕事より先に読んでしまうと、
+/// 書き手は一つ前の姿を編集することになる**。同じ中身をもう一度書くだけなので、
+/// 行列に残ったぶんが後から着いても害は無い。
+fn edit_word_file(window: &AppWindow, live: &Live) {
+    let Some(directory) = app_data::app_directory() else {
+        window.set_render_status("単語帳の置き場所が分かりません".into());
+        return;
+    };
+    let held = app_data::StoredWords {
+        modes: word_modes_now().iter().map(stored_from_mode).collect(),
+        next_id: WORD_NEXT_ID.with(std::cell::Cell::get),
+    };
+    let path = app_data::words_path(&directory);
+    // **読めない表のときは書かない**（同要件 4.4）。書き手が直しに行く先を、
+    // こちらが上書きしてしまう。
+    if WORD_STORING.with(std::cell::Cell::get)
+        && let Err(error) =
+            file_io::write_atomically(&path, app_data::encode_words(&held).as_bytes())
+    {
+        window.set_render_status(format!("単語帳を書けません: {error}").into());
+        return;
+    }
+    if !path.exists() {
+        window.set_render_status("単語帳のファイルがありません".into());
+        return;
+    }
+    open_path_in_focused_pane(window, live, &path, Opening::Kept);
+    window.set_render_status("単語帳を開きました（保存すると取り込みます）".into());
+}
+
+/// 単語帳のファイルが保存されたので、そこから読み直す（同要件 5.4）。
+///
+/// **取り込みではなく、置き換えである。**書き手が直したのは表そのもので、
+/// 画面の表と食い違ったまま進むと、次に語を1つ足した拍子に**書き手の編集が
+/// 消える**。
+///
+/// **読めなければ、いまの表のまま止める**（同要件 4.4）。そして書き込みを止める
+/// ——直している最中のファイルを上書きしないためで、次に読めたときに戻る。
+fn adopt_word_file(window: &AppWindow, live: &Live) {
+    let Some(directory) = app_data::app_directory() else {
+        return;
+    };
+    match app_data::read_words(&directory) {
+        Some((stored, damaged)) => {
+            WORD_STORING.with(|storing| storing.set(true));
+            WORD_NEXT_ID.with(|next| next.set(stored.next_id.max(1)));
+            let modes: Vec<word_marks::WordMode> =
+                stored.modes.iter().map(mode_from_stored).collect();
+            let told = if damaged > 0 {
+                format!("単語帳を取り込みました（{damaged}行は読めませんでした）")
+            } else {
+                "単語帳を取り込みました".to_owned()
+            };
+            // **書き戻さない。**いま読んだものがファイルの中身なので、書けば
+            // 開いているタブに外部変更として立つだけである（要件 8.2）。
+            hold_word_modes(window, live, modes, false);
+            publish_word_mode_of(window, live);
+            window.set_render_status(told.into());
+        }
+        None => {
+            WORD_STORING.with(|storing| storing.set(false));
+            window.set_render_status("単語帳を読めませんでした（取り込みません）".into());
+            live.cache
+                .borrow_mut()
+                .log_diag("spec", "words unreadable after edit");
+        }
+    }
+}
+
+/// いま保存されたのが単語帳そのものか（同要件 5.4）。
+pub fn is_word_file(path: &Path) -> bool {
+    app_data::app_directory().is_some_and(|directory| app_data::words_path(&directory) == path)
+}
+
 /// 選んでいる語を、語群へ足す（要件 7.9）。
 ///
 /// **書きながら足すいちばん普通の道。**書いていて気づいた名前を、その場で、書く手を
