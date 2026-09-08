@@ -13094,21 +13094,14 @@ mod tests {
         assert_eq!(round, read, "往復して同じ");
     }
 
-    /// **版2も読める**（2026-09-08）。前置きが要らなくなっただけで、見出しの形は
-    /// 同じ——書き手が積み上げた辞書を、版を上げたこちらの都合で読めなくしない。
+    /// **古い版は読まない**（2026-09-08、書き手の指示）。まだ誰の辞書も世に
+    /// 出ていない段階で、形式は文書に書いてあれば足りる。**読めない表は
+    /// 上書きしない**（要件 4.4）ので、間違って古い版を指しても消えはしない。
     #[test]
-    fn the_previous_version_still_reads() {
-        let raw = concat!(
-            "RFN-EDIT-WORDS 2\n",
-            "next: 5\n",
-            "mode: 1 | 作品A\n",
-            "group: 2 | 人物 | #cc3333\n",
-            "word: 田中\n",
-        );
-        let (read, damaged) = app_data::decode_words(raw).expect("decodes");
+    fn another_version_is_not_this_table() {
+        let raw = concat!("RFN-EDIT-WORDS 2\n", "next: 5\n", "mode: 1 | 作品A\n",);
 
-        assert_eq!(damaged, 0);
-        assert_eq!(read.modes[0].groups[0].words, ["田中"]);
+        assert!(app_data::decode_words(raw).is_none());
     }
 
     /// 二つのモードがあっても、語がどちらのものかを取り違えない。
@@ -13129,7 +13122,7 @@ mod tests {
     #[test]
     fn damaged_lines_are_counted_not_hidden() {
         let raw = concat!(
-            "RFN-EDIT-WORDS 2\n",
+            "RFN-EDIT-WORDS 3\n",
             "next: 9\n",
             "これは行ではない\n",
             "word: 迷子\n",
@@ -13146,11 +13139,14 @@ mod tests {
         assert_eq!(read.modes[0].groups[0].words, ["田中"], "読めたぶんは残る");
     }
 
-    /// **番号を持たない古い表には、読むときに配る。**この版より前の表が、
-    /// 次の起動で番号を持って戻ってくる。
+    /// **番号を書かずに手で足された表には、読むときに配る**（2026-09-08）。
+    ///
+    /// 辞書は書き手が開いて直せるもの（要件 5.3）なので、`mode: 作品A`と1行
+    /// 書いただけのものが来る。**番号は編集器の都合であって、書き手が覚えて
+    /// おくものではない。**
     #[test]
-    fn an_older_table_is_given_ids_when_it_is_read() {
-        let raw = "RFN-EDIT-WORDS 2\nmode: 作品A\ngroup: 人物 | #cc3333\nword: 田中\n";
+    fn a_hand_written_table_is_given_ids_when_it_is_read() {
+        let raw = "RFN-EDIT-WORDS 3\nmode: 作品A\ngroup: 人物 | #cc3333\n田中\n";
         let (read, _) = app_data::decode_words(raw).expect("decodes");
 
         assert!(read.modes[0].id > 0);

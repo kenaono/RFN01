@@ -415,10 +415,12 @@ const WORDS_FILE: &str = "words.rfnwords";
 /// 表の先頭の1行——版と身元。
 ///
 /// **3で`word: `の前置きが要らなくなった**（書き手の求め 2026-09-08：「毎行Word
-/// 半角スペースを入れるのは、作業量が多いです」）。**2も読める**——書き手が
-/// 積み上げた辞書を、版を上げたこちらの都合で読めなくしない。
+/// 半角スペースを入れるのは、作業量が多いです」）。
+///
+/// **古い版は読まない**（同日、書き手の指示）。形式は文書に書いてあれば足りる
+/// 段階で、**まだ誰の辞書も世に出ていない**——出てからは、この行が版を上げる
+/// ための場所になる。
 const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 3";
-const WORDS_MAGIC_2: &str = "RFN-EDIT-WORDS 2";
 
 /// 行の頭に立てる鍵。**これで始まる行だけが見出しである。**
 const WORDS_KEYS: [&str; 4] = ["next: ", "mode: ", "group: ", "word: "];
@@ -507,10 +509,7 @@ pub fn encode_words(held: &StoredWords) -> String {
 /// 半分にしたものである。
 pub fn decode_words(raw: &str) -> Option<(StoredWords, usize)> {
     let mut lines = raw.split('\n');
-    let magic = lines.next()?;
-    // **2も読む。**`word: `の前置きが要らなくなっただけで、見出しの形は同じ
-    // ——前置きのある語はそのまま語として読める（2026-09-08）。
-    if magic != WORDS_MAGIC && magic != WORDS_MAGIC_2 {
+    if lines.next()? != WORDS_MAGIC {
         return None;
     }
     let mut held = StoredWords::default();
