@@ -7256,6 +7256,9 @@ fn hold_word_modes(window: &AppWindow, live: &Live, modes: Vec<word_marks::WordM
     cache.borrow_mut().log_diag("spec", &told);
     WORD_MODES.with(|held| *held.borrow_mut() = Rc::new(built));
     publish_word_modes(window);
+    // **働いていない理由も出し直す**（要件 2.1.1）。衝突は語を1つ足しただけで
+    // 増えたり消えたりするので、表が変わるこの1本を必ず通る。
+    publish_word_mode_of(window, live);
     // **色が変わったので描き直す。測り直しはしない**（要件 7.9）。単語セットは
     // `Typography`の外にいるので`matches`が真のままで、`update`は何も捨てずに
     // 戻る——**動くのはタイルの署名だけ**である（技術検証 9.3.1）。
@@ -7425,13 +7428,28 @@ fn set_word_mode_of(window: &AppWindow, live: &Live, id: PaneId, mode: u32) {
 /// が常に見えていて、押せば切り替わる。
 fn publish_word_mode_of(window: &AppWindow, live: &Live) {
     let id = pane_word_mode(live, focused_pane(window));
-    let name = word_mode_with(id).mode.name.clone();
+    let marks = word_mode_with(id);
+    let name = marks.mode.name.clone();
     window.set_word_mode(id as i32);
     // **番号ではなく名前を見せる。**指しているのは番号でも、書き手が読むのは名前。
     window.set_word_mode_name(if name.is_empty() {
         word_marks::NO_MODE.into()
     } else {
         name.into()
+    });
+    // **色分けが働いていない状態は、画面に出す**（単語チェックモード要件 2.1.1）。
+    //
+    // この機能の値打ちは**色が付かなかったこと**にある——`リオン`のつもりが
+    // `リオソ`だったと気づくため。だから「辞書が読めなかった」「その語は衝突して
+    // いて色が付かない」も**打ち間違えたのと同じ見た目になる**。黙っていると、
+    // 書き手は自分の原稿のほうを疑うことになる。
+    let conflicts = marks.conflicts();
+    window.set_word_mode_trouble(if !WORD_STORING.with(std::cell::Cell::get) {
+        "辞書を読めていません".into()
+    } else if conflicts > 0 {
+        format!("色が付かない語 {conflicts}").into()
+    } else {
+        SharedString::new()
     });
 }
 

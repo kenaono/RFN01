@@ -453,6 +453,12 @@ export component AppWindow inherits Window {
     /// 変えた瞬間に文書のモードが切れていた。
     in property <int> word-mode;
     in property <string> word-mode-name;
+    /// **色分けが働いていない理由**（空なら働いている、2026-09-08）。
+    ///
+    /// この機能の値打ちは**色が付かなかったこと**にあるので（単語チェックモード
+    /// 要件 2.1.1）、働いていない状態は**打ち間違えたのと同じ見た目になる**。
+    /// 黙っていると、書き手は自分の原稿のほうを疑う。
+    in property <string> word-mode-trouble;
     /// 前に出ている文書のモードを、この番号にする（ステータスバーから）。
     callback word-mode-chosen(int);
     /// そのペインの前に出ているタブのモードを、この番号にする（タブのメニューから）。
@@ -2205,8 +2211,13 @@ export component AppWindow inherits Window {
                     mode-text := Text {
                         x: 6px;
                         y: (parent.height - self.height) / 2;
-                        text: root.word-mode-name;
-                        color: Tok.ink-muted;
+                        // **働いていない理由は、モードの名前の隣に出す。**
+                        // 帯の言葉は次の報せで流れるが、これは続いているあいだ
+                        // ずっと出ていなければならない。
+                        text: root.word-mode-trouble == ""
+                            ? root.word-mode-name
+                            : root.word-mode-name + " · " + root.word-mode-trouble;
+                        color: root.word-mode-trouble == "" ? Tok.ink-muted : Tok.alert;
                         font-size: 12px;
                     }
 
