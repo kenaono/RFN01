@@ -406,6 +406,27 @@ export component AppWindow inherits Window {
     /// タブ列のメニュー、ペインの下段——はすべてこれを起こす。設定にも残る。
     in-out property <int> default-shell: 0;
     callback default-shell-chosen(int);
+    /// 追加要件 2026-09-08: 端末の見た目（要件 6.8）。
+    ///
+    /// **紙とは別に持つ。**要件 9 のシートは原稿の紙の設定で、端末を黒地で使うことと
+    /// 何の関係も無い。書字方向も持たないので、設定でもシートの外に立つ。
+    /// 16色（SGR）はここに無い——背景の明るさからRustが決める。
+    in-out property <color> terminal-paper: #fcf9ef;
+    in-out property <color> terminal-ink: #24211e;
+    in-out property <string> terminal-font: "Consolas";
+    in-out property <int> terminal-size: 15;
+    /// どれを変えたのか（0 背景、1 文字）。色はWindowsの色ダイアログで選ぶので、
+    /// 要件 9 の`color-picked`と同じ形——**開いてから戻ってくるまでのあいだに、
+    /// 何を選んでいたのかを覚えておく場所**が要る。
+    callback terminal-colour-picked(int);
+    callback terminal-font-picked();
+    /// 書体の一覧は要件 9 のものと同じ`font-menu`を使う。**どちらの欄のために
+    /// 開いたか**を、開いた側がここで言う——戻る先だけが違う。
+    in-out property <bool> font-for-terminal: false;
+    callback terminal-size-stepped(int);
+    /// 黒地／紙のひとまとめの選択。**背景と文字を一度に置く**——片方だけ変えた状態は
+    /// 読めない画面で、そこを通らせない。
+    callback terminal-theme-chosen(bool);
     /// 追加要件 2026-09-08: 要件 8.1 の自動退避を働かせるかどうか。
     ///
     /// **既定はOn。**何も言っていない書き手は、未保存の中身を捨ててくれとは
@@ -2277,24 +2298,31 @@ export component AppWindow inherits Window {
                         }
                     }
                     PanelTab {
-                        title: "Text";
+                        title: "Terminal";
                         current: root.settings-tab == 1;
                         clicked => {
                             root.settings-tab = 1;
                         }
                     }
                     PanelTab {
-                        title: "Layout";
+                        title: "Text";
                         current: root.settings-tab == 2;
                         clicked => {
                             root.settings-tab = 2;
                         }
                     }
                     PanelTab {
-                        title: "Page";
+                        title: "Layout";
                         current: root.settings-tab == 3;
                         clicked => {
                             root.settings-tab = 3;
+                        }
+                    }
+                    PanelTab {
+                        title: "Page";
+                        current: root.settings-tab == 4;
+                        clicked => {
+                            root.settings-tab = 4;
                         }
                     }
                 }
@@ -2305,6 +2333,61 @@ export component AppWindow inherits Window {
                 }
 
                 if root.settings-tab == 0: VerticalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: "FILES";
+                        color: Tok.ink-faint;
+                        font-size: 10px;
+                        letter-spacing: 0.9px;
+                    }
+
+                    // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
+                    // Offが何を意味するかを、同じ場所で言う**——「切ってある
+                    // 間は書かない」だけなら、置いてある古い退避が次の起動で
+                    // 戻ってきて、書き手の言ったこととちょうど逆になる。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Auto-save";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        TextButton {
+                            title: root.autosave ? "On" : "Off";
+                            role: root.autosave ? Role.primary : Role.normal;
+                            clicked => {
+                                root.autosave-toggled(!root.autosave);
+                            }
+                        }
+                    }
+
+                    // **折り返さない。**`wrap: word-wrap`のTextは、`min-width`が
+                    // 0になる代わりに`preferred-width`が「一行に伸ばしたときの
+                    // 幅」のまま残る（`builtins.slint`, Text）。popupは開くとき
+                    // に`preferred`で、その後の更新では`min`で大きさを決め直す
+                    // ので、両者が食い違うぶんだけ**開いた直後に寸法が変わる**。
+                    // `overflow: elide`なら`min-width`は同じく0で、高さは一行
+                    // ぶんに定まる——幅と高さが互いを見ない形にしておく。
+                    Text {
+                        text: root.autosave
+                            ? "入力が止まって2秒、続いていても5秒ごとに退避します。"
+                            : "退避しません。切り替えたときに作業コピーも消えます。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+
+                // 追加要件 2026-09-08（要件 6.8）: **端末は紙とは別の設定を持つ。**
+                // 黒地で使う人が多く、要件9のシート（原稿の紙）と同じ値で決める
+                // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
+                // 無い。
+                if root.settings-tab == 1: VerticalLayout {
                     spacing: 8px;
 
                     // 追加要件 2026-09-07: **書字方向を持たない設定はここ**。
@@ -2367,21 +2450,21 @@ export component AppWindow inherits Window {
                     }
 
                     Text {
-                        text: "FILES";
+                        text: "APPEARANCE";
                         color: Tok.ink-faint;
                         font-size: 10px;
                         letter-spacing: 0.9px;
                     }
 
-                    // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
-                    // Offが何を意味するかを、同じ場所で言う**——「切ってある
-                    // 間は書かない」だけなら、置いてある古い退避が次の起動で
-                    // 戻ってきて、書き手の言ったこととちょうど逆になる。
+                    // **黒地と紙を、ひとまとめで置く。**背景だけ黒くして文字が
+                    // 黒のままの画面は読めない——そこを通らせないために、2つを
+                    // 一度に決める道を先に出す。細かく決めたい人のために、下に
+                    // 1色ずつの行も残してある。
                     HorizontalLayout {
                         spacing: 2px;
 
                         Text {
-                            text: "Auto-save";
+                            text: "Theme";
                             color: Tok.ink;
                             font-size: 12px;
                             vertical-alignment: center;
@@ -2389,25 +2472,56 @@ export component AppWindow inherits Window {
                         }
 
                         TextButton {
-                            title: root.autosave ? "On" : "Off";
-                            role: root.autosave ? Role.primary : Role.normal;
+                            title: "Paper";
                             clicked => {
-                                root.autosave-toggled(!root.autosave);
+                                root.terminal-theme-chosen(false);
+                            }
+                        }
+                        TextButton {
+                            title: "Dark";
+                            clicked => {
+                                root.terminal-theme-chosen(true);
                             }
                         }
                     }
 
-                    // **折り返さない。**`wrap: word-wrap`のTextは、`min-width`が
-                    // 0になる代わりに`preferred-width`が「一行に伸ばしたときの
-                    // 幅」のまま残る（`builtins.slint`, Text）。popupは開くとき
-                    // に`preferred`で、その後の更新では`min`で大きさを決め直す
-                    // ので、両者が食い違うぶんだけ**開いた直後に寸法が変わる**。
-                    // `overflow: elide`なら`min-width`は同じく0で、高さは一行
-                    // ぶんに定まる——幅と高さが互いを見ない形にしておく。
+                    ColorCell {
+                        label: "Background";
+                        shown: root.terminal-paper;
+                        picked => {
+                            root.terminal-colour-picked(0);
+                        }
+                    }
+
+                    ColorCell {
+                        label: "Text Color";
+                        shown: root.terminal-ink;
+                        picked => {
+                            root.terminal-colour-picked(1);
+                        }
+                    }
+
+                    PickRow {
+                        label: "Font";
+                        value: root.terminal-font;
+                        pressed => {
+                            root.terminal-font-picked();
+                            font-menu.show();
+                        }
+                    }
+
+                    StepRow {
+                        label: "Size";
+                        value: root.terminal-size + " px";
+                        stepped(by) => {
+                            root.terminal-size-stepped(by);
+                        }
+                    }
+
+                    // **16色は選ばせない**（要件 6.8）。選ばせれば16回選ぶことに
+                    // なり、しかも選び終えるまで読めない。
                     Text {
-                        text: root.autosave
-                            ? "入力が止まって2秒、続いていても5秒ごとに退避します。"
-                            : "退避しません。切り替えたときに作業コピーも消えます。";
+                        text: "SGRの16色は背景の明るさから選びます。";
                         color: Tok.ink-faint;
                         font-size: 11px;
                         overflow: elide;
@@ -2416,7 +2530,7 @@ export component AppWindow inherits Window {
 
                 // どの面にいても、値はいまのシートのもの——だから帯のすぐ
                 // 下に在る（要件 9）。
-                if root.settings-tab != 0: VerticalLayout {
+                if root.settings-tab > 1: VerticalLayout {
                     spacing: 8px;
 
                     // 要件 9: which sheet is being set. **Everything below belongs
@@ -2442,7 +2556,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.settings-tab == 1: VerticalLayout {
+                if root.settings-tab == 2: VerticalLayout {
                     spacing: 8px;
 
                     // One row per kind of text: how large, what colour, which
@@ -2569,7 +2683,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.settings-tab == 2: VerticalLayout {
+                if root.settings-tab == 3: VerticalLayout {
                     spacing: 8px;
 
                     // 要件 9 calls the flow advance 行間 in horizontal writing and
@@ -2695,7 +2809,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.settings-tab == 3: VerticalLayout {
+                if root.settings-tab == 4: VerticalLayout {
                     spacing: 8px;
 
                     // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
@@ -2721,7 +2835,7 @@ export component AppWindow inherits Window {
 
                 // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
                 // なので、書式の面にだけ置く。General の2つはこれで戻らない。
-                if root.settings-tab != 0: VerticalLayout {
+                if root.settings-tab > 1: VerticalLayout {
                     spacing: 8px;
 
                     Rectangle {

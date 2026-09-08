@@ -227,6 +227,27 @@ fn publish_shells(window: &AppWindow) {
     window.set_default_shell(window.get_default_shell().clamp(0, most));
 }
 
+/// 端末の見た目を、設定から一つ作る（追加要件 2026-09-08、要件 6.8）。
+///
+/// **`TerminalLook::default()`を呼んでいた4か所を、ここへ集めた。**升目の大きさは
+/// この`look`から出る（`terminal_cell_size`）ので、**描くときと、シェルへ「画面は何桁
+/// 何行だ」と伝えるときとで違う`look`を使うと、プロンプトが折り返す場所がずれる**。
+/// 1か所で作れば、そのずれ方が起きない。
+///
+/// 16色は選ばせず、背景の明るさから決める（`palette_for`）。
+fn terminal_look(window: &AppWindow) -> cells::TerminalLook {
+    let paper = channels(window.get_terminal_paper());
+    let (low, high) = TERMINAL_SIZE_RANGE;
+    cells::TerminalLook {
+        family: window.get_terminal_font().to_string(),
+        font_size: window.get_terminal_size().clamp(low, high) as f32,
+        paper,
+        ink: channels(window.get_terminal_ink()),
+        palette: cells::TerminalLook::palette_for(paper),
+        ..cells::TerminalLook::default()
+    }
+}
+
 /// Whether a program is somewhere on `PATH`.
 ///
 /// **A few `stat` calls, and only when a terminal is opened or the menu is
@@ -867,7 +888,7 @@ enum TerminalSpot {
 struct TerminalBands {
     /// Columns, rows and the cell size. **Any of them moving invalidates every
     /// band**, because each of them changes where every cell is.
-    shape: Option<(usize, usize, u32, u32)>,
+    shape: Option<(usize, usize, u32, u32, u64)>,
     /// The bands, **keyed by where they sit in the history** rather than by
     /// where they are on screen.
     ///
@@ -1867,6 +1888,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     wiring::wire_find(&window, &live);
 
+    wiring::wire_terminal_look(&window, &live, &render_cache);
+
     let weak = window.as_weak();
     let tab_live = live.clone();
     window.on_pane_new_tab(move |pane| {
@@ -2289,12 +2312,6 @@ fn main() -> Result<(), slint::PlatformError> {
     window.set_sheet_numbers(ModelRc::from(numbers.clone()));
     window.set_palette(ModelRc::from(palette.clone()));
     window.set_sheet_fonts(ModelRc::from(sheet_fonts.clone()));
-    // The families installed on this machine, asked for the first time the
-    // picker is opened. **Not at startup**: it is a few hundred families read
-    // out of the system collection, and a writer who never opens the picker
-    // should not wait for it.
-    let font_names: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
-    window.set_font_names(ModelRc::from(font_names.clone()));
     // 要件 9: what the last run was set to, before anything is drawn with it.
     if let Some(directory) = app_data::app_directory()
         && let Some(values) = app_data::read_settings(&directory)
@@ -2310,7 +2327,6 @@ fn main() -> Result<(), slint::PlatformError> {
         numbers,
         palette,
         sheet_fonts,
-        font_names,
     );
 
     // The IME lays its candidate list out from the composition font, so it has
@@ -6989,6 +7005,17 @@ const AUTOSAVE_SETTING: &str = "work.autosave";
 /// the middle one gets a list of two rather than a hole.
 const SHELL_SETTING: &str = "terminal.shell";
 
+/// 追加要件 2026-09-08: 端末の見た目（要件 6.8）。
+///
+/// **紙とは別に持つ。**要件9のシートは原稿の紙の設定で、端末を黒地で使う人が多いことと
+/// 何の関係も無い。書字方向も持たないので、シートの外にいる。
+const TERMINAL_PAPER_SETTING: &str = "terminal.paper";
+const TERMINAL_INK_SETTING: &str = "terminal.ink";
+const TERMINAL_FONT_SETTING: &str = "terminal.font";
+const TERMINAL_SIZE_SETTING: &str = "terminal.size";
+/// 端末の字の大きさの幅。**紙より狭い**——升目が壊れるほど大きくしても読めない。
+const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
+
 fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     let mut values = Vec::new();
     // **一覧が先、既定が後。**読むほうは二度なめるので順に頼ってはいないが、
@@ -7010,6 +7037,22 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     values.push((
         AUTOSAVE_SETTING.to_owned(),
         i32::from(window.get_autosave()).to_string(),
+    ));
+    values.push((
+        TERMINAL_PAPER_SETTING.to_owned(),
+        hex_colour(window.get_terminal_paper()),
+    ));
+    values.push((
+        TERMINAL_INK_SETTING.to_owned(),
+        hex_colour(window.get_terminal_ink()),
+    ));
+    values.push((
+        TERMINAL_FONT_SETTING.to_owned(),
+        window.get_terminal_font().to_string(),
+    ));
+    values.push((
+        TERMINAL_SIZE_SETTING.to_owned(),
+        window.get_terminal_size().to_string(),
     ));
     let palette = window.get_palette();
     let fonts = window.get_sheet_fonts();
@@ -7083,6 +7126,33 @@ fn apply_settings(
         // 無い値なので、約束しているほう（要件 8.1 を守る側）へ倒す。
         if written == AUTOSAVE_SETTING {
             window.set_autosave(value.trim() != "0");
+            continue;
+        }
+        // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
+        // ——手で書いた設定ファイルが、端末を読めない色にできてはならない。
+        if written == TERMINAL_PAPER_SETTING {
+            if let Some(rgb) = parse_hex_colour(value) {
+                window.set_terminal_paper(slint_colour(rgb));
+            }
+            continue;
+        }
+        if written == TERMINAL_INK_SETTING {
+            if let Some(rgb) = parse_hex_colour(value) {
+                window.set_terminal_ink(slint_colour(rgb));
+            }
+            continue;
+        }
+        if written == TERMINAL_FONT_SETTING {
+            if !value.trim().is_empty() {
+                window.set_terminal_font(value.into());
+            }
+            continue;
+        }
+        if written == TERMINAL_SIZE_SETTING {
+            if let Ok(size) = value.trim().parse::<i32>() {
+                let (low, high) = TERMINAL_SIZE_RANGE;
+                window.set_terminal_size(size.clamp(low, high));
+            }
             continue;
         }
         let (only, name) = sheet_prefix(written);
@@ -8677,7 +8747,7 @@ fn refresh_terminal(
     else {
         return;
     };
-    let look = cells::TerminalLook::default();
+    let look = terminal_look(window);
     let Ok(cell) = cells::terminal_cell_size(&look) else {
         return;
     };
@@ -8732,7 +8802,24 @@ fn refresh_terminal(
         .map(|shell| shell.preedit.clone())
         .unwrap_or_default();
 
-    let shape = (columns, rows, cell.advance.to_bits(), cell.line.to_bits());
+    // **署名に見た目を混ぜる**（追加要件 2026-09-08）。升目の大きさが変われば
+    // `advance`／`line`が動くが、**色だけを変えても動かない**——混ぜないと、
+    // 帯の絵置き場にある古い色のままの絵がそのまま出る（6.18の色と同じ罠の5例目）。
+    let painted_as = {
+        let mut hasher = DefaultHasher::new();
+        for channel in look.paper.iter().chain(look.ink.iter()) {
+            channel.to_bits().hash(&mut hasher);
+        }
+        look.family.hash(&mut hasher);
+        hasher.finish()
+    };
+    let shape = (
+        columns,
+        rows,
+        cell.advance.to_bits(),
+        cell.line.to_bits(),
+        painted_as,
+    );
     {
         let mut borrowed = cache.borrow_mut();
         let Some(shell) = borrowed.pane(id).shell(spot) else {
@@ -9074,7 +9161,7 @@ fn start_shell(
     shell: &TerminalShell,
     extent: f32,
 ) -> Option<TerminalSession> {
-    let look = cells::TerminalLook::default();
+    let look = terminal_look(window);
     let cell = cells::terminal_cell_size(&look).unwrap_or(cells::CellSize {
         advance: 8.0,
         line: 18.0,
@@ -9253,7 +9340,7 @@ fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSp
         return;
     };
     let history = session.borrow().screen().scrollback().len();
-    let look = cells::TerminalLook::default();
+    let look = terminal_look(window);
     let line = cells::terminal_cell_size(&look)
         .map(|cell| cell.line)
         .unwrap_or(18.0);
@@ -9316,7 +9403,7 @@ fn select_in_terminal(
     else {
         return;
     };
-    let look = cells::TerminalLook::default();
+    let look = terminal_look(window);
     let Ok(cell) = cells::terminal_cell_size(&look) else {
         return;
     };

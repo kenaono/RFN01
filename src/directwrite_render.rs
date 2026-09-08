@@ -7815,6 +7815,31 @@ pub mod cells {
         [0.20, 0.19, 0.18], // bright white — ink again, so bold text stays read
     ];
 
+    /// The same sixteen for a dark screen (追加要件 2026-09-08).
+    ///
+    /// **要件 6.8 は書き手に16色を選ばせない。**選ばせれば16回選ぶことになり、しかも
+    /// 選び終えるまで読めない——**紙の色を黒に変えた瞬間に、紙のために暗く混ぜた色が
+    /// 消える**のが、この設定でいちばん起きやすい壊れ方である。だから背景の明るさから
+    /// こちらへ切り替える（[`TerminalLook::for_paper`]）。
+    const TERMINAL_PALETTE_DARK: [[f32; 3]; 16] = [
+        [0.23, 0.22, 0.21], // black — 黒地の上の黒は、地より少しだけ明るく
+        [0.94, 0.42, 0.40],
+        [0.49, 0.83, 0.48],
+        [0.93, 0.79, 0.40],
+        [0.45, 0.66, 0.98],
+        [0.85, 0.56, 0.94],
+        [0.40, 0.83, 0.85],
+        [0.80, 0.78, 0.75], // white (the dim one)
+        [0.53, 0.51, 0.49], // bright black
+        [1.00, 0.55, 0.52],
+        [0.62, 0.93, 0.60],
+        [1.00, 0.88, 0.52],
+        [0.60, 0.76, 1.00],
+        [0.93, 0.68, 1.00],
+        [0.52, 0.93, 0.94],
+        [0.97, 0.96, 0.94], // bright white
+    ];
+
     impl Default for TerminalLook {
         fn default() -> Self {
             Self {
@@ -7826,6 +7851,29 @@ pub mod cells {
                 palette: TERMINAL_PALETTE,
             }
         }
+    }
+
+    impl TerminalLook {
+        /// The sixteen that suit this background (追加要件 2026-09-08).
+        ///
+        /// **規則は一つ、明るさだけ。**設定を増やさずに「黒地にしたら色も黒地のものに
+        /// なる」を満たす——書き手が16色を選び直す必要が無い。境目は0.5で、そこは
+        /// 「紙か、そうでないか」がはっきりしている場所である。
+        pub fn palette_for(paper: [f32; 3]) -> [[f32; 3]; 16] {
+            if brightness(paper) < 0.5 {
+                TERMINAL_PALETTE_DARK
+            } else {
+                TERMINAL_PALETTE
+            }
+        }
+    }
+
+    /// How light a colour reads, 0 to 1.
+    ///
+    /// **人の目の重みで測る**（緑がいちばん明るく見える）。単純な平均だと、青い背景が
+    /// 実際より明るいと判定されて暗い色が乗る。
+    pub fn brightness([red, green, blue]: [f32; 3]) -> f32 {
+        0.2126 * red + 0.7152 * green + 0.0722 * blue
     }
 
     /// One cell's size in pixels. **Everything about a terminal's geometry is these

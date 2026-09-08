@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{Color, ComponentHandle, Model, SharedString, Timer, VecModel};
+use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, VecModel};
 
 use crate::directwrite_render;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
@@ -29,9 +29,127 @@ use crate::{
     find_in_pane, focused_pane, font_name, font_row, go_to_remembered_folder, ime, navigate,
     open_work_folder, paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs,
     quick_draft, replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus,
-    schedule_relayout, search_in_folder, search_work_folder, set_colour, shell, shown_sheet,
-    step_setting, tree_command,
+    save_settings, schedule_relayout, search_in_folder, search_work_folder, set_colour, shell,
+    shown_sheet, slint_colour, step_setting, tree_command,
 };
+
+/// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
+///
+/// **紙の設定（要件 9）とは別の口。**端末を黒地で使う人が多く、原稿の紙と同じ値で
+/// 決めるものではない。16色はここに無い——背景の明るさからRustが選ぶ。
+pub fn wire_terminal_look(
+    window: &AppWindow,
+    live: &Live,
+    render_cache: &Rc<RefCell<RenderCache>>,
+) {
+    // **黒地と紙を、ひとまとめで置く。**背景だけ黒くして文字が黒のままの画面は
+    // 読めない——その状態を通らせない。
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_terminal_theme_chosen(move |dark| {
+        if let Some(window) = weak.upgrade() {
+            let (paper, ink) = if dark {
+                ([0.09, 0.09, 0.10], [0.88, 0.87, 0.85])
+            } else {
+                (
+                    crate::text_blocks::DEFAULT_PAPER,
+                    crate::text_blocks::DEFAULT_INK,
+                )
+            };
+            window.set_terminal_paper(slint_colour(paper));
+            window.set_terminal_ink(slint_colour(ink));
+            cache
+                .borrow_mut()
+                .log_diag("spec", &format!("terminal theme dark={}", u8::from(dark)));
+            after_terminal_look(&window, &cache);
+        }
+    });
+
+    // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
+    // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_terminal_colour_picked(move |which| {
+        let weak = weak.clone();
+        let cache = cache.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            let now = if which == 0 {
+                window.get_terminal_paper()
+            } else {
+                window.get_terminal_ink()
+            };
+            let standing = [now.red(), now.green(), now.blue()];
+            let Some(picked) = shell::choose_colour(ime::window_handle(&window), standing) else {
+                return;
+            };
+            let rgb = [
+                picked[0] as f32 / 255.0,
+                picked[1] as f32 / 255.0,
+                picked[2] as f32 / 255.0,
+            ];
+            if which == 0 {
+                window.set_terminal_paper(slint_colour(rgb));
+            } else {
+                window.set_terminal_ink(slint_colour(rgb));
+            }
+            after_terminal_look(&window, &cache);
+        });
+    });
+
+    let weak = window.as_weak();
+    window.on_terminal_font_picked(move || {
+        if let Some(window) = weak.upgrade() {
+            fill_font_names(&window);
+            // **どちらの欄のために開いたかを旗で言う。**一覧は要件 9 のものと
+            // 同じ`font-menu`で、選ばれた家名が戻る先だけが違う。
+            window.set_font_for_terminal(true);
+            let standing = window.get_terminal_font();
+            window.set_font_current(standing);
+        }
+    });
+
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_terminal_size_stepped(move |by| {
+        if let Some(window) = weak.upgrade() {
+            let (low, high) = crate::TERMINAL_SIZE_RANGE;
+            let size = (window.get_terminal_size() + by).clamp(low, high);
+            window.set_terminal_size(size);
+            after_terminal_look(&window, &cache);
+        }
+    });
+
+    let _ = live;
+}
+
+/// システムの書体の一覧を、初めて必要になったときだけ読む。
+///
+/// **起動時には読まない**（要件 9）：数百の家名をシステムのコレクションから読むので、
+/// 一度も開かない書き手を待たせる理由が無い。一度読んだら持っておく——一覧は編集器が
+/// 走っているあいだ変わらず、書体を決めるときは続けて何度も開く。
+fn fill_font_names(window: &AppWindow) {
+    let names = window.get_font_names();
+    if names.row_count() > 0 {
+        return;
+    }
+    let read: Vec<SharedString> = directwrite_render::font_families()
+        .into_iter()
+        .map(SharedString::from)
+        .collect();
+    window.set_font_names(ModelRc::new(VecModel::from(read)));
+}
+
+/// 見た目が変わったので、書き直して覚える（追加要件 2026-09-08）。
+///
+/// **描き直しは帯の署名が起こす**（`refresh_terminal`が見た目を混ぜている）ので、
+/// ここがすることは「もう一度描け」と言うことと、設定を書くことの2つだけ。
+fn after_terminal_look(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
+    save_settings(window, cache);
+    window.invoke_terminal_woken();
+}
 
 /// 要件 7.7: 文書の中を探して置き換える。
 ///
@@ -78,7 +196,6 @@ pub fn wire_typography(
     numbers: Rc<VecModel<i32>>,
     palette: Rc<VecModel<Color>>,
     sheet_fonts: Rc<VecModel<SharedString>>,
-    font_names: Rc<VecModel<SharedString>>,
 ) {
     // **借りたものを、その場で自分のものにする。**下の閉包はどれも`'static`で、
     // 参照は入っていけない——`main()`ではこれらが局所変数だった、そこだけが違う。
@@ -158,20 +275,14 @@ pub fn wire_typography(
     });
 
     // 要件 9: which families this machine has, and which one was chosen.
+    // **一覧は`fill_font_names`が窓へ入れる**——同じ一覧を端末の書体（6.8）も
+    // 使うので、持ち主は窓のほうにいる。
     let weak = window.as_weak();
-    let names = font_names;
     window.on_font_picked(move |slot| {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        // Read once and kept: the collection does not change while the editor
-        // runs, and the picker is opened several times in a row when somebody
-        // is settling on a set of families.
-        if names.row_count() == 0 {
-            for family in directwrite_render::font_families() {
-                names.push(SharedString::from(family));
-            }
-        }
+        fill_font_names(&window);
         let sheet = shown_sheet(&window);
         let row = font_row(sheet, slot.max(0) as usize);
         let standing = window.get_sheet_fonts().row_data(row).unwrap_or_default();
@@ -186,6 +297,17 @@ pub fn wire_typography(
     let families = sheet_fonts.clone();
     window.on_font_chosen(move |slot, family| {
         if let Some(window) = weak.upgrade() {
+            // 追加要件 2026-09-08: **同じ一覧が2つの欄のために開く。**どちらの
+            // ために開いたかは、開いた側が旗で言う（要件 6.8 の端末の書体）。
+            if window.get_font_for_terminal() {
+                window.set_font_for_terminal(false);
+                window.set_terminal_font(family.clone());
+                cache
+                    .borrow_mut()
+                    .log_diag("spec", &format!("terminal font={family}"));
+                after_terminal_look(&window, &cache);
+                return;
+            }
             let sheet = shown_sheet(&window);
             let slot = slot.max(0) as usize;
             families.set_row_data(font_row(sheet, slot), family.clone());
