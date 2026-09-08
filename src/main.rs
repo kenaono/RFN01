@@ -1892,7 +1892,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
-    wiring::wire_word_sets(&window, &live, &render_cache);
+    wiring::wire_word_sets(&window, &live);
 
     let weak = window.as_weak();
     let tab_live = live.clone();
@@ -2324,7 +2324,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
     // 色しか覚えていないので、語はここで初めて手に入る。
-    open_word_sets(&window, &render_cache);
+    open_word_sets(&window, &live);
 
     wiring::wire_typography(
         &window,
@@ -6594,10 +6594,6 @@ fn typography_for(
     for (level, scale) in spec.heading_scale.iter_mut().enumerate() {
         *scale = percent(number(Setting::Heading(level)));
     }
-    // 要件 7.9（2026-09-08追加）: 単語セット。**もう建ててある木を`Arc`1つで
-    // 受け取る**——語は数千になりうるので、組版のたびに読み直しては木にした
-    // 意味が消える（建て直すのは`reload_word_sets`だけ）。
-    spec.words = loaded_words();
     let palette = window.get_palette();
     let colour = |slot: usize| {
         channels(
@@ -7069,25 +7065,22 @@ fn book_from_set(set: &word_marks::WordSet) -> app_data::WordBook {
 }
 
 /// 表を読んで木を建て、画面へ出す（要件 7.9）。**起動のときに一度。**
-fn open_word_sets(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
+fn open_word_sets(window: &AppWindow, live: &Live) {
     let books = match app_data::app_directory() {
         Some(directory) => app_data::read_words(&directory),
         None => Vec::new(),
     };
     let sets: Vec<word_marks::WordSet> = books.iter().map(set_from_book).collect();
-    hold_word_sets(window, cache, sets, false);
+    hold_word_sets(window, live, sets, false);
 }
 
 /// 表を置き換え、木を建て直し、画面へ出し、必要なら書き出す（要件 7.9）。
 ///
 /// **どの操作もここを通る**：取り込み、色を変える、畳む、外す。順番を守る場所が
 /// 1つで済み、**重複を数える場所も1つ**になる（`WordMarks::build`）。
-fn hold_word_sets(
-    window: &AppWindow,
-    cache: &Rc<RefCell<RenderCache>>,
-    sets: Vec<word_marks::WordSet>,
-    store: bool,
-) {
+fn hold_word_sets(window: &AppWindow, live: &Live, sets: Vec<word_marks::WordSet>, store: bool) {
+    let started = Instant::now();
+    let cache = &live.cache;
     if store && let Some(directory) = app_data::app_directory() {
         let books: Vec<app_data::WordBook> = sets.iter().map(book_from_set).collect();
         if let Err(error) = app_data::write_words(&directory, &books) {
@@ -7096,18 +7089,29 @@ fn hold_word_sets(
                 .log_diag("spec", &format!("words not saved error={error}"));
         }
     }
+    let words: usize = sets.iter().map(|set| set.words.len()).sum();
     let built = Arc::new(word_marks::WordMarks::build(sets));
     let told = format!(
-        "words sets={} conflicts={} troubles={}",
+        "words sets={} words={words} conflicts={} troubles={} built={:.2}ms",
         built.sets.len(),
         built.conflicts(),
-        built.troubles.len()
+        built.troubles.len(),
+        elapsed_ms(started)
     );
     cache.borrow_mut().log_diag("spec", &told);
     LOADED_WORDS.with(|held| *held.borrow_mut() = built);
     publish_word_sets(window);
-    // 色が変わったので、いま見えているものを描き直す。
+    // **色が変わったので描き直す。測り直しはしない**（要件 7.9、2026-09-08）。
+    // 単語セットは`Typography`の外にいるので`matches`が真のままで、`update`は
+    // 何も捨てずに戻る——**動くのはタイルの署名だけ**である。ここを`Typography`の
+    // 中に置いていたときは、色を1つ変えるだけで文書全体が測り直されていた
+    // （書き手の報告：On/Offから反映まで結構かかる）。
+    relayout_panes(window, &live.states, cache);
     window.invoke_republish_tabs();
+    live.cache.borrow_mut().log_diag(
+        "spec",
+        &format!("words shown ms={:.2}", elapsed_ms(started)),
+    );
 }
 
 /// いまの表（画面の操作が手を入れる元）。
@@ -8861,6 +8865,9 @@ fn lay_out_pane(
     let styled = marked
         .with_markers(shown.markers())
         .with_source_line(shown.source_line());
+    // 要件 7.9: **色を付ける語は、組み直しの判定に入らない**（`set_words`）。
+    // 幾何を1画素も動かさないので、変わってもタイルだけが古くなる。
+    engine.set_words(loaded_words());
     let measured = match engine.update(styled, line_fit, typography) {
         Ok(measured) => measured,
         Err(error) => {

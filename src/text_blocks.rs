@@ -84,16 +84,6 @@ pub struct Typography {
     /// Size multiplier per heading level, index 0 being level 1. Read as given:
     /// nothing here assumes the sizes descend, or that they exceed body size.
     pub heading_scale: [f32; MAX_HEADING_LEVEL],
-    /// 要件 7.9（2026-09-08追加）: 単語帳。**本文の中のこの語を、この色で。**
-    ///
-    /// **ここに置いてあるのは、`Typography`が「この面をどう組むか」の全部だから**
-    /// である。色と同じで幾何は1画素も動かさないので、組み直しの鍵（`hash_typography`）
-    /// ではなくタイルの鍵（`hash_colours`）に入る——**そこを間違えると、語を足すたびに
-    /// 文書を測り直す**ことになる。
-    ///
-    /// `Arc`なのは、これがペインごと・組版ごとに複製されるものの中でいちばん大きい
-    /// から。中身は書き手が設定で変えたときにだけ変わる。
-    pub words: Arc<crate::word_marks::WordMarks>,
     /// The ink and the paper (要件 9), as sRGB channels from 0 to 1.
     ///
     /// **Kept here, in the module that knows nothing about Windows**, because
@@ -178,9 +168,6 @@ impl Typography {
             heading_font: [const { String::new() }; MAX_HEADING_LEVEL]
                 .map(|_| DEFAULT_HEADING_FONT.to_owned()),
             code_font: DEFAULT_CODE_FONT.to_owned(),
-            // 要件 7.9: 単語帳は初期状態では一冊も無い。**一冊も無いことが
-            // 普通**なので、`is_empty`がその場合を先に答える。
-            words: Arc::default(),
             ink: DEFAULT_INK,
             paper: DEFAULT_PAPER,
             heading_ink: [DEFAULT_INK; MAX_HEADING_LEVEL],

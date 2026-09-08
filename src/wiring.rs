@@ -162,14 +162,14 @@ fn after_terminal_look(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
 ///
 /// **どの操作も`hold_word_sets`一本を通る**：表を置き換え、重複を数え直し、木を
 /// 建て直し、画面へ出し、書き出す。順番を守る場所が1つで済む。
-pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell<RenderCache>>) {
+pub fn wire_word_sets(window: &AppWindow, live: &Live) {
     // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
     // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
     let weak = window.as_weak();
-    let cache = render_cache.clone();
+    let held = live.clone();
     window.on_word_set_added(move || {
         let weak = weak.clone();
-        let cache = cache.clone();
+        let held = held.clone();
         Timer::single_shot(Duration::ZERO, move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -202,7 +202,7 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
                 words,
             });
             let taken = sets.last().map_or(0, |set| set.words.len());
-            hold_word_sets(&window, &cache, sets, true);
+            hold_word_sets(&window, &held, sets, true);
             window.set_render_status(format!("{taken}語を取り込みました").into());
         });
     });
@@ -210,7 +210,7 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
     // **もう一度取り込む。**語は表の中にあるので、元のファイルを直しただけでは
     // 変わらない——それがIMEの辞書と同じ形であることの、目に見える面である。
     let weak = window.as_weak();
-    let cache = render_cache.clone();
+    let held = live.clone();
     window.on_word_set_reimported(move |at| {
         if let Some(window) = weak.upgrade() {
             let mut sets = word_sets_now();
@@ -223,16 +223,16 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
             };
             set.words = words;
             let taken = set.words.len();
-            hold_word_sets(&window, &cache, sets, true);
+            hold_word_sets(&window, &held, sets, true);
             window.set_render_status(format!("{taken}語を取り込み直しました").into());
         }
     });
 
     let weak = window.as_weak();
-    let cache = render_cache.clone();
+    let held = live.clone();
     window.on_word_set_colour_picked(move |at| {
         let weak = weak.clone();
-        let cache = cache.clone();
+        let held = held.clone();
         Timer::single_shot(Duration::ZERO, move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -250,12 +250,12 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
                 picked[1] as f32 / 255.0,
                 picked[2] as f32 / 255.0,
             ];
-            hold_word_sets(&window, &cache, sets, true);
+            hold_word_sets(&window, &held, sets, true);
         });
     });
 
     let weak = window.as_weak();
-    let cache = render_cache.clone();
+    let held = live.clone();
     window.on_word_set_muted(move |at, muted| {
         if let Some(window) = weak.upgrade() {
             let mut sets = word_sets_now();
@@ -265,12 +265,12 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
             set.muted = muted;
             // **畳めば衝突も消える**（`WordMarks::build`が畳んだセットを見ない）
             // ので、重複の一覧もここで数え直る。
-            hold_word_sets(&window, &cache, sets, true);
+            hold_word_sets(&window, &held, sets, true);
         }
     });
 
     let weak = window.as_weak();
-    let cache = render_cache.clone();
+    let held = live.clone();
     window.on_word_set_removed(move |at| {
         if let Some(window) = weak.upgrade() {
             let mut sets = word_sets_now();
@@ -281,7 +281,7 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
             // **取り込み元のファイルには触らない。**表から外すだけで、書き手が
             // 集めた語はそのまま残る。
             sets.remove(at);
-            hold_word_sets(&window, &cache, sets, true);
+            hold_word_sets(&window, &held, sets, true);
         }
     });
 

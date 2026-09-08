@@ -2155,6 +2155,9 @@ struct TileTask {
     runs: Vec<StyleRun>,
     lines: Vec<LineRun>,
     typography: Arc<Typography>,
+    /// 要件 7.9: 色を付ける語。**`Typography`ではなくここ**——組み直しの判定に
+    /// 入れてはならない（`TextEngine::set_words`）。
+    words: Arc<crate::word_marks::WordMarks>,
     mode: WritingMode,
     margin: f32,
     /// The line numbers' column, when there is one (要件 9).
@@ -2243,11 +2246,10 @@ fn draw_tile(
     // 要件 7.9: この帯の中のどこに、どの帳の色が付くか（2026-09-08）。
     // **ブロックの本文だけを見る**——タイルの中の位置は全部ブロックから数えて
     // あるので、文書のどこにあるブロックかを知る必要が無い。
-    let word_marks = if typography.words.is_empty() {
+    let word_marks = if task.words.is_empty() {
         Vec::new()
     } else {
-        typography
-            .words
+        task.words
             .marks_in(&task.text, crate::word_marks::MAX_MARKS_PER_BLOCK)
     };
 
@@ -2266,7 +2268,7 @@ fn draw_tile(
         }
         comment_brush.SetColor(&colour(typography.comment_ink()));
         // 要件 7.9: 帳ごとの色。使っていない筆はそのままでよい——参照されない。
-        for (at, set) in typography.words.sets.iter().enumerate() {
+        for (at, set) in task.words.sets.iter().enumerate() {
             if let Some(word_brush) = word_brushes.get(at) {
                 word_brush.SetColor(&colour(set.colour));
             }
@@ -2800,6 +2802,12 @@ pub struct UpdateCost {
 pub struct TextEngine {
     mode: WritingMode,
     text: String,
+    /// 要件 7.9（2026-09-08）: いま効いている単語セット。
+    ///
+    /// **`typography`の隣であって、中ではない。**中に入れていたときは、色を1つ
+    /// 変えるだけで`matches`が偽になり、**文書全体が測り直された**。語も色も
+    /// 幾何を1画素も動かさないのだから、測り直す理由が無い。
+    words: Arc<crate::word_marks::WordMarks>,
     /// Heading level per logical line of `text`. Blocks cut only at logical line
     /// boundaries, so `block_lines` slices this without ever cutting an entry.
     line_styles: Vec<LineStyle>,
@@ -2887,10 +2895,6 @@ fn hash_colours(typography: &Typography, hasher: &mut DefaultHasher) {
             channel.to_bits().hash(hasher);
         }
     }
-    // 要件 7.9（2026-09-08追加）: 単語帳。**色と同じ側にいる**——語を足しても
-    // 本文の大きさは1画素も動かないので、組み直しではなくタイルだけが古くなる。
-    // 混ぜていないと、絵置き場の古い絵がそのまま出る（6.18の罠）。
-    typography.words.fingerprint().hash(hasher);
 }
 
 /// The block-local ranges and the size each is set at.
@@ -3145,6 +3149,19 @@ impl TextEngine {
     /// roughly constant as the window grows or shrinks.
     pub fn tile_flow_size(&self) -> u32 {
         (TILE_TARGET_PIXELS / self.tile_cross_size()).clamp(MIN_TILE_FLOW_SIZE, MAX_TILE_FLOW_SIZE)
+    }
+
+    /// 要件 7.9（2026-09-08）: いま効いている単語セット。
+    ///
+    /// **`Typography`の外に置いてある。**一度中に入れて、**色を変えるたびに文書
+    /// 全体が測り直された**（`update`は`typography`が変わると`measures`も`layouts`も
+    /// `wraps`も捨てる）。語も色も**幾何を1画素も動かさない**のだから、測り直す
+    /// 理由が無い——`matches`が見るものと、絵が変わったかどうかを言うものは、
+    /// 別々でなければならない。
+    ///
+    /// だからここは`matches`に入らず、[`TextEngine::tile_signature`]にだけ入る。
+    pub fn set_words(&mut self, words: Arc<crate::word_marks::WordMarks>) {
+        self.words = words;
     }
 
     /// True when the engine already describes exactly this text and geometry.
@@ -3951,6 +3968,7 @@ impl TextEngine {
                     runs,
                     lines,
                     typography: spec.clone(),
+                    words: self.words.clone(),
                     mode: self.mode,
                     margin: self.margin,
                     numbers: self.numbers,
@@ -4034,6 +4052,11 @@ impl TextEngine {
         self.line_extent().hash(&mut hasher);
         hash_typography(&self.typography, &mut hasher);
         hash_colours(&self.typography, &mut hasher);
+        // 要件 7.9（2026-09-08追加）: 単語セット。**色と同じ側にいる**——語を
+        // 足しても本文の大きさは1画素も動かないので、**組み直しではなくタイル
+        // だけが古くなる**。だから`matches`ではなくここに入る。混ぜていないと、
+        // 絵置き場の古い絵がそのまま出る（6.18の罠）。
+        self.words.fingerprint().hash(&mut hasher);
         // 要件 9（2026-09-07追加）: **which numbers this tile shows.** Two
         // blocks holding the same words draw the same pixels — until they carry
         // their line numbers, and then the one at line 12 and the one at line
