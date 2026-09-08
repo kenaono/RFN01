@@ -7089,6 +7089,9 @@ thread_local! {
 thread_local! {
     /// 次に配る番号（要件 7.9、2026-09-08）。**消した番号は二度と使わない。**
     static WORD_NEXT_ID: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    /// どの語群にも属さない覚え書き（2026-09-08）。**書き手が書いたものを、
+    /// 画面から一度も見えないまま消さないため**に持ち歩く。
+    static WORD_NOTES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 表を書き出してよいか。**読めない表を見つけたら偽になる**——書き手が
     /// 積み上げた辞書を、読めなかったこの実行が上書きしてしまわないように。
     static WORD_STORING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
@@ -7182,6 +7185,7 @@ fn open_word_modes(window: &AppWindow, live: &Live) {
                     .log_diag("spec", &format!("words damaged lines={damaged}"));
             }
             WORD_NEXT_ID.with(|next| next.set(stored.next_id.max(1)));
+            WORD_NOTES.with(|notes| *notes.borrow_mut() = stored.notes.clone());
             let modes: Vec<word_marks::WordMode> =
                 stored.modes.iter().map(mode_from_stored).collect();
             hold_word_modes(window, live, modes, false);
@@ -7215,6 +7219,7 @@ fn hold_word_modes(window: &AppWindow, live: &Live, modes: Vec<word_marks::WordM
         let held = app_data::StoredWords {
             modes: modes.iter().map(stored_from_mode).collect(),
             next_id: WORD_NEXT_ID.with(std::cell::Cell::get),
+            notes: WORD_NOTES.with(|notes| notes.borrow().clone()),
         };
         // **書くのは別のスレッド**（2026-09-08）。作業コピーと同じ行列へ乗せる
         // ——1語足すたびに数百KBを`sync_all`まで待って書くのは、書く手を止める
@@ -7300,7 +7305,7 @@ fn publish_word_modes(window: &AppWindow) {
         window.set_word_group_rows(ModelRc::new(VecModel::from(Vec::<WordGroupRow>::new())));
         window.set_word_troubles(ModelRc::new(VecModel::from(Vec::<WordTroubleRow>::new())));
         window.set_word_trouble_count(0);
-        window.set_word_group_words(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+        window.set_word_group_words(ModelRc::new(VecModel::from(Vec::<WordRow>::new())));
         return;
     };
 
@@ -7317,7 +7322,7 @@ fn publish_word_modes(window: &AppWindow) {
                 .count();
             WordGroupRow {
                 name: group.name.clone().into(),
-                words: group.words.len() as i32,
+                words: group.word_count() as i32,
                 conflicts: conflicts as i32,
                 repeated: (told.len() - conflicts) as i32,
                 shown: slint_colour(group.colour),
@@ -7362,12 +7367,23 @@ fn publish_word_modes(window: &AppWindow) {
 
     // **開いている語群の語だけ**を窓へ渡す——数千語を毎回渡さない。
     let group = window.get_word_group_opened_at();
-    let words: Vec<SharedString> = marks
+    let words: Vec<WordRow> = marks
         .mode
         .groups
         .get(group.max(0) as usize)
         .filter(|_| group >= 0)
-        .map(|group| group.words.iter().map(SharedString::from).collect())
+        .map(|group| {
+            group
+                .words
+                .iter()
+                .map(|line| WordRow {
+                    // **覚え書きは薄く、消す釦も出さない**（2026-09-08）。
+                    // 語ではないので、語の一覧の中では見出しとして立つ。
+                    note: word_marks::is_note(line),
+                    text: line.as_str().into(),
+                })
+                .collect()
+        })
         .unwrap_or_default();
     window.set_word_group_words(ModelRc::new(VecModel::from(words)));
 }
@@ -7596,6 +7612,7 @@ fn edit_word_file(window: &AppWindow, live: &Live) {
     let held = app_data::StoredWords {
         modes: word_modes_now().iter().map(stored_from_mode).collect(),
         next_id: WORD_NEXT_ID.with(std::cell::Cell::get),
+        notes: WORD_NOTES.with(|notes| notes.borrow().clone()),
     };
     let path = app_data::words_path(&directory);
     // **読めない表のときは書かない**（同要件 4.4）。書き手が直しに行く先を、
@@ -7631,6 +7648,7 @@ fn adopt_word_file(window: &AppWindow, live: &Live) {
         Some((stored, damaged)) => {
             WORD_STORING.with(|storing| storing.set(true));
             WORD_NEXT_ID.with(|next| next.set(stored.next_id.max(1)));
+            WORD_NOTES.with(|notes| *notes.borrow_mut() = stored.notes.clone());
             let modes: Vec<word_marks::WordMode> =
                 stored.modes.iter().map(mode_from_stored).collect();
             let told = if damaged > 0 {
@@ -7670,6 +7688,13 @@ fn add_word_to_group(window: &AppWindow, live: &Live, mode: u32, at: usize, word
     let word = word.trim();
     if word.is_empty() || word.contains('\n') {
         window.set_render_status("1行に収まる語だけを足せます".into());
+        return;
+    }
+    // **`#`で始まる語は足せない**（2026-09-08）。その形は覚え書きのもので、
+    // 足せてしまうと一覧の中で見出しに化ける——見出しの行を選んで足そうとした
+    // ときに起きる。
+    if word_marks::is_note(word) {
+        window.set_render_status("`#`で始まる語は足せません（覚え書きの印です）".into());
         return;
     }
     let mut modes = word_modes_now();
@@ -7720,6 +7745,8 @@ fn export_word_group(window: &AppWindow, mode: usize, at: usize) {
     let Some(target) = file_dialog::save_document_as(owner, &suggested) else {
         return;
     };
+    // **覚え書きごと書き出す。**取り込みの形も「1行1語、`#`は覚え書き」なので
+    // （単語チェックモード要件 5.1）、書き出して直して取り込む道で並べ方が消えない。
     let mut out = String::with_capacity(group.words.len() * 8);
     for word in &group.words {
         out.push_str(word);
@@ -7727,7 +7754,7 @@ fn export_word_group(window: &AppWindow, mode: usize, at: usize) {
     }
     match file_io::write_atomically(&target, out.as_bytes()) {
         Ok(_) => {
-            let told = format!("{}語を書き出しました", group.words.len());
+            let told = format!("{}語を書き出しました", group.word_count());
             window.set_render_status(told.into());
         }
         Err(error) => window.set_render_status(format!("書き出せません: {error}").into()),
@@ -12989,6 +13016,7 @@ mod tests {
         app_data::StoredWords {
             modes: modes.iter().map(stored_from_mode).collect(),
             next_id: 99,
+            notes: Vec::new(),
         }
     }
 
@@ -13025,6 +13053,62 @@ mod tests {
         {
             assert!((was - now).abs() < 0.005, "{was} と {now}");
         }
+    }
+
+    /// 版3（書き手の求め 2026-09-08）: **語は前置き無しの1行**、`#`は覚え書き。
+    ///
+    /// 「毎行Word半角スペースを入れるのは、作業量が多いです」——**手で足すのが
+    /// 普通の道になった以上、打鍵の少ないほうが正しい形である。**
+    #[test]
+    fn a_word_is_a_bare_line_and_a_hash_is_a_note() {
+        let raw = concat!(
+            "RFN-EDIT-WORDS 3\n",
+            "next: 9\n",
+            "# この辞書について\n",
+            "mode: 1 | 作品A\n",
+            "group: 2 | 人物 | #cc3333\n",
+            "# 主要人物\n",
+            "田中\n",
+            "\n",
+            "佐藤\n",
+            "word: mode: 名前が鍵と紛れる語\n",
+        );
+        let (read, damaged) = app_data::decode_words(raw).expect("decodes");
+
+        assert_eq!(damaged, 0);
+        assert_eq!(read.notes, ["# この辞書について"], "語群の外の覚え書き");
+        assert_eq!(
+            read.modes[0].groups[0].words,
+            ["# 主要人物", "田中", "佐藤", "mode: 名前が鍵と紛れる語"],
+            "覚え書きは並びのまま残り、紛れる語は前置きで守られる"
+        );
+
+        // **書き直しても同じものが読める**——前置きが要るのは紛れる語だけ。
+        let again = app_data::encode_words(&read);
+        assert!(again.contains("\n田中\n"), "語は素の行で出る:\n{again}");
+        assert!(
+            again.contains("word: mode: 名前が紛れる語") || again.contains("word: mode: "),
+            "紛れる語にだけ前置きが付く:\n{again}"
+        );
+        let (round, _) = app_data::decode_words(&again).expect("decodes again");
+        assert_eq!(round, read, "往復して同じ");
+    }
+
+    /// **版2も読める**（2026-09-08）。前置きが要らなくなっただけで、見出しの形は
+    /// 同じ——書き手が積み上げた辞書を、版を上げたこちらの都合で読めなくしない。
+    #[test]
+    fn the_previous_version_still_reads() {
+        let raw = concat!(
+            "RFN-EDIT-WORDS 2\n",
+            "next: 5\n",
+            "mode: 1 | 作品A\n",
+            "group: 2 | 人物 | #cc3333\n",
+            "word: 田中\n",
+        );
+        let (read, damaged) = app_data::decode_words(raw).expect("decodes");
+
+        assert_eq!(damaged, 0);
+        assert_eq!(read.modes[0].groups[0].words, ["田中"]);
     }
 
     /// 二つのモードがあっても、語がどちらのものかを取り違えない。

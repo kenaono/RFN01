@@ -23,6 +23,7 @@ use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, VecMode
 
 use crate::directwrite_render;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
+use crate::word_marks;
 use crate::{
     AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, add_word_to_group, close_word_naming, collect_search, colour_row,
@@ -397,8 +398,21 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
             };
             // **足す**（置き換えない）。取り込みは書き手が起こす操作で、いまある
             // 語を黙って捨てる理由が無い——重なったぶんは「二重」と言われる。
-            let taken = words.len();
-            group.words.extend(words);
+            //
+            // **覚え書きだけは重ねない**（2026-09-08）。語の「二重」は画面に出て
+            // 掃除できるが、同じ見出しが取り込むたびに増えるのは、ただの散らかり
+            // である。
+            let mut taken = 0usize;
+            for line in words {
+                if word_marks::is_note(&line) {
+                    if !group.words.contains(&line) {
+                        group.words.push(line);
+                    }
+                    continue;
+                }
+                taken += 1;
+                group.words.push(line);
+            }
             hold_word_modes(&window, &held, modes, true);
             window.set_render_status(format!("{taken}語を取り込みました").into());
         });

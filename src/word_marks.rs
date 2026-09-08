@@ -116,8 +116,30 @@ pub struct WordMode {
 
 impl WordMode {
     pub fn words(&self) -> usize {
-        self.groups.iter().map(|group| group.words.len()).sum()
+        self.groups.iter().map(WordGroup::word_count).sum()
     }
+}
+
+impl WordGroup {
+    /// **覚え書きは語ではない**（2026-09-08）。`10語`と出すのはこの数である。
+    pub fn word_count(&self) -> usize {
+        self.words.iter().filter(|line| !is_note(line)).count()
+    }
+}
+
+/// 覚え書きの印。
+pub const NOTE_MARK: char = '#';
+
+/// この行は語ではなく覚え書きか（単語チェックモード要件 4.2、2026-09-08）。
+///
+/// **手で書き足せる形にした以上、見出しが要る**——「主要人物」「脇役」。
+/// 書き手の求め：「手作業で追加することを許すなら、コメント追加は必要」。
+///
+/// **覚え書きは語群の中に、語と同じ並びで残る。**別の場所へ避けると順番が失われ、
+/// 「この見出しの下の語」という書き手の並べ方が消える。木には積まないので、
+/// 本文の`#`に色が付くことはない。
+pub fn is_note(line: &str) -> bool {
+    line.trim_start().starts_with(NOTE_MARK)
 }
 
 /// 重複の種類（IMEの辞書と同じ考え）。
@@ -197,7 +219,7 @@ impl WordMarks {
         for (at, group) in mode.groups.iter().enumerate() {
             for word in &group.words {
                 let word = word.trim();
-                if word.is_empty() {
+                if word.is_empty() || is_note(word) {
                     continue;
                 }
                 seen.entry(word.to_ascii_lowercase()).or_default().push(at);
@@ -209,7 +231,7 @@ impl WordMarks {
             let mut told: Vec<String> = Vec::new();
             for word in &group.words {
                 let word = word.trim();
-                if word.is_empty() {
+                if word.is_empty() || is_note(word) {
                     continue;
                 }
                 let folded = word.to_ascii_lowercase();
@@ -250,7 +272,8 @@ impl WordMarks {
         for (at, group) in mode.groups.iter().enumerate() {
             for word in &group.words {
                 let word = word.trim();
-                if word.is_empty() || refused.contains(&word.to_ascii_lowercase()) {
+                if word.is_empty() || is_note(word) || refused.contains(&word.to_ascii_lowercase())
+                {
                     continue;
                 }
                 let mut node = 0usize;
@@ -377,7 +400,10 @@ impl WordMarks {
 pub fn read_word_file(raw: &str) -> Vec<String> {
     raw.lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        // **`#`の行は捨てずに持ち帰る**（2026-09-08）。覚え書きは語群の中に
+        // 残るようになったので、取り込んだ一覧の見出しもそのまま残る——
+        // 書き出して直して取り込む道で、並べ方が消えなくなった。
+        .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .take(MAX_WORDS_PER_GROUP)
         .collect()
@@ -564,12 +590,27 @@ mod tests {
         assert_eq!(found[1].start, 3);
     }
 
-    /// 1行1語。**空行と`#`の行は語ではない**。**重複はここで落とさない**。
+    /// 1行1語。**空行は落とす**が、**`#`の行は覚え書きとして持ち帰る**
+    /// （2026-09-08、書き手の求め）。**重複はここで落とさない**。
     #[test]
     fn a_word_file_is_one_word_to_a_line() {
         let read = read_word_file("# 主要人物\n田中\n\n  佐藤  \n#脇役\n田中\n");
 
-        assert_eq!(read, ["田中", "佐藤", "田中"]);
+        assert_eq!(read, ["# 主要人物", "田中", "佐藤", "#脇役", "田中"]);
+    }
+
+    /// **覚え書きは語ではない**（2026-09-08）。木に積まず、数にも入れず、
+    /// 重複にも数えない——本文の`#`に色が付いてはいけない。
+    #[test]
+    fn a_note_is_not_a_word() {
+        let marks = mode(vec![group("人物", RED, &["# 主要人物", "田中", "# 脇役"])]);
+
+        assert_eq!(marks.mode.groups[0].word_count(), 1, "語は「田中」ひとつ");
+        assert!(marks.troubles.is_empty(), "覚え書きは重複ではない");
+        assert!(
+            marks.marks_in("# 主要人物 と 田中", 100).len() == 1,
+            "色が付くのは語だけ"
+        );
     }
 
     /// 印は組版の鍵に混ぜる（要件 7.9）。**モードの名前も数のうち**——名前だけ

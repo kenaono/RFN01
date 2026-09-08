@@ -12,6 +12,15 @@ import { QuickDraft } from "quick-draft.slint";
 ///
 /// **数はモードを建てたときの結果**である（`WordMarks::build`）。画面はそれを
 /// 読むだけ——数え役は1つ。
+/// 語群の中の1行（単語チェックモード要件 4.2、2026-09-08）。
+///
+/// **語か、覚え書きか。**`#`で始まる行は覚え書きで、木には積まれず、語数にも
+/// 数えられない——一覧の中では見出しとして立つ。
+export struct WordRow {
+    text: string,
+    note: bool,
+}
+
 export struct WordGroupRow {
     name: string,
     words: int,
@@ -473,7 +482,7 @@ export component AppWindow inherits Window {
     /// 語の一覧を開いている語群（-1で閉じている）。**開いているものだけ語を窓へ
     /// 渡す**——数千語を毎回渡さないため。
     in-out property <int> word-group-opened-at: -1;
-    in property <[string]> word-group-words;
+    in property <[WordRow]> word-group-words;
     /// 取り込みで見つかった重複。**色を付けられなかったものが先**に並ぶ。
     in property <[WordTroubleRow]> word-troubles;
     /// 全部でいくつ見つかったか（一覧は`SHOWN_TROUBLES`までしか出さない）。
@@ -3017,8 +3026,11 @@ export component AppWindow inherits Window {
                                         spacing: 6px;
 
                                         Text {
-                                            text: word;
-                                            color: Tok.ink;
+                                            text: word.text;
+                                            // **覚え書きは薄く。**語の並びの中で
+                                            // 見出しとして読めればよく、語と同じ
+                                            // 濃さで出ると語の数が分からなくなる。
+                                            color: word.note ? Tok.ink-faint : Tok.ink;
                                             font-size: 12px;
                                             vertical-alignment: center;
                                             overflow: elide;
@@ -3029,14 +3041,15 @@ export component AppWindow inherits Window {
                                             role: Role.quiet;
                                             clicked => {
                                                 root.word-removed(
-                                                    root.word-group-opened-at, word);
+                                                    root.word-group-opened-at, word.text);
                                             }
                                         }
                                     }
 
                                     if root.word-group-words.length == 0: Text {
                                         text: "まだ語がありません。本文で語を選んで右ボタン、"
-                                            + "`単語帳へ追加`から入れられます。";
+                                            + "`単語帳へ追加`から入れられます。"
+                                            + "`#`で始まる行は覚え書きです。";
                                         color: Tok.ink-faint;
                                         font-size: 11px;
                                         wrap: word-wrap;

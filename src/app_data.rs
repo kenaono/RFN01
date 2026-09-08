@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::file_io;
+use crate::word_marks;
 
 /// The editor's folder inside the user's local application data.
 const APP_FOLDER: &str = "RFN Edit";
@@ -411,7 +412,16 @@ pub fn decode_settings(raw: &str) -> Option<Vec<(String, String)>> {
 /// 設定（`settings.rfnsettings`）ではなくこちらに置くのは、**大きさが違う**から
 /// である。設定は数十行で人が読んで直すもの、こちらは数千行になりうる。
 const WORDS_FILE: &str = "words.rfnwords";
-const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 2";
+/// 表の先頭の1行——版と身元。
+///
+/// **3で`word: `の前置きが要らなくなった**（書き手の求め 2026-09-08：「毎行Word
+/// 半角スペースを入れるのは、作業量が多いです」）。**2も読める**——書き手が
+/// 積み上げた辞書を、版を上げたこちらの都合で読めなくしない。
+const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 3";
+const WORDS_MAGIC_2: &str = "RFN-EDIT-WORDS 2";
+
+/// 行の頭に立てる鍵。**これで始まる行だけが見出しである。**
+const WORDS_KEYS: [&str; 4] = ["next: ", "mode: ", "group: ", "word: "];
 
 /// 表の中の1つの語群。`word_marks::WordGroup`と同じ形だが、**この層は語の意味を
 /// 知らない**——並びとして預かるだけである。
@@ -441,17 +451,39 @@ pub struct StoredMode {
 pub struct StoredWords {
     pub modes: Vec<StoredMode>,
     pub next_id: u32,
+    /// どの語群にも属さない覚え書き（ファイルの頭に置くもの、2026-09-08）。
+    ///
+    /// **語群の中の覚え書きはその語群が持つ**（語と同じ並びで残る）。ここに来るのは
+    /// 最初の`group:`より前に書かれたもので、**書き直すときはファイルの頭へ集まる。**
+    pub notes: Vec<String>,
+}
+
+/// この語は、そのまま1行に書くと見出しに読めてしまうか。
+///
+/// **前置きが要るのはこれだけである**（2026-09-08）。`mode: `で始まる語や、空白
+/// だけの語を素で書くと、読み直したときに別のものになる。
+fn word_needs_key(word: &str) -> bool {
+    let head = word.trim_start();
+    head.is_empty() || WORDS_KEYS.iter().any(|key| head.starts_with(key))
 }
 
 /// 表を書き出す。
 ///
-/// **1行1語**（要件 7.9）。`mode:`の下に`group:`が続き、その下に`word:`が続く。
-/// 人が開いて読める形なのは、この編集器の他の書き出しと同じ方針である。
+/// **1行1語**（単語チェックモード要件 4.2）。`mode:`の下に`group:`が続き、その下は
+/// **語そのものが並ぶ**——`word: `の前置きは、それが無いと見出しに読めてしまう語
+/// だけに付ける。**手で足すときの打鍵を減らすためであり、取り込みのファイル（5.1）
+/// と同じ形にするためでもある。**
+///
+/// `#`で始まる行は覚え書きで、語と同じ並びのまま残る。
 pub fn encode_words(held: &StoredWords) -> String {
     let mut out = String::new();
     out.push_str(WORDS_MAGIC);
     out.push('\n');
     out.push_str(&format!("next: {}\n", held.next_id));
+    for note in &held.notes {
+        out.push_str(note);
+        out.push('\n');
+    }
     for mode in &held.modes {
         out.push_str(&format!("mode: {} | {}\n", mode.id, mode.name));
         for group in &mode.groups {
@@ -460,7 +492,11 @@ pub fn encode_words(held: &StoredWords) -> String {
                 group.id, group.name, group.colour
             ));
             for word in &group.words {
-                out.push_str(&format!("word: {word}\n"));
+                if word_needs_key(word) {
+                    out.push_str("word: ");
+                }
+                out.push_str(word);
+                out.push('\n');
             }
         }
     }
@@ -471,7 +507,10 @@ pub fn encode_words(held: &StoredWords) -> String {
 /// 半分にしたものである。
 pub fn decode_words(raw: &str) -> Option<(StoredWords, usize)> {
     let mut lines = raw.split('\n');
-    if lines.next()? != WORDS_MAGIC {
+    let magic = lines.next()?;
+    // **2も読む。**`word: `の前置きが要らなくなっただけで、見出しの形は同じ
+    // ——前置きのある語はそのまま語として読める（2026-09-08）。
+    if magic != WORDS_MAGIC && magic != WORDS_MAGIC_2 {
         return None;
     }
     let mut held = StoredWords::default();
@@ -479,7 +518,27 @@ pub fn decode_words(raw: &str) -> Option<(StoredWords, usize)> {
     // 黙って半分になった辞書は、いちばん気づきにくい失い方である。
     let mut damaged = 0usize;
     for line in lines {
-        if line.is_empty() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // **見出しでない行は語である**（版3、2026-09-08）。鍵で始まらないものは
+        // すべて語群の中身——`#`で始まれば覚え書き、そうでなければ語。
+        let head = line.trim_start();
+        let keyed = WORDS_KEYS.iter().any(|key| head.starts_with(key));
+        if !keyed {
+            match held
+                .modes
+                .last_mut()
+                .and_then(|mode| mode.groups.last_mut())
+            {
+                // **語は行そのまま。**前後の空白まで書き手のものとして残す。
+                Some(group) => group.words.push(line.to_owned()),
+                // **語群の外に語は置けない。**覚え書きだけはファイルの頭へ
+                // 引き取る——書き手が書いたものを消さないためで、書き直すと
+                // そこへ集まる。
+                None if word_marks::is_note(head) => held.notes.push(line.to_owned()),
+                None => damaged += 1,
+            }
             continue;
         }
         let Some((key, value)) = line.split_once(": ") else {
