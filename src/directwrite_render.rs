@@ -2268,9 +2268,11 @@ fn draw_tile(
         }
         comment_brush.SetColor(&colour(typography.comment_ink()));
         // 要件 7.9: 帳ごとの色。使っていない筆はそのままでよい——参照されない。
+        // **色を持たない語群（除外語群、2026-09-08）の筆は触らない**——下で
+        // その印ごと飛ばすので、この筆は参照されない。
         for (at, group) in task.words.mode.groups.iter().enumerate() {
-            if let Some(word_brush) = word_brushes.get(at) {
-                word_brush.SetColor(&colour(group.colour));
+            if let (Some(word_brush), Some(ink)) = (word_brushes.get(at), group.colour) {
+                word_brush.SetColor(&colour(ink));
             }
         }
     }
@@ -2369,7 +2371,16 @@ fn draw_tile(
             // 強い。書き手が自分でそこへ置いたしるしのほうが、記法から出た色より
             // 言いたいことがはっきりしている。
             for mark in &word_marks {
-                let Some(word_brush) = word_brushes.get(mark.group) else {
+                // **色を持たない語群は塗らない**（除外語群、2026-09-08）。木には
+                // 積まれていて最長一致で勝つので、**包む語を書き手が言えば、その
+                // 中の短い語は光らない**——止める仕組みは、この1行である。
+                let paints = task
+                    .words
+                    .mode
+                    .groups
+                    .get(mark.group)
+                    .is_some_and(|group| group.colour.is_some());
+                let Some(word_brush) = word_brushes.get(mark.group).filter(|_| paints) else {
                     continue;
                 };
                 let start = utf16_units(&task.text[..mark.start]);

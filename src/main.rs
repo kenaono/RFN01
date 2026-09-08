@@ -7137,7 +7137,10 @@ fn mode_from_stored(stored: &app_data::StoredMode) -> word_marks::WordMode {
             .map(|group| word_marks::WordGroup {
                 id: group.id,
                 name: group.name.clone(),
-                colour: parse_hex_colour(&group.colour).unwrap_or([0.5, 0.5, 0.5]),
+                // **`none`は色を持たない語群**（除外語群、2026-09-08）。読めない
+                // 綴りは灰色にする——色が消えるより、変な色のほうが直しやすい。
+                colour: (group.colour != app_data::NO_COLOUR)
+                    .then(|| parse_hex_colour(&group.colour).unwrap_or([0.5, 0.5, 0.5])),
                 words: group.words.clone(),
             })
             .collect(),
@@ -7154,7 +7157,11 @@ fn stored_from_mode(mode: &word_marks::WordMode) -> app_data::StoredMode {
             .map(|group| app_data::StoredGroup {
                 id: group.id,
                 name: group.name.clone(),
-                colour: hex_colour(slint_colour(group.colour)),
+                colour: match group.colour {
+                    Some(ink) => hex_colour(slint_colour(ink)),
+                    // **色を持たない語群**（除外語群、2026-09-08）。
+                    None => app_data::NO_COLOUR.to_owned(),
+                },
                 words: group.words.clone(),
             })
             .collect(),
@@ -7325,7 +7332,8 @@ fn publish_word_modes(window: &AppWindow) {
                 words: group.word_count() as i32,
                 conflicts: conflicts as i32,
                 repeated: (told.len() - conflicts) as i32,
-                shown: slint_colour(group.colour),
+                paints: group.colour.is_some(),
+                shown: slint_colour(group.colour.unwrap_or([0.5, 0.5, 0.5])),
             }
         })
         .collect();
@@ -7445,7 +7453,7 @@ fn next_word_colour(groups: &[word_marks::WordGroup]) -> [f32; 3] {
     ];
     OFFERED
         .into_iter()
-        .find(|colour| !groups.iter().any(|group| group.colour == *colour))
+        .find(|colour| !groups.iter().any(|group| group.colour == Some(*colour)))
         .unwrap_or(OFFERED[0])
 }
 
@@ -7524,7 +7532,7 @@ fn new_word_group(window: &AppWindow, live: &Live, at: usize, name: &str) -> Res
     mode.groups.push(word_marks::WordGroup {
         id: next_word_id(),
         name: name.to_owned(),
-        colour,
+        colour: Some(colour),
         words: Vec::new(),
     });
     hold_word_modes(window, live, modes, true);
@@ -12999,7 +13007,7 @@ mod tests {
         word_marks::WordGroup {
             id,
             name: name.to_owned(),
-            colour: [0.8, 0.2, 0.2],
+            colour: Some([0.8, 0.2, 0.2]),
             words: words.iter().map(|word| (*word).to_owned()).collect(),
         }
     }
@@ -13046,13 +13054,33 @@ mod tests {
         assert_eq!(back.groups[0].id, 4);
         assert_eq!(back.groups[0].words, ["田中", "佐藤"]);
         assert_eq!(back.groups[1].words, ["京都"]);
-        for (was, now) in mode.groups[0]
-            .colour
-            .iter()
-            .zip(back.groups[0].colour.iter())
-        {
+        let was = mode.groups[0].colour.expect("色がある");
+        let now = back.groups[0].colour.expect("色は往復する");
+        for (was, now) in was.iter().zip(now.iter()) {
             assert!((was - now).abs() < 0.005, "{was} と {now}");
         }
+    }
+
+    /// 除外語群（書き手と決めた 2026-09-08）: **色を持たない語群は往復する。**
+    ///
+    /// 色が戻らなければ、次の起動で除外語群がただの語群になり、**止めていた
+    /// 短い語が一斉に光りだす。**
+    #[test]
+    fn a_group_with_no_colour_goes_out_and_comes_back() {
+        let mut group = a_group(4, "除外", &["カリオン"]);
+        group.colour = None;
+        let mode = a_mode(3, "作品A", vec![group]);
+        let written = app_data::encode_words(&stored_of(&[mode]));
+        assert!(
+            written.contains("| 除外 | none"),
+            "綴りは`none`:\n{written}"
+        );
+
+        let (read, damaged) = app_data::decode_words(&written).expect("decodes");
+        assert_eq!(damaged, 0);
+        let back = mode_from_stored(&read.modes[0]);
+        assert_eq!(back.groups[0].colour, None);
+        assert_eq!(back.groups[0].words, ["カリオン"]);
     }
 
     /// 版3（書き手の求め 2026-09-08）: **語は前置き無しの1行**、`#`は覚え書き。

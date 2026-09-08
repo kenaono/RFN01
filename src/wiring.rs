@@ -29,12 +29,13 @@ use crate::{
     activate_left_row, add_word_to_group, close_word_naming, collect_search, colour_row,
     drop_tree_row, edit_word_file, export_word_group, file_dialog, file_tree, find_in_pane,
     focused_pane, font_name, font_row, go_to_remembered_folder, hold_word_modes, ime, navigate,
-    new_word_group, new_word_mode, open_work_folder, pane_word_mode, paste_into_tab, paste_targets,
-    pick_tree_row, publish_left, publish_tabs, publish_word_mode_of, publish_word_modes,
-    quick_draft, read_word_source, remove_word_from_group, rename_word_group, rename_word_mode,
-    replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
-    schedule_relayout, search_in_folder, search_work_folder, selected_runs, set_colour,
-    set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command, word_modes_now,
+    new_word_group, new_word_mode, next_word_colour, open_work_folder, pane_word_mode,
+    paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
+    publish_word_modes, quick_draft, read_word_source, remove_word_from_group, rename_word_group,
+    rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus,
+    save_settings, schedule_relayout, search_in_folder, search_work_folder, selected_runs,
+    set_colour, set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command,
+    word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -318,17 +319,59 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
             else {
                 return;
             };
-            let standing = group.colour.map(|channel| (channel * 255.0).round() as u8);
+            // 色を持たない語群（除外語群）から選び直すこともできる。そのときは
+            // **色を選んだことが、色を付けると言ったことである。**
+            let standing = group
+                .colour
+                .unwrap_or([0.5, 0.5, 0.5])
+                .map(|channel| (channel * 255.0).round() as u8);
             let Some(picked) = shell::choose_colour(ime::window_handle(&window), standing) else {
                 return;
             };
-            group.colour = [
+            group.colour = Some([
                 picked[0] as f32 / 255.0,
                 picked[1] as f32 / 255.0,
                 picked[2] as f32 / 255.0,
-            ];
+            ]);
             hold_word_modes(&window, &held, modes, true);
         });
+    });
+
+    // 書き手と決めた 2026-09-08: **除外語群。**色を持たない語群は木に積まれて
+    // 最長一致で勝ち、しかし何も塗らない——`リオン`を色分けしている書き手が
+    // `カリオン`をここへ入れると、`カリオン`の中で`リオン`が光らなくなる。
+    // **照合の仕組みは1行も変えずに、包む語を書き手が言える。**
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_group_paint_toggled(move |at| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let at = at.max(0) as usize;
+        let mut modes = word_modes_now();
+        let Some(mode) = modes.get_mut(window.get_word_mode_opened_at().max(0) as usize) else {
+            return;
+        };
+        let Some(standing) = mode.groups.get(at).map(|group| group.colour) else {
+            return;
+        };
+        // **色を戻すときは、いま空いている色を配る**（消したときの色を覚えて
+        // おくより役に立つ）。**自分は数に入れない**——自分の古い色が「使われて
+        // いる」ことになると、隣の語群と同じ色を配ってしまう。
+        let given = standing.is_none().then(|| {
+            let others: Vec<word_marks::WordGroup> = mode
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != at)
+                .map(|(_, group)| group.clone())
+                .collect();
+            next_word_colour(&others)
+        });
+        if let Some(group) = mode.groups.get_mut(at) {
+            group.colour = given;
+        }
+        hold_word_modes(&window, &held, modes, true);
     });
 
     let weak = window.as_weak();

@@ -95,7 +95,12 @@ pub struct WordGroup {
     /// 指していたものが切れる——それは名前の仕事ではない。
     pub id: u32,
     pub name: String,
-    pub colour: [f32; 3],
+    /// **`None`は「色を付けない」**（2026-09-08、書き手と決めた除外語群）。
+    ///
+    /// **語は木に積まれ、最長一致で勝つ。ただし何も塗らない。**`リオン`を色分け
+    /// している書き手が`カリオン`をここへ入れると、`カリオン`の中で`リオン`が
+    /// 光らなくなる——**照合の仕組みは1行も変えずに、包む語を書き手が言える。**
+    pub colour: Option<[f32; 3]>,
     /// **書かれた順のまま**で、並べ替えない。
     pub words: Vec<String>,
 }
@@ -415,7 +420,10 @@ fn fingerprint_of(mode: &WordMode) -> u64 {
     mode.name.hash(&mut hasher);
     for group in &mode.groups {
         group.name.hash(&mut hasher);
-        for channel in &group.colour {
+        // **色を消したことも見た目の変化である**（2026-09-08）。有無そのものを
+        // 混ぜないと、色を落とした語群が同じ数のままになる。
+        group.colour.is_some().hash(&mut hasher);
+        for channel in group.colour.iter().flatten() {
             channel.to_bits().hash(&mut hasher);
         }
         for word in &group.words {
@@ -438,7 +446,7 @@ mod tests {
         WordGroup {
             id: 1,
             name: name.to_owned(),
-            colour,
+            colour: Some(colour),
             words: words.iter().map(|word| (*word).to_owned()).collect(),
         }
     }
@@ -675,5 +683,96 @@ mod tests {
         };
 
         assert_eq!(held.words(), 3);
+    }
+}
+
+#[cfg(test)]
+mod collision_cases {
+    use super::*;
+
+    const RED: [f32; 3] = [0.8, 0.2, 0.2];
+    const BLUE: [f32; 3] = [0.2, 0.2, 0.8];
+
+    fn built(groups: Vec<WordGroup>) -> WordMarks {
+        WordMarks::build(WordMode {
+            id: 1,
+            name: "調べ".to_owned(),
+            groups,
+        })
+    }
+
+    fn group(name: &str, colour: [f32; 3], words: &[&str]) -> WordGroup {
+        WordGroup {
+            id: 1,
+            name: name.to_owned(),
+            colour: Some(colour),
+            words: words.iter().map(|held| (*held).to_owned()).collect(),
+        }
+    }
+
+    fn hits(marks: &WordMarks, source: &str) -> Vec<String> {
+        marks
+            .marks_in(source, 100)
+            .into_iter()
+            .map(|mark| source[mark.start..mark.end].to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn case_analysis() {
+        // 1. 長い語が登録されていれば勝つ（前・中・後、どこに包まれても）
+        let both = built(vec![group("人物", RED, &["リオン", "カリオン"])]);
+        assert_eq!(hits(&both, "カリオンとリオン"), ["カリオン", "リオン"]);
+
+        // 2. 長い語が別の語群にいても勝つ（モードの中の話）
+        let split = built(vec![
+            group("人物", RED, &["リオン"]),
+            group("敵役", BLUE, &["カリオン"]),
+        ]);
+        assert_eq!(hits(&split, "カリオン"), ["カリオン"]);
+
+        // 3. 長い語が登録されていなければ、中で当たる（これが報告された姿）
+        let alone = built(vec![group("人物", RED, &["リオン"])]);
+        assert_eq!(hits(&alone, "カリオン"), ["リオン"]);
+
+        // 4. 語をまたぐ当たり——包む「語」が存在しない
+        assert_eq!(hits(&alone, "メモリオンライン"), ["リオン"]);
+        let kanji = built(vec![group("語", RED, &["対応"])]);
+        assert_eq!(hits(&kanji, "絶対応答"), ["対応"]);
+
+        // 5. 長い語を登録すれば、またぐ当たりも止まる
+        let guarded = built(vec![
+            group("人物", RED, &["リオン"]),
+            group("除外", BLUE, &["メモリオンライン"]),
+        ]);
+        assert_eq!(hits(&guarded, "メモリオンライン"), ["メモリオンライン"]);
+
+        // 6. 包む語が二つ重なるとき（カリオン と リオンズ）
+        let two = built(vec![group(
+            "人物",
+            RED,
+            &["リオン", "カリオン", "リオンズ"],
+        )]);
+        assert_eq!(hits(&two, "カリオンズ"), ["カリオン"]);
+    }
+
+    /// 除外語群（書き手と決めた 2026-09-08）: **色を持たない語群は、木に積まれて
+    /// 最長一致で勝ち、しかし何も塗らない。**
+    ///
+    /// `marks_in`は印を返し続ける——**塗らないのは描くときの判断**（`draw_tile`）で
+    /// ある。ここで落とすと、その位置から短い語がもう一度当たってしまい、止めたい
+    /// ものが止まらない。
+    #[test]
+    fn an_excluded_word_still_takes_its_span() {
+        let mut excluded = group("除外", RED, &["カリオン"]);
+        excluded.colour = None;
+        let marks = built(vec![group("人物", RED, &["リオン"]), excluded]);
+
+        let source = "カリオンとリオン";
+        let found = marks.marks_in(source, 100);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].group, 1, "カリオンは除外語群のもの");
+        assert_eq!(&source[found[0].start..found[0].end], "カリオン");
+        assert_eq!(found[1].group, 0, "外に出たリオンは色が付く");
     }
 }

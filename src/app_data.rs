@@ -422,6 +422,12 @@ const WORDS_FILE: &str = "words.rfnwords";
 /// ための場所になる。
 const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 3";
 
+/// 色を持たない語群の綴り（除外語群、2026-09-08）。
+///
+/// **語は木に積まれ、最長一致で勝つ。ただし何も塗らない。**`リオン`を色分けして
+/// いる書き手が`カリオン`をここへ入れると、`カリオン`の中で`リオン`が光らなくなる。
+pub const NO_COLOUR: &str = "none";
+
 /// 行の頭に立てる鍵。**これで始まる行だけが見出しである。**
 const WORDS_KEYS: [&str; 4] = ["next: ", "mode: ", "group: ", "word: "];
 
