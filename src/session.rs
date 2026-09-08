@@ -142,6 +142,17 @@ pub fn open_session(
     // the writer cannot reach, and a leaf naming nothing is an empty rectangle.
     // A session that fails either is one from another build, and the editor
     // opens on the focused pane alone rather than saying so.
+    // 要件 7.9（書き手の報告 2026-09-08）: **前に出ているタブのモードを、画面の
+    // 行へ入れておく。**組版はこの行から読む（`lay_out_pane`）のに、ここまでで
+    // 入れているのはタブの側だけだった——**起動直後、ステータスバーには前回の
+    // モード名が出ているのに色が付かない**のがそれである。名前はタブから、色は
+    // 行から来ていて、二つが食い違っていた。
+    for id in PaneId::all(window) {
+        let mode = strips[id.index() as usize]
+            .current()
+            .map_or(0, |tab| tab.word_mode);
+        id.update_screen(window, |screen| screen.word_mode = mode as i32);
+    }
     let panes = strips.len();
     let layout = Layout::decode(&session.layout)
         .filter(|layout| {

@@ -2345,6 +2345,20 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 書き手の報告 2026-09-08: **縦書きのペインで設定画面に名前を打つと、IMEが
+    // 縦のままだった。**合成フォントは窓に1つしか無く（技術検証 7.2）、最後に
+    // 言ったのがペインなら縦のままである——**欄はペインではない。**
+    //
+    // **返したときはペインの向きへ戻す**：どこへ戻るかを知っているのはRustで、
+    // 欄はそれを知らない。
+    let weak = window.as_weak();
+    window.global::<Ime>().on_field_focus(move |taken| {
+        if let Some(window) = weak.upgrade() {
+            let vertical = !taken && focused_pane(&window).vertical(&window);
+            ime::set_vertical(&window, vertical);
+        }
+    });
+
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
@@ -4623,10 +4637,18 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
             }
         },
     };
+    // 要件 4.2（書き手の報告 2026-09-08）: **Markdownでないものは横書きのソースで
+    // 開く。**縦書きのペインで設定ファイルを開いたら設定ファイルまで縦書きに
+    // なっていた——記法の無いテキストに整形表示は無く、`key: value`の並びを縦に
+    // 組んでも読めない。
+    //
+    // **開くときだけである。**そのあと縦書きにするのは書き手の自由——縦書きで
+    // 書く人は`.txt`の原稿も縦で読みたい（要件 3）。
+    let markdown = is_markdown_path(path);
     let tab = PaneTab {
         view: TabView {
-            vertical: id.vertical(window),
-            preview: id.shows_preview(window),
+            vertical: markdown && id.vertical(window),
+            preview: markdown && id.shows_preview(window),
             ..TabView::default()
         },
         provisional: Cell::new(opening == Opening::Peeked),
@@ -4639,6 +4661,18 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
     // Recorded once it is open, so a file that could not be read does not sit
     // in the history as though it had been (要件 7.7).
     remember_recent(live, path);
+}
+
+/// 要件 4.2: この道はMarkdownか。
+///
+/// **拡張子で判じる。**中身を見て決めると、`#`で始まる設定ファイルがMarkdownに
+/// なり、見出しの無い原稿がそうでなくなる——どちらも書き手には理由が見えない。
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension().is_some_and(|held| {
+        held.eq_ignore_ascii_case("md")
+            || held.eq_ignore_ascii_case("markdown")
+            || held.eq_ignore_ascii_case("mdown")
+    })
 }
 
 /// Put a file in the tab the pane is only looking through (書き手の報告 2026-09-07).
@@ -7043,6 +7077,14 @@ const TERMINAL_FONT_SETTING: &str = "terminal.font";
 const TERMINAL_SIZE_SETTING: &str = "terminal.size";
 /// 端末の字の大きさの幅。**紙より狭い**——升目が壊れるほど大きくしても読めない。
 const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
+
+thread_local! {
+    /// 鍵盤を持っている素の欄の数（書き手の報告 2026-09-08）。
+    ///
+    /// **0でなければIMEは横書き。**縦書きはペインの組版の話で、設定画面や検索欄へ
+    /// 打ち込む語はどこまでも横書きである（技術検証 7.2）。
+    static FIELDS_TYPING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 
 thread_local! {
     /// 次に配る番号（要件 7.9、2026-09-08）。**消した番号は二度と使わない。**
@@ -13206,6 +13248,27 @@ mod tests {
 
         assert_eq!(text, "前方    方");
         assert_eq!(caret, "前方    ".len());
+    }
+
+    /// 要件 4.2（書き手の報告 2026-09-08）: **Markdownでないものは横書きの
+    /// ソースで開く。**縦書きのペインで設定ファイルを開いたら、設定ファイルまで
+    /// 縦書きになっていた。
+    ///
+    /// **拡張子で判じる**ので、大小の別は無く、`.`で始まる名前は拡張子ではない。
+    #[test]
+    fn only_markdown_opens_the_way_the_pane_is_set() {
+        for path in ["原稿.md", "原稿.MD", "note.markdown", "a/b/章1.mdown"] {
+            assert!(is_markdown_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "words.rfnwords",
+            "settings.rfnsettings",
+            "memo.txt",
+            "README",
+            ".md",
+        ] {
+            assert!(!is_markdown_path(Path::new(path)), "{path}");
+        }
     }
 
     /// 追加要件 2026-09-06: renaming a tab selects the name without its

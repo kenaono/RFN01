@@ -141,6 +141,19 @@ export component IconButton inherits Rectangle {
     }
 }
 
+// 書き手の報告 2026-09-08: **縦書きのペインで設定画面に打ち込むと、IMEが縦のまま。**
+//
+// 変換候補の並びは合成フォントで決まり（技術検証 7.2）、それは窓に1つしかない
+// ——**組版の向きはペインのものだが、欄はペインではない。**素の欄が鍵盤を取ったら
+// 横に戻し、返したらRustがペインの向きへ戻す。
+//
+// **大域なのは、欄が窓の根を知らないからである。**`Field`は`controls.slint`の部品で、
+// 使う側ごとに配線すると**新しい欄を足すたびに忘れられる**種類の配線になる。
+export global Ime {
+    /// 素の欄が鍵盤を取った（true）／返した（false）。
+    callback field-focus(bool);
+}
+
 // A line of text the writer types into.
 //
 // The same builtin `TextInput` a `LineEdit` is made of — the cursor, the
@@ -152,6 +165,10 @@ export component Field inherits Rectangle {
     // A one-way binding, not `<=>`: the input's own `has-focus` is read-only,
     // and a two-way binding needs both ends to be writable.
     out property <bool> has-focus: input.has-focus;
+    // **どの欄でも、打っているあいだIMEは横書き**（上の`Ime`）。
+    changed has-focus => {
+        Ime.field-focus(self.has-focus);
+    }
     callback accepted();
     callback edited();
     /// Escape, which a field has to pass on rather than swallow: the bar it

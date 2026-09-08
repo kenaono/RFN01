@@ -2,7 +2,10 @@ import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
-import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
+import { ColorCell, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
+// **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
+// 窓の外から見えない。
+export { Ime }
 import { QuickDraft } from "quick-draft.slint";
 
 /// 要件 7.9: 設定画面が出す語群の1行。
