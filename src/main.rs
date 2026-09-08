@@ -25,6 +25,7 @@ mod text_blocks;
 #[cfg(test)]
 mod vertical_layout;
 mod wiring;
+mod word_marks;
 mod writer;
 
 use std::{
@@ -6587,6 +6588,16 @@ fn typography_for(
     for (level, scale) in spec.heading_scale.iter_mut().enumerate() {
         *scale = percent(number(Setting::Heading(level)));
     }
+    // 要件 7.9（2026-09-08追加）: 単語帳。**組版のたびに読み直す**——数行の
+    // 文字列を割るだけで、1打鍵の2.5ms（技術検証 6.9）に対して測れる量ではない。
+    // 高くつくと分かったら、そのとき覚えさせる（要件15の構え）。
+    spec.words = std::sync::Arc::new(word_marks::WordMarks {
+        lists: window
+            .get_word_lists()
+            .iter()
+            .filter_map(|line| read_word_list(&line))
+            .collect(),
+    });
     let palette = window.get_palette();
     let colour = |slot: usize| {
         channels(
@@ -7016,6 +7027,40 @@ const TERMINAL_SIZE_SETTING: &str = "terminal.size";
 /// 端末の字の大きさの幅。**紙より狭い**——升目が壊れるほど大きくしても読めない。
 const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
 
+/// 要件 7.9（2026-09-08追加）: 単語帳。設定ファイルの1行が1冊。
+///
+/// **書き方は`名前 | #rrggbb | 語,語,語`。**シェルの一覧（`SHELL_SETTING`）と
+/// 同じ形にしてある——**人が読んで直せる形が、この規模で要る唯一の書き出し**という
+/// のがこのファイルの方針で（README）、単語帳はまさに人が手で足すものである。
+/// 先頭に`-`を付けると畳んだ状態（色を出さない）。
+const WORD_LIST_SETTING: &str = "word.list";
+
+/// 設定ファイルの1行を1冊に。読めない行は`None`——1行読めないことは、
+/// 他の帳を落とす理由にならない。
+fn read_word_list(written: &str) -> Option<word_marks::WordList> {
+    let mut parts = written.splitn(3, '|');
+    let name = parts.next()?.trim();
+    let colour = parse_hex_colour(parts.next()?.trim())?;
+    let words = parts.next().unwrap_or("");
+    let (muted, name) = match name.strip_prefix('-') {
+        Some(rest) => (true, rest.trim()),
+        None => (false, name),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(word_marks::WordList {
+        name: name.to_owned(),
+        colour,
+        words: words
+            .split(',')
+            .map(|word| word.trim().to_owned())
+            .filter(|word| !word.is_empty())
+            .collect(),
+        muted,
+    })
+}
+
 fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     let mut values = Vec::new();
     // **一覧が先、既定が後。**読むほうは二度なめるので順に頼ってはいないが、
@@ -7038,6 +7083,11 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         AUTOSAVE_SETTING.to_owned(),
         i32::from(window.get_autosave()).to_string(),
     ));
+    // 要件 7.9: 単語帳。**窓が書かれたままの形で持っている**——書き戻す
+    // `save_settings`が持っているのは窓だけ、というシェルの一覧と同じ事情。
+    for (at, line) in window.get_word_lists().iter().enumerate() {
+        values.push((format!("{WORD_LIST_SETTING}.{at}"), line.to_string()));
+    }
     values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
         hex_colour(window.get_terminal_paper()),
@@ -7093,6 +7143,17 @@ fn apply_settings(
     // 追加要件 2026-09-08: **一覧が先、二度なめてでも。**既定はその一覧の中の
     // 一つを名前で指すので、指される側が揃っていなければ答えようがない——
     // そして手で書き換えられた設定ファイルの並び順は、誰も約束していない。
+    // 要件 7.9: 単語帳も一覧である。**読めた行だけを、書かれたまま窓へ。**
+    // **読めない行も持ち帰る。**書き戻すのは書かれたままの形なので、落とすと
+    // 打ち間違いが次の保存で消える——要件7.4が記法について言っているのと同じで、
+    // **分からないものを壊さない**。色が付かないことが、直せという合図になる。
+    let books: Vec<SharedString> = values
+        .iter()
+        .filter(|(name, _)| name.starts_with(WORD_LIST_SETTING))
+        .take(word_marks::MAX_WORD_LISTS)
+        .map(|(_, value)| SharedString::from(value.as_str()))
+        .collect();
+    window.set_word_lists(ModelRc::new(VecModel::from(books)));
     let read: Vec<TerminalShell> = values
         .iter()
         .filter(|(name, _)| name.starts_with(SHELL_SETTING))
@@ -7126,6 +7187,11 @@ fn apply_settings(
         // 無い値なので、約束しているほう（要件 8.1 を守る側）へ倒す。
         if written == AUTOSAVE_SETTING {
             window.set_autosave(value.trim() != "0");
+            continue;
+        }
+        // 要件 7.9（2026-09-08）: 単語帳。**一覧として集めるので、ここでは飛ばす**
+        // ——下の`hold_word_lists`が拾う。
+        if written.starts_with(WORD_LIST_SETTING) {
             continue;
         }
         // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
@@ -12234,6 +12300,49 @@ mod tests {
 
         // The oldest falls off the end; the newest is never refused.
         assert_eq!(history, [d, c, a]);
+    }
+
+    /// 要件 7.9（2026-09-08）: 単語帳の1行。**人が手で書く行**なので、
+    /// 空白の入れ方に寛容であること。
+    #[test]
+    fn a_word_list_line_reads_back() {
+        let read = read_word_list(" 人物 | #cc3333 | 田中, 佐藤 ,鈴木 ").expect("reads");
+
+        assert_eq!(read.name, "人物");
+        assert_eq!(read.words, ["田中", "佐藤", "鈴木"]);
+        assert!(!read.muted);
+        // #cc3333 の赤。
+        assert!((read.colour[0] - 0.8).abs() < 0.01, "{:?}", read.colour);
+    }
+
+    /// **先頭の`-`は畳んだ帳**（要件 7.9）。消すのとは別で、校正の段によって
+    /// 使う帳が違う。
+    #[test]
+    fn a_muted_word_list_is_marked_with_a_dash() {
+        let read = read_word_list("-伏線 | #3355cc | 鍵, 手紙").expect("reads");
+
+        assert!(read.muted);
+        assert_eq!(read.name, "伏線");
+        assert_eq!(read.words.len(), 2);
+    }
+
+    /// 語が1つも無い帳も帳である（これから足すところ）。
+    #[test]
+    fn a_word_list_with_no_words_still_reads() {
+        let read = read_word_list("新しい帳 | #888888 |").expect("reads");
+
+        assert_eq!(read.name, "新しい帳");
+        assert!(read.words.is_empty());
+    }
+
+    /// 半端な行は`None`。**捨てはしない**（`apply_settings`が書かれたまま持ち帰る）
+    /// が、色は付かない——それが直せという合図になる。
+    #[test]
+    fn half_a_word_list_line_is_refused() {
+        assert!(read_word_list("").is_none());
+        assert!(read_word_list("名前だけ").is_none());
+        assert!(read_word_list("名前 | 色ではない | 語").is_none());
+        assert!(read_word_list(" | #cc3333 | 語").is_none(), "名前が無い");
     }
 
     /// 追加要件 2026-09-08: 接続先の一覧は設定ファイルの行になり、行から

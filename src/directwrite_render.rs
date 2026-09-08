@@ -328,6 +328,9 @@ struct RenderTargetCache {
     /// tile**, because a brush belongs to the target that made it while a
     /// colour is a setting that outlives any of them.
     heading_brushes: Vec<ID2D1SolidColorBrush>,
+    /// 要件 7.9: 単語帳1冊につき1本（2026-09-08）。**`SetDrawingEffect`は筆を
+    /// 覚える**ので、1本を色を変えながら使い回すと、最後に置いた色で全部が塗られる。
+    word_brushes: Vec<ID2D1SolidColorBrush>,
     /// And the one a comment inside code is drawn in (要件 7.3.2).
     comment_brush: ID2D1SolidColorBrush,
 }
@@ -513,7 +516,7 @@ impl Graphics {
             };
             // SAFETY: The bitmap outlives the render target created from it,
             // both being owned by the cache entry stored below.
-            let (bitmap, target, brush, heading_brushes, comment_brush) = unsafe {
+            let (bitmap, target, brush, heading_brushes, comment_brush, word_brushes) = unsafe {
                 let bitmap = self.wic.CreateBitmap(
                     width,
                     height,
@@ -535,7 +538,18 @@ impl Graphics {
                     heading_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
                 }
                 let comment_brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
-                (bitmap, target, brush, heading_brushes, comment_brush)
+                let mut word_brushes = Vec::with_capacity(crate::word_marks::MAX_WORD_LISTS);
+                for _ in 0..crate::word_marks::MAX_WORD_LISTS {
+                    word_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
+                }
+                (
+                    bitmap,
+                    target,
+                    brush,
+                    heading_brushes,
+                    comment_brush,
+                    word_brushes,
+                )
             };
             self.target = Some(RenderTargetCache {
                 width,
@@ -545,6 +559,7 @@ impl Graphics {
                 brush,
                 heading_brushes,
                 comment_brush,
+                word_brushes,
             });
         }
         Ok(self.target.as_ref().expect("render target created above"))
@@ -2214,15 +2229,26 @@ fn draw_tile(
     let line_extent = task.line_extent;
     let margin = task.margin;
     let (surface_width, surface_height) = mode.to_surface(task.surface_size, task.surface_cross);
-    let (target, brush, heading_brushes, comment_brush, bitmap) = {
+    let (target, brush, heading_brushes, comment_brush, word_brushes, bitmap) = {
         let cache = graphics.render_target(surface_width, surface_height)?;
         (
             cache.target.clone(),
             cache.brush.clone(),
             cache.heading_brushes.clone(),
             cache.comment_brush.clone(),
+            cache.word_brushes.clone(),
             cache.bitmap.clone(),
         )
+    };
+    // 要件 7.9: この帯の中のどこに、どの帳の色が付くか（2026-09-08）。
+    // **ブロックの本文だけを見る**——タイルの中の位置は全部ブロックから数えて
+    // あるので、文書のどこにあるブロックかを知る必要が無い。
+    let word_marks = if typography.words.is_empty() {
+        Vec::new()
+    } else {
+        typography
+            .words
+            .marks_in(&task.text, crate::word_marks::MAX_MARKS_PER_BLOCK)
     };
 
     // SAFETY: The target, brush and bitmap are kept alive by the cache for the
@@ -2239,6 +2265,12 @@ fn draw_tile(
             heading_brush.SetColor(&heading_ink);
         }
         comment_brush.SetColor(&colour(typography.comment_ink()));
+        // 要件 7.9: 帳ごとの色。使っていない筆はそのままでよい——参照されない。
+        for (at, list) in typography.words.lists.iter().enumerate() {
+            if let Some(word_brush) = word_brushes.get(at) {
+                word_brush.SetColor(&colour(list.colour));
+            }
+        }
     }
 
     // The block is drawn at its own offset inside the tile, and the margin plus
@@ -2298,6 +2330,18 @@ fn draw_tile(
         //
         // SAFETY: the layout and the brushes both outlive the draw.
         unsafe {
+            // **先に、この組版に置いてある効果を全部剥がす**（2026-09-08）。
+            // 組版はキャッシュされて何度も描かれるのに`SetDrawingEffect`は
+            // 置きっぱなしになるので、**もう当てはまらない範囲の筆が残る**
+            // ——単語帳から語を1つ消したとき、その語だけ色が残っていたのが
+            // これである。効果は下で全部置き直すので、剥がして困るものは無い。
+            layout.SetDrawingEffect(
+                None,
+                DWRITE_TEXT_RANGE {
+                    startPosition: 0,
+                    length: u32::MAX,
+                },
+            )?;
             for run in &task.runs {
                 let range = DWRITE_TEXT_RANGE {
                     startPosition: run.utf16_start,
@@ -2318,6 +2362,23 @@ fn draw_tile(
                     continue;
                 };
                 layout.SetDrawingEffect(heading_brush, range)?;
+            }
+            // 要件 7.9: **単語帳の色は最後に置く**ので、見出しやコメントの色より
+            // 強い。書き手が自分でそこへ置いたしるしのほうが、記法から出た色より
+            // 言いたいことがはっきりしている。
+            for mark in &word_marks {
+                let Some(word_brush) = word_brushes.get(mark.list) else {
+                    continue;
+                };
+                let start = utf16_units(&task.text[..mark.start]);
+                let length = utf16_units(&task.text[mark.start..mark.end]);
+                layout.SetDrawingEffect(
+                    word_brush,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: start,
+                        length,
+                    },
+                )?;
             }
         }
         let inset = block_inset(&task.block.span, typography);
@@ -2826,6 +2887,10 @@ fn hash_colours(typography: &Typography, hasher: &mut DefaultHasher) {
             channel.to_bits().hash(hasher);
         }
     }
+    // 要件 7.9（2026-09-08追加）: 単語帳。**色と同じ側にいる**——語を足しても
+    // 本文の大きさは1画素も動かないので、組み直しではなくタイルだけが古くなる。
+    // 混ぜていないと、絵置き場の古い絵がそのまま出る（6.18の罠）。
+    typography.words.fingerprint().hash(hasher);
 }
 
 /// The block-local ranges and the size each is set at.
