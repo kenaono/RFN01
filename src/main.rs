@@ -7283,6 +7283,29 @@ fn publish_word_modes(window: &AppWindow) {
     window.set_word_group_words(ModelRc::new(VecModel::from(words)));
 }
 
+/// そのペインの前に出ているタブのモードを決める（要件 7.9、2026-09-08）。
+///
+/// **タブのメニューとステータスバー、どちらの口もここへ来る。**指す先が違う
+/// だけで、することは同じである——モードは文書ごとのものなので、変えるのは
+/// 「そのタブ」であって「そのペイン」ではない。
+fn set_word_mode_of(window: &AppWindow, live: &Live, id: PaneId, name: &str) {
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(id);
+        let at = strip.active;
+        let Some(tab) = strip.tabs.get_mut(at) else {
+            return;
+        };
+        tab.word_mode = name.to_owned();
+    }
+    // 組版はこの行から読む（`lay_out_pane`）。
+    id.update_screen(window, |screen| screen.word_mode = name.into());
+    publish_word_mode_of(window, live);
+    // **色が変わったので描き直す。測り直しはしない**（技術検証 9.3.1）。
+    relayout_panes(window, &live.states, &live.cache);
+    write_session(window, live);
+}
+
 /// ステータスバーへ、前に出ているタブのモードを出す（要件 10）。
 ///
 /// **コードエディタが言語モードを出しているのと同じ場所**である。いまどのモードか

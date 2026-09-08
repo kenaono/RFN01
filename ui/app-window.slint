@@ -433,8 +433,10 @@ export component AppWindow inherits Window {
     in property <[string]> word-mode-names;
     /// 前に出ている文書のモード。**ステータスバーに出る**（要件 10）。
     in property <string> word-mode;
-    /// この文書のモードを、この名前にする。
+    /// 前に出ている文書のモードを、この名前にする（ステータスバーから）。
     callback word-mode-chosen(string);
+    /// そのペインの前に出ているタブのモードを、この名前にする（タブのメニューから）。
+    callback pane-word-mode-chosen(int, string);
     /// 設定画面が開いているモード（-1でどれも開いていない）。
     in-out property <int> word-mode-opened-at: -1;
     /// その中の語群。
@@ -1990,6 +1992,12 @@ export component AppWindow inherits Window {
                         kill-requested(what) => { root.pane-kill(pane.id, what); }
                         // 要件 7.9（2026-09-08）: 選んだ語を単語帳へ。
                         word-sets: root.word-group-names;
+                        // 要件 7.9: このタブのモードを、このタブのメニューから。
+                        word-modes: root.word-mode-names;
+                        word-mode: pane.word-mode;
+                        word-mode-chosen(name) => {
+                            root.pane-word-mode-chosen(pane.id, name);
+                        }
                         has-selection: pane.selection-rects.length > 0;
                         word-add-requested(at) => {
                             root.pane-word-added(pane.id, at);
@@ -2712,8 +2720,15 @@ export component AppWindow inherits Window {
                         TextButton {
                             title: "New Mode";
                             role: Role.primary;
+                            // 書き手の報告 2026-09-08: **名前を訊く問いが、この
+                            // パネルの下に立つ。**問いは窓の中に描くもの（要件
+                            // 8.3・8.4）で、このパネルはその上に浮いている別の
+                            // 窓——だから1回目の押下はパネルを閉じるだけに使われ、
+                            // 決定するのに二度押すことになっていた。
+                            // **訊く前に、こちらを閉じる。**
                             clicked => {
                                 root.word-mode-created();
+                                typography-panel.close();
                             }
                         }
                     }
@@ -2866,8 +2881,12 @@ export component AppWindow inherits Window {
 
                             TextButton {
                                 title: "New Group";
+                                // **訊く前にパネルを閉じる**（`New Mode`の注記）。
+                                // **頼んでから閉じる**のは技術検証 6.24——この行は
+                                // `if`の中、つまり繰り返し要素である。
                                 clicked => {
                                     root.word-group-created(root.word-mode-opened-at);
+                                    typography-panel.close();
                                 }
                             }
                             // **重複は畳んで置く。**普段は数だけ見えていればよく、

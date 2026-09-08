@@ -284,9 +284,17 @@ export component EditorPane inherits Rectangle {
     /// would be the editor deciding what a shell means.
     in property <bool> terminal: false;
     in property <bool> empty: false;
-    /// 要件 7.9（2026-09-08）: 単語セットの名前。**選んだ語を足す先**として
-    /// 右ボタンのメニューに並ぶ。空なら行そのものが出ない。
+    /// 要件 7.9（2026-09-08）: いまこの面に効いている語群の名前。**選んだ語を
+    /// 足す先**として右ボタンのメニューに並ぶ。空なら行そのものが出ない。
     in property <[string]> word-sets;
+    /// 選べるモードの名前（先頭は「なし」）と、このタブのモード。
+    ///
+    /// **タブのメニューに出す**（書き手の報告 2026-09-08）。ステータスバーだけに
+    /// 置いていたときは、**どのタブに効くのかが画面から読めなかった**——モードは
+    /// 文書ごとのものなので、そのタブを右クリックして決めるのが素直である。
+    in property <[string]> word-modes;
+    in property <string> word-mode;
+    callback word-mode-chosen(string);
     /// 何か選んでいるか。**選択があるときだけ`単語帳へ追加`を出す**——
     /// 押しても何も起きない行は出さない（要件 6.7）。
     in property <bool> has-selection: false;
@@ -2854,6 +2862,28 @@ export component EditorPane inherits Rectangle {
                         // 動いていたのは、登る段数が少ないからにすぎない。
                         activated => {
                             root.tab-shell-chosen(index);
+                            tab-menu.close();
+                        }
+                    }
+                }
+
+                // 要件 7.9（2026-09-08、書き手の報告）: **このタブの単語チェック
+                // モード。**モードは文書ごとのものなので、**そのタブのメニューに
+                // 在るのがいちばん素直**である——ステータスバーだけに置いて
+                // いたときは、どのタブに効くのかが画面から読めなかった。
+                // 端末のタブには本文が無いので出さない。
+                if !root.terminal && root.word-modes.length > 1: VerticalLayout {
+                    spacing: 1px;
+
+                    MenuSep { }
+
+                    for name in root.word-modes: MenuRow {
+                        title: "モード：" + name;
+                        checked: name == root.word-mode
+                            || (root.word-mode == "" && name == "なし");
+                        // **頼んでから閉じる**（技術検証 6.24）。
+                        activated => {
+                            root.word-mode-chosen(name);
                             tab-menu.close();
                         }
                     }
