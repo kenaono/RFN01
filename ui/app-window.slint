@@ -2918,7 +2918,12 @@ export component AppWindow inherits Window {
                             if !(root.word-naming == 4
                                 && root.word-naming-at == index): TextButton {
                                 wide: true;
-                                role: Role.quiet;
+                                // **開いている語群には印を付ける。**下に出ている
+                                // `Import…`と`この語群を消す`がどれに効くのかは、
+                                // この印だけが言う。
+                                role: root.word-group-opened-at == index
+                                    ? Role.primary
+                                    : Role.quiet;
                                 title: row.name;
                                 clicked => {
                                     root.word-group-opened(
@@ -2947,28 +2952,6 @@ export component AppWindow inherits Window {
                                 clicked => {
                                     root.word-group-opened(
                                         root.word-group-opened-at == index ? -1 : index);
-                                }
-                            }
-                            if !(root.word-naming == 4
-                                && root.word-naming-at == index): TextButton {
-                                title: "Import…";
-                                clicked => {
-                                    root.word-group-imported(index);
-                                }
-                            }
-                            if !(root.word-naming == 4
-                                && root.word-naming-at == index): TextButton {
-                                title: "Export…";
-                                clicked => {
-                                    root.word-group-exported(index);
-                                }
-                            }
-                            if !(root.word-naming == 4
-                                && root.word-naming-at == index): TextButton {
-                                title: "×";
-                                role: Role.quiet;
-                                clicked => {
-                                    root.word-group-removed(index);
                                 }
                             }
 
@@ -3058,6 +3041,38 @@ export component AppWindow inherits Window {
                                         font-size: 11px;
                                         wrap: word-wrap;
                                     }
+                                }
+                            }
+                        }
+
+                        // **開いている語群についてすることは、その語群の下に置く**
+                        // （書き手の報告 2026-09-08：名前が「…」に潰れていた）。
+                        // 行に釦を5つ並べると、380pxの幅では**いちばん大事な名前が
+                        // 先に潰れる**——名前は行に、することは開いた先に。
+                        //
+                        // **消すのもここである。**語を1万まで入れられるものを、
+                        // 一覧の行の`×`ひとつで消せてよいはずがない。
+                        if root.word-group-opened-at >= 0: HorizontalLayout {
+                            alignment: start;
+                            spacing: 6px;
+
+                            TextButton {
+                                title: "Import…";
+                                clicked => {
+                                    root.word-group-imported(root.word-group-opened-at);
+                                }
+                            }
+                            TextButton {
+                                title: "Export…";
+                                clicked => {
+                                    root.word-group-exported(root.word-group-opened-at);
+                                }
+                            }
+                            TextButton {
+                                title: "この語群を消す";
+                                role: Role.danger;
+                                clicked => {
+                                    root.word-group-removed(root.word-group-opened-at);
                                 }
                             }
                         }
