@@ -5902,6 +5902,13 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     } else {
         choice
     };
+    // 書き手の報告 2026-09-08: **答えたら設定画面へ戻す。**名前を訊くあいだ
+    // パネルは閉じている（問いは窓の中に描くもので、パネルはその上の別の窓
+    // だから）ので、**開き直さないと何が変わったのか画面のどこにも出ない**。
+    // 取り消したときも戻す——閉じたのはこちらの都合である。
+    if matches!(question, Question::NewWordMode | Question::NewWordGroup) {
+        window.set_settings_generation(window.get_settings_generation() + 1);
+    }
     match (question, choice) {
         (Question::CloseTab { pane, index }, 0) => {
             save_document(window, live, false);

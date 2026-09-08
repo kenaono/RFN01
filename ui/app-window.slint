@@ -441,8 +441,18 @@ export component AppWindow inherits Window {
     callback word-mode-chosen(int);
     /// そのペインの前に出ているタブのモードを、この番号にする（タブのメニューから）。
     callback pane-word-mode-chosen(int, int);
-    /// 設定画面が開いているモード（-1でどれも開いていない）。
+    /// 設定画面が開いているモード（-1でどれも開いていない）。**Rustが持つ**
+    /// ——中身（語群・語・重複）はRustが作るモデルなので、開く先が変わったら
+    /// 作り直さなければならない（書き手の報告 2026-09-08）。
     in-out property <int> word-mode-opened-at: -1;
+    callback word-mode-opened(int);
+    callback word-group-opened(int);
+    /// **設定画面をもう一度開け**、という合図（書き手の報告 2026-09-08）。
+    ///
+    /// 名前を訊くあいだパネルは閉じている（問いは窓の中に描くもので、パネルは
+    /// その上の別の窓だから）。**答えたあとに開き直さないと、何が変わったのか
+    /// 画面のどこにも出ない。**数を1つ進めることが合図になる。
+    in-out property <int> settings-generation: 0;
     /// その中の語群。
     in property <[WordGroupRow]> word-group-rows;
     /// 語の一覧を開いている語群（-1で閉じている）。**開いているものだけ語を窓へ
@@ -2375,6 +2385,13 @@ export component AppWindow inherits Window {
         }
     }
 
+    // **答えたあとに設定画面を開き直す**（書き手の報告 2026-09-08）。
+    // 名前を訊くあいだパネルは閉じている——閉じたのはこちらの都合であって、
+    // 書き手が閉じたわけではない。Rustが数を1つ進めるのが合図である。
+    changed settings-generation => {
+        typography-panel.show();
+    }
+
     typography-panel := PopupWindow {
         // Wider than a menu: 要件 9's six heading sizes are three to a row, and
         // three of them do not fit in a menu's 250px.
@@ -2702,11 +2719,25 @@ export component AppWindow inherits Window {
                             role: root.word-mode-opened-at == index - 1
                                 ? Role.primary
                                 : Role.normal;
+                            // **開くのはRustに頼む**（書き手の報告 2026-09-08：
+                            // モードを選んでも何も出ない）。中身（語群・語・重複）は
+                            // Rustが作って窓へ渡すモデルなので、こちら側で数字を
+                            // 変えただけでは**誰も作り直さない**——押した先が
+                            // 空のままだったのはそれである。
                             clicked => {
-                                root.word-group-opened-at = -1;
-                                root.word-mode-opened-at =
-                                    root.word-mode-opened-at == index - 1 ? -1 : index - 1;
+                                root.word-mode-opened(
+                                    root.word-mode-opened-at == index - 1 ? -1 : index - 1);
                             }
+                        }
+                        // **いまこの文書が使っているモード**（同日追加、書き手の
+                        // 報告：設定上どちらも同じに見える）。開いて中を見ている
+                        // ことと、いま色が付いていることは別のことである。
+                        if index > 0 && mode.id == root.word-mode: Text {
+                            text: "この文書";
+                            color: Tok.accent;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 0;
                         }
                         if index > 0: TextButton {
                             title: "×";
@@ -2749,8 +2780,12 @@ export component AppWindow inherits Window {
                         background: Tok.rule;
                     }
 
+                    // **開いたモードの名前を出す。**「GROUPS」だけでは、どの
+                    // モードの中を見ているのか画面に無かった（書き手の報告
+                    // 2026-09-08）。`+ 1`は先頭の「なし」の分。
                     if root.word-mode-opened-at >= 0: Text {
-                        text: "GROUPS";
+                        text: "GROUPS — "
+                            + root.word-mode-names[root.word-mode-opened-at + 1].name;
                         color: Tok.ink-faint;
                         font-size: 10px;
                         letter-spacing: 0.9px;
@@ -2805,8 +2840,8 @@ export component AppWindow inherits Window {
                                         ? row.words + "語 (二重" + row.repeated + ")"
                                         : row.words + "語");
                                 clicked => {
-                                    root.word-group-opened-at =
-                                        root.word-group-opened-at == index ? -1 : index;
+                                    root.word-group-opened(
+                                        root.word-group-opened-at == index ? -1 : index);
                                 }
                             }
                             TextButton {
@@ -2828,6 +2863,17 @@ export component AppWindow inherits Window {
                                     root.word-group-removed(index);
                                 }
                             }
+                        }
+
+                        // **語群が1つも無いモード。**作った直後はここに来る——
+                        // 何も出ないのは「効かなかった」に見える（書き手の報告
+                        // 2026-09-08）ので、**次にすることを書いておく**。
+                        if root.word-group-rows.length == 0: Text {
+                            text: "このモードにはまだ語群がありません。"
+                                + "`New Group`で人物・地名などの語群を作り、色を決めます。";
+                            color: Tok.ink-faint;
+                            font-size: 11px;
+                            wrap: word-wrap;
                         }
 
                         // 開いている語群の語。**アプリの中で消せる**（要件 7.9）。

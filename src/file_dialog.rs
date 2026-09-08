@@ -74,7 +74,7 @@ pub fn open_document(owner: Owner) -> Option<PathBuf> {
     }
 }
 
-/// 単語セットのファイルを選ぶ（要件 7.9、2026-09-08）。
+/// 語群へ取り込むファイルを選ぶ（要件 7.9、2026-09-08）。
 ///
 /// **`open_document`と同じ道具で、題と絞り込みだけが違う。**選ぶのは1行1語の
 /// テキストで、開く先も違う（設定に覚えるだけで、タブは開かない）——**同じ絵の
@@ -87,7 +87,7 @@ pub fn open_word_set(owner: Owner) -> Option<PathBuf> {
         let created = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER);
         let dialog: IFileDialog = created.ok()?;
         let _ = dialog.SetFileTypes(&filters);
-        let _ = dialog.SetTitle(w!("単語セットを選ぶ（1行に1語）"));
+        let _ = dialog.SetTitle(w!("語群へ取り込むファイルを選ぶ（1行に1語）"));
         if let Ok(options) = dialog.GetOptions() {
             let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM);
         }

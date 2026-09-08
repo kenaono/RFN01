@@ -29,10 +29,10 @@ use crate::{
     export_word_group, file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
     go_to_remembered_folder, hold_word_modes, ime, navigate, open_work_folder, pane_word_mode,
     paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
-    quick_draft, read_word_source, remove_word_from_group, replace_all_in_pane, replace_in_pane,
-    reset_settings, restore_editor_focus, save_settings, schedule_relayout, search_in_folder,
-    search_work_folder, selected_runs, set_colour, set_word_mode_of, shell, shown_sheet,
-    slint_colour, step_setting, tree_command, word_modes_now,
+    publish_word_modes, quick_draft, read_word_source, remove_word_from_group, replace_all_in_pane,
+    replace_in_pane, reset_settings, restore_editor_focus, save_settings, schedule_relayout,
+    search_in_folder, search_work_folder, selected_runs, set_colour, set_word_mode_of, shell,
+    shown_sheet, slint_colour, step_setting, tree_command, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -194,6 +194,27 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
                 "新しい語群の名前を入れてください。".to_owned(),
                 &format!("語群{taken}"),
             );
+        }
+    });
+
+    // 書き手の報告 2026-09-08: **モードを選んでも何も出なかった。**
+    // 語群も語も重複もRustが作って窓へ渡すモデルで、画面側で数字を変えても
+    // **誰も作り直さない**——開く先が変わったら、ここで作り直す。
+    let weak = window.as_weak();
+    window.on_word_mode_opened(move |at| {
+        if let Some(window) = weak.upgrade() {
+            window.set_word_mode_opened_at(at);
+            // 別のモードを開いたら、前のモードの語群を開いたままにしない。
+            window.set_word_group_opened_at(-1);
+            publish_word_modes(&window);
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_word_group_opened(move |at| {
+        if let Some(window) = weak.upgrade() {
+            window.set_word_group_opened_at(at);
+            publish_word_modes(&window);
         }
     });
 
