@@ -203,17 +203,17 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
     // タブのメニューは「そのタブ」——指す先が違うだけで、することは同じである。
     let weak = window.as_weak();
     let held = live.clone();
-    window.on_pane_word_mode_chosen(move |pane, name| {
+    window.on_pane_word_mode_chosen(move |pane, mode| {
         if let Some(window) = weak.upgrade() {
-            set_word_mode_of(&window, &held, PaneId::from_index(pane), &name);
+            set_word_mode_of(&window, &held, PaneId::from_index(pane), mode.max(0) as u32);
         }
     });
 
     let weak = window.as_weak();
     let held = live.clone();
-    window.on_word_mode_chosen(move |name| {
+    window.on_word_mode_chosen(move |mode| {
         if let Some(window) = weak.upgrade() {
-            set_word_mode_of(&window, &held, focused_pane(&window), &name);
+            set_word_mode_of(&window, &held, focused_pane(&window), mode.max(0) as u32);
         }
     });
 
@@ -233,7 +233,7 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
             };
             let word = source[start..end].to_owned();
             let mode = pane_word_mode(&held, id);
-            add_word_to_group(&window, &held, &mode, at.max(0) as usize, &word);
+            add_word_to_group(&window, &held, mode, at.max(0) as usize, &word);
         }
     });
 

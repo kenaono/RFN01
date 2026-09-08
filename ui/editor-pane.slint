@@ -65,6 +65,15 @@ export struct DraftLine {
     breaks: bool,
 }
 
+/// 要件 7.9: 選べるモードの1つ。**番号と名前**——指すのは番号で、読むのは名前。
+///
+/// **ここに在るのは、タブのメニューが並べるから**（要件 7.9、書き手の報告
+/// 2026-09-08：ステータスバーだけではどのタブに効くのか分からない）。
+export struct WordModeRow {
+    id: int,
+    name: string,
+}
+
 export struct PreviewSelectionRect {
     x: float,
     y: float,
@@ -141,7 +150,7 @@ export struct PaneScreen {
     ///
     /// **モードは文書ごと**（コードエディタの言語モードと同じ粒度）なので、
     /// タブと一緒に動く。2つのペインが別の作品を開いていれば、別の色分けになる。
-    word-mode: string,
+    word-mode: int,
     // 追加要件 Terminal: what stands along the foot of this pane. 0 nothing,
     // 1 a shell under a document, 2 a draft under a shell. **A number rather
     // than two flags**: the two can never both be there, because which one it
@@ -292,9 +301,9 @@ export component EditorPane inherits Rectangle {
     /// **タブのメニューに出す**（書き手の報告 2026-09-08）。ステータスバーだけに
     /// 置いていたときは、**どのタブに効くのかが画面から読めなかった**——モードは
     /// 文書ごとのものなので、そのタブを右クリックして決めるのが素直である。
-    in property <[string]> word-modes;
-    in property <string> word-mode;
-    callback word-mode-chosen(string);
+    in property <[WordModeRow]> word-modes;
+    in property <int> word-mode;
+    callback word-mode-chosen(int);
     /// 何か選んでいるか。**選択があるときだけ`単語帳へ追加`を出す**——
     /// 押しても何も起きない行は出さない（要件 6.7）。
     in property <bool> has-selection: false;
@@ -2877,13 +2886,12 @@ export component EditorPane inherits Rectangle {
 
                     MenuSep { }
 
-                    for name in root.word-modes: MenuRow {
-                        title: "モード：" + name;
-                        checked: name == root.word-mode
-                            || (root.word-mode == "" && name == "なし");
+                    for row in root.word-modes: MenuRow {
+                        title: "モード：" + row.name;
+                        checked: row.id == root.word-mode;
                         // **頼んでから閉じる**（技術検証 6.24）。
                         activated => {
-                            root.word-mode-chosen(name);
+                            root.word-mode-chosen(row.id);
                             tab-menu.close();
                         }
                     }

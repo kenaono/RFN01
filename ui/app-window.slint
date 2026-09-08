@@ -1,5 +1,5 @@
 import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
-import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo } from "editor-pane.slint";
+import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
 import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
@@ -428,15 +428,19 @@ export component AppWindow inherits Window {
     /// 要件 7.9（2026-09-08）: **単語チェックモード**（書き手の指摘：ソースの
     /// 予約語の色分けと同じ考え）。**モードが語群を持ち、語群が色を持つ。**
     ///
-    /// 選べるモードの名前。**先頭は「なし」**——色分けを止めるのにモードを
+    /// 選べるモード。**先頭は「なし」（番号0）**——色分けを止めるのにモードを
     /// 消す必要は無い（コードエディタの`Plain Text`にあたる）。
-    in property <[string]> word-mode-names;
-    /// 前に出ている文書のモード。**ステータスバーに出る**（要件 10）。
-    in property <string> word-mode;
-    /// 前に出ている文書のモードを、この名前にする（ステータスバーから）。
-    callback word-mode-chosen(string);
-    /// そのペインの前に出ているタブのモードを、この名前にする（タブのメニューから）。
-    callback pane-word-mode-chosen(int, string);
+    in property <[WordModeRow]> word-mode-names;
+    /// 前に出ている文書のモードの番号と、その名前。**ステータスバーに出る**（要件 10）。
+    ///
+    /// **指すのは番号、読むのは名前。**名前で指していたときは、モードの名前を
+    /// 変えた瞬間に文書のモードが切れていた。
+    in property <int> word-mode;
+    in property <string> word-mode-name;
+    /// 前に出ている文書のモードを、この番号にする（ステータスバーから）。
+    callback word-mode-chosen(int);
+    /// そのペインの前に出ているタブのモードを、この番号にする（タブのメニューから）。
+    callback pane-word-mode-chosen(int, int);
     /// 設定画面が開いているモード（-1でどれも開いていない）。
     in-out property <int> word-mode-opened-at: -1;
     /// その中の語群。
@@ -1995,8 +1999,8 @@ export component AppWindow inherits Window {
                         // 要件 7.9: このタブのモードを、このタブのメニューから。
                         word-modes: root.word-mode-names;
                         word-mode: pane.word-mode;
-                        word-mode-chosen(name) => {
-                            root.pane-word-mode-chosen(pane.id, name);
+                        word-mode-chosen(mode) => {
+                            root.pane-word-mode-chosen(pane.id, mode);
                         }
                         has-selection: pane.selection-rects.length > 0;
                         word-add-requested(at) => {
@@ -2163,7 +2167,7 @@ export component AppWindow inherits Window {
                     mode-text := Text {
                         x: 6px;
                         y: (parent.height - self.height) / 2;
-                        text: root.word-mode == "" ? "なし" : root.word-mode;
+                        text: root.word-mode-name;
                         color: Tok.ink-muted;
                         font-size: 12px;
                     }
@@ -2191,12 +2195,11 @@ export component AppWindow inherits Window {
                                 spacing: 1px;
 
                                 // **頼んでから閉じる**（技術検証 6.24）。
-                                for name in root.word-mode-names: MenuRow {
-                                    title: name;
-                                    checked: name == root.word-mode
-                                        || (root.word-mode == "" && name == "なし");
+                                for row in root.word-mode-names: MenuRow {
+                                    title: row.name;
+                                    checked: row.id == root.word-mode;
                                     activated => {
-                                        root.word-mode-chosen(name);
+                                        root.word-mode-chosen(row.id);
                                         mode-menu.close();
                                     }
                                 }
@@ -2695,7 +2698,7 @@ export component AppWindow inherits Window {
                         // **先頭の「なし」は作ったモードではない**ので出さない。
                         if index > 0: TextButton {
                             wide: true;
-                            title: mode;
+                            title: mode.name;
                             role: root.word-mode-opened-at == index - 1
                                 ? Role.primary
                                 : Role.normal;

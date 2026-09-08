@@ -70,10 +70,10 @@ pub fn open_session(
             }
             let caret = tab.caret;
             strips[id.index() as usize].tabs.push(PaneTab {
-                // 要件 7.9（2026-09-08）: セッションが覚えていたモード。
-                // **無い名前は「なし」**になる（`word_mode_named`）——モードを
+                // 要件 7.9（2026-09-08）: セッションが覚えていたモードの番号。
+                // **無い番号は「なし」**になる（`word_mode_with`）——モードを
                 // 消したあとの文書は、間違った色ではなく色無しで戻る。
-                word_mode: tab.word_mode.clone(),
+                word_mode: tab.word_mode,
                 document,
                 view: TabView {
                     state: EditorState {
@@ -116,7 +116,7 @@ pub fn open_session(
         let strip = &mut strips[focused.index() as usize];
         strip.tabs.push(PaneTab {
             // セッションが名を挙げていない作業コピーなので、モードも無い。
-            word_mode: crate::word_marks::NO_MODE.to_owned(),
+            word_mode: 0,
             document: document.clone(),
             view: TabView {
                 state: state.clone(),
@@ -219,7 +219,7 @@ pub fn open_without_session(
         tabs: documents
             .iter()
             .map(|(document, state)| PaneTab {
-                word_mode: crate::word_marks::NO_MODE.to_owned(),
+                word_mode: 0,
                 document: document.clone(),
                 view: TabView {
                     state: state.clone(),
@@ -342,7 +342,7 @@ pub fn session_tab(tab: &PaneTab) -> app_data::SessionTab {
     app_data::SessionTab {
         // 要件 7.9（2026-09-08）: この文書のモード。**名前で覚える**——番号は
         // モードを作り消しすれば別のものを指す。
-        word_mode: tab.word_mode.clone(),
+        word_mode: tab.word_mode,
         origin: file.path().map(Path::to_path_buf),
         untitled: file.untitled_number(),
         vertical: tab.view.vertical,

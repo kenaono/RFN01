@@ -91,6 +91,9 @@ pub const NO_MODE: &str = "なし";
 /// 少ない。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WordGroup {
+    /// **変わらない番号**（2026-09-08）。名前は書き手が変えるもので、変えたら
+    /// 指していたものが切れる——それは名前の仕事ではない。
+    pub id: u32,
     pub name: String,
     pub colour: [f32; 3],
     /// **書かれた順のまま**で、並べ替えない。
@@ -100,6 +103,13 @@ pub struct WordGroup {
 /// ひとつのモード——名前と、語群（要件 7.9）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WordMode {
+    /// **変わらない番号。**文書（タブ）はこれを指す——名前で指していたときは、
+    /// 名前を変えた瞬間に文書のモードが切れていた。
+    ///
+    /// **消した番号は二度と使わない**（表が`next`を覚えている）。使い回すと、
+    /// 古いセッションが指していた番号が**別のモード**を指すことになり、
+    /// 「切れている」より悪い。
+    pub id: u32,
     pub name: String,
     pub groups: Vec<WordGroup>,
 }
@@ -375,6 +385,7 @@ pub fn read_word_file(raw: &str) -> Vec<String> {
 
 fn fingerprint_of(mode: &WordMode) -> u64 {
     let mut hasher = DefaultHasher::new();
+    mode.id.hash(&mut hasher);
     mode.name.hash(&mut hasher);
     for group in &mode.groups {
         group.name.hash(&mut hasher);
@@ -399,6 +410,7 @@ mod tests {
 
     fn group(name: &str, colour: [f32; 3], words: &[&str]) -> WordGroup {
         WordGroup {
+            id: 1,
             name: name.to_owned(),
             colour,
             words: words.iter().map(|word| (*word).to_owned()).collect(),
@@ -407,6 +419,7 @@ mod tests {
 
     fn mode(groups: Vec<WordGroup>) -> WordMarks {
         WordMarks::build(WordMode {
+            id: 1,
             name: "作品A".to_owned(),
             groups,
         })
@@ -461,6 +474,7 @@ mod tests {
     fn two_modes_do_not_collide_with_each_other() {
         let one = mode(vec![group("人物", RED, &["田中"])]);
         let other = WordMarks::build(WordMode {
+            id: 2,
             name: "作品B".to_owned(),
             groups: vec![group("人物", BLUE, &["田中"])],
         });
@@ -566,6 +580,7 @@ mod tests {
         let other_colour = mode(vec![group("人物", BLUE, &["猫"])]);
         let other_word = mode(vec![group("人物", RED, &["犬"])]);
         let other_name = WordMarks::build(WordMode {
+            id: 1,
             name: "作品B".to_owned(),
             groups: vec![group("人物", RED, &["猫"])],
         });
@@ -610,6 +625,7 @@ mod tests {
     #[test]
     fn a_mode_counts_its_words() {
         let held = WordMode {
+            id: 1,
             name: "作品A".to_owned(),
             groups: vec![
                 group("人物", RED, &["田中", "佐藤"]),

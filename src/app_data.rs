@@ -108,11 +108,12 @@ pub struct SessionTab {
     /// started when the tab comes to the front.
     pub below: bool,
     pub below_height: i32,
-    /// 要件 7.9（2026-09-08）: この文書の単語チェックモードの名前。
+    /// 要件 7.9（2026-09-08）: この文書の単語チェックモードの番号。
     ///
-    /// **書かないのは「なし」のときだけ**なので、この版より前のセッションは
-    /// 空のまま読まれ、色分けの無い文書として戻る。
-    pub word_mode: String,
+    /// **名前ではなく番号**（同日改訂）——名前は書き手が変えるもので、変えた
+    /// 瞬間に文書のモードが切れる。`0`が「なし」で、**書かないのはそのときだけ**
+    /// なので、この版より前のセッションは0のまま読まれる。
+    pub word_mode: u32,
     /// 追加要件 2026-09-07: whether this tab was still asking what it is.
     ///
     /// **Written only when it was**, so a session from a build without this
@@ -247,7 +248,7 @@ pub fn encode_session(session: &Session) -> String {
             }
             // 要件 7.9（2026-09-08）: 単語チェックモード。**「なし」なら書かない**
             // ので、この版より前のセッションは空のまま読まれる。
-            if !tab.word_mode.is_empty() {
+            if tab.word_mode != 0 {
                 out.push_str(&format!("mode: {}\n", tab.word_mode));
             }
             if tab.below || tab.below_height > 0 {
@@ -343,7 +344,7 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             }
             "mode" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
-                tab.word_mode = value.to_owned();
+                tab.word_mode = value.trim().parse().unwrap_or(0);
             }
             "below" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
@@ -416,6 +417,7 @@ const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 2";
 /// 知らない**——並びとして預かるだけである。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StoredGroup {
+    pub id: u32,
     pub name: String,
     /// `#rrggbb`。**文字列のまま持つ**：この層は色を混ぜない。
     pub colour: String,
@@ -425,22 +427,38 @@ pub struct StoredGroup {
 /// 表の中の1つのモード。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StoredMode {
+    pub id: u32,
     pub name: String,
     pub groups: Vec<StoredGroup>,
+}
+
+/// 表そのもの——モードと、**次に配る番号**。
+///
+/// **消した番号は二度と使わない**ので、次の番号を表が覚えている。使い回すと、
+/// 古いセッションが指していた番号が別のモードを指すことになり、「切れている」より
+/// 悪い。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StoredWords {
+    pub modes: Vec<StoredMode>,
+    pub next_id: u32,
 }
 
 /// 表を書き出す。
 ///
 /// **1行1語**（要件 7.9）。`mode:`の下に`group:`が続き、その下に`word:`が続く。
 /// 人が開いて読める形なのは、この編集器の他の書き出しと同じ方針である。
-pub fn encode_words(modes: &[StoredMode]) -> String {
+pub fn encode_words(held: &StoredWords) -> String {
     let mut out = String::new();
     out.push_str(WORDS_MAGIC);
     out.push('\n');
-    for mode in modes {
-        out.push_str(&format!("mode: {}\n", mode.name));
+    out.push_str(&format!("next: {}\n", held.next_id));
+    for mode in &held.modes {
+        out.push_str(&format!("mode: {} | {}\n", mode.id, mode.name));
         for group in &mode.groups {
-            out.push_str(&format!("group: {} | {}\n", group.name, group.colour));
+            out.push_str(&format!(
+                "group: {} | {} | {}\n",
+                group.id, group.name, group.colour
+            ));
             for word in &group.words {
                 out.push_str(&format!("word: {word}\n"));
             }
@@ -451,61 +469,109 @@ pub fn encode_words(modes: &[StoredMode]) -> String {
 
 /// 表を読み戻す。**読めなければ`None`**——半分だけ読んだ表は、書き手の一覧を
 /// 半分にしたものである。
-pub fn decode_words(raw: &str) -> Option<Vec<StoredMode>> {
+pub fn decode_words(raw: &str) -> Option<(StoredWords, usize)> {
     let mut lines = raw.split('\n');
     if lines.next()? != WORDS_MAGIC {
         return None;
     }
-    let mut modes: Vec<StoredMode> = Vec::new();
+    let mut held = StoredWords::default();
+    // **読めなかった行を数える。**捨てた語の数を書き手に言えるように——
+    // 黙って半分になった辞書は、いちばん気づきにくい失い方である。
+    let mut damaged = 0usize;
     for line in lines {
         if line.is_empty() {
             continue;
         }
         let Some((key, value)) = line.split_once(": ") else {
+            damaged += 1;
             continue;
         };
-        match key {
-            "mode" => modes.push(StoredMode {
-                name: value.to_owned(),
-                groups: Vec::new(),
-            }),
-            // **モードの無い`group:`は捨てる。**行の順が壊れた表で、どこへ
+        // **頭の空白は許す。**この表は書き手が開いて直せるファイルなので、
+        // 字下げくらいで語が消えては困る（2026-09-08）。
+        match key.trim_start() {
+            "next" => held.next_id = value.trim().parse().unwrap_or(0),
+            "mode" => {
+                let (id, name) = value.split_once(" | ").unwrap_or(("0", value));
+                held.modes.push(StoredMode {
+                    id: id.trim().parse().unwrap_or(0),
+                    name: name.to_owned(),
+                    groups: Vec::new(),
+                });
+            }
+            // **モードの無い`group:`は数える。**行の順が壊れた表で、どこへ
             // 入れるか決められない。`word:`も同じ。
-            "group" => {
-                if let Some(mode) = modes.last_mut() {
-                    let (name, colour) = value.split_once(" | ").unwrap_or((value, ""));
+            "group" => match held.modes.last_mut() {
+                Some(mode) => {
+                    let mut parts = value.splitn(3, " | ");
+                    let id = parts.next().unwrap_or("0").trim().parse().unwrap_or(0);
                     mode.groups.push(StoredGroup {
-                        name: name.to_owned(),
-                        colour: colour.to_owned(),
+                        id,
+                        name: parts.next().unwrap_or_default().to_owned(),
+                        colour: parts.next().unwrap_or_default().to_owned(),
                         words: Vec::new(),
                     });
                 }
-            }
-            "word" => {
-                if let Some(group) = modes.last_mut().and_then(|mode| mode.groups.last_mut()) {
-                    group.words.push(value.to_owned());
-                }
-            }
-            _ => {}
+                None => damaged += 1,
+            },
+            "word" => match held
+                .modes
+                .last_mut()
+                .and_then(|mode| mode.groups.last_mut())
+            {
+                Some(group) => group.words.push(value.to_owned()),
+                None => damaged += 1,
+            },
+            _ => damaged += 1,
         }
     }
-    Some(modes)
+    // **番号を配ったことが無い表**（この版より前のもの）には、いま配る。
+    if held.next_id == 0 {
+        let mut next = 1;
+        for mode in &mut held.modes {
+            if mode.id == 0 {
+                mode.id = next;
+                next += 1;
+            }
+            for group in &mut mode.groups {
+                if group.id == 0 {
+                    group.id = next;
+                    next += 1;
+                }
+            }
+        }
+        held.next_id = next;
+    }
+    Some((held, damaged))
 }
 
 /// 表を置く。
-pub fn write_words(directory: &Path, modes: &[StoredMode]) -> io::Result<PathBuf> {
-    fs::create_dir_all(directory)?;
-    let path = directory.join(WORDS_FILE);
-    file_io::write_atomically(&path, encode_words(modes).as_bytes())?;
-    Ok(path)
+pub fn words_path(directory: &Path) -> PathBuf {
+    directory.join(WORDS_FILE)
 }
 
-/// 表を読む。無ければ空。
-pub fn read_words(directory: &Path) -> Vec<StoredMode> {
-    fs::read_to_string(directory.join(WORDS_FILE))
-        .ok()
-        .and_then(|raw| decode_words(&raw))
-        .unwrap_or_default()
+/// 表を読む。無ければ空。**読めなかった行の数も返す。**
+///
+/// **`None`は「表が無い」ではなく「表が読めない」**：先頭の1行が合わないものは、
+/// この編集器の表ではない。呼ぶ側はそれを上書きしない——**辞書は書き手が積み
+/// 上げたもの**で、読めないからといって捨ててよいものではない。
+pub fn read_words(directory: &Path) -> Option<(StoredWords, usize)> {
+    let raw = fs::read_to_string(words_path(directory)).ok()?;
+    decode_words(&raw)
+}
+
+/// いまの表を、1世代だけ控えておく（2026-09-08）。
+///
+/// **起動のときに一度だけ**。守りたいのは「この実行が辞書を壊した」で、そのとき
+/// 直前の姿が要る——`perf_log.prev.txt`が同じ理由で同じことをしている。
+/// 実行中の変更ごとに控えても、守れるものは増えない。
+pub fn keep_previous_words(directory: &Path) -> io::Result<()> {
+    let path = words_path(directory);
+    if !path.exists() {
+        return Ok(());
+    }
+    let kept = directory.join(format!("{WORDS_FILE}.prev"));
+    fs::copy(&path, &kept)?;
+    Ok(())
 }
 
 /// Put the display settings away where the next run will look for them.
