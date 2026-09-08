@@ -5799,11 +5799,6 @@ enum Question {
     RenameEntry(PathBuf),
     /// The file or folder named, waiting to be told to go (要件 5.2).
     DeleteEntry(PathBuf),
-    /// 空のモードが、名前を待っている（要件 7.9、2026-09-08）。
-    NewWordMode,
-    /// 空の語群が、名前を待っている。どのモードのものかは
-    /// `word-group-wanted-in`が持つ。
-    NewWordGroup,
     /// Something carried onto a name that is already taken (要件 5.2): what is
     /// being moved, and where it would land. **The order is the same as
     /// `move_entry`'s**, from and to.
@@ -5902,13 +5897,6 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     } else {
         choice
     };
-    // 書き手の報告 2026-09-08: **答えたら設定画面へ戻す。**名前を訊くあいだ
-    // パネルは閉じている（問いは窓の中に描くもので、パネルはその上の別の窓
-    // だから）ので、**開き直さないと何が変わったのか画面のどこにも出ない**。
-    // 取り消したときも戻す——閉じたのはこちらの都合である。
-    if matches!(question, Question::NewWordMode | Question::NewWordGroup) {
-        window.set_settings_generation(window.get_settings_generation() + 1);
-    }
     match (question, choice) {
         (Question::CloseTab { pane, index }, 0) => {
             save_document(window, live, false);
@@ -5978,15 +5966,6 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         (Question::SaveConflict, 0) => overwrite_the_outside_change(window, live),
         (Question::SaveConflict, 1) => reload_from_file(window, live),
         (Question::SaveConflict, 2) => save_document(window, live, true),
-        (Question::NewWordMode, 0) => {
-            let typed = window.get_question_name().to_string();
-            new_word_mode(window, live, &typed);
-        }
-        (Question::NewWordGroup, 0) => {
-            let typed = window.get_question_name().to_string();
-            let at = window.get_word_group_wanted_in().max(0) as usize;
-            new_word_group(window, live, at, &typed);
-        }
         (Question::NewFile(parent), 0) => make_entry(window, live, &parent, false),
         (Question::NewFolder(parent), 0) => make_entry(window, live, &parent, true),
         (Question::RenameEntry(path), 0) => rename_entry(window, live, &path),
@@ -7424,54 +7403,74 @@ fn next_word_id() -> u32 {
     })
 }
 
-/// 空のモードを1つ作る（要件 7.9）。
+/// 名前を訊いていた欄を畳む（単語チェックモード要件 7.4）。
+///
+/// **できたときだけ畳む。**駄目だったときに畳むと、書き手が打った名前が消えて、
+/// 何が起きたのかも消える。
+fn close_word_naming(window: &AppWindow) {
+    window.set_word_naming(0);
+    window.set_word_new_name(SharedString::new());
+    window.set_word_naming_trouble(SharedString::new());
+}
+
+/// 空のモードを1つ作る（単語チェックモード要件 7.2）。
 ///
 /// **ファイルは要らない。**辞書は編集器が持つもので、書き手がファイルを管理する
 /// 必要は無い。
-fn new_word_mode(window: &AppWindow, live: &Live, name: &str) {
+///
+/// **駄目だった理由は文字で返す**（同要件 7.4、書き手の求め 2026-09-08）。設定は
+/// 一枚で終えるので、言う先は下の帯ではなく**名前を打った欄のすぐ下**である
+/// ——目はいまそこにある。
+fn new_word_mode(window: &AppWindow, live: &Live, name: &str) -> Result<(), String> {
     let mut modes = word_modes_now();
     if modes.len() >= word_marks::MAX_WORD_MODES {
-        let told = format!("モードは{}個までです", word_marks::MAX_WORD_MODES);
-        window.set_render_status(told.into());
-        return;
+        return Err(format!("モードは{}個までです", word_marks::MAX_WORD_MODES));
     }
     let name = name.trim();
     if name.is_empty() || name == word_marks::NO_MODE {
-        window.set_render_status("その名前は使えません".into());
-        return;
+        return Err("その名前は使えません".to_owned());
     }
     if modes.iter().any(|mode| mode.name == name) {
-        window.set_render_status(format!("「{name}」はもうあります").into());
-        return;
+        return Err(format!("「{name}」はもうあります"));
     }
     modes.push(word_marks::WordMode {
         id: next_word_id(),
         name: name.to_owned(),
         groups: Vec::new(),
     });
+    // **作ったモードを開いておく。**作った直後に中身が出ていなければ、何が
+    // 起きたのか画面に無い（同要件 7.4）。
     window.set_word_mode_opened_at(modes.len() as i32 - 1);
+    window.set_word_group_opened_at(-1);
     hold_word_modes(window, live, modes, true);
+    Ok(())
 }
 
-/// 開いているモードへ語群を1つ足す（要件 7.9）。
-fn new_word_group(window: &AppWindow, live: &Live, at: usize, name: &str) {
+/// 開いているモードへ語群を1つ足す（単語チェックモード要件 7.2）。
+fn new_word_group(window: &AppWindow, live: &Live, at: usize, name: &str) -> Result<(), String> {
     let mut modes = word_modes_now();
     let Some(mode) = modes.get_mut(at) else {
-        return;
+        return Err("先にモードを開いてください".to_owned());
     };
     if mode.groups.len() >= word_marks::MAX_WORD_GROUPS {
-        let told = format!("語群は{}つまでです", word_marks::MAX_WORD_GROUPS);
-        window.set_render_status(told.into());
-        return;
+        return Err(format!("語群は{}つまでです", word_marks::MAX_WORD_GROUPS));
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("その名前は使えません".to_owned());
+    }
+    if mode.groups.iter().any(|group| group.name == name) {
+        return Err(format!("「{name}」はもうあります"));
     }
     let colour = next_word_colour(&mode.groups);
     mode.groups.push(word_marks::WordGroup {
         id: next_word_id(),
-        name: name.trim().to_owned(),
+        name: name.to_owned(),
         colour,
         words: Vec::new(),
     });
     hold_word_modes(window, live, modes, true);
+    Ok(())
 }
 
 /// 選んでいる語を、語群へ足す（要件 7.9）。

@@ -24,15 +24,16 @@ use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, VecMode
 use crate::directwrite_render;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
 use crate::{
-    AppWindow, Live, NO_TARGET, PaneId, PaneStates, Question, RenderCache, Setting, TreeCommand,
-    activate_left_row, add_word_to_group, ask_for_name, collect_search, colour_row, drop_tree_row,
-    export_word_group, file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
-    go_to_remembered_folder, hold_word_modes, ime, navigate, open_work_folder, pane_word_mode,
-    paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
-    publish_word_modes, quick_draft, read_word_source, remove_word_from_group, replace_all_in_pane,
-    replace_in_pane, reset_settings, restore_editor_focus, save_settings, schedule_relayout,
-    search_in_folder, search_work_folder, selected_runs, set_colour, set_word_mode_of, shell,
-    shown_sheet, slint_colour, step_setting, tree_command, word_modes_now,
+    AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
+    activate_left_row, add_word_to_group, close_word_naming, collect_search, colour_row,
+    drop_tree_row, export_word_group, file_dialog, file_tree, find_in_pane, focused_pane,
+    font_name, font_row, go_to_remembered_folder, hold_word_modes, ime, navigate, new_word_group,
+    new_word_mode, open_work_folder, pane_word_mode, paste_into_tab, paste_targets, pick_tree_row,
+    publish_left, publish_tabs, publish_word_mode_of, publish_word_modes, quick_draft,
+    read_word_source, remove_word_from_group, replace_all_in_pane, replace_in_pane, reset_settings,
+    restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
+    selected_runs, set_colour, set_word_mode_of, shell, shown_sheet, slint_colour, step_setting,
+    tree_command, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -162,38 +163,32 @@ fn after_terminal_look(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
 /// 建て直し、画面へ出し、書き出す。順番を守る場所が1つで済む。
 pub fn wire_word_modes(window: &AppWindow, live: &Live) {
     // **モードを1つ作る。**ファイルは要らない——辞書は編集器が持つもので、
-    // 書き手がファイルを管理する必要は無い。名前は要件5.2の新規ファイルと
-    // 同じ問い方で訊く。
+    // 書き手がファイルを管理する必要は無い。
+    //
+    // **名前は設定画面の中の欄で受ける**（書き手の求め 2026-09-08、単語チェック
+    // モード要件 7.4）。問いは窓の中に描くもの（要件 8.3）で、設定画面はその上に
+    // 浮いている別の窓——**訊くたびに設定画面が消えて戻る**ことになり、「決定
+    // すると次の画面」が続くと何をしているのか分からなくなる。
     let weak = window.as_weak();
     let held = live.clone();
-    window.on_word_mode_created(move || {
+    window.on_word_mode_added(move |name| {
         if let Some(window) = weak.upgrade() {
-            let taken = word_modes_now().len() + 1;
-            ask_for_name(
-                &window,
-                &held,
-                Question::NewWordMode,
-                "新しいモードの名前を入れてください。".to_owned(),
-                &format!("モード{taken}"),
-            );
+            match new_word_mode(&window, &held, &name) {
+                // **できたら欄を畳む。**次にすることは、この画面の中にある。
+                Ok(()) => close_word_naming(&window),
+                Err(told) => window.set_word_naming_trouble(told.into()),
+            }
         }
     });
 
     let weak = window.as_weak();
     let held = live.clone();
-    window.on_word_group_created(move |mode| {
+    window.on_word_group_added(move |mode, name| {
         if let Some(window) = weak.upgrade() {
-            let taken = word_modes_now()
-                .get(mode.max(0) as usize)
-                .map_or(1, |held| held.groups.len() + 1);
-            window.set_word_group_wanted_in(mode);
-            ask_for_name(
-                &window,
-                &held,
-                Question::NewWordGroup,
-                "新しい語群の名前を入れてください。".to_owned(),
-                &format!("語群{taken}"),
-            );
+            match new_word_group(&window, &held, mode.max(0) as usize, &name) {
+                Ok(()) => close_word_naming(&window),
+                Err(told) => window.set_word_naming_trouble(told.into()),
+            }
         }
     });
 

@@ -447,20 +447,23 @@ export component AppWindow inherits Window {
     in-out property <int> word-mode-opened-at: -1;
     callback word-mode-opened(int);
     callback word-group-opened(int);
-    /// **設定画面をもう一度開け**、という合図（書き手の報告 2026-09-08）。
+    /// いま名前を訊いている先（0＝訊いていない／1＝モード／2＝語群）。
     ///
-    /// 名前を訊くあいだパネルは閉じている（問いは窓の中に描くもので、パネルは
-    /// その上の別の窓だから）。**答えたあとに開き直さないと、何が変わったのか
-    /// 画面のどこにも出ない。**数を1つ進めることが合図になる。
-    in-out property <int> settings-generation: 0;
+    /// **設定は一枚で終える**（書き手の求め 2026-09-08、単語チェックモード要件 7.4）。
+    /// 名前は別の問いにせず、**この画面の中の欄で受ける**——「決定すると次の画面」が
+    /// 続くと、何をしているのか分からなくなる。**一度に開くのは一つ**なので、
+    /// 旗を2つ持たずに1つの数で言う。
+    in-out property <int> word-naming: 0;
+    in-out property <string> word-new-name;
+    /// 名前が使えなかったときの言葉。**この画面の中に出す**——下の帯へ出すと、
+    /// 目はいま欄の上にある。
+    in-out property <string> word-naming-trouble;
     /// その中の語群。
     in property <[WordGroupRow]> word-group-rows;
     /// 語の一覧を開いている語群（-1で閉じている）。**開いているものだけ語を窓へ
     /// 渡す**——数千語を毎回渡さないため。
     in-out property <int> word-group-opened-at: -1;
     in property <[string]> word-group-words;
-    /// どのモードへ語群を足すのか（名前を訊いているあいだ覚えておく場所）。
-    in-out property <int> word-group-wanted-in: -1;
     /// 取り込みで見つかった重複。**色を付けられなかったものが先**に並ぶ。
     in property <[WordTroubleRow]> word-troubles;
     /// 全部でいくつ見つかったか（一覧は`SHOWN_TROUBLES`までしか出さない）。
@@ -474,9 +477,9 @@ export component AppWindow inherits Window {
     callback pane-word-added(int, int);
     /// その語群から語を1つ落とす。
     callback word-removed(int, string);
-    callback word-mode-created();
+    callback word-mode-added(string);
     callback word-mode-removed(int);
-    callback word-group-created(int);
+    callback word-group-added(int, string);
     callback word-group-removed(int);
     callback word-group-colour-picked(int);
     /// 1行1語のファイルから足す／へ書き出す（**あってもよい道**）。
@@ -2385,13 +2388,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    // **答えたあとに設定画面を開き直す**（書き手の報告 2026-09-08）。
-    // 名前を訊くあいだパネルは閉じている——閉じたのはこちらの都合であって、
-    // 書き手が閉じたわけではない。Rustが数を1つ進めるのが合図である。
-    changed settings-generation => {
-        typography-panel.show();
-    }
-
     typography-panel := PopupWindow {
         // Wider than a menu: 要件 9's six heading sizes are three to a row, and
         // three of them do not fit in a menu's 250px.
@@ -2748,23 +2744,66 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    HorizontalLayout {
+                    // 書き手の求め 2026-09-08: **設定は一枚で終える。**
+                    // 名前は別の問いにしない——問いは窓の中に描くもの（要件
+                    // 8.3・8.4）で、このパネルはその上に浮いている別の窓だから、
+                    // **訊くたびにパネルが消えて戻る**ことになる。「決定すると
+                    // 次の画面」が続くと、何をしているのか分からなくなる。
+                    // **欄はこの場に出し、この場で終える。**
+                    if root.word-naming != 1: HorizontalLayout {
                         alignment: start;
 
                         TextButton {
                             title: "New Mode";
                             role: Role.primary;
-                            // 書き手の報告 2026-09-08: **名前を訊く問いが、この
-                            // パネルの下に立つ。**問いは窓の中に描くもの（要件
-                            // 8.3・8.4）で、このパネルはその上に浮いている別の
-                            // 窓——だから1回目の押下はパネルを閉じるだけに使われ、
-                            // 決定するのに二度押すことになっていた。
-                            // **訊く前に、こちらを閉じる。**
                             clicked => {
-                                root.word-mode-created();
-                                typography-panel.close();
+                                root.word-new-name = "";
+                                root.word-naming-trouble = "";
+                                root.word-naming = 1;
                             }
                         }
+                    }
+
+                    if root.word-naming == 1: HorizontalLayout {
+                        spacing: 6px;
+
+                        Field {
+                            placeholder: "モードの名前";
+                            text <=> root.word-new-name;
+                            // **出たときに鍵盤をここへ。**押した手はもう名前を
+                            // 打つつもりでいる。`if`の中の要素はここからしか
+                            // 触れないので、外から呼ばずに自分で取る。
+                            init => {
+                                self.take-focus();
+                            }
+                            accepted => {
+                                root.word-mode-added(root.word-new-name);
+                            }
+                            escaped => {
+                                root.word-naming = 0;
+                            }
+                        }
+                        TextButton {
+                            title: "追加";
+                            role: Role.primary;
+                            clicked => {
+                                root.word-mode-added(root.word-new-name);
+                            }
+                        }
+                        TextButton {
+                            title: "取消";
+                            role: Role.quiet;
+                            clicked => {
+                                root.word-naming = 0;
+                            }
+                        }
+                    }
+
+                    if root.word-naming != 0 && root.word-naming-trouble != "": Text {
+                        text: root.word-naming-trouble;
+                        color: Tok.alert;
+                        font-size: 11px;
+                        wrap: word-wrap;
                     }
 
                     if root.word-mode-names.length <= 1: Text {
@@ -2924,18 +2963,51 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        if root.word-naming == 2: HorizontalLayout {
+                            spacing: 6px;
+
+                            Field {
+                                placeholder: "語群の名前";
+                                text <=> root.word-new-name;
+                                init => {
+                                    self.take-focus();
+                                }
+                                accepted => {
+                                    root.word-group-added(
+                                        root.word-mode-opened-at, root.word-new-name);
+                                }
+                                escaped => {
+                                    root.word-naming = 0;
+                                }
+                            }
+                            TextButton {
+                                title: "追加";
+                                role: Role.primary;
+                                clicked => {
+                                    root.word-group-added(
+                                        root.word-mode-opened-at, root.word-new-name);
+                                }
+                            }
+                            TextButton {
+                                title: "取消";
+                                role: Role.quiet;
+                                clicked => {
+                                    root.word-naming = 0;
+                                }
+                            }
+                        }
+
                         HorizontalLayout {
                             alignment: start;
                             spacing: 6px;
 
-                            TextButton {
+                            if root.word-naming != 2: TextButton {
                                 title: "New Group";
-                                // **訊く前にパネルを閉じる**（`New Mode`の注記）。
-                                // **頼んでから閉じる**のは技術検証 6.24——この行は
-                                // `if`の中、つまり繰り返し要素である。
+                                // **一枚で終える**（`New Mode`の注記）。
                                 clicked => {
-                                    root.word-group-created(root.word-mode-opened-at);
-                                    typography-panel.close();
+                                    root.word-new-name = "";
+                                    root.word-naming-trouble = "";
+                                    root.word-naming = 2;
                                 }
                             }
                             // **重複は畳んで置く。**普段は数だけ見えていればよく、
