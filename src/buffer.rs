@@ -166,6 +166,30 @@ impl DocumentFile {
         }
     }
 
+    /// The stamp this document last agreed with its file at (要件 8.3).
+    ///
+    /// **What the watcher compares against**, as opposed to `current_stamp`,
+    /// which is what the file says right now. A work copy carries this one, so
+    /// that a document restored into another run keeps the same idea of "the
+    /// version I was editing against" (2026-09-08).
+    pub fn agreed_stamp(&self) -> Option<FileStamp> {
+        match &self.origin {
+            Origin::Saved(saved) => Some(saved.stamp),
+            Origin::Untitled(_) => None,
+        }
+    }
+
+    /// Put back the stamp a work copy was taken against (要件 8.3, 2026-09-08).
+    ///
+    /// **復元は元ファイルを読み直す**ので、そのままでは「合意した姿」が*いまの*
+    /// ファイルになり、閉じているあいだの外部変更が無かったことになる。退避
+    /// した時点の姿へ戻せば、`external_change`が最初の一度で食い違いを言う。
+    pub fn agreed_at(&mut self, stamp: FileStamp) {
+        if let Origin::Saved(saved) = &mut self.origin {
+            saved.stamp = stamp;
+        }
+    }
+
     /// What the file is now, or `None` when there is none or it cannot be read.
     pub fn current_stamp(&self) -> Option<FileStamp> {
         let Origin::Saved(saved) = &self.origin else {

@@ -44,8 +44,9 @@ use kill_ring::{KillAction, KillRing};
 use pane_layout::{Layout, Rect, Split, Towards, neighbour};
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use slint::{
-    Color, ComponentHandle, Image, Model, ModelRc, PhysicalPosition, PhysicalSize, RenderingState,
-    Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
+    CloseRequestResponse, Color, ComponentHandle, Image, Model, ModelRc, PhysicalPosition,
+    PhysicalSize, RenderingState, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
+    VecModel, Weak,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -1907,7 +1908,7 @@ fn main() -> Result<(), slint::PlatformError> {
     work_timer.start(TimerMode::Repeated, WORK_COPY_TICK, move || {
         if let Some(window) = weak.upgrade() {
             write_work_copy_if_due(&window, &timer_live);
-            collect_write_results(&timer_live);
+            collect_write_results(&window, &timer_live);
         }
     });
 
@@ -3573,15 +3574,79 @@ fn main() -> Result<(), slint::PlatformError> {
         open_path_in_pane(&window, &live, opening_pane, &path, Opening::Kept);
     }
 
+    // 要件 8.1・8.4: **自動退避を切ってあるときだけ、閉じる前に訊く**
+    // （2026-09-08）。退避が働いていれば、閉じても未保存の中身は次の起動で
+    // 戻ってくるので訊く理由が無い——切ってあるときだけ、`×`は取り返しの
+    // つかない操作になる。
+    let weak = window.as_weak();
+    let closing_live = live.clone();
+    window.window().on_close_requested(move || {
+        let Some(window) = weak.upgrade() else {
+            return CloseRequestResponse::HideWindow;
+        };
+        let live = &closing_live;
+        if window.get_autosave() {
+            return CloseRequestResponse::HideWindow;
+        }
+        // **問いが立っているあいだは、もう一度は訊かない。**`×`を続けて
+        // 押されても重ねられないのは、`pending`が1つしか持てないからで
+        // （`Live::pending`）、ここで返さないと下の`ask_question`が
+        // 立っているほうを黙って捨てる。
+        if live.pending.borrow().is_some() {
+            return CloseRequestResponse::KeepWindowShown;
+        }
+        let unsaved = open_documents(live)
+            .iter()
+            .filter(|document| document.text.edited())
+            .count();
+        if unsaved == 0 {
+            return CloseRequestResponse::HideWindow;
+        }
+        live.cache
+            .borrow_mut()
+            .log_diag("work", &format!("close asked unsaved={unsaved}"));
+        ask_question(
+            &window,
+            live,
+            Question::CloseWindow,
+            format!(
+                "保存していない文書が{unsaved}件あります。\n\n\
+                 自動退避を切ってあるので、閉じると元に戻せません。"
+            ),
+            &["すべて保存して閉じる", "破棄して閉じる", "キャンセル"],
+            1,
+        );
+        CloseRequestResponse::KeepWindowShown
+    });
+
     let outcome = window.run();
     // 要件 8.5: the arrangement as the writer left it, including a boundary
     // moved without anything else happening. The views are taken out of the
     // panes first, because a caret and a scroll live there until they are.
     sync_active_tab(&window, &live);
+    // 要件 8.1: **最後の2秒を落とさない**（2026-09-08）。退避は入力が止まって
+    // 2秒、続いていても5秒ごとで、その時計は窓が閉じれば止まる——打った直後に
+    // `×`を押すと、そのぶんだけがどこにも書かれないまま消えていた。ここで
+    // 一度に書けば、時計が回りきらなかったぶんが行列に乗る。
+    write_work_copy_now(&window, &live);
     write_session(&window, &live);
     // 要件 12.4: and the draft, which is otherwise waiting on a two-second
     // timer that the end of the process will not let run.
     draft.borrow().store_now();
+    // **そして、書き上がるまで待つ**（2026-09-08）。行列に乗せただけで
+    // プロセスが終われば、乗せたことに意味は無い。待つのは残っているぶんだけ
+    // で、普段は0か1件——`sync_all`込みで2.4〜5.9msの世界である。
+    let waited = Instant::now();
+    let left = live.writer.finish();
+    let failed = left.iter().filter(|result| result.error.is_some()).count();
+    live.cache.borrow_mut().log_diag(
+        "work",
+        &format!(
+            "flushed jobs={} failed={failed} ms={:.2}",
+            left.len(),
+            elapsed_ms(waited)
+        ),
+    );
     outcome
 }
 
@@ -4828,6 +4893,18 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
         window.set_find_status(format!("「{needle}」は見つかりません").into());
         return;
     }
+    // 2026-09-08: **置換も上限の内側にいる。**打鍵も貼り付けも
+    // `fits_document_limit`を通るのに、ここだけが結果をそのまま代入していた
+    // ——短い語を長い語へ一括で置き換えれば文書は上限を越え、**保存はできて
+    // 開き直せないファイル**になる（読み込み側は同じ上限で断る）。
+    // **確定の前に測る**ので、断るときは何も起きていない。
+    if next.chars().count() > MAX_DOCUMENT_CHARACTERS {
+        let told = format!(
+            "文書の上限{MAX_DOCUMENT_CHARACTERS}文字を超えるため、{replaced}件の置換を取り消しました"
+        );
+        window.set_find_status(told.into());
+        return;
+    }
     let (at, removed, inserted) = find::changed_span(&source, &next);
     let change = Change {
         at,
@@ -5593,12 +5670,31 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
     let elsewhere = open_documents(live)
         .into_iter()
         .find(|document| document.file.borrow().path() == Some(path));
+    let shown = path.display().to_string();
     let document = match elsewhere {
         Some(document) => document,
         None => match DocumentFile::open(path, MAX_DOCUMENT_CHARACTERS) {
-            Ok((file, text)) => OpenDocument::new(file, text, window.as_weak()),
+            Ok((file, text)) => {
+                let bytes = text.len();
+                let mixed = file.mixed_newlines();
+                live.cache.borrow_mut().log_diag(
+                    "file",
+                    &format!("open ok bytes={bytes} mixed={mixed} path={shown}"),
+                );
+                // **改行の混在だけは言う**（2026-09-08、ダイアログの道から
+                // 移してきた）。読み込みが黙って揃えたことを、揃えられた側は
+                // 画面からしか知りようがない。開けたこと自体は画面が言って
+                // いる——タブがそこに増えている。
+                if mixed {
+                    window.set_render_status("改行コードが混在していました".into());
+                }
+                OpenDocument::new(file, text, window.as_weak())
+            }
             Err(error) => {
                 window.set_render_status(format!("開けません: {error}").into());
+                live.cache
+                    .borrow_mut()
+                    .log_diag("file", &format!("open failed path={shown} error={error}"));
                 return;
             }
         },
@@ -6028,7 +6124,7 @@ fn documents_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
         // 要件 8.1 is about the work surviving exactly such moments.
         document.text.mark_pending();
         write_work_copy_of(window, live, &document);
-        discard_work_copy(&was);
+        discard_work_copy(live, &was);
     }
     // A tab is titled after its file, and the file has just been renamed.
     window.invoke_republish_tabs();
@@ -6780,6 +6876,10 @@ enum Question {
     /// being moved, and where it would land. **The order is the same as
     /// `move_entry`'s**, from and to.
     ReplaceOnMove(PathBuf, PathBuf),
+    /// 窓を閉じようとしているが、自動退避が切ってあって未保存の文書がある
+    /// （2026-09-08、要件 8.1・8.4）。**退避が働いていれば訊かない**——
+    /// そちらは閉じても失われないので、問いは書き手の邪魔でしかない。
+    CloseWindow,
 }
 
 /// Put a question in front of the writer.
@@ -6913,12 +7013,28 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                 cancel_close_run(live);
                 return;
             };
-            discard_work_copy(&work_identity(&document.file.borrow()));
+            discard_work_copy(live, &work_identity(&document.file.borrow()));
             // Nothing is waiting to be written any more, so neither the tick
             // nor the close can put the copy back.
             document.text.mark_saved();
             finish_close(window, live, pane, index);
             advance_close_run(window, live);
+        }
+        (Question::CloseWindow, 0) => {
+            save_all(window, live);
+            // **保存が済んでいなければ閉じない。**「名前を付けて保存」を
+            // 取り消した文書がまだ編集中のまま残っている——そのまま閉じるのは
+            // 書き手が断ったことをやることになる。
+            if open_documents(live).iter().any(|held| held.text.edited()) {
+                window.set_render_status("保存していない文書が残っています".into());
+                return;
+            }
+            window.hide().ok();
+        }
+        (Question::CloseWindow, 1) => {
+            // 破棄して閉じる。**退避は切ってあるので、消すものは無い**——
+            // 作業コピーはそもそも書かれていない。
+            window.hide().ok();
         }
         (Question::SaveConflict, 0) => overwrite_the_outside_change(window, live),
         (Question::SaveConflict, 1) => reload_from_file(window, live),
@@ -7507,10 +7623,22 @@ fn work_identity(file: &DocumentFile) -> app_data::WorkCopy {
 }
 
 /// Drop a work copy that is no longer needed (要件 8.2).
-fn discard_work_copy(copy: &app_data::WorkCopy) {
+///
+/// **書き込みと同じ待ち行列を通る**（2026-09-08）。退避は別スレッドで走って
+/// いて、`sync_all`まで含めて数ミリ秒かかる——その場で`remove_file`すると、
+/// **消したあとに古いコピーが書き上がり、次の起動で戻ってくる**。行列が1本なら
+/// 順序を約束するものも1本で済み、`writer.rs`の畳み込み（同じパスは新しいほう
+/// だけ残す）が「書いて、消す」を「消す」に縮めてくれる。
+///
+/// スレッドが無いときはその場で消す——書き込みがその場で走る道と同じ側である。
+fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
     let Some(directory) = app_data::work_directory() else {
         return;
     };
+    let path = directory.join(app_data::work_file_name(copy));
+    if live.writer.remove(path) {
+        return;
+    }
     let _ = app_data::discard_in(&directory, copy);
 }
 
@@ -7625,6 +7753,10 @@ fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDocumen
         origin: file.borrow().path().map(Path::to_path_buf),
         untitled: file.borrow().untitled_number(),
         caret,
+        // 要件 8.3（2026-09-08追加）: **どの版に対して書いていたか**を一緒に
+        // 置く。これが無いと、次の起動で復元したとき「合意した姿」が*その時の*
+        // ファイルになり、閉じているあいだの外部変更が消える。
+        stamp: file.borrow().agreed_stamp(),
         text: document.text.borrow().clone(),
     };
     // Marked written as soon as it is handed over, not when it lands. The
@@ -7659,17 +7791,52 @@ fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDocumen
 ///
 /// Polled on the same timer that decides when to write, so nothing on that
 /// thread has to reach into the UI and no lock is shared with it.
-fn collect_write_results(live: &Live) {
-    for result in live.writer.drain() {
-        let shown = result.path.display();
-        let message = match &result.error {
-            None => format!(
+fn collect_write_results(window: &AppWindow, live: &Live) {
+    let results = live.writer.drain();
+    if results.is_empty() {
+        return;
+    }
+    for result in results {
+        let shown = result.path.display().to_string();
+        let message = match (&result.error, result.removed) {
+            (None, false) => format!(
                 "saved bytes={} ms={:.2} path={shown}",
                 result.bytes, result.ms
             ),
-            Some(error) => format!("failed bytes={} error={error}", result.bytes),
+            (None, true) => format!("discarded ms={:.2} path={shown}", result.ms),
+            (Some(error), removed) => {
+                format!("failed removed={} error={error}", u8::from(removed))
+            }
         };
         live.cache.borrow_mut().log_diag("work", &message);
+        if result.error.is_none() {
+            continue;
+        }
+        // 2026-09-08: **失敗したら旗を立て直す。**渡した時点で「退避済み」に
+        // していたので、書けなかった一回はそのまま忘れられていた——次の打鍵が
+        // 無ければ、その文書は二度と退避されない（要件 8.1 が守れていない）。
+        // `mark_pending`は時計を今から数え直すので、**次の試みは2秒後**に
+        // なる：同じ失敗を毎秒繰り返すのではなく、間を置いて一度。
+        //
+        // **新しい編集が来ていれば何もしない**（`mark_pending`は待っている
+        // 旗があれば触らない）。そちらの時計のほうが正しい。
+        let named = result.path.file_name().and_then(|name| name.to_str());
+        let failed = open_documents(live).into_iter().find(|document| {
+            let copy = work_identity(&document.file.borrow());
+            named == Some(app_data::work_file_name(&copy).as_str())
+        });
+        if let Some(document) = failed {
+            document.text.mark_pending();
+        }
+        // **画面にも出す。**要件 8.1 は書き手への約束なので、守れていないことは
+        // 書き手が知っていなければならない。1件目だけ——同じ理由で失敗した
+        // 数件が順に上書きし合っても、読めるのは最後の1つである。
+        let told = if result.removed {
+            "作業コピーを片づけられませんでした"
+        } else {
+            "作業コピーを退避できませんでした。まもなく再試行します"
+        };
+        window.set_render_status(told.into());
     }
 }
 
@@ -7716,7 +7883,7 @@ fn reload_from_file(window: &AppWindow, live: &Live) {
             replace_document(window, &live.states, &live.cache, &document, text);
             // Reloaded, not edited: the text and the file agree by definition.
             document.text.mark_saved();
-            discard_work_copy(&work_identity(&document.file.borrow()));
+            discard_work_copy(live, &work_identity(&document.file.borrow()));
             publish_tabs(window, live);
             window.set_render_status("外部の変更を読み込みました".into());
             live.cache
@@ -7771,6 +7938,18 @@ fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> {
             ..EditorState::default()
         };
         let document = OpenDocument::new(file, copy.text, window.as_weak());
+        // 要件 8.3（2026-09-08追加）: **退避した時点の姿へ戻す。**`open`は
+        // いま読んだファイルの姿を「合意した姿」として持っているので、その
+        // ままでは閉じているあいだに別のアプリが書き換えていても
+        // `external_change`が「変わっていない」と答え、`Ctrl+S`が要件 8.3 の
+        // 問いを出さずに上書きしてしまう。持ち歩いてきた姿を入れ直せば、
+        // **食い違いは復元したその瞬間から見える**。
+        //
+        // 古いコピー（この版より前に書かれたもの）は`None`で、そのときは
+        // 今までどおり——比べる相手が無いのだから、無いなりに振る舞う。
+        if let Some(stamp) = copy.stamp {
+            document.file.borrow_mut().agreed_at(stamp);
+        }
         // Restored from a work copy: the text does not agree with its file, but
         // the copy on disk already holds it, so nothing is waiting to be
         // written.
@@ -7880,8 +8059,8 @@ fn write_document_to(
     match outcome {
         Ok(()) => {
             document.text.mark_saved();
-            discard_work_copy(&previous);
-            discard_work_copy(&work_identity(&file.borrow()));
+            discard_work_copy(live, &previous);
+            discard_work_copy(live, &work_identity(&file.borrow()));
             // The name in the strip changes with 名前を付けて保存, and the
             // unsaved marker changes with every save.
             publish_tabs(window, live);
@@ -7993,52 +8172,21 @@ fn reveal_active_document(window: &AppWindow, live: &Live) {
     shell::reveal(&path);
 }
 
-/// Open a file the writer chooses, in place of the current document.
+/// Open a file the writer chooses (要件 6.5).
+///
+/// 2026-09-08: **入口は1つ**（[`open_path_in_pane`]）。ダイアログだけが自分で
+/// `DocumentFile::open`を呼んでいて、**同じファイルを開くたびに別の
+/// `OpenDocument`ができていた**——要件 7.6 は「何枚の面から見ても本文は1つ」と
+/// 言っているのに、ダイアログから開いた双子どうしは互いの編集を知らず、
+/// 退避先（`work_file_name`はパスから決まる）まで取り合っていた。ツリーと
+/// コマンドラインが通っていた道をこちらも通る。
 fn open_document(window: &AppWindow, live: &Live) {
     let owner = ime::window_handle(window);
     let Some(path) = file_dialog::open_document(owner) else {
         return;
     };
-    let shown = path.display().to_string();
-    match DocumentFile::open(&path, MAX_DOCUMENT_CHARACTERS) {
-        Ok((opened, text)) => {
-            let bytes = text.len();
-            let mixed = opened.mixed_newlines();
-            // Its own tab, rather than in place of what is open. The document
-            // already there may have unsaved work, and 要件 6.3 gives each file
-            // a tab of its own.
-            let document = OpenDocument::new(opened, text, window.as_weak());
-            let id = focused_pane(window);
-            let tab = PaneTab {
-                view: TabView {
-                    vertical: id.vertical(window),
-                    preview: id.shows_preview(window),
-                    ..TabView::default()
-                },
-                ..PaneTab::showing(window, id, document)
-            };
-            add_tab(window, live, id, tab);
-            // 要件 7.7: opened through the dialog counts the same as opened
-            // through the tree.
-            remember_recent(live, &path);
-            let note = if mixed {
-                "（改行コードが混在していました）"
-            } else {
-                ""
-            };
-            window.set_render_status(format!("開きました{note}").into());
-            live.cache.borrow_mut().log_diag(
-                "file",
-                &format!("open ok bytes={bytes} mixed={mixed} path={shown}"),
-            );
-        }
-        Err(error) => {
-            window.set_render_status(format!("開けません: {error}").into());
-            live.cache
-                .borrow_mut()
-                .log_diag("file", &format!("open failed path={shown} error={error}"));
-        }
-    }
+    // **`Kept`**：書き手が名前で指した1件で、一覧を歩いているのではない。
+    open_path_in_focused_pane(window, live, &path, Opening::Kept);
 }
 
 fn usable_preview_height(height: f32) -> u32 {

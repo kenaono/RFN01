@@ -20,6 +20,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::file_io;
 
@@ -420,7 +421,48 @@ pub struct WorkCopy {
     pub untitled: u32,
     /// Where the caret was, so a restored document opens where it was left.
     pub caret: Option<usize>,
+    /// What the origin file was when this copy was taken (要件 8.3、2026-09-08).
+    ///
+    /// **これが無いと、閉じているあいだの外部変更を見逃す。**復元は元ファイル
+    /// を読み直すので、そのとき記録される「合意した姿」は*いまの*ファイルに
+    /// なる——別のアプリが書き換えていても`external_change`は「変わっていない」
+    /// と答え、`Ctrl+S`が要件 8.3 の問いを出さずに上書きする。退避した時点の
+    /// 姿を持ち歩けば、復元したその瞬間から食い違いが見える。
+    ///
+    /// `None`は「この版より前に書かれたコピー」と「ファイルを持たない文書」の
+    /// 両方——どちらも比べる相手がいないので、同じ扱いでよい。
+    pub stamp: Option<file_io::FileStamp>,
     pub text: String,
+}
+
+/// The stamp as one line of a work copy: 秒・ナノ秒・長さ。
+///
+/// **時刻が無いことも書く**（`-`）。ファイルシステムが更新時刻を答えなかった
+/// ときで、長さだけは比べられる。
+fn write_stamp(stamp: &file_io::FileStamp) -> String {
+    let since = stamp
+        .modified
+        .and_then(|at| at.duration_since(UNIX_EPOCH).ok());
+    let when = match since {
+        Some(since) => format!("{} {}", since.as_secs(), since.subsec_nanos()),
+        None => "- -".to_owned(),
+    };
+    format!("{when} {}", stamp.length)
+}
+
+fn read_stamp(written: &str) -> Option<file_io::FileStamp> {
+    let mut parts = written.split(' ');
+    let secs = parts.next()?;
+    let nanos = parts.next()?;
+    let length = parts.next()?.parse().ok()?;
+    let modified = match (secs, nanos) {
+        ("-", _) | (_, "-") => None,
+        (secs, nanos) => {
+            let since = Duration::new(secs.parse().ok()?, nanos.parse().ok()?);
+            Some(UNIX_EPOCH.checked_add(since)?)
+        }
+    };
+    Some(file_io::FileStamp { modified, length })
 }
 
 /// The quick draft, and what it takes to open its window where it was
@@ -678,6 +720,9 @@ pub fn encode(copy: &WorkCopy) -> String {
     if let Some(caret) = copy.caret {
         out.push_str(&format!("caret: {caret}\n"));
     }
+    if let Some(stamp) = &copy.stamp {
+        out.push_str(&format!("stamp: {}\n", write_stamp(stamp)));
+    }
     out.push('\n');
     out.push_str(&copy.text);
     out
@@ -705,6 +750,9 @@ pub fn decode(raw: &str) -> Option<WorkCopy> {
             "untitled" => copy.untitled = value.parse().ok()?,
             "origin" => copy.origin = Some(PathBuf::from(value)),
             "caret" => copy.caret = value.parse().ok(),
+            // **読めなければ`None`のまま**——「比べる相手を持たない」に倒れる
+            // ので、古いコピーと同じ扱いになる。
+            "stamp" => copy.stamp = read_stamp(value),
             // A field this build does not know is from a later one. Ignored
             // rather than refused: the text is the part worth having.
             _ => {}
@@ -927,6 +975,7 @@ mod tests {
             origin: None,
             untitled: 1,
             caret: Some(3),
+            stamp: None,
             text: text.to_owned(),
         }
     }
@@ -1146,10 +1195,58 @@ mod tests {
             origin: Some(PathBuf::from("D:\\原稿\\note.md")),
             untitled: 0,
             caret: Some(120),
+            stamp: None,
             text: "本文".to_owned(),
         };
         let read = decode(&encode(&copy)).expect("decodes");
         assert_eq!(read, copy);
+    }
+
+    /// 要件 8.3（2026-09-08）: **どの版に対して書いていたかが往復する。**
+    /// これが往復しないと、復元した文書は「閉じているあいだの外部変更」を
+    /// 見分けられない。
+    #[test]
+    fn a_copy_remembers_the_file_it_was_taken_against() {
+        let stamp = file_io::FileStamp {
+            modified: Some(UNIX_EPOCH + Duration::new(1_757_000_000, 123_456_700)),
+            length: 4096,
+        };
+        let copy = WorkCopy {
+            origin: Some(PathBuf::from("D:\\原稿\\note.md")),
+            untitled: 0,
+            caret: Some(1),
+            stamp: Some(stamp),
+            text: "本文".to_owned(),
+        };
+        let read = decode(&encode(&copy)).expect("decodes");
+
+        assert_eq!(read, copy);
+        assert_eq!(read.stamp.expect("stamp").modified, stamp.modified);
+    }
+
+    /// 更新時刻を答えないファイルシステムもある。**長さだけは比べられる**ので、
+    /// 時刻が無いことも書いて往復させる。
+    #[test]
+    fn a_copy_without_a_time_still_carries_the_length() {
+        let stamp = file_io::FileStamp {
+            modified: None,
+            length: 7,
+        };
+        let written = write_stamp(&stamp);
+
+        assert_eq!(written, "- - 7");
+        assert_eq!(read_stamp(&written), Some(stamp));
+    }
+
+    /// この版より前に書かれたコピーには`stamp:`の行が無い。**読めなければ
+    /// `None`**——比べる相手を持たない、という同じ答えに倒れる。
+    #[test]
+    fn a_copy_from_an_older_build_has_no_stamp() {
+        let older = format!("{WORK_MAGIC}\nuntitled: 2\ncaret: 0\n\n本文");
+        let read = decode(&older).expect("decodes");
+
+        assert_eq!(read.stamp, None);
+        assert_eq!(read.text, "本文");
     }
 
     #[test]

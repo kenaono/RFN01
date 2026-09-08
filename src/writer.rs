@@ -13,20 +13,29 @@
 //! leaves open — what happens when several threads lay text out at once — does
 //! not arise here. It moves file writing off the UI thread and nothing else.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crate::file_io;
 
-/// One file to write, whole.
+/// One thing to do to one file.
 ///
 /// Owned, not borrowed: the point of handing it to another thread is that the
 /// editor goes on changing the document while this is being written.
+///
+/// **削除も同じ待ち行列を通る**（2026-09-08）。作業コピーを消すのは要件 8.2 の
+/// 仕事で、それまでUIスレッドがその場で`remove_file`していた——**退避を頼んだ
+/// 直後に保存すると、消してから古いコピーが書き上がる**（`sync_all`まで含めて
+/// 2.4〜5.9msかかるので、順番が入れ替わるのは珍しくない）。次の起動でそれが
+/// 戻ってくる。**1本の待ち行列に並べれば、順序を約束するものが1つで済む。**
 pub struct WriteJob {
     pub path: PathBuf,
-    pub bytes: Vec<u8>,
+    /// 書くなら中身、消すなら`None`。
+    pub bytes: Option<Vec<u8>>,
 }
 
 /// What became of one job, for the log.
@@ -34,7 +43,9 @@ pub struct WriteResult {
     pub path: PathBuf,
     pub bytes: usize,
     pub ms: f64,
-    /// `None` when it was written.
+    /// Whether this job was a delete rather than a write.
+    pub removed: bool,
+    /// `None` when it was done.
     pub error: Option<String>,
 }
 
@@ -44,7 +55,10 @@ pub struct WriteResult {
 /// same timer that decides when to write, so nothing here needs to reach into
 /// the UI and the whole arrangement stays on one thread at the editor's end.
 pub struct FileWriter {
-    jobs: Option<Sender<WriteJob>>,
+    /// **`RefCell`なのは終わり方のため**：送り口を落とすことがスレッドへの
+    /// 「もう来ない」の合図で、[`FileWriter::finish`]はそれをしてから合流する。
+    jobs: RefCell<Option<Sender<WriteJob>>>,
+    worker: RefCell<Option<JoinHandle<()>>>,
     results: Receiver<WriteResult>,
 }
 
@@ -59,8 +73,13 @@ impl FileWriter {
         let spawned = thread::Builder::new()
             .name("rfnedit-writer".to_owned())
             .spawn(move || run(&job_receiver, &result_sender));
+        let (jobs, worker) = match spawned {
+            Ok(handle) => (Some(job_sender), Some(handle)),
+            Err(_) => (None, None),
+        };
         Self {
-            jobs: spawned.is_ok().then_some(job_sender),
+            jobs: RefCell::new(jobs),
+            worker: RefCell::new(worker),
             results: result_receiver,
         }
     }
@@ -68,10 +87,24 @@ impl FileWriter {
     /// Hand over a file to be written. `false` means there is no thread to
     /// write it, and the caller has to.
     pub fn write(&self, path: PathBuf, bytes: Vec<u8>) -> bool {
-        let Some(jobs) = &self.jobs else {
+        self.hand_over(WriteJob {
+            path,
+            bytes: Some(bytes),
+        })
+    }
+
+    /// Hand over a file to be taken away, **behind whatever is queued for it**.
+    /// `false` means there is no thread, and the caller has to.
+    pub fn remove(&self, path: PathBuf) -> bool {
+        self.hand_over(WriteJob { path, bytes: None })
+    }
+
+    fn hand_over(&self, job: WriteJob) -> bool {
+        let jobs = self.jobs.borrow();
+        let Some(jobs) = jobs.as_ref() else {
             return false;
         };
-        jobs.send(WriteJob { path, bytes }).is_ok()
+        jobs.send(job).is_ok()
     }
 
     /// Everything finished since this was last asked.
@@ -81,6 +114,24 @@ impl FileWriter {
             done.push(result);
         }
         done
+    }
+
+    /// Let everything queued finish, then stop the thread (2026-09-08).
+    ///
+    /// **終了の直前に呼ぶ。**要件 8.1 の退避は別スレッドで走っているので、
+    /// 窓が閉じてプロセスが終われば、書き上がっていないものはそのまま消える
+    /// ——「入力の2秒後に退避する」の2秒が、最後の1回だけ守られない。
+    /// 送り口を落としてから合流するので、**待つのは行列に残っているぶんだけ**。
+    ///
+    /// 呼んだあとの[`FileWriter::write`]は`false`を返し、呼び出し側がその場で
+    /// 書く——スレッドが最初から起動できなかったときと同じ道である。
+    pub fn finish(&self) -> Vec<WriteResult> {
+        // **落とすのが合図**：`recv`が`Err`を返して初めてスレッドは輪を出る。
+        drop(self.jobs.borrow_mut().take());
+        if let Some(worker) = self.worker.borrow_mut().take() {
+            let _ = worker.join();
+        }
+        self.drain()
     }
 }
 
@@ -103,15 +154,29 @@ fn run(jobs: &Receiver<WriteJob>, results: &Sender<WriteResult>) {
         }
         for job in pending {
             let started = Instant::now();
-            // The directory may not exist yet on the first write of a run.
-            if let Some(parent) = job.path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let outcome = file_io::write_atomically(&job.path, &job.bytes);
+            let bytes = job.bytes.as_ref().map(Vec::len).unwrap_or(0);
+            let outcome = match &job.bytes {
+                Some(content) => {
+                    // The directory may not exist yet on the first write of a
+                    // run.
+                    if let Some(parent) = job.path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    file_io::write_atomically(&job.path, content).map(|_| ())
+                }
+                // **無いものを消すのは成功**。同じコピーを二度消す道は普通に
+                // あり（保存したあとタブを閉じる）、そのたびに失敗を報告しても
+                // 読む人が困るだけである。
+                None => match std::fs::remove_file(&job.path) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                    _ => Ok(()),
+                },
+            };
             let result = WriteResult {
                 path: job.path,
-                bytes: job.bytes.len(),
+                bytes,
                 ms: started.elapsed().as_secs_f64() * 1000.0,
+                removed: job.bytes.is_none(),
                 error: outcome.err().map(|error| error.to_string()),
             };
             // A closed receiver means the editor is gone. Nothing to report to.
@@ -174,6 +239,63 @@ mod tests {
         writer.write(path.clone(), b"x".to_vec());
         wait_for_results(&writer, 1);
         assert!(path.exists());
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// 2026-09-08: **消すのも同じ行列。**書き込みを頼んだ直後に削除を頼むと、
+    /// 消えたままになる——UIスレッドがその場で`remove_file`していた頃は、
+    /// 消してから古いコピーが書き上がり、次の起動で戻ってきた。
+    #[test]
+    fn a_delete_queued_behind_a_write_leaves_the_file_gone() {
+        let directory = scratch_directory("delete-after-write");
+        let path = directory.join("note.rfnwork");
+        let writer = FileWriter::start();
+        assert!(writer.write(path.clone(), b"x".to_vec()));
+        assert!(writer.remove(path.clone()));
+        let results = wait_for_results(&writer, 1);
+
+        // 畳み込みで1件になることもあれば2件のこともある（どちらの順で
+        // 拾われたか次第）。**約束しているのは結果のほう**で、件数ではない。
+        assert!(results.iter().all(|result| result.error.is_none()));
+        assert!(!path.exists(), "書いたものが残っていない");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// 無いものを消すのは失敗ではない。保存してからタブを閉じれば同じコピーを
+    /// 二度消しにいくので、そのたびに失敗を報告しても読む人が困るだけである。
+    #[test]
+    fn removing_what_is_not_there_is_not_a_failure() {
+        let directory = scratch_directory("delete-missing");
+        let writer = FileWriter::start();
+        assert!(writer.remove(directory.join("never.rfnwork")));
+        let results = wait_for_results(&writer, 1);
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].error.is_none(), "{:?}", results[0].error);
+        assert!(results[0].removed);
+    }
+
+    /// 2026-09-08: 終わる前に行列を空にする。**乗せただけでプロセスが終われば、
+    /// 乗せたことに意味が無い**（要件 8.1 の最後の1回）。
+    #[test]
+    fn finishing_waits_for_what_is_queued() {
+        let directory = scratch_directory("finish");
+        let writer = FileWriter::start();
+        let paths: Vec<PathBuf> = (0..8)
+            .map(|at| directory.join(format!("note-{at}.rfnwork")))
+            .collect();
+        for path in &paths {
+            assert!(writer.write(path.clone(), b"x".to_vec()));
+        }
+        let left = writer.finish();
+
+        assert!(left.iter().all(|result| result.error.is_none()));
+        for path in &paths {
+            assert!(path.exists(), "{} が書き上がっている", path.display());
+        }
+        // 終わったあとは、その場で書く側へ落ちる（スレッドが起動できなかった
+        // ときと同じ道）。
+        assert!(!writer.write(directory.join("after.rfnwork"), b"x".to_vec()));
         let _ = fs::remove_dir_all(&directory);
     }
 
