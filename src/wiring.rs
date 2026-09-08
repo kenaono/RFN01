@@ -24,13 +24,14 @@ use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, VecMode
 use crate::directwrite_render;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
 use crate::{
-    AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
+    AppWindow, Live, NO_TARGET, Opening, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, collect_search, colour_row, drop_tree_row, file_dialog, file_tree,
     find_in_pane, focused_pane, font_name, font_row, go_to_remembered_folder, ime, navigate,
-    open_work_folder, paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs,
-    quick_draft, replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus,
-    save_settings, schedule_relayout, search_in_folder, search_work_folder, set_colour, shell,
-    shown_sheet, slint_colour, step_setting, tree_command,
+    open_path_in_focused_pane, open_work_folder, paste_into_tab, paste_targets, pick_tree_row,
+    publish_left, publish_tabs, quick_draft, replace_all_in_pane, replace_in_pane, reset_settings,
+    restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
+    set_colour, shell, shown_sheet, slint_colour, step_setting, store_word_sets, tree_command,
+    word_marks, word_sets_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -149,6 +150,122 @@ fn fill_font_names(window: &AppWindow) {
 fn after_terminal_look(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
     save_settings(window, cache);
     window.invoke_terminal_woken();
+}
+
+/// 要件 7.9（2026-09-08）: 単語セット——**この編集器がいちばん力を入れるところ**の
+/// 設定側。
+///
+/// **ここに語は無い。**設定が覚えているのは色とファイルの場所だけで、語はその
+/// ファイルに1行1語で入っている（書き手の指摘：単語帳は大きくなる）。だから
+/// `Open`はただこの編集器でそれを開く——**語を足すのはそこでする**。専用の
+/// 編集画面を作らないのが要件3の「軽く」である。
+///
+/// **どの操作も`store_word_sets`一本を通る**：行を書き戻し、読み直し、木を建て直し、
+/// 画面へ出し、設定を保存する。順番を守る場所が1つで済む。
+pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell<RenderCache>>) {
+    // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
+    // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_word_set_added(move || {
+        let weak = weak.clone();
+        let cache = cache.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            let Some(path) = file_dialog::open_word_set(ime::window_handle(&window)) else {
+                return;
+            };
+            let mut sets = word_sets_now(&window);
+            if sets.len() >= word_marks::MAX_WORD_SETS {
+                window.set_render_status(
+                    format!("単語セットは{}冊までです", word_marks::MAX_WORD_SETS).into(),
+                );
+                return;
+            }
+            // **足したセットの色は、まだ使っていない色から。**同じ色が2つ並ぶと、
+            // どちらの色分けを見ているのか画面が言えない。
+            let colour = crate::next_word_colour(&sets);
+            sets.push(word_marks::WordSet {
+                path,
+                colour,
+                muted: false,
+                words: Vec::new(),
+            });
+            store_word_sets(&window, &cache, &sets);
+        });
+    });
+
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_word_set_colour_picked(move |at| {
+        let weak = weak.clone();
+        let cache = cache.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            let mut sets = word_sets_now(&window);
+            let Some(set) = sets.get_mut(at.max(0) as usize) else {
+                return;
+            };
+            let standing = set.colour.map(|channel| (channel * 255.0).round() as u8);
+            let Some(picked) = shell::choose_colour(ime::window_handle(&window), standing) else {
+                return;
+            };
+            set.colour = [
+                picked[0] as f32 / 255.0,
+                picked[1] as f32 / 255.0,
+                picked[2] as f32 / 255.0,
+            ];
+            store_word_sets(&window, &cache, &sets);
+        });
+    });
+
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_word_set_muted(move |at, muted| {
+        if let Some(window) = weak.upgrade() {
+            let mut sets = word_sets_now(&window);
+            let Some(set) = sets.get_mut(at.max(0) as usize) else {
+                return;
+            };
+            set.muted = muted;
+            store_word_sets(&window, &cache, &sets);
+        }
+    });
+
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_word_set_removed(move |at| {
+        if let Some(window) = weak.upgrade() {
+            let mut sets = word_sets_now(&window);
+            let at = at.max(0) as usize;
+            if at >= sets.len() {
+                return;
+            }
+            // **ファイルには触らない。**設定から外すだけで、書き手が集めた語は
+            // そのまま残る——消すのは書き手が別のところですることである。
+            sets.remove(at);
+            store_word_sets(&window, &cache, &sets);
+        }
+    });
+
+    let weak = window.as_weak();
+    let open_live = live.clone();
+    window.on_word_set_opened(move |at| {
+        if let Some(window) = weak.upgrade() {
+            let sets = word_sets_now(&window);
+            let Some(set) = sets.get(at.max(0) as usize) else {
+                return;
+            };
+            // **ただのテキストなので、ただ開く。**保存すれば色が付き直る
+            // （`saving.rs`が単語セットのファイルかどうかを訊く）。
+            let path = set.path.clone();
+            open_path_in_focused_pane(&window, &open_live, &path, Opening::Kept);
+        }
+    });
 }
 
 /// 要件 7.7: 文書の中を探して置き換える。

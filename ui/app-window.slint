@@ -5,6 +5,19 @@ import { Tok } from "tokens.slint";
 import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
 import { QuickDraft } from "quick-draft.slint";
 
+/// 要件 7.9: 設定画面が出す単語セットの1行。
+///
+/// **名前と語数は読んだ結果**で、設定の行には無い——「人物（342語）」と言えるのは
+/// ファイルを読んだあとだけである。
+export struct WordSetRow {
+    name: string,
+    /// 語数、あるいは読めなかったこと。
+    note: string,
+    path: string,
+    shown: color,
+    muted: bool,
+}
+
 // Re-exported so they stay part of this window's public API: Rust builds the
 // pane model and the tile and selection models inside it, and they reach it
 // through the generated types.
@@ -402,11 +415,24 @@ export component AppWindow inherits Window {
     /// 「設定ファイルへ書き戻すもの」で、書き戻す関数が持っているのは窓だけ
     /// だから、窓が持っている。要件 9 の数・色・書体と同じ置き方。
     in property <[string]> terminal-shell-lines;
-    /// 要件 7.9（2026-09-08）: 単語帳。`名前 | #rrggbb | 語,語,語`の1行で1冊、
-    /// 書かれたままの形で。**画面はまだこれを描かない**——いまは設定ファイルへ
-    /// 手で書く（シェルの一覧が最初そうだったのと同じ段）。窓が持っているのは、
-    /// 書き戻す`save_settings`が持っているのが窓だけだからである。
-    in property <[string]> word-lists;
+    /// 要件 7.9（2026-09-08）: 単語セット。`#rrggbb | ファイルの場所`の1行で
+    /// 1セット、書かれたままの形で。**語はここに無い**——それはそのファイルの中に
+    /// 1行1語で入っている（書き手の指摘：単語帳は大きくなる）。
+    /// 窓が持っているのは、書き戻す`save_settings`が持っているのが窓だけだから。
+    in-out property <[string]> word-sets;
+    /// 要件 7.9: 設定画面に出す1行。**名前と語数は読んだ結果**で、設定の行には
+    /// 無い——「人物（342語）」と言えるのはファイルを読んだあとだけである。
+    in property <[WordSetRow]> word-set-rows;
+    /// セットを1つ足す（ファイルを手で選ぶ）。
+    callback word-set-added();
+    /// 何番目のセットの色を選び直すか。
+    callback word-set-colour-picked(int);
+    /// 畳む／戻す。**消すのとは別**——校正の段によって使うセットが違う。
+    callback word-set-muted(int, bool);
+    callback word-set-removed(int);
+    /// そのファイルをこの編集器で開く。**語を足すのはそこでする**——
+    /// ただのテキストなので、専用の編集画面を作らない（要件 3：軽く）。
+    callback word-set-opened(int);
     /// 追加要件 2026-09-07: **どれが既定か。**接続先を訊かない場所——`＋`のNew Tab、
     /// タブ列のメニュー、ペインの下段——はすべてこれを起こす。設定にも残る。
     in-out property <int> default-shell: 0;
@@ -2310,24 +2336,31 @@ export component AppWindow inherits Window {
                         }
                     }
                     PanelTab {
-                        title: "Text";
+                        title: "Words";
                         current: root.settings-tab == 2;
                         clicked => {
                             root.settings-tab = 2;
                         }
                     }
                     PanelTab {
-                        title: "Layout";
+                        title: "Text";
                         current: root.settings-tab == 3;
                         clicked => {
                             root.settings-tab = 3;
                         }
                     }
                     PanelTab {
-                        title: "Page";
+                        title: "Layout";
                         current: root.settings-tab == 4;
                         clicked => {
                             root.settings-tab = 4;
+                        }
+                    }
+                    PanelTab {
+                        title: "Page";
+                        current: root.settings-tab == 5;
+                        clicked => {
+                            root.settings-tab = 5;
                         }
                     }
                 }
@@ -2533,9 +2566,110 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // 要件 7.9（2026-09-08）: **単語セット。**この編集器がいちばん力を
+                // 入れるところの、設定側。**ここに語は無い**——一覧はセットごとの
+                // ファイルに1行1語で入っていて、`Open`でこの編集器が開く。
+                // 語を足すのはそこでする（要件 3：軽く、専用の編集画面を作らない）。
+                if root.settings-tab == 2: VerticalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: "WORD SETS";
+                        color: Tok.ink-faint;
+                        font-size: 10px;
+                        letter-spacing: 0.9px;
+                    }
+
+                    for row[index] in root.word-set-rows: HorizontalLayout {
+                        spacing: 6px;
+
+                        // 色見本。押すとWindowsの色ダイアログ（要件 9 と同じ道）。
+                        Rectangle {
+                            width: 24px;
+                            horizontal-stretch: 0;
+
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 24px;
+                                height: 20px;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
+                                background: row.shown;
+                                // **畳んだセットは色も畳む。**出ていない色を
+                                // そのまま見せると、効いているように読める。
+                                opacity: row.muted ? 0.3 : 1.0;
+
+                                swatch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.word-set-colour-picked(index);
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: row.name;
+                            color: row.muted ? Tok.ink-faint : Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+
+                        Text {
+                            text: row.note;
+                            color: Tok.ink-faint;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 0;
+                        }
+
+                        TextButton {
+                            title: row.muted ? "Off" : "On";
+                            role: row.muted ? Role.normal : Role.primary;
+                            clicked => {
+                                root.word-set-muted(index, !row.muted);
+                            }
+                        }
+                        TextButton {
+                            title: "Open";
+                            clicked => {
+                                root.word-set-opened(index);
+                            }
+                        }
+                        TextButton {
+                            title: "×";
+                            role: Role.quiet;
+                            clicked => {
+                                root.word-set-removed(index);
+                            }
+                        }
+                    }
+
+                    if root.word-set-rows.length == 0: Text {
+                        text: "1行に1語のテキストファイルを選ぶと、その語に色が付きます。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+
+                    HorizontalLayout {
+                        alignment: start;
+
+                        TextButton {
+                            title: "Add Word Set…";
+                            clicked => {
+                                root.word-set-added();
+                            }
+                        }
+                    }
+                }
+
                 // どの面にいても、値はいまのシートのもの——だから帯のすぐ
                 // 下に在る（要件 9）。
-                if root.settings-tab > 1: VerticalLayout {
+                if root.settings-tab > 2: VerticalLayout {
                     spacing: 8px;
 
                     // 要件 9: which sheet is being set. **Everything below belongs
@@ -2561,7 +2695,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.settings-tab == 2: VerticalLayout {
+                if root.settings-tab == 3: VerticalLayout {
                     spacing: 8px;
 
                     // One row per kind of text: how large, what colour, which
@@ -2688,7 +2822,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.settings-tab == 3: VerticalLayout {
+                if root.settings-tab == 4: VerticalLayout {
                     spacing: 8px;
 
                     // 要件 9 calls the flow advance 行間 in horizontal writing and
@@ -2814,7 +2948,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.settings-tab == 4: VerticalLayout {
+                if root.settings-tab == 5: VerticalLayout {
                     spacing: 8px;
 
                     // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
@@ -2840,7 +2974,7 @@ export component AppWindow inherits Window {
 
                 // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
                 // なので、書式の面にだけ置く。General の2つはこれで戻らない。
-                if root.settings-tab > 1: VerticalLayout {
+                if root.settings-tab > 2: VerticalLayout {
                     spacing: 8px;
 
                     Rectangle {

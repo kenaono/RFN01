@@ -538,8 +538,8 @@ impl Graphics {
                     heading_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
                 }
                 let comment_brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
-                let mut word_brushes = Vec::with_capacity(crate::word_marks::MAX_WORD_LISTS);
-                for _ in 0..crate::word_marks::MAX_WORD_LISTS {
+                let mut word_brushes = Vec::with_capacity(crate::word_marks::MAX_WORD_SETS);
+                for _ in 0..crate::word_marks::MAX_WORD_SETS {
                     word_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
                 }
                 (
@@ -2266,9 +2266,9 @@ fn draw_tile(
         }
         comment_brush.SetColor(&colour(typography.comment_ink()));
         // 要件 7.9: 帳ごとの色。使っていない筆はそのままでよい——参照されない。
-        for (at, list) in typography.words.lists.iter().enumerate() {
+        for (at, set) in typography.words.sets.iter().enumerate() {
             if let Some(word_brush) = word_brushes.get(at) {
-                word_brush.SetColor(&colour(list.colour));
+                word_brush.SetColor(&colour(set.colour));
             }
         }
     }
@@ -2367,7 +2367,7 @@ fn draw_tile(
             // 強い。書き手が自分でそこへ置いたしるしのほうが、記法から出た色より
             // 言いたいことがはっきりしている。
             for mark in &word_marks {
-                let Some(word_brush) = word_brushes.get(mark.list) else {
+                let Some(word_brush) = word_brushes.get(mark.set) else {
                     continue;
                 };
                 let start = utf16_units(&task.text[..mark.start]);

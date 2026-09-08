@@ -74,6 +74,29 @@ pub fn open_document(owner: Owner) -> Option<PathBuf> {
     }
 }
 
+/// 単語セットのファイルを選ぶ（要件 7.9、2026-09-08）。
+///
+/// **`open_document`と同じ道具で、題と絞り込みだけが違う。**選ぶのは1行1語の
+/// テキストで、開く先も違う（設定に覚えるだけで、タブは開かない）——**同じ絵の
+/// ダイアログが2つの用事に出るなら、題でそれを言う**。
+pub fn open_word_set(owner: Owner) -> Option<PathBuf> {
+    let filters = filters();
+    // SAFETY: `open_document`と同じ——COMは窓のスレッドで初期化済みで、
+    // シェルが返した文字列は`chosen_path`が解放する。
+    unsafe {
+        let created = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER);
+        let dialog: IFileDialog = created.ok()?;
+        let _ = dialog.SetFileTypes(&filters);
+        let _ = dialog.SetTitle(w!("単語セットを選ぶ（1行に1語）"));
+        if let Ok(options) = dialog.GetOptions() {
+            let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM);
+        }
+        dialog.Show(owner).ok()?;
+        let item = dialog.GetResult().ok()?;
+        chosen_path(&item)
+    }
+}
+
 /// Ask which folder to work in (要件 5.1).
 ///
 /// The same dialog as `open_document`, told to pick a folder instead of a file

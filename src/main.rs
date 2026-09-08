@@ -61,6 +61,7 @@ use slint::{
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 use terminal::{Key as TerminalKey, Modifiers as TerminalModifiers};
 use terminal_session::TerminalSession;
 use text_blocks::{
@@ -1891,6 +1892,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
+    wiring::wire_word_sets(&window, &live, &render_cache);
+
     let weak = window.as_weak();
     let tab_live = live.clone();
     window.on_pane_new_tab(move |pane| {
@@ -2319,6 +2322,10 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         apply_settings(&window, &numbers, &palette, &sheet_fonts, &values);
     }
+    // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
+    // 色しか覚えていないので、語はここで初めて手に入る。
+    reload_word_sets(&window, &render_cache);
+    publish_word_sets(&window);
 
     wiring::wire_typography(
         &window,
@@ -6588,16 +6595,10 @@ fn typography_for(
     for (level, scale) in spec.heading_scale.iter_mut().enumerate() {
         *scale = percent(number(Setting::Heading(level)));
     }
-    // 要件 7.9（2026-09-08追加）: 単語帳。**組版のたびに読み直す**——数行の
-    // 文字列を割るだけで、1打鍵の2.5ms（技術検証 6.9）に対して測れる量ではない。
-    // 高くつくと分かったら、そのとき覚えさせる（要件15の構え）。
-    spec.words = std::sync::Arc::new(word_marks::WordMarks {
-        lists: window
-            .get_word_lists()
-            .iter()
-            .filter_map(|line| read_word_list(&line))
-            .collect(),
-    });
+    // 要件 7.9（2026-09-08追加）: 単語セット。**もう建ててある木を`Arc`1つで
+    // 受け取る**——語は数千になりうるので、組版のたびに読み直しては木にした
+    // 意味が消える（建て直すのは`reload_word_sets`だけ）。
+    spec.words = loaded_words();
     let palette = window.get_palette();
     let colour = |slot: usize| {
         channels(
@@ -7027,38 +7028,185 @@ const TERMINAL_SIZE_SETTING: &str = "terminal.size";
 /// 端末の字の大きさの幅。**紙より狭い**——升目が壊れるほど大きくしても読めない。
 const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
 
-/// 要件 7.9（2026-09-08追加）: 単語帳。設定ファイルの1行が1冊。
+/// 要件 7.9（2026-09-08追加）: 単語セット。設定ファイルの1行が1セット。
 ///
-/// **書き方は`名前 | #rrggbb | 語,語,語`。**シェルの一覧（`SHELL_SETTING`）と
-/// 同じ形にしてある——**人が読んで直せる形が、この規模で要る唯一の書き出し**という
-/// のがこのファイルの方針で（README）、単語帳はまさに人が手で足すものである。
-/// 先頭に`-`を付けると畳んだ状態（色を出さない）。
-const WORD_LIST_SETTING: &str = "word.list";
+/// **書き方は`#rrggbb | ファイルの場所`。**先頭に`-`を付けると畳んだ状態
+/// （色を出さない）。**語そのものはここに入らない**——書き手の指摘のとおり
+/// 単語帳は大きくなるもので、カンマで並べた1行では探せないし直せない。語は
+/// そのファイルに1行1語で入っていて、**この編集器で開いて直せる**。
+///
+/// 名前は書かない。**ファイルの名前がセットの名前**である——同じ名前を二度
+/// 書かせない。
+const WORD_SET_SETTING: &str = "word.set";
 
-/// 設定ファイルの1行を1冊に。読めない行は`None`——1行読めないことは、
-/// 他の帳を落とす理由にならない。
-fn read_word_list(written: &str) -> Option<word_marks::WordList> {
-    let mut parts = written.splitn(3, '|');
-    let name = parts.next()?.trim();
-    let colour = parse_hex_colour(parts.next()?.trim())?;
-    let words = parts.next().unwrap_or("");
-    let (muted, name) = match name.strip_prefix('-') {
+/// 設定ファイルの1行を1セットに（語はまだ読まない）。
+///
+/// 読めない行は`None`。**捨てはしない**（`apply_settings`が書かれたまま持ち帰る）
+/// が、色は付かない——それが直せという合図になる。
+fn read_word_set(written: &str) -> Option<word_marks::WordSet> {
+    let (colour, path) = written.split_once('|')?;
+    let colour = colour.trim();
+    let (muted, colour) = match colour.strip_prefix('-') {
         Some(rest) => (true, rest.trim()),
-        None => (false, name),
+        None => (false, colour),
     };
-    if name.is_empty() {
+    let path = path.trim();
+    if path.is_empty() {
         return None;
     }
-    Some(word_marks::WordList {
-        name: name.to_owned(),
-        colour,
-        words: words
-            .split(',')
-            .map(|word| word.trim().to_owned())
-            .filter(|word| !word.is_empty())
-            .collect(),
+    Some(word_marks::WordSet {
+        path: PathBuf::from(path),
+        colour: parse_hex_colour(colour)?,
         muted,
+        words: Vec::new(),
     })
+}
+
+fn write_word_set(set: &word_marks::WordSet) -> String {
+    let mark = if set.muted { "-" } else { "" };
+    format!(
+        "{mark}{} | {}",
+        hex_colour(slint_colour(set.colour)),
+        set.path.display()
+    )
+}
+
+thread_local! {
+    /// いま効いている単語セットと、そこから建てた木（要件 7.9）。
+    ///
+    /// **窓の外に置いてある。**Slintのプロパティは任意のRustの値を持てず、しかし
+    /// これは`typography_for`——組版のたびに走る関数——から`Rc`1つの複製で届く
+    /// 必要がある。木を組版のたびに建て直しては、木にした意味が消える。
+    ///
+    /// **UIスレッドのものである。**書き換えるのは`reload_word_sets`だけで、読むのは
+    /// 組版を組み立てる側だけ——どちらも窓のスレッドにいる（要件 2 で外へ出した
+    /// 3本は、どれもここへ触らない）。
+    static LOADED_WORDS: RefCell<Arc<word_marks::WordMarks>> =
+        RefCell::new(Arc::new(word_marks::WordMarks::default()));
+}
+
+/// いま効いている単語セット。**複製は`Arc`1つぶん。**
+fn loaded_words() -> Arc<word_marks::WordMarks> {
+    LOADED_WORDS.with(|held| held.borrow().clone())
+}
+
+/// 設定が名指しているファイルを読み直して、木を建て直す（要件 7.9）。
+///
+/// **呼ぶのは3か所**：起動して設定を読んだあと、設定画面でセットを足したり色を
+/// 変えたりしたあと、そして**単語セットのファイルを保存したあと**——書き手は
+/// この編集器でその一覧を開いて直すので、保存した瞬間に色が変わるのが
+/// 「軽い」（要件 3）。
+fn reload_word_sets(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
+    let mut sets: Vec<word_marks::WordSet> = window
+        .get_word_sets()
+        .iter()
+        .filter_map(|line| read_word_set(&line))
+        .take(word_marks::MAX_WORD_SETS)
+        .collect();
+    let mut words = 0;
+    let mut missing = 0;
+    for set in &mut sets {
+        // **読めなければ語が無いセット**として残す。設定から消すのは書き手の
+        // 決めることで、ファイルが一時的に見えないこと（切れているネットワーク
+        // ドライブ）は消す理由にならない。
+        match file_io::read(&set.path, word_marks::MAX_WORDS_PER_SET * 64) {
+            Ok(loaded) => {
+                set.words = word_marks::read_word_file(&loaded.text);
+                words += set.words.len();
+            }
+            Err(_) => missing += 1,
+        }
+    }
+    cache.borrow_mut().log_diag(
+        "spec",
+        &format!("word sets={} words={words} missing={missing}", sets.len()),
+    );
+    let built = Arc::new(word_marks::WordMarks::build(sets));
+    LOADED_WORDS.with(|held| *held.borrow_mut() = built);
+}
+
+/// 単語セットの並びを画面へ（要件 7.9）。
+///
+/// **名前と語数は読んだ結果から出す。**設定の行が持っているのは色と場所だけで、
+/// 「人物（342語）」と言えるのは読んだあとだけである。読めなかったセットは
+/// 語数の代わりにその旨を出す——**設定から消えたのではなく、いま読めない**。
+fn publish_word_sets(window: &AppWindow) {
+    let loaded = loaded_words();
+    let rows: Vec<WordSetRow> = loaded
+        .sets
+        .iter()
+        .map(|set| WordSetRow {
+            name: set.name().into(),
+            note: if set.words.is_empty() {
+                "読めません".into()
+            } else {
+                format!("{}語", set.words.len()).into()
+            },
+            path: set.path.display().to_string().into(),
+            shown: slint_colour(set.colour),
+            muted: set.muted,
+        })
+        .collect();
+    window.set_word_set_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+/// 画面の並びを設定の行へ書き戻し、読み直す（要件 7.9）。
+///
+/// **一本の道**：設定画面のどの操作もここへ来る。行を作るのは`write_word_set`
+/// だけで、読むのは`read_word_set`だけ——**作った行を自分で読めなければ次の
+/// 起動で消える**ので、往復はテストで固定してある。
+fn store_word_sets(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    sets: &[word_marks::WordSet],
+) {
+    let lines: Vec<SharedString> = sets.iter().map(|set| write_word_set(set).into()).collect();
+    window.set_word_sets(ModelRc::new(VecModel::from(lines)));
+    reload_word_sets(window, cache);
+    publish_word_sets(window);
+    save_settings(window, cache);
+}
+
+/// いま設定が持っているセット（語は読んだもの）。
+fn word_sets_now(window: &AppWindow) -> Vec<word_marks::WordSet> {
+    window
+        .get_word_sets()
+        .iter()
+        .filter_map(|line| read_word_set(&line))
+        .collect()
+}
+
+/// 足すセットに与える色（要件 7.9）。
+///
+/// **まだ使っていない色から順に。**同じ色が2つ並ぶと、どちらの色分けを見ているのか
+/// 画面が言えない。並びは要件9の墨と同じ家族から選んである——紙の上で読める濃さで、
+/// 互いに見分けが付く。
+fn next_word_colour(sets: &[word_marks::WordSet]) -> [f32; 3] {
+    const OFFERED: [[f32; 3]; word_marks::MAX_WORD_SETS] = [
+        [0.70, 0.16, 0.16], // 紅
+        [0.16, 0.32, 0.66], // 藍
+        [0.18, 0.45, 0.20], // 緑
+        [0.63, 0.42, 0.09], // 山吹
+        [0.53, 0.22, 0.62], // 紫
+        [0.11, 0.45, 0.48], // 青緑
+        [0.60, 0.30, 0.12], // 煉瓦
+        [0.35, 0.35, 0.38], // 鈍色
+    ];
+    OFFERED
+        .into_iter()
+        .find(|colour| !sets.iter().any(|set| set.colour == *colour))
+        .unwrap_or(OFFERED[0])
+}
+
+/// このファイルは単語セットのものか（要件 7.9）。
+///
+/// **保存したら色が変わる**ようにするための問い。`saving.rs`が保存のたびに訊く。
+fn is_word_set_file(window: &AppWindow, path: &Path) -> bool {
+    window
+        .get_word_sets()
+        .iter()
+        .filter_map(|line| read_word_set(&line))
+        .any(|set| set.path == path)
 }
 
 fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
@@ -7085,8 +7233,8 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     ));
     // 要件 7.9: 単語帳。**窓が書かれたままの形で持っている**——書き戻す
     // `save_settings`が持っているのは窓だけ、というシェルの一覧と同じ事情。
-    for (at, line) in window.get_word_lists().iter().enumerate() {
-        values.push((format!("{WORD_LIST_SETTING}.{at}"), line.to_string()));
+    for (at, line) in window.get_word_sets().iter().enumerate() {
+        values.push((format!("{WORD_SET_SETTING}.{at}"), line.to_string()));
     }
     values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
@@ -7149,11 +7297,11 @@ fn apply_settings(
     // **分からないものを壊さない**。色が付かないことが、直せという合図になる。
     let books: Vec<SharedString> = values
         .iter()
-        .filter(|(name, _)| name.starts_with(WORD_LIST_SETTING))
-        .take(word_marks::MAX_WORD_LISTS)
+        .filter(|(name, _)| name.starts_with(WORD_SET_SETTING))
+        .take(word_marks::MAX_WORD_SETS)
         .map(|(_, value)| SharedString::from(value.as_str()))
         .collect();
-    window.set_word_lists(ModelRc::new(VecModel::from(books)));
+    window.set_word_sets(ModelRc::new(VecModel::from(books)));
     let read: Vec<TerminalShell> = values
         .iter()
         .filter(|(name, _)| name.starts_with(SHELL_SETTING))
@@ -7191,7 +7339,7 @@ fn apply_settings(
         }
         // 要件 7.9（2026-09-08）: 単語帳。**一覧として集めるので、ここでは飛ばす**
         // ——下の`hold_word_lists`が拾う。
-        if written.starts_with(WORD_LIST_SETTING) {
+        if written.starts_with(WORD_SET_SETTING) {
             continue;
         }
         // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
@@ -12302,47 +12450,58 @@ mod tests {
         assert_eq!(history, [d, c, a]);
     }
 
-    /// 要件 7.9（2026-09-08）: 単語帳の1行。**人が手で書く行**なので、
-    /// 空白の入れ方に寛容であること。
+    /// 要件 7.9（2026-09-08）: 単語セットの1行。**人が手で書く行**なので、
+    /// 空白の入れ方に寛容であること。**語はここに無い**——そのファイルの中に
+    /// 1行1語で入っている。
     #[test]
-    fn a_word_list_line_reads_back() {
-        let read = read_word_list(" 人物 | #cc3333 | 田中, 佐藤 ,鈴木 ").expect("reads");
+    fn a_word_set_line_reads_back() {
+        let read = read_word_set(" #cc3333 | D:\\原稿\\単語帳\\人物.txt ").expect("reads");
 
-        assert_eq!(read.name, "人物");
-        assert_eq!(read.words, ["田中", "佐藤", "鈴木"]);
+        assert_eq!(read.name(), "人物");
         assert!(!read.muted);
+        assert!(read.words.is_empty(), "語はまだ読んでいない");
         // #cc3333 の赤。
         assert!((read.colour[0] - 0.8).abs() < 0.01, "{:?}", read.colour);
     }
 
-    /// **先頭の`-`は畳んだ帳**（要件 7.9）。消すのとは別で、校正の段によって
-    /// 使う帳が違う。
+    /// **先頭の`-`は畳んだセット**（要件 7.9）。消すのとは別で、校正の段によって
+    /// 使うセットが違う。
     #[test]
-    fn a_muted_word_list_is_marked_with_a_dash() {
-        let read = read_word_list("-伏線 | #3355cc | 鍵, 手紙").expect("reads");
+    fn a_muted_word_set_is_marked_with_a_dash() {
+        let read = read_word_set("-#3355cc | D:\\原稿\\伏線.txt").expect("reads");
 
         assert!(read.muted);
-        assert_eq!(read.name, "伏線");
-        assert_eq!(read.words.len(), 2);
+        assert_eq!(read.name(), "伏線");
     }
 
-    /// 語が1つも無い帳も帳である（これから足すところ）。
+    /// 書いた行は、そのまま読み戻せる。**設定画面が行を作る側**なので、
+    /// 作った行を自分で読めなければ次の起動で消える。
     #[test]
-    fn a_word_list_with_no_words_still_reads() {
-        let read = read_word_list("新しい帳 | #888888 |").expect("reads");
+    fn a_word_set_line_goes_out_and_comes_back() {
+        let set = word_marks::WordSet {
+            path: PathBuf::from("D:\\原稿\\単語帳\\地名.txt"),
+            colour: [0.2, 0.4, 0.6],
+            muted: true,
+            words: Vec::new(),
+        };
+        let read = read_word_set(&write_word_set(&set)).expect("reads");
 
-        assert_eq!(read.name, "新しい帳");
-        assert!(read.words.is_empty());
+        assert_eq!(read.path, set.path);
+        assert_eq!(read.muted, set.muted);
+        // 色は#rrggbbを通るので、1/255まで。
+        for (was, now) in set.colour.iter().zip(read.colour.iter()) {
+            assert!((was - now).abs() < 0.005, "{was} と {now}");
+        }
     }
 
     /// 半端な行は`None`。**捨てはしない**（`apply_settings`が書かれたまま持ち帰る）
     /// が、色は付かない——それが直せという合図になる。
     #[test]
-    fn half_a_word_list_line_is_refused() {
-        assert!(read_word_list("").is_none());
-        assert!(read_word_list("名前だけ").is_none());
-        assert!(read_word_list("名前 | 色ではない | 語").is_none());
-        assert!(read_word_list(" | #cc3333 | 語").is_none(), "名前が無い");
+    fn half_a_word_set_line_is_refused() {
+        assert!(read_word_set("").is_none());
+        assert!(read_word_set("#cc3333").is_none(), "場所が無い");
+        assert!(read_word_set("#cc3333 | ").is_none(), "場所が空");
+        assert!(read_word_set("あか | D:\\人物.txt").is_none(), "色ではない");
     }
 
     /// 追加要件 2026-09-08: 接続先の一覧は設定ファイルの行になり、行から
