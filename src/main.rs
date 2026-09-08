@@ -5778,6 +5778,8 @@ enum Question {
     RenameEntry(PathBuf),
     /// The file or folder named, waiting to be told to go (要件 5.2).
     DeleteEntry(PathBuf),
+    /// 空の単語セットが、名前を待っている（要件 7.9、2026-09-08）。
+    NewWordSet,
     /// Something carried onto a name that is already taken (要件 5.2): what is
     /// being moved, and where it would land. **The order is the same as
     /// `move_entry`'s**, from and to.
@@ -5945,6 +5947,10 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         (Question::SaveConflict, 0) => overwrite_the_outside_change(window, live),
         (Question::SaveConflict, 1) => reload_from_file(window, live),
         (Question::SaveConflict, 2) => save_document(window, live, true),
+        (Question::NewWordSet, 0) => {
+            let typed = window.get_question_name().to_string();
+            new_word_set(window, live, &typed);
+        }
         (Question::NewFile(parent), 0) => make_entry(window, live, &parent, false),
         (Question::NewFolder(parent), 0) => make_entry(window, live, &parent, true),
         (Question::RenameEntry(path), 0) => rename_entry(window, live, &path),
@@ -7148,6 +7154,14 @@ fn publish_word_sets(window: &AppWindow) {
         })
         .collect();
     window.set_word_set_rows(ModelRc::new(VecModel::from(rows)));
+    // **編集面の右ボタンが並べる名前。**畳んだセットも出す——足すことと、
+    // いま色を出していることは別である。
+    let names: Vec<SharedString> = loaded
+        .sets
+        .iter()
+        .map(|set| SharedString::from(set.name.as_str()))
+        .collect();
+    window.set_word_set_names(ModelRc::new(VecModel::from(names)));
 
     // **重複の一覧。**セットの番号ではなく名前で言う——書き手が見るのは名前である。
     let named = |at: &usize| {
@@ -7182,6 +7196,18 @@ fn publish_word_sets(window: &AppWindow) {
         .collect();
     window.set_word_troubles(ModelRc::new(VecModel::from(troubles)));
     window.set_word_trouble_count(loaded.troubles.len() as i32);
+
+    // **開いているセットの語**（要件 7.9、2026-09-08）。**アプリの中で見て、
+    // アプリの中で消せる**——書き手が辞書ファイルを管理しなくてよい、という
+    // のがこの機能の形である。開いていないときは空で、数千語を毎回窓へ渡さない。
+    let opened = window.get_word_set_opened_at();
+    let words: Vec<SharedString> = loaded
+        .sets
+        .get(opened.max(0) as usize)
+        .filter(|_| opened >= 0)
+        .map(|set| set.words.iter().map(SharedString::from).collect())
+        .unwrap_or_default();
+    window.set_word_set_words(ModelRc::new(VecModel::from(words)));
 }
 
 /// 足すセットに与える色（要件 7.9）。
@@ -7204,6 +7230,96 @@ fn next_word_colour(sets: &[word_marks::WordSet]) -> [f32; 3] {
         .into_iter()
         .find(|colour| !sets.iter().any(|set| set.colour == *colour))
         .unwrap_or(OFFERED[0])
+}
+
+/// 空のセットを1つ作る（要件 7.9、2026-09-08）。
+///
+/// **ファイルは要らない。**辞書は編集器が持つもので、書き手がファイルを管理する
+/// 必要は無い——取り込みは「あってもよい道」であって、始めるための道ではない。
+fn new_word_set(window: &AppWindow, live: &Live, name: &str) {
+    let mut sets = word_sets_now();
+    if sets.len() >= word_marks::MAX_WORD_SETS {
+        let told = format!("単語セットは{}冊までです", word_marks::MAX_WORD_SETS);
+        window.set_render_status(told.into());
+        return;
+    }
+    let colour = next_word_colour(&sets);
+    sets.push(word_marks::WordSet {
+        name: name.trim().to_owned(),
+        colour,
+        muted: false,
+        source: PathBuf::new(),
+        words: Vec::new(),
+    });
+    hold_word_sets(window, live, sets, true);
+}
+
+/// 選んでいる語を、セットへ足す（要件 7.9、2026-09-08）。
+///
+/// **書きながら足すいちばん普通の道。**書いていて気づいた名前を、その場で、書く手を
+/// 止めずに入れる（要件 3）。一覧を開いて打ち込むのは、その次である。
+///
+/// **改行をまたぐ選択は語にしない。**語とは1行に収まるもので、段落を丸ごと選んで
+/// 足せてしまうと、その語は本文のどこにも当たらないまま一覧を汚す。
+fn add_word_to_set(window: &AppWindow, live: &Live, at: usize, word: &str) {
+    let word = word.trim();
+    if word.is_empty() || word.contains('\n') {
+        window.set_render_status("1行に収まる語だけを足せます".into());
+        return;
+    }
+    let mut sets = word_sets_now();
+    let Some(set) = sets.get_mut(at) else {
+        return;
+    };
+    // **もう入っているなら、足さずに言う。**黙って二度目を入れると、次の取り込みで
+    // 「二重」と言われるだけの語が増える。
+    if set.words.iter().any(|held| held.eq_ignore_ascii_case(word)) {
+        let told = format!("「{word}」は{}にもう入っています", set.name);
+        window.set_render_status(told.into());
+        return;
+    }
+    set.words.push(word.to_owned());
+    let name = set.name.clone();
+    hold_word_sets(window, live, sets, true);
+    window.set_render_status(format!("「{word}」を{name}へ足しました").into());
+}
+
+/// セットから語を1つ落とす（要件 7.9）。
+fn remove_word_from_set(window: &AppWindow, live: &Live, at: usize, word: &str) {
+    let mut sets = word_sets_now();
+    let Some(set) = sets.get_mut(at) else {
+        return;
+    };
+    set.words.retain(|held| held != word);
+    hold_word_sets(window, live, sets, true);
+}
+
+/// セットを1行1語で書き出す（要件 7.9）。
+///
+/// **控えを取るため、そして他の道具と行き来するため**にある。独自の形式にしないのは
+/// それが値打ちだからで、読むほうと同じ形である。
+fn export_word_set(window: &AppWindow, at: usize) {
+    let sets = word_sets_now();
+    let Some(set) = sets.get(at) else {
+        return;
+    };
+    let owner = ime::window_handle(window);
+    let suggested = format!("{}.txt", set.name);
+    let Some(target) = file_dialog::save_document_as(owner, &suggested) else {
+        return;
+    };
+    let mut out = String::with_capacity(set.words.len() * 8);
+    for word in &set.words {
+        out.push_str(word);
+        out.push('\n');
+    }
+    match file_io::write_atomically(&target, out.as_bytes()) {
+        Ok(_) => {
+            let told = format!("{}語を書き出しました", set.words.len());
+            window.set_render_status(told.into());
+        }
+        Err(error) => window.set_render_status(format!("書き出せません: {error}").into()),
+    }
 }
 
 /// 取り込み元のファイルを読む（要件 7.9）。

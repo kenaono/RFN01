@@ -279,6 +279,14 @@ export component EditorPane inherits Rectangle {
     /// would be the editor deciding what a shell means.
     in property <bool> terminal: false;
     in property <bool> empty: false;
+    /// 要件 7.9（2026-09-08）: 単語セットの名前。**選んだ語を足す先**として
+    /// 右ボタンのメニューに並ぶ。空なら行そのものが出ない。
+    in property <[string]> word-sets;
+    /// 何か選んでいるか。**選択があるときだけ`単語帳へ追加`を出す**——
+    /// 押しても何も起きない行は出さない（要件 6.7）。
+    in property <bool> has-selection: false;
+    /// 選んだ語を、何冊目のセットへ足すか。
+    callback word-add-requested(int);
     /// 追加要件 2026-09-07: New Tab の三つの言葉。
     ///
     /// **接続先は New Tab の中でも選べる**（書き手の指摘 2026-09-07）——
@@ -1993,6 +2001,29 @@ export component EditorPane inherits Rectangle {
                                             ime-input.paste();
                                         }
                                     }
+                                    // 要件 7.9（2026-09-08）: **書きながら語を
+                                    // 足す、いちばん普通の道。**選んだものを
+                                    // そのままセットへ入れる——一覧を開いて
+                                    // 打ち込むのは、その次である（要件 3）。
+                                    //
+                                    // **選択があるときだけ**出す。セットが1冊
+                                    // なら行は1つ、複数なら名前が並ぶ。
+                                    if !root.terminal && root.has-selection
+                                        && root.word-sets.length > 0: VerticalLayout {
+                                        spacing: 1px;
+
+                                        MenuSep { }
+
+                                        for name[index] in root.word-sets: MenuRow {
+                                            title: "単語帳へ追加：" + name;
+                                            // **頼んでから閉じる**（6.24）。
+                                            activated => {
+                                                root.word-add-requested(index);
+                                                context-menu.close();
+                                            }
+                                        }
+                                    }
+
                                     if !root.terminal: VerticalLayout {
                                         spacing: 1px;
 

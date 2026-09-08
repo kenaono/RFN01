@@ -24,14 +24,15 @@ use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, VecMode
 use crate::directwrite_render;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
 use crate::{
-    AppWindow, Live, NO_TARGET, Opening, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
-    activate_left_row, collect_search, colour_row, drop_tree_row, file_dialog, file_tree,
-    find_in_pane, focused_pane, font_name, font_row, go_to_remembered_folder, hold_word_sets, ime,
-    navigate, next_word_colour, open_path_in_focused_pane, open_work_folder, paste_into_tab,
-    paste_targets, pick_tree_row, publish_left, publish_tabs, quick_draft, read_word_source,
+    AppWindow, Live, NO_TARGET, Opening, PaneId, PaneStates, Question, RenderCache, Setting,
+    TreeCommand, activate_left_row, add_word_to_set, ask_for_name, collect_search, colour_row,
+    drop_tree_row, export_word_set, file_dialog, file_tree, find_in_pane, focused_pane, font_name,
+    font_row, go_to_remembered_folder, hold_word_sets, ime, navigate, next_word_colour,
+    open_path_in_focused_pane, open_work_folder, paste_into_tab, paste_targets, pick_tree_row,
+    publish_left, publish_tabs, quick_draft, read_word_source, remove_word_from_set,
     replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
-    schedule_relayout, search_in_folder, search_work_folder, set_colour, shell, shown_sheet,
-    slint_colour, step_setting, tree_command, word_marks, word_sets_now,
+    schedule_relayout, search_in_folder, search_work_folder, selected_runs, set_colour, shell,
+    shown_sheet, slint_colour, step_setting, tree_command, word_marks, word_sets_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -283,6 +284,65 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live) {
             sets.remove(at);
             hold_word_sets(&window, &held, sets, true);
         }
+    });
+
+    // **空のセットを作る。**ファイルは要らない——辞書は編集器が持つもので、
+    // 書き手がファイルを管理する必要は無い（要件 7.9）。名前は他の「作る」と
+    // 同じ問い方で訊く（要件 5.2 の新規ファイルと同じ道具）。
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_set_created(move || {
+        if let Some(window) = weak.upgrade() {
+            let taken: Vec<String> = word_sets_now().iter().map(|set| set.name.clone()).collect();
+            let mut number = taken.len() + 1;
+            while taken.iter().any(|name| *name == format!("単語帳{number}")) {
+                number += 1;
+            }
+            ask_for_name(
+                &window,
+                &held,
+                Question::NewWordSet,
+                "新しい単語セットの名前を入れてください。".to_owned(),
+                &format!("単語帳{number}"),
+            );
+        }
+    });
+
+    // 要件 7.9: **書きながら語を足す、いちばん普通の道。**
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_pane_word_added(move |pane, at| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let document = held.states.document(id);
+            let source = document.text.borrow().clone();
+            let ranges = selected_runs(&held.cache, id);
+            // **選んだものをそのまま語にする。**矩形選択なら行ごとに切れている
+            // ので、先頭の1本だけを採る——語は1行に収まるものである。
+            let Some((start, end)) = ranges.first().copied() else {
+                return;
+            };
+            let word = source[start..end].to_owned();
+            add_word_to_set(&window, &held, at.max(0) as usize, &word);
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_word_removed(move |at, word| {
+        if let Some(window) = weak.upgrade() {
+            remove_word_from_set(&window, &held, at.max(0) as usize, &word);
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_word_set_exported(move |at| {
+        let weak = weak.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                export_word_set(&window, at.max(0) as usize);
+            }
+        });
     });
 
     let weak = window.as_weak();

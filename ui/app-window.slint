@@ -437,8 +437,23 @@ export component AppWindow inherits Window {
     in property <int> word-trouble-count;
     /// いま重複の一覧を開いているか。
     in-out property <bool> word-troubles-shown: false;
-    /// ファイルを選んで取り込む。
+    /// **語の一覧を開いているセット。**-1で閉じている。開いているものだけ語を
+    /// 窓へ渡す——数千語を毎回渡さないため。
+    in-out property <int> word-set-opened-at: -1;
+    /// そのセットの語。**アプリの中で見て、アプリの中で消せる**（要件 7.9）。
+    in property <[string]> word-set-words;
+    /// セットの名前だけ。**編集面の右ボタンが「どこへ足すか」を並べる**のに使う。
+    in property <[string]> word-set-names;
+    /// そのペインで選んでいる語を、何冊目のセットへ足すか。
+    callback pane-word-added(int, int);
+    /// 空のセットを1つ作る。**ファイルは要らない**——辞書は編集器が持つもの。
+    callback word-set-created();
+    /// ファイルを選んで取り込む（あってもよい道）。
     callback word-set-added();
+    /// 1行1語で書き出す（控えと、他の道具との行き来のため）。
+    callback word-set-exported(int);
+    /// そのセットから語を1つ落とす。
+    callback word-removed(int, string);
     /// もう一度取り込む（取り込み元を読み直す）。
     callback word-set-reimported(int);
     /// 何番目のセットの色を選び直すか。
@@ -1971,6 +1986,12 @@ export component AppWindow inherits Window {
                         tab-stepped(backwards) => { root.pane-tab-stepped(pane.id, backwards); }
                         focus-moved(towards) => { root.pane-focus-moved(pane.id, towards); }
                         kill-requested(what) => { root.pane-kill(pane.id, what); }
+                        // 要件 7.9（2026-09-08）: 選んだ語を単語帳へ。
+                        word-sets: root.word-set-names;
+                        has-selection: pane.selection-rects.length > 0;
+                        word-add-requested(at) => {
+                            root.pane-word-added(pane.id, at);
+                        }
                         mark-toggled(rectangular) => {
                             root.pane-mark-toggled(pane.id, rectangular);
                         }
@@ -2637,16 +2658,21 @@ export component AppWindow inherits Window {
                         // **語数と、色を付けられなかった数。**0でない衝突の数は
                         // 警告の色で出す——「取り込んだのに色が付かない」の答えが
                         // ここにあることが、画面から分かるように。
-                        Text {
-                            text: row.conflicts > 0
+                        //
+                        // **押すと語の一覧が開く**（要件 7.9）：アプリの中で見て、
+                        // アプリの中で消せることが、辞書ファイルを書き手に管理
+                        // させないということである。
+                        TextButton {
+                            role: Role.quiet;
+                            title: row.conflicts > 0
                                 ? row.words + "語 / 重複" + row.conflicts
                                 : (row.repeated > 0
                                     ? row.words + "語 (二重" + row.repeated + ")"
                                     : row.words + "語");
-                            color: row.conflicts > 0 ? Tok.alert : Tok.ink-faint;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 0;
+                            clicked => {
+                                root.word-set-opened-at =
+                                    root.word-set-opened-at == index ? -1 : index;
+                            }
                         }
 
                         TextButton {
@@ -2657,18 +2683,9 @@ export component AppWindow inherits Window {
                             }
                         }
                         TextButton {
-                            title: "Open";
+                            title: "Export…";
                             clicked => {
-                                root.word-set-opened(index);
-                            }
-                        }
-                        // **取り込み直す。**語は編集器の表の中にあるので、元の
-                        // ファイルを直しても、こう言うまでは変わらない
-                        // ——IMEの辞書と同じ（要件 7.9）。
-                        TextButton {
-                            title: "Re-import";
-                            clicked => {
-                                root.word-set-reimported(index);
+                                root.word-set-exported(index);
                             }
                         }
                         TextButton {
@@ -2680,8 +2697,56 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // 開いているセットの語。**アプリの中で消せる**（要件 7.9）。
+                    if root.word-set-opened-at >= 0: Rectangle {
+                        height: 152px;
+                        background: Tok.chrome-raised;
+                        border-radius: 6px;
+
+                        ScrollView {
+                            x: 8px;
+                            y: 6px;
+                            width: parent.width - 16px;
+                            height: parent.height - 12px;
+
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 1px;
+
+                                for word in root.word-set-words: HorizontalLayout {
+                                    spacing: 6px;
+
+                                    Text {
+                                        text: word;
+                                        color: Tok.ink;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    TextButton {
+                                        title: "×";
+                                        role: Role.quiet;
+                                        clicked => {
+                                            root.word-removed(
+                                                root.word-set-opened-at, word);
+                                        }
+                                    }
+                                }
+
+                                if root.word-set-words.length == 0: Text {
+                                    text: "まだ語がありません。本文で語を選んで右ボタン、"
+                                        + "`単語帳へ追加`から入れられます。";
+                                    color: Tok.ink-faint;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
                     if root.word-set-rows.length == 0: Text {
-                        text: "1行に1語のテキストファイルを取り込むと、その語に色が付きます。";
+                        text: "`New Set`でセットを作り、本文で語を選んで右ボタンから足します。";
                         color: Tok.ink-faint;
                         font-size: 11px;
                         overflow: elide;
@@ -2691,6 +2756,13 @@ export component AppWindow inherits Window {
                         alignment: start;
                         spacing: 6px;
 
+                        TextButton {
+                            title: "New Set";
+                            role: Role.primary;
+                            clicked => {
+                                root.word-set-created();
+                            }
+                        }
                         TextButton {
                             title: "Import…";
                             clicked => {
