@@ -63,92 +63,157 @@ slint::include_modules!();
 /// What a terminal tab can be running (追加要件 Terminal: WSL2とPowerShell、
 /// 既定はWSL2).
 ///
-/// **Two, and the writer picks one when they open the tab.** The requirement
-/// names these and says which is the default; the list lives here rather than in
-/// the window, so the menu is built out of what can actually be started.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum TerminalShell {
-    /// `wsl.exe` with nothing after it opens the default distribution in the
-    /// current directory, and **starts it if it is not running** — which is
-    /// what the requirement asks for, done by the thing that knows how.
-    Wsl,
-    PowerShell,
-    /// PowerShell 7, when it is on the machine.
-    ///
-    /// **Offered because of what it reads, not what it runs.** Windows
-    /// PowerShell decodes a file with no BOM in the ANSI code page, so
-    /// `Get-Content` of a UTF-8 document comes out as mojibake before it
-    /// reaches any terminal (technical検証9.4 measured both in one screen).
-    /// PowerShell 7 reads UTF-8 by default.
-    PowerShell7,
+/// 追加要件 2026-09-08: **一覧は設定ファイルにある。**三つの決め打ちだった
+/// ものが、名前とコマンド行の組の並びになった——書き手の機械には`cmd.exe`も
+/// `git-bash`も`wsl -d Ubuntu`もあり、そのどれを「接続先」と呼ぶかは編集器が
+/// 決めることではない。**組み込みの三つは初期値**で、設定ファイルが無いとき
+/// にそこへ書き出されるだけの並びになった。
+///
+/// **`&'static str`ではなく`String`。**書き手が名づけたものは、この実行より
+/// 長生きしない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TerminalShell {
+    /// What a tab of this shell is called. **The shell, not 無題** — the
+    /// document behind it is a stand-in nobody is writing in.
+    name: String,
+    /// The command line, the program first. Everything after the first word is
+    /// handed to the shell as it is written.
+    command: String,
 }
 
 impl TerminalShell {
-    /// **The default first.** The menu is built in this order, and 追加要件 says
-    /// the first is where a writer who does not choose ends up.
-    const ALL: [TerminalShell; 3] = [
-        TerminalShell::Wsl,
-        TerminalShell::PowerShell,
-        TerminalShell::PowerShell7,
-    ];
+    /// What a settings file with no shell list means (追加要件 2026-09-08).
+    ///
+    /// **The default first.** The menu is built in this order, and 追加要件
+    /// says the first is where a writer who does not choose ends up.
+    ///
+    /// - `wsl.exe` with nothing after it opens the default distribution in the
+    ///   current directory, and **starts it if it is not running** — which is
+    ///   what the requirement asks for, done by the thing that knows how.
+    /// - **No logo** on either PowerShell: a terminal opened to run something
+    ///   should not spend its first second printing a banner.
+    /// - PowerShell 7 is offered **because of what it reads, not what it
+    ///   runs**. Windows PowerShell decodes a file with no BOM in the ANSI code
+    ///   page, so `Get-Content` of a UTF-8 document comes out as mojibake
+    ///   before it reaches any terminal (技術検証 9.4 measured both in one
+    ///   screen). PowerShell 7 reads UTF-8 by default.
+    fn built_in() -> Vec<TerminalShell> {
+        [
+            ("WSL", "wsl.exe"),
+            ("PowerShell", "powershell.exe -NoLogo"),
+            ("PowerShell 7", "pwsh.exe -NoLogo"),
+        ]
+        .into_iter()
+        .map(|(name, command)| TerminalShell {
+            name: name.to_owned(),
+            command: command.to_owned(),
+        })
+        .collect()
+    }
 
-    /// What a tab of this shell is called. **The shell, not 無題** — the
-    /// document behind it is a stand-in nobody is writing in.
-    fn name(self) -> &'static str {
-        match self {
-            TerminalShell::Wsl => "WSL",
-            TerminalShell::PowerShell => "PowerShell",
-            TerminalShell::PowerShell7 => "PowerShell 7",
+    /// How the settings file writes one: the name, then the command line.
+    ///
+    /// **`|` between them**, because a name may hold spaces and a command line
+    /// certainly does. A line without one is all command and takes its name
+    /// from the program.
+    fn written(&self) -> String {
+        format!("{} | {}", self.name, self.command)
+    }
+
+    fn read(written: &str) -> Option<TerminalShell> {
+        let (name, command) = match written.split_once('|') {
+            Some((name, command)) => (name.trim().to_owned(), command.trim().to_owned()),
+            None => {
+                let command = written.trim().to_owned();
+                let name = command.split_whitespace().next()?.to_owned();
+                (name, command)
+            }
+        };
+        if name.is_empty() || command.is_empty() {
+            return None;
         }
+        Some(TerminalShell { name, command })
     }
 
     /// The program this shell is, as a file to look for.
-    fn program(self) -> &'static str {
-        match self {
-            TerminalShell::Wsl => "wsl.exe",
-            TerminalShell::PowerShell => "powershell.exe",
-            TerminalShell::PowerShell7 => "pwsh.exe",
-        }
+    fn program(&self) -> &str {
+        self.command.split_whitespace().next().unwrap_or("")
     }
+}
 
-    /// The shells this machine actually has.
-    ///
-    /// **A row that opens nothing looks exactly like a row that is broken**, so
-    /// a shell that is not installed is not offered. If the search finds
-    /// nothing at all — a `PATH` this cannot read — the whole list is offered
-    /// rather than none of it, because a message the writer can read beats a
-    /// menu with no rows.
-    fn offered() -> Vec<TerminalShell> {
-        let found: Vec<TerminalShell> = Self::ALL
-            .into_iter()
-            .filter(|shell| on_path(shell.program()))
-            .collect();
-        if found.is_empty() {
-            Self::ALL.to_vec()
-        } else {
-            found
-        }
-    }
+/// The shells this machine actually has, out of the ones it is set to offer.
+///
+/// **A row that opens nothing looks exactly like a row that is broken**, so a
+/// shell that is not installed is not offered. If the search finds nothing at
+/// all — a `PATH` this cannot read — the whole list is offered rather than none
+/// of it, because a message the writer can read beats a menu with no rows.
+fn offered_shells(window: &AppWindow) -> Vec<TerminalShell> {
+    let configured = configured_shells(window);
+    let found: Vec<TerminalShell> = configured
+        .iter()
+        .filter(|shell| on_path(shell.program()))
+        .cloned()
+        .collect();
+    if found.is_empty() { configured } else { found }
+}
 
-    fn command(self) -> &'static str {
-        match self {
-            TerminalShell::Wsl => "wsl.exe",
-            // **No logo.** A terminal opened to run something should not spend
-            // its first second printing a banner.
-            TerminalShell::PowerShell => "powershell.exe -NoLogo",
-            TerminalShell::PowerShell7 => "pwsh.exe -NoLogo",
-        }
+/// The whole list the settings file names, whether or not this machine has it.
+///
+/// **Held in the window, like every other setting** (要件 9's numbers, the
+/// palette, the families, the default shell). Nothing draws these lines — the
+/// menus read `terminal-shells`, which is the offered subset by name — but this
+/// is what `save_settings` writes back, and that function is reached from
+/// places that carry the window and nothing else.
+fn configured_shells(window: &AppWindow) -> Vec<TerminalShell> {
+    let written = window.get_terminal_shell_lines();
+    let read: Vec<TerminalShell> = written
+        .iter()
+        .filter_map(|line| TerminalShell::read(&line))
+        .collect();
+    if read.is_empty() {
+        TerminalShell::built_in()
+    } else {
+        read
     }
+}
 
-    /// The shell a number from the menu names. **Anything unexpected is the
-    /// default**, for the reason every other number arriving from the window is
-    /// bounded rather than trusted.
-    fn at(index: i32) -> Self {
-        Self::offered()
-            .get(index.max(0) as usize)
-            .copied()
-            .unwrap_or(TerminalShell::Wsl)
+/// Put the list the file named into the window, in the file's own words.
+fn hold_shells(window: &AppWindow, shells: &[TerminalShell]) {
+    window.set_terminal_shell_lines(ModelRc::new(VecModel::from(
+        shells
+            .iter()
+            .map(|shell| SharedString::from(shell.written()))
+            .collect::<Vec<_>>(),
+    )));
+}
+
+/// The shell a number from a menu names. **Anything unexpected is the first
+/// one**, for the reason every other number arriving from the window is bounded
+/// rather than trusted.
+fn shell_at(window: &AppWindow, index: i32) -> TerminalShell {
+    let offered = offered_shells(window);
+    let first = || TerminalShell::built_in().remove(0);
+    match offered.get(index.max(0) as usize) {
+        Some(shell) => shell.clone(),
+        None => offered.first().cloned().unwrap_or_else(first),
     }
+}
+
+/// Put the shells the writer may open in front of them (追加要件 Terminal).
+///
+/// **Called wherever the list can have changed**: once at startup, and again
+/// when a settings file has been read. The default is held inside the list, so
+/// a file naming a shell this machine does not have opens the first one it has.
+fn publish_shells(window: &AppWindow) {
+    let offered = offered_shells(window);
+    let most = offered.len().saturating_sub(1) as i32;
+    window.set_terminal_shells(ModelRc::new(VecModel::from(
+        offered
+            .iter()
+            .map(|shell| SharedString::from(shell.name.clone()))
+            .collect::<Vec<_>>(),
+    )));
+    window.set_default_shell(window.get_default_shell().clamp(0, most));
 }
 
 /// Whether a program is somewhere on `PATH`.
@@ -1063,6 +1128,13 @@ struct TerminalView {
     /// shell must not see it, and the writer must — so it lives here until it
     /// is committed and only then goes up the pipe as text.
     preedit: String,
+    /// How often this shell has been drawn, and since when (2026-09-08追加).
+    ///
+    /// **描いた回数は、秒ごとにひとことだけ残す。**帯に切ってあるのは升目を
+    /// 描く費用を抑えるためで、効いているかどうかは頻度でしか読めない——
+    /// 1描画1行では読めない量になり、何も書かなければ推測しか残らない。
+    drawn: u32,
+    counted_since: Option<Instant>,
 }
 
 impl TerminalView {
@@ -1078,7 +1150,27 @@ impl TerminalView {
             looking: 0,
             history: 0,
             preedit: String::new(),
+            drawn: 0,
+            counted_since: None,
         }
+    }
+
+    /// One more draw. Answers with how many there were in the second just
+    /// ended, when one has.
+    ///
+    /// **秒をまたいだときだけ答える**ので、ログは1行/秒より増えない。静かな
+    /// シェルは描かれないので、1行も出ない。
+    fn drew(&mut self, now: Instant) -> Option<(u32, f32)> {
+        let since = *self.counted_since.get_or_insert(now);
+        self.drawn += 1;
+        let span = now.duration_since(since);
+        if span < Duration::from_secs(1) {
+            return None;
+        }
+        let counted = self.drawn;
+        self.drawn = 0;
+        self.counted_since = Some(now);
+        Some((counted, span.as_secs_f32()))
     }
 }
 
@@ -2379,12 +2471,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // 閉じるのと同じ重さで、書き手がそう言ったのだからそうする）。
     window.on_pane_switch_shell(move |pane, shell| {
         if let Some(window) = weak.upgrade() {
-            switch_shell(
-                &window,
-                &switch_live,
-                PaneId::from_index(pane),
-                TerminalShell::at(shell),
-            );
+            let chosen = shell_at(&window, shell);
+            switch_shell(&window, &switch_live, PaneId::from_index(pane), chosen);
         }
     });
 
@@ -2392,7 +2480,8 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_new_terminal(move |pane, shell| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            open_terminal(&window, &answer_live, id, TerminalShell::at(shell));
+            let chosen = shell_at(&window, shell);
+            open_terminal(&window, &answer_live, id, chosen);
         }
     });
 
@@ -2978,14 +3067,24 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 追加要件 2026-09-08: **Copy means the shell's selection when a shell is
+    // in front.** The row sends the same signal either way — what is selected
+    // on screen is what a writer means by Copy — and this is the end that knows
+    // which of the two is showing. Cut never reaches here over a shell: what a
+    // shell has written is not the writer's to take away, so that row is not
+    // offered (`ui/editor-pane.slint`).
     let weak = window.as_weak();
-    let states = pane_states.clone();
-    let cache = render_cache.clone();
+    let copy_live = live.clone();
     window.on_pane_copy(move |pane, cut| {
         if let Some(window) = weak.upgrade() {
+            let live = &copy_live;
             let id = PaneId::from_index(pane);
-            let document = states.document(id);
-            copy_selection(&window, id, &document, &states, &cache, cut);
+            if id.shows_terminal(&window) {
+                copy_terminal_selection(&window, live, id, TerminalSpot::Front);
+                return;
+            }
+            let document = live.states.document(id);
+            copy_selection(&window, id, &document, &live.states, &live.cache, cut);
         }
     });
 
@@ -3021,14 +3120,13 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // 追加要件 Terminal: the shells the menu offers, in the order they are
-    // defined — the first is the default.
-    window.set_terminal_shells(ModelRc::new(VecModel::from(
-        TerminalShell::offered()
-            .iter()
-            .map(|shell| SharedString::from(shell.name()))
-            .collect::<Vec<_>>(),
-    )));
+    // 追加要件 Terminal: the shells the menu offers, in the order the settings
+    // file names them — the first is the default.
+    //
+    // **設定を読んだあと**（追加要件 2026-09-08）。起動時の一覧は組み込みの
+    // 三つで、設定ファイルはそれを丸ごと置き換えることがある——先に並べて
+    // しまうと、書き手が足したシェルがどのメニューにも出ない。
+    publish_shells(&window);
 
     // 追加要件 Terminal. **Opened in the pane the writer is in**, like every
     // other new tab: which pane is the writer's business and they said it by
@@ -3039,21 +3137,34 @@ fn main() -> Result<(), slint::PlatformError> {
     // 追加要件 2026-09-07: which shell everything that does not ask opens.
     window.on_default_shell_chosen(move |shell| {
         if let Some(window) = weak.upgrade() {
-            let most = TerminalShell::ALL.len() as i32 - 1;
+            let most = offered_shells(&window).len().saturating_sub(1) as i32;
             window.set_default_shell(shell.clamp(0, most));
             save_settings(&window, &default_cache);
+        }
+    });
+
+    // 追加要件 2026-09-08: 自動退避のOn/Off（要件 8.1）。**切った瞬間に、
+    // 置いてあるものを全部持っていく**——「Offの場合は状態を維持しない」の
+    // 「維持しない」は、これから書かないことではなく、いま在るものが残らない
+    // ことである。
+    let weak = window.as_weak();
+    let autosave_live = live.clone();
+    let autosave_cache = render_cache.clone();
+    window.on_autosave_toggled(move |wanted| {
+        if let Some(window) = weak.upgrade() {
+            window.set_autosave(wanted);
+            if !wanted {
+                discard_all_work_copies(&autosave_live);
+            }
+            save_settings(&window, &autosave_cache);
         }
     });
 
     let weak = window.as_weak();
     window.on_terminal_requested(move |shell| {
         if let Some(window) = weak.upgrade() {
-            open_terminal(
-                &window,
-                &terminal_live,
-                focused_pane(&window),
-                TerminalShell::at(shell),
-            );
+            let chosen = shell_at(&window, shell);
+            open_terminal(&window, &terminal_live, focused_pane(&window), chosen);
         }
     });
 
@@ -3282,6 +3393,18 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_below_sent(move |pane| {
         if let Some(window) = weak.upgrade() {
             send_draft(&window, &below_live, PaneId::from_index(pane));
+        }
+    });
+
+    // 書き手の報告 2026-09-08: 下段のシェルの選択を写す（要件 11.2）。
+    // **上の面の`on_pane_copy`とは別の口**：あちらは前に出ているタブが
+    // シェルかどうかで写す先を選ぶが、こちらは訊くまでもなく下段である。
+    let weak = window.as_weak();
+    let below_copy_live = live.clone();
+    window.on_pane_below_copy(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            copy_terminal_selection(&window, &below_copy_live, id, TerminalSpot::Below);
         }
     });
 
@@ -6578,7 +6701,7 @@ fn answer_new_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Option<Ter
     // the tab asking rather than half answered.
     let session = match shell {
         Some(shell) => {
-            let started = start_shell(window, live, id, shell, id.shown_height(window));
+            let started = start_shell(window, live, id, &shell, id.shown_height(window));
             let Some(started) = started else {
                 return;
             };
@@ -6732,6 +6855,21 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     live.cache
         .borrow_mut()
         .log_diag("answer", &format!("{question:?} choice={choice}"));
+    // 追加要件 2026-09-08: **並びが短いときの番号を、いつもの番号へ直す。**
+    // 自動退避が切れているとタブを閉じる問いは3つしか出さない（真ん中の
+    // 「作業コピーを残して閉じる」が無い）ので、そのままでは「破棄して
+    // 閉じる」が「残して閉じる」として読まれる。ここで直せば、下の腕は
+    // 4つの並びのつもりのままでいられる。
+    let closing_tab = matches!(question, Question::CloseTab { .. });
+    let choice = if closing_tab && !window.get_autosave() {
+        match choice {
+            0 => 0,
+            1 => 2,
+            _ => 3,
+        }
+    } else {
+        choice
+    };
     match (question, choice) {
         (Question::CloseTab { pane, index }, 0) => {
             save_document(window, live, false);
@@ -6831,21 +6969,40 @@ fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool 
     // 保存して閉じる on one pane's tab would save the other pane's document.
     window.set_focused_pane(id.index());
     let title = document.file.borrow().title();
+    // 追加要件 2026-09-08: **自動退避が切れていれば、真ん中の答えは無い。**
+    // 「作業コピーを残して閉じる」は要件 8.1 の退避があってはじめて意味を
+    // 持つ約束で、切ってあるときにそれを差し出すのは嘘になる——押せて、
+    // 閉じて、次の起動には戻ってこない。答えの並びが変わるので、返ってきた
+    // 番号は`answer_question`で読み直す。
+    if window.get_autosave() {
+        ask_question(
+            window,
+            live,
+            Question::CloseTab { pane: id, index },
+            format!(
+                "「{title}」には保存していない変更があります。\n\n\
+                 作業コピーを残して閉じると、次に起動したときに戻ってきます。"
+            ),
+            &[
+                "保存して閉じる",
+                "作業コピーを残して閉じる",
+                "破棄して閉じる",
+                "キャンセル",
+            ],
+            2,
+        );
+        return true;
+    }
     ask_question(
         window,
         live,
         Question::CloseTab { pane: id, index },
         format!(
             "「{title}」には保存していない変更があります。\n\n\
-             作業コピーを残して閉じると、次に起動したときに戻ってきます。"
+             自動退避を切ってあるので、閉じると元に戻せません。"
         ),
-        &[
-            "保存して閉じる",
-            "作業コピーを残して閉じる",
-            "破棄して閉じる",
-            "キャンセル",
-        ],
-        2,
+        &["保存して閉じる", "破棄して閉じる", "キャンセル"],
+        1,
     );
     true
 }
@@ -7357,6 +7514,47 @@ fn discard_work_copy(copy: &app_data::WorkCopy) {
     let _ = app_data::discard_in(&directory, copy);
 }
 
+/// Take away every work copy there is (追加要件 2026-09-08).
+///
+/// **自動退避を切った瞬間に走る。**切ったのに前の退避が残っていれば、次の
+/// 起動でそれが戻ってくる——書き手は「維持しない」と言ったのに、いちばん
+/// 古い姿だけが維持されることになる。開いている文書はそのまま：切るのは
+/// ディスクに置くことであって、書いているものではない。
+fn discard_all_work_copies(live: &Live) -> usize {
+    let Some(directory) = app_data::work_directory() else {
+        return 0;
+    };
+    let mut gone = 0;
+    for copy in app_data::read_all_in(&directory) {
+        if app_data::discard_in(&directory, &copy).is_ok() {
+            gone += 1;
+        }
+    }
+    live.cache
+        .borrow_mut()
+        .log_diag("work", &format!("autosave off, discarded={gone}"));
+    gone
+}
+
+/// Whether the settings file leaves the automatic work copies switched on.
+///
+/// **Asked of the file rather than the window**, because the one caller runs
+/// before the settings have been applied: 要件 8.1 puts the writer's own text
+/// on screen before anything else, and that is earlier in `main` than 要件 9's
+/// values are read. The window is the source of truth everywhere else.
+fn autosave_wanted() -> bool {
+    let Some(directory) = app_data::app_directory() else {
+        return true;
+    };
+    let Some(values) = app_data::read_settings(&directory) else {
+        return true;
+    };
+    values
+        .iter()
+        .find(|(name, _)| name == AUTOSAVE_SETTING)
+        .is_none_or(|(_, value)| value.trim() != "0")
+}
+
 /// Write the work copy if either of 要件 8.1's rules says it is time.
 ///
 /// The pending run is cleared whether the write succeeded or not. Left set, a
@@ -7396,7 +7594,16 @@ fn write_work_copy_now(window: &AppWindow, live: &Live) {
 }
 
 /// Write one document's work copy, if it has changes waiting.
+///
+/// 追加要件 2026-09-08: **自動退避を切ってあれば、ここで終わる。**要件 8.1 の
+/// 道はすべてこの1本を通る（時計も、タブを離れるときも、閉じるときも）ので、
+/// 止める場所も1つで足りる。**待っている旗は下ろさない**——切っている間に
+/// 書かれた文字は「まだ退避していない変更」のままで、書き手が入れ直せば
+/// その続きから退避が始まる。
 fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) {
+    if !window.get_autosave() {
+        return;
+    }
     if document.text.pending_since().is_none() {
         return;
     }
@@ -7534,6 +7741,13 @@ fn reload_from_file(window: &AppWindow, live: &Live) {
 /// buffer rather than lost — not losing what was typed is the point, and the
 /// name is the lesser half of it.
 fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> {
+    // 追加要件 2026-09-08: 自動退避を切ってあれば、戻すものは無い。切った
+    // ときに全部消しているので普段はここに何も残っていないが、**設定ファイル
+    // を手で書き換えた場合は残っている**——そのときも、切ってあると言われた
+    // なら戻さない。
+    if !autosave_wanted() {
+        return Vec::new();
+    }
     let Some(directory) = app_data::work_directory() else {
         return Vec::new();
     };
@@ -8303,11 +8517,42 @@ fn sheet_prefix(name: &str) -> (Option<usize>, &str) {
 /// the editor is set to lives.
 const DEFAULT_SHELL_SETTING: &str = "terminal.default";
 
+/// 追加要件 2026-09-08: whether the editor keeps work copies at all (要件 8.1).
+///
+/// **On unless the file says otherwise**, which is also what a fresh install
+/// has: 要件 8.1 is the promise the editor makes about unsaved work, and a
+/// writer who has not said anything has not asked to give it up.
+const AUTOSAVE_SETTING: &str = "work.autosave";
+
+/// 追加要件 2026-09-08: the shell list, one entry per numbered name
+/// (`terminal.shell.0`, `terminal.shell.1`, …).
+///
+/// **The numbers are the order, not an identity.** They are read in the order
+/// the file writes them and renumbered on the way out, so a writer who deletes
+/// the middle one gets a list of two rather than a hole.
+const SHELL_SETTING: &str = "terminal.shell";
+
 fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     let mut values = Vec::new();
+    // **一覧が先、既定が後。**読むほうは二度なめるので順に頼ってはいないが、
+    // 人が開いたときに「何があるか」を見てから「どれが既定か」を読むほうが
+    // 素直である。番号は書き出すたびに振り直すので、真ん中を消した一覧は
+    // 穴のあいた一覧ではなく、二つの一覧になる。
+    for (at, shell) in configured_shells(window).iter().enumerate() {
+        values.push((format!("{SHELL_SETTING}.{at}"), shell.written()));
+    }
+    // 追加要件 2026-09-08: **既定は名前で書く。**番号は一覧が変われば別の
+    // シェルを指し、その一覧はいまや書き手のものである。
     values.push((
         DEFAULT_SHELL_SETTING.to_owned(),
-        window.get_default_shell().to_string(),
+        offered_shells(window)
+            .get(window.get_default_shell().max(0) as usize)
+            .map(|shell| shell.name.clone())
+            .unwrap_or_default(),
+    ));
+    values.push((
+        AUTOSAVE_SETTING.to_owned(),
+        i32::from(window.get_autosave()).to_string(),
     ));
     let palette = window.get_palette();
     let fonts = window.get_sheet_fonts();
@@ -8345,15 +8590,42 @@ fn apply_settings(
     fonts: &VecModel<SharedString>,
     values: &[(String, String)],
 ) {
+    // 追加要件 2026-09-08: **一覧が先、二度なめてでも。**既定はその一覧の中の
+    // 一つを名前で指すので、指される側が揃っていなければ答えようがない——
+    // そして手で書き換えられた設定ファイルの並び順は、誰も約束していない。
+    let read: Vec<TerminalShell> = values
+        .iter()
+        .filter(|(name, _)| name.starts_with(SHELL_SETTING))
+        .filter_map(|(_, value)| TerminalShell::read(value))
+        .collect();
+    // **一件も読めなければ組み込みのまま。**シェルの無い編集器は、端末の
+    // タブを開く道がどこにも無い編集器である。
+    if !read.is_empty() {
+        hold_shells(window, &read);
+    }
     for (written, value) in values {
         // 追加要件 2026-09-07: the default shell, which belongs to neither
-        // sheet. **Held to the shells this build knows**, so a file naming a
-        // fourth one opens the first.
+        // sheet. **Held to the shells this machine offers**, so a file naming
+        // one it does not have opens the first one it does.
         if written == DEFAULT_SHELL_SETTING {
-            if let Ok(shell) = value.parse::<i32>() {
-                let most = TerminalShell::ALL.len() as i32 - 1;
-                window.set_default_shell(shell.clamp(0, most));
-            }
+            let offered = offered_shells(window);
+            let most = offered.len().saturating_sub(1) as i32;
+            // 番号で書かれた古い設定ファイルもそのまま読める（2026-09-08 まで
+            // はそちらだった）。
+            let at = match value.trim().parse::<i32>() {
+                Ok(number) => number,
+                Err(_) => offered
+                    .iter()
+                    .position(|shell| shell.name == value.trim())
+                    .map_or(0, |at| at as i32),
+            };
+            window.set_default_shell(at.clamp(0, most));
+            continue;
+        }
+        // 追加要件 2026-09-08: **`0`だけがOff。**読めない値は書いた覚えの
+        // 無い値なので、約束しているほう（要件 8.1 を守る側）へ倒す。
+        if written == AUTOSAVE_SETTING {
+            window.set_autosave(value.trim() != "0");
             continue;
         }
         let (only, name) = sheet_prefix(written);
@@ -9051,6 +9323,15 @@ impl PaneId {
 
     fn set_shows_preview(self, window: &AppWindow, shows: bool) {
         self.update_screen(window, |screen| screen.preview = shows);
+    }
+
+    /// Whether the tab in front of this pane is a shell (追加要件 Terminal).
+    ///
+    /// **The same flag the pane itself reads**, so Rust and the screen cannot
+    /// disagree about what is in front. Asked wherever a command means one
+    /// thing over text and another over a shell — or nothing at all.
+    fn shows_terminal(self, window: &AppWindow) -> bool {
+        self.screen(window).terminal
     }
 
     /// How much this pane magnifies the text (要件 9).
@@ -10124,6 +10405,27 @@ fn refresh_terminal(
         shell.bands.bands.retain(|band, _| wanted.contains(band));
     }
 
+    // **どれだけ描いているかを、秒ごとにひとことだけ**（2026-09-08追加）。
+    // 帯に切ってあるのは升目を描く費用を抑えるためで（この関数の注記）、
+    // 効いているかどうかは頻度でしか読めない。静かなシェルは1行も出さない。
+    let counted = {
+        let mut borrowed = cache.borrow_mut();
+        let now = Instant::now();
+        borrowed
+            .pane(id)
+            .shell(spot)
+            .and_then(|shell| shell.drew(now))
+    };
+    if let Some((drawn, span)) = counted {
+        cache.borrow_mut().log_diag(
+            "terminal",
+            &format!(
+                "frames pane={} spot={spot:?} drawn={drawn} in={span:.1}s",
+                id.log_name()
+            ),
+        );
+    }
+
     match spot {
         TerminalSpot::Front => {
             let height = (rows as f32 * line).ceil().max(1.0) as i32;
@@ -10235,7 +10537,7 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
     if !running {
         return;
     }
-    let Some(session) = start_shell(window, live, id, shell, id.shown_height(window)) else {
+    let Some(session) = start_shell(window, live, id, &shell, id.shown_height(window)) else {
         return;
     };
     {
@@ -10288,7 +10590,7 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
             .collect();
         next_untitled_number(&taken)
     };
-    let Some(session) = start_shell(window, live, id, shell, id.shown_height(window)) else {
+    let Some(session) = start_shell(window, live, id, &shell, id.shown_height(window)) else {
         return;
     };
     let document = OpenDocument::untitled(number, window.as_weak());
@@ -10312,7 +10614,7 @@ fn start_shell(
     window: &AppWindow,
     live: &Live,
     id: PaneId,
-    shell: TerminalShell,
+    shell: &TerminalShell,
     extent: f32,
 ) -> Option<TerminalSession> {
     let look = cells::TerminalLook::default();
@@ -10328,14 +10630,14 @@ fn start_shell(
         // any of it (要件 2).
         let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
     };
-    match TerminalSession::start(shell.name(), shell.command(), columns, rows, wake) {
+    match TerminalSession::start(&shell.name, &shell.command, columns, rows, wake) {
         Ok(session) => {
             live.cache.borrow_mut().log_diag(
                 "terminal",
                 &format!(
                     "open pane={} {} {columns}x{rows}",
                     id.log_name(),
-                    shell.command()
+                    shell.command
                 ),
             );
             Some(session)
@@ -10343,8 +10645,9 @@ fn start_shell(
         Err(error) => {
             live.cache
                 .borrow_mut()
-                .log_diag("terminal", &format!("open {} {error}", shell.command()));
-            window.set_render_status(format!("{}を開けませんでした: {error}", shell.name()).into());
+                .log_diag("terminal", &format!("open {} {error}", shell.command));
+            let told = format!("{}を開けませんでした: {error}", shell.name);
+            window.set_render_status(told.into());
             None
         }
     }
@@ -10731,8 +11034,8 @@ fn open_below_shell(window: &AppWindow, live: &Live, id: PaneId) -> bool {
     // 追加要件 2026-09-07: **the writer's default**, not WSL because WSL was
     // first. The strip has no room to ask and no name to show, so the one thing
     // it can be right about is being the same shell as everything else.
-    let shell = TerminalShell::at(window.get_default_shell());
-    let Some(session) = start_shell(window, live, id, shell, height) else {
+    let shell = shell_at(window, window.get_default_shell());
+    let Some(session) = start_shell(window, live, id, &shell, height) else {
         return false;
     };
     live.cache.borrow_mut().pane(id).below = Some(TerminalView::new(session));
@@ -13423,6 +13726,62 @@ mod tests {
 
         // The oldest falls off the end; the newest is never refused.
         assert_eq!(history, [d, c, a]);
+    }
+
+    /// 追加要件 2026-09-08: 接続先の一覧は設定ファイルの行になり、行から
+    /// 戻ってくる。**名前にも引数にも空白がある**ので、切るのは`|`であって
+    /// 空白ではない。
+    #[test]
+    fn a_shell_line_goes_out_and_comes_back_the_same() {
+        let shell = TerminalShell {
+            name: "PowerShell 7".to_owned(),
+            command: "pwsh.exe -NoLogo -WorkingDirectory .".to_owned(),
+        };
+
+        assert_eq!(
+            shell.written(),
+            "PowerShell 7 | pwsh.exe -NoLogo -WorkingDirectory ."
+        );
+        assert_eq!(TerminalShell::read(&shell.written()), Some(shell));
+    }
+
+    /// **`|`の無い行は、丸ごとコマンド行。**手で足すとき、名前を考えるまでも
+    /// ない接続先がある（`cmd.exe`）——そのときは道具の名前がそのまま名前に
+    /// なる。
+    #[test]
+    fn a_shell_line_with_no_name_is_named_after_its_program() {
+        let read = TerminalShell::read("  cmd.exe /k chcp 65001  ").expect("reads");
+
+        assert_eq!(read.name, "cmd.exe");
+        assert_eq!(read.command, "cmd.exe /k chcp 65001");
+        // PATHを探すのは最初の語だけ。引数はその道具のもので、ファイルの名前
+        // ではない。
+        assert_eq!(read.program(), "cmd.exe");
+    }
+
+    /// 片側しか無い行は行ではない。**断るのは`decode_settings`と同じ構え**
+    /// ——読めない1行は、設定を全部初期値へ戻す理由にはならない。
+    #[test]
+    fn half_a_shell_line_is_refused() {
+        assert_eq!(TerminalShell::read(""), None);
+        assert_eq!(TerminalShell::read("   "), None);
+        assert_eq!(TerminalShell::read("WSL |"), None);
+        assert_eq!(TerminalShell::read("| wsl.exe"), None);
+    }
+
+    /// 組み込みの三つは、そのまま設定ファイルの行として往復できる——初回に
+    /// 書き出されるのはこれで、書き手が手を入れる出発点になる。
+    #[test]
+    fn the_built_in_shells_survive_the_settings_file() {
+        for shell in TerminalShell::built_in() {
+            let line = shell.written();
+            assert_eq!(TerminalShell::read(&line), Some(shell.clone()));
+            let values = vec![(format!("{SHELL_SETTING}.0"), line)];
+            let file = app_data::encode_settings(&values);
+            let read = app_data::decode_settings(&file).expect("reads");
+
+            assert_eq!(read, values, "{} は行のまま戻る", shell.name);
+        }
     }
 
     fn engine_for(text: &str, zoom: i32) -> TextEngine {

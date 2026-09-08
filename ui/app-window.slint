@@ -2,7 +2,7 @@ import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
-import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
+import { ColorCell, Field, Icon, IconButton, Icons, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
 import { QuickDraft } from "quick-draft.slint";
 
 // Re-exported so they stay part of this window's public API: Rust builds the
@@ -293,6 +293,13 @@ export component AppWindow inherits Window {
     in property <[string]> sheet-fonts;
     /// Which sheet the panel is showing: 0 horizontal, 1 vertical.
     in-out property <int> sheet: 0;
+    /// 追加要件 2026-09-08: どの群を出しているか——0 General、1 Text、
+    /// 2 Layout、3 Page。
+    ///
+    /// **窓が持つ**（パネルの中ではなく）。`PopupWindow`の中身は開くたびに
+    /// 作り直されるので、そこに置いた値は毎回0へ戻る——書き手が Layout を
+    /// 見ていて閉じ、また開けば、見たいのは Layout である。
+    property <int> settings-tab: 0;
     /// What the picker lists, and what it is picking for. The list is read from
     /// the system the first time it is opened.
     in property <[string]> font-names;
@@ -365,6 +372,9 @@ export component AppWindow inherits Window {
     callback pane-below-scrolled(int, float);
     callback pane-below-selection(int, float, float, int);
     callback pane-below-sent(int);
+    /// 書き手の報告 2026-09-08: 下段のシェルで選んでいるものを写す
+    /// （要件 11.2 の`Ctrl+Shift+C`と同じ道）。
+    callback pane-below-copy(int);
     callback pane-below-draft-edited(int, string);
     callback pane-navigate(int, bool);
     /// 要件 7.2 の変換、下段のシェルの上で。
@@ -384,10 +394,24 @@ export component AppWindow inherits Window {
     /// The shells a terminal tab can be opened on (追加要件 Terminal). **Named
     /// by Rust**, because the list is what can actually be started.
     in property <[string]> terminal-shells;
+    /// 追加要件 2026-09-08: 設定ファイルが並べているシェルを、書かれたままの
+    /// 形で（`名前 | コマンド行`）。
+    ///
+    /// **画面はこれを読まない。**メニューが読むのは上の`terminal-shells`——
+    /// この機械に実際にあるものだけを名前で並べたほうである。ここに在るのは
+    /// 「設定ファイルへ書き戻すもの」で、書き戻す関数が持っているのは窓だけ
+    /// だから、窓が持っている。要件 9 の数・色・書体と同じ置き方。
+    in property <[string]> terminal-shell-lines;
     /// 追加要件 2026-09-07: **どれが既定か。**接続先を訊かない場所——`＋`のNew Tab、
     /// タブ列のメニュー、ペインの下段——はすべてこれを起こす。設定にも残る。
     in-out property <int> default-shell: 0;
     callback default-shell-chosen(int);
+    /// 追加要件 2026-09-08: 要件 8.1 の自動退避を働かせるかどうか。
+    ///
+    /// **既定はOn。**何も言っていない書き手は、未保存の中身を捨ててくれとは
+    /// 言っていない。Offにした瞬間に、置いてある作業コピーは全部消える。
+    in-out property <bool> autosave: true;
+    callback autosave-toggled(bool);
     callback pane-tab(int);
     callback pane-preedit-changed(int, string);
     callback pane-backspace(int);
@@ -732,15 +756,22 @@ export component AppWindow inherits Window {
                                 }
                             }
                             MenuSep { }
-                            MenuRow {
+                            // 追加要件 2026-09-08: **探す相手がいないときは
+                            // 出さない。**この行は要件 7.7 の帯をいま鍵盤を
+                            // 持っているペインの上に開くが、そこにシェルが
+                            // 立っているなら帯が読むのはその裏の見えない文書
+                            // ——押せて、開いて、何も見つからない。
+                            //
+                            // **`if`の中の行は頼んでから閉じる**（6.24）。
+                            if !root.panes[root.focused-pane].terminal: MenuRow {
                                 title: "Find in File…";
                                 shortcut: "Ctrl+F"; activated => {
-                                    app-menu.close();
                                     root.find-pane = root.focused-pane;
                                     root.find-replacing = false;
                                     root.find-open = true;
                                     root.find-generation += 1;
                                     root.focus-generation += 1;
+                                    app-menu.close();
                                 }
                             }
                             MenuRow {
@@ -1659,6 +1690,7 @@ export component AppWindow inherits Window {
                         below-selection-update(x, y) => { root.pane-below-selection(pane.id, x, y, 1); }
                         below-selection-end(x, y) => { root.pane-below-selection(pane.id, x, y, 2); }
                         below-sent => { root.pane-below-sent(pane.id); }
+                        below-copy => { root.pane-below-copy(pane.id); }
                         below-caret-x: pane.below-caret-x;
                         below-caret-y: pane.below-caret-y;
                         below-buffer <=> pane.below-buffer;
@@ -2225,384 +2257,486 @@ export component AppWindow inherits Window {
                     background: Tok.rule;
                 }
 
-                // 追加要件 2026-09-07: **書字方向を持たない設定はここ**、
-                // シートを選ぶより前に。下にあるものはすべてそのシートのもの、
-                // という読み方を壊さないため。
-                Text {
-                    text: "TERMINAL";
-                    color: Tok.ink-faint;
-                    font-size: 10px;
-                    letter-spacing: 0.9px;
-                }
+                // 追加要件 2026-09-08: **一度に一つの群だけ出す。**
+                // 設定は増える一方で、一枚に積むと下のほうは窓から
+                // 落ちる。帯で群を選び、下はその群だけになる。
+                //
+                // 面の並びは**書字方向を持つかどうか**で切れている：
+                // General だけが方向を持たず、残りの3面はどれも
+                // シート（横書き／縦書き）の上の値である。だから
+                // シートを選ぶ釦は General には無く、他の3面に在る。
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 2px;
 
-                PickRow {
-                    label: "Default";
-                    value: root.terminal-shells[root.default-shell];
-                    pressed => {
-                        default-shell-menu.show();
+                    PanelTab {
+                        title: "General";
+                        current: root.settings-tab == 0;
+                        clicked => {
+                            root.settings-tab = 0;
+                        }
+                    }
+                    PanelTab {
+                        title: "Text";
+                        current: root.settings-tab == 1;
+                        clicked => {
+                            root.settings-tab = 1;
+                        }
+                    }
+                    PanelTab {
+                        title: "Layout";
+                        current: root.settings-tab == 2;
+                        clicked => {
+                            root.settings-tab = 2;
+                        }
+                    }
+                    PanelTab {
+                        title: "Page";
+                        current: root.settings-tab == 3;
+                        clicked => {
+                            root.settings-tab = 3;
+                        }
                     }
                 }
 
-                default-shell-menu := PopupWindow {
-                    x: 60px;
-                    y: 78px;
-                    width: 240px;
-                    close-policy: close-on-click-outside;
+                Rectangle {
+                    height: 1px;
+                    background: Tok.rule;
+                }
 
-                    MenuFrame {
+                if root.settings-tab == 0: VerticalLayout {
+                    spacing: 8px;
+
+                    // 追加要件 2026-09-07: **書字方向を持たない設定はここ**。
+                    // 2026-09-08 からはこの面が丸ごとそれで、シートを選ぶ釦は
+                    // 隣の3面にある。
+                    Text {
+                        text: "TERMINAL";
+                        color: Tok.ink-faint;
+                        font-size: 10px;
+                        letter-spacing: 0.9px;
+                    }
+
+                    PickRow {
+                        label: "Default";
+                        value: root.terminal-shells[root.default-shell];
+                        pressed => {
+                            default-shell-menu.show();
+                        }
+                    }
+
+                    // **原点はこの群の左上**（技術検証 6.30：popupを
+                    // レイアウトに直に置くと、そのレイアウトの左上から
+                    // 数える）。帯の下に群が入ったので、パネルの上端から
+                    // 数えていた78pxは、この群の中の78pxになった——
+                    // 見出し13px＋間8px＋行28pxの、行の下。
+                    default-shell-menu := PopupWindow {
+                        x: 60px;
+                        y: 52px;
                         width: 240px;
+                        close-policy: close-on-click-outside;
 
-                        VerticalLayout {
-                            padding: 6px;
-                            spacing: 1px;
+                        MenuFrame {
+                            width: 240px;
 
-                            // **頼んでから閉じる**（書き手の報告 2026-09-07:
-                            // WSL以外に変えられない）。`close`はこのメニューの
-                            // 木を——この行と、行を包む`for`ごと——捨てるので、
-                            // その後で`root`へ登ろうとすると生成されたコードは
-                            // `parent.upgrade()`に失敗し、**黙って何もしない**。
-                            // タブの接続先の一覧で同じことを踏んだ。
-                            for shell[index] in root.terminal-shells: MenuRow {
-                                title: shell;
-                                checked: index == root.default-shell;
-                                activated => {
-                                    root.default-shell-chosen(index);
-                                    default-shell-menu.close();
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 1px;
+
+                                // **頼んでから閉じる**（書き手の報告 2026-09-07:
+                                // WSL以外に変えられない）。`close`はこのメニューの
+                                // 木を——この行と、行を包む`for`ごと——捨てるので、
+                                // その後で`root`へ登ろうとすると生成されたコードは
+                                // `parent.upgrade()`に失敗し、**黙って何もしない**。
+                                // タブの接続先の一覧で同じことを踏んだ。
+                                for shell[index] in root.terminal-shells: MenuRow {
+                                    title: shell;
+                                    checked: index == root.default-shell;
+                                    activated => {
+                                        root.default-shell-chosen(index);
+                                        default-shell-menu.close();
+                                    }
                                 }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Tok.rule;
+                    }
+
+                    Text {
+                        text: "FILES";
+                        color: Tok.ink-faint;
+                        font-size: 10px;
+                        letter-spacing: 0.9px;
+                    }
+
+                    // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
+                    // Offが何を意味するかを、同じ場所で言う**——「切ってある
+                    // 間は書かない」だけなら、置いてある古い退避が次の起動で
+                    // 戻ってきて、書き手の言ったこととちょうど逆になる。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Auto-save";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        TextButton {
+                            title: root.autosave ? "On" : "Off";
+                            role: root.autosave ? Role.primary : Role.normal;
+                            clicked => {
+                                root.autosave-toggled(!root.autosave);
+                            }
+                        }
+                    }
+
+                    // **折り返さない。**`wrap: word-wrap`のTextは、`min-width`が
+                    // 0になる代わりに`preferred-width`が「一行に伸ばしたときの
+                    // 幅」のまま残る（`builtins.slint`, Text）。popupは開くとき
+                    // に`preferred`で、その後の更新では`min`で大きさを決め直す
+                    // ので、両者が食い違うぶんだけ**開いた直後に寸法が変わる**。
+                    // `overflow: elide`なら`min-width`は同じく0で、高さは一行
+                    // ぶんに定まる——幅と高さが互いを見ない形にしておく。
+                    Text {
+                        text: root.autosave
+                            ? "入力が止まって2秒、続いていても5秒ごとに退避します。"
+                            : "退避しません。切り替えたときに作業コピーも消えます。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+
+                // どの面にいても、値はいまのシートのもの——だから帯のすぐ
+                // 下に在る（要件 9）。
+                if root.settings-tab != 0: VerticalLayout {
+                    spacing: 8px;
+
+                    // 要件 9: which sheet is being set. **Everything below belongs
+                    // to it** — there is nothing to mark, because a value that is
+                    // on screen while 縦書き is chosen is the vertical one.
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        TextButton {
+                            title: "Horizontal";
+                            role: root.sheet == 0 ? Role.primary : Role.normal;
+                            clicked => {
+                                root.sheet = 0;
+                            }
+                        }
+                        TextButton {
+                            title: "Vertical";
+                            role: root.sheet == 1 ? Role.primary : Role.normal;
+                            clicked => {
+                                root.sheet = 1;
                             }
                         }
                     }
                 }
 
-                Rectangle {
-                    height: 1px;
-                    background: Tok.rule;
-                }
-
-                Text {
-                    text: "TYPOGRAPHY";
-                    color: Tok.ink-faint;
-                    font-size: 10px;
-                    letter-spacing: 0.9px;
-                }
-
-                // 要件 9: which sheet is being set. **Everything below belongs
-                // to it** — there is nothing to mark, because a value that is
-                // on screen while 縦書き is chosen is the vertical one.
-                HorizontalLayout {
-                    spacing: 2px;
-
-                    TextButton {
-                        title: "Horizontal";
-                        role: root.sheet == 0 ? Role.primary : Role.normal;
-                        clicked => {
-                            root.sheet = 0;
-                        }
-                    }
-                    TextButton {
-                        title: "Vertical";
-                        role: root.sheet == 1 ? Role.primary : Role.normal;
-                        clicked => {
-                            root.sheet = 1;
-                        }
-                    }
-                }
-
-                Text {
-                    text: "TEXT";
-                    color: Tok.ink-faint;
-                    font-size: 10px;
-                    letter-spacing: 0.9px;
-                }
-
-                // One row per kind of text: how large, what colour, which
-                // family. The numbers are the rows of the models — ten numbers,
-                // eight colours and eight families to a sheet — and the same
-                // numbers are what the callbacks carry.
-                TextRow {
-                    label: "Body";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride] + " px";
-                    shown: root.palette[root.sheet * 8 + 0];
-                    family: root.sheet-fonts[root.sheet * 8 + 0];
-                    stepped(by) => {
-                        root.typography-step(0, by);
-                    }
-                    picked => {
-                        root.color-picked(0);
-                    }
-                    chose-font => {
-                        root.font-picked(0);
-                        font-menu.show();
-                    }
-                }
-
-                TextRow {
-                    label: "H1";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 4] + "%";
-                    shown: root.palette[root.sheet * 8 + 1];
-                    family: root.sheet-fonts[root.sheet * 8 + 1];
-                    stepped(by) => {
-                        root.typography-step(4, by);
-                    }
-                    picked => {
-                        root.color-picked(1);
-                    }
-                    chose-font => {
-                        root.font-picked(1);
-                        font-menu.show();
-                    }
-                }
-
-                TextRow {
-                    label: "H2";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 5] + "%";
-                    shown: root.palette[root.sheet * 8 + 2];
-                    family: root.sheet-fonts[root.sheet * 8 + 2];
-                    stepped(by) => {
-                        root.typography-step(5, by);
-                    }
-                    picked => {
-                        root.color-picked(2);
-                    }
-                    chose-font => {
-                        root.font-picked(2);
-                        font-menu.show();
-                    }
-                }
-
-                TextRow {
-                    label: "H3";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 6] + "%";
-                    shown: root.palette[root.sheet * 8 + 3];
-                    family: root.sheet-fonts[root.sheet * 8 + 3];
-                    stepped(by) => {
-                        root.typography-step(6, by);
-                    }
-                    picked => {
-                        root.color-picked(3);
-                    }
-                    chose-font => {
-                        root.font-picked(3);
-                        font-menu.show();
-                    }
-                }
-
-                TextRow {
-                    label: "H4";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 7] + "%";
-                    shown: root.palette[root.sheet * 8 + 4];
-                    family: root.sheet-fonts[root.sheet * 8 + 4];
-                    stepped(by) => {
-                        root.typography-step(7, by);
-                    }
-                    picked => {
-                        root.color-picked(4);
-                    }
-                    chose-font => {
-                        root.font-picked(4);
-                        font-menu.show();
-                    }
-                }
-
-                TextRow {
-                    label: "H5";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 8] + "%";
-                    shown: root.palette[root.sheet * 8 + 5];
-                    family: root.sheet-fonts[root.sheet * 8 + 5];
-                    stepped(by) => {
-                        root.typography-step(8, by);
-                    }
-                    picked => {
-                        root.color-picked(5);
-                    }
-                    chose-font => {
-                        root.font-picked(5);
-                        font-menu.show();
-                    }
-                }
-
-                TextRow {
-                    label: "H6";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 9] + "%";
-                    shown: root.palette[root.sheet * 8 + 6];
-                    family: root.sheet-fonts[root.sheet * 8 + 6];
-                    stepped(by) => {
-                        root.typography-step(9, by);
-                    }
-                    picked => {
-                        root.color-picked(6);
-                    }
-                    chose-font => {
-                        root.font-picked(6);
-                        font-menu.show();
-                    }
-                }
-
-                Text {
-                    text: "SPACING";
-                    color: Tok.ink-faint;
-                    font-size: 10px;
-                    letter-spacing: 0.9px;
-                }
-
-                // 要件 9 calls the flow advance 行間 in horizontal writing and
-                // 列間隔 in vertical writing. **One quantity, two names**: the
-                // label follows the sheet, because on this sheet that is what
-                // it is.
-                StepRow {
-                    label: root.sheet == 0 ? "Line height" : "Column gap";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 1] + "%";
-                    stepped(by) => {
-                        root.typography-step(1, by);
-                    }
-                }
-
-                StepRow {
-                    label: "Char advance";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 2] + "%";
-                    stepped(by) => {
-                        root.typography-step(2, by);
-                    }
-                }
-
-                StepRow {
-                    label: "Page margin";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 3] + " px";
-                    stepped(by) => {
-                        root.typography-step(3, by);
-                    }
-                }
-
-                // 要件 9: how long a line may be. **Two switches that cannot
-                // both be on**, and neither of them on is the third answer: the
-                // line is not wrapped at all. One value holds all three, so
-                // "both on" is not a state this can reach — and pressing the
-                // one that is on turns it off, which is how the writer says
-                // "neither" without a button for it.
-                HorizontalLayout {
-                    spacing: 2px;
-
-                    Text {
-                        text: "Wrap";
-                        color: Tok.ink;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-
-                    // **The state that is an absence is still named.** With
-                    // neither switch on, a row of unlit buttons reads as a
-                    // setting nobody has made rather than as the setting it is.
-                    if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 0: Text {
-                        text: "not wrapped";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-
-                    TextButton {
-                        title: "Width";
-                        role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
-                            ? Role.primary
-                            : Role.normal;
-                        clicked => {
-                            root.typography-chose(10,
-                                root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
-                                    ? 0
-                                    : 1);
-                        }
-                    }
-                    TextButton {
-                        title: "Pane";
-                        role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
-                            ? Role.primary
-                            : Role.normal;
-                        clicked => {
-                            root.typography-chose(10,
-                                root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
-                                    ? 0
-                                    : 2);
-                        }
-                    }
-                }
-
-                // In characters of body text, because that is what a line
-                // length means: the number stays true when the body size or the
-                // zoom changes, and a width in pixels would not.
-                if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1: StepRow {
-                    label: "Line length";
-                    value: root.sheet-numbers[root.sheet * root.sheet-stride + 11] + " chars";
-                    stepped(by) => {
-                        root.typography-step(11, by);
-                    }
-                }
-
-                // 要件 9（2026-09-07追加）: 行番号。**どちらの面にも置く**
-                // ——横書きでは行の頭の余白に、縦書きでは列の頭（面の上端）に、
-                // 同じ形で立つ。数字はどちらでも正立させる。
-                HorizontalLayout {
-                    spacing: 2px;
-
-                    Text {
-                        text: "Line numbers";
-                        color: Tok.ink;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-
-                    TextButton {
-                        title: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                            ? "Shown"
-                            : "Hidden";
-                        role: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                            ? Role.primary
-                            : Role.normal;
-                        clicked => {
-                            root.typography-chose(12,
-                                root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                                    ? 0
-                                    : 1);
-                        }
-                    }
-                }
-
-                Text {
-                    text: "PAGE";
-                    color: Tok.ink-faint;
-                    font-size: 10px;
-                    letter-spacing: 0.9px;
-                }
-
-                ColorCell {
-                    label: "Paper";
-                    shown: root.palette[root.sheet * 8 + 7];
-                    picked => {
-                        root.color-picked(7);
-                    }
-                }
-
-                PickRow {
-                    label: "Code";
-                    value: root.sheet-fonts[root.sheet * 8 + 7];
-                    pressed => {
-                        root.font-picked(7);
-                        font-menu.show();
-                    }
-                }
-
-                Rectangle {
-                    height: 1px;
-                    background: Tok.rule;
-                }
-
-                HorizontalLayout {
+                if root.settings-tab == 1: VerticalLayout {
                     spacing: 8px;
 
-                    TextButton {
-                        title: "Reset";
-                        clicked => {
-                            root.typography-reset();
+                    // One row per kind of text: how large, what colour, which
+                    // family. The numbers are the rows of the models — ten numbers,
+                    // eight colours and eight families to a sheet — and the same
+                    // numbers are what the callbacks carry.
+                    TextRow {
+                        label: "Body";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride] + " px";
+                        shown: root.palette[root.sheet * 8 + 0];
+                        family: root.sheet-fonts[root.sheet * 8 + 0];
+                        stepped(by) => {
+                            root.typography-step(0, by);
+                        }
+                        picked => {
+                            root.color-picked(0);
+                        }
+                        chose-font => {
+                            root.font-picked(0);
+                            font-menu.show();
+                        }
+                    }
+
+                    TextRow {
+                        label: "H1";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 4] + "%";
+                        shown: root.palette[root.sheet * 8 + 1];
+                        family: root.sheet-fonts[root.sheet * 8 + 1];
+                        stepped(by) => {
+                            root.typography-step(4, by);
+                        }
+                        picked => {
+                            root.color-picked(1);
+                        }
+                        chose-font => {
+                            root.font-picked(1);
+                            font-menu.show();
+                        }
+                    }
+
+                    TextRow {
+                        label: "H2";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 5] + "%";
+                        shown: root.palette[root.sheet * 8 + 2];
+                        family: root.sheet-fonts[root.sheet * 8 + 2];
+                        stepped(by) => {
+                            root.typography-step(5, by);
+                        }
+                        picked => {
+                            root.color-picked(2);
+                        }
+                        chose-font => {
+                            root.font-picked(2);
+                            font-menu.show();
+                        }
+                    }
+
+                    TextRow {
+                        label: "H3";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 6] + "%";
+                        shown: root.palette[root.sheet * 8 + 3];
+                        family: root.sheet-fonts[root.sheet * 8 + 3];
+                        stepped(by) => {
+                            root.typography-step(6, by);
+                        }
+                        picked => {
+                            root.color-picked(3);
+                        }
+                        chose-font => {
+                            root.font-picked(3);
+                            font-menu.show();
+                        }
+                    }
+
+                    TextRow {
+                        label: "H4";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 7] + "%";
+                        shown: root.palette[root.sheet * 8 + 4];
+                        family: root.sheet-fonts[root.sheet * 8 + 4];
+                        stepped(by) => {
+                            root.typography-step(7, by);
+                        }
+                        picked => {
+                            root.color-picked(4);
+                        }
+                        chose-font => {
+                            root.font-picked(4);
+                            font-menu.show();
+                        }
+                    }
+
+                    TextRow {
+                        label: "H5";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 8] + "%";
+                        shown: root.palette[root.sheet * 8 + 5];
+                        family: root.sheet-fonts[root.sheet * 8 + 5];
+                        stepped(by) => {
+                            root.typography-step(8, by);
+                        }
+                        picked => {
+                            root.color-picked(5);
+                        }
+                        chose-font => {
+                            root.font-picked(5);
+                            font-menu.show();
+                        }
+                    }
+
+                    TextRow {
+                        label: "H6";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 9] + "%";
+                        shown: root.palette[root.sheet * 8 + 6];
+                        family: root.sheet-fonts[root.sheet * 8 + 6];
+                        stepped(by) => {
+                            root.typography-step(9, by);
+                        }
+                        picked => {
+                            root.color-picked(6);
+                        }
+                        chose-font => {
+                            root.font-picked(6);
+                            font-menu.show();
+                        }
+                    }
+                }
+
+                if root.settings-tab == 2: VerticalLayout {
+                    spacing: 8px;
+
+                    // 要件 9 calls the flow advance 行間 in horizontal writing and
+                    // 列間隔 in vertical writing. **One quantity, two names**: the
+                    // label follows the sheet, because on this sheet that is what
+                    // it is.
+                    StepRow {
+                        label: root.sheet == 0 ? "Line height" : "Column gap";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 1] + "%";
+                        stepped(by) => {
+                            root.typography-step(1, by);
+                        }
+                    }
+
+                    StepRow {
+                        label: "Char advance";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 2] + "%";
+                        stepped(by) => {
+                            root.typography-step(2, by);
+                        }
+                    }
+
+                    StepRow {
+                        label: "Page margin";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 3] + " px";
+                        stepped(by) => {
+                            root.typography-step(3, by);
+                        }
+                    }
+
+                    // 要件 9: how long a line may be. **Two switches that cannot
+                    // both be on**, and neither of them on is the third answer: the
+                    // line is not wrapped at all. One value holds all three, so
+                    // "both on" is not a state this can reach — and pressing the
+                    // one that is on turns it off, which is how the writer says
+                    // "neither" without a button for it.
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Wrap";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        // **The state that is an absence is still named.** With
+                        // neither switch on, a row of unlit buttons reads as a
+                        // setting nobody has made rather than as the setting it is.
+                        if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 0: Text {
+                            text: "not wrapped";
+                            color: Tok.ink-faint;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        TextButton {
+                            title: "Width";
+                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
+                                ? Role.primary
+                                : Role.normal;
+                            clicked => {
+                                root.typography-chose(10,
+                                    root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
+                                        ? 0
+                                        : 1);
+                            }
+                        }
+                        TextButton {
+                            title: "Pane";
+                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
+                                ? Role.primary
+                                : Role.normal;
+                            clicked => {
+                                root.typography-chose(10,
+                                    root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
+                                        ? 0
+                                        : 2);
+                            }
+                        }
+                    }
+
+                    // In characters of body text, because that is what a line
+                    // length means: the number stays true when the body size or the
+                    // zoom changes, and a width in pixels would not.
+                    if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1: StepRow {
+                        label: "Line length";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 11] + " chars";
+                        stepped(by) => {
+                            root.typography-step(11, by);
+                        }
+                    }
+
+                    // 要件 9（2026-09-07追加）: 行番号。**どちらの面にも置く**
+                    // ——横書きでは行の頭の余白に、縦書きでは列の頭（面の上端）に、
+                    // 同じ形で立つ。数字はどちらでも正立させる。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Line numbers";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        TextButton {
+                            title: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
+                                ? "Shown"
+                                : "Hidden";
+                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
+                                ? Role.primary
+                                : Role.normal;
+                            clicked => {
+                                root.typography-chose(12,
+                                    root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
+                                        ? 0
+                                        : 1);
+                            }
+                        }
+                    }
+                }
+
+                if root.settings-tab == 3: VerticalLayout {
+                    spacing: 8px;
+
+                    // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
+                    // ——この面には紙の**色**と、コードの**書体**が並んでいて、
+                    // どちらも「紙」「コード」としか言っていなかった。
+                    ColorCell {
+                        label: "Paper Color";
+                        shown: root.palette[root.sheet * 8 + 7];
+                        picked => {
+                            root.color-picked(7);
+                        }
+                    }
+
+                    PickRow {
+                        label: "Code Font";
+                        value: root.sheet-fonts[root.sheet * 8 + 7];
+                        pressed => {
+                            root.font-picked(7);
+                            font-menu.show();
+                        }
+                    }
+                }
+
+                // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
+                // なので、書式の面にだけ置く。General の2つはこれで戻らない。
+                if root.settings-tab != 0: VerticalLayout {
+                    spacing: 8px;
+
+                    Rectangle {
+                        height: 1px;
+                        background: Tok.rule;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        TextButton {
+                            title: "Reset";
+                            clicked => {
+                                root.typography-reset();
+                            }
                         }
                     }
                 }

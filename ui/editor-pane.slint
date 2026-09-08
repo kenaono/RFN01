@@ -323,6 +323,17 @@ export component EditorPane inherits Rectangle {
     callback below-resized(length);
     /// 追加要件 Terminal: open or close the strip (`Ctrl+\``).
     callback below-toggled();
+    /// 書き手の報告 2026-09-08: 下段のシェルで選んでいるものを写す。
+    ///
+    /// **上の面の`copy-requested`とは別の口。**あちらは「前に出ているタブ」を
+    /// 見て写す先を決めるが、下段は前に出ているものが何であれ下段である。
+    callback below-copy();
+    /// 下段の右ボタンが開いたメニューの、この帯の中での位置
+    /// （書き手の報告 2026-09-08）。**開いたものと同じ座標系で数える**
+    /// （技術検証 6.30）——`TouchArea`の`mouse-x`をそのまま渡し、popupは
+    /// その`TouchArea`と同じ箱の中に置く。
+    property <length> below-menu-x;
+    property <length> below-menu-y;
     /// 書き手の報告 2026-09-07: 戻る（false）と進む（true）。**ブラウザと同じ
     /// 手つき**——左パネルの一覧を歩くと、見てきたファイルは順に並ぶ。
     callback navigate-requested(bool);
@@ -957,30 +968,40 @@ export component EditorPane inherits Rectangle {
                         padding: 6px;
                         spacing: 1px;
 
-                        MenuRow {
-                            title: "Save";
-                            shortcut: "Ctrl+S";
-                            activated => {
-                                pane-menu.close();
-                                root.save-requested();
+                        // 追加要件 2026-09-08: **シェルには名前も道も無く、
+                        // 保存するものも無い**——タブのメニューが 2026-09-07 に
+                        // 落とした3行と同じ理由で、こちらからも落とす。同じ
+                        // ことを2か所で言っている限り、片方だけ直す日が来る。
+                        //
+                        // **`if`の中の行は頼んでから閉じる**（技術検証 6.24）。
+                        if !root.terminal: VerticalLayout {
+                            spacing: 1px;
+
+                            MenuRow {
+                                title: "Save";
+                                shortcut: "Ctrl+S";
+                                activated => {
+                                    root.save-requested();
+                                    pane-menu.close();
+                                }
                             }
-                        }
-                        MenuRow {
-                            title: "Save As…";
-                            shortcut: "Ctrl+Shift+S";
-                            activated => {
-                                pane-menu.close();
-                                root.save-as-requested();
+                            MenuRow {
+                                title: "Save As…";
+                                shortcut: "Ctrl+Shift+S";
+                                activated => {
+                                    root.save-as-requested();
+                                    pane-menu.close();
+                                }
                             }
-                        }
-                        MenuRow {
-                            title: "Reveal in Explorer";
-                            activated => {
-                                pane-menu.close();
-                                root.reveal-requested();
+                            MenuRow {
+                                title: "Reveal in Explorer";
+                                activated => {
+                                    root.reveal-requested();
+                                    pane-menu.close();
+                                }
                             }
+                            MenuSep { }
                         }
-                        MenuSep { }
                         MenuRow {
                             title: "Close Tab";
                             shortcut: "Ctrl+W";
@@ -1094,31 +1115,37 @@ export component EditorPane inherits Rectangle {
                         // so the window cannot tell from the signal alone
                         // whether focus should follow, and this is the end
                         // that knows.
-                        MenuRow {
-                            title: "Zoom In";
-                            shortcut: "Ctrl+=";
-                            activated => {
-                                pane-menu.close();
-                                root.zoom-stepped(1);
-                                ime-input.focus();
+                        // 追加要件 2026-09-08: 倍率は文書のもの——シェルの
+                        // 升目には効かない（右ボタンのメニューと同じ理由）。
+                        if !root.terminal: VerticalLayout {
+                            spacing: 1px;
+
+                            MenuRow {
+                                title: "Zoom In";
+                                shortcut: "Ctrl+=";
+                                activated => {
+                                    root.zoom-stepped(1);
+                                    ime-input.focus();
+                                    pane-menu.close();
+                                }
                             }
-                        }
-                        MenuRow {
-                            title: "Zoom Out";
-                            shortcut: "Ctrl+-";
-                            activated => {
-                                pane-menu.close();
-                                root.zoom-stepped(-1);
-                                ime-input.focus();
+                            MenuRow {
+                                title: "Zoom Out";
+                                shortcut: "Ctrl+-";
+                                activated => {
+                                    root.zoom-stepped(-1);
+                                    ime-input.focus();
+                                    pane-menu.close();
+                                }
                             }
-                        }
-                        MenuRow {
-                            title: "Reset Zoom";
-                            shortcut: "Ctrl+0";
-                            activated => {
-                                pane-menu.close();
-                                root.zoom-reset-requested();
-                                ime-input.focus();
+                            MenuRow {
+                                title: "Reset Zoom";
+                                shortcut: "Ctrl+0";
+                                activated => {
+                                    root.zoom-reset-requested();
+                                    ime-input.focus();
+                                    pane-menu.close();
+                                }
                             }
                         }
                     }
@@ -1382,7 +1409,21 @@ export component EditorPane inherits Rectangle {
                     x: root.vertical ? 0px : max(0px, (parent.width - self.width) / 2);
                     y: root.vertical ? max(0px, (parent.height - self.height) / 2) : 0px;
                     background: root.page-background;
-                    border-width: ime-input.has-focus ? 2px : 0px;
+                    // 書き手の報告 2026-09-08:「設定を開いていると背面がちらつく」
+                    // ——ちらついていたのはこの線だった。**Slintの`has-focus`は
+                    // popupが開いた瞬間に落ちる**（`WindowInner::show_popup`が
+                    // `FocusReason::PopupActivation`で焦点の要素を取り上げ、
+                    // 閉じるときに返す）ので、メニューを開くたびに枠が消えて
+                    // 戻っていた。指定幅で折り返しているときは、この枠が幅の
+                    // 境界線そのものとして見えている（要件 9）ので、いちばん
+                    // 目につく場所で点滅していたことになる。
+                    //
+                    // **要件 6.3 と同じ旗で言う**：アクセントは「キーボードは
+                    // ここ」の色で、それを持っているのは`focused-pane`——Rust
+                    // が決める値なので、popupが横から取り上げることがない。
+                    // タブがアクセントを着る条件とこの枠の条件が同じになった
+                    // （同じことを2か所で別々に判じていた、6.15の形）。
+                    border-width: root.focused ? 2px : 0px;
                     border-color: Tok.accent;
 
                     // Held here rather than watched on the parent: a `changed`
@@ -1907,17 +1948,33 @@ export component EditorPane inherits Rectangle {
                                     padding: 6px;
                                     spacing: 1px;
 
-                                    MenuRow {
+                                    // 追加要件 2026-09-08: **押しても何も
+                                    // 起きない行は出さない。**シェルが前に
+                                    // 出ているとき、この面の下にある文書は
+                                    // 見えていない——`Cut`はその見えない文書
+                                    // から切り取り、`Ctrl+Space`はその中に印を
+                                    // 置いていた。
+                                    //
+                                    // **`if`の中の行は頼んでから閉じる**
+                                    // （技術検証 6.24・6.30）。`close`はこの木を
+                                    // 捨て、捨てられた木から`root`へ登ろうと
+                                    // した生成コードは黙って何もしない。
+                                    if !root.terminal: MenuRow {
                                         title: "Cut";
                                         shortcut: "Ctrl+X";
                                         activated => {
-                                            context-menu.close();
                                             root.copy-requested(true);
+                                            context-menu.close();
                                         }
                                     }
+                                    // **Copyは両方にある。**シェルにも選択は
+                                    // あり（要件 11.2）、選ばれているものを
+                                    // 写すのがこの行の意味——どちらから写すかは
+                                    // Rustが前に出ているものを見て決める。
+                                    // 綴じ目だけが違うので、そこは文言で言う。
                                     MenuRow {
                                         title: "Copy";
-                                        shortcut: "Ctrl+C";
+                                        shortcut: root.terminal ? "Ctrl+Shift+C" : "Ctrl+C";
                                         activated => {
                                             context-menu.close();
                                             root.copy-requested(false);
@@ -1930,26 +1987,32 @@ export component EditorPane inherits Rectangle {
                                             context-menu.close();
                                             // **The field pastes, and what it
                                             // takes comes in as typing** — the
-                                            // same road every paste travels.
+                                            // same road every paste travels,
+                                            // shell included.
                                             ime-input.focus();
                                             ime-input.paste();
                                         }
                                     }
-                                    MenuSep { }
-                                    MenuRow {
-                                        title: "Start Selection";
-                                        shortcut: "Ctrl+Space";
-                                        activated => {
-                                            context-menu.close();
-                                            root.mark-toggled(false);
+                                    if !root.terminal: VerticalLayout {
+                                        spacing: 1px;
+
+                                        MenuSep { }
+
+                                        MenuRow {
+                                            title: "Start Selection";
+                                            shortcut: "Ctrl+Space";
+                                            activated => {
+                                                root.mark-toggled(false);
+                                                context-menu.close();
+                                            }
                                         }
-                                    }
-                                    MenuRow {
-                                        title: "Start Rectangle Selection";
-                                        shortcut: "Ctrl+Shift+Space";
-                                        activated => {
-                                            context-menu.close();
-                                            root.mark-toggled(true);
+                                        MenuRow {
+                                            title: "Start Rectangle Selection";
+                                            shortcut: "Ctrl+Shift+Space";
+                                            activated => {
+                                                root.mark-toggled(true);
+                                                context-menu.close();
+                                            }
                                         }
                                     }
                                     MenuSep { }
@@ -2007,29 +2070,38 @@ export component EditorPane inherits Rectangle {
                                             root.close-others-requested();
                                         }
                                     }
-                                    MenuSep { }
-                                    MenuRow {
-                                        title: "Zoom In";
-                                        shortcut: "Ctrl+=";
-                                        activated => {
-                                            context-menu.close();
-                                            root.zoom-stepped(1);
+                                    // 追加要件 2026-09-08: **倍率は文書のもの。**
+                                    // シェルの升目は`TerminalLook::default()`が
+                                    // 決めていて、要件 9 の倍率は通っていない
+                                    // ——3行とも押せて何も変わらなかった。
+                                    if !root.terminal: VerticalLayout {
+                                        spacing: 1px;
+
+                                        MenuSep { }
+
+                                        MenuRow {
+                                            title: "Zoom In";
+                                            shortcut: "Ctrl+=";
+                                            activated => {
+                                                root.zoom-stepped(1);
+                                                context-menu.close();
+                                            }
                                         }
-                                    }
-                                    MenuRow {
-                                        title: "Zoom Out";
-                                        shortcut: "Ctrl+-";
-                                        activated => {
-                                            context-menu.close();
-                                            root.zoom-stepped(-1);
+                                        MenuRow {
+                                            title: "Zoom Out";
+                                            shortcut: "Ctrl+-";
+                                            activated => {
+                                                root.zoom-stepped(-1);
+                                                context-menu.close();
+                                            }
                                         }
-                                    }
-                                    MenuRow {
-                                        title: "Reset Zoom";
-                                        shortcut: "Ctrl+0";
-                                        activated => {
-                                            context-menu.close();
-                                            root.zoom-reset-requested();
+                                        MenuRow {
+                                            title: "Reset Zoom";
+                                            shortcut: "Ctrl+0";
+                                            activated => {
+                                                root.zoom-reset-requested();
+                                                context-menu.close();
+                                            }
                                         }
                                     }
                                 }
@@ -2314,6 +2386,17 @@ export component EditorPane inherits Rectangle {
                             accept
                         }
                         pointer-event(event) => {
+                            // 書き手の報告 2026-09-08: **下段にも右ボタンの
+                            // メニューがある。**帯はペインの一段下の面で、
+                            // 手がそこにあるときに右を押して何も出ないのは、
+                            // 上の面と揃っていない。
+                            if event.button == PointerEventButton.right
+                                && event.kind == PointerEventKind.down {
+                                root.below-menu-x = self.mouse-x;
+                                root.below-menu-y = self.mouse-y;
+                                below-menu.show();
+                                return;
+                            }
                             if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
                                 root.below-selection-start(self.mouse-x / 1px, self.mouse-y / 1px);
                             } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
@@ -2333,6 +2416,66 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                     }
+
+                    // 書き手の報告 2026-09-08: 下段のシェルの右ボタン。
+                    //
+                    // **この箱の中に置く**ので、原点は帯そのもの——`below-pointer`
+                    // が読んだ`mouse-x`と同じ物差しになる（技術検証 6.30の3つの
+                    // 罠のうち2番目と3番目を、両方この置き方で外している）。
+                    // **行は、この帯にできることだけ**（要件 6.7）：升目は組み直せ
+                    // ないので倍率は無く、シェルには保存するものも無い。
+                    below-menu := PopupWindow {
+                        x: root.below-menu-x;
+                        y: root.below-menu-y;
+                        width: 264px;
+                        close-policy: close-on-click-outside;
+
+                        MenuFrame {
+                            width: 264px;
+
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 1px;
+
+                                MenuRow {
+                                    title: "Copy";
+                                    shortcut: "Ctrl+Shift+C";
+                                    activated => {
+                                        below-menu.close();
+                                        root.below-copy();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "Paste";
+                                    shortcut: "Ctrl+V";
+                                    activated => {
+                                        below-menu.close();
+                                        // **欄が貼り、取ったものは打鍵として
+                                        // 入る**——上の面と同じ道。
+                                        below-ime.focus();
+                                        below-ime.paste();
+                                    }
+                                }
+                                MenuSep { }
+                                MenuRow {
+                                    title: "Editor Above";
+                                    shortcut: "Ctrl+Alt+↑";
+                                    activated => {
+                                        below-menu.close();
+                                        root.below-left();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "Close Terminal Below";
+                                    shortcut: "Ctrl+`";
+                                    activated => {
+                                        below-menu.close();
+                                        root.below-toggled();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // The draft under a shell (追加要件 Terminal: サブEditor).
@@ -2349,150 +2492,259 @@ export component EditorPane inherits Rectangle {
                     // 矩形が交わるかを見る。
                     clip: true;
 
-                    sheet := Rectangle {
-                        x: 0;
-                        y: 0;
+                    // 書き手の報告 2026-09-08: 下段の下書きにも右ボタンの
+                    // メニューを。
+                    //
+                    // **欄を包む`TouchArea`である**（横に並べるのではなく）。
+                    // Slintの`TouchArea`は`ForwardAndInterceptGrab`——中の
+                    // 要素へ先に渡し、中が拾わなかったものだけを自分で受ける
+                    // ——なので、左ボタンは今までどおり`TextInput`のもの
+                    // （キャレット・語の選択・ドラッグの掴み）で、`TextInput`が
+                    // 見ない右ボタンだけがここへ落ちてくる。横に置くと、後から
+                    // 書いた要素が上に来て左ボタンごと奪ってしまう。
+                    draft-pointer := TouchArea {
                         width: parent.width;
                         height: parent.height;
-
-                        // 一行の送り。**測って出す**——行の帯は欄の行に乗って
-                        // いなければ嘘になるので、二行ぶんの高さの半分を字体
-                        // 自身から取る。
-                        property <length> row-height: ruler-probe.preferred-height / 2;
-                        // 内容をどれだけ上へ押しやっているか。欄は自分では
-                        // 動かない（Slintの`TextInput`の注記）ので、キャレットを
-                        // 見失わないようこちらが追う。**横は折り返すので要らない。**
-                        property <length> pan-y: 0;
-                        // 字を組む幅。帯も欄も同じこれで組むから、同じところで
-                        // 折り返す。
-                        property <length> text-width: max(sheet.width - 16px, 40px);
-
-                        ruler-probe := Text {
-                            text: "M\nM";
-                            font-family: "Consolas";
-                            font-size: 14px;
-                            visible: false;
-                        }
-
-                        // 書き手の報告 2026-09-07: **どこまで送られるかを見せる。**
-                        // 送られる行に薄い色を敷き、改行のあるところに`↵`を置く。
-                        //
-                        // **折り返しは残す**（書き手の指摘 2026-09-07——折り返さ
-                        // ないのは使いにくい）。折り返す以上「1行＝1段」ではないので、
-                        // 行の高さは**その行を同じ幅・同じ折り返しで組んだ`Text`に
-                        // 訊く**。それを縦に積めば、欄が自分で折り返した段と同じ
-                        // ところに帯が来る——どちらもSlintの同じ組版を通るから。
-                        bands := VerticalLayout {
-                            x: 8px;
-                            y: 6px - sheet.pan-y;
-                            width: sheet.text-width;
-                            alignment: start;
-                            spacing: 0px;
-
-                            for line in root.below-draft-lines: Rectangle {
-                                // **高さを自分で言う。**帯は矩形で、矩形は中身の
-                                // 大きさを親へ伝えない（伝えるのはレイアウトだけ）
-                                // ので、書かなければ高さ0になる。書いた高さは
-                                // レイアウトが上書きしない。
-                                height: flow.preferred-height;
-                                background: line.sent ? Tok.accent-faint : transparent;
-
-                                flow := Text {
-                                    x: 0;
-                                    y: 0;
-                                    width: sheet.text-width;
-                                    // **空の行にも一字置く。**組む字が無ければ
-                                    // 高さも0で、空行の帯だけ潰れて以降の行が
-                                    // すべて上へずれる。透明なので見えない。
-                                    text: line.text == "" ? " " : line.text;
-                                    wrap: word-wrap;
-                                    font-family: "Consolas";
-                                    font-size: 14px;
-                                    color: transparent;
-                                }
-
-                                // 改行は**罫で言う**（書き手の報告 2026-09-07・
-                                // 3回目）。字としての`¶`はあきらめた——折り返した
-                                // 行だけ印が無いのは、印が無いことより悪い。
-                                //
-                                // **どこで折り返したかを知っているのはSlintだけ**で、
-                                // こちらは行の段数しか訊けない。だから字の終わりは
-                                // 指せず、指せない場所に印を置くのもやめた。段の下の
-                                // 罫なら、折り返した行でも折り返さない行でも、
-                                // 同じ場所に同じものが出る。
-                                if line.breaks: Rectangle {
-                                    x: 0;
-                                    y: flow.preferred-height - 1px;
-                                    width: sheet.text-width;
-                                    height: 1px;
-                                    background: Tok.rule;
-                                }
+                        mouse-cursor: text;
+                        pointer-event(event) => {
+                            if event.button == PointerEventButton.right
+                                && event.kind == PointerEventKind.down {
+                                root.below-menu-x = self.mouse-x;
+                                root.below-menu-y = self.mouse-y;
+                                draft-menu.show();
                             }
                         }
 
-                        draft := TextInput {
-                            x: 8px;
-                            y: 6px - sheet.pan-y;
-                            // **帯と同じ幅で組む。**高さは行が増えれば伸び、
-                            // 溢れた分は`pan-y`が運ぶ。
-                            width: sheet.text-width;
-                            height: max(sheet.height - 12px,
-                                bands.preferred-height + sheet.row-height);
-                            text <=> root.below-draft;
-                            font-family: "Consolas";
-                            font-size: 14px;
-                            color: Tok.doc-ink;
-                            single-line: false;
-                            wrap: word-wrap;
-                            edited => {
-                                root.below-draft-edited(self.text);
+                        sheet := Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+
+                            // 一行の送り。**測って出す**——行の帯は欄の行に乗って
+                            // いなければ嘘になるので、二行ぶんの高さの半分を字体
+                            // 自身から取る。
+                            property <length> row-height: ruler-probe.preferred-height / 2;
+                            // 内容をどれだけ上へ押しやっているか。欄は自分では
+                            // 動かない（Slintの`TextInput`の注記）ので、キャレットを
+                            // 見失わないようこちらが追う。**横は折り返すので要らない。**
+                            property <length> pan-y: 0;
+                            // 字を組む幅。帯も欄も同じこれで組むから、同じところで
+                            // 折り返す。
+                            property <length> text-width: max(sheet.width - 16px, 40px);
+
+                            ruler-probe := Text {
+                                text: "M\nM";
+                                font-family: "Consolas";
+                                font-size: 14px;
+                                visible: false;
                             }
-                            // キャレットを窓の中に留める。「見えている端から
-                            // 一行ぶん内側」。
-                            cursor-position-changed(at) => {
-                                if (at.y + sheet.row-height - sheet.pan-y > sheet.height - 12px) {
-                                    sheet.pan-y = at.y + sheet.row-height - sheet.height + 12px;
-                                }
-                                if (at.y < sheet.pan-y) {
-                                    sheet.pan-y = at.y;
+
+                            // 書き手の報告 2026-09-07: **どこまで送られるかを見せる。**
+                            // 送られる行に薄い色を敷き、改行のあるところに`↵`を置く。
+                            //
+                            // **折り返しは残す**（書き手の指摘 2026-09-07——折り返さ
+                            // ないのは使いにくい）。折り返す以上「1行＝1段」ではないので、
+                            // 行の高さは**その行を同じ幅・同じ折り返しで組んだ`Text`に
+                            // 訊く**。それを縦に積めば、欄が自分で折り返した段と同じ
+                            // ところに帯が来る——どちらもSlintの同じ組版を通るから。
+                            bands := VerticalLayout {
+                                x: 8px;
+                                y: 6px - sheet.pan-y;
+                                width: sheet.text-width;
+                                alignment: start;
+                                spacing: 0px;
+
+                                for line in root.below-draft-lines: Rectangle {
+                                    // **高さを自分で言う。**帯は矩形で、矩形は中身の
+                                    // 大きさを親へ伝えない（伝えるのはレイアウトだけ）
+                                    // ので、書かなければ高さ0になる。書いた高さは
+                                    // レイアウトが上書きしない。
+                                    height: flow.preferred-height;
+                                    background: line.sent ? Tok.accent-faint : transparent;
+
+                                    flow := Text {
+                                        x: 0;
+                                        y: 0;
+                                        width: sheet.text-width;
+                                        // **空の行にも一字置く。**組む字が無ければ
+                                        // 高さも0で、空行の帯だけ潰れて以降の行が
+                                        // すべて上へずれる。透明なので見えない。
+                                        text: line.text == "" ? " " : line.text;
+                                        wrap: word-wrap;
+                                        font-family: "Consolas";
+                                        font-size: 14px;
+                                        color: transparent;
+                                    }
+
+                                    // 改行は**罫で言う**（書き手の報告 2026-09-07・
+                                    // 3回目）。字としての`¶`はあきらめた——折り返した
+                                    // 行だけ印が無いのは、印が無いことより悪い。
+                                    //
+                                    // **どこで折り返したかを知っているのはSlintだけ**で、
+                                    // こちらは行の段数しか訊けない。だから字の終わりは
+                                    // 指せず、指せない場所に印を置くのもやめた。段の下の
+                                    // 罫なら、折り返した行でも折り返さない行でも、
+                                    // 同じ場所に同じものが出る。
+                                    if line.breaks: Rectangle {
+                                        x: 0;
+                                        y: flow.preferred-height - 1px;
+                                        width: sheet.text-width;
+                                        height: 1px;
+                                        background: Tok.rule;
+                                    }
                                 }
                             }
 
-                            property <int> generation: root.below-focus-generation;
-                            changed generation => {
-                                self.focus();
-                            }
-                            init => {
-                                self.focus();
+                            draft := TextInput {
+                                x: 8px;
+                                y: 6px - sheet.pan-y;
+                                // **帯と同じ幅で組む。**高さは行が増えれば伸び、
+                                // 溢れた分は`pan-y`が運ぶ。
+                                width: sheet.text-width;
+                                height: max(sheet.height - 12px,
+                                    bands.preferred-height + sheet.row-height);
+                                text <=> root.below-draft;
+                                font-family: "Consolas";
+                                font-size: 14px;
+                                color: Tok.doc-ink;
+                                single-line: false;
+                                wrap: word-wrap;
+                                edited => {
+                                    root.below-draft-edited(self.text);
+                                }
+                                // キャレットを窓の中に留める。「見えている端から
+                                // 一行ぶん内側」。
+                                cursor-position-changed(at) => {
+                                    if (at.y + sheet.row-height - sheet.pan-y > sheet.height - 12px) {
+                                        sheet.pan-y = at.y + sheet.row-height - sheet.height + 12px;
+                                    }
+                                    if (at.y < sheet.pan-y) {
+                                        sheet.pan-y = at.y;
+                                    }
+                                }
+
+                                property <int> generation: root.below-focus-generation;
+                                changed generation => {
+                                    self.focus();
+                                }
+                                init => {
+                                    self.focus();
+                                }
+
+                                key-pressed(event) => {
+                                    if (event.modifiers.control && event.text == "`") {
+                                        root.below-toggled();
+                                        return accept;
+                                    }
+                                    // **Ctrl+Enter sends it.** Enter alone is a line
+                                    // break: a draft is where a command is composed
+                                    // over several lines before it is run.
+                                    if (event.modifiers.control && event.text == Key.Return) {
+                                        root.below-sent();
+                                        return accept;
+                                    }
+                                    if (event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.UpArrow) {
+                                        root.below-left();
+                                        return accept;
+                                    }
+                                    reject
+                                }
                             }
 
-                            key-pressed(event) => {
-                                if (event.modifiers.control && event.text == "`") {
-                                    root.below-toggled();
-                                    return accept;
-                                }
-                                // **Ctrl+Enter sends it.** Enter alone is a line
-                                // break: a draft is where a command is composed
-                                // over several lines before it is run.
-                                if (event.modifiers.control && event.text == Key.Return) {
-                                    root.below-sent();
-                                    return accept;
-                                }
-                                if (event.modifiers.control && event.modifiers.alt
-                                    && event.text == Key.UpArrow) {
-                                    root.below-left();
-                                    return accept;
-                                }
-                                reject
+                            if root.below-draft == "": Text {
+                                x: 10px;
+                                y: 8px;
+                                text: "Ctrl+Enter で上の端末へ送ります";
+                                color: Tok.ink-faint;
+                                font-size: 12px;
                             }
                         }
+                    }
 
-                        if root.below-draft == "": Text {
-                            x: 10px;
-                            y: 8px;
-                            text: "Ctrl+Enter で上の端末へ送ります";
-                            color: Tok.ink-faint;
-                            font-size: 12px;
+                    // 書き手の報告 2026-09-08: 下書きの右ボタン。
+                    //
+                    // **この帯は編集器のほう**なので、行はシェルの帯とは別も
+                    // のになる：切り取りがあり、送る行があり、倍率は無い
+                    // （下書きは組版ではなく等幅の一枚である）。切り貼りは
+                    // `TextInput`自身に頼む——選んでいるのがどこかを知って
+                    // いるのはあの欄だけで、Rustは字を持っていない。
+                    draft-menu := PopupWindow {
+                        x: root.below-menu-x;
+                        y: root.below-menu-y;
+                        width: 264px;
+                        close-policy: close-on-click-outside;
+
+                        MenuFrame {
+                            width: 264px;
+
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 1px;
+
+                                MenuRow {
+                                    title: "Cut";
+                                    shortcut: "Ctrl+X";
+                                    activated => {
+                                        draft-menu.close();
+                                        draft.focus();
+                                        draft.cut();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "Copy";
+                                    shortcut: "Ctrl+C";
+                                    activated => {
+                                        draft-menu.close();
+                                        draft.copy();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "Paste";
+                                    shortcut: "Ctrl+V";
+                                    activated => {
+                                        draft-menu.close();
+                                        draft.focus();
+                                        draft.paste();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "Select All";
+                                    shortcut: "Ctrl+A";
+                                    activated => {
+                                        draft-menu.close();
+                                        draft.focus();
+                                        draft.select-all();
+                                    }
+                                }
+                                MenuSep { }
+                                MenuRow {
+                                    title: "Send to Terminal";
+                                    shortcut: "Ctrl+Enter";
+                                    activated => {
+                                        draft-menu.close();
+                                        root.below-sent();
+                                    }
+                                }
+                                MenuRow {
+                                    title: "Terminal Above";
+                                    shortcut: "Ctrl+Alt+↑";
+                                    activated => {
+                                        draft-menu.close();
+                                        root.below-left();
+                                    }
+                                }
+                                MenuSep { }
+                                MenuRow {
+                                    title: "Close Editor Below";
+                                    shortcut: "Ctrl+`";
+                                    activated => {
+                                        draft-menu.close();
+                                        root.below-toggled();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2575,7 +2827,15 @@ export component EditorPane inherits Rectangle {
                 // ものも無い**（書き手の指摘）。文書のタブだけが持つ4行は、
                 // 端末のタブでは出さない——押せる行が何もしないより、
                 // 無いほうがよい。
-                if !root.terminal: VerticalLayout {
+                //
+                // 追加要件 2026-09-08: **名前と道はさらに、ディスクの上に
+                // 何かあるタブだけのもの。**`Rename`はタブの`renamable`が
+                // 立っていなければ黙って何もしない（`controls.slint`の
+                // `changed rename-asked`）——長押しが何も起こさないのと同じ
+                // 理由で、右ボタンからも消える。無題の文書は`Save`で名前を
+                // もらう側なので、そちらの2行は残る。
+                if !root.terminal && root.tabs[root.tab-menu-target].renamable:
+                VerticalLayout {
                     spacing: 1px;
 
                     MenuSep { }
@@ -2599,6 +2859,10 @@ export component EditorPane inherits Rectangle {
                             tab-menu.close();
                         }
                     }
+                }
+
+                if !root.terminal: VerticalLayout {
+                    spacing: 1px;
 
                     MenuSep { }
 

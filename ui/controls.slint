@@ -723,6 +723,56 @@ export component TextButton inherits Rectangle {
 }
 
 
+// 追加要件 2026-09-08: 設定の面を選ぶ帯。
+//
+// **設定は一枚に収まらなくなった。**要件 9 の書式だけで20行あり、そこへ
+// 書字方向を持たない設定（既定の接続先、自動退避）が増えていく。群ごとに
+// 分けて、一度に一つだけ出す。
+//
+// **`TextButton`ではない。**すぐ下には同じ形の釦が2つ並んでいる——シートを
+// 選ぶ「Horizontal／Vertical」で、そちらは*この面の中の*選択である。両方が
+// 同じ見た目なら、画面はどちらが上位かを言えない。こちらは下線で言う。
+export component PanelTab inherits Rectangle {
+    in property <string> title;
+    in property <bool> current;
+    callback clicked();
+
+    height: 26px;
+    // **`preferred-width`、`width`ではない**（`TextButton`と同じ理由）：幅は
+    // レイアウトがこの2つから決めるもので、ここで自分の幅を読めば束縛の輪に
+    // なる。
+    min-width: label.preferred-width + 16px;
+    max-width: label.preferred-width + 16px;
+    border-radius: 4px;
+    background: touch.has-hover && !root.current ? Tok.accent-faint : transparent;
+
+    label := Text {
+        x: 8px;
+        y: (parent.height - self.height) / 2 - 1px;
+        text: root.title;
+        font-size: 12px;
+        font-weight: root.current ? 600 : 400;
+        color: root.current ? Tok.ink-strong : Tok.ink-muted;
+    }
+
+    // いま居る面の下の線。**アクセントで引く**——この窓がアクセントに使わせて
+    // いるのは「ここに鍵盤がある」で、開いている設定の面はまさにそれである。
+    if root.current: Rectangle {
+        x: 4px;
+        y: parent.height - 2px;
+        width: parent.width - 8px;
+        height: 2px;
+        border-radius: 1px;
+        background: Tok.accent;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // The mark on a setting that only does something in one writing direction
 // (要件 9): `H` for horizontal, `V` for vertical.
 //
