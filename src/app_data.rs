@@ -384,6 +384,112 @@ pub fn decode_settings(raw: &str) -> Option<Vec<(String, String)>> {
     Some(values)
 }
 
+/// 要件 7.9（2026-09-08）: 取り込んだ単語セットの表。
+///
+/// **編集器が持つ表である**（書き手の指摘、IMEの辞書と同じ考え）。取り込み元の
+/// ファイルを指しっぱなしにするのではなく、**取り込んだ結果をここへ置く**——
+/// そうしてはじめて、重複を数えて画面から参照できる。
+///
+/// 設定（`settings.rfnsettings`）ではなくこちらに置くのは、**大きさが違う**から
+/// である。設定は数十行で人が読んで直すもの、こちらは数千行になりうる。
+const WORDS_FILE: &str = "words.rfnwords";
+const WORDS_MAGIC: &str = "RFN-EDIT-WORDS 1";
+
+/// 表の1冊。`word_marks::WordSet`と同じ形だが、**この層は語の意味を知らない**
+/// ——並びとして預かるだけである。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WordBook {
+    pub name: String,
+    /// `#rrggbb`。**文字列のまま持つ**：この層は色を混ぜない。
+    pub colour: String,
+    pub muted: bool,
+    /// どこから取り込んだか。もう一度取り込むときの既定の場所。
+    pub source: PathBuf,
+    pub words: Vec<String>,
+}
+
+/// 表を書き出す。
+///
+/// **1行1語**（要件 7.9）。`set:`の行のあとに、そのセットの`word:`が続く。
+/// 人が開いて読める形なのは、この編集器の他の書き出しと同じ方針である。
+pub fn encode_words(books: &[WordBook]) -> String {
+    let mut out = String::new();
+    out.push_str(WORDS_MAGIC);
+    out.push('\n');
+    for book in books {
+        out.push_str(&format!(
+            "set: {} | {} | {} | {}\n",
+            book.name,
+            book.colour,
+            u8::from(book.muted),
+            book.source.display()
+        ));
+        for word in &book.words {
+            out.push_str(&format!("word: {word}\n"));
+        }
+    }
+    out
+}
+
+/// 表を読み戻す。**読めなければ`None`**——半分だけ読んだ表は、書き手の一覧を
+/// 半分にしたものである。
+pub fn decode_words(raw: &str) -> Option<Vec<WordBook>> {
+    let mut lines = raw.split('\n');
+    if lines.next()? != WORDS_MAGIC {
+        return None;
+    }
+    let mut books: Vec<WordBook> = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(": ") else {
+            continue;
+        };
+        match key {
+            "set" => {
+                let mut parts = value.splitn(4, " | ");
+                let name = parts.next().unwrap_or_default().to_owned();
+                let colour = parts.next().unwrap_or_default().to_owned();
+                let muted = parts.next().unwrap_or("0") != "0";
+                let source = PathBuf::from(parts.next().unwrap_or_default());
+                books.push(WordBook {
+                    name,
+                    colour,
+                    muted,
+                    source,
+                    words: Vec::new(),
+                });
+            }
+            // **セットの無い`word:`は捨てる。**行の順が壊れた表で、語を
+            // どこへ入れるか決められない。
+            "word" => {
+                if let Some(book) = books.last_mut() {
+                    book.words.push(value.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(books)
+}
+
+/// 表を置く。
+pub fn write_words(directory: &Path, books: &[WordBook]) -> io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let path = directory.join(WORDS_FILE);
+    file_io::write_atomically(&path, encode_words(books).as_bytes())?;
+    Ok(path)
+}
+
+/// 表を読む。無ければ空。
+pub fn read_words(directory: &Path) -> Vec<WordBook> {
+    fs::read_to_string(directory.join(WORDS_FILE))
+        .ok()
+        .and_then(|raw| decode_words(&raw))
+        .unwrap_or_default()
+}
+
 /// Put the display settings away where the next run will look for them.
 pub fn write_settings(directory: &Path, values: &[(String, String)]) -> io::Result<PathBuf> {
     fs::create_dir_all(directory)?;

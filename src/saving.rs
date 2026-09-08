@@ -32,9 +32,8 @@ use crate::open_document::OpenDocument;
 use crate::{
     AUTOSAVE_SETTING, AppWindow, EditorState, Live, MAX_DOCUMENT_CHARACTERS, Opening, PaneId,
     Question, WORK_COPY_IDLE, WORK_COPY_LONGEST, app_data, ask_question, elapsed_ms, file_dialog,
-    floor_char_boundary, focused_pane, ime, is_word_set_file, open_documents,
-    open_path_in_focused_pane, publish_tabs, publish_word_sets, reload_word_sets, replace_document,
-    shell,
+    floor_char_boundary, focused_pane, ime, open_documents, open_path_in_focused_pane,
+    publish_tabs, replace_document, shell,
 };
 
 /// Whether the work copy is due (要件 8.1).
@@ -472,9 +471,6 @@ pub fn write_document_to(
     // Taken before the save, because 名前を付けて保存 moves the document to
     // another file and the copy on disk is still under the old name.
     let previous = work_identity(&file.borrow());
-    // **保存する前に控える**：`save_to`が場所を持っていくので、
-    // 保存できたあとに「どこへ書いたか」を訊く相手がいなくなる。
-    let saved_to = target.clone();
     let outcome = file.borrow_mut().save_to(target, &text);
     match outcome {
         Ok(()) => {
@@ -488,15 +484,6 @@ pub fn write_document_to(
             cache
                 .borrow_mut()
                 .log_diag("file", &format!("save ok bytes={bytes} path={shown}"));
-            // 要件 7.9（2026-09-08）: **単語セットを保存したら、色が付き直る。**
-            // 語の一覧はただのテキストで、書き手はこの編集器でそれを開いて直す
-            // ——保存した瞬間に本文の色が変わるのが「軽い」（要件 3）。
-            // 専用の編集画面を作らずに済んでいるのは、この一手のおかげである。
-            if is_word_set_file(window, &saved_to) {
-                reload_word_sets(window, cache);
-                publish_word_sets(window);
-                window.invoke_republish_tabs();
-            }
             true
         }
         Err(error) => {

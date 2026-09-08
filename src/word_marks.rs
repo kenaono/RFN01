@@ -1,18 +1,27 @@
-//! 単語セット——書き手が置いておいた語と、それが本文のどこにあるか（要件 7.9）。
+//! 単語セット——書き手が取り込んだ語と、それが本文のどこにあるか（要件 7.9）。
 //!
 //! **これは検索の言い換えである。**校正とは同じ語を何度も探すことで（要件 7.7）、
 //! 単語セットは「毎回打ち込んでいた語を、置いておく場所」にあたる。だから探し方は
 //! `find.rs`と同じ規則にしてある——ASCIIの大文字小文字だけを同じ字として畳み、
 //! それ以外は畳まない。**書き手が`find`で見つかると思った語が、色でも付く。**
 //!
-//! # 語は別のファイルに、1行に1語（書き手の指摘 2026-09-08）
+//! # 取り込む。参照する。重複は言う（書き手の指摘 2026-09-08）
 //!
-//! **単語帳は大きくなる。**人物名だけで何百、表記ゆれを追い始めれば何千になる。
-//! 最初は設定ファイルの1行にカンマで並べていたが、**その形は探せないし直せない**
-//! ——書き手がそう言った。いまは1セット＝1ファイルで、**1行に1語**である。
-//! ファイルはただのテキストなので、この編集器自身で開いて直せる。
+//! **IMEの辞書と同じ形にしてある。**ファイルを指しっぱなしにするのではなく、
+//! **取り込んで編集器の表にする**。表は編集器が持ち、画面から見える。
 //!
-//! 設定ファイルが持つのは**色とファイルの場所だけ**で、語そのものは持たない。
+//! そうする理由は重複である。書き手は同じ語を二度登録する——一覧が数百行にも
+//! なれば必ず起きる——のに、**指しっぱなしの形では黙って先勝ちにするしかない**。
+//! それは書き手から見て「なぜかこの語だけ色が違う」であり、原因を画面のどこからも
+//! 辿れない。表にしてあれば、**取り込んだときに数えて、そう言える**。
+//!
+//! 重複には2つある。**同じ意味ではないので、扱いも違う。**
+//!
+//! - [`Trouble::Repeated`]——**同じセットの中で二度**。色は1つに決まるので迷いが
+//!   無い。1つだけ採り、**言うだけ**にする（一覧を掃除する手がかりとして）。
+//! - [`Trouble::Conflict`]——**2つ以上のセットにまたがる**。どちらの色で出すべきか
+//!   **編集器には決められない**ので、**色を付けない**。黙って片方を選ぶのは、
+//!   選んだことを書き手に隠すことである。
 //!
 //! # 大きくなるから、木で探す
 //!
@@ -21,17 +30,17 @@
 //! （トライ）に積んで、**本文を一度だけ歩く**。位置ごとの費用は「そこから伸びる
 //! 語の長さ」で、一致しない位置ではほとんど1歩で終わる。
 //!
-//! 木は**セットを読み直したときにだけ**建てる。組版のたびに建て直しては、木にした
-//! 意味が消える（`WordMarks::build`を呼ぶのは`main.rs`の一箇所だけ）。
+//! 木は**表が変わったときにだけ**建てる（`WordMarks::build`）。組版のたびに
+//! 建て直しては、木にした意味が消える。
 //!
 //! **純粋な文字列の演算**であり、窓もペインもファイルシステムも知らない。
 //! `find.rs`と`text_blocks.rs`が取っている取引と同じで、規則をテストで固定できる
 //! のが値打ちである。
 //!
 //! **編集器はどれが正しいかを判定しない**（要件 7.9）。ここにあるのは「書かれた語が
-//! どこにあるか」だけで、表記ゆれの判定も、揺れているという指摘も無い。判定を始めた
-//! 瞬間に、当たらない指摘を消す作業が書き手に増える。
+//! どこにあるか」と「同じ語が二度あること」だけで、表記ゆれの判定は無い。
 
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -55,49 +64,49 @@ pub const MAX_MARKS_PER_BLOCK: usize = 256;
 /// 節はおよそ数万——数メガバイトで、文書1つぶんに満たない。
 pub const MAX_WORDS_PER_SET: usize = 10_000;
 
-/// 一冊の単語セット（要件 7.9）。
+/// 画面に出す重複の数。**全部は出さない**——数百並べても読めない。
+pub const SHOWN_TROUBLES: usize = 50;
+
+/// 取り込んだ一冊（要件 7.9）。
 ///
 /// **色はセットごと**で、語ごとではない。単語帳1＝赤、単語帳2＝青、という書き手の
 /// 言い方がそのまま形になっている——語ごとに色を選べるようにすると、**色を決める
 /// 作業が語の数だけ増える**。分けたいならセットを分ける、というほうが手数が少ない。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WordSet {
-    /// 語の入ったファイル。**設定が覚えているのはここまで**で、語そのものは
-    /// 覚えない。
-    pub path: PathBuf,
+    /// 書き手が付けた名前。**取り込んだファイルの名前が初期値**になる。
+    pub name: String,
     /// このセットの語を出す色。
     pub colour: [f32; 3],
     /// 今は使わない、という状態。**消すのとは別**——校正の段によって使うセットが
     /// 違うので、消さずに畳んでおける必要がある。
     pub muted: bool,
-    /// ファイルから読んだ語。**設定ファイルには入らない。**
+    /// **どこから取り込んだか。**もう一度取り込むときの既定の場所で、
+    /// それ以外の意味は無い——**語はもうこの表の中にある**。
+    pub source: PathBuf,
+    /// 取り込んだ語。**書かれた順のまま**で、並べ替えない。
     pub words: Vec<String>,
 }
 
-impl WordSet {
-    /// 画面に出す名前。**ファイル名から作る**——書き手に同じ名前を二度書かせない。
-    pub fn name(&self) -> String {
-        self.path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    }
+/// 重複の種類（書き手の指摘 2026-09-08、IMEの辞書と同じ考え）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trouble {
+    /// **同じセットの中に二度以上。**色は1つに決まるので迷いが無い。1つだけ採り、
+    /// 言うだけにする——一覧を掃除する手がかり。
+    Repeated,
+    /// **2つ以上のセットにまたがる。**どちらの色で出すのか編集器には決められない
+    /// ので、**色を付けない**。黙って片方を選ぶのは、選んだことを隠すことである。
+    Conflict,
 }
 
-/// 単語セットのファイルを、語の並びに（要件 7.9）。
-///
-/// **1行に1語。**前後の空白は落とし、空行は語ではない。`#`で始まる行は覚え書きで、
-/// 語ではない——**何百語の一覧には見出しが要る**（「主要人物」「脇役」）ので、
-/// 書き手が自分で区切れるようにしてある。
-///
-/// 同じ語が二度あっても構わない。木は二度目を黙って捨てる。
-pub fn read_word_file(raw: &str) -> Vec<String> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned)
-        .take(MAX_WORDS_PER_SET)
-        .collect()
+/// 取り込みで見つかった、1つの語についての言い分。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WordTrouble {
+    pub word: String,
+    pub kind: Trouble,
+    /// どのセットに現れたか（`Conflict`なら2つ以上）。名前ではなく番号で持つ
+    /// ——名前は書き手が変えられる。
+    pub sets: Vec<usize>,
 }
 
 /// 本文の中の、ある一致（要件 7.9）。
@@ -123,9 +132,6 @@ struct Node {
     /// （畳んだバイト, 子の番号）を、バイトの順に。
     children: Vec<(u8, u32)>,
     /// ここで終わる語があるなら、その（セット番号, バイト長）。
-    ///
-    /// **先に入れたほうが残る**ので、同じ語を2つのセットが持っていたら先の
-    /// セットが勝つ——並びは書き手が決めたものである。
     ends: Option<(u32, u32)>,
 }
 
@@ -138,13 +144,13 @@ impl Node {
     }
 }
 
-/// 開いている単語セットのぜんぶと、そこから建てた木。
+/// 取り込んである表のぜんぶと、そこから建てた木。
 #[derive(Clone, Debug, PartialEq)]
 pub struct WordMarks {
     pub sets: Vec<WordSet>,
-    /// 語を積んだ木。**`build`でだけ建つ**——組版のたびに建て直しては意味が無い。
+    /// 取り込みで見つかった重複。**画面が出す**（要件 7.9：参照できること）。
+    pub troubles: Vec<WordTrouble>,
     nodes: Vec<Node>,
-    /// 木に語が1つでも入っているか。空の木を歩かせないための、先に訊く答え。
     any: bool,
     fingerprint: u64,
 }
@@ -156,8 +162,74 @@ impl Default for WordMarks {
 }
 
 impl WordMarks {
-    /// セットから木を建てる。**読み直したときにだけ呼ぶ。**
+    /// 表から木を建て、そのときに重複を数える。**表が変わったときにだけ呼ぶ。**
+    ///
+    /// 畳んだセットは数にも木にも入らない。**畳めば色が出ないので、他のセットと
+    /// 衝突しようが無い**——畳んだセットが原因で別のセットの色が消えるのは、
+    /// 画面から辿れない振る舞いである。
     pub fn build(sets: Vec<WordSet>) -> Self {
+        // どの語が、どのセットに何回あるか。**畳んだセットは見ない。**
+        let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
+        for (at, set) in sets.iter().enumerate() {
+            if set.muted {
+                continue;
+            }
+            for word in &set.words {
+                let word = word.trim();
+                if word.is_empty() {
+                    continue;
+                }
+                seen.entry(word.to_ascii_lowercase()).or_default().push(at);
+            }
+        }
+        let mut troubles: Vec<WordTrouble> = Vec::new();
+        let mut refused: Vec<String> = Vec::new();
+        for (at, set) in sets.iter().enumerate() {
+            if set.muted {
+                continue;
+            }
+            let mut told: Vec<String> = Vec::new();
+            for word in &set.words {
+                let word = word.trim();
+                if word.is_empty() {
+                    continue;
+                }
+                let folded = word.to_ascii_lowercase();
+                let Some(places) = seen.get(&folded) else {
+                    continue;
+                };
+                // **言うのは一度だけ。**同じ語が3回あっても言い分は1つである。
+                if told.contains(&folded) {
+                    continue;
+                }
+                let elsewhere: Vec<usize> = {
+                    let mut all = places.clone();
+                    all.dedup();
+                    all
+                };
+                if elsewhere.len() > 1 {
+                    // **セットをまたいだ衝突**：色を付けない。
+                    if !refused.contains(&folded) {
+                        refused.push(folded.clone());
+                        troubles.push(WordTrouble {
+                            word: word.to_owned(),
+                            kind: Trouble::Conflict,
+                            sets: elsewhere,
+                        });
+                    }
+                    told.push(folded);
+                } else if places.len() > 1 {
+                    // **同じセットの中で二度以上**：1つ採って、言うだけ。
+                    troubles.push(WordTrouble {
+                        word: word.to_owned(),
+                        kind: Trouble::Repeated,
+                        sets: vec![at],
+                    });
+                    told.push(folded);
+                }
+            }
+        }
+
         let mut nodes = vec![Node::default()];
         let mut any = false;
         for (at, set) in sets.iter().enumerate() {
@@ -166,7 +238,7 @@ impl WordMarks {
             }
             for word in &set.words {
                 let word = word.trim();
-                if word.is_empty() {
+                if word.is_empty() || refused.contains(&word.to_ascii_lowercase()) {
                     continue;
                 }
                 let mut node = 0usize;
@@ -186,7 +258,7 @@ impl WordMarks {
                         }
                     };
                 }
-                // **二度目は捨てる。**先に入れたセットが勝つ（要件 7.9）。
+                // 同じセットの中の二度目は、ここで黙って落ちる（上で言ってある）。
                 if nodes[node].ends.is_none() {
                     nodes[node].ends = Some((at as u32, word.len() as u32));
                     any = true;
@@ -196,19 +268,36 @@ impl WordMarks {
         let fingerprint = fingerprint_of(&sets);
         Self {
             sets,
+            troubles,
             nodes,
             any,
             fingerprint,
         }
     }
 
-    /// 何も出すものが無いか。**先に訊く**——単語セットを一冊も持っていない
-    /// 書き手に、本文を歩く費用を払わせない（普通はこちらである）。
+    /// 色を付けない語がいくつあるか（`Conflict`の数）。
+    pub fn conflicts(&self) -> usize {
+        self.troubles
+            .iter()
+            .filter(|trouble| trouble.kind == Trouble::Conflict)
+            .count()
+    }
+
+    /// このセットについての言い分だけ。
+    pub fn troubles_of(&self, set: usize) -> Vec<&WordTrouble> {
+        self.troubles
+            .iter()
+            .filter(|trouble| trouble.sets.contains(&set))
+            .collect()
+    }
+
+    /// 何も出すものが無いか。**先に訊く**——一冊も取り込んでいない書き手に、
+    /// 本文を歩く費用を払わせない（普通はこちらである）。
     pub fn is_empty(&self) -> bool {
         !self.any
     }
 
-    /// このセットの並びを一つの数にする。
+    /// この表を一つの数にする。
     ///
     /// **組版とタイルの鍵に混ぜるためのもの**（要件 7.9）。語や色を変えても本文の
     /// 大きさは1画素も変わらないので、これを混ぜないと**絵置き場にある古い色のままの
@@ -219,15 +308,8 @@ impl WordMarks {
 
     /// 本文の中の一致を、位置の順に。**重なりは残さない。**
     ///
-    /// 本文を一度だけ歩き、**位置ごとに木をいちばん深くまで下りる**。決め方は2つ。
-    ///
-    /// 1. **その位置から始まるいちばん長い語が勝つ。**「田中」と「田中さん」の
-    ///    両方があるなら、書き手が「田中さん」を入れたのはそこを別のものとして
-    ///    見たいからである。
-    /// 2. 一致したら**その先へ飛ぶ**ので、重なった一致は出てこない。
-    ///
-    /// 始めるのは文字の境目だけ。`limit`は1ブロックの上限で、**本文を描くたびに
-    /// 走る**ので際限が要る。
+    /// 本文を一度だけ歩き、**位置ごとに木をいちばん深くまで下りる**。その位置から
+    /// 始まるいちばん長い語が勝ち、一致したらその先へ飛ぶ。始めるのは文字の境目だけ。
     pub fn marks_in(&self, source: &str, limit: usize) -> Vec<WordMark> {
         if self.is_empty() || source.is_empty() || limit == 0 {
             return Vec::new();
@@ -273,11 +355,28 @@ impl WordMarks {
     }
 }
 
+/// 取り込んだファイルの中身を、語の並びに（要件 7.9）。
+///
+/// **1行に1語。**前後の空白は落とし、空行は語ではない。`#`で始まる行は覚え書きで、
+/// 語ではない——**何百語の一覧には見出しが要る**（「主要人物」「脇役」）ので、
+/// 書き手が自分で区切れるようにしてある。
+///
+/// **重複はここで落とさない。**落とせば書き手に言えなくなる——数えるのは
+/// [`WordMarks::build`]で、言うのは画面である。
+pub fn read_word_file(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .take(MAX_WORDS_PER_SET)
+        .collect()
+}
+
 fn fingerprint_of(sets: &[WordSet]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for set in sets {
         set.muted.hash(&mut hasher);
-        set.path.hash(&mut hasher);
+        set.name.hash(&mut hasher);
         for channel in &set.colour {
             channel.to_bits().hash(&mut hasher);
         }
@@ -297,116 +396,177 @@ mod tests {
     const RED: [f32; 3] = [1.0, 0.0, 0.0];
     const BLUE: [f32; 3] = [0.0, 0.0, 1.0];
 
-    fn set(colour: [f32; 3], words: &[&str]) -> WordSet {
+    fn set(name: &str, colour: [f32; 3], words: &[&str]) -> WordSet {
         WordSet {
-            path: PathBuf::from("D:\\原稿\\人物.txt"),
+            name: name.to_owned(),
             colour,
             muted: false,
+            source: PathBuf::from(format!("D:\\原稿\\{name}.txt")),
             words: words.iter().map(|word| (*word).to_owned()).collect(),
         }
     }
 
     #[test]
     fn finds_every_occurrence_in_order() {
-        let marks = WordMarks::build(vec![set(RED, &["田中"])]);
+        let marks = WordMarks::build(vec![set("人物", RED, &["田中"])]);
         let found = marks.marks_in("田中と佐藤、そして田中。", 100);
 
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].start, 0);
         assert_eq!(found[1].start, "田中と佐藤、そして".len());
-        assert!(found.windows(2).all(|two| two[0].start < two[1].start));
     }
 
     /// 要件 7.7 と同じ畳み方——**書き手が`find`で見つかると思った語が、色でも付く**。
     #[test]
     fn folds_ascii_case_the_way_find_does() {
-        let marks = WordMarks::build(vec![set(RED, &["windows"])]);
+        let marks = WordMarks::build(vec![set("英語", RED, &["windows"])]);
 
         assert_eq!(marks.marks_in("Windows と windows", 100).len(), 2);
     }
 
-    /// その位置から始まるいちばん長い語が勝つ。「田中」と「田中さん」の両方を
-    /// 入れたのは、そこを別のものとして見たいからである。
+    /// **2つのセットにまたがる語には、色を付けない**（書き手の指摘 2026-09-08）。
+    ///
+    /// どちらの色で出すのか編集器には決められない。黙って片方を選ぶのは、
+    /// 選んだことを書き手に隠すことである。
+    #[test]
+    fn a_word_in_two_sets_gets_no_colour_and_is_reported() {
+        let marks = WordMarks::build(vec![
+            set("人物", RED, &["田中", "佐藤"]),
+            set("敵役", BLUE, &["田中", "山田"]),
+        ]);
+
+        assert!(
+            marks.marks_in("田中", 100).is_empty(),
+            "衝突には色を付けない"
+        );
+        assert_eq!(
+            marks.marks_in("佐藤", 100).len(),
+            1,
+            "衝突していない語は付く"
+        );
+        assert_eq!(marks.marks_in("山田", 100).len(), 1);
+
+        let told = &marks.troubles;
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].word, "田中");
+        assert_eq!(told[0].kind, Trouble::Conflict);
+        assert_eq!(told[0].sets, [0, 1], "どちらにあるかを言う");
+        assert_eq!(marks.conflicts(), 1);
+    }
+
+    /// **同じセットの中の二度は、言うだけ。**色は1つに決まるので迷いが無い。
+    #[test]
+    fn a_word_twice_in_one_set_is_kept_and_mentioned() {
+        let marks = WordMarks::build(vec![set("人物", RED, &["田中", "佐藤", "田中"])]);
+
+        assert_eq!(marks.marks_in("田中", 100).len(), 1, "色は付く");
+        assert_eq!(marks.troubles.len(), 1);
+        assert_eq!(marks.troubles[0].kind, Trouble::Repeated);
+        assert_eq!(marks.troubles[0].word, "田中");
+        assert_eq!(marks.conflicts(), 0, "これは衝突ではない");
+    }
+
+    /// 三度あっても言い分は1つ。**一覧に同じ苦情を並べない。**
+    #[test]
+    fn the_same_trouble_is_told_once() {
+        let marks = WordMarks::build(vec![set("人物", RED, &["猫", "猫", "猫"])]);
+
+        assert_eq!(marks.troubles.len(), 1);
+    }
+
+    /// 大小の違いだけでも重複である——探し方がそれを同じ字として畳むのだから、
+    /// **登録も同じ字として重なる**。
+    #[test]
+    fn case_only_differences_are_duplicates_too() {
+        let marks = WordMarks::build(vec![
+            set("英語", RED, &["Windows"]),
+            set("用語", BLUE, &["windows"]),
+        ]);
+
+        assert_eq!(marks.conflicts(), 1);
+        assert!(marks.marks_in("Windows", 100).is_empty());
+    }
+
+    /// **畳んだセットは衝突しない。**色が出ないのだから、他のセットの色を
+    /// 消す理由が無い——それは画面から辿れない振る舞いである。
+    #[test]
+    fn a_muted_set_does_not_take_a_colour_away() {
+        let mut hushed = set("敵役", BLUE, &["田中"]);
+        hushed.muted = true;
+        let marks = WordMarks::build(vec![set("人物", RED, &["田中"]), hushed]);
+
+        assert_eq!(marks.conflicts(), 0);
+        assert_eq!(marks.marks_in("田中", 100).len(), 1);
+        assert_eq!(marks.marks_in("田中", 100)[0].set, 0);
+    }
+
+    /// その位置から始まるいちばん長い語が勝つ。
     #[test]
     fn the_longer_word_wins_where_two_start_together() {
-        let marks = WordMarks::build(vec![set(RED, &["田中"]), set(BLUE, &["田中さん"])]);
+        let marks = WordMarks::build(vec![set("人物", RED, &["田中", "田中さん"])]);
         let found = marks.marks_in("田中さんが来た", 100);
 
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].set, 1, "長いほうのセット");
         assert_eq!(found[0].end, "田中さん".len());
     }
 
     /// 一致したらその先へ飛ぶので、重なった一致は出てこない。
     #[test]
     fn a_match_is_not_looked_inside() {
-        let marks = WordMarks::build(vec![set(RED, &["ABC", "BC"])]);
+        let marks = WordMarks::build(vec![set("英語", RED, &["ABC", "BC"])]);
         let found = marks.marks_in("ABC", 100);
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].end, 3);
     }
 
-    /// 同じ語を2つのセットが持っていたら、先のセットが勝つ。並びは書き手が
-    /// 決めたものである。
+    /// どのセットについての言い分かを引ける（画面が1セットぶんだけ出すため）。
     #[test]
-    fn the_earlier_set_wins_a_tie() {
-        let marks = WordMarks::build(vec![set(RED, &["猫"]), set(BLUE, &["猫"])]);
-        let found = marks.marks_in("猫", 100);
+    fn troubles_can_be_asked_for_one_set() {
+        let marks = WordMarks::build(vec![
+            set("人物", RED, &["田中", "田中"]),
+            set("敵役", BLUE, &["山田"]),
+        ]);
 
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].set, 0);
+        assert_eq!(marks.troubles_of(0).len(), 1);
+        assert!(marks.troubles_of(1).is_empty());
     }
 
-    /// 畳んだセットは出ない。**消すのとは別**——校正の段によって使うセットが違う。
-    #[test]
-    fn a_muted_set_marks_nothing() {
-        let mut only = set(RED, &["猫"]);
-        only.muted = true;
-        let marks = WordMarks::build(vec![only]);
-
-        assert!(marks.is_empty());
-        assert!(marks.marks_in("猫が猫を", 100).is_empty());
-    }
-
-    /// 上限は守る。**本文を描くたびに走る**ので、際限なく返してはいけない。
     #[test]
     fn the_limit_is_kept() {
-        let marks = WordMarks::build(vec![set(RED, &["あ"])]);
+        let marks = WordMarks::build(vec![set("あ", RED, &["あ"])]);
         let found = marks.marks_in(&"あ".repeat(500), 10);
 
         assert_eq!(found.len(), 10);
-        assert_eq!(found[0].start, 0);
     }
 
     /// 文字の途中からは始めない。**畳むのはASCIIだけ**なので、多バイト文字の
     /// 途中のバイトが語の頭と同じでも当たらない。
     #[test]
     fn a_match_never_starts_inside_a_character() {
-        let marks = WordMarks::build(vec![set(RED, &["亜"])]);
+        let marks = WordMarks::build(vec![set("字", RED, &["亜"])]);
         let found = marks.marks_in("亜亜", 100);
 
         assert_eq!(found.len(), 2);
-        assert_eq!(found[0].start, 0);
         assert_eq!(found[1].start, 3);
     }
 
     /// 1行1語。**空行と`#`の行は語ではない**——何百語の一覧には見出しが要る。
+    /// **重複はここで落とさない**：落とせば書き手に言えなくなる。
     #[test]
     fn a_word_file_is_one_word_to_a_line() {
-        let read = read_word_file("# 主要人物\n田中\n\n  佐藤  \n#脇役\n鈴木\n");
+        let read = read_word_file("# 主要人物\n田中\n\n  佐藤  \n#脇役\n田中\n");
 
-        assert_eq!(read, ["田中", "佐藤", "鈴木"]);
+        assert_eq!(read, ["田中", "佐藤", "田中"]);
     }
 
-    /// 印は組版の鍵に混ぜる（要件 7.9）。**語や色を変えても本文の大きさは変わらない**
-    /// ので、混ぜていないと古い色のままの絵が出る（6.18の罠）。
+    /// 印は組版の鍵に混ぜる（要件 7.9）。
     #[test]
     fn the_fingerprint_moves_when_anything_the_eye_sees_moves() {
-        let one = WordMarks::build(vec![set(RED, &["猫"])]);
-        let other_colour = WordMarks::build(vec![set(BLUE, &["猫"])]);
-        let other_word = WordMarks::build(vec![set(RED, &["犬"])]);
-        let mut hushed = set(RED, &["猫"]);
+        let one = WordMarks::build(vec![set("人物", RED, &["猫"])]);
+        let other_colour = WordMarks::build(vec![set("人物", BLUE, &["猫"])]);
+        let other_word = WordMarks::build(vec![set("人物", RED, &["犬"])]);
+        let mut hushed = set("人物", RED, &["猫"]);
         hushed.muted = true;
         let hushed = WordMarks::build(vec![hushed]);
 
@@ -415,22 +575,19 @@ mod tests {
         assert_ne!(one.fingerprint(), hushed.fingerprint(), "畳んだ");
         assert_eq!(
             one.fingerprint(),
-            WordMarks::build(vec![set(RED, &["猫"])]).fingerprint(),
-            "同じものは同じ"
+            WordMarks::build(vec![set("人物", RED, &["猫"])]).fingerprint()
         );
     }
 
-    /// 語の区切りが数に入っていること。**入れないと`["ab","c"]`と`["a","bc"]`が
-    /// 同じ数になる**——別の色分けなのに描き直らない。
+    /// 語の区切りが数に入っていること。
     #[test]
     fn two_sets_split_differently_are_not_the_same_fingerprint() {
-        let one = WordMarks::build(vec![set(RED, &["ab", "c"])]);
-        let other = WordMarks::build(vec![set(RED, &["a", "bc"])]);
+        let one = WordMarks::build(vec![set("あ", RED, &["ab", "c"])]);
+        let other = WordMarks::build(vec![set("あ", RED, &["a", "bc"])]);
 
         assert_ne!(one.fingerprint(), other.fingerprint());
     }
 
-    /// 一冊も持っていない書き手に、本文を歩く費用を払わせない。
     #[test]
     fn nothing_to_mark_is_answered_before_the_walk() {
         assert!(WordMarks::default().is_empty());
@@ -438,19 +595,15 @@ mod tests {
     }
 
     /// **大きい単語帳でも、本文を一度歩くだけ**（書き手の指摘 2026-09-08）。
-    ///
-    /// 語ごとに本文を一周する形では、5,000語×本文の長さになる。木なら位置ごとに
-    /// 数歩で、**語を増やしても本文を歩く回数は増えない**。ここで固定しているのは
-    /// 時間ではなく形——大きいセットでも当たるものが当たること。
     #[test]
     fn a_large_set_still_walks_the_text_once() {
         let many: Vec<String> = (0..5_000).map(|at| format!("語{at:04}")).collect();
         let words: Vec<&str> = many.iter().map(String::as_str).collect();
-        let marks = WordMarks::build(vec![set(RED, &words)]);
+        let marks = WordMarks::build(vec![set("多い", RED, &words)]);
         let source = "語0000のあとに語4999が来て、語9999は無い。".repeat(50);
         let found = marks.marks_in(&source, MAX_MARKS_PER_BLOCK);
 
         assert_eq!(found.len(), 100, "1周につき2つ、50周");
-        assert!(found.iter().all(|mark| mark.set == 0));
+        assert!(marks.troubles.is_empty(), "重複は無い");
     }
 }

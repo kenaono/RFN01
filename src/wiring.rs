@@ -26,12 +26,12 @@ use crate::saving::{open_document, reveal_active_document, save_all, save_docume
 use crate::{
     AppWindow, Live, NO_TARGET, Opening, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, collect_search, colour_row, drop_tree_row, file_dialog, file_tree,
-    find_in_pane, focused_pane, font_name, font_row, go_to_remembered_folder, ime, navigate,
-    open_path_in_focused_pane, open_work_folder, paste_into_tab, paste_targets, pick_tree_row,
-    publish_left, publish_tabs, quick_draft, replace_all_in_pane, replace_in_pane, reset_settings,
-    restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
-    set_colour, shell, shown_sheet, slint_colour, step_setting, store_word_sets, tree_command,
-    word_marks, word_sets_now,
+    find_in_pane, focused_pane, font_name, font_row, go_to_remembered_folder, hold_word_sets, ime,
+    navigate, next_word_colour, open_path_in_focused_pane, open_work_folder, paste_into_tab,
+    paste_targets, pick_tree_row, publish_left, publish_tabs, quick_draft, read_word_source,
+    replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
+    schedule_relayout, search_in_folder, search_work_folder, set_colour, shell, shown_sheet,
+    slint_colour, step_setting, tree_command, word_marks, word_sets_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -155,13 +155,13 @@ fn after_terminal_look(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
 /// 要件 7.9（2026-09-08）: 単語セット——**この編集器がいちばん力を入れるところ**の
 /// 設定側。
 ///
-/// **ここに語は無い。**設定が覚えているのは色とファイルの場所だけで、語はその
-/// ファイルに1行1語で入っている（書き手の指摘：単語帳は大きくなる）。だから
-/// `Open`はただこの編集器でそれを開く——**語を足すのはそこでする**。専用の
-/// 編集画面を作らないのが要件3の「軽く」である。
+/// **取り込む形にしてある**（書き手の指摘、IMEの辞書と同じ）。ファイルを指し
+/// っぱなしにするのではなく、読んだ結果を編集器の表へ入れる——**そうしてはじめて、
+/// 重複を数えて画面から参照できる**。元のファイルを直しても、`Re-import`と言う
+/// までは変わらない。
 ///
-/// **どの操作も`store_word_sets`一本を通る**：行を書き戻し、読み直し、木を建て直し、
-/// 画面へ出し、設定を保存する。順番を守る場所が1つで済む。
+/// **どの操作も`hold_word_sets`一本を通る**：表を置き換え、重複を数え直し、木を
+/// 建て直し、画面へ出し、書き出す。順番を守る場所が1つで済む。
 pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell<RenderCache>>) {
     // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
     // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
@@ -174,27 +174,58 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
             let Some(window) = weak.upgrade() else {
                 return;
             };
-            let Some(path) = file_dialog::open_word_set(ime::window_handle(&window)) else {
+            let Some(source) = file_dialog::open_word_set(ime::window_handle(&window)) else {
                 return;
             };
-            let mut sets = word_sets_now(&window);
+            let mut sets = word_sets_now();
             if sets.len() >= word_marks::MAX_WORD_SETS {
                 window.set_render_status(
                     format!("単語セットは{}冊までです", word_marks::MAX_WORD_SETS).into(),
                 );
                 return;
             }
+            let Some(words) = read_word_source(&source) else {
+                window.set_render_status("取り込めませんでした".into());
+                return;
+            };
             // **足したセットの色は、まだ使っていない色から。**同じ色が2つ並ぶと、
             // どちらの色分けを見ているのか画面が言えない。
-            let colour = crate::next_word_colour(&sets);
+            let colour = next_word_colour(&sets);
             sets.push(word_marks::WordSet {
-                path,
+                name: source
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "単語セット".to_owned()),
                 colour,
                 muted: false,
-                words: Vec::new(),
+                source,
+                words,
             });
-            store_word_sets(&window, &cache, &sets);
+            let taken = sets.last().map_or(0, |set| set.words.len());
+            hold_word_sets(&window, &cache, sets, true);
+            window.set_render_status(format!("{taken}語を取り込みました").into());
         });
+    });
+
+    // **もう一度取り込む。**語は表の中にあるので、元のファイルを直しただけでは
+    // 変わらない——それがIMEの辞書と同じ形であることの、目に見える面である。
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_word_set_reimported(move |at| {
+        if let Some(window) = weak.upgrade() {
+            let mut sets = word_sets_now();
+            let Some(set) = sets.get_mut(at.max(0) as usize) else {
+                return;
+            };
+            let Some(words) = read_word_source(&set.source) else {
+                window.set_render_status("取り込み元を読めませんでした".into());
+                return;
+            };
+            set.words = words;
+            let taken = set.words.len();
+            hold_word_sets(&window, &cache, sets, true);
+            window.set_render_status(format!("{taken}語を取り込み直しました").into());
+        }
     });
 
     let weak = window.as_weak();
@@ -206,7 +237,7 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
             let Some(window) = weak.upgrade() else {
                 return;
             };
-            let mut sets = word_sets_now(&window);
+            let mut sets = word_sets_now();
             let Some(set) = sets.get_mut(at.max(0) as usize) else {
                 return;
             };
@@ -219,7 +250,7 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
                 picked[1] as f32 / 255.0,
                 picked[2] as f32 / 255.0,
             ];
-            store_word_sets(&window, &cache, &sets);
+            hold_word_sets(&window, &cache, sets, true);
         });
     });
 
@@ -227,12 +258,14 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
     let cache = render_cache.clone();
     window.on_word_set_muted(move |at, muted| {
         if let Some(window) = weak.upgrade() {
-            let mut sets = word_sets_now(&window);
+            let mut sets = word_sets_now();
             let Some(set) = sets.get_mut(at.max(0) as usize) else {
                 return;
             };
             set.muted = muted;
-            store_word_sets(&window, &cache, &sets);
+            // **畳めば衝突も消える**（`WordMarks::build`が畳んだセットを見ない）
+            // ので、重複の一覧もここで数え直る。
+            hold_word_sets(&window, &cache, sets, true);
         }
     });
 
@@ -240,15 +273,15 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
     let cache = render_cache.clone();
     window.on_word_set_removed(move |at| {
         if let Some(window) = weak.upgrade() {
-            let mut sets = word_sets_now(&window);
+            let mut sets = word_sets_now();
             let at = at.max(0) as usize;
             if at >= sets.len() {
                 return;
             }
-            // **ファイルには触らない。**設定から外すだけで、書き手が集めた語は
-            // そのまま残る——消すのは書き手が別のところですることである。
+            // **取り込み元のファイルには触らない。**表から外すだけで、書き手が
+            // 集めた語はそのまま残る。
             sets.remove(at);
-            store_word_sets(&window, &cache, &sets);
+            hold_word_sets(&window, &cache, sets, true);
         }
     });
 
@@ -256,14 +289,13 @@ pub fn wire_word_sets(window: &AppWindow, live: &Live, render_cache: &Rc<RefCell
     let open_live = live.clone();
     window.on_word_set_opened(move |at| {
         if let Some(window) = weak.upgrade() {
-            let sets = word_sets_now(&window);
+            let sets = word_sets_now();
             let Some(set) = sets.get(at.max(0) as usize) else {
                 return;
             };
-            // **ただのテキストなので、ただ開く。**保存すれば色が付き直る
-            // （`saving.rs`が単語セットのファイルかどうかを訊く）。
-            let path = set.path.clone();
-            open_path_in_focused_pane(&window, &open_live, &path, Opening::Kept);
+            // **ただのテキストなので、ただ開く。**直したら`Re-import`で取り込み直す。
+            let source = set.source.clone();
+            open_path_in_focused_pane(&window, &open_live, &source, Opening::Kept);
         }
     });
 }

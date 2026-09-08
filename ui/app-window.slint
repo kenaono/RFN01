@@ -7,15 +7,27 @@ import { QuickDraft } from "quick-draft.slint";
 
 /// 要件 7.9: 設定画面が出す単語セットの1行。
 ///
-/// **名前と語数は読んだ結果**で、設定の行には無い——「人物（342語）」と言えるのは
-/// ファイルを読んだあとだけである。
+/// **数は取り込んだ結果**である。取り込みのときに数えてあり（`WordMarks::build`）、
+/// 画面はそれを読むだけ——数え役は1つ。
 export struct WordSetRow {
     name: string,
-    /// 語数、あるいは読めなかったこと。
-    note: string,
-    path: string,
+    words: int,
+    /// 色を付けられない語の数（他のセットと衝突）。**0でないことが目印**。
+    conflicts: int,
+    /// 同じセットの中で二度書かれた語の数。色は付くので、掃除の手がかり。
+    repeated: int,
+    source: string,
     shown: color,
     muted: bool,
+}
+
+/// 重複ひとつぶんの言い分（要件 7.9）。
+export struct WordTroubleRow {
+    word: string,
+    /// 真なら色を付けていない（セットをまたいだ衝突）。偽なら言うだけ。
+    conflict: bool,
+    /// どこで起きたか、書き手の言葉で。
+    told: string,
 }
 
 // Re-exported so they stay part of this window's public API: Rust builds the
@@ -415,16 +427,20 @@ export component AppWindow inherits Window {
     /// 「設定ファイルへ書き戻すもの」で、書き戻す関数が持っているのは窓だけ
     /// だから、窓が持っている。要件 9 の数・色・書体と同じ置き方。
     in property <[string]> terminal-shell-lines;
-    /// 要件 7.9（2026-09-08）: 単語セット。`#rrggbb | ファイルの場所`の1行で
-    /// 1セット、書かれたままの形で。**語はここに無い**——それはそのファイルの中に
-    /// 1行1語で入っている（書き手の指摘：単語帳は大きくなる）。
-    /// 窓が持っているのは、書き戻す`save_settings`が持っているのが窓だけだから。
-    in-out property <[string]> word-sets;
-    /// 要件 7.9: 設定画面に出す1行。**名前と語数は読んだ結果**で、設定の行には
-    /// 無い——「人物（342語）」と言えるのはファイルを読んだあとだけである。
+    /// 要件 7.9（2026-09-08）: 取り込んである単語セット。**語は編集器の表の中**に
+    /// あり、設定ファイルにも編集器の外のファイルにも依っていない（書き手の指摘：
+    /// IMEの辞書と同じ）。
     in property <[WordSetRow]> word-set-rows;
-    /// セットを1つ足す（ファイルを手で選ぶ）。
+    /// 取り込みで見つかった重複。**色を付けられなかったものが先**に並ぶ。
+    in property <[WordTroubleRow]> word-troubles;
+    /// 全部でいくつ見つかったか（一覧は`SHOWN_TROUBLES`までしか出さない）。
+    in property <int> word-trouble-count;
+    /// いま重複の一覧を開いているか。
+    in-out property <bool> word-troubles-shown: false;
+    /// ファイルを選んで取り込む。
     callback word-set-added();
+    /// もう一度取り込む（取り込み元を読み直す）。
+    callback word-set-reimported(int);
     /// 何番目のセットの色を選び直すか。
     callback word-set-colour-picked(int);
     /// 畳む／戻す。**消すのとは別**——校正の段によって使うセットが違う。
@@ -2618,9 +2634,16 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                         }
 
+                        // **語数と、色を付けられなかった数。**0でない衝突の数は
+                        // 警告の色で出す——「取り込んだのに色が付かない」の答えが
+                        // ここにあることが、画面から分かるように。
                         Text {
-                            text: row.note;
-                            color: Tok.ink-faint;
+                            text: row.conflicts > 0
+                                ? row.words + "語 / 重複" + row.conflicts
+                                : (row.repeated > 0
+                                    ? row.words + "語 (二重" + row.repeated + ")"
+                                    : row.words + "語");
+                            color: row.conflicts > 0 ? Tok.alert : Tok.ink-faint;
                             font-size: 11px;
                             vertical-alignment: center;
                             horizontal-stretch: 0;
@@ -2639,6 +2662,15 @@ export component AppWindow inherits Window {
                                 root.word-set-opened(index);
                             }
                         }
+                        // **取り込み直す。**語は編集器の表の中にあるので、元の
+                        // ファイルを直しても、こう言うまでは変わらない
+                        // ——IMEの辞書と同じ（要件 7.9）。
+                        TextButton {
+                            title: "Re-import";
+                            clicked => {
+                                root.word-set-reimported(index);
+                            }
+                        }
                         TextButton {
                             title: "×";
                             role: Role.quiet;
@@ -2649,7 +2681,7 @@ export component AppWindow inherits Window {
                     }
 
                     if root.word-set-rows.length == 0: Text {
-                        text: "1行に1語のテキストファイルを選ぶと、その語に色が付きます。";
+                        text: "1行に1語のテキストファイルを取り込むと、その語に色が付きます。";
                         color: Tok.ink-faint;
                         font-size: 11px;
                         overflow: elide;
@@ -2657,11 +2689,76 @@ export component AppWindow inherits Window {
 
                     HorizontalLayout {
                         alignment: start;
+                        spacing: 6px;
 
                         TextButton {
-                            title: "Add Word Set…";
+                            title: "Import…";
                             clicked => {
                                 root.word-set-added();
+                            }
+                        }
+                        // **重複は畳んで置く。**普段は数だけ見えていればよく、
+                        // 直すときにだけ開く。
+                        if root.word-trouble-count > 0: TextButton {
+                            title: root.word-troubles-shown
+                                ? "重複を閉じる"
+                                : "重複 " + root.word-trouble-count + " 件";
+                            clicked => {
+                                root.word-troubles-shown = !root.word-troubles-shown;
+                            }
+                        }
+                    }
+
+                    // 要件 7.9: **参照画面。**取り込みで見つかった重複を、書き手の
+                    // 言葉で並べる——どの語が、どこで、色が付いているのかいないのか。
+                    if root.word-troubles-shown: Rectangle {
+                        height: 152px;
+                        background: Tok.chrome-raised;
+                        border-radius: 6px;
+
+                        ScrollView {
+                            x: 8px;
+                            y: 6px;
+                            width: parent.width - 16px;
+                            height: parent.height - 12px;
+
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 2px;
+
+                                for trouble in root.word-troubles: HorizontalLayout {
+                                    spacing: 6px;
+
+                                    Text {
+                                        text: trouble.conflict ? "色なし" : "二重";
+                                        color: trouble.conflict ? Tok.alert : Tok.ink-faint;
+                                        font-size: 11px;
+                                        horizontal-stretch: 0;
+                                        min-width: 44px;
+                                    }
+                                    Text {
+                                        text: trouble.word;
+                                        color: Tok.ink;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: trouble.told;
+                                        color: Tok.ink-faint;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+
+                                if root.word-trouble-count > root.word-troubles.length: Text {
+                                    text: "ほかに "
+                                        + (root.word-trouble-count - root.word-troubles.length)
+                                        + " 件";
+                                    color: Tok.ink-faint;
+                                    font-size: 11px;
+                                }
                             }
                         }
                     }
