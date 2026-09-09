@@ -163,6 +163,8 @@ export struct PaneScreen {
     /// E1: この面の**探し方**。大小の別と、語の全体だけを見るかどうか。
     find-match-case: bool,
     find-whole-word: bool,
+    /// E1: 語を正規表現として読むか（書き手の求め 2026-09-10）。
+    find-regex: bool,
     /// 範囲内だけを探すときの、その範囲（本文のバイト）。
     /// **終わりが始まりより大きいときだけ効く**——0と0は「範囲は無い」である。
     /// 書き手が選んだものそのもので、一致へ移っても動かない（E1）。
@@ -308,6 +310,7 @@ export component EditorPane inherits Rectangle {
     /// 選んだ範囲の中だけ。
     in property <bool> find-match-case;
     in property <bool> find-whole-word;
+    in property <bool> find-regex;
     in property <bool> find-in-scope;
     in property <int> find-generation;
     /// 帯が出たときに鍵盤をそこへ置くか（E1、書き手の求め 2026-09-09）。
@@ -1371,6 +1374,17 @@ export component EditorPane inherits Rectangle {
                             checked: root.find-in-scope;
                             clicked => {
                                 root.find-option(2);
+                            }
+                        }
+                        // E1（書き手の求め 2026-09-10）: 正規表現。**ワイルド
+                        // カードもこれで書ける**（`*`は`.*`、`?`は`.`）ので、
+                        // 切り替えは1つにしてある。
+                        ToggleChip {
+                            title: ".*";
+                            tip: "Regular expression";
+                            checked: root.find-regex;
+                            clicked => {
+                                root.find-option(3);
                             }
                         }
 

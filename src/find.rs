@@ -37,6 +37,15 @@ pub struct Rules {
     /// 片方だけを落とす規則は**失敗の向きが悪い**（見えない見落としになる）。
     /// 単語チェックモード要件 8.1.3 が文字種の規則を見送ったのと同じ理由。
     pub whole_word: bool,
+    /// 語を正規表現として読むか（E1、書き手の求め 2026-09-10）。
+    ///
+    /// **入りと切りだけ。**ワイルドカードを別の切り替えにはしない——`*`と`?`は
+    /// 正規表現の`.*`と`.`で書けるし、**同じことを2つの切り替えで言うと、
+    /// どちらが効いているのかを画面に出す仕事が増える。**
+    ///
+    /// 入れると「一致の長さは針の長さ」が成り立たなくなる。それを前提にした
+    /// 関数を並べないために[`Search`]がある。
+    pub regex: bool,
     /// 探す範囲（バイト）。`None`は文書ぜんぶ。
     ///
     /// **範囲は書き手が選んだものそのもの**で、一致へ移っても動かない
@@ -93,48 +102,214 @@ fn is_word_letter(letter: char) -> bool {
         || matches!(letter, '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ')
 }
 
-/// Where the next match is, from a position, wrapping around the end.
+/// 1回の検索——**語と探し方を1つに束ねたもの**（E1）。
 ///
-/// `from` is where the search begins: forwards, that is the first byte the
-/// match may start at; backwards, the first byte it must end before. **The
-/// document is a ring**: a search that reaches the end carries on from the
-/// start, so `Ctrl+F` never simply stops working halfway down a document.
+/// **なぜ型にするか。**正規表現を入れると「一致の長さは針の長さ」が成り立たなく
+/// なる。長さを前提にした関数を4つ並べておくと、次に規則が増えたとき**どれか1つが
+/// 取り残される**——追加要件の0番で直したのがまさにそれだった（`alpha`で見つけた
+/// `Alpha`が置換されなかった）。ここを通る限り、検索・件数・色・置換は同じ一巡を
+/// 見ている。
 ///
-/// An empty needle matches nothing. There is no position in a document that is
-/// "where the nothing is", and a search box the writer has not typed into yet is
-/// the common case.
-pub fn next_match(
-    source: &str,
-    needle: &str,
-    from: usize,
-    forwards: bool,
+/// **組み立てで誤りが分かる。**`(`だけの正規表現は「まだ書きかけ」であって、
+/// 黙って0件にするのは嘘である——[`Search::new`]が理由を返し、帯がそれを言う。
+pub struct Search {
+    needle: String,
     rules: Rules,
-) -> Option<(usize, usize)> {
-    if needle.is_empty() || needle.len() > source.len() {
-        return None;
+    /// 正規表現のときだけ。素の語では[`found_at`]が歩く。
+    pattern: Option<regex::Regex>,
+}
+
+impl Search {
+    /// 探し方を束ねる。正規表現が正しくなければ、その理由を返す。
+    ///
+    /// **大小の別は組み立てに混ぜる**（`(?i)`）——正規表現の畳み方はUnicodeの
+    /// それで、素の語のASCIIだけの畳み方より広い。**それでも仮名は畳まれない**
+    /// （`ア`と`あ`は大小の関係にない）ので、要件 7.7 が心配していたことは起きない。
+    pub fn new(needle: &str, rules: Rules) -> Result<Self, String> {
+        let pattern = if rules.regex && !needle.is_empty() {
+            let built = regex::RegexBuilder::new(needle)
+                .case_insensitive(!rules.match_case)
+                // **`^`と`$`は行の端**（編集器の作法）。`.`は改行に当たらない
+                // ままなので、行をまたぐ一致は`\n`や`[\s\S]`と書いた人にだけ
+                // 起きる——E1が「複数行検索は次の段階」と言ったのは、書き手が
+                // 頼んでいないのに一致が行を越えることのほうである。
+                .multi_line(true)
+                .build();
+            match built {
+                Ok(pattern) => Some(pattern),
+                // **書き手に見せるのは1行。**どこがどう悪いかは正規表現の
+                // 作法の話で、帯に置くには長い——大事なのは「いま探せていない」
+                // ことが画面に出ていることである。
+                Err(_) => return Err("正規表現が正しくありません".to_owned()),
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            needle: needle.to_owned(),
+            rules,
+            pattern,
+        })
     }
-    // **輪は範囲の輪である**（E1）。範囲内を探しているあいだ、端まで行った
-    // 検索は範囲の反対の端から続く——文書の頭へ戻れば、選んでいない本文を
-    // 探し始めることになる。
-    let (low, high) = rules.scope(source);
-    // **A byte that is not a character boundary is not an error here.** It
-    // arrives from a caret that has been moved by an edit elsewhere, and
-    // `str::get` answers `None` for it — which, before this, sent the search
-    // back to the top of the document and made 次へ find the same match for
-    // ever. Forwards the position moves on to the next character, backwards
-    // back to the start of the one it is in: either way, no match is skipped.
-    let from = if forwards {
-        boundary_at_or_after(source, from)
-    } else {
-        boundary_at_or_before(source, from)
-    };
-    let found = if forwards {
-        found_at(source, needle, from, rules).or_else(|| found_at(source, needle, low, rules))
-    } else {
-        found_before(source, needle, from, rules)
-            .or_else(|| found_before(source, needle, high, rules))
-    };
-    found.map(|at| (at, at + needle.len()))
+
+    /// この本文の一致を順に見せる。**すべてがここを通る。**
+    ///
+    /// `visit`が`false`を返したらそこで止める——次の1つだけが要る呼び手
+    /// （[`Self::next`]）が、文書ぜんぶを歩かずに済むように。
+    ///
+    /// **重なる一致は返さない**（`str::matches`と同じ）。長さ0の一致
+    /// （`a*`が空に当たるような）も返さない：**何も無いところは一致ではない**し、
+    /// 返せば同じ場所で止まり続ける。
+    fn walk(&self, source: &str, mut visit: impl FnMut(usize, usize) -> bool) {
+        if self.needle.is_empty() {
+            return;
+        }
+        let (low, high) = self.rules.scope(source);
+        match &self.pattern {
+            Some(pattern) => {
+                // **範囲の中だけを見せる。**`^`と`$`はその切れ端の端に当たる
+                // ——範囲内検索は「そこだけが本文である」という約束なので、
+                // それでよい。
+                let Some(hay) = source.get(low..high) else {
+                    return;
+                };
+                for found in pattern.find_iter(hay) {
+                    if found.is_empty() {
+                        continue;
+                    }
+                    let start = low + found.start();
+                    let end = low + found.end();
+                    if !self
+                        .rules
+                        .word_edges(source, found.as_str(), start, end - start)
+                    {
+                        continue;
+                    }
+                    if !visit(start, end) {
+                        return;
+                    }
+                }
+            }
+            None => {
+                let mut from = low;
+                while let Some(at) = found_at(source, &self.needle, from, self.rules) {
+                    let end = at + self.needle.len();
+                    if !visit(at, end) {
+                        return;
+                    }
+                    from = end;
+                }
+            }
+        }
+    }
+
+    /// 次（または前）の一致。**文書は輪**で、範囲内検索ではその範囲が輪である。
+    ///
+    /// 前向きは`from`以降に始まる最初の一致、後ろ向きは`from`までに終わる最後の
+    /// 一致。どちらも見つからなければ輪を回って端から返す。
+    pub fn next(&self, source: &str, from: usize, forwards: bool) -> Option<(usize, usize)> {
+        let mut first = None;
+        let mut answer = None;
+        if forwards {
+            self.walk(source, |start, end| {
+                if first.is_none() {
+                    first = Some((start, end));
+                }
+                if start >= from {
+                    answer = Some((start, end));
+                    return false;
+                }
+                true
+            });
+            answer.or(first)
+        } else {
+            let mut last = None;
+            self.walk(source, |start, end| {
+                last = Some((start, end));
+                if end <= from {
+                    answer = Some((start, end));
+                }
+                true
+            });
+            answer.or(last)
+        }
+    }
+
+    /// 何件あって、いま何件目か（E1）。
+    ///
+    /// **一巡で両方を答える。**「12件ある」と「その3件目にいる」は同じ一巡から
+    /// 出るもので、別々に数えれば同じ本文を2度歩くことになる。
+    ///
+    /// `at`は立っている一致の**始まり**。それが数の中の一致でなければ`None`
+    /// ——**立っていないことは0件目ではない。**[`Self::next`]も同じ一巡を
+    /// 歩くので、**着いた先は必ず数の中にある。**
+    pub fn tally(&self, source: &str, at: Option<usize>) -> (usize, Option<usize>) {
+        let mut total = 0;
+        let mut which = None;
+        self.walk(source, |start, _| {
+            total += 1;
+            if at == Some(start) {
+                which = Some(total);
+            }
+            true
+        });
+        (total, which)
+    }
+
+    /// 色を付けるための一致の並び（E1の③）。
+    ///
+    /// `limit`は歯止め——**見せられる数の決まりではなく、1打鍵の費用の**。
+    pub fn spans(&self, source: &str, limit: usize) -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        if limit == 0 {
+            return found;
+        }
+        self.walk(source, |start, end| {
+            found.push((start, end));
+            found.len() < limit
+        });
+        found
+    }
+
+    /// この範囲が、この探し方の一致そのものか（要件 7.7）。
+    ///
+    /// **一件置換が訊く唯一の問い。**「いま選ばれているのは検索が見つけたものか」
+    /// ——ここが検索より厳しいと、見つかったのに置換されない一致ができる。
+    pub fn covers(&self, source: &str, start: usize, end: usize) -> bool {
+        let mut found = false;
+        self.walk(source, |at, to| {
+            if (at, to) == (start, end) {
+                found = true;
+                return false;
+            }
+            // 並びは前から後ろなので、通り過ぎたら無い。
+            at < start
+        });
+        found
+    }
+
+    /// 一致をすべて置き換えて、その数（要件 7.7）。
+    ///
+    /// **書いたものは読み直さない**ので、`a`を`aa`にしても走らない。
+    /// **入れる字はそのまま**——正規表現でも`$1`のような後方参照は解さない。
+    /// 解すると、`$`を打った書き手が置換のたびに驚くことになる（要件 15：
+    /// 要るとなったら足す）。
+    ///
+    /// 範囲内検索では**範囲の外を1バイトも触らない**。
+    pub fn replace_all(&self, source: &str, replacement: &str) -> (String, usize) {
+        let mut out = String::with_capacity(source.len());
+        let mut from = 0;
+        let mut replaced = 0;
+        self.walk(source, |start, end| {
+            out.push_str(&source[from..start]);
+            out.push_str(replacement);
+            from = end;
+            replaced += 1;
+            true
+        });
+        out.push_str(&source[from..]);
+        (out, replaced)
+    }
 }
 
 /// Where the needle is, at or after `from`, ignoring the case of ASCII letters.
@@ -163,165 +338,13 @@ fn found_at(haystack: &str, needle: &str, from: usize, rules: Rules) -> Option<u
         // with one of those.
         if haystack.is_char_boundary(at)
             && rules.same(&hay[at..at + pin.len()], pin)
-            && rules.word_edges(haystack, needle, at, pin.len())
+            && rules.word_edges(haystack, &haystack[at..at + pin.len()], at, pin.len())
         {
             return Some(at);
         }
         at += 1;
     }
     None
-}
-
-/// Where the last match that ends at or before `before` is.
-fn found_before(haystack: &str, needle: &str, before: usize, rules: Rules) -> Option<usize> {
-    let hay = haystack.as_bytes();
-    let pin = needle.as_bytes();
-    let (low, high) = rules.scope(haystack);
-    let end = before.min(high);
-    if pin.is_empty() || end < low + pin.len() {
-        return None;
-    }
-    let mut at = end - pin.len();
-    loop {
-        if haystack.is_char_boundary(at)
-            && rules.same(&hay[at..at + pin.len()], pin)
-            && rules.word_edges(haystack, needle, at, pin.len())
-        {
-            return Some(at);
-        }
-        if at == low {
-            return None;
-        }
-        at -= 1;
-    }
-}
-
-/// The first character boundary at or after `at`.
-fn boundary_at_or_after(source: &str, at: usize) -> usize {
-    let mut at = at.min(source.len());
-    while !source.is_char_boundary(at) {
-        at += 1;
-    }
-    at
-}
-
-/// The last character boundary at or before `at`.
-fn boundary_at_or_before(source: &str, at: usize) -> usize {
-    let mut at = at.min(source.len());
-    while !source.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
-}
-
-/// Whether the text between two byte positions is the needle.
-///
-/// **The one place that answers "is this a match?"** (追加要件 2026-09-09).
-/// 一件置換は「いま選ばれているものが検索で見つけたものか」を訊いてから
-/// 置き換える。それを`==`で訊いていたので、`alpha`で見つけた`Alpha`は
-/// 置換されずに次へ飛んでいた——**見つける規則と置き換える規則が2つあった**。
-/// 畳み方は[`next_match`]・[`tally`]・[`replace_all`]と同じASCIIのそれで、
-/// ここを通せば4つが1つの規則を共有する。
-///
-/// 範囲が文字の途中から始まっていたり、長さが針と違えば一致ではない
-/// ——畳んでも長さが変わらないのがASCIIの折り畳みの性質なので、
-/// 長さの違いはそれだけで答えになる。
-pub fn is_match(source: &str, needle: &str, start: usize, end: usize, rules: Rules) -> bool {
-    if needle.is_empty() || end.saturating_sub(start) != needle.len() {
-        return false;
-    }
-    let (low, high) = rules.scope(source);
-    if start < low || end > high {
-        return false;
-    }
-    source
-        .get(start..end)
-        .is_some_and(|found| rules.same(found.as_bytes(), needle.as_bytes()))
-        && rules.word_edges(source, needle, start, needle.len())
-}
-
-/// How many matches there are, and which one a position is standing on.
-///
-/// **One walk answers both** (E1). 「12件ある」と「その3件目にいる」は同じ一巡
-/// から出るもので、別々に数えれば同じ本文を2度歩くことになる。
-///
-/// Matches that would overlap are not counted twice, the same rule
-/// `str::matches` follows — and the same one [`replace_all`] replaces by: the
-/// search for the next one starts after the last. **数え方と置き換え方が同じで
-/// なければ、「12件」と言った直後の全置換が11件を報せる。**
-///
-/// `at` is where the match the writer stands on begins. The answer is `None`
-/// when that is not the start of a counted match: **立っていないことは0件目では
-/// ない**ので、呼ぶ側は件数だけを言う。自分と重なる語（`あああ`から`ああ`を探した
-/// とき）では次の一致が数の網目から外れることがあり、そこでも`None`と答える。
-pub fn tally(
-    source: &str,
-    needle: &str,
-    at: Option<usize>,
-    rules: Rules,
-) -> (usize, Option<usize>) {
-    let mut total = 0;
-    let mut which = None;
-    let mut from = rules.scope(source).0;
-    while let Some(found) = found_at(source, needle, from, rules) {
-        total += 1;
-        if at == Some(found) {
-            which = Some(total);
-        }
-        from = found + needle.len();
-    }
-    (total, which)
-}
-
-/// 見えるところに出すための、一致の並び（E1）。
-///
-/// **数え方は[`tally`]と同じ**——重なる一致は二度返さない。`limit`は歯止めで、
-/// 画面に出せる数を超えたぶんは色を付けない：**一致が多すぎる語で1打鍵の費用を
-/// 押し上げないため**であって、見せられる数を編集器が決めているわけではない。
-pub fn spans(source: &str, needle: &str, rules: Rules, limit: usize) -> Vec<(usize, usize)> {
-    let mut found = Vec::new();
-    if needle.is_empty() || limit == 0 {
-        return found;
-    }
-    let mut from = rules.scope(source).0;
-    while let Some(at) = found_at(source, needle, from, rules) {
-        found.push((at, at + needle.len()));
-        if found.len() >= limit {
-            break;
-        }
-        from = at + needle.len();
-    }
-    found
-}
-
-/// Every match replaced, and how many there were.
-///
-/// **The replacement is never searched again**, so replacing "a" with "aa"
-/// finishes rather than filling the document: the next search starts after
-/// what was just written.
-///
-/// **What is written is what the writer typed**, whatever case the match was
-/// in. A replacement that copied the case of each match would be guessing at
-/// which of three or four conventions was meant, and would be wrong about
-/// proper nouns either way.
-pub fn replace_all(source: &str, needle: &str, replacement: &str, rules: Rules) -> (String, usize) {
-    if needle.is_empty() {
-        return (source.to_owned(), 0);
-    }
-    let mut out = String::with_capacity(source.len());
-    // **範囲の外は1バイトも触らない**（E1）。頭から書き出し、範囲の中だけを
-    // 置き換え、残りをそのまま繋ぐ。
-    let mut from = rules.scope(source).0;
-    out.push_str(&source[..from]);
-    let mut replaced = 0;
-    while let Some(at) = found_at(source, needle, from, rules) {
-        out.push_str(&source[from..at]);
-        out.push_str(replacement);
-        from = at + needle.len();
-        replaced += 1;
-    }
-    out.push_str(&source[from..]);
-    (out, replaced)
 }
 
 /// The one span that differs between two versions of a document.
@@ -441,8 +464,15 @@ mod tests {
     const PLAIN: Rules = Rules {
         match_case: false,
         whole_word: false,
+        regex: false,
         within: None,
     };
+
+    /// 試験のための組み立て。**正しくない探し方はここで落ちる**ので、
+    /// 誤りそのものを見る試験だけが`Search::new`を直に呼ぶ。
+    fn seek(needle: &str, rules: Rules) -> Search {
+        Search::new(needle, rules).expect("読める探し方")
+    }
 
     const SOURCE: &str = "春の海 ひねもすのたり のたりかな";
 
@@ -452,11 +482,11 @@ mod tests {
         let second = SOURCE.rfind("のたり").expect("is there twice");
 
         assert_eq!(
-            next_match(SOURCE, "のたり", 0, true, PLAIN),
+            seek("のたり", PLAIN).next(SOURCE, 0, true),
             Some((at, at + 9))
         );
         assert_eq!(
-            next_match(SOURCE, "のたり", at + 1, true, PLAIN),
+            seek("のたり", PLAIN).next(SOURCE, at + 1, true),
             Some((second, second + 9)),
         );
     }
@@ -469,12 +499,12 @@ mod tests {
         let second = SOURCE.rfind("のたり").expect("is there twice");
 
         assert_eq!(
-            next_match(SOURCE, "のたり", second + 1, true, PLAIN),
+            seek("のたり", PLAIN).next(SOURCE, second + 1, true),
             Some((first, first + 9)),
             "past the last match, back to the first",
         );
         assert_eq!(
-            next_match(SOURCE, "のたり", 0, false, PLAIN),
+            seek("のたり", PLAIN).next(SOURCE, 0, false),
             Some((second, second + 9)),
             "backwards from the start, round to the last",
         );
@@ -486,7 +516,7 @@ mod tests {
         let second = SOURCE.rfind("のたり").expect("is there twice");
 
         assert_eq!(
-            next_match(SOURCE, "のたり", second, false, PLAIN),
+            seek("のたり", PLAIN).next(SOURCE, second, false),
             Some((first, first + 9)),
         );
     }
@@ -504,11 +534,11 @@ mod tests {
         let inside = first + 1;
         assert!(!SOURCE.is_char_boundary(inside));
         assert_eq!(
-            next_match(SOURCE, "のたり", inside, true, PLAIN),
+            seek("のたり", PLAIN).next(SOURCE, inside, true),
             Some((second, second + 9)),
         );
         assert_eq!(
-            next_match(SOURCE, "のたり", inside, false, PLAIN),
+            seek("のたり", PLAIN).next(SOURCE, inside, false),
             Some((second, second + 9)),
             "backwards from inside it, round to the last",
         );
@@ -517,22 +547,26 @@ mod tests {
     #[test]
     fn upper_and_lower_case_are_the_same_letter() {
         let source = "Windows 11 と windows の WINDOWS";
-        let first = next_match(source, "windows", 0, true, PLAIN).expect("the first one");
+        let first = seek("windows", PLAIN)
+            .next(source, 0, true)
+            .expect("the first one");
         assert_eq!(first, (0, 7));
-        let second = next_match(source, "WINDOWS", first.1, true, PLAIN).expect("the second one");
+        let second = seek("WINDOWS", PLAIN)
+            .next(source, first.1, true)
+            .expect("the second one");
         assert_eq!(&source[second.0..second.1], "windows");
-        assert_eq!(tally(source, "windows", None, PLAIN).0, 3);
+        assert_eq!(seek("windows", PLAIN).tally(source, None).0, 3);
     }
 
     #[test]
     fn only_ascii_letters_are_folded() {
         // Full-width Ａ and half-width a are different characters, and a
         // Japanese document is full of pairs a search must not treat as equal.
-        assert_eq!(next_match("Ａ", "a", 0, true, PLAIN), None);
-        assert_eq!(next_match("ア", "あ", 0, true, PLAIN), None);
+        assert_eq!(seek("a", PLAIN).next("Ａ", 0, true), None);
+        assert_eq!(seek("あ", PLAIN).next("ア", 0, true), None);
         // And a needle that is not ASCII at all still finds itself.
         assert_eq!(
-            next_match("春はあけぼの", "あけぼの", 0, true, PLAIN),
+            seek("あけぼの", PLAIN).next("春はあけぼの", 0, true),
             Some((6, 18))
         );
     }
@@ -540,7 +574,7 @@ mod tests {
     #[test]
     fn a_replacement_is_written_as_it_was_typed() {
         // Both matches go, and neither takes its own case with it.
-        let (replaced, count) = replace_all("Cat and cat", "CAT", "dog", PLAIN);
+        let (replaced, count) = seek("CAT", PLAIN).replace_all("Cat and cat", "dog");
         assert_eq!(replaced, "dog and dog");
         assert_eq!(count, 2);
     }
@@ -548,7 +582,9 @@ mod tests {
     #[test]
     fn a_search_backwards_folds_case_as_well() {
         let source = "cat と CAT";
-        let found = next_match(source, "Cat", source.len(), false, PLAIN).expect("the last one");
+        let found = seek("Cat", PLAIN)
+            .next(source, source.len(), false)
+            .expect("the last one");
         assert_eq!(&source[found.0..found.1], "CAT");
     }
 
@@ -560,9 +596,9 @@ mod tests {
         let source = "Alpha alpha ALPHA";
         let mut from = 0;
         let mut matched = 0;
-        while let Some((start, end)) = next_match(source, "alpha", from, true, PLAIN) {
+        while let Some((start, end)) = seek("alpha", PLAIN).next(source, from, true) {
             assert!(
-                is_match(source, "alpha", start, end, PLAIN),
+                seek("alpha", PLAIN).covers(source, start, end),
                 "found {:?} but would not replace it",
                 &source[start..end]
             );
@@ -573,8 +609,8 @@ mod tests {
             }
         }
         assert_eq!(matched, 3);
-        assert_eq!(tally(source, "alpha", None, PLAIN).0, 3);
-        assert_eq!(replace_all(source, "alpha", "beta", PLAIN).1, 3);
+        assert_eq!(seek("alpha", PLAIN).tally(source, None).0, 3);
+        assert_eq!(seek("alpha", PLAIN).replace_all(source, "beta").1, 3);
     }
 
     /// Anything that is not exactly one match is not one: a longer span, a
@@ -585,16 +621,16 @@ mod tests {
         let source = "あかalphaあか";
 
         assert!(
-            !is_match(source, "alpha", 6, 12, PLAIN),
+            !seek("alpha", PLAIN).covers(source, 6, 12),
             "one byte too long"
         );
-        assert!(!is_match(source, "alpha", 6, 10, PLAIN), "too short");
+        assert!(!seek("alpha", PLAIN).covers(source, 6, 10), "too short");
         assert!(
-            !is_match(source, "alpha", 5, 10, PLAIN),
+            !seek("alpha", PLAIN).covers(source, 5, 10),
             "starts inside a character"
         );
-        assert!(!is_match(source, "", 6, 6, PLAIN), "nothing matches");
-        assert!(is_match(source, "ALPHA", 6, 11, PLAIN));
+        assert!(!seek("", PLAIN).covers(source, 6, 6), "nothing matches");
+        assert!(seek("ALPHA", PLAIN).covers(source, 6, 11));
     }
 
     /// **件数と現在位置は同じ一巡から出る**（E1）。帯が`3 / 12`と言えるのは、
@@ -604,29 +640,43 @@ mod tests {
         let first = SOURCE.find("のたり").expect("is there");
         let second = SOURCE.rfind("のたり").expect("is there twice");
 
-        assert_eq!(tally(SOURCE, "のたり", Some(first), PLAIN), (2, Some(1)));
-        assert_eq!(tally(SOURCE, "のたり", Some(second), PLAIN), (2, Some(2)));
+        assert_eq!(
+            seek("のたり", PLAIN).tally(SOURCE, Some(first)),
+            (2, Some(1))
+        );
+        assert_eq!(
+            seek("のたり", PLAIN).tally(SOURCE, Some(second)),
+            (2, Some(2))
+        );
         // 一致の頭でない場所に立っているのは、0件目ではなく「どれでもない」。
-        assert_eq!(tally(SOURCE, "のたり", Some(0), PLAIN), (2, None));
-        assert_eq!(tally(SOURCE, "のたり", None, PLAIN), (2, None));
-        assert_eq!(tally(SOURCE, "冬の海", Some(0), PLAIN), (0, None));
+        assert_eq!(seek("のたり", PLAIN).tally(SOURCE, Some(0)), (2, None));
+        assert_eq!(seek("のたり", PLAIN).tally(SOURCE, None), (2, None));
+        assert_eq!(seek("冬の海", PLAIN).tally(SOURCE, Some(0)), (0, None));
     }
 
-    /// 数え方は[`replace_all`]の置き換え方と同じ——重なる一致は二度数えない。
-    /// **ここが食い違うと、「2件」と言った直後の全置換が3件を報せる。**
+    /// 数え方は[`Search::replace_all`]の置き換え方と同じ——重なる一致は二度
+    /// 数えない。**ここが食い違うと、「2件」と言った直後の全置換が3件を報せる。**
+    ///
+    /// **見つかるものは必ず数の中にある**（2026-09-10、正規表現のために一巡へ
+    /// 揃えたときに手に入った）。以前は`next`だけが別の道を歩いていて、
+    /// `あああ`の2文字目から`ああ`を探すと**数に無い一致**へ着けた——帯はそこで
+    /// 件数だけを言うしかなかった。いまは`next`も同じ網目を歩く。
     #[test]
     fn what_is_counted_is_what_a_replace_all_would_replace() {
         let source = "あああ あああ";
 
-        let (total, _) = tally(source, "ああ", None, PLAIN);
+        let (total, _) = seek("ああ", PLAIN).tally(source, None);
 
         assert_eq!(total, 2);
-        assert_eq!(replace_all(source, "ああ", "い", PLAIN).1, total);
-        // 網目から外れた一致（2つめの`あ`から始まるもの）に立つことはできる。
-        // そこは件数の中に無いので、何件目かは答えない——帯は件数だけを言う。
-        let off_the_grid = next_match(source, "ああ", 3, true, PLAIN).expect("is there");
-        assert_eq!(off_the_grid.0, 3);
-        assert_eq!(tally(source, "ああ", Some(3), PLAIN), (2, None));
+        assert_eq!(seek("ああ", PLAIN).replace_all(source, "い").1, total);
+        // 網目の外（2文字目から始まる`ああ`）へは着かない。次の一致は
+        // **数の中の2件目**である。
+        let next = seek("ああ", PLAIN).next(source, 3, true).expect("is there");
+        assert_eq!(next.0, 10);
+        assert_eq!(
+            seek("ああ", PLAIN).tally(source, Some(next.0)),
+            (2, Some(2))
+        );
     }
 
     /// E1: **大文字と小文字を別の字として扱う切り替え。**既定は畳むほうで、
@@ -640,13 +690,15 @@ mod tests {
             ..PLAIN
         };
 
-        let found = next_match(source, "cat", 0, true, strict).expect("the lower one");
+        let found = seek("cat", strict)
+            .next(source, 0, true)
+            .expect("the lower one");
         assert_eq!(&source[found.0..found.1], "cat");
-        assert_eq!(tally(source, "cat", None, strict).0, 1);
-        assert_eq!(tally(source, "cat", None, PLAIN).0, 3);
+        assert_eq!(seek("cat", strict).tally(source, None).0, 1);
+        assert_eq!(seek("cat", PLAIN).tally(source, None).0, 3);
         // 置換も同じ規則で動く——**4つが同じ答えを出す**のがこの型の値打ち。
         assert_eq!(
-            replace_all(source, "cat", "犬", strict).0,
+            seek("cat", strict).replace_all(source, "犬").0,
             "Cat と 犬 と CAT"
         );
     }
@@ -663,18 +715,22 @@ mod tests {
         };
 
         let source = "cat cats concat cat_1";
-        assert_eq!(tally(source, "cat", None, PLAIN).0, 4);
-        assert_eq!(tally(source, "cat", None, whole).0, 1, "頭の1つだけが語");
+        assert_eq!(seek("cat", PLAIN).tally(source, None).0, 4);
+        assert_eq!(
+            seek("cat", whole).tally(source, None).0,
+            1,
+            "頭の1つだけが語"
+        );
         // `_`は語をつくる字なので、`cat_1`の`cat`は語の一部である。
-        assert_eq!(tally(source, "cat_1", None, whole).0, 1);
+        assert_eq!(seek("cat_1", whole).tally(source, None).0, 1);
 
         // 日本語は変わらない——ここが変わると「ほとんど何も見つからない
         // 切り替え」になる。
         let japanese = "猫と黒猫と猫又";
-        assert_eq!(tally(japanese, "猫", None, whole).0, 3);
+        assert_eq!(seek("猫", whole).tally(japanese, None).0, 3);
 
         // 針の端が語をつくる字でなければ、その側は問わない（`\b`と同じ）。
-        assert_eq!(tally("a-b と -", "-", None, whole).0, 2);
+        assert_eq!(seek("-", whole).tally("a-b と -", None).0, 2);
     }
 
     /// E1: **選んだ範囲の外は、探しも置き換えもしない。**
@@ -692,21 +748,25 @@ mod tests {
             ..PLAIN
         };
 
-        assert_eq!(tally(source, "猫", None, PLAIN).0, 4);
-        assert_eq!(tally(source, "猫", None, inside).0, 2);
+        assert_eq!(seek("猫", PLAIN).tally(source, None).0, 4);
+        assert_eq!(seek("猫", inside).tally(source, None).0, 2);
 
         // 範囲の最後の一致から次を探すと、範囲の頭へ戻る（文書の頭ではない）。
         let last = source[..end].rfind('猫').expect("is there");
-        let wrapped = next_match(source, "猫", last + 3, true, inside).expect("wraps");
+        let wrapped = seek("猫", inside)
+            .next(source, last + 3, true)
+            .expect("wraps");
         assert!(wrapped.0 >= start && wrapped.0 < end);
         // 後ろ向きも同じ輪の中。
-        let back = next_match(source, "猫", start, false, inside).expect("wraps back");
+        let back = seek("猫", inside)
+            .next(source, start, false)
+            .expect("wraps back");
         assert_eq!(back.0, last);
 
         // 範囲の外の猫は、一致でもなければ置き換えもされない。
         let outside = source.find('猫').expect("is there");
-        assert!(!is_match(source, "猫", outside, outside + 3, inside));
-        let (replaced, count) = replace_all(source, "猫", "犬", inside);
+        assert!(!seek("猫", inside).covers(source, outside, outside + 3));
+        let (replaced, count) = seek("猫", inside).replace_all(source, "犬");
         assert_eq!(count, 2);
         assert_eq!(replaced, "まえがき 猫 ほんぶん 犬 犬 あとがき 猫");
     }
@@ -717,37 +777,150 @@ mod tests {
     fn every_match_can_be_shown_at_once() {
         let source = "猫と犬と猫と猫";
 
-        let all = spans(source, "猫", PLAIN, 100);
+        let all = seek("猫", PLAIN).spans(source, 100);
 
-        assert_eq!(all.len(), tally(source, "猫", None, PLAIN).0);
+        assert_eq!(all.len(), seek("猫", PLAIN).tally(source, None).0);
         for (start, end) in &all {
             assert_eq!(&source[*start..*end], "猫");
-            assert!(is_match(source, "猫", *start, *end, PLAIN));
+            assert!(seek("猫", PLAIN).covers(source, *start, *end));
         }
         // 上限で止まる。**止まったことは色の付かなさとして出る**ので、
         // 散文で届かないところに置いてある（`MAX_SHOWN_MATCHES`）。
-        assert_eq!(spans(source, "猫", PLAIN, 2).len(), 2);
-        assert!(spans(source, "猫", PLAIN, 0).is_empty());
-        assert!(spans(source, "", PLAIN, 100).is_empty());
+        assert_eq!(seek("猫", PLAIN).spans(source, 2).len(), 2);
+        assert!(seek("猫", PLAIN).spans(source, 0).is_empty());
+        assert!(seek("", PLAIN).spans(source, 100).is_empty());
         // 探し方をそのまま受ける——範囲の外は色が付かない。
         let inside = Rules {
             within: Some((0, 3)),
             ..PLAIN
         };
-        assert_eq!(spans(source, "猫", inside, 100), vec![(0, 3)]);
+        assert_eq!(seek("猫", inside).spans(source, 100), vec![(0, 3)]);
+    }
+
+    /// E1（書き手の求め 2026-09-10）: **正規表現。**入りと切りだけで、
+    /// ワイルドカードもここに含まれる（`*`は`.*`、`?`は`.`）。
+    #[test]
+    fn a_pattern_finds_what_a_plain_needle_cannot() {
+        let source = "猫が3匹、犬が12匹";
+        let rules = Rules {
+            regex: true,
+            ..PLAIN
+        };
+
+        // 長さの違う一致。**数・色・置換が同じ一巡から出る**ので食い違わない。
+        let digits = seek("[0-9]+", rules);
+        assert_eq!(digits.spans(source, 10), vec![(6, 7), (19, 21)]);
+        assert_eq!(digits.tally(source, Some(19)), (2, Some(2)));
+        assert_eq!(digits.replace_all(source, "N").0, "猫がN匹、犬がN匹");
+        // 見つけたものは、そのまま置換できる（要件 7.7 の畳み方は1つ）。
+        assert!(digits.covers(source, 19, 21));
+        assert!(!digits.covers(source, 19, 20), "半端な範囲は一致ではない");
+
+        // 選び（`|`）も日本語のまま書ける。
+        assert_eq!(seek("猫|犬", rules).tally(source, None).0, 2);
+    }
+
+    /// E1: `^`と`$`は**行の端**に当たる（編集器の作法）。`.`は改行に当たらない
+    /// ので、行をまたぐ一致はそう書いた人にだけ起きる。
+    #[test]
+    fn a_pattern_reads_the_lines_as_lines() {
+        let source = "第一章\n中身\n第二章\n";
+        let rules = Rules {
+            regex: true,
+            ..PLAIN
+        };
+
+        assert_eq!(seek("^第", rules).tally(source, None).0, 2);
+        assert_eq!(seek("章$", rules).tally(source, None).0, 2);
+        assert_eq!(
+            seek("章.中", rules).tally(source, None).0,
+            0,
+            "`.`は改行に当たらない"
+        );
+        assert_eq!(seek("章\n中", rules).tally(source, None).0, 1);
+    }
+
+    /// E1: **書きかけの正規表現に「0件」と答えない。**`(`は誤りであって、
+    /// 見つからないのとは違う——黙って0件にすると、書き手は自分の本文のほうを
+    /// 疑う（単語チェックモード要件 2.1.1 と同じ根）。
+    #[test]
+    fn a_pattern_that_does_not_read_says_so() {
+        let rules = Rules {
+            regex: true,
+            ..PLAIN
+        };
+
+        assert!(Search::new("(", rules).is_err());
+        assert!(Search::new("[a-", rules).is_err());
+        // 切りのときは、同じ字がただの語である。
+        assert!(Search::new("(", PLAIN).is_ok());
+        assert_eq!(seek("(", PLAIN).tally("(a) (b)", None).0, 2);
+    }
+
+    /// E1: **何も無いところは一致ではない。**`a*`は空にも当たるが、それを
+    /// 返せば同じ場所で止まり続け、色は文書ぜんぶに付く。
+    #[test]
+    fn an_empty_match_is_not_a_match() {
+        let rules = Rules {
+            regex: true,
+            ..PLAIN
+        };
+        let source = "aa bb aa";
+
+        assert_eq!(seek("a*", rules).spans(source, 10), vec![(0, 2), (6, 8)]);
+        assert_eq!(seek("x*", rules).tally(source, None), (0, None));
+    }
+
+    /// E1: 探し方の3つは正規表現にも効く。**語の切れ目の決め方は1つ**で、
+    /// 正規表現の`\b`ではなく[`Rules::whole_word`]のそれを使う——2つあれば、
+    /// 切り替えを入れた書き手が別の答えを受け取る。
+    #[test]
+    fn the_other_rules_still_hold_over_a_pattern() {
+        let source = "cat cats CAT";
+        let strict = Rules {
+            regex: true,
+            match_case: true,
+            ..PLAIN
+        };
+        let whole = Rules {
+            regex: true,
+            whole_word: true,
+            ..PLAIN
+        };
+
+        assert_eq!(seek("c.t", strict).tally(source, None).0, 2, "CATは別の字");
+        assert_eq!(
+            seek("c.t", whole).tally(source, None).0,
+            2,
+            "catsは語の一部"
+        );
+    }
+
+    /// E1: 置換に入れる字は**そのまま**——正規表現でも`$1`は解さない。
+    #[test]
+    fn a_replacement_is_written_as_it_was_typed_even_under_a_pattern() {
+        let rules = Rules {
+            regex: true,
+            ..PLAIN
+        };
+
+        let (text, count) = seek("[0-9]+", rules).replace_all("章1と章22", "$1");
+
+        assert_eq!(text, "章$1と章$1");
+        assert_eq!(count, 2);
     }
 
     #[test]
     fn a_needle_that_is_not_there_is_not_found() {
-        assert_eq!(next_match(SOURCE, "冬の海", 0, true, PLAIN), None);
+        assert_eq!(seek("冬の海", PLAIN).next(SOURCE, 0, true), None);
         assert_eq!(
-            next_match(SOURCE, "", 0, true, PLAIN),
+            seek("", PLAIN).next(SOURCE, 0, true),
             None,
             "nothing matches"
         );
-        assert_eq!(next_match("", "あ", 0, true, PLAIN), None);
-        assert_eq!(tally(SOURCE, "のたり", None, PLAIN).0, 2);
-        assert_eq!(tally(SOURCE, "", None, PLAIN).0, 0);
+        assert_eq!(seek("あ", PLAIN).next("", 0, true), None);
+        assert_eq!(seek("のたり", PLAIN).tally(SOURCE, None).0, 2);
+        assert_eq!(seek("", PLAIN).tally(SOURCE, None).0, 0);
     }
 
     /// A match can only start at a character boundary, so a byte position
@@ -755,7 +928,7 @@ mod tests {
     #[test]
     fn a_match_never_starts_inside_a_character() {
         let source = "あいうえお";
-        let (start, end) = next_match(source, "うえ", 0, true, PLAIN).expect("is there");
+        let (start, end) = seek("うえ", PLAIN).next(source, 0, true).expect("is there");
 
         assert!(source.is_char_boundary(start));
         assert!(source.is_char_boundary(end));
@@ -766,11 +939,14 @@ mod tests {
     /// the needle finishes rather than running away.
     #[test]
     fn replacing_every_match_does_not_search_what_it_wrote() {
-        let (text, replaced) = replace_all("ああ", "あ", "ああ", PLAIN);
+        let (text, replaced) = seek("あ", PLAIN).replace_all("ああ", "ああ");
 
         assert_eq!(text, "ああああ");
         assert_eq!(replaced, 2);
-        assert_eq!(replace_all("ああ", "", "い", PLAIN), ("ああ".to_owned(), 0));
+        assert_eq!(
+            seek("", PLAIN).replace_all("ああ", "い"),
+            ("ああ".to_owned(), 0)
+        );
     }
 
     /// A replace-all is described to the rest of the editor as the one span
@@ -821,7 +997,7 @@ mod tests {
         // Standing on a reported byte finds that match and no other.
         for hit in &hits {
             assert_eq!(
-                next_match(source, "章", hit.at, true, PLAIN),
+                seek("章", PLAIN).next(source, hit.at, true),
                 Some((hit.at, hit.at + 3)),
             );
         }

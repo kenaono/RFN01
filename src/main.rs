@@ -3829,11 +3829,21 @@ fn clear_find(window: &AppWindow, live: &Live) {
         screen.find_status = SharedString::new();
         screen.find_match_case = false;
         screen.find_whole_word = false;
+        screen.find_regex = false;
         screen.find_scope_start = 0;
         screen.find_scope_end = 0;
     });
     // 数え直し＝塗り直し。色も帯の言葉も、これで消える。
     count_in_pane(window, live);
+}
+
+/// この面の探し方で、1回ぶんの検索を組み立てる（E1）。
+///
+/// **正しくない正規表現は、ここで分かる。**`(`だけ打った書き手に0件と答えるのは
+/// 嘘で、`Err`はそのまま帯とステータスバーの言葉になる。
+fn find_search(window: &AppWindow, id: PaneId) -> Result<find::Search, String> {
+    let needle = id.screen(window).find_needle.to_string();
+    find::Search::new(&needle, find_rules(window, id))
 }
 
 /// 画面に色を付ける一致の上限（E1）。
@@ -3896,6 +3906,7 @@ fn find_rules(window: &AppWindow, id: PaneId) -> find::Rules {
     find::Rules {
         match_case: screen.find_match_case,
         whole_word: screen.find_whole_word,
+        regex: screen.find_regex,
         within: scope,
     }
 }
@@ -3914,7 +3925,14 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
     refresh_find_scope(window, live, id);
-    let rules = find_rules(window, id);
+    let search = match find_search(window, id) {
+        Ok(search) => search,
+        Err(trouble) => {
+            window.set_count_find(format!("「{needle}」{trouble}").into());
+            say_in_bar(window, id, trouble);
+            return;
+        }
+    };
     let caret = id.caret_byte(&state, &source);
     // Forwards from the caret, which after a find sits at the end of the match
     // — so the next one is found rather than the same one again. Backwards from
@@ -3927,7 +3945,7 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
             .unwrap_or(caret)
     };
     let step = if forwards { "next" } else { "previous" };
-    let Some((start, end)) = find::next_match(&source, &needle, from, forwards, rules) else {
+    let Some((start, end)) = search.next(&source, from, forwards) else {
         // **見つからなかったことも、画面に出す。**帯は閉じていることがあり、
         // そのときF3の答えは選択が動くことだけなので、動かなかった回は画面の
         // どこにも現れない（要件 7.7 の「効かない」報告は、たいてい「効いたのが
@@ -3942,9 +3960,9 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
         live.cache.borrow_mut().log_diag("find", &told);
         return;
     };
-    let (total, which) = find::tally(&source, &needle, Some(start), rules);
+    let (total, which) = search.tally(&source, Some(start));
     let place = which.map_or_else(|| "-".to_owned(), |which| which.to_string());
-    let scope = match rules.within {
+    let scope = match find_rules(window, id).within {
         Some((from, to)) => format!("{from}..{to}"),
         None => "-".to_owned(),
     };
@@ -4000,6 +4018,11 @@ fn choose_find_option(window: &AppWindow, live: &Live, which: i32) {
         }),
         1 => id.update_screen(window, |screen| {
             screen.find_whole_word = !screen.find_whole_word;
+        }),
+        // E1: 正規表現（書き手の求め 2026-09-10）。**入りと切りだけ**で、
+        // 誤りは`Search::new`が言う。
+        3 => id.update_screen(window, |screen| {
+            screen.find_regex = !screen.find_regex;
         }),
         _ => {
             let screen = id.screen(window);
@@ -4061,11 +4084,22 @@ fn tell_find(window: &AppWindow, id: PaneId, source: &str, selected: Option<(usi
         });
         return;
     }
-    let rules = find_rules(window, id);
+    let search = match find_search(window, id) {
+        Ok(search) => search,
+        Err(trouble) => {
+            // **書きかけの正規表現は「0件」ではない。**打っている途中の`(`に
+            // 0件と答えるのは、探し方の話を数の話に見せかけることである。
+            window.set_count_find(format!("「{needle}」{trouble}").into());
+            id.update_screen(window, |screen| {
+                screen.find_status = trouble.into();
+            });
+            return;
+        }
+    };
     let standing = selected
-        .filter(|(start, end)| find::is_match(source, &needle, *start, *end, rules))
+        .filter(|(start, end)| search.covers(source, *start, *end))
         .map(|(start, _)| start);
-    let (total, which) = find::tally(source, &needle, standing, rules);
+    let (total, which) = search.tally(source, standing);
     let counted = found_status(total, which);
     // 帯の中では語を繰り返さない——書き手が打った欄がすぐ隣にある。
     // ステータスバーでは語を言う。帯が閉じていれば、何を探しているかは
@@ -4073,7 +4107,7 @@ fn tell_find(window: &AppWindow, id: PaneId, source: &str, selected: Option<(usi
     // **範囲の中を数えているなら、そう言う**（書き手の報告 2026-09-09：
     // 「`[]`の挙動が不安」）。`3 / 12`が文書ぜんぶの数なのか選んだ範囲の数なのか、
     // 数だけでは見分けられない——見えない状態は、無い状態と同じに見える。
-    let scope = if rules.within.is_some() {
+    let scope = if find_rules(window, id).within.is_some() {
         "・範囲内"
     } else {
         ""
@@ -4164,9 +4198,13 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
     // あいだ、`alpha`で見つけた`Alpha`は選ばれているのに置換されず、次の一致へ
     // 飛んでいた——検索が畳む大小を、置換だけが畳んでいなかった。見つける道と
     // 置き換える道で一致の意味が違えば、画面が言っていることと動作が違う。
-    let rules = find_rules(window, id);
+    let Ok(search) = find_search(window, id) else {
+        // 誤りは`find_in_pane`が言う——置換は探すところから始まる。
+        find_in_pane(window, live, true);
+        return;
+    };
     let on_a_match = selected
-        .filter(|(start, end)| find::is_match(&source, &needle, *start, *end, rules))
+        .filter(|(start, end)| search.covers(&source, *start, *end))
         .is_some();
     if !on_a_match {
         find_in_pane(window, live, true);
@@ -4206,8 +4244,14 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     refresh_find_scope(window, live, id);
-    let rules = find_rules(window, id);
-    let (next, replaced) = find::replace_all(&source, &needle, &replacement, rules);
+    let search = match find_search(window, id) {
+        Ok(search) => search,
+        Err(trouble) => {
+            say_in_bar(window, id, trouble);
+            return;
+        }
+    };
+    let (next, replaced) = search.replace_all(&source, &replacement);
     if replaced == 0 {
         say_in_bar(window, id, format!("「{needle}」は見つかりません"));
         return;
@@ -4567,8 +4611,10 @@ fn open_result(window: &AppWindow, live: &Live, index: usize) {
     // **フォルダ全文検索は帯の切り替えを持たない**ので、既定の探し方で探し直す
     // ——`hits_in`がその規則で見つけたものを、同じ規則で指し直すのでなければ、
     // 一覧の行と本文の位置が食い違う。
-    let rules = find::Rules::default();
-    let Some((start, end)) = find::next_match(&source, &needle, found.at, true, rules) else {
+    let Ok(search) = find::Search::new(&needle, find::Rules::default()) else {
+        return;
+    };
+    let Some((start, end)) = search.next(&source, found.at, true) else {
         return;
     };
     show_source_range(window, live, id, &source, start, end);
@@ -9968,7 +10014,9 @@ fn lay_out_pane(
     let matches = if needle.is_empty() {
         Vec::new()
     } else {
-        find::spans(source, &needle, rules, MAX_SHOWN_MATCHES)
+        find::Search::new(&needle, rules)
+            .map(|search| search.spans(source, MAX_SHOWN_MATCHES))
+            .unwrap_or_default()
             .into_iter()
             // **いま選ばれている一致には敷かない。**そこは選択が濃く出して
             // いるので、下に薄いのを重ねると同じ語なのに3段の濃さになる

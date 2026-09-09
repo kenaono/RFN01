@@ -10,6 +10,9 @@ slint = { version = "1.17.1", features = ["raw-window-handle-06"] }
 # must match the one Slint's `raw-window-handle-06` feature exposes.
 raw-window-handle = "0.6"
 unicode-segmentation = "1.13.3"
+# 要件 7.7・E1: 検索の正規表現（書き手の求め 2026-09-10）。**Slintがすでに
+# 連れてきている**ので、これで増えるものは無い——同じ版を直に指している。
+regex = "1.13.1"
 windows-numerics = "0.3.1"
 windows = { version = "0.62.2", features = [
     "Win32_Graphics_Direct2D",
