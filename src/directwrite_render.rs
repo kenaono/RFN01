@@ -287,6 +287,14 @@ pub struct SelectionRect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HitTest {
     pub utf16_position: u32,
+    /// **押された字そのものの頭**（E3、書き手の報告 2026-09-10）。
+    ///
+    /// `utf16_position`はカーソルの置き場所——字と字の**境目**で、点が字の後ろ
+    /// 半分にあれば次の字の頭になる。語を選ぶときに要るのはそれではなく、
+    /// **どの字を押したか**である：`cat`の`t`の右半分を押した書き手は、次の空白
+    /// ではなく`cat`を指している。字の広い日本語では差が出にくく、細い英字で
+    /// 「単語選択にならない」として出た。
+    pub utf16_letter: u32,
     pub is_inside: bool,
 }
 
@@ -4871,6 +4879,7 @@ impl TextEngine {
         if self.plan.is_empty() {
             return Ok(HitTest {
                 utf16_position: 0,
+                utf16_letter: 0,
                 is_inside: false,
             });
         }
@@ -4938,6 +4947,7 @@ impl TextEngine {
         let Some((_, cell)) = nearest else {
             return Ok(HitTest {
                 utf16_position: span.utf16_start,
+                utf16_letter: span.utf16_start,
                 is_inside: false,
             });
         };
@@ -4968,6 +4978,7 @@ impl TextEngine {
     ) -> Result<HitTest> {
         let unchanged = HitTest {
             utf16_position: caret_utf16,
+            utf16_letter: caret_utf16,
             is_inside: false,
         };
         let Some((block_index, line_index)) = self.plan.locate(caret_utf16) else {
@@ -5154,6 +5165,11 @@ fn hit_test_in_block(
     };
     Ok(HitTest {
         utf16_position: block_utf16_start.saturating_add(local).min(block_utf16_end),
+        // **境目ではなく、字そのもの。**`textPosition`は点が乗っている字の頭で、
+        // 後ろ半分に落ちても次の字にはならない。
+        utf16_letter: block_utf16_start
+            .saturating_add(metrics.textPosition)
+            .min(block_utf16_end),
         is_inside: inside.as_bool(),
     })
 }
@@ -8180,6 +8196,29 @@ mod tests {
     /// Hit testing and caret geometry must agree in horizontal writing too, which
     /// is the round trip that says the flow axis was mapped onto screen y
     /// consistently in both directions.
+    #[test]
+    /// E3（書き手の報告 2026-09-10）: **押された字は、字の後ろ半分でも変わらない。**
+    ///
+    /// `utf16_position`はカーソルの置き場所なので後ろ半分で次へ送るが、
+    /// `utf16_letter`は押された字そのものである——語を選ぶのはこちらで訊く。
+    /// 英字のように細い字では、この差が「単語選択にならない」として出た。
+    #[test]
+    fn the_letter_under_the_pointer_is_not_the_caret_it_would_place() {
+        let text = "white cat\n";
+        let mut engine = engine_in(WritingMode::Horizontal, text, 22.0);
+
+        // `e`（`white`の5字目）の箱の右寄り——その字の両端をカーソルの位置から取る。
+        let head = engine.caret_geometry(4).expect("caret geometry");
+        let next = engine.caret_geometry(5).expect("caret geometry");
+        let inside = head.x + (next.x - head.x) * 0.8;
+        let hit = engine
+            .hit_test(inside, head.y + head.height * 0.5)
+            .expect("hit test");
+
+        assert_eq!(hit.utf16_position, 5, "カーソルは字の後ろへ送られる");
+        assert_eq!(hit.utf16_letter, 4, "押されたのは`e`そのもの");
+    }
+
     #[test]
     fn horizontal_hit_testing_agrees_with_caret_geometry() {
         let paragraph = "横書きのヒットテスト検証。日本語ABC123と句読点、を含む段落です。\n\n";

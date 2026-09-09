@@ -658,13 +658,20 @@ pub fn word_around(source: &str, byte: usize) -> (usize, usize) {
         .map_or(source.len(), |newline| byte + newline);
     let line = &source[head..tail];
     let at = byte - head;
-    // ここの字、無ければ手前の字。どちらも無い（空の行）なら選ぶものが無い。
-    let kind = match line[at..].chars().next() {
-        Some(character) => letter_kind(character),
-        None => match line[..at].chars().next_back() {
-            Some(character) => letter_kind(character),
-            None => return (byte, byte),
-        },
+    let here = line[at..].chars().next().map(letter_kind);
+    let before = line[..at].chars().next_back().map(letter_kind);
+    // **押された字そのものの頭を渡してもらう**（`PaneHit::letter`、書き手の報告
+    // 2026-09-10：「英語では単語選択にならない感じ」）。カーソルの置き場所は字と
+    // 字の境目なので、**英語のように字が細いと、押した点は語の後ろの境目へ寄る**
+    // ——`cat`の右半分を押した書き手は空白ではなく`cat`を指しているのに、境目で
+    // 訊けば空白と答えることになる。日本語は字が広いぶん、これが起きにくかった。
+    let kind = match (here, before) {
+        (Some(kind), _) => kind,
+        // 行末（字の無いところ）で押されたら、手前の語。打ち終えた語の後ろを
+        // 押すのは、その語を指しているのと同じことである。
+        (None, Some(kind)) => kind,
+        // 空の行には選ぶものが無い。
+        (None, None) => return (byte, byte),
     };
     let mut start = at.min(line.len());
     let mut end = start;
@@ -2285,9 +2292,13 @@ mod tests {
         // 英語は語ごと。`Alt+F`が止まるところと同じである。
         let white = source.find("white").expect("ある");
         assert_eq!(word_around(source, white + 2), (white, white + 5));
-        // 空白は空白だけ（前後の語まで取らない）。
+        // 空白は空白だけ（前後の語まで取らない）。**押された字で決まる**ので、
+        // 語の隣の空白でも語を巻き込まない。
         let space = white + 5;
         assert_eq!(word_around(source, space), (space, space + 1));
+        assert_eq!(word_around(source, space + 1), (space + 1, source.len()));
+        let spaces = "a  b";
+        assert_eq!(word_around(spaces, 2), (1, 3));
     }
 
     /// E3: **行はまたがない。**行末で押したら手前の語。

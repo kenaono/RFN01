@@ -450,6 +450,13 @@ struct EditorState {
     /// ぶれで行の選択が字の選択へ変わってしまうと、押しただけのつもりが
     /// 選び直しになる。ボタンを離すと消える。
     line_drag: Option<usize>,
+    /// ダブルクリックが選んだ語（E3、書き手の報告 2026-09-10）。
+    ///
+    /// **2回目を離した合図から、選んだ語を守る。**離した合図はカーソルを押した
+    /// 点へ置くので、そのままでは語の途中までしか残らない——「不安定に感じました」
+    /// 「英語では単語選択にならない感じ」の半分はこれである。**引けば語ごと
+    /// 伸びる**のも同じ印で、押し直すまで残る。
+    word_drag: Option<(usize, usize)>,
 }
 
 /// Both panes' states, so that a callback carrying a pane number can reach the
@@ -12409,6 +12416,7 @@ fn hit_test_pane(
     match engine.hit_test(x, y) {
         Ok(hit) => Some(PaneHit {
             byte: shown.source_byte_at_utf16(hit.utf16_position as usize),
+            letter: shown.source_byte_at_utf16(hit.utf16_letter as usize),
             in_numbers,
         }),
         Err(error) => {
@@ -12422,7 +12430,13 @@ fn hit_test_pane(
 #[derive(Clone, Copy, Debug)]
 struct PaneHit {
     /// いちばん近い本文の位置。**欄の中の点でも本文の位置が返る**（その行の頭）。
+    ///
+    /// カーソルを置く場所なので、**字と字の境目**である——点が字の後ろ半分に
+    /// あれば、次の字の頭になる。
     byte: usize,
+    /// **押された字そのものの頭**（E3）。語を選ぶのはこちらで訊く：`cat`の`t`の
+    /// 右半分を押した書き手は、次の空白ではなく`cat`を指している。
+    letter: usize,
     /// 行番号の欄の中か（要件 9 の番号を出している面だけ）。
     in_numbers: bool,
 }
@@ -12528,6 +12542,25 @@ fn update_pane_selection(
         // **本文で押し直したら、行の選択は終わり。**離した合図（`End`）は
         // 窓の外へポインタが出ると来ないことがあるので、次に押した回でも畳む。
         state.borrow_mut().line_drag = None;
+    }
+    // E3: ダブルクリックのあと（書き手の報告 2026-09-10）。**離した合図が語を
+    // 崩さない**——`End`はカーソルを押した点へ置くので、素通しすると語の途中まで
+    // しか残らない。引いているあいだは語ごと伸びる。
+    let word = match phase {
+        SelectionPhase::Begin => None,
+        _ => state.borrow().word_drag,
+    };
+    if phase == SelectionPhase::Begin {
+        state.borrow_mut().word_drag = None;
+    }
+    if let Some((first_start, first_end)) = word {
+        let (start, end) = document::word_around(&source, hit.letter);
+        let (start, end) = (first_start.min(start), first_end.max(end));
+        if phase == SelectionPhase::End {
+            state.borrow_mut().word_drag = None;
+        }
+        select_source_range(window, cache, document, state, id, &source, start, end);
+        return;
     }
     if let Some(anchor) = from_numbers {
         let (first, _) = document::line_span(&source, anchor);
@@ -12668,7 +12701,7 @@ fn select_word_in_pane(
     let (start, end) = if hit.in_numbers {
         document::line_span(&source, hit.byte)
     } else {
-        document::word_around(&source, hit.byte)
+        document::word_around(&source, hit.letter)
     };
     cache.borrow_mut().log_diag(
         &format!("pointer.{}", id.diag_suffix()),
@@ -12679,6 +12712,17 @@ fn select_word_in_pane(
             u8::from(hit.in_numbers),
         ),
     );
+    {
+        let mut state = state.borrow_mut();
+        // **この選択は、次に押されるまで守られる**（上の`word_drag`／`line_drag`）。
+        // ダブルクリックの2回目を離した合図がすぐ後ろから来るので、素通しすると
+        // 語が崩れる——引けば語ごと・行ごと伸びるのも、同じ印による。
+        if hit.in_numbers {
+            state.line_drag = Some(hit.byte);
+        } else {
+            state.word_drag = Some((start, end));
+        }
+    }
     select_source_range(window, cache, document, state, id, &source, start, end);
 }
 
