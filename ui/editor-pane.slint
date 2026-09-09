@@ -493,6 +493,9 @@ export component EditorPane inherits Rectangle {
     /// terminal has no half-lines to stop on.
     callback terminal-scrolled(float);
     callback tab-pressed();
+    /// E3の③: Enter。**ただの改行ではない**——字下げと、箇条書き・引用の印を
+    /// 継ぐかどうかをRustが決める（本文を持っているのはあちらである）。
+    callback enter-pressed();
     /// E3の②: 行そのものを動かす・写す・消す。0=前へ、1=後へ、2=前へ写す、
     /// 3=後へ写す、4=消す。**上下ではなく文書順の前と後**（書き手の選択
     /// 2026-09-10）——縦書きでも`Alt+↑`が「前の行と入れ替える」である。
@@ -2163,7 +2166,7 @@ export component EditorPane inherits Rectangle {
                                             reject
                                         }
                                     } else if event.text == Key.Return {
-                                        root.text-input("\n", false);
+                                        root.enter-pressed();
                                         accept
                                     } else if event.text == Key.Backspace {
                                         root.backspace-pressed();

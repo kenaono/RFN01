@@ -34,6 +34,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::Write,
+    ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2146,6 +2147,15 @@ fn main() -> Result<(), slint::PlatformError> {
             _ => document::LineEdit::Drop,
         };
         edit_lines(&window, &line_live, PaneId::from_index(pane), what);
+    });
+
+    // E3の③: Enter。**継ぐものはRustが決める**——画面と同じ行の見方を使うため。
+    let weak = window.as_weak();
+    let enter_live = live.clone();
+    window.on_pane_enter(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            enter_in_pane(&window, &enter_live, PaneId::from_index(pane));
+        }
     });
 
     let weak = window.as_weak();
@@ -13149,12 +13159,44 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
     let Some((region, text, chosen)) = document::line_edit(&source, span, what) else {
         return;
     };
-    let mut next = source.clone();
-    next.replace_range(region.clone(), &text);
+    apply_span_edit(
+        window,
+        live,
+        id,
+        &source,
+        region,
+        &text,
+        chosen,
+        &format!("{what:?}"),
+    );
+}
+
+/// 本文のひと続きを、別の字で置き換える——1回の編集として（E3）。
+///
+/// **普通の編集の道**（`draw_edit`）を通るので、取り消しは1回で戻り、同じ文書を
+/// 出している別の面も付いてくる（要件 7.6）。行の入れ替えも、箇条書きを終える
+/// Enterも、ここを通る——**編集の入口が増えても、編集の道は1本**である。
+///
+/// `chosen`は編集のあとに選ばれている範囲。長さが無ければ、そこに立つカーソル。
+#[allow(clippy::too_many_arguments)]
+fn apply_span_edit(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    source: &str,
+    region: Range<usize>,
+    text: &str,
+    chosen: (usize, usize),
+    told: &str,
+) {
+    let document = live.states.document(id);
+    let state = live.states.of(id);
+    let mut next = source.to_owned();
+    next.replace_range(region.clone(), text);
     // **写しは文書を増やす**ので、打鍵や貼り付けと同じ上限を通る（要件 8.2）。
     // 越えるなら何も起きない——保存はできて開き直せないファイルを作らない。
     if next.chars().count() > MAX_DOCUMENT_CHARACTERS {
-        window.set_render_status(over_limit_message(&text).into());
+        window.set_render_status(over_limit_message(text).into());
         return;
     }
     let change = Change {
@@ -13162,7 +13204,11 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
         removed: region.len(),
         inserted: text.len(),
     };
-    document.record(region.start, source[region.clone()].to_owned(), text);
+    document.record(
+        region.start,
+        source[region.clone()].to_owned(),
+        text.to_owned(),
+    );
     *document.text.borrow_mut() = next.clone();
     {
         let mut state = state.borrow_mut();
@@ -13181,7 +13227,7 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
     live.cache.borrow_mut().log_diag(
         "lines",
         &format!(
-            "pane={} {what:?} region={}..{} chose={}..{}",
+            "pane={} {told} region={}..{} chose={}..{}",
             id.log_name(),
             region.start,
             region.end,
@@ -13198,6 +13244,75 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
         chosen.1,
         change,
     );
+}
+
+/// Enterを押した（E3の③）。
+///
+/// **字下げと、箇条書き・引用の印を継ぐ。**継ぐものが無ければただの改行で、
+/// 中身の無い項目なら印を消して継続を終える（`document::enter_continuation`）。
+///
+/// **行の見方は画面と同じもの**（`DocumentCounts`の`line_styles`）を渡す。ここで
+/// 決め直すと、画面が箇条書きとして組んでいる行をEnterが本文として扱うことになる。
+///
+/// **選んでいるものがあれば、その頭の行で決める**——選択は`insert_pane_text`が
+/// 取り除き、入る字はそこへ落ちるからである。
+fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId) {
+    // 追加要件 2026-09-07: **打ち始めたら、そのタブは文書になる。**Enterも打鍵で
+    // ある——`on_pane_text_input`がこれを呼んでいたので、Enterだけ`New Tab`の上で
+    // 何も起きない鍵になっていた。**文書を取り出す前に**呼ぶ：答えたあとのタブは、
+    // もう別の文書を持っている。
+    answer_new_tab(window, live, id, None);
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let at = {
+        let borrowed = state.borrow();
+        match selection_source_range(&borrowed) {
+            Some((start, _)) => start,
+            None => {
+                drop(borrowed);
+                id.caret_byte(&state, &source)
+            }
+        }
+    };
+    let (line_start, line_end) = document::line_span(&source, at);
+    let line = source[line_start..line_end]
+        .strip_suffix('\n')
+        .unwrap_or(source.get(line_start..line_end).unwrap_or_default());
+    let index = source[..line_start].matches('\n').count();
+    let style = document
+        .counts
+        .borrow_mut()
+        .get(&source)
+        .line_styles()
+        .get(index)
+        .copied()
+        .unwrap_or_default();
+    match document::enter_continuation(line, style, at - line_start) {
+        document::Continuation::Insert(text) => insert_pane_text(
+            window,
+            id,
+            &document,
+            &live.states,
+            &live.cache,
+            &text,
+            false,
+        ),
+        document::Continuation::Clear { upto, keep } => {
+            let region = line_start..line_start + upto;
+            let caret = line_start + keep.len();
+            apply_span_edit(
+                window,
+                live,
+                id,
+                &source,
+                region,
+                &keep,
+                (caret, caret),
+                "EndItem",
+            );
+        }
+    }
 }
 
 /// Delete the grapheme cluster beside a pane's caret, or its selection.

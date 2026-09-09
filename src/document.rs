@@ -869,6 +869,80 @@ fn rejoin(blocks: &[&str], newline_at_end: bool) -> String {
     out
 }
 
+/// Enterが継ぐもの（E3の③）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Continuation {
+    /// 改行と、その後ろへ入る頭——字下げ・引用の`>`・箇条書きの印。
+    /// **そのまま打ったのと同じ道を通る**ので、取り消しも別の面の追従も変わらない。
+    Insert(String),
+    /// 中身の無い項目でEnter——**行頭から`upto`までを`keep`に置き換える**。
+    ///
+    /// **改行は入らない。**書き手が終えたいのは箇条書きであって、行ではない。
+    /// 残すのは字下げだけ（書き手の選択 2026-09-10）：入れ子の項目の下で、
+    /// その位置に段落を書き続けられる。
+    Clear { upto: usize, keep: String },
+}
+
+/// Enterを押したときに継ぐもの（E3の③）。
+///
+/// **行の見方は`line_styles`のもの**（`style`で受け取る）。箇条書きかどうかを
+/// ここで決め直すと、画面が箇条書きとして組んでいる行をEnterが本文として扱う、
+/// という食い違いが起きる——**規則は1つ**である（②の語の切れ目と同じ考え方）。
+///
+/// `at`は行の中のカーソル位置（バイト）。**頭の中で押されたEnterは、ただの改行**
+/// ——行を押し下げたいだけの書き手に、印を写して返さない。
+pub fn enter_continuation(line: &str, style: LineStyle, at: usize) -> Continuation {
+    let at = at.min(line.len());
+    let quote = line.len() - quote_content(line).len();
+    let content = &line[quote..];
+    let (_, body) = leading_indent(content);
+    let indent = content.len() - body.len();
+    let marker = marker_len(body, style.kind).unwrap_or(0) as usize;
+    let head = quote + indent + marker;
+    if at < head {
+        return Continuation::Insert("\n".to_owned());
+    }
+    let kept = &line[quote..quote + indent];
+    // **中身の無い項目は、そこで終わる**（E3：「空の項目でEnterを押すと継続を
+    // 終える」）。印を持たない行はここへ来ない——字下げだけの行でEnterが何も
+    // しないと、効かない鍵に見える。
+    if line[head..].trim().is_empty() && (marker > 0 || quote > 0) {
+        return Continuation::Clear {
+            upto: head,
+            keep: kept.to_owned(),
+        };
+    }
+    let mut next = String::from("\n");
+    next.push_str(&line[..quote]);
+    next.push_str(kept);
+    next.push_str(&continued_marker(body, style.kind, marker));
+    Continuation::Insert(next)
+}
+
+/// 次の行が持つ印（[`enter_continuation`]）。
+///
+/// - 番号は**1つ進める**（書き手の選択 2026-09-10）。**下の行は書き換えない**
+///   ——途中に行を挿したときに下を振り直すのは、打っていないところが動くことである。
+/// - タスクは**空の箱で継ぐ**。済んだ印を写すのは、まだしていないことを済んだと
+///   言うことになる。
+/// - 区切り線や表・コードは印を持たない（`marker_len`が`None`を返す）。
+fn continued_marker(body: &str, kind: LineKind, marker: usize) -> String {
+    match kind {
+        LineKind::Bullet => body[..marker.min(body.len())].to_owned(),
+        LineKind::Task { .. } => {
+            let bullet = body.chars().next().unwrap_or('-');
+            format!("{bullet} [ ] ")
+        }
+        LineKind::Ordered => {
+            let digits = body.chars().take_while(char::is_ascii_digit).count();
+            let number: u64 = body[..digits].parse().unwrap_or(0);
+            let delimiter = body[digits..].chars().next().unwrap_or('.');
+            format!("{}{delimiter} ", number.saturating_add(1))
+        }
+        _ => String::new(),
+    }
+}
+
 /// Whether a character is inside a word, for 要件 11.4's `Alt+F` and `Alt+B`.
 ///
 /// **Everything that is not punctuation or space.** 要件 11.4 says the move
@@ -2577,6 +2651,105 @@ mod tests {
         );
         // 1行しかない文書は、空になる。
         assert_eq!(edited("一", (0, 0), LineEdit::Drop).expect("消せる").0, "");
+    }
+
+    /// Enterの継ぎ方を、その行の見方ごと当てる（E3の③）。
+    fn continued(line: &str, at: usize) -> Continuation {
+        let style = line_styles(line)[0];
+        enter_continuation(line, style, at)
+    }
+
+    /// E3の③: 箇条書きは継ぐ。**番号は1つ進む**（書き手の選択 2026-09-10）。
+    #[test]
+    fn a_list_item_carries_its_marker_to_the_next_line() {
+        assert_eq!(
+            continued("- 一つめ", "- 一つめ".len()),
+            Continuation::Insert("\n- ".to_owned())
+        );
+        assert_eq!(
+            continued("  * 一つめ", "  * 一つめ".len()),
+            Continuation::Insert("\n  * ".to_owned())
+        );
+        assert_eq!(
+            continued("9. 九つめ", "9. 九つめ".len()),
+            Continuation::Insert("\n10. ".to_owned())
+        );
+        // 済んだ印は写さない——まだしていないことを済んだと言うことになる。
+        assert_eq!(
+            continued("- [x] 済んだ", "- [x] 済んだ".len()),
+            Continuation::Insert("\n- [ ] ".to_owned())
+        );
+        // 引用も継ぐ。
+        assert_eq!(
+            continued("> 引用", "> 引用".len()),
+            Continuation::Insert("\n> ".to_owned())
+        );
+    }
+
+    /// E3の③: 印の無い行は、**字下げだけ**を継ぐ。
+    #[test]
+    fn an_indented_line_keeps_its_indent() {
+        assert_eq!(
+            continued("    続きの段落", "    続きの段落".len()),
+            Continuation::Insert("\n    ".to_owned())
+        );
+        assert_eq!(
+            continued("本文", "本文".len()),
+            Continuation::Insert("\n".to_owned())
+        );
+    }
+
+    /// E3の③: **中身の無い項目でEnterは、印だけ消す**（書き手の選択 2026-09-10）。
+    /// 字下げは残り、改行は入らない。
+    #[test]
+    fn an_empty_item_ends_the_list_instead_of_growing_it() {
+        assert_eq!(
+            continued("- ", 2),
+            Continuation::Clear {
+                upto: 2,
+                keep: String::new()
+            }
+        );
+        assert_eq!(
+            continued("  - ", 4),
+            Continuation::Clear {
+                upto: 4,
+                keep: "  ".to_owned()
+            }
+        );
+        // 引用の印も印である。
+        assert_eq!(
+            continued("> ", 2),
+            Continuation::Clear {
+                upto: 2,
+                keep: String::new()
+            }
+        );
+        // **印を持たない行は、ここへ来ない**——字下げだけの行でEnterが何もしないと、
+        // 効かない鍵に見える。
+        assert_eq!(
+            continued("    ", 4),
+            Continuation::Insert("\n    ".to_owned())
+        );
+    }
+
+    /// E3の③: **頭の中で押されたEnterは、ただの改行。**行を押し下げたいだけの
+    /// 書き手に、印を写して返さない。
+    #[test]
+    fn an_enter_inside_the_head_is_only_a_line_break() {
+        assert_eq!(
+            continued("- 一つめ", 0),
+            Continuation::Insert("\n".to_owned())
+        );
+        assert_eq!(
+            continued("  - 一つめ", 3),
+            Continuation::Insert("\n".to_owned())
+        );
+        // 印の直後から先は、継ぐ側。
+        assert_eq!(
+            continued("- 一つめ", 2),
+            Continuation::Insert("\n- ".to_owned())
+        );
     }
 
     #[test]
