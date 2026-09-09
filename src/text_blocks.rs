@@ -124,6 +124,16 @@ pub struct Typography {
     /// to be laid out again. Keeping it here is what makes that happen: two
     /// specs that differ by this are not the same page and never were.
     pub line_numbers: bool,
+    /// ルビと傍点の大きさ、親文字に対する比率（要件 7.8・要件 9）。
+    ///
+    /// **幾何には効かない。**ルビは幅0の箱の脇に描かれるので、この値が動いても
+    /// 折り返しも行送りも変わらない——変わるのは絵だけである。だから仕様に
+    /// 入れておくのは*測り直しのため*ではなく、**タイルの署名に入れるため**で
+    /// ある（6.18の色と同じ罠：見た目だけが変わると古い絵が残る）。
+    pub ruby_scale: f32,
+    /// ルビと傍点を、行の箱の中でどれだけ字へ寄せるか（要件 7.8）。
+    /// 本文の大きさに対する比率で、正が字へ近づく向き。
+    pub ruby_offset: f32,
 }
 
 /// What the editor sets text in until the writer says otherwise (要件 9).
@@ -163,6 +173,9 @@ impl Typography {
             font_size: font_size.max(1.0),
             character_spacing: 0.0,
             line_spacing: 1.0,
+            // 要件 7.8: 半分が日本語の組版の当たり前。位置は行の箱の端のまま。
+            ruby_scale: 0.5,
+            ruby_offset: 0.0,
             heading_scale: [1.0; MAX_HEADING_LEVEL],
             body_font: DEFAULT_BODY_FONT.to_owned(),
             heading_font: [const { String::new() }; MAX_HEADING_LEVEL]
@@ -552,6 +565,16 @@ pub struct Marks {
     /// of prose actually wants, which is which lines are the writer talking and
     /// which are the program.
     pub comment: bool,
+    /// 傍点（圏点）が振られている範囲（要件 7.8）。
+    ///
+    /// **旗であって箱ではない。**傍点は本文の字をそのまま見せたまま、その脇に
+    /// 点を打つ——字を隠す[`Ornament`]とは逆の仕事である。だから太字や斜体と
+    /// 同じ側にいて、同じように入れ子になれる。点そのものはタイル描画側で、
+    /// この範囲が当たった矩形へ打つ。
+    ///
+    /// **幾何は動かさない。**点は行の外（ルビと同じ帯）に出るので、字送りも
+    /// 折り返し位置も傍点の有無で変わらない。
+    pub dots: bool,
 }
 
 /// What is drawn in place of the marker a box stands over (要件 7.3.2).
@@ -592,6 +615,30 @@ pub enum Ornament {
     /// sets the line in is the block, and space that also took room would set
     /// it in twice — and only on the first line it wrapped to.
     Indent,
+    /// ルビの読み——`《かんじ》`のほう（要件 7.8）。
+    ///
+    /// **読みは本文に居残ったまま、箱で隠される。**消してしまうと描くときに
+    /// 読む字が無くなり、`Emphasis`に文字列を持たせることになる——`Emphasis`も
+    /// [`StyleRun`]も`Copy`でハッシュ可能で、レイアウトキャッシュの鍵に入って
+    /// いるので、そこに`String`は置けない。箱なら幅0で字が消え、**読みは
+    /// ブロックの本文から読み出せる**（`Ornament::Number`が数字を読み出すのと
+    /// 同じ道）。
+    ///
+    /// `base_utf16`は**この箱の手前にある親文字の長さ**（UTF-16単位）。
+    /// 描くときはそこから親文字の矩形を出し、その脇へ読みを小さく組む。
+    /// 親と読みが1つの走りに収まっているので、**組の対応が壊れようがない**。
+    Ruby { base_utf16: u32 },
+    /// 縦中横——縦書きの列の中で、半角の数字を正立させる（要件 7.8）。
+    ///
+    /// **書き手は何も書かない。**「20歳」が「2」と「0」に割れて縦に並ぶのは、
+    /// 縦書きの原稿として当たり前の姿ではない——だから記法ではなく、
+    /// 縦書きの面が数字をそう組む、という決まりにしてある。
+    ///
+    /// 箱は**1文字ぶんの送りを取り**、その中に数字を正立・横並びで組む
+    /// （[`Ornament::Number`]と同じく、箱が覆っている範囲の字をそのまま描く）。
+    /// 1〜2桁で1つの箱、3桁以上は**1桁につき1つ**——要件 7.8 の「3桁以上は
+    /// 縦に並べる」がそれで、桁ごとに正立した箱が列に並ぶ。
+    Upright,
 }
 
 impl Ornament {
@@ -604,14 +651,39 @@ impl Ornament {
         !matches!(self, Self::Hidden | Self::Indent)
     }
 
-    /// Whether the box keeps the room the text under it took.
+    /// Whether the box's ink goes beside the line rather than in the gutter the
+    /// block's indent opened (要件 7.8).
     ///
-    /// **Only a box over a whole line of marks does.** A rule and a fence leave
-    /// their line behind as blank space, which is what gives a code block its
-    /// padding at each end. Everything else a box covers is standing where an
-    /// indent will be, and an indent is the block's (要件 7.3.2).
-    pub fn keeps_room(self) -> bool {
-        matches!(self, Self::Hidden)
+    /// **A marker's ink stands before the text and ruby stands over it**, so
+    /// the two are placed off different axes. Asked here rather than at the
+    /// place that draws, so that a new ornament has to answer it.
+    pub fn rides_beside_the_line(self) -> bool {
+        matches!(self, Self::Ruby { .. })
+    }
+
+    /// How far the box reaches along the line axis.
+    ///
+    /// **Three answers, and most boxes give the third.** A box over a whole
+    /// line of marks keeps that line's room — a rule and a fence leave their
+    /// line behind as blank space, which is what gives a code block its padding
+    /// at each end. A box standing digits upright (要件 7.8) takes the one
+    /// character it stands them in. Everything else is standing where an indent
+    /// will be, and an indent is the block's (要件 7.3.2), so it takes nothing.
+    pub fn box_advance(self, indent_step: f32, font_size: f32) -> f32 {
+        match self {
+            Self::Hidden => indent_step,
+            Self::Upright => font_size,
+            _ => 0.0,
+        }
+    }
+
+    /// Whether the ink goes inside the box rather than in the gutter the
+    /// block's indent opened.
+    ///
+    /// **Only the upright digits do.** A marker's ink stands before the text,
+    /// ruby stands over it, and these stand exactly where the box is.
+    pub fn stands_in_its_box(self) -> bool {
+        matches!(self, Self::Upright)
     }
 }
 
@@ -649,6 +721,14 @@ pub struct Emphasis {
     pub utf16_start: u32,
     pub utf16_len: u32,
     pub marks: Marks,
+    /// Set when a box stands over this stretch instead of its glyphs being
+    /// drawn (要件 7.8).
+    ///
+    /// **The line's own boxes come the same way the head one does** — through
+    /// [`style_runs`] and into a [`StyleRun`]. Ruby's reading is the first box
+    /// that is not at the head of a line, so this is where a mid-line one is
+    /// said; everything downstream already knew what to do with it.
+    pub ornament: Option<Ornament>,
 }
 
 impl LineStyle {
@@ -1303,6 +1383,13 @@ impl LongLine<'_> {
                     utf16_start: start - before,
                     utf16_len: mark_end - start,
                     marks: mark.marks,
+                    // **切られた側の箱は連れていかない**（要件 7.8）。ルビの
+                    // 箱は親文字を手前に数えて置き場所を決めるので、親が向こう
+                    // 側へ残った切れ端では指す先が無い。読みは本文に居るので
+                    // 字が消えることもない——組めないルビは、組まない。
+                    ornament: (mark.utf16_start >= before)
+                        .then_some(mark.ornament)
+                        .flatten(),
                 })
             })
             .collect()
@@ -2350,7 +2437,13 @@ fn finished(held: Option<Gathering>) -> Option<LineRun> {
 /// the tallest thing on it, so the break itself never needs the heading size,
 /// and leaving it at body size keeps the empty line a block gives up (see
 /// `measure_block`) the size it has always been.
-pub fn style_runs(styled: StyledText<'_>) -> Vec<StyleRun> {
+///
+/// `upright_digits`は**縦書きの面だけが立てる旗**（要件 7.8）。ここが
+/// [`WritingMode`]を知らずに真偽で受けるのは、`text_blocks`が画面の向きを
+/// 一度も知らずに済んでいるからで、知る必要があるのは「この面は数字を正立
+/// させるか」だけである。面ごとに違う答えでよい——ブロックを測るのは面ごと
+/// なので、同じ文書が横書きの面では数字をそのまま組む。
+pub fn style_runs(styled: StyledText<'_>, upright_digits: bool) -> Vec<StyleRun> {
     let mut runs = Vec::new();
     let mut utf16_start = 0_u32;
     for (index, line) in styled.text.split('\n').enumerate() {
@@ -2403,8 +2496,42 @@ pub fn style_runs(styled: StyledText<'_>) -> Vec<StyleRun> {
                 utf16_len: emphasis.utf16_len,
                 heading_level,
                 marks: emphasis.marks,
-                ornament: None,
+                // 要件 7.8: ルビの読みを隠す箱はここから来る。**行頭の箱と
+                // 同じ道**を通るので、幅0の`MarkerBox`を張るのも、当たった
+                // 矩形へ墨を置くのも、増やした仕組みは無い。
+                ornament: emphasis.ornament,
             });
+        }
+        // 要件 7.8: 縦中横。**最後に足す**ので、上で置かれた箱（行頭のマーカー、
+        // ルビの読み）の範囲がもう分かっている——同じ字に2つの箱は張れない。
+        if upright_digits && !kind.is_code() {
+            // **借りて、返す。**張ってある箱の範囲を先に写しておく——
+            // 数字の箱を足しながら同じ`runs`を読むことはできない。
+            let boxed = runs
+                .iter()
+                .filter(|run: &&StyleRun| run.ornament.is_some())
+                .map(|run| (run.utf16_start, run.utf16_start + run.utf16_len))
+                .collect::<Vec<_>>();
+            let taken =
+                |from: u32, to: u32| boxed.iter().any(|(start, end)| *start < to && from < *end);
+            for (from, len) in digit_runs(line) {
+                // 1〜2桁は1つの箱に並べ、3桁以上は1桁ずつ縦に並べる。
+                let step = if len <= 2 { len } else { 1 };
+                for cell in (0..len).step_by(step as usize) {
+                    let start = utf16_start + from + cell;
+                    let length = step.min(len - cell);
+                    if taken(start, start + length) {
+                        continue;
+                    }
+                    runs.push(StyleRun {
+                        utf16_start: start,
+                        utf16_len: length,
+                        heading_level,
+                        marks: Marks::default(),
+                        ornament: Some(Ornament::Upright),
+                    });
+                }
+            }
         }
         // Past the newline this split consumed.
         utf16_start += utf16_len + 1;
@@ -2412,9 +2539,91 @@ pub fn style_runs(styled: StyledText<'_>) -> Vec<StyleRun> {
     runs
 }
 
+/// 行の中の半角数字の連なり——`(始まり, 長さ)`をUTF-16単位で（要件 7.8）。
+///
+/// **連なりで見るのは、桁数が組み方を決めるからである。**`2026`の`20`だけを
+/// 縦中横にすると、読めない数になる。半角の`0-9`だけを数字とする——全角の
+/// `０-９`は縦書きの中でもとから正立しているので、何もしなくてよい。
+fn digit_runs(line: &str) -> Vec<(u32, u32)> {
+    let mut found = Vec::new();
+    let mut at = 0_u32;
+    let mut run: Option<(u32, u32)> = None;
+    for letter in line.chars() {
+        let units = letter.len_utf16() as u32;
+        if letter.is_ascii_digit() {
+            run = Some(match run {
+                Some((from, len)) => (from, len + units),
+                None => (at, units),
+            });
+        } else if let Some(span) = run.take() {
+            found.push(span);
+        }
+        at += units;
+    }
+    found.extend(run);
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 要件 7.8: 縦中横。**1〜2桁は1マス、3桁以上は1桁ずつ。**書き手は何も
+    /// 書かない——縦書きの面がそう組む、という決まりである。
+    #[test]
+    fn digits_stand_upright_a_cell_at_a_time() {
+        let boxes = |text: &str| -> Vec<(u32, u32)> {
+            let levels = vec![LineStyle::default(); text.split('\n').count()];
+            style_runs(StyledText::new(text, &levels), true)
+                .into_iter()
+                .filter(|run| run.ornament == Some(Ornament::Upright))
+                .map(|run| (run.utf16_start, run.utf16_len))
+                .collect()
+        };
+
+        // 2桁は1つの箱に並ぶ。
+        assert_eq!(boxes("20歳"), vec![(0, 2)]);
+        // 1桁も正立させる——寝た数字はどの桁数でも数字に見えない。
+        assert_eq!(boxes("5歳"), vec![(0, 1)]);
+        // 3桁以上は1桁につき1マス（要件 7.8 の「縦に並べる」）。
+        assert_eq!(boxes("2026年"), vec![(0, 1), (1, 1), (2, 1), (3, 1)]);
+        // 連なりで見る——`2026`の`20`だけを縦中横にすると読めない数になる。
+        assert_eq!(boxes("第2章と第10章"), vec![(1, 1), (5, 2)]);
+        // 全角の数字はもともと正立しているので何もしない。
+        assert_eq!(boxes("２０歳"), vec![]);
+    }
+
+    /// **横書きの面は数字に触らない。**横書きの数字はもともと正立していて、
+    /// そこへ箱を張れば送りだけが変わる——何も直さずに幾何を動かすことになる。
+    #[test]
+    fn a_horizontal_sheet_leaves_its_digits_alone() {
+        let text = "20歳";
+        let levels = vec![LineStyle::default()];
+        let runs = style_runs(StyledText::new(text, &levels), false);
+
+        assert!(runs.iter().all(|run| run.ornament.is_none()));
+    }
+
+    /// **同じ字に箱は2つ張れない。**順序付きリストの`10.`はもうマーカーの箱が
+    /// 覆っているので、縦中横はそこを避ける——避けなければ、あとから張った箱が
+    /// 数字を1マスに詰め、マーカーの墨と重なる。
+    #[test]
+    fn digits_already_under_a_box_are_left_to_it() {
+        let text = "10. 項目";
+        let levels = vec![LineStyle::of_kind(LineKind::Ordered)];
+        let markers = vec![Some(LineMarker {
+            utf16_len: 4,
+            ornament: Ornament::Number,
+        })];
+        let runs = style_runs(StyledText::new(text, &levels).with_markers(&markers), true);
+
+        assert_eq!(
+            runs.iter()
+                .filter(|run| run.ornament == Some(Ornament::Upright))
+                .count(),
+            0
+        );
+    }
 
     /// Cells per line at the default pane extent and font size.
     const CELLS: u32 = 20;
@@ -2904,6 +3113,7 @@ mod tests {
                 bold: true,
                 ..Marks::default()
             },
+            ornament: None,
         };
         let bullet = LineMarker {
             utf16_len: 2,
@@ -3274,7 +3484,7 @@ mod tests {
             LineStyle::heading(2),
         ];
 
-        let runs = style_runs(StyledText::new(text, &levels));
+        let runs = style_runs(StyledText::new(text, &levels), false);
 
         assert_eq!(
             runs,
@@ -3311,7 +3521,7 @@ mod tests {
             LineStyle::default(),
         ];
 
-        let runs = style_runs(StyledText::new(text, &levels));
+        let runs = style_runs(StyledText::new(text, &levels), false);
 
         let ranges = runs
             .iter()
@@ -3346,7 +3556,7 @@ mod tests {
         let markers = [None, Some(bullet), Some(number)];
 
         let styled = StyledText::new(text, &levels).with_markers(&markers);
-        let boxes = style_runs(styled)
+        let boxes = style_runs(styled, false)
             .into_iter()
             .filter(|run| run.ornament.is_some())
             .collect::<Vec<StyleRun>>();
@@ -3376,7 +3586,7 @@ mod tests {
         let text = "- 箇条書き";
         let levels = [LineStyle::of_kind(LineKind::Bullet)];
 
-        let runs = style_runs(StyledText::new(text, &levels));
+        let runs = style_runs(StyledText::new(text, &levels), false);
         assert!(runs.iter().all(|run| run.ornament.is_none()));
     }
 
@@ -3588,15 +3798,17 @@ mod tests {
                 utf16_start: 1,
                 utf16_len: 2,
                 marks: bold,
+                ornament: None,
             }],
             vec![Emphasis {
                 utf16_start: 0,
                 utf16_len: 2,
                 marks: bold,
+                ornament: None,
             }],
         ];
 
-        let runs = style_runs(StyledText::marked(text, &levels, &spans));
+        let runs = style_runs(StyledText::marked(text, &levels, &spans), false);
 
         // The heading's own run, then what is marked inside it, then the
         // marked stretch on the body line.
@@ -3611,7 +3823,7 @@ mod tests {
         assert_eq!(shape, wanted);
         // A line nobody worked out has no marked stretches, and the headings
         // are unchanged by the shorter list.
-        let plain = style_runs(StyledText::new(text, &levels));
+        let plain = style_runs(StyledText::new(text, &levels), false);
         assert_eq!(plain.len(), 1);
     }
 

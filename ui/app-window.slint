@@ -547,6 +547,11 @@ export component AppWindow inherits Window {
     /// 言っていない。Offにした瞬間に、置いてある作業コピーは全部消える。
     in-out property <bool> autosave: true;
     callback autosave-toggled(bool);
+    // 要件 7.8・要件 10: 本文文字数がルビの読みを数えるか。**初期値は数えない**
+    // ——投稿サイトへ出すための字数はルビを含まない。打ち込んだ量を知りたい
+    // 人には逆が要るので、これは「正解が二つある」たぐいで、選ばせる。
+    in-out property <bool> count-ruby: false;
+    callback count-ruby-toggled(bool);
     callback pane-tab(int);
     callback pane-preedit-changed(int, string);
     callback pane-backspace(int);
@@ -2562,6 +2567,40 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。
+                    // **「正解が二つある」から選ばせる**——投稿サイトへ出す
+                    // ための字数はルビを含まず、打ち込んだ量を知りたいときは
+                    // 含む。編集器がどちらかに決めると、もう一方の用事の人が
+                    // 毎回数え直すことになる。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Count ruby";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        TextButton {
+                            title: root.count-ruby ? "On" : "Off";
+                            role: root.count-ruby ? Role.primary : Role.normal;
+                            clicked => {
+                                root.count-ruby-toggled(!root.count-ruby);
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.count-ruby
+                            ? "《よみ》も本文の字数に入れます。"
+                            : "《よみ》は本文の字数に入れません。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+
                     // **折り返さない。**`wrap: word-wrap`のTextは、`min-width`が
                     // 0になる代わりに`preferred-width`が「一行に伸ばしたときの
                     // 幅」のまま残る（`builtins.slint`, Text）。popupは開くとき
@@ -3554,6 +3593,27 @@ export component AppWindow inherits Window {
                                         ? 0
                                         : 1);
                             }
+                        }
+                    }
+
+                    // 要件 7.8（2026-09-09）: ルビと傍点。**大きさも位置も
+                    // 親文字に対する比率**で、面ごとに持つ——縦書きと横書きでは
+                    // ルビの置き場所そのものが違うので、読める大きさも同じとは
+                    // 限らない。位置は0が行の箱の端（行間の空きの外側）で、
+                    // 上げるほど字に近づく。
+                    StepRow {
+                        label: "Ruby size";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 13] + "%";
+                        stepped(by) => {
+                            root.typography-step(13, by);
+                        }
+                    }
+
+                    StepRow {
+                        label: "Ruby position";
+                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 14] + "%";
+                        stepped(by) => {
+                            root.typography-step(14, by);
                         }
                     }
                 }

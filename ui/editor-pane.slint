@@ -1674,6 +1674,21 @@ export component EditorPane inherits Rectangle {
                                         && (event.text == "s" || event.text == "S" || event.text == "\u{13}") {
                                         root.save-requested();
                                         accept
+                                    // 追加要件 2026-09-09: **メニューが言って
+                                    // いたことを、いま受ける。**ペインの`⋮`も
+                                    // タブのメニューも「Close Tab / Ctrl+W」と
+                                    // 出していたのに、その鍵を受ける行がどこにも
+                                    // 無かった——書いてあるのに効かないのは、
+                                    // 働いていない状態が画面に出ていないのと
+                                    // 同じことである（単語チェックモード要件
+                                    // 2.1.1）。**端末は上で先に返している**ので
+                                    // ここには来ない：Ctrl+Wはシェルでは
+                                    // 「直前の語を消す」で、そちらの意味を
+                                    // 奪ってはいけない。
+                                    } else if event.modifiers.control
+                                        && (event.text == "w" || event.text == "W" || event.text == "\u{17}") {
+                                        root.close-active-tab();
+                                        accept
                                     } else if event.modifiers.control
                                         && (event.text == "f" || event.text == "F" || event.text == "\u{6}") {
                                         root.find-requested(false);

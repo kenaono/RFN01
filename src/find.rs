@@ -123,6 +123,27 @@ fn boundary_at_or_before(source: &str, at: usize) -> usize {
     at
 }
 
+/// Whether the text between two byte positions is the needle.
+///
+/// **The one place that answers "is this a match?"** (追加要件 2026-09-09).
+/// 一件置換は「いま選ばれているものが検索で見つけたものか」を訊いてから
+/// 置き換える。それを`==`で訊いていたので、`alpha`で見つけた`Alpha`は
+/// 置換されずに次へ飛んでいた——**見つける規則と置き換える規則が2つあった**。
+/// 畳み方は[`next_match`]・[`count`]・[`replace_all`]と同じASCIIのそれで、
+/// ここを通せば4つが1つの規則を共有する。
+///
+/// 範囲が文字の途中から始まっていたり、長さが針と違えば一致ではない
+/// ——畳んでも長さが変わらないのがASCIIの折り畳みの性質なので、
+/// 長さの違いはそれだけで答えになる。
+pub fn is_match(source: &str, needle: &str, start: usize, end: usize) -> bool {
+    if needle.is_empty() || end.saturating_sub(start) != needle.len() {
+        return false;
+    }
+    source
+        .get(start..end)
+        .is_some_and(|found| found.eq_ignore_ascii_case(needle))
+}
+
 /// How many times the needle is in the document.
 ///
 /// Matches that would overlap are not counted twice, the same rule
@@ -380,6 +401,48 @@ mod tests {
         let source = "cat と CAT";
         let found = next_match(source, "Cat", source.len(), false).expect("the last one");
         assert_eq!(&source[found.0..found.1], "CAT");
+    }
+
+    /// **見つけたものは、そのまま置換できる**（追加要件 2026-09-09）。
+    /// 一件置換は「選ばれているのは検索が見つけたものか」を訊いてから置き換える
+    /// ので、この問いが検索より厳しいと、見つかったのに置換されない一致ができる。
+    #[test]
+    fn what_the_search_finds_is_what_a_replace_calls_a_match() {
+        let source = "Alpha alpha ALPHA";
+        let mut from = 0;
+        let mut matched = 0;
+        while let Some((start, end)) = next_match(source, "alpha", from, true) {
+            assert!(
+                is_match(source, "alpha", start, end),
+                "found {:?} but would not replace it",
+                &source[start..end]
+            );
+            matched += 1;
+            from = end;
+            if from >= source.len() {
+                break;
+            }
+        }
+        assert_eq!(matched, 3);
+        assert_eq!(count(source, "alpha"), 3);
+        assert_eq!(replace_all(source, "alpha", "beta").1, 3);
+    }
+
+    /// Anything that is not exactly one match is not one: a longer span, a
+    /// shorter one, a start inside a character, and the empty needle a search
+    /// box has before it is typed into.
+    #[test]
+    fn a_span_that_is_not_the_needle_is_not_a_match() {
+        let source = "あかalphaあか";
+
+        assert!(!is_match(source, "alpha", 6, 12), "one byte too long");
+        assert!(!is_match(source, "alpha", 6, 10), "too short");
+        assert!(
+            !is_match(source, "alpha", 5, 10),
+            "starts inside a character"
+        );
+        assert!(!is_match(source, "", 6, 6), "nothing matches");
+        assert!(is_match(source, "ALPHA", 6, 11));
     }
 
     #[test]

@@ -31,9 +31,9 @@ use crate::buffer::{DocumentFile, ExternalChange};
 use crate::open_document::OpenDocument;
 use crate::{
     AUTOSAVE_SETTING, AppWindow, EditorState, Live, MAX_DOCUMENT_CHARACTERS, Opening, PaneId,
-    Question, WORK_COPY_IDLE, WORK_COPY_LONGEST, app_data, ask_question, elapsed_ms, file_dialog,
-    floor_char_boundary, focused_pane, ime, open_documents, open_path_in_focused_pane,
-    publish_tabs, replace_document, shell,
+    Question, WORK_COPY_IDLE, WORK_COPY_LONGEST, WORK_COPY_SETTLE, app_data, ask_question,
+    elapsed_ms, file_dialog, floor_char_boundary, focused_pane, ime, open_documents,
+    open_path_in_focused_pane, publish_tabs, replace_document, shell, writer,
 };
 
 /// Whether the work copy is due (要件 8.1).
@@ -82,20 +82,82 @@ pub fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
 /// 起動でそれが戻ってくる——書き手は「維持しない」と言ったのに、いちばん
 /// 古い姿だけが維持されることになる。開いている文書はそのまま：切るのは
 /// ディスクに置くことであって、書いているものではない。
+///
+/// **消すのも待ち行列を通る**（追加要件 2026-09-09、残り1）。ここだけが
+/// [`discard_work_copy`]を通らずその場で`remove_file`していた——退避の
+/// 書き込みは別スレッドで数ミリ秒かかるので、**消したあとに古いコピーが
+/// 書き上がる**。Offのあいだは復元しないので画面には出ないが、Onへ戻した
+/// 次の起動でそれが本文として戻ってくる。
+///
+/// 数えるのは**ディスクにあるものと、開いている文書のぶんの両方**である。
+/// 行列で待っているだけのコピーはまだファイルとして存在しないので
+/// [`app_data::read_all_in`]には出てこない——「未完成・待機中のコピーも
+/// 対象に含め」るには、文書の側から名前を作って並べるしかない。同じ名前を
+/// 二度並べても`writer.rs`が畳むが、数が合わなくなるので先に落とす。
 pub fn discard_all_work_copies(live: &Live) -> usize {
     let Some(directory) = app_data::work_directory() else {
         return 0;
     };
-    let mut gone = 0;
-    for copy in app_data::read_all_in(&directory) {
-        if app_data::discard_in(&directory, &copy).is_ok() {
-            gone += 1;
+    // 名前を作るのに要るのは`work_file_name`だけで、道は
+    // [`discard_work_copy`]がもう一度組み立てる。ここでフォルダを訊くのは
+    // **置き場所が無ければ数える対象も無い**からである。
+    let _ = &directory;
+    let mut named = Vec::new();
+    let mut copies = Vec::new();
+    for copy in app_data::read_all_in(&directory).into_iter().chain(
+        open_documents(live)
+            .iter()
+            .map(|document| work_identity(&document.file.borrow())),
+    ) {
+        let name = app_data::work_file_name(&copy);
+        if named.contains(&name) {
+            continue;
         }
+        named.push(name);
+        copies.push(copy);
+    }
+    let gone = copies.len();
+    for copy in &copies {
+        discard_work_copy(live, copy);
     }
     live.cache
         .borrow_mut()
         .log_diag("work", &format!("autosave off, discarded={gone}"));
     gone
+}
+
+/// Put every unsaved document back in the queue for a work copy (追加要件
+/// 2026-09-09、残り1).
+///
+/// **自動退避を入れ直した瞬間に走る。**塞いでいるのは1つの並びだけである：
+/// Offにすると[`discard_all_work_copies`]が置いてあるコピーを全部消すので、
+/// **Onへ戻したあと、未保存の文書にコピーが1つも無い状態**が残りうる。
+/// そのまま閉じると終了時の[`write_work_copy_now`]も旗を見て何もしないので、
+/// 未保存の本文はどこにも残らない。
+///
+/// **打っているあいだは、これは要らない**——`SharedText::borrow_mut`が編集の
+/// たびに旗を立て、[`write_work_copy_of`]はOffのあいだそれを*下ろさない*ので、
+/// Onへ戻せば次の時計で書かれる。だから穴は「Offにして、**何も打たずに**、
+/// Onへ戻す」ときだけ開く（Offにする直前に最後のコピーが書けていて、旗が
+/// 下りていた場合）。**自動退避がOnのあいだ、未保存の文書には必ずコピーがある**
+/// ——それが要件 8.1 の約束で、ここはOffが壊したその状態を戻すだけである。
+///
+/// 対象は**未保存の本文がある文書だけ**——`mark_pending`が`edited`を自分で
+/// 見るので、ここは全部に訊いて、旗が立ったものを数えるだけでよい。保存済みの
+/// 文書には失うものが無く、コピーはディスクにあるファイルと同じものになる。
+/// 既に待っている文書の時計は動かさない（そちらのほうが古く、正しい）。
+pub fn keep_work_copies_again(live: &Live) -> usize {
+    let mut waiting = 0;
+    for document in open_documents(live) {
+        document.text.mark_pending();
+        if document.text.pending_since().is_some() {
+            waiting += 1;
+        }
+    }
+    live.cache
+        .borrow_mut()
+        .log_diag("work", &format!("autosave on, waiting={waiting}"));
+    waiting
 }
 
 /// Whether the settings file leaves the automatic work copies switched on.
@@ -221,16 +283,64 @@ pub fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDoc
     cache.borrow_mut().log_diag("work", &message);
 }
 
+/// Write the last work copies and **wait to hear whether they landed**
+/// (追加要件 2026-09-09、残り2).
+///
+/// 終了の直前に呼ぶ。それまで、最後の退避は行列に乗せるだけで、書けたかどうかは
+/// `finish`のあと——**窓が閉じたあと**——にしか分からなかった。ディスクが一杯でも
+/// 書き込み権が無くても、書き手には最後の入力を失ったことを知る道が無い。
+///
+/// 返すのは**書けなかった作業コピーの数**。0なら何も起きなかったのと同じで、
+/// 問いは増えない（要件 8.1 は静かな約束である）。
+pub fn flush_work_copies(window: &AppWindow, live: &Live) -> usize {
+    write_work_copy_now(window, live);
+    let landed = live.writer.settle(WORK_COPY_SETTLE);
+    report_write_results(window, live, landed)
+}
+
 /// Log what the writer thread has finished since last asked.
 ///
 /// Polled on the same timer that decides when to write, so nothing on that
 /// thread has to reach into the UI and no lock is shared with it.
 pub fn collect_write_results(window: &AppWindow, live: &Live) {
-    let results = live.writer.drain();
+    report_write_results(window, live, live.writer.drain());
+}
+
+/// Log and act on a batch of results the writer thread has handed back, and
+/// say **how many of them were work copies that could not be written**
+/// (追加要件 2026-09-09、残り2).
+///
+/// Split out from [`collect_write_results`] because the close path collects its
+/// results a different way — it waits for them ([`writer::FileWriter::settle`])
+/// rather than taking whatever has landed — and everything that happens to a
+/// result afterwards has to be the same either way: the flag put back up, the
+/// line in the log, the message on screen.
+///
+/// **削除の失敗は数に入らない。**片づけられなかったコピーは書き手の文章を
+/// 失わせない——残るだけである。数えるのは失われうるものだけ。
+pub fn report_write_results(
+    window: &AppWindow,
+    live: &Live,
+    results: Vec<writer::WriteResult>,
+) -> usize {
+    let mut lost = 0;
     if results.is_empty() {
-        return;
+        return 0;
     }
     for result in results {
+        // **置き換えられた仕事は、何もしなかった仕事である**（2026-09-09）。
+        // 同じ文書の新しいコピーが先に行列へ入っただけなので、旗も画面も
+        // 触らない。ログには残す——順序の話はここでしか読めない。
+        if result.superseded {
+            let shown = result.path.display().to_string();
+            live.cache
+                .borrow_mut()
+                .log_diag("work", &format!("superseded path={shown}"));
+            continue;
+        }
+        if result.error.is_some() && !result.removed {
+            lost += 1;
+        }
         let shown = result.path.display().to_string();
         let message = match (&result.error, result.removed) {
             (None, false) => format!(
@@ -272,6 +382,7 @@ pub fn collect_write_results(window: &AppWindow, live: &Live) {
         };
         window.set_render_status(told.into());
     }
+    lost
 }
 
 /// Notice another program writing the file (要件 8.3).

@@ -9,6 +9,14 @@ use crate::text_blocks::{
 pub struct DocumentStats {
     pub logical_lines: usize,
     pub body_characters: usize,
+    /// そのうち、ルビの読みが占めるぶん（要件 7.8・要件 10）。
+    ///
+    /// **足したものではなく、引けるものとして持つ。**要件 7.8 は「本文文字数が
+    /// ルビを数えるかどうかは設定で選べる（初期値は数えない）」と言っている
+    /// ——両方を持っておけば、**設定が変わっても数え直しが要らない**。
+    /// 数え直しは1打鍵ぶんの仕事（`DocumentCounts`）なので、設定を切り替える
+    /// たびに全文を歩くのは、この機能が求めていることに対して重すぎる。
+    pub ruby_characters: usize,
     pub source_characters: usize,
     /// Characters in the longest logical line.
     ///
@@ -394,6 +402,7 @@ impl DocumentStats {
         Self {
             logical_lines: logical_line_count(source),
             body_characters: visible_markdown_text(source).graphemes(true).count(),
+            ruby_characters: ruby_graphemes_in(source),
             source_characters: source.graphemes(true).count(),
             longest_line_characters: longest_logical_line(source),
         }
@@ -408,6 +417,8 @@ struct LineCounts {
     source_graphemes: usize,
     /// Graphemes of the line as the preview shows it.
     body_graphemes: usize,
+    /// そのうち、ルビの読みのぶん（要件 7.8）。
+    ruby_graphemes: usize,
     characters: usize,
     /// How the line was set when it was counted (要件 7.3.2). **Kept for the
     /// reason [`PreviewLine`] keeps it**: a fence opening above a line changes
@@ -421,10 +432,14 @@ impl LineCounts {
     fn of(line: &str, style: LineStyle) -> Self {
         let mut visible = String::with_capacity(line.len());
         // The counts are about how much text there is, not how it is set.
-        push_visible_line(line, style, &mut visible, &mut Vec::new());
+        // **印は要る**（要件 7.8）：ルビの読みは本文に居残るので、どこからどこ
+        // までが読みかを言えるのは印だけである。
+        let mut marks = Vec::new();
+        push_visible_line(line, style, &mut visible, &mut marks);
         Self {
             source_graphemes: line.graphemes(true).count(),
             body_graphemes: visible.graphemes(true).count(),
+            ruby_graphemes: ruby_graphemes(&visible, &marks),
             characters: line.chars().count(),
             style,
             text: line.to_owned(),
@@ -508,6 +523,11 @@ impl DocumentCounts {
                 .map(|line| line.body_graphemes)
                 .sum::<usize>()
                 + breaks,
+            ruby_characters: self
+                .lines
+                .iter()
+                .map(|line| line.ruby_graphemes)
+                .sum::<usize>(),
             source_characters: self
                 .lines
                 .iter()
@@ -705,6 +725,7 @@ fn push_visible_line(
                     comment: true,
                     ..Marks::default()
                 },
+                ornament: None,
             });
         }
         return;
@@ -740,6 +761,7 @@ fn push_visible_line(
                     bold: true,
                     ..Marks::default()
                 },
+                ornament: None,
             });
             rest
         }
@@ -815,6 +837,74 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
     let mut rest = content;
     let mut previous = None;
     while let Some(letter) = rest.chars().next() {
+        // 要件 7.8: **傍点はルビより先に読む。**`《《強調》》`はルビの`《》`で
+        // 始まるので、後から見ると「《強調《」という読みのおかしなルビとして
+        // 当たってしまう。長いほうを先に訊く、というだけの順である。
+        if let Some((inner, after)) = dots_here(rest) {
+            let start = *at;
+            // 中は普通の本文なので、太字も斜体もそのまま入れ子になる。
+            push_marked(inner, visible, marks, at);
+            marks.push(Emphasis {
+                utf16_start: start,
+                utf16_len: *at - start,
+                marks: Marks {
+                    dots: true,
+                    ..Marks::default()
+                },
+                ornament: None,
+            });
+            previous = inner.chars().next_back();
+            rest = after;
+            continue;
+        }
+        // 要件 7.8: 青空文庫の注記形式（`［＃「本当に」に傍点］`）。
+        // **これだけが後ろを向いている。**注記は自分より前にある語を指すので、
+        // いま書き出した`visible`の中をさかのぼって、その語に点を打つ。
+        if let Some((word, after)) = dots_note_here(rest) {
+            if let Some(found) = visible.rfind(word) {
+                let start = visible[..found].encode_utf16().count() as u32;
+                marks.push(Emphasis {
+                    utf16_start: start,
+                    utf16_len: word.encode_utf16().count() as u32,
+                    marks: Marks {
+                        dots: true,
+                        ..Marks::default()
+                    },
+                    ornament: None,
+                });
+            }
+            // 指す先が無くても注記そのものは消える。**原文には残っている**ので
+            // 失われるものは無く、本文に`［＃…］`が出続けるほうが読みにくい。
+            rest = after;
+            continue;
+        }
+        // 要件 7.8: ルビ。`｜親《よみ》`と、親が漢字の連なりで明らかなときの
+        // `漢字《かんじ》`。**縦線は消え、読みは居残って箱で隠れる**
+        // （`Ornament::Ruby`にその理由が書いてある）。
+        if let Some((base, reading, after, already_shown)) = ruby_here(rest, visible) {
+            let base_start = *at;
+            for character in base.chars() {
+                visible.push(character);
+                *at += character.len_utf16() as u32;
+            }
+            // **親文字は縦線の側から来るとは限らない。**`漢字《かんじ》`では
+            // 親はもう`visible`に出ているので、そのぶんを数えに足す。
+            let base_utf16 = already_shown + (*at - base_start);
+            let reading_start = *at;
+            for character in reading.chars() {
+                visible.push(character);
+                *at += character.len_utf16() as u32;
+            }
+            marks.push(Emphasis {
+                utf16_start: reading_start,
+                utf16_len: *at - reading_start,
+                marks: Marks::default(),
+                ornament: Some(Ornament::Ruby { base_utf16 }),
+            });
+            previous = base.chars().next_back().or(previous);
+            rest = after;
+            continue;
+        }
         // 要件 7.3.2: a link shows what it was given to show. **Before the
         // paired markers**, because what a link hides is not a pair around the
         // text — `[` opens it, `](…)` closes it, and the part between them is
@@ -840,6 +930,7 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
                     link: true,
                     ..Marks::default()
                 },
+                ornament: None,
             });
             previous = Some(']');
             rest = after;
@@ -858,6 +949,7 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
                     link: true,
                     ..Marks::default()
                 },
+                ornament: None,
             });
             previous = shown.chars().next_back();
             rest = after;
@@ -880,6 +972,7 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
                 utf16_start: start,
                 utf16_len: *at - start,
                 marks: found,
+                ornament: None,
             });
             previous = inner.chars().next_back();
             rest = after;
@@ -890,6 +983,162 @@ fn push_marked(content: &str, visible: &mut String, marks: &mut Vec<Emphasis>, a
         previous = Some(letter);
         rest = &rest[letter.len_utf8()..];
     }
+}
+
+/// 傍点の`《《…》》`（要件 7.8、カクヨム式）。中身と、その後ろ。
+///
+/// **開いて閉じるものだけが記法である**——太字の`**`と同じ規則で、閉じない
+/// `《《`はただの括弧として本文に残る。空の`《《》》`も記法ではない（点を打つ
+/// 相手がいない）。
+fn dots_here(rest: &str) -> Option<(&str, &str)> {
+    let after_open = rest.strip_prefix("《《")?;
+    let close = after_open.find("》》")?;
+    if close == 0 {
+        return None;
+    }
+    Some((&after_open[..close], &after_open[close + "》》".len()..]))
+}
+
+/// 青空文庫の注記形式の傍点（`［＃「本当に」に傍点］`、要件 7.8）。
+/// 点を打つ語と、注記の後ろ。
+///
+/// **注記は後ろから前を指す**ので、返すのは語そのものである——どこに打つかは
+/// 呼び出し側が`visible`をさかのぼって決める。ここは書式を読むだけ。
+///
+/// 「傍点」以外の注記（`［＃改ページ］`など）は読まない。**知らない注記は
+/// 本文として残す**：消してしまうと、原文にある指示が画面から消えたまま
+/// 何も起きないことになる。
+fn dots_note_here(rest: &str) -> Option<(&str, &str)> {
+    let after_open = rest.strip_prefix("［＃「")?;
+    let close = after_open.find("」に傍点］")?;
+    if close == 0 {
+        return None;
+    }
+    Some((
+        &after_open[..close],
+        &after_open[close + "」に傍点］".len()..],
+    ))
+}
+
+/// ルビ（要件 7.8、青空文庫／なろう式）。
+///
+/// 返すのは**これから書き出す親文字**、`《》`込みの読み、その後ろ、そして
+/// **すでに`visible`に出ている親文字の長さ**（UTF-16単位）の4つ。
+/// 形が2つあるので、どちらから来ても同じ組を返すためにこの形にしてある。
+///
+/// - `｜親文字《よみ》`（半角`|`も受ける——なろうが両方読む）。縦線が親文字の
+///   始まりを言うので、親は何の字でもよい。**縦線だけが消える。**
+/// - `漢字《かんじ》`。親は`《`の直前にある漢字の連なりで、そこはもう書き出して
+///   ある。**漢字が前に無ければルビではない**——`《`は日本語の本文では引用符
+///   としても使われるので、これがそれと分ける唯一の規則である。
+///
+/// **読みが空ならルビではない。**`《》`だけが残っても組む字が無い。
+fn ruby_here<'a>(rest: &'a str, visible: &str) -> Option<(&'a str, &'a str, &'a str, u32)> {
+    if let Some(after_bar) = rest.strip_prefix('｜').or_else(|| rest.strip_prefix('|')) {
+        let open = after_bar.find('《')?;
+        let base = &after_bar[..open];
+        // 縦線が2本続くのは親文字の切れ目の言い直しで、ルビの親ではない。
+        // 表の行の`|`もここで落ちる。
+        if base.is_empty() || base.contains(['｜', '|']) {
+            return None;
+        }
+        let (reading, after) = reading_at(&after_bar[open..])?;
+        return Some((base, reading, after, 0));
+    }
+    if !rest.starts_with('《') || rest.starts_with("《《") {
+        return None;
+    }
+    let (reading, after) = reading_at(rest)?;
+    let back = trailing_kanji(visible);
+    if back == 0 {
+        return None;
+    }
+    Some(("", reading, after, back))
+}
+
+/// `《…》`を`《》`込みで切り出す。入れ子は読まない——ルビの読みは字の並びで
+/// あって、その中にもう一段の記法は無い。
+fn reading_at(rest: &str) -> Option<(&str, &str)> {
+    let after_open = rest.strip_prefix('《')?;
+    let close = after_open.find('》')?;
+    if close == 0 || after_open[..close].contains('《') {
+        return None;
+    }
+    let end = '《'.len_utf8() + close + '》'.len_utf8();
+    Some((&rest[..end], &rest[end..]))
+}
+
+/// 末尾に続いている漢字の長さ（UTF-16単位）。0なら漢字で終わっていない。
+///
+/// **々も漢字の側に数える**（「人々《ひとびと》」）。ひらがな・カタカナは
+/// 数えない——`親《おや》`のように送り仮名まで巻き込むと、書き手が縦線で
+/// 言い直すしかなくなる。それが縦線のある理由だが、**要らないときに要求する
+/// 記法は、要件7.8が採った互換性の意味を薄くする**。
+fn trailing_kanji(visible: &str) -> u32 {
+    let mut counted = 0;
+    for letter in visible.chars().rev() {
+        if !is_kanji(letter) {
+            break;
+        }
+        counted += letter.len_utf16() as u32;
+    }
+    counted
+}
+
+/// CJK統合漢字（拡張Aまで）と、繰り返しの`々`。
+fn is_kanji(letter: char) -> bool {
+    matches!(letter, '\u{3005}' | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}')
+}
+
+/// ルビの読みが占める書記素の数（要件 7.8）。
+///
+/// **`《》`込みで数える。**画面に出ていないのは読みの字だけではなく、それを
+/// 囲む括弧もである——本文として読む人にはどちらも見えていない。
+fn ruby_graphemes(visible: &str, marks: &[Emphasis]) -> usize {
+    marks
+        .iter()
+        .filter(|mark| matches!(mark.ornament, Some(Ornament::Ruby { .. })))
+        .map(|mark| {
+            let start = byte_at_utf16_in(visible, mark.utf16_start);
+            let end = byte_at_utf16_in(visible, mark.utf16_start + mark.utf16_len);
+            visible[start..end].graphemes(true).count()
+        })
+        .sum()
+}
+
+/// 文書全体のルビの読みの数（要件 7.8）。
+///
+/// **[`DocumentStats::from_source`]と同じ立場**——1行ずつ数える
+/// [`DocumentCounts`]の答え合わせに使う、素朴なほうの実装である。
+#[cfg(test)]
+fn ruby_graphemes_in(source: &str) -> usize {
+    let styles = line_styles(source);
+    source
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let style = styles.get(index).copied().unwrap_or_default();
+            let mut visible = String::with_capacity(line.len());
+            let mut marks = Vec::new();
+            push_visible_line(line, style, &mut visible, &mut marks);
+            ruby_graphemes(&visible, &marks)
+        })
+        .sum()
+}
+
+/// `visible`の中の、UTF-16位置に当たるバイト位置。
+///
+/// 印はUTF-16で測ってあり、書記素を数えるにはバイトが要る。**範囲の外は
+/// 末尾に丸める**——切れ端の印を渡されても落ちない側へ。
+fn byte_at_utf16_in(visible: &str, position: u32) -> usize {
+    let mut units = 0;
+    for (byte, letter) in visible.char_indices() {
+        if units >= position {
+            return byte;
+        }
+        units += letter.len_utf16() as u32;
+    }
+    visible.len()
 }
 
 /// The footnote `rest` begins with: what it shows, and what follows it
@@ -1834,8 +2083,22 @@ mod tests {
             Marks { italic: true, .. } => "italic",
             Marks { strike: true, .. } => "strike",
             Marks { code: true, .. } => "code",
+            Marks { dots: true, .. } => "dots",
             _ => "none",
         }
+    }
+
+    /// ルビの走りだけを、`(読みの位置, 読みの長さ, 親文字の長さ)`で。
+    fn ruby_shape(marks: &[Emphasis]) -> Vec<(u32, u32, u32)> {
+        marks
+            .iter()
+            .filter_map(|mark| match mark.ornament {
+                Some(Ornament::Ruby { base_utf16 }) => {
+                    Some((mark.utf16_start, mark.utf16_len, base_utf16))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn shape(marks: &[Emphasis]) -> Vec<(u32, u32, &'static str)> {
@@ -1843,6 +2106,80 @@ mod tests {
             .iter()
             .map(|mark| (mark.utf16_start, mark.utf16_len, label(mark.marks)))
             .collect()
+    }
+
+    /// 要件 7.8: **縦線が親文字の始まりを言う。**消えるのは縦線だけで、
+    /// 読みは本文に居残ったまま箱で隠れる——だから描くときに読む字がある。
+    #[test]
+    fn a_ruby_bar_names_where_the_base_begins() {
+        let (visible, marks) = preview_of("｜地の文《じのぶん》を書く");
+
+        assert_eq!(visible, "地の文《じのぶん》を書く");
+        // 読みは3文字目から`《じのぶん》`の6単位、親文字は3単位。
+        assert_eq!(ruby_shape(&marks), vec![(3, 6, 3)]);
+    }
+
+    /// 半角の`|`も受ける（なろうが両方読む）。表の行の`|`は、読みが続かない
+    /// のでルビにならない。
+    #[test]
+    fn a_half_width_bar_is_a_ruby_bar_too() {
+        assert_eq!(preview_of("|地の文《じのぶん》").0, "地の文《じのぶん》");
+        assert_eq!(preview_of("| a | b |").0, "| a | b |");
+        assert_eq!(ruby_shape(&preview_of("| a | b |").1), vec![]);
+    }
+
+    /// 要件 7.8: 親が漢字の連なりで明らかなときは縦線が要らない。
+    /// **漢字が前に無ければルビではない**——`《》`は本文の引用符でもある。
+    #[test]
+    fn kanji_before_a_reading_is_the_base_without_a_bar() {
+        let (visible, marks) = preview_of("彼は漢字《かんじ》を見た");
+
+        assert_eq!(visible, "彼は漢字《かんじ》を見た");
+        assert_eq!(ruby_shape(&marks), vec![(4, 5, 2)]);
+        // ひらがなの後ろは親文字にならないので、これはただの括弧。
+        assert_eq!(ruby_shape(&preview_of("ここで《ちゅうい》").1), vec![]);
+        assert_eq!(preview_of("ここで《ちゅうい》").0, "ここで《ちゅうい》");
+    }
+
+    /// **閉じない《はルビではない**——太字の`**`と同じ規則である。
+    #[test]
+    fn a_reading_that_does_not_close_is_not_ruby() {
+        assert_eq!(ruby_shape(&preview_of("漢字《かんじ").1), vec![]);
+        assert_eq!(ruby_shape(&preview_of("漢字《》").1), vec![], "空の読み");
+        assert_eq!(ruby_shape(&preview_of("｜親《").1), vec![], "縦線だけ");
+        assert_eq!(preview_of("漢字《かんじ").0, "漢字《かんじ");
+    }
+
+    /// 要件 7.8: 傍点はカクヨム式の`《《…》》`。**ルビより先に読む**ので、
+    /// `《強調《`という読みのおかしなルビにはならない。
+    #[test]
+    fn double_brackets_are_emphasis_dots() {
+        let (visible, marks) = preview_of("彼は《《本当に》》来た");
+
+        assert_eq!(visible, "彼は本当に来た");
+        assert_eq!(shape(&marks), vec![(2, 3, "dots")]);
+        assert_eq!(ruby_shape(&marks), vec![], "ルビとして当たっていない");
+    }
+
+    /// 青空文庫の注記形式（書き手の決定、2026-09-09）。
+    /// **これだけが後ろを向いている**——注記は自分より前にある語を指す。
+    #[test]
+    fn an_aozora_note_puts_dots_on_the_word_before_it() {
+        let (visible, marks) = preview_of("彼は本当に来た［＃「本当に」に傍点］");
+
+        assert_eq!(visible, "彼は本当に来た");
+        assert_eq!(shape(&marks), vec![(2, 3, "dots")]);
+    }
+
+    /// 指す先が無い注記も消える。**原文には残っている**ので失うものは無く、
+    /// 本文に`［＃…］`が出続けるほうが読みにくい。知らない注記は本文のまま。
+    #[test]
+    fn a_note_pointing_at_nothing_still_comes_off() {
+        assert_eq!(preview_of("彼は来た［＃「本当に」に傍点］").0, "彼は来た");
+        assert_eq!(
+            preview_of("彼は来た［＃改ページ］").0,
+            "彼は来た［＃改ページ］"
+        );
     }
 
     /// **A marker that nothing closes is not a marker** (要件 7.3.2). This is
@@ -2343,6 +2680,45 @@ mod tests {
         source.clear();
         counts.refresh(&source);
         assert_eq!(counts.stats(), DocumentStats::from_source(&source));
+    }
+
+    /// 要件 7.8・要件 10: **ルビは別に数える。**両方持っているので、設定を
+    /// 切り替えても数え直しは起きない——引き算が変わるだけである。
+    #[test]
+    fn ruby_is_counted_apart_from_the_body() {
+        let stats = DocumentStats::from_source("彼は｜漢字《かんじ》を見た");
+
+        // 本文に居残っているので`body`はルビ込み、`ruby`が`《かんじ》`の5字。
+        assert_eq!(stats.ruby_characters, "《かんじ》".chars().count());
+        assert_eq!(
+            stats.body_characters - stats.ruby_characters,
+            "彼は漢字を見た".chars().count()
+        );
+        // 縦線は本文にも数に残らない。
+        assert_eq!(
+            stats.source_characters,
+            "彼は｜漢字《かんじ》を見た".chars().count()
+        );
+        // ルビの無い行は0。
+        assert_eq!(
+            DocumentStats::from_source("彼は漢字を見た").ruby_characters,
+            0
+        );
+    }
+
+    /// 1行ずつ数えるほう（`DocumentCounts`）と素朴なほうが、ルビについても
+    /// 同じ答えを出す。**この2つが食い違うと、打鍵のたびに数が揺れる。**
+    #[test]
+    fn the_line_at_a_time_count_agrees_about_ruby() {
+        let source = "｜漢字《かんじ》
+傍点は《《ここ》》
+人々《ひとびと》の話
+";
+        let mut counts = DocumentCounts::default();
+        counts.refresh(source);
+
+        assert_eq!(counts.stats(), DocumentStats::from_source(source));
+        assert!(counts.stats().ruby_characters > 0);
     }
 
     #[test]

@@ -57,10 +57,10 @@ use windows::{
                 DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
                 DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_ALIGNMENT_CENTER,
                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS,
-                DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
-                IDWriteInlineObject, IDWriteInlineObject_Impl, IDWriteLocalizedStrings,
-                IDWriteTextFormat, IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1,
-                IDWriteTextRenderer,
+                DWRITE_TEXT_RANGE, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
+                IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
+                IDWriteInlineObject_Impl, IDWriteLocalizedStrings, IDWriteTextFormat,
+                IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTextRenderer,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Imaging::{
@@ -108,6 +108,14 @@ pub enum WritingMode {
 }
 
 impl WritingMode {
+    /// 要件 7.8: 半角の数字を正立させる面か。
+    ///
+    /// **縦書きだけ。**横書きの数字はもともと正立していて、そこへ箱を張れば
+    /// 送りだけが変わる——何も直さずに幾何を動かすことになる。
+    fn stands_digits_upright(self) -> bool {
+        matches!(self, WritingMode::Vertical)
+    }
+
     /// Vertical writing reads towards smaller screen x, so its blocks are placed
     /// from the far end of the flow axis.
     fn flow_order(self) -> FlowOrder {
@@ -355,6 +363,14 @@ struct Graphics {
     /// family. **Its own map**: it is set to the trailing edge of its box, and
     /// an alignment set on a format shared with the body would move the body.
     number_formats: HashMap<(u32, String, WritingMode), IDWriteTextFormat>,
+    /// ルビと傍点の書式（要件 7.8）、大きさ・書字方向・書体で引く。
+    /// **本文とは別の地図に置く。**折り返しを切ってあるからで（読みが親文字より
+    /// 長ければはみ出して組む——2行目へ回すと、それはもうルビではない）、
+    /// 本文と同じ書式にそれを設定すると本文が折り返さなくなる。
+    ruby_formats: HashMap<(u32, WritingMode, String), IDWriteTextFormat>,
+    /// 縦中横の書式（要件 7.8）。**書字方向を持たない**ので本文とは別の地図に
+    /// いる——正立させるというのは、面の向きを聞かないということである。
+    upright_formats: HashMap<(u32, String, WritingMode), IDWriteTextFormat>,
     /// The terminal's formats (追加要件 Terminal), keyed by size, family and
     /// weight. **Kept apart from the document's**: a terminal's format has no
     /// writing mode to speak of and no line spacing — a cell grid decides its
@@ -392,6 +408,8 @@ impl Graphics {
                 wic: CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?,
                 formats: HashMap::new(),
                 number_formats: HashMap::new(),
+                ruby_formats: HashMap::new(),
+                upright_formats: HashMap::new(),
                 cell_formats: HashMap::new(),
                 cell_size: None,
                 target: None,
@@ -407,6 +425,80 @@ impl Graphics {
     /// they are wide, and the family the writer chose for code is the one they
     /// already picked for exactly that. Always horizontal: the numbers are
     /// drawn beside horizontal text and nowhere else.
+    /// ルビと傍点を組む書式（要件 7.8）。
+    ///
+    /// 本文と同じ書体・同じ書字方向で、大きさだけが[`RUBY_SCALE`]倍。
+    /// **折り返さない**——読みが親文字より長ければ前後へはみ出して組むのが
+    /// 縦組みの当たり前で、2行になったものはルビとして読めない。
+    fn ruby_format(
+        &mut self,
+        typography: &Typography,
+        mode: WritingMode,
+    ) -> Result<IDWriteTextFormat> {
+        let size = ruby_size(typography);
+        let family = typography.body_family().to_owned();
+        let key = (size.to_bits(), mode, family);
+        if let Some(format) = self.ruby_formats.get(&key) {
+            return Ok(format.clone());
+        }
+        let family = HSTRING::from(key.2.as_str());
+        // SAFETY: as in `text_format`.
+        let format = unsafe {
+            self.dwrite.CreateTextFormat(
+                &family,
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                w!("ja-JP"),
+            )?
+        };
+        mode.apply_to(&format)?;
+        // SAFETY: the format is alive here and for as long as the cache holds it.
+        unsafe {
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        }
+        self.ruby_formats.insert(key, format.clone());
+        Ok(format)
+    }
+
+    /// 縦中横の数字を組む書式（要件 7.8）。
+    ///
+    /// **書字方向を教えない。**教えれば数字は列と一緒に寝てしまい、それが
+    /// この機能が直したかったことである（行番号が同じ理由で同じことをして
+    /// いる）。箱の真ん中に、折り返さずに置く——2桁が1マスに並ぶのは、
+    /// 半角の数字が全角の半分だからで、こちらが詰めているのではない。
+    fn upright_format(&mut self, typography: &Typography) -> Result<IDWriteTextFormat> {
+        let size = typography.font_size.max(1.0);
+        let family = typography.body_family().to_owned();
+        let key = (size.to_bits(), family, WritingMode::Horizontal);
+        if let Some(format) = self.upright_formats.get(&key) {
+            return Ok(format.clone());
+        }
+        let family = HSTRING::from(key.1.as_str());
+        // SAFETY: as in `text_format`.
+        let format = unsafe {
+            self.dwrite.CreateTextFormat(
+                &family,
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                w!("ja-JP"),
+            )?
+        };
+        // SAFETY: the format is alive here and for as long as the cache holds it.
+        unsafe {
+            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        }
+        self.upright_formats.insert(key, format.clone());
+        Ok(format)
+    }
+
     fn number_format(
         &mut self,
         typography: &Typography,
@@ -787,8 +879,12 @@ fn apply_marker_boxes(
         }
         .into()
     };
-    let marker = box_of(0.0);
-    let whole_line = box_of(typography.indent_step());
+    // **幅0の箱だけを使い回す。**送りを持つ箱は走りごとに作る——同じ
+    // インスタンスを隣り合う範囲に張ると、DirectWriteはそれを**1つの箱として
+    // 扱う**（実測 2026-09-09：縦中横の`202`が3マスではなく1マスに収まった。
+    // 3桁ぶんの深さ59pxのはずが26pxだった）。幅0の箱にはその症状が出ないし、
+    // 出たとしても送りが0なので何も動かない。
+    let width_less = box_of(0.0);
     for run in runs {
         let Some(ornament) = run.ornament else {
             continue;
@@ -798,10 +894,11 @@ fn apply_marker_boxes(
         // two cells of a table can, because what the box holds is what is left
         // of the column before it — and the box over the delimiter row is as
         // wide as the whole table (技術検証 7.7).
-        let object = if ornament.keeps_room() {
-            &whole_line
+        let advance = ornament.box_advance(typography.indent_step(), typography.font_size);
+        let object = if advance > 0.0 {
+            box_of(advance)
         } else {
-            &marker
+            width_less.clone()
         };
         let range = DWRITE_TEXT_RANGE {
             startPosition: run.utf16_start,
@@ -809,7 +906,7 @@ fn apply_marker_boxes(
         };
         // SAFETY: `style_runs` keeps every range inside the block's own text,
         // and both objects outlive the call.
-        unsafe { layout.SetInlineObject(object, range)? };
+        unsafe { layout.SetInlineObject(&object, range)? };
     }
     Ok(())
 }
@@ -1427,6 +1524,25 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
             let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
             block_text[start..end].trim_end().to_owned()
         }
+        // 要件 7.8: **読みは本文に居残っている。**`《かんじ》`の`《`と`》`を
+        // 外した中身がそのまま組む字で、箱はそれを本文の流れから隠している
+        // だけである。`Number`が数字を読み出すのと同じ道——`Emphasis`にも
+        // `StyleRun`にも文字列を持たせずに済む理由がこれ。
+        // 要件 7.8: **箱が覆っている数字を、そのまま正立で描く。**`Number`と
+        // 同じ道で、違うのは置き場所だけ——あちらは溝、これは箱の中。
+        Ornament::Upright => {
+            let start = byte_at_utf16(block_text, run.utf16_start);
+            let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
+            block_text[start..end].to_owned()
+        }
+        Ornament::Ruby { .. } => {
+            let start = byte_at_utf16(block_text, run.utf16_start);
+            let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
+            block_text[start..end]
+                .trim_start_matches('《')
+                .trim_end_matches('》')
+                .to_owned()
+        }
     }
 }
 
@@ -1444,6 +1560,7 @@ fn draw_marker_ink(
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
     format: &IDWriteTextFormat,
+    upright_format: &IDWriteTextFormat,
     layout: &IDWriteTextLayout,
     runs: &[StyleRun],
     text: &str,
@@ -1451,6 +1568,9 @@ fn draw_marker_ink(
     mode: WritingMode,
     indent: f32,
 ) -> Result<()> {
+    // 要件 7.8: **箱の中に立つものは、あとでまとめて。**溝へ置くものと置き場所
+    // の決め方が違うだけなので、輪の中に二つ目の`if`を積むより読める。
+    let mut upright: Vec<StyleRun> = Vec::new();
     // A box is one cluster and hit-tests to one region (技術検証 4.12). The
     // room for a few more costs nothing and keeps a surprise from becoming an
     // insufficient-buffer error in the middle of a draw.
@@ -1459,6 +1579,15 @@ fn draw_marker_ink(
         let Some(ornament) = run.ornament.filter(|kind| kind.draws_ink()) else {
             continue;
         };
+        // 要件 7.8: ルビは行の脇に出るので、行頭の溝へ置くこの道は通らない。
+        // 置き場所を決める軸が違うだけで、当たった矩形へ墨を置くのは同じ。
+        if ornament.rides_beside_the_line() {
+            continue;
+        }
+        if ornament.stands_in_its_box() {
+            upright.push(*run);
+            continue;
+        }
         let mut count = 0;
         // SAFETY: `style_runs` keeps every range inside the block's own text,
         // and the buffer is larger than one cluster can need.
@@ -1514,7 +1643,273 @@ fn draw_marker_ink(
             );
         }
     }
+    draw_upright_digits(
+        target,
+        brush,
+        upright_format,
+        layout,
+        &upright,
+        text,
+        origin,
+    )
+}
+
+/// 要件 7.8: 縦中横——箱が取った1マスの中に、数字を正立・横並びで組む。
+///
+/// **墨は箱そのものの矩形へ置く。**当たった矩形がすでに1文字ぶんの送りを持って
+/// いるので（[`Ornament::box_advance`]）、溝を数えるような細工は要らない。
+fn draw_upright_digits(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    format: &IDWriteTextFormat,
+    layout: &IDWriteTextLayout,
+    runs: &[StyleRun],
+    text: &str,
+    origin: windows_numerics::Vector2,
+) -> Result<()> {
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
+    for run in runs {
+        let mut count = 0;
+        // SAFETY: `style_runs` keeps every range inside the block's own text,
+        // and a box is one cluster and hit-tests to one region (技術検証 4.12).
+        unsafe {
+            layout.HitTestTextRange(
+                run.utf16_start,
+                run.utf16_len,
+                origin.X,
+                origin.Y,
+                Some(&mut regions),
+                &mut count,
+            )?;
+        }
+        if count == 0 {
+            continue;
+        }
+        let region = regions[0];
+        let digits = marker_ink(Ornament::Upright, text, run);
+        let utf16 = digits.encode_utf16().collect::<Vec<u16>>();
+        let rect = D2D_RECT_F {
+            left: region.left,
+            top: region.top,
+            right: region.left + region.width,
+            bottom: region.top + region.height,
+        };
+        // SAFETY: The buffer, the format and the brush all outlive the call.
+        unsafe {
+            target.DrawText(
+                &utf16,
+                format,
+                &rect,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
     Ok(())
+}
+
+/// 傍点に使う字（要件 7.8）。
+///
+/// **中黒を採る。**ゴマ点（`﹅`）のほうが組版としては正しいが、持っていない
+/// 書体があり、無い字は豆腐になる——**点が出ないより、形が少し違うほうがいい。**
+const DOT: &str = "・";
+
+/// ルビと傍点を組む大きさ（要件 7.8・要件 9）。
+///
+/// **書き手の比率を、下限だけ押さえて使う。**0pxの書式は作れないので。
+fn ruby_size(typography: &Typography) -> f32 {
+    (typography.font_size * typography.ruby_scale).max(1.0)
+}
+
+/// 帯を字へ寄せる量（要件 7.8）。本文の大きさに対する比率で、正が字へ近づく。
+fn ruby_offset(typography: &Typography) -> f32 {
+    typography.font_size * typography.ruby_offset
+}
+
+/// ルビと傍点が出る帯——親文字の脇（要件 7.8）。
+///
+/// **どちらの書字方向でも「前の行がある側」に出る。**横書きなら上、縦書きなら
+/// 右で、これは流れ軸の向き（[`WritingMode::flow_order`]）がそのまま答える
+/// ——横書きは下へ流れるので前は上、縦書きは左へ流れるので前は右である。
+/// 画面のxとyで場合分けすると、同じ話を2回書くことになる。
+///
+/// **帯は行の外ではなく、行自身の箱の中にある。**当たった矩形は1行ぶんの
+/// 送り（行間を含む）で、字はその中に組まれている——ルビが入るのはその空きで
+/// あって、隣の行の場所ではない。外側へ出すと2つ壊れる：**最初の行のルビが
+/// 文書の外へ出て切れる**（縦書きの1列目は流れ軸のいちばん端にいる）のと、
+/// **隣の行の字に重なる**のと。行間が詰まっていれば字に近づくが、それは
+/// 行間の設定（要件 9）が答えることで、置き場所を変えて隠す話ではない。
+///
+/// `region`は親文字が当たった矩形、`thickness`は帯の厚み。
+fn beside_the_line(
+    region: &DWRITE_HIT_TEST_METRICS,
+    mode: WritingMode,
+    thickness: f32,
+    towards: f32,
+) -> D2D_RECT_F {
+    let (flow_start, line_start) = mode.to_axes(region.left, region.top);
+    let (flow_extent, line_extent) = mode.to_axes(region.width, region.height);
+    // `towards`は字へ寄せる量（要件 7.8）。**どちらの書字方向でも「字のほう」へ
+    // 動く**ので、流れ軸の向きで符号が反転する。
+    let band = match mode.flow_order() {
+        FlowOrder::Descending => flow_start + (flow_extent - thickness).max(0.0) - towards,
+        FlowOrder::Ascending => flow_start + towards,
+    };
+    let (left, top) = mode.to_screen(band, line_start);
+    let (width, height) = mode.to_screen(thickness, line_extent);
+    D2D_RECT_F {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+/// Draw the reading beside every base a ruby box stands after (要件 7.8).
+///
+/// **箱は読みの上に立っていて、墨は親文字の脇に置く。**その2つを1つの走りが
+/// 持っている（`Ornament::Ruby`の`base_utf16`）ので、親と読みの対応が壊れよう
+/// がない——別々の表に分けていたら、片方だけが編集で動く道があった。
+///
+/// 親文字が折り返しをまたいだときは、**最初の矩形にだけ組む**。読みは分けられる
+/// ものではなく、半分ずつ2箇所に出るくらいなら1箇所に出ているほうが読める。
+fn draw_ruby(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    format: &IDWriteTextFormat,
+    layout: &IDWriteTextLayout,
+    runs: &[StyleRun],
+    text: &str,
+    origin: windows_numerics::Vector2,
+    mode: WritingMode,
+    thickness: f32,
+    towards: f32,
+) -> Result<()> {
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
+    for run in runs {
+        let Some(Ornament::Ruby { base_utf16 }) = run.ornament else {
+            continue;
+        };
+        // **親文字が無ければ組まない。**切れ端になった走り（`marks_from`）は
+        // 箱を連れてこないので普通は起きないが、指す先の無い読みを画面の端に
+        // 置くよりは、何も置かないほうがいい。
+        if base_utf16 == 0 || base_utf16 > run.utf16_start {
+            continue;
+        }
+        let mut count = 0;
+        // SAFETY: `style_runs` keeps every range inside the block's own text,
+        // and the buffer is larger than one base can need.
+        unsafe {
+            layout.HitTestTextRange(
+                run.utf16_start - base_utf16,
+                base_utf16,
+                origin.X,
+                origin.Y,
+                Some(&mut regions),
+                &mut count,
+            )?;
+        }
+        if count == 0 {
+            continue;
+        }
+        let reading = marker_ink(Ornament::Ruby { base_utf16 }, text, run);
+        if reading.is_empty() {
+            continue;
+        }
+        let utf16 = reading.encode_utf16().collect::<Vec<u16>>();
+        let rect = beside_the_line(&regions[0], mode, thickness, towards);
+        // SAFETY: The buffer, the format and the brush all outlive the call,
+        // and the rectangle is read before it returns.
+        unsafe {
+            target.DrawText(
+                &utf16,
+                format,
+                &rect,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Put a dot beside every character of every stretch marked for them
+/// (要件 7.8).
+///
+/// **1字につき1つ当てて訊く。**範囲をまとめて訊いて等分すれば安いが、全角と
+/// 半角が混じった行で点が字からずれる——傍点が振られるのは数文字なので、
+/// 正しいほうを選んでいる。
+///
+/// ルビと同じ帯に出る。**同じ字に両方が付くことはある**（親文字に傍点、その上に
+/// ルビ）が、そのときは重なって出る——組版としては正しくないが、要件 7.8 は
+/// どちらも「原稿として読めること」を求めており、片方を黙って落とすほうが遠い。
+fn draw_emphasis_dots(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    format: &IDWriteTextFormat,
+    layout: &IDWriteTextLayout,
+    runs: &[StyleRun],
+    text: &str,
+    origin: windows_numerics::Vector2,
+    mode: WritingMode,
+    thickness: f32,
+    towards: f32,
+) -> Result<()> {
+    let dot = DOT.encode_utf16().collect::<Vec<u16>>();
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
+    for run in runs {
+        if !run.marks.dots {
+            continue;
+        }
+        let start = byte_at_utf16(text, run.utf16_start);
+        let end = byte_at_utf16(text, run.utf16_start + run.utf16_len);
+        let mut at = run.utf16_start;
+        for letter in text[start..end].chars() {
+            let units = letter.len_utf16() as u32;
+            // 改行には点を打たない——行末の外にある字ではない。
+            if letter == '\n' {
+                at += units;
+                continue;
+            }
+            let mut count = 0;
+            // SAFETY: the range is inside the block's own text, and the buffer
+            // is larger than one character can need.
+            unsafe {
+                layout.HitTestTextRange(
+                    at,
+                    units,
+                    origin.X,
+                    origin.Y,
+                    Some(&mut regions),
+                    &mut count,
+                )?;
+            }
+            at += units;
+            if count == 0 {
+                continue;
+            }
+            let rect = beside_the_line(&regions[0], mode, thickness, towards);
+            // SAFETY: as in `draw_ruby`.
+            unsafe {
+                target.DrawText(
+                    &dot,
+                    format,
+                    &rect,
+                    brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether anything on this block goes in the band beside the line (要件 7.8).
+fn run_rides_beside(run: &StyleRun) -> bool {
+    run.marks.dots || run.ornament.is_some_and(Ornament::rides_beside_the_line)
 }
 
 /// How thick a drawn rule is, at the size the writer set (要件 7.3.2).
@@ -2446,16 +2841,33 @@ fn draw_tile(
         // so the ink sits on top of nothing it has to fight.
         if task.runs.iter().any(run_draws_ink) {
             let format = graphics.text_format(typography, mode)?;
+            let upright = graphics.upright_format(typography)?;
             draw_marker_ink(
                 &target,
                 &brush,
                 &format,
+                &upright,
                 &layout,
                 &task.runs,
                 &task.text,
                 origin,
                 mode,
                 typography.indent_step(),
+            )?;
+        }
+        // 要件 7.8: ルビと傍点は行の脇の帯に出る。**本文の上に描く**ので、
+        // 親文字と点の重なりは起きない——帯そのものが行の外側にある。
+        if task.runs.iter().any(run_rides_beside) {
+            let ruby = graphics.ruby_format(typography, mode)?;
+            let thickness = ruby_size(typography);
+            let towards = ruby_offset(typography);
+            draw_ruby(
+                &target, &brush, &ruby, &layout, &task.runs, &task.text, origin, mode, thickness,
+                towards,
+            )?;
+            draw_emphasis_dots(
+                &target, &brush, &ruby, &layout, &task.runs, &task.text, origin, mode, thickness,
+                towards,
             )?;
         }
     }
@@ -2887,6 +3299,12 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // them is not the page without them — in the tiles as well as in the
     // measurements. **The trap the colours fell into** is two lines above.
     typography.line_numbers.hash(hasher);
+    // 要件 7.8（2026-09-09）: ルビの大きさと位置。**色と同じ側にいる**
+    // ——ルビは幅0の箱の脇に描かれるので、この2つが動いても幾何は1画素も
+    // 動かず、**古くなるのはタイルだけ**である。混ぜていないと、絵置き場の
+    // 古い絵がそのまま出る（6.18の罠）。
+    typography.ruby_scale.to_bits().hash(hasher);
+    typography.ruby_offset.to_bits().hash(hasher);
 }
 
 /// The colours a tile is drawn in (要件 9).
@@ -3298,7 +3716,7 @@ impl TextEngine {
                 let block_text = &text[span.byte_start..span.byte_end];
                 let block_styled = block_styling(styled, span, &block_lines[index]);
 
-                let runs = style_runs(block_styled);
+                let runs = style_runs(block_styled, mode.stands_digits_upright());
                 let keep_trailing_empty_line = index == last_index;
                 let block_box = block_boxes[index];
                 // 要件 7.3.2: **a table is measured like every other block, and
@@ -3733,7 +4151,7 @@ impl TextEngine {
     fn block_marks(&self, block_index: usize) -> BlockMarks {
         let styled = self.block_styled(block_index);
         BlockMarks {
-            runs: style_runs(styled),
+            runs: style_runs(styled, self.mode.stands_digits_upright()),
             lines: line_runs(styled),
         }
     }
@@ -4092,7 +4510,10 @@ impl TextEngine {
             // above — so a signature that carries them says nothing the rest of
             // it does not. Measuring cells here would cost a DirectWrite call
             // per tile per frame to learn what is already known (技術検証 7.7).
-            let runs = style_runs(self.block_styled(tile.block_index));
+            let runs = style_runs(
+                self.block_styled(tile.block_index),
+                self.mode.stands_digits_upright(),
+            );
             hash_style_runs(&runs, &self.typography, &mut hasher);
             // 要件 7.3.2: and the marks that belong to whole lines. **Nothing
             // in the block's own text says a line is one** — three hyphens
@@ -4861,7 +5282,7 @@ fn wrap_offsets_in(
             .dwrite
             .CreateTextLayout(&utf16, format, max_width, max_height)?
     };
-    let runs = style_runs(styled);
+    let runs = style_runs(styled, page.mode.stands_digits_upright());
     apply_typography(&layout, typography, &runs, utf16.len() as u32)?;
     apply_marker_boxes(&layout, typography, &runs)?;
     Ok(wrap_byte_offsets(text, &line_metrics(&layout)?))
@@ -5761,6 +6182,207 @@ mod tests {
         }
     }
 
+    /// 要件 7.8: **ルビが画素に届いていて、幾何は動いていない。**
+    ///
+    /// 2つを一度に押さえている。読みは本文に居残って幅0の箱で隠れているので、
+    /// **文字が増えても文書は伸びない**——伸びたなら箱が room を取っている。
+    /// そして墨が増えているなら、読みは行の脇に組まれている。
+    ///
+    /// **画素でしか言えないこと**である：組版が読みを知っていることと、それが
+    /// 描かれることは別（表の罫と行番号で二度やった）。
+    #[test]
+    fn ruby_reaches_the_pixels_without_moving_the_page() {
+        let measured = |source: &str, mode: WritingMode| -> (u32, u32) {
+            let (preview, styles) = preview_of(source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let mut engine = engine_set(mode, styled, &plain());
+            let flow = engine.total_flow_size();
+            let tiles = engine.visible_tiles(0.0, flow as f32, 0, 0.0, LINE_EXTENT as f32);
+            let mut drawn = DrawnTiles::default();
+            engine
+                .render_tiles(&tiles, None, &mut drawn)
+                .expect("tiles");
+            let mut ink = 0;
+            for (_, width, _, bgra) in &drawn.tiles {
+                for row in bgra.chunks_exact(*width as usize * 4) {
+                    for pixel in row.chunks_exact(4) {
+                        if pixel[2] < 200 {
+                            ink += 1;
+                        }
+                    }
+                }
+            }
+            (flow, ink)
+        };
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            let (bare_flow, bare_ink) = measured("彼は漢字を見た\n", mode);
+            let (ruby_flow, ruby_ink) = measured("彼は｜漢字《かんじ》を見た\n", mode);
+
+            assert_eq!(
+                bare_flow, ruby_flow,
+                "読みは room を取らない（幅0の箱）: {mode:?}"
+            );
+            assert!(
+                ruby_ink > bare_ink + 20,
+                "読みの4字が脇に立っているはず: {mode:?} {bare_ink} -> {ruby_ink}"
+            );
+        }
+    }
+
+    /// 要件 7.8: **縦中横が画素に届いていて、2桁が1マスに収まっている。**
+    ///
+    /// 縦書きの列の中で、`20`の墨が広がっている幅（列の軸＝流れ軸）を見る。
+    /// 寝ていれば2文字ぶんの深さに伸び、正立して並んでいれば1マスに収まる
+    /// ——**それは列の幅を越えない**、というのがこの機能の全部である。
+    #[test]
+    fn two_digits_stand_upright_inside_one_cell() {
+        let ink_span = |source: &str| -> (u32, u32) {
+            let (preview, styles) = preview_of(source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let mut engine = engine_set(WritingMode::Vertical, styled, &plain());
+            let tiles = engine.visible_tiles(
+                0.0,
+                engine.total_flow_size() as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
+            let mut drawn = DrawnTiles::default();
+            engine
+                .render_tiles(&tiles, None, &mut drawn)
+                .expect("tiles");
+            // 行の軸（縦書きなら画面のy）に沿って、墨のある範囲の長さ。
+            let mut lowest = u32::MAX;
+            let mut highest = 0;
+            let mut ink = 0;
+            for (_, width, _, bgra) in &drawn.tiles {
+                for (y, row) in bgra.chunks_exact(*width as usize * 4).enumerate() {
+                    for pixel in row.chunks_exact(4) {
+                        if pixel[2] < 200 {
+                            lowest = lowest.min(y as u32);
+                            highest = highest.max(y as u32);
+                            ink += 1;
+                        }
+                    }
+                }
+            }
+            (highest.saturating_sub(lowest) + 1, ink)
+        };
+        let (one_character, _) = ink_span("あ\n");
+        let (two_digits, digit_ink) = ink_span("20\n");
+        let (three_digits, _) = ink_span("202\n");
+
+        assert!(digit_ink > 0, "数字が描かれている");
+        // 1文字ぶんの深さに収まっている。**同じ字の高さと比べる**ので、
+        // 書体や大きさが変わっても意味の変わらない比較になる。
+        assert!(
+            two_digits <= one_character + 4,
+            "2桁が1マスに収まっているはず: 仮名 {one_character} に対し数字 {two_digits}"
+        );
+        // **3桁は縦に並ぶ**（要件 7.8）ので、深さは桁の数だけ要る。
+        // この一行が上の比較を意味のあるものにしている——どちらも1マスに
+        // 見えるなら、測っているのは組み方ではない。
+        assert!(
+            three_digits > two_digits * 2,
+            "3桁は3マスに並ぶはず: 2桁 {two_digits} に対し3桁 {three_digits}"
+        );
+    }
+
+    /// 要件 7.8・要件 9: **ルビの大きさの設定が画素に届いている。**
+    ///
+    /// 幾何を1画素も動かさない設定なので、署名に混ぜ忘れると**絵置き場の古い絵が
+    /// そのまま出る**——6.18の罠で、色・単語セット・端末の色で 三度踏んでいる。
+    /// ここは同じ絵置き場から2度取り出して、違う絵が来ることを見る。
+    #[test]
+    fn the_ruby_size_setting_reaches_the_pixels() {
+        let ink_at = |percent: f32| -> u32 {
+            let spec = Typography {
+                ruby_scale: percent,
+                ..Typography::new(22.0)
+            };
+            let (preview, styles) = preview_of("｜漢字《かんじ》\n");
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let mut engine = engine_set(WritingMode::Vertical, styled, &spec);
+            let tiles = engine.visible_tiles(
+                0.0,
+                engine.total_flow_size() as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
+            let mut drawn = DrawnTiles::default();
+            engine
+                .render_tiles(&tiles, None, &mut drawn)
+                .expect("tiles");
+            let mut ink = 0;
+            for (_, width, _, bgra) in &drawn.tiles {
+                for row in bgra.chunks_exact(*width as usize * 4) {
+                    for pixel in row.chunks_exact(4) {
+                        if pixel[2] < 200 {
+                            ink += 1;
+                        }
+                    }
+                }
+            }
+            ink
+        };
+        let small = ink_at(0.3);
+        let large = ink_at(0.8);
+
+        assert!(
+            large > small,
+            "大きいルビは墨も多い: {small} -> {large}（署名に混ざっていない？）"
+        );
+    }
+
+    /// 要件 7.8: 傍点も同じ帯に、同じように届く（書き手の決定、2026-09-09）。
+    /// **綴りが2つあっても点は1種類**——どちらの記法から来ても同じ墨になる。
+    #[test]
+    fn emphasis_dots_reach_the_pixels_from_either_spelling() {
+        let ink_of = |source: &str| -> u32 {
+            let (preview, styles) = preview_of(source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let mut engine = engine_set(WritingMode::Vertical, styled, &plain());
+            let tiles = engine.visible_tiles(
+                0.0,
+                engine.total_flow_size() as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
+            let mut drawn = DrawnTiles::default();
+            engine
+                .render_tiles(&tiles, None, &mut drawn)
+                .expect("tiles");
+            let mut ink = 0;
+            for (_, width, _, bgra) in &drawn.tiles {
+                for row in bgra.chunks_exact(*width as usize * 4) {
+                    for pixel in row.chunks_exact(4) {
+                        if pixel[2] < 200 {
+                            ink += 1;
+                        }
+                    }
+                }
+            }
+            ink
+        };
+        let bare = ink_of("彼は本当に来た\n");
+        let kakuyomu = ink_of("彼は《《本当に》》来た\n");
+        let aozora = ink_of("彼は本当に来た［＃「本当に」に傍点］\n");
+
+        assert!(kakuyomu > bare, "カクヨム式の点: {bare} -> {kakuyomu}");
+        assert!(aozora > bare, "青空文庫式の点: {bare} -> {aozora}");
+        // 同じ3字に同じ点を打つので、墨の量はほぼ同じになる。
+        assert!(
+            kakuyomu.abs_diff(aozora) <= kakuyomu / 8,
+            "綴りが違っても同じ点: {kakuyomu} vs {aozora}"
+        );
+    }
+
     /// 要件 7.3.2: **and those rules are drawn.** The same trap the rule under
     /// the header fell into — a mark that the layout knows about and the ink
     /// pass has never heard of — and the same answer: only the pixels say it.
@@ -6461,7 +7083,7 @@ mod tests {
         let utf16 = text.encode_utf16().collect::<Vec<u16>>();
         // The whole document set exactly as its blocks were: same spec, same
         // ranges, only measured in one piece.
-        let runs = style_runs(styled);
+        let runs = style_runs(styled, mode.stands_digits_upright());
         let whole = with_graphics(|graphics| {
             let format = graphics.text_format(typography, mode)?;
             // SAFETY: The UTF-16 buffer outlives CreateTextLayout.
@@ -6471,6 +7093,11 @@ mod tests {
                     .CreateTextLayout(&utf16, &format, max_width, max_height)?
             };
             apply_typography(&layout, typography, &runs, utf16.len() as u32)?;
+            // **箱も張る**（要件 7.8、2026-09-09）。「ブロックのときとまったく
+            // 同じに組む」がこの比較の前提で、室を取る箱（`---`やフェンス、
+            // 縦中横の1マス）はブロック側では張られていた——縦中横が入るまで、
+            // 標本の文に室を取る箱が1つも無かったので気づけていなかった。
+            apply_marker_boxes(&layout, typography, &runs)?;
             // The whole document is its own last block, so it keeps the
             // trailing empty line the split blocks give up.
             measure_block(&layout, bound, true, mode)
@@ -6870,6 +7497,7 @@ mod tests {
                 bold: true,
                 ..Marks::default()
             },
+            ornament: None,
         };
 
         // The same table says the same thing throughout.
@@ -6935,11 +7563,18 @@ mod tests {
     /// covers stands where an indent will be, and the indent is the block's —
     /// a box that also took a step would set the line in twice, and only on the
     /// first line it wrapped to.
+    /// 要件 7.8 で3つ目の答えが増えた：縦中横の箱は1文字ぶんを取る。
     #[test]
     fn only_a_whole_line_box_keeps_the_room_it_covered() {
-        assert!(Ornament::Hidden.keeps_room());
-        assert!(!Ornament::Indent.keeps_room());
-        assert!(!Ornament::Bullet.keeps_room());
+        let step = 40.0;
+        let character = 22.0;
+        let advance = |ornament: Ornament| ornament.box_advance(step, character);
+
+        assert_eq!(advance(Ornament::Hidden), step);
+        assert_eq!(advance(Ornament::Upright), character);
+        assert_eq!(advance(Ornament::Indent), 0.0);
+        assert_eq!(advance(Ornament::Bullet), 0.0);
+        assert_eq!(advance(Ornament::Ruby { base_utf16: 2 }), 0.0);
     }
 
     /// Measure these on the laying-out threads.
@@ -6961,7 +7596,7 @@ mod tests {
                 let text = format!("ブロック{index}の本文。長さはどれも同じである。\n");
                 MeasureTask {
                     index,
-                    runs: style_runs(StyledText::plain(&text)),
+                    runs: style_runs(StyledText::plain(&text), false),
                     text,
                     typography: typography.clone(),
                     mode: WritingMode::Horizontal,

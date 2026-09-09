@@ -13,12 +13,12 @@
 //! leaves open — what happens when several threads lay text out at once — does
 //! not arise here. It moves file writing off the UI thread and nothing else.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::file_io;
 
@@ -45,6 +45,15 @@ pub struct WriteResult {
     pub ms: f64,
     /// Whether this job was a delete rather than a write.
     pub removed: bool,
+    /// **Nothing was done to the file**: a newer job for the same path arrived
+    /// before this one ran, and every job holds the whole document, so the
+    /// older one was already out of date (追加要件 2026-09-09).
+    ///
+    /// Reported rather than dropped because the editor now **counts what it
+    /// handed over against what came back** ([`FileWriter::settle`]): a job
+    /// that answered nothing would leave that count owed for ever, and the
+    /// wait before closing would sit out its whole timeout every time.
+    pub superseded: bool,
     /// `None` when it was done.
     pub error: Option<String>,
 }
@@ -60,6 +69,11 @@ pub struct FileWriter {
     jobs: RefCell<Option<Sender<WriteJob>>>,
     worker: RefCell<Option<JoinHandle<()>>>,
     results: Receiver<WriteResult>,
+    /// How many jobs have been handed over, and how many answers have been
+    /// taken back. The difference is **what the disk still owes**, which is
+    /// what [`FileWriter::settle`] waits out.
+    handed_over: Cell<usize>,
+    answered: Cell<usize>,
 }
 
 impl FileWriter {
@@ -81,6 +95,8 @@ impl FileWriter {
             jobs: RefCell::new(jobs),
             worker: RefCell::new(worker),
             results: result_receiver,
+            handed_over: Cell::new(0),
+            answered: Cell::new(0),
         }
     }
 
@@ -104,7 +120,11 @@ impl FileWriter {
         let Some(jobs) = jobs.as_ref() else {
             return false;
         };
-        jobs.send(job).is_ok()
+        if jobs.send(job).is_err() {
+            return false;
+        }
+        self.handed_over.set(self.handed_over.get() + 1);
+        true
     }
 
     /// Everything finished since this was last asked.
@@ -112,6 +132,39 @@ impl FileWriter {
         let mut done = Vec::new();
         while let Ok(result) = self.results.try_recv() {
             done.push(result);
+        }
+        self.answered.set(self.answered.get() + done.len());
+        done
+    }
+
+    /// Wait until everything handed over has been answered, or the time is up
+    /// (追加要件 2026-09-09).
+    ///
+    /// **[`FileWriter::finish`]の、閉じない版である。**終了の直前に「最後の
+    /// 退避は書けたのか」を訊くには、答えを窓が開いているうちに受け取らな
+    /// ければならない——`finish`は送り口を落とすので、そのあと書き直すことが
+    /// できない。こちらは行列をそのまま残すので、失敗を見て**もう一度頼める**。
+    ///
+    /// **上限を切ってあるのは、閉じられない窓を作らないため。**時間切れは
+    /// 失敗ではない（まだ書いている最中かもしれない）ので、呼び出し側は
+    /// 「失敗したものは無い」として先へ進み、残りは`finish`が待ち切る。
+    pub fn settle(&self, longest: Duration) -> Vec<WriteResult> {
+        let mut done = self.drain();
+        let until = Instant::now() + longest;
+        while self.handed_over.get() > self.answered.get() {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.results.recv_timeout(left) {
+                Ok(result) => {
+                    self.answered.set(self.answered.get() + 1);
+                    done.push(result);
+                }
+                // A disconnected channel means the thread is gone, and nothing
+                // else is coming: waiting longer would only spend the timeout.
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+            }
         }
         done
     }
@@ -146,7 +199,32 @@ fn run(jobs: &Receiver<WriteJob>, results: &Sender<WriteResult>) {
         loop {
             match jobs.try_recv() {
                 Ok(next) => {
-                    pending.retain(|held| held.path != next.path);
+                    // **The one it replaces is still answered for**
+                    // (追加要件 2026-09-09). The editor counts answers against
+                    // jobs to know when the disk has caught up, and a job that
+                    // quietly vanished here would leave that count owed for the
+                    // rest of the run.
+                    let mut replaced = Vec::new();
+                    pending.retain(|held| {
+                        if held.path == next.path {
+                            replaced.push(held.path.clone());
+                            return false;
+                        }
+                        true
+                    });
+                    for path in replaced {
+                        let result = WriteResult {
+                            path,
+                            bytes: 0,
+                            ms: 0.0,
+                            removed: false,
+                            superseded: true,
+                            error: None,
+                        };
+                        if results.send(result).is_err() {
+                            return;
+                        }
+                    }
                     pending.push(next);
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
@@ -177,6 +255,7 @@ fn run(jobs: &Receiver<WriteJob>, results: &Sender<WriteResult>) {
                 bytes,
                 ms: started.elapsed().as_secs_f64() * 1000.0,
                 removed: job.bytes.is_none(),
+                superseded: false,
                 error: outcome.err().map(|error| error.to_string()),
             };
             // A closed receiver means the editor is gone. Nothing to report to.
@@ -273,6 +352,53 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].error.is_none(), "{:?}", results[0].error);
         assert!(results[0].removed);
+    }
+
+    /// 追加要件 2026-09-09（残り2）: **閉じる前に、書けたかどうかを訊ける。**
+    /// `finish`と違って送り口を落とさないので、失敗を見てからもう一度頼める
+    /// ——それが「再試行」を成り立たせている唯一の性質である。
+    #[test]
+    fn waiting_for_the_queue_leaves_it_open_for_another_write() {
+        let directory = scratch_directory("settle");
+        let path = directory.join("note.rfnwork");
+        let writer = FileWriter::start();
+        assert!(writer.write(path.clone(), b"one".to_vec()));
+        let settled = writer.settle(Duration::from_secs(3));
+
+        assert_eq!(settled.len(), 1, "待った先で答えが返る");
+        assert!(settled[0].error.is_none(), "{:?}", settled[0].error);
+        // **行列はまだ生きている。**
+        assert!(writer.write(path.clone(), b"two".to_vec()));
+        let again = writer.settle(Duration::from_secs(3));
+        assert_eq!(again.len(), 1);
+        assert_eq!(fs::read(&path).expect("reads"), b"two");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// **置き換えられた仕事も答えを返す。**返さなければ、渡した数と返った数が
+    /// 永久に食い違い、[`FileWriter::settle`]は毎回その上限を待ち切ることに
+    /// なる——閉じるたびに3秒黙る窓ができる。
+    #[test]
+    fn a_job_replaced_by_a_newer_one_still_answers() {
+        let directory = scratch_directory("superseded");
+        let path = directory.join("note.rfnwork");
+        let writer = FileWriter::start();
+        for round in 0..8 {
+            assert!(writer.write(path.clone(), vec![b'a' + round]));
+        }
+        let waited = Instant::now();
+        let settled = writer.settle(Duration::from_secs(3));
+
+        assert_eq!(settled.len(), 8, "渡した数だけ返る");
+        assert!(
+            waited.elapsed() < Duration::from_secs(2),
+            "上限を待ち切っていない"
+        );
+        assert!(settled.iter().any(|result| result.superseded));
+        assert!(settled.iter().all(|result| result.error.is_none()));
+        // 畳まれたぶんは**何もしていない**。最後に頼んだ中身が残っている。
+        assert_eq!(fs::read(&path).expect("reads"), b"h");
+        let _ = fs::remove_dir_all(&directory);
     }
 
     /// 2026-09-08: 終わる前に行列を空にする。**乗せただけでプロセスが終われば、

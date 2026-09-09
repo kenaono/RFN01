@@ -50,8 +50,9 @@ use open_document::{Change, OpenDocument, replace_source_range};
 use pane_layout::{Layout, Rect, Split, Towards, neighbour};
 use saving::{
     check_external_change, collect_write_results, discard_all_work_copies, discard_work_copy,
-    overwrite_the_outside_change, reload_from_file, restore_tabs, save_all, save_document,
-    work_identity, write_work_copy_if_due, write_work_copy_now, write_work_copy_of,
+    flush_work_copies, keep_work_copies_again, overwrite_the_outside_change, reload_from_file,
+    restore_tabs, save_all, save_document, work_identity, write_work_copy_if_due,
+    write_work_copy_now, write_work_copy_of,
 };
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use session::{open_session, restore_window_place, write_session};
@@ -353,6 +354,14 @@ const WORK_COPY_LONGEST: Duration = Duration::from_secs(5);
 /// How often the two rules are checked. Short enough that two seconds means
 /// two seconds, long enough to cost nothing while nothing is happening.
 const WORK_COPY_TICK: Duration = Duration::from_millis(500);
+/// How long closing waits for the last work copy to reach the disk before it
+/// stops asking (追加要件 2026-09-09、残り2).
+///
+/// **失敗を見るには、答えを窓が開いているうちに受け取らなければならない**
+/// ——書けなかったことに気づけるのはそこだけである。1件2.4〜5.9msの世界なので、
+/// 普段のここは一往復で終わる。**上限があるのは閉じられない窓を作らないため**で、
+/// 時間切れは失敗として扱わない（`FileWriter::finish`が残りを待ち切る）。
+const WORK_COPY_SETTLE: Duration = Duration::from_secs(3);
 
 /// How often the open file is checked for an outside change (要件 8.3).
 ///
@@ -2500,16 +2509,41 @@ fn main() -> Result<(), slint::PlatformError> {
     // 置いてあるものを全部持っていく**——「Offの場合は状態を維持しない」の
     // 「維持しない」は、これから書かないことではなく、いま在るものが残らない
     // ことである。
+    //
+    // 追加要件 2026-09-09: **入れ直した瞬間も、同じだけのことをする。**Offの
+    // あいだに書いた文字の旗は下りたままなので、Onへ戻しただけでは次の打鍵まで
+    // 一文字も退避されない——入れたはずのものが働いていない状態で、しかも
+    // 画面には何も出ない。
     let weak = window.as_weak();
     let autosave_live = live.clone();
     let autosave_cache = render_cache.clone();
     window.on_autosave_toggled(move |wanted| {
         if let Some(window) = weak.upgrade() {
             window.set_autosave(wanted);
-            if !wanted {
+            if wanted {
+                keep_work_copies_again(&autosave_live);
+            } else {
                 discard_all_work_copies(&autosave_live);
             }
             save_settings(&window, &autosave_cache);
+        }
+    });
+
+    // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。**数え直しは要らない**
+    // ——両方の数はもう出ている（`DocumentStats::ruby_characters`）ので、
+    // 変わるのは status bar の引き算だけである。
+    let weak = window.as_weak();
+    let ruby_live = live.clone();
+    let ruby_cache = render_cache.clone();
+    window.on_count_ruby_toggled(move |wanted| {
+        if let Some(window) = weak.upgrade() {
+            window.set_count_ruby(wanted);
+            // 切り替えたその場で数を書き直す——次の打鍵まで前の数が残っていたら、
+            // 設定が効いていないのと同じに見える。
+            let document = ruby_live.active(&window);
+            let source = document.text.borrow().clone();
+            update_status(&window, &document, &source, &[], None);
+            save_settings(&window, &ruby_cache);
         }
     });
 
@@ -2845,15 +2879,23 @@ fn main() -> Result<(), slint::PlatformError> {
             return CloseRequestResponse::HideWindow;
         };
         let live = &closing_live;
-        if window.get_autosave() {
-            return CloseRequestResponse::HideWindow;
-        }
         // **問いが立っているあいだは、もう一度は訊かない。**`×`を続けて
         // 押されても重ねられないのは、`pending`が1つしか持てないからで
         // （`Live::pending`）、ここで返さないと下の`ask_question`が
         // 立っているほうを黙って捨てる。
         if live.pending.borrow().is_some() {
             return CloseRequestResponse::KeepWindowShown;
+        }
+        // 追加要件 2026-09-09（残り2）: **最後の退避を、まだ訊けるうちに試す。**
+        // これまでは窓が閉じたあとに行列を待ち切っていたので、書けなかった
+        // ときには誰にも言えないまま終わっていた——打った直後に`×`を押した
+        // 数秒ぶんが、静かに消える。**成功すれば何も起きない**（普段はここで
+        // 一往復、数ミリ秒）。
+        if ask_about_the_last_work_copy(&window, live) {
+            return CloseRequestResponse::KeepWindowShown;
+        }
+        if window.get_autosave() {
+            return CloseRequestResponse::HideWindow;
         }
         let unsaved = open_documents(live)
             .iter()
@@ -3792,8 +3834,13 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
     // Only what the search found. A selection that is not the needle means the
     // writer has moved on, and replacing it would take out something they chose
     // themselves.
+    //
+    // 追加要件 2026-09-09: **訊くのは`find`である。**ここが`==`で訊いていた
+    // あいだ、`alpha`で見つけた`Alpha`は選ばれているのに置換されず、次の一致へ
+    // 飛んでいた——検索が畳む大小を、置換だけが畳んでいなかった。見つける道と
+    // 置き換える道で一致の意味が違えば、画面が言っていることと動作が違う。
     let on_a_match = selected
-        .filter(|(start, end)| source.get(*start..*end) == Some(needle.as_str()))
+        .filter(|(start, end)| find::is_match(&source, &needle, *start, *end))
         .is_some();
     if !on_a_match {
         find_in_pane(window, live, true);
@@ -5841,6 +5888,43 @@ enum Question {
     /// （2026-09-08、要件 8.1・8.4）。**退避が働いていれば訊かない**——
     /// そちらは閉じても失われないので、問いは書き手の邪魔でしかない。
     CloseWindow,
+    /// 終了の直前の退避が書けなかった（追加要件 2026-09-09、残り2）。
+    /// **退避が働いているつもりで閉じようとしている**ときにだけ立つ問いで、
+    /// 書けた件数が0のときは何も訊かない——要件 8.1 は静かな約束である。
+    LastWorkCopyFailed,
+}
+
+/// Write the last work copy and, if it could not be written, ask what to do
+/// about it (追加要件 2026-09-09、残り2).
+///
+/// **True when a question is now standing**, which is what tells the caller to
+/// keep the window open. False means there was nothing to report — either the
+/// copies landed, or the writer thread ran out of time and the join after
+/// `run()` will wait the rest out.
+///
+/// 要件 8.1 は「入力の2秒後に退避する」という約束で、その最後の1回だけは
+/// **窓が閉じたあと**に判定されていた。書けなかったときログに1行残るだけで、
+/// 書き手は最後の数秒を失ったことを知らない。ここで訊けば、3つの道がある
+/// ——もう一度試す、本文そのものをファイルへ入れる、閉じるのをやめる。
+fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
+    let lost = flush_work_copies(window, live);
+    if lost == 0 {
+        return false;
+    }
+    live.cache
+        .borrow_mut()
+        .log_diag("work", &format!("close blocked, unwritten={lost}"));
+    ask_question(
+        window,
+        live,
+        Question::LastWorkCopyFailed,
+        format!(
+            "最後の自動退避を{lost}件書けませんでした。\n\n             このまま閉じると、退避していない変更は戻せません。"
+        ),
+        &["もう一度試す", "文書を保存する…", "閉じない"],
+        -1,
+    );
+    true
 }
 
 /// Put a question in front of the writer.
@@ -5995,6 +6079,25 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         (Question::CloseWindow, 1) => {
             // 破棄して閉じる。**退避は切ってあるので、消すものは無い**——
             // 作業コピーはそもそも書かれていない。
+            window.hide().ok();
+        }
+        // 追加要件 2026-09-09（残り2）: 最後の退避が書けなかったときの3つ。
+        // **どれも勝手には閉じない**——閉じてよいと決められるのは、書けた
+        // ことを確かめたときだけである。
+        (Question::LastWorkCopyFailed, 0) => {
+            if !ask_about_the_last_work_copy(window, live) {
+                window.hide().ok();
+            }
+        }
+        (Question::LastWorkCopyFailed, 1) => {
+            save_all(window, live);
+            // 本文がファイルへ入ったなら、作業コピーが書けないことはもう
+            // 何も失わせない。**残っていれば閉じない**：「名前を付けて保存」を
+            // 取り消した文書がまだ編集中で、そこには失うものがある。
+            if open_documents(live).iter().any(|held| held.text.edited()) {
+                window.set_render_status("保存していない文書が残っています".into());
+                return;
+            }
             window.hide().ok();
         }
         (Question::SaveConflict, 0) => overwrite_the_outside_change(window, live),
@@ -6646,6 +6749,11 @@ fn typography_for(
     // travels with the spec that decides that margin.
     spec.line_numbers = number(Setting::LineNumbers) != 0;
     spec.character_spacing = percent(number(Setting::CharAdvance));
+    // 要件 7.8: ルビと傍点の大きさと位置。**組版の仕様と一緒に運ぶ**ので、
+    // タイルの署名（`hash_style_runs`が混ぜる`Typography`）にも自然に入る
+    // ——大きさだけ変えたときに古い絵が残る、が起きない。
+    spec.ruby_scale = percent(number(Setting::RubySize));
+    spec.ruby_offset = percent(number(Setting::RubyOffset));
     for (level, scale) in spec.heading_scale.iter_mut().enumerate() {
         *scale = percent(number(Setting::Heading(level)));
     }
@@ -6715,7 +6823,7 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// to 12 the two places that had written the absolute row instead were missed —
 /// the vertical pane then took its page margin from the line height. One
 /// definition, sent over.
-const SHEET_NUMBERS: usize = 7 + MAX_HEADING_LEVEL;
+const SHEET_NUMBERS: usize = 9 + MAX_HEADING_LEVEL;
 /// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
 /// two values are `2`, the pane's own width, and `0`, not wrapping at all —
 /// **which is written down and not yet built**: tiles are cut along the flow
@@ -6826,6 +6934,18 @@ enum Setting {
     /// line, which is the left edge of a horizontal page and the top of a
     /// vertical one. Upright either way.
     LineNumbers,
+    /// ルビと傍点の大きさ、親文字に対する百分率（要件 7.8・要件 9）。
+    ///
+    /// **シートごとに持つ**——要件 7.8 がそう言っている。縦書きと横書きでは
+    /// ルビの置き場所そのものが違うので、読める大きさも同じとは限らない。
+    RubySize,
+    /// ルビと傍点の位置——行の箱の中で、字へどれだけ寄せるか（要件 7.8）。
+    ///
+    /// **本文の大きさに対する百分率で、正が字へ近づく向き。**0は行の箱の端
+    /// （前の行がある側）で、そこが既定である。行間を詰めて使う人はここを
+    /// 負にして逃がせる——**大きさと位置のどちらで直すかは書き手のもの**で、
+    /// 編集器が決められることではない。
+    RubyOffset,
 }
 
 impl Setting {
@@ -6842,6 +6962,8 @@ impl Setting {
             10 => Some(Self::WrapMode),
             11 => Some(Self::WrapChars),
             12 => Some(Self::LineNumbers),
+            13 => Some(Self::RubySize),
+            14 => Some(Self::RubyOffset),
             _ => None,
         }
     }
@@ -6856,6 +6978,8 @@ impl Setting {
             Self::WrapMode => 4 + MAX_HEADING_LEVEL,
             Self::WrapChars => 5 + MAX_HEADING_LEVEL,
             Self::LineNumbers => 6 + MAX_HEADING_LEVEL,
+            Self::RubySize => 7 + MAX_HEADING_LEVEL,
+            Self::RubyOffset => 8 + MAX_HEADING_LEVEL,
         }
     }
 
@@ -6866,6 +6990,8 @@ impl Setting {
             Self::WrapMode => 1,
             Self::LineNumbers => 1,
             Self::WrapChars => 2,
+            Self::RubySize => 2,
+            Self::RubyOffset => 2,
             Self::PageMargin => 4,
             Self::CharAdvance => 5,
             Self::Heading(_) => 5,
@@ -6885,6 +7011,9 @@ impl Setting {
             Self::WrapMode => (0, 2),
             Self::LineNumbers => (0, 1),
             Self::WrapChars => (10, 200),
+            // 親文字より大きいルビは、ルビではなく別の本文である。
+            Self::RubySize => (20, 100),
+            Self::RubyOffset => (-50, 50),
             Self::Heading(_) => (50, 400),
         }
     }
@@ -6904,6 +7033,10 @@ impl Setting {
             // Off: a page of prose is not a program, and the writer asks for
             // the numbers when they want them.
             Self::LineNumbers => 0,
+            // 半分が日本語の組版の当たり前である。
+            Self::RubySize => 50,
+            // 行の箱の端。行間の空きがそのままルビの帯になる。
+            Self::RubyOffset => 0,
             Self::Heading(level) => HEADING_DEFAULTS.get(level).copied().unwrap_or(100),
         }
     }
@@ -6937,6 +7070,8 @@ impl Setting {
             Self::WrapMode => "wrap-mode",
             Self::LineNumbers => "line-numbers",
             Self::WrapChars => "wrap-chars",
+            Self::RubySize => "ruby-size",
+            Self::RubyOffset => "ruby-offset",
             Self::Heading(0) => "h1",
             Self::Heading(1) => "h2",
             Self::Heading(2) => "h3",
@@ -7058,6 +7193,12 @@ const DEFAULT_SHELL_SETTING: &str = "terminal.default";
 /// has: 要件 8.1 is the promise the editor makes about unsaved work, and a
 /// writer who has not said anything has not asked to give it up.
 const AUTOSAVE_SETTING: &str = "work.autosave";
+/// 本文文字数がルビの読みを数えるか（要件 7.8・要件 10、2026-09-09）。
+///
+/// **紙の設定（要件 9）のシートには置かない。**シートが持つのは組み方であり、
+/// これは数え方である——縦書きの原稿と横書きの原稿で、投稿サイトへ出す字数の
+/// 決まりが変わるわけではない。
+const COUNT_RUBY_SETTING: &str = "count.ruby";
 
 /// 追加要件 2026-09-08: the shell list, one entry per numbered name
 /// (`terminal.shell.0`, `terminal.shell.1`, …).
@@ -7819,6 +7960,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_autosave()).to_string(),
     ));
     values.push((
+        COUNT_RUBY_SETTING.to_owned(),
+        i32::from(window.get_count_ruby()).to_string(),
+    ));
+    values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
         hex_colour(window.get_terminal_paper()),
     ));
@@ -7906,6 +8051,12 @@ fn apply_settings(
         // 無い値なので、約束しているほう（要件 8.1 を守る側）へ倒す。
         if written == AUTOSAVE_SETTING {
             window.set_autosave(value.trim() != "0");
+            continue;
+        }
+        // 要件 7.8: **`1`だけがOn。**初期値は数えないほうなので、読めない値は
+        // そちらへ倒す。
+        if written == COUNT_RUBY_SETTING {
+            window.set_count_ruby(value.trim() == "1");
             continue;
         }
         // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
@@ -11252,7 +11403,16 @@ fn update_status(
         None => String::new(),
     };
     let lines = format!("{} lines", thousands(stats.logical_lines));
-    let body = format!("{} chars", thousands(stats.body_characters));
+    // 要件 7.8・要件 10: **ルビは既定では数えない。**投稿サイトへ出すための
+    // 字数はルビを含まないので、そちらを初期値にしてある。両方を数えてある
+    // （`DocumentStats::ruby_characters`）ので、設定を切り替えても数え直しは
+    // 起きない。
+    let counted = if window.get_count_ruby() {
+        stats.body_characters
+    } else {
+        stats.body_characters.saturating_sub(stats.ruby_characters)
+    };
+    let body = format!("{} chars", thousands(counted));
     let source = format!("{} source", thousands(stats.source_characters));
     let selected = format!("{} selected", thousands(selected_characters));
     window.set_count_lines(lines.into());
