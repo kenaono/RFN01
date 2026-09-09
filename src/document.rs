@@ -878,8 +878,9 @@ pub enum Continuation {
     /// 中身の無い項目でEnter——**行頭から`upto`までを`keep`に置き換える**。
     ///
     /// **改行は入らない。**書き手が終えたいのは箇条書きであって、行ではない。
-    /// 残すのは字下げだけ（書き手の選択 2026-09-10）：入れ子の項目の下で、
-    /// その位置に段落を書き続けられる。
+    /// 残すのは**項目の本文が始まっていた列まで**の空白（書き手の選択 2026-09-10）
+    /// ——字下げに、印の幅ぶんの空白を足したもの。その項目に属する段落として
+    /// 書き続けられる位置であり、Markdownとしてもそう読まれる。
     Clear { upto: usize, keep: String },
 }
 
@@ -907,10 +908,17 @@ pub fn enter_continuation(line: &str, style: LineStyle, at: usize) -> Continuati
     // 終える」）。印を持たない行はここへ来ない——字下げだけの行でEnterが何も
     // しないと、効かない鍵に見える。
     if line[head..].trim().is_empty() && (marker > 0 || quote > 0) {
-        return Continuation::Clear {
-            upto: head,
-            keep: kept.to_owned(),
-        };
+        // **印の幅は空白で埋める**（書き手の選択 2026-09-10）。印は消えるが、
+        // 書き始める場所は動かない——その項目の本文が始まっていた列である。
+        // **引用の`>`は埋めない**：引用に「本文の列」は無く、終えた書き手が
+        // 戻るのは本文そのものである。印は`marker_len`が数えたASCIIなので、
+        // バイトの数がそのまま桁の数になる。
+        let mut keep = String::with_capacity(kept.len() + marker);
+        keep.push_str(kept);
+        for _ in 0..marker {
+            keep.push(' ');
+        }
+        return Continuation::Clear { upto: head, keep };
     }
     let mut next = String::from("\n");
     next.push_str(&line[..quote]);
@@ -2699,6 +2707,37 @@ mod tests {
         );
     }
 
+    /// E3の③: **入れ子の項目でも、字下げは行の見方ごと正しく残る**（書き手の報告
+    /// 2026-09-10：「字下げは残っていないように見えます」——診断ログでは、試された
+    /// 行が`- `／`1. `／`> `で、**そもそも字下げを持っていなかった**）。
+    ///
+    /// 1行だけを見る`continued`と違い、こちらは文書の中の行——`line_styles`は
+    /// 入れ子の深さを前の行から決めるので、そこも通して確かめる。
+    #[test]
+    fn a_nested_item_keeps_the_indent_it_was_written_at() {
+        let source = "- 一つめ\n  - ";
+        let styles = line_styles(source);
+        let line = "  - ";
+
+        assert_eq!(styles[1].kind, LineKind::Bullet);
+        // 字下げ2つ＋印の幅2つ＝本文が始まっていた列。
+        assert_eq!(
+            enter_continuation(line, styles[1], line.len()),
+            Continuation::Clear {
+                upto: 4,
+                keep: "    ".to_owned()
+            }
+        );
+        // 行頭の項目でも、本文の列は印の幅のぶん右にある。
+        assert_eq!(
+            enter_continuation("- ", styles[0], 2),
+            Continuation::Clear {
+                upto: 2,
+                keep: "  ".to_owned()
+            }
+        );
+    }
+
     /// E3の③: **中身の無い項目でEnterは、印だけ消す**（書き手の選択 2026-09-10）。
     /// 字下げは残り、改行は入らない。
     #[test]
@@ -2707,17 +2746,25 @@ mod tests {
             continued("- ", 2),
             Continuation::Clear {
                 upto: 2,
-                keep: String::new()
+                keep: "  ".to_owned()
             }
         );
         assert_eq!(
             continued("  - ", 4),
             Continuation::Clear {
                 upto: 4,
-                keep: "  ".to_owned()
+                keep: "    ".to_owned()
             }
         );
-        // 引用の印も印である。
+        // 番号は幅が広いぶん、本文の列も右にある。
+        assert_eq!(
+            continued("10. ", 4),
+            Continuation::Clear {
+                upto: 4,
+                keep: "    ".to_owned()
+            }
+        );
+        // 引用の印も印である。**こちらは埋めない**——引用に「本文の列」は無い。
         assert_eq!(
             continued("> ", 2),
             Continuation::Clear {
