@@ -2361,11 +2361,24 @@ fn main() -> Result<(), slint::PlatformError> {
     // **返したときはペインの向きへ戻す**：どこへ戻るかを知っているのはRustで、
     // 欄はそれを知らない。
     let weak = window.as_weak();
+    let cache = render_cache.clone();
     window.global::<Ime>().on_field_focus(move |taken| {
         if let Some(window) = weak.upgrade() {
             let vertical = !taken && focused_pane(&window).vertical(&window);
             ime::set_vertical(&window, vertical);
+            let told = format!("field taken={taken} vertical={vertical}");
+            cache.borrow_mut().log_diag("ime", &told);
         }
+    });
+
+    // 書き手の報告 2026-09-09:「検索バーを出してIMEを起動すると、IMEが入力
+    // ボックスと重なる」。**直ったかどうかを画面の外から確かめられるように
+    // しておく**（技術検証 6.31）。欄が「配置が済んだあとに位置を送り直した」
+    // ことがここに残る——出ていなければ時計が動いていない、出ているのに重なる
+    // なら送った座標のほうが違う、と切り分けられる。
+    let cache = render_cache.clone();
+    window.global::<Ime>().on_settled(move || {
+        cache.borrow_mut().log_diag("ime", "settle");
     });
 
     let weak = window.as_weak();
@@ -2542,7 +2555,14 @@ fn main() -> Result<(), slint::PlatformError> {
             // 設定が効いていないのと同じに見える。
             let document = ruby_live.active(&window);
             let source = document.text.borrow().clone();
-            update_status(&window, &document, &source, &[], None);
+            update_status(
+                &window,
+                focused_pane(&window),
+                &document,
+                &source,
+                &[],
+                None,
+            );
             save_settings(&window, &ruby_cache);
         }
     });
@@ -3753,6 +3773,24 @@ fn publish_boundaries(window: &AppWindow, drawn: Vec<PaneBoundary>) {
     window.set_boundaries(ModelRc::new(VecModel::from(drawn)));
 }
 
+/// 検索と置換が働くペイン（要件 7.7、E1）。
+///
+/// **帯は自分が探す本文の中にある。**開いているあいだはそのペインが答えで、
+/// 欄に打っている書き手が見ているのもそこの本文である。閉じていればキーボードの
+/// あるペイン——F3は本文から来る。
+///
+/// 以前はどちらも`focused_pane`だった。帯を出したまま隣のペインの本文を触り、
+/// 欄へ戻って打つと、**見ている帯とは別の文書を数えていた。**
+fn find_target(window: &AppWindow) -> PaneId {
+    if window.get_find_open() {
+        let bar = PaneId::from_index(window.get_find_pane());
+        if bar.is_shown(window) {
+            return bar;
+        }
+    }
+    focused_pane(window)
+}
+
 /// Find the next match and put the selection on it (要件 7.7).
 ///
 /// **The search runs in the pane the writer is in**, over the document that
@@ -3761,8 +3799,8 @@ fn publish_boundaries(window: &AppWindow, drawn: Vec<PaneBoundary>) {
 /// to work with — and it costs nothing, because a selection is what this editor
 /// already knows how to show.
 fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
-    let id = focused_pane(window);
-    let needle = window.get_find_needle().to_string();
+    let id = find_target(window);
+    let needle = id.screen(window).find_needle.to_string();
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
@@ -3777,18 +3815,111 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
             .map(|(start, _)| start)
             .unwrap_or(caret)
     };
+    let step = if forwards { "next" } else { "previous" };
     let Some((start, end)) = find::next_match(&source, &needle, from, forwards) else {
-        let found = if needle.is_empty() {
-            String::new()
-        } else {
-            format!("「{needle}」は見つかりません")
-        };
-        window.set_find_status(found.into());
+        // **見つからなかったことも、画面に出す。**帯は閉じていることがあり、
+        // そのときF3の答えは選択が動くことだけなので、動かなかった回は画面の
+        // どこにも現れない（要件 7.7 の「効かない」報告は、たいてい「効いたのが
+        // 見えない」である）。ステータスバーは帯より長生きするので、そちらが言う。
+        let selected = selection_source_range(&state.borrow());
+        tell_find(window, id, &source, selected);
+        let told = format!(
+            "step pane={} {step} needle={} nothing",
+            id.log_name(),
+            needle.chars().count(),
+        );
+        live.cache.borrow_mut().log_diag("find", &told);
         return;
     };
-    let total = find::count(&source, &needle);
-    window.set_find_status(format!("{total}件").into());
+    let (total, which) = find::tally(&source, &needle, Some(start));
+    let place = which.map_or_else(|| "-".to_owned(), |which| which.to_string());
+    let told = format!(
+        "step pane={} {step} needle={} at={place}/{total}",
+        id.log_name(),
+        needle.chars().count(),
+    );
+    live.cache.borrow_mut().log_diag("find", &told);
+    // 帯もステータスバーも、この選択から数え直される（`update_status`）。
     show_source_range(window, live, id, &source, start, end);
+}
+
+/// 件数を数え直すだけで、どこへも動かない（E1）。
+///
+/// **打っているあいだ帯は数だけを言う。**検索欄で1字打つたびに本文の選択が
+/// 飛べば、書き手はまだ打ち終えていない語で連れ回される——IMEで変換の途中なら
+/// なおさらで、「IME入力中に本文へフォーカスを奪わない」（E1の完了の目安）は
+/// カーソルを動かさないことでもある。動かす鍵はEnterとF3のほうにある。
+fn count_in_pane(window: &AppWindow, live: &Live) {
+    let id = find_target(window);
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let selected = selection_source_range(&state.borrow());
+    tell_find(window, id, &source, selected);
+}
+
+/// 探している語と、その数を言う——帯の中と、ステータスバーに（E1）。
+///
+/// **2か所が同じ一巡から出る。**帯は閉じていることがあり、F3はそれでも効く。
+/// 答えが帯にしか無ければ、閉じているあいだの検索は画面のどこにも現れない
+/// ——**効いたのが見えないのは、効かないのと見分けがつかない**（2026-08-28 の
+/// `Ctrl+Tab`と同じ根）。
+///
+/// **打鍵のたびに数え直すので、古い数が残らない。**本文が変われば数も変わる
+/// ものなので、最後に探したときの数を貼り出しておくのは嘘になる。費用は本文を
+/// 1回なぞるぶんで、ここで既に数えている行数・文字数と同じ桁である。
+///
+/// `selected`はいま選ばれている範囲。それが一致であれば「何件目か」が言える
+/// ——一致でなければ数だけを言う。**立っていないことは0件目ではない。**
+fn tell_find(window: &AppWindow, id: PaneId, source: &str, selected: Option<(usize, usize)>) {
+    let needle = id.screen(window).find_needle.to_string();
+    if needle.is_empty() {
+        window.set_count_find(SharedString::new());
+        id.update_screen(window, |screen| {
+            screen.find_status = SharedString::new();
+        });
+        return;
+    }
+    let standing = selected
+        .filter(|(start, end)| find::is_match(source, &needle, *start, *end))
+        .map(|(start, _)| start);
+    let (total, which) = find::tally(source, &needle, standing);
+    let counted = found_status(total, which);
+    // 帯の中では語を繰り返さない——書き手が打った欄がすぐ隣にある。
+    // ステータスバーでは語を言う。帯が閉じていれば、何を探しているかは
+    // 画面のどこにも無いからである。
+    let line = if total == 0 {
+        format!("「{needle}」は見つかりません")
+    } else {
+        format!("「{needle}」{counted}")
+    };
+    window.set_count_find(line.into());
+    id.update_screen(window, |screen| {
+        screen.find_status = counted.into();
+    });
+}
+
+/// 帯に一言だけ言わせる——**起きたこと**を（要件 7.7）。
+///
+/// 数は`tell_find`が言う。ここを通るのは「12件置換しました」のように、数え直せば
+/// 消えてしまう出来事だけである。
+fn say_in_bar(window: &AppWindow, id: PaneId, told: String) {
+    id.update_screen(window, |screen| {
+        screen.find_status = told.into();
+    });
+}
+
+/// 何件あって、いま何件目か（E1）。
+///
+/// **`3 / 12`は「12件のうちの3件目」**で、一致の上に立っているときだけ言える。
+/// 立っていなければ数だけを言い、無ければ無いと言う——数が0のときに`0 / 0`と
+/// 出すのは、探し方の話を数の話に見せかけることである。
+fn found_status(total: usize, which: Option<usize>) -> String {
+    match (total, which) {
+        (0, _) => "見つかりません".to_owned(),
+        (total, Some(which)) => format!("{which} / {total}"),
+        (total, None) => format!("{total}件"),
+    }
 }
 
 /// Select a range of a pane's source and show it (要件 7.7).
@@ -3822,8 +3953,8 @@ fn show_source_range(
 /// reaches every pane showing the document, and is written to the work copy
 /// like anything else typed.
 fn replace_in_pane(window: &AppWindow, live: &Live) {
-    let id = focused_pane(window);
-    let needle = window.get_find_needle().to_string();
+    let id = find_target(window);
+    let needle = id.screen(window).find_needle.to_string();
     if needle.is_empty() {
         return;
     }
@@ -3846,7 +3977,7 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
         find_in_pane(window, live, true);
         return;
     }
-    let replacement = window.get_find_replacement().to_string();
+    let replacement = id.screen(window).find_replacement.to_string();
     insert_pane_text(
         window,
         id,
@@ -3865,17 +3996,18 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
 /// the writer asked for, and taking it back a match at a time would be a
 /// different operation from the one they did.
 fn replace_all_in_pane(window: &AppWindow, live: &Live) {
-    let id = focused_pane(window);
-    let needle = window.get_find_needle().to_string();
+    let id = find_target(window);
+    let screen = id.screen(window);
+    let needle = screen.find_needle.to_string();
     if needle.is_empty() {
         return;
     }
-    let replacement = window.get_find_replacement().to_string();
+    let replacement = screen.find_replacement.to_string();
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let (next, replaced) = find::replace_all(&source, &needle, &replacement);
     if replaced == 0 {
-        window.set_find_status(format!("「{needle}」は見つかりません").into());
+        say_in_bar(window, id, format!("「{needle}」は見つかりません"));
         return;
     }
     // 2026-09-08: **置換も上限の内側にいる。**打鍵も貼り付けも
@@ -3887,7 +4019,7 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
         let told = format!(
             "文書の上限{MAX_DOCUMENT_CHARACTERS}文字を超えるため、{replaced}件の置換を取り消しました"
         );
-        window.set_find_status(told.into());
+        say_in_bar(window, id, told);
         return;
     }
     let (at, removed, inserted) = find::changed_span(&source, &next);
@@ -3920,7 +4052,7 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
         caret,
         change,
     );
-    window.set_find_status(format!("{replaced}件置換しました").into());
+    say_in_bar(window, id, format!("{replaced}件置換しました"));
 }
 
 /// Bring another pane along after an edit (要件 7.6).
@@ -3944,7 +4076,7 @@ fn draw_followed_edit(
     if !id.is_shown(window) {
         // The counts under the status bar are this document's and have just
         // changed, whoever is showing it.
-        update_status(window, document, source, &[], None);
+        update_status(window, id, document, source, &[], None);
         cache.borrow_mut().source_push_ms = None;
         return;
     }
@@ -6587,16 +6719,19 @@ fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
 /// begins with a dot rather than an extension with nothing in front of it. A
 /// name with no dot at all is all stem.
 ///
-/// Counted in characters rather than bytes, because what it is handed to is a
-/// text field's selection and a field counts what it shows.
+/// **Counted in bytes** (2026-09-09). It is handed to `set-selection-offsets`,
+/// and Slint's own description of that is "selects the text between two UTF-8
+/// offsets" — `safe_byte_offset` treats the number as a byte position. Counting
+/// characters looked right and was wrong for every Japanese name: `第一章.md`
+/// gave 3, and 3 bytes into it is the end of `第`, so renaming it selected one
+/// character out of three.
 fn stem_length(title: &str) -> i32 {
-    let characters = title.chars().count();
     title
         .char_indices()
         .filter(|(at, character)| *character == '.' && *at > 0)
         .next_back()
-        .map(|(at, _)| title[..at].chars().count())
-        .unwrap_or(characters) as i32
+        .map(|(at, _)| at)
+        .unwrap_or(title.len()) as i32
 }
 
 /// Give the file a tab stands for the name typed into that tab
@@ -6748,6 +6883,9 @@ fn typography_for(
     // 要件 9（2026-09-07追加）: the numbers widen the page's own margin, so this
     // travels with the spec that decides that margin.
     spec.line_numbers = number(Setting::LineNumbers) != 0;
+    // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。**寸法に効く**ので、
+    // 切り替えれば組み直しが起きる。
+    spec.upright_digits = number(Setting::UprightDigits) != 0;
     spec.character_spacing = percent(number(Setting::CharAdvance));
     // 要件 7.8: ルビと傍点の大きさと位置。**組版の仕様と一緒に運ぶ**ので、
     // タイルの署名（`hash_style_runs`が混ぜる`Typography`）にも自然に入る
@@ -6823,7 +6961,7 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// to 12 the two places that had written the absolute row instead were missed —
 /// the vertical pane then took its page margin from the line height. One
 /// definition, sent over.
-const SHEET_NUMBERS: usize = 9 + MAX_HEADING_LEVEL;
+const SHEET_NUMBERS: usize = 10 + MAX_HEADING_LEVEL;
 /// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
 /// two values are `2`, the pane's own width, and `0`, not wrapping at all —
 /// **which is written down and not yet built**: tiles are cut along the flow
@@ -6946,6 +7084,12 @@ enum Setting {
     /// 負にして逃がせる——**大きさと位置のどちらで直すかは書き手のもの**で、
     /// 編集器が決められることではない。
     RubyOffset,
+    /// 縦中横を効かせるか（要件 7.8、書き手の決定 2026-09-09）。
+    ///
+    /// **縦書きのシートにしか出さない。**縦中横は縦書きの中でだけ起きるので、
+    /// 横書きのシートに置けば「押しても何も起きない切り替え」になる
+    /// ——働いていない状態を画面に置かない（単語チェックモード要件 2.1.1）。
+    UprightDigits,
 }
 
 impl Setting {
@@ -6964,6 +7108,7 @@ impl Setting {
             12 => Some(Self::LineNumbers),
             13 => Some(Self::RubySize),
             14 => Some(Self::RubyOffset),
+            15 => Some(Self::UprightDigits),
             _ => None,
         }
     }
@@ -6980,6 +7125,7 @@ impl Setting {
             Self::LineNumbers => 6 + MAX_HEADING_LEVEL,
             Self::RubySize => 7 + MAX_HEADING_LEVEL,
             Self::RubyOffset => 8 + MAX_HEADING_LEVEL,
+            Self::UprightDigits => 9 + MAX_HEADING_LEVEL,
         }
     }
 
@@ -6989,6 +7135,7 @@ impl Setting {
             Self::BodySize => 1,
             Self::WrapMode => 1,
             Self::LineNumbers => 1,
+            Self::UprightDigits => 1,
             Self::WrapChars => 2,
             Self::RubySize => 2,
             Self::RubyOffset => 2,
@@ -7010,6 +7157,7 @@ impl Setting {
             Self::PageMargin => (0, 160),
             Self::WrapMode => (0, 2),
             Self::LineNumbers => (0, 1),
+            Self::UprightDigits => (0, 1),
             Self::WrapChars => (10, 200),
             // 親文字より大きいルビは、ルビではなく別の本文である。
             Self::RubySize => (20, 100),
@@ -7033,6 +7181,9 @@ impl Setting {
             // Off: a page of prose is not a program, and the writer asks for
             // the numbers when they want them.
             Self::LineNumbers => 0,
+            // 入。要件 7.8 は「書き手が何も書かなくても効く」と言っている
+            // ——切りたい書き手が切る側であって、既定が何もしない側ではない。
+            Self::UprightDigits => 1,
             // 半分が日本語の組版の当たり前である。
             Self::RubySize => 50,
             // 行の箱の端。行間の空きがそのままルビの帯になる。
@@ -7069,6 +7220,7 @@ impl Setting {
             Self::PageMargin => "page-margin",
             Self::WrapMode => "wrap-mode",
             Self::LineNumbers => "line-numbers",
+            Self::UprightDigits => "upright-digits",
             Self::WrapChars => "wrap-chars",
             Self::RubySize => "ruby-size",
             Self::RubyOffset => "ruby-offset",
@@ -10810,6 +10962,7 @@ fn refresh_pane(
             window.set_render_status(format!("{label}座標計算: NG / {error}").into());
             update_status(
                 window,
+                id,
                 document,
                 source,
                 &selection_source,
@@ -10839,6 +10992,7 @@ fn refresh_pane(
             window.set_render_status(format!("{label}選択座標: NG / {error}").into());
             update_status(
                 window,
+                id,
                 document,
                 source,
                 &selection_source,
@@ -10872,7 +11026,7 @@ fn refresh_pane(
     // the document, so in Split whichever pane acted last owns it.
     let stats_started = Instant::now();
     let place = source_caret(window, id, caret_source_byte);
-    update_status(window, document, source, &selection_source, place);
+    update_status(window, id, document, source, &selection_source, place);
     // 要件 7.7: the outline is of the document in front of the writer, and the
     // pane that has just drawn is only sometimes the one they are in.
     if id == focused_pane(window) {
@@ -11367,11 +11521,21 @@ fn source_caret(window: &AppWindow, id: PaneId, caret: Option<usize>) -> Option<
 
 fn update_status(
     window: &AppWindow,
+    id: PaneId,
     document: &OpenDocument,
     source: &str,
     selection_source_bytes: &[(usize, usize)],
     source_caret: Option<usize>,
 ) {
+    // E1: **探している語の数も、ここで数え直す。**打鍵のたびに通る道なので、
+    // ステータスバーの`3 / 12`が古いままになることがない。一致の上に立って
+    // いるかは選択で決まる——**矩形選択は走りが複数**なので、1本のときだけが
+    // 「一致に立っている」たりうる（要件 7.1）。
+    let selected = match selection_source_bytes {
+        [only] => Some(*only),
+        _ => None,
+    };
+    tell_find(window, id, source, selected);
     let stats = document.counts.borrow_mut().get(source).stats();
     // Every run, because a rectangle is several (要件 7.1) — and what 要件 10
     // shows is how much text is selected, not how many pieces it is in.
@@ -11878,7 +12042,7 @@ fn drag_caret_only(
                 false,
             );
             let place = source_caret(window, id, Some(hit));
-            update_status(window, document, source, selection, place);
+            update_status(window, id, document, source, selection, place);
             // Nothing reported the mid-drag cost before, which is exactly the
             // path the slowness was reported on.
             let ms = elapsed_ms(started);
@@ -13562,24 +13726,23 @@ mod tests {
     ///
     /// **The last dot, and never the first character**: `.gitignore` is a name
     /// that begins with a dot, not an extension with nothing in front of it.
+    ///
+    /// **数えるのはバイト**（2026-09-09）。渡す先の`set-selection-offsets`が
+    /// Slintの言葉で「2つのUTF-8の位置のあいだを選ぶ」ものだからで、文字で
+    /// 数えていたあいだ**日本語の名前は頭の1文字しか選ばれていなかった**。
     #[test]
     fn a_rename_selects_the_name_without_its_extension() {
-        assert_eq!(
-            stem_length("Part01設計.md"),
-            "Part01設計".chars().count() as i32
-        );
-        assert_eq!(
-            stem_length("notes.tar.gz"),
-            "notes.tar".chars().count() as i32
-        );
+        assert_eq!(stem_length("Part01設計.md"), "Part01設計".len() as i32);
+        assert_eq!(stem_length("notes.tar.gz"), "notes.tar".len() as i32);
         // No extension: all of it is the name.
         assert_eq!(stem_length("README"), 6);
-        assert_eq!(stem_length("無題1"), 3);
+        assert_eq!(stem_length("無題1"), "無題1".len() as i32);
         // A dotfile is a name, not an empty one with an extension.
         assert_eq!(stem_length(".gitignore"), 10);
         assert_eq!(stem_length(""), 0);
-        // **Characters, not bytes**, because a text field counts what it shows.
-        assert_eq!(stem_length("あいう.md"), 3);
+        // **バイトであって文字ではない**——`あいう`は9バイト。ここを3にして
+        // いたので、`あいう.md`の名前変更は`あ`だけを選んでいた。
+        assert_eq!(stem_length("あいう.md"), 9);
     }
 
     #[test]

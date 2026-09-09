@@ -27,9 +27,9 @@ use crate::word_marks;
 use crate::{
     AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, add_word_to_group, close_word_naming, collect_search, colour_row,
-    drop_tree_row, edit_word_file, export_word_group, file_dialog, file_tree, find_in_pane,
-    focused_pane, font_name, font_row, go_to_remembered_folder, hold_word_modes, ime, navigate,
-    new_word_group, new_word_mode, next_word_colour, open_work_folder, pane_word_mode,
+    count_in_pane, drop_tree_row, edit_word_file, export_word_group, file_dialog, file_tree,
+    find_in_pane, focused_pane, font_name, font_row, go_to_remembered_folder, hold_word_modes, ime,
+    navigate, new_word_group, new_word_mode, next_word_colour, open_work_folder, pane_word_mode,
     paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
     publish_word_modes, quick_draft, read_word_source, remove_word_from_group, rename_word_group,
     rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus,
@@ -486,6 +486,17 @@ pub fn wire_find(window: &AppWindow, live: &Live) {
     window.on_find_requested(move |forwards| {
         if let Some(window) = weak.upgrade() {
             find_in_pane(&window, &find_live, forwards);
+        }
+    });
+
+    // E1: 打っているあいだの数え直し。**動かさないのはここだけの約束ではない**
+    // ——`count_in_pane`がカーソルに触らないので、検索欄でのIME変換中に本文が
+    // 飛ばない。
+    let weak = window.as_weak();
+    let typed_live = live.clone();
+    window.on_find_typed(move || {
+        if let Some(window) = weak.upgrade() {
+            count_in_pane(&window, &typed_live);
         }
     });
 

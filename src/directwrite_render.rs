@@ -112,8 +112,8 @@ impl WritingMode {
     ///
     /// **縦書きだけ。**横書きの数字はもともと正立していて、そこへ箱を張れば
     /// 送りだけが変わる——何も直さずに幾何を動かすことになる。
-    fn stands_digits_upright(self) -> bool {
-        matches!(self, WritingMode::Vertical)
+    fn stands_digits_upright(self, typography: &Typography) -> bool {
+        matches!(self, WritingMode::Vertical) && typography.upright_digits
     }
 
     /// Vertical writing reads towards smaller screen x, so its blocks are placed
@@ -3305,6 +3305,9 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // 古い絵がそのまま出る（6.18の罠）。
     typography.ruby_scale.to_bits().hash(hasher);
     typography.ruby_offset.to_bits().hash(hasher);
+    // 要件 7.8（2026-09-09）: 縦中横。**こちらは寸法の側**——3桁の数字は
+    // 1マスに収まるのと1桁ずつ縦に並ぶのとで占める長さが違う。
+    typography.upright_digits.hash(hasher);
 }
 
 /// The colours a tile is drawn in (要件 9).
@@ -3716,7 +3719,7 @@ impl TextEngine {
                 let block_text = &text[span.byte_start..span.byte_end];
                 let block_styled = block_styling(styled, span, &block_lines[index]);
 
-                let runs = style_runs(block_styled, mode.stands_digits_upright());
+                let runs = style_runs(block_styled, mode.stands_digits_upright(&typography));
                 let keep_trailing_empty_line = index == last_index;
                 let block_box = block_boxes[index];
                 // 要件 7.3.2: **a table is measured like every other block, and
@@ -4151,7 +4154,7 @@ impl TextEngine {
     fn block_marks(&self, block_index: usize) -> BlockMarks {
         let styled = self.block_styled(block_index);
         BlockMarks {
-            runs: style_runs(styled, self.mode.stands_digits_upright()),
+            runs: style_runs(styled, self.mode.stands_digits_upright(&self.typography)),
             lines: line_runs(styled),
         }
     }
@@ -4512,7 +4515,7 @@ impl TextEngine {
             // per tile per frame to learn what is already known (技術検証 7.7).
             let runs = style_runs(
                 self.block_styled(tile.block_index),
-                self.mode.stands_digits_upright(),
+                self.mode.stands_digits_upright(&self.typography),
             );
             hash_style_runs(&runs, &self.typography, &mut hasher);
             // 要件 7.3.2: and the marks that belong to whole lines. **Nothing
@@ -5282,7 +5285,7 @@ fn wrap_offsets_in(
             .dwrite
             .CreateTextLayout(&utf16, format, max_width, max_height)?
     };
-    let runs = style_runs(styled, page.mode.stands_digits_upright());
+    let runs = style_runs(styled, page.mode.stands_digits_upright(typography));
     apply_typography(&layout, typography, &runs, utf16.len() as u32)?;
     apply_marker_boxes(&layout, typography, &runs)?;
     Ok(wrap_byte_offsets(text, &line_metrics(&layout)?))
@@ -6235,6 +6238,22 @@ mod tests {
     /// 縦書きの列の中で、`20`の墨が広がっている幅（列の軸＝流れ軸）を見る。
     /// 寝ていれば2文字ぶんの深さに伸び、正立して並んでいれば1マスに収まる
     /// ——**それは列の幅を越えない**、というのがこの機能の全部である。
+    /// 要件 7.8（書き手の決定 2026-09-09）: **縦中横は切れる。**書き手が
+    /// 「気持ち悪い」と言ったので、組み方の好みとして表示設定に置いた
+    /// （要件 9）。横書きには初めから効かないので、切り替えを出すのは
+    /// 縦書きのシートだけ——**働かない切り替えを画面に置かない。**
+    #[test]
+    fn tate_chu_yoko_can_be_turned_off() {
+        let mut typography = Typography::new(16.0);
+
+        assert!(WritingMode::Vertical.stands_digits_upright(&typography));
+        assert!(!WritingMode::Horizontal.stands_digits_upright(&typography));
+
+        typography.upright_digits = false;
+        assert!(!WritingMode::Vertical.stands_digits_upright(&typography));
+        assert!(!WritingMode::Horizontal.stands_digits_upright(&typography));
+    }
+
     #[test]
     fn two_digits_stand_upright_inside_one_cell() {
         let ink_span = |source: &str| -> (u32, u32) {
@@ -7083,7 +7102,7 @@ mod tests {
         let utf16 = text.encode_utf16().collect::<Vec<u16>>();
         // The whole document set exactly as its blocks were: same spec, same
         // ranges, only measured in one piece.
-        let runs = style_runs(styled, mode.stands_digits_upright());
+        let runs = style_runs(styled, mode.stands_digits_upright(typography));
         let whole = with_graphics(|graphics| {
             let format = graphics.text_format(typography, mode)?;
             // SAFETY: The UTF-16 buffer outlives CreateTextLayout.

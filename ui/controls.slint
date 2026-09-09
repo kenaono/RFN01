@@ -149,9 +149,19 @@ export component IconButton inherits Rectangle {
 //
 // **大域なのは、欄が窓の根を知らないからである。**`Field`は`controls.slint`の部品で、
 // 使う側ごとに配線すると**新しい欄を足すたびに忘れられる**種類の配線になる。
+/// 「終わりまで」を表す選択の終端（`Field`）。**位置ではなく合図**なので、
+/// ありえない負の数にしてある。
+export global Selection {
+    out property <int> everything: -1;
+}
+
 export global Ime {
     /// 素の欄が鍵盤を取った（true）／返した（false）。
     callback field-focus(bool);
+    /// 配置が済んだあと、候補窓の位置を送り直した（書き手の報告 2026-09-09）。
+    /// **診断ログのためだけにある**——効いたかどうかを画面の外から確かめられる
+    /// ようにしておく。
+    callback settled();
 }
 
 // A line of text the writer types into.
@@ -167,6 +177,9 @@ export component Field inherits Rectangle {
     out property <bool> has-focus: input.has-focus;
     // **どの欄でも、打っているあいだIMEは横書き**（上の`Ime`）。
     changed has-focus => {
+        if (!self.has-focus) {
+            settle.running = false;
+        }
         Ime.field-focus(self.has-focus);
     }
     callback accepted();
@@ -195,6 +208,7 @@ export component Field inherits Rectangle {
     /// Called by whoever raised the bar this field is in.
     public function take-focus() {
         input.focus();
+        root.arrive(0);
     }
 
     /// Put the keyboard here with `count` characters already selected from the
@@ -204,6 +218,79 @@ export component Field inherits Rectangle {
     public function take-focus-selecting(count: int) {
         input.focus();
         input.set-selection-offsets(0, count);
+        root.arrive(count);
+    }
+
+    /// 鍵盤をここへ置き、入っている文字をぜんぶ選ぶ。**打てば置き換わる**
+    /// ——`Ctrl+F`をもう一度押した書き手は、たいてい別の語を探しに来ている。
+    ///
+    /// **IMEの候補窓の位置は、配置が済んでからもう一度送る**（書き手の報告
+    /// 2026-09-09：「検索バーを出してIMEを起動すると、IMEが入力ボックスと
+    /// 重なる。マウスでクリックすると直る」）。Slintは`FocusIn`の瞬間に
+    /// カーソル矩形を`InputMethodRequest::Enable`へ入れてWindowsへ渡すが
+    /// （`i-slint-core/items/text.rs`）、**生まれたばかりの欄はまだ配置されて
+    /// いない**ので、古い矩形が渡って候補窓がそこへ出る。クリックで直るのは
+    /// `ensure_focus_and_ime`が正しい座標で送り直すからで、その送り直しを
+    /// 時計でやる——`select-all`は`update_ime`＝`Update`を通り、winitが
+    /// `set_ime_cursor_area`を呼ぶ。
+    public function take-focus-selecting-all() {
+        input.focus();
+        input.select-all();
+        root.arrive(Selection.everything);
+    }
+
+    /// 鍵盤がプログラムから来たときに要る2つ。
+    ///
+    /// 1. **IMEを横書きへ**。`changed has-focus`に任せていたが、**生まれたときから
+    ///    焦点を持っている欄では変化が起きない**ので、その回だけ誰も言わなかった
+    ///    ——縦書きのペインから開いた帯で、IMEは縦のままだったことになる。
+    /// 2. **候補窓の位置を送り直す時計を起こす**（下の`settle`）。
+    ///
+    /// `selection`は**呼び手が頼んだ選択**で、時計はそれを出し直す。
+    /// 書き手の報告 2026-09-09：名前の変更で「一度拡張子を除く名前が選ばれるが、
+    /// 次の瞬間に拡張子まで広がる」——時計が`select-all`を掛けていた。
+    /// **送り直しは、選び直しではない。**
+    function arrive(selection: int) {
+        root.settle-end = selection;
+        Ime.field-focus(true);
+        settle.running = true;
+    }
+
+    /// 時計が出し直す選択の終わり。`Selection.everything`は「ぜんぶ」。
+    property <int> settle-end: 0;
+
+    // 上の送り直し。**1回だけ動く。**打ち始めたら止める——選び直しが書き手の
+    // 打った字を選んでしまわないように（`edited`で止めている）。
+    settle := Timer {
+        interval: 100ms;
+        running: false;
+        triggered => {
+            settle.running = false;
+            // **空の欄では`select-all`が何も送らない**（2026-09-09、Slintの
+            // `move_cursor`は`if text.is_empty() { return false; }`で戻る）。
+            // 帯は開いた直後が空なので、これが最初の直しが効かなかった理由
+            // である。`set-selection-offsets`は`set_cursor_position`を素通しで
+            // 呼ぶので、**空でも必ず**`update_ime`＝`set_ime_cursor_area`まで
+            // 届く。そのあとで選び直す（中身があれば「打てば置き換わる」を保つ）。
+            // **送り直しは、選び直しではない。**呼び手が頼んだ選択をそのまま
+            // 出し直す——`select-all`を掛けていたせいで、名前の変更で拡張子まで
+            // 選択が広がっていた（書き手の報告 2026-09-09）。
+            if (root.settle-end == Selection.everything) {
+                // 空でも必ず届く一手を先に。`select-all`は空だと何もしない。
+                input.set-selection-offsets(0, 0);
+                input.select-all();
+            } else if (root.settle-end > 0) {
+                input.set-selection-offsets(0, root.settle-end);
+            } else if (root.text == "") {
+                // 頼まれた選択が無い欄。**空のときだけ**位置を送り直せる
+                // ——空の欄はカーソルが0にしかなく、動かすものが無いからである。
+                // 中身のある欄でこれを打てば、書き手の置いたカーソルを頭へ
+                // 引き戻すことになる。そちらは、欄が「何を選びたいか」を
+                // 言うようになってからでよい。
+                input.set-selection-offsets(0, 0);
+            }
+            Ime.settled();
+        }
     }
 
     // Under the input, so the pointer reaches the text rather than this.
@@ -232,6 +319,10 @@ export component Field inherits Rectangle {
             root.accepted();
         }
         edited => {
+            // 打ち始めたら、候補窓の送り直しは要らない——打鍵そのものが
+            // `update_ime`を通す。ここで止めないと、100ms以内に打った字を
+            // 選び直してしまう。
+            settle.running = false;
             root.edited();
         }
         key-pressed(event) => {

@@ -146,6 +146,14 @@ export struct PaneScreen {
     // (追加要件 2026-09-07). The document behind the page is real and empty;
     // what stands over it is three words.
     empty: bool,
+    /// E1（書き手の報告 2026-09-09）: **探している語は、その面のもの。**
+    ///
+    /// 窓に1つだけ持っていたので、Pane1で探してPane2で探し、Pane1へ戻ると
+    /// F3が**Pane2の語**を探していた。帯はその文書を開いているペインの中に
+    /// 出る（要件 7.7）——ならば語も置換語も、帯が言うことも、そこにある。
+    find-needle: string,
+    find-replacement: string,
+    find-status: string,
     /// 要件 7.9（2026-09-08）: この面の**単語チェックモード**の名前。
     ///
     /// **モードは文書ごと**（コードエディタの言語モードと同じ粒度）なので、
@@ -516,6 +524,8 @@ export component EditorPane inherits Rectangle {
     callback find-requested(bool);
     /// What the bar asks for once it is open. True is forwards.
     callback find-step(bool);
+    /// 検索欄に1字打たれた。**数え直すだけで、どこへも動かない**（E1）。
+    callback find-typed();
     callback replace-one();
     callback replace-every();
     callback find-dismissed();
@@ -625,7 +635,36 @@ export component EditorPane inherits Rectangle {
             root.find-requested(true);
             return accept;
         }
+        // 欄の中のF3は「次へ」だけ。**帯を出す側は呼ばない**——欄が空のまま
+        // `find-requested`を呼ぶと、開いているのと同じ形を頼むことになって
+        // 帯が閉じる（同じ鍵は閉じる、要件 7.7）。
+        if (event.text == Key.F3) {
+            if (root.find-needle != "") {
+                root.find-step(!event.modifiers.shift);
+            }
+            return accept;
+        }
+        // Enterは欄そのものが「次へ」として受ける（`accepted`）。Shift+Enterは
+        // ここでしか受けられない——一行の入力は改行を入れないので、取らなければ
+        // 何も起きない鍵になる（E1）。
+        if (event.text == Key.Return && event.modifiers.shift) {
+            root.find-step(false);
+            return accept;
+        }
         return reject;
+    }
+
+    /// 次／前の一致へ（E1）。
+    ///
+    /// **探す語が無ければ帯を出す。**F3は「探す」と書いてある鍵で、何も探して
+    /// いないときに黙るのは効かないのと見分けがつかない——書いてあるのに効かない
+    /// のと同じことである。
+    function find-again(forwards: bool) {
+        if (root.find-needle == "") {
+            root.find-requested(false);
+        } else {
+            root.find-step(forwards);
+        }
     }
 
     // Bring the tab in front into view (要件 6.3).
@@ -1238,15 +1277,19 @@ export component EditorPane inherits Rectangle {
                             // keyboard back (6.11).
                             property <int> asked: root.find-generation;
                             init => {
-                                self.take-focus();
+                                self.take-focus-selecting-all();
                             }
                             changed asked => {
-                                self.take-focus();
+                                self.take-focus-selecting-all();
                             }
                             // Enter is "the next one", which is what a writer
                             // expects from a search box they have just typed in.
                             accepted => {
                                 root.find-step(true);
+                            }
+                            // 数だけが変わる。カーソルは動かない（E1）。
+                            edited => {
+                                root.find-typed();
                             }
                             escaped => {
                                 root.find-dismissed();
@@ -1696,6 +1739,12 @@ export component EditorPane inherits Rectangle {
                                     } else if event.modifiers.control
                                         && (event.text == "h" || event.text == "H" || event.text == "\u{8}") {
                                         root.find-requested(true);
+                                        accept
+                                    // E1: **本文に戻ってもF3で次／前へ。**帯は
+                                    // 開いていなくてよい——最後に探した語は
+                                    // `find-needle`に残っている。
+                                    } else if event.text == Key.F3 {
+                                        root.find-again(!event.modifiers.shift);
                                         accept
                                     } else if event.modifiers.control
                                         && (event.text == "z" || event.text == "Z" || event.text == "\u{1a}") {

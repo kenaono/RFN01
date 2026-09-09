@@ -129,7 +129,7 @@ fn boundary_at_or_before(source: &str, at: usize) -> usize {
 /// 一件置換は「いま選ばれているものが検索で見つけたものか」を訊いてから
 /// 置き換える。それを`==`で訊いていたので、`alpha`で見つけた`Alpha`は
 /// 置換されずに次へ飛んでいた——**見つける規則と置き換える規則が2つあった**。
-/// 畳み方は[`next_match`]・[`count`]・[`replace_all`]と同じASCIIのそれで、
+/// 畳み方は[`next_match`]・[`tally`]・[`replace_all`]と同じASCIIのそれで、
 /// ここを通せば4つが1つの規則を共有する。
 ///
 /// 範囲が文字の途中から始まっていたり、長さが針と違えば一致ではない
@@ -144,18 +144,32 @@ pub fn is_match(source: &str, needle: &str, start: usize, end: usize) -> bool {
         .is_some_and(|found| found.eq_ignore_ascii_case(needle))
 }
 
-/// How many times the needle is in the document.
+/// How many matches there are, and which one a position is standing on.
+///
+/// **One walk answers both** (E1). 「12件ある」と「その3件目にいる」は同じ一巡
+/// から出るもので、別々に数えれば同じ本文を2度歩くことになる。
 ///
 /// Matches that would overlap are not counted twice, the same rule
-/// `str::matches` follows: the search for the next one starts after the last.
-pub fn count(source: &str, needle: &str) -> usize {
+/// `str::matches` follows — and the same one [`replace_all`] replaces by: the
+/// search for the next one starts after the last. **数え方と置き換え方が同じで
+/// なければ、「12件」と言った直後の全置換が11件を報せる。**
+///
+/// `at` is where the match the writer stands on begins. The answer is `None`
+/// when that is not the start of a counted match: **立っていないことは0件目では
+/// ない**ので、呼ぶ側は件数だけを言う。自分と重なる語（`あああ`から`ああ`を探した
+/// とき）では次の一致が数の網目から外れることがあり、そこでも`None`と答える。
+pub fn tally(source: &str, needle: &str, at: Option<usize>) -> (usize, Option<usize>) {
     let mut total = 0;
+    let mut which = None;
     let mut from = 0;
-    while let Some(at) = found_at(source, needle, from) {
+    while let Some(found) = found_at(source, needle, from) {
         total += 1;
-        from = at + needle.len();
+        if at == Some(found) {
+            which = Some(total);
+        }
+        from = found + needle.len();
     }
-    total
+    (total, which)
 }
 
 /// Every match replaced, and how many there were.
@@ -372,7 +386,7 @@ mod tests {
         assert_eq!(first, (0, 7));
         let second = next_match(source, "WINDOWS", first.1, true).expect("the second one");
         assert_eq!(&source[second.0..second.1], "windows");
-        assert_eq!(count(source, "windows"), 3);
+        assert_eq!(tally(source, "windows", None).0, 3);
     }
 
     #[test]
@@ -424,7 +438,7 @@ mod tests {
             }
         }
         assert_eq!(matched, 3);
-        assert_eq!(count(source, "alpha"), 3);
+        assert_eq!(tally(source, "alpha", None).0, 3);
         assert_eq!(replace_all(source, "alpha", "beta").1, 3);
     }
 
@@ -445,13 +459,45 @@ mod tests {
         assert!(is_match(source, "ALPHA", 6, 11));
     }
 
+    /// **件数と現在位置は同じ一巡から出る**（E1）。帯が`3 / 12`と言えるのは、
+    /// 数えながら「いま立っているのはどれか」を見ているからである。
+    #[test]
+    fn the_count_says_which_match_it_is_standing_on() {
+        let first = SOURCE.find("のたり").expect("is there");
+        let second = SOURCE.rfind("のたり").expect("is there twice");
+
+        assert_eq!(tally(SOURCE, "のたり", Some(first)), (2, Some(1)));
+        assert_eq!(tally(SOURCE, "のたり", Some(second)), (2, Some(2)));
+        // 一致の頭でない場所に立っているのは、0件目ではなく「どれでもない」。
+        assert_eq!(tally(SOURCE, "のたり", Some(0)), (2, None));
+        assert_eq!(tally(SOURCE, "のたり", None), (2, None));
+        assert_eq!(tally(SOURCE, "冬の海", Some(0)), (0, None));
+    }
+
+    /// 数え方は[`replace_all`]の置き換え方と同じ——重なる一致は二度数えない。
+    /// **ここが食い違うと、「2件」と言った直後の全置換が3件を報せる。**
+    #[test]
+    fn what_is_counted_is_what_a_replace_all_would_replace() {
+        let source = "あああ あああ";
+
+        let (total, _) = tally(source, "ああ", None);
+
+        assert_eq!(total, 2);
+        assert_eq!(replace_all(source, "ああ", "い").1, total);
+        // 網目から外れた一致（2つめの`あ`から始まるもの）に立つことはできる。
+        // そこは件数の中に無いので、何件目かは答えない——帯は件数だけを言う。
+        let off_the_grid = next_match(source, "ああ", 3, true).expect("is there");
+        assert_eq!(off_the_grid.0, 3);
+        assert_eq!(tally(source, "ああ", Some(3)), (2, None));
+    }
+
     #[test]
     fn a_needle_that_is_not_there_is_not_found() {
         assert_eq!(next_match(SOURCE, "冬の海", 0, true), None);
         assert_eq!(next_match(SOURCE, "", 0, true), None, "nothing matches");
         assert_eq!(next_match("", "あ", 0, true), None);
-        assert_eq!(count(SOURCE, "のたり"), 2);
-        assert_eq!(count(SOURCE, ""), 0);
+        assert_eq!(tally(SOURCE, "のたり", None).0, 2);
+        assert_eq!(tally(SOURCE, "", None).0, 0);
     }
 
     /// A match can only start at a character boundary, so a byte position

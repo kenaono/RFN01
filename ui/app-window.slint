@@ -266,10 +266,8 @@ export component AppWindow inherits Window {
     // (要件 7.7). One bar for the window rather than one per pane: the question
     // is about a document, and which document is the focused pane's business.
     in-out property <bool> find-open: false;
-    in-out property <string> find-needle;
-    in-out property <string> find-replacement;
-    /// What the last search or replacement did, for the bar to say.
-    in-out property <string> find-status;
+    // E1: 語・置換語・帯が言うことは`PaneScreen`の行にある（**面ごと**）。
+    // ここに残っているのは、帯が「どの面に・どの形で」出ているかだけ。
     /// Bumped whenever the bar is asked for. **The search field cannot be
     /// reached from outside the bar** — an id does not cross a conditional —
     /// so the field watches this instead and takes the keyboard itself, which
@@ -277,6 +275,9 @@ export component AppWindow inherits Window {
     in-out property <int> find-generation: 0;
     /// True searches on from the caret, false back towards the start.
     callback find-requested(bool);
+    /// 検索の語が打ち変えられた。**数え直すだけ**で、本文のカーソルは動かない
+    /// （E1）。
+    callback find-typed();
     /// Which pane the find bar is in, and whether it has its replace row
     /// (要件 7.7). **The bar is one document's**, so it is drawn inside the
     /// pane holding that document rather than across the window.
@@ -311,6 +312,9 @@ export component AppWindow inherits Window {
     /// file does not have.
     in property <string> count-caret;
     in property <string> count-warning;
+    /// E1: いま探している語と、その数——`「白猫」3 / 12`。**帯が閉じていても
+    /// 見えている**唯一の場所で、打鍵のたびに数え直すので古くならない。
+    in property <string> count-find;
     // What to say above the paper when something went wrong: the document
     // would not open, would not be laid out, would not be saved.
     in property <string> render-status;
@@ -1700,9 +1704,9 @@ export component AppWindow inherits Window {
                         // 要件 7.7: one bar, in the pane that asked for it.
                         find-open: root.find-open && pane.id == root.find-pane;
                         find-replacing: root.find-replacing;
-                        find-needle <=> root.find-needle;
-                        find-replacement <=> root.find-replacement;
-                        find-status: root.find-status;
+                        find-needle <=> pane.find-needle;
+                        find-replacement <=> pane.find-replacement;
+                        find-status: pane.find-status;
                         find-generation: root.find-generation;
                         width: parent.width;
                         height: parent.height;
@@ -1874,13 +1878,18 @@ export component AppWindow inherits Window {
                                 root.find-replacing = replacing;
                                 root.find-open = true;
                                 root.find-generation += 1;
-                                // Nothing to say any more: the row that appears
-                                // for 置換 is what used to be explained here.
-                                root.find-status = "";
+                                // **開いた瞬間に件数が出ている**（E1）。前に
+                                // 探した語がそのまま欄に残っているので、
+                                // 「いま何件あるか」は開けば分かってよい。
+                                // 語が無ければこれが帯を空にする。
+                                root.find-typed();
                             }
                         }
                         find-step(forwards) => {
                             root.find-requested(forwards);
+                        }
+                        find-typed => {
+                            root.find-typed();
                         }
                         replace-one => {
                             root.replace-requested();
@@ -2181,6 +2190,20 @@ export component AppWindow inherits Window {
                     font-size: 12px;
                     vertical-alignment: center;
                     horizontal-stretch: 0;
+                }
+
+                // E1: **いま探している語が、この文書に何回あるか。**帯は閉じて
+                // いることがあり、F3はそれでも効く——**効いたのが見えないのは、
+                // 効かないのと見分けがつかない**ので、答えはここに出ている。
+                // 打鍵のたびに数え直すので古くならない。
+                if root.count-find != "": Text {
+                    text: root.count-find;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                    max-width: 280px;
+                    overflow: elide;
                 }
 
                 // 要件 7.3: a paragraph long enough to cost a keystroke. The
@@ -3614,6 +3637,38 @@ export component AppWindow inherits Window {
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 14] + "%";
                         stepped(by) => {
                             root.typography-step(14, by);
+                        }
+                    }
+
+                    // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。半角の数字を
+                    // 1〜2桁なら1マスに正立させ、3桁以上は1桁ずつ縦に並べる。
+                    // **縦書きのシートにだけ出す**——縦中横は縦書きの中でしか
+                    // 起きないので、横書きの面に置けば「押しても何も起きない
+                    // 切り替え」になる。
+                    if root.sheet == 1: HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Tate-chu-yoko";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        TextButton {
+                            title: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
+                                ? "Upright"
+                                : "Sideways";
+                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
+                                ? Role.primary
+                                : Role.normal;
+                            clicked => {
+                                root.typography-chose(15,
+                                    root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
+                                        ? 0
+                                        : 1);
+                            }
                         }
                     }
                 }
