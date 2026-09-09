@@ -457,6 +457,45 @@ struct EditorState {
     /// 「英語では単語選択にならない感じ」の半分はこれである。**引けば語ごと
     /// 伸びる**のも同じ印で、押し直すまで残る。
     word_drag: Option<(usize, usize)>,
+    /// 直前の押下——いつ、どこを（E3）。**2回目かどうかを数えるためだけにある。**
+    ///
+    /// 2回目を数えたら空に戻す：**3回目は普通の押下**である。窓の
+    /// `double-clicked`に任せていたときは3回目・4回目にも来ていて、
+    /// 押すたびに語が選び直されるので選択が外れなくなった（書き手の報告
+    /// 2026-09-10：「契機がわからないのですが、選択がはずれなくなります」）。
+    last_click: Option<(Instant, f32, f32)>,
+}
+
+impl EditorState {
+    /// この押下は「2回目」か——ダブルクリックの判定（E3）。
+    ///
+    /// **速さはWindowsのもの**（`GetDoubleClickTime`）。この編集器が独自の秒数を
+    /// 持てば、書き手が他のアプリで慣れた速さと違う反応をすることになる。
+    ///
+    /// **場所も見る。**離れたところを2回押したのは、同じものを2回押したのではない。
+    fn double_click(&mut self, x: f32, y: f32) -> bool {
+        let now = Instant::now();
+        let doubled = self.last_click.is_some_and(|(when, at_x, at_y)| {
+            now.duration_since(when) <= double_click_time()
+                && (x - at_x).abs() <= DOUBLE_CLICK_SLACK
+                && (y - at_y).abs() <= DOUBLE_CLICK_SLACK
+        });
+        // 2回目で区切る。3回目は、次の1回目である。
+        self.last_click = (!doubled).then_some((now, x, y));
+        doubled
+    }
+}
+
+/// 2回目とみなす、押した場所のずれ（画素、E3）。**手は完全には止まらない。**
+const DOUBLE_CLICK_SLACK: f32 = 4.0;
+
+/// Windowsで決められたダブルクリックの間隔（E3）。
+fn double_click_time() -> Duration {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+
+    // SAFETY: 引数の無い呼び出しで、返るのはミリ秒の数である。失敗しない。
+    let ms = unsafe { GetDoubleClickTime() };
+    Duration::from_millis(u64::from(ms.max(1)))
 }
 
 /// Both panes' states, so that a callback carrying a pane number can reach the
@@ -2088,20 +2127,6 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let state = states.of(id);
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
-        }
-    });
-
-    // E3: ダブルクリックで語を選ぶ。**押した位置は同じ道で訊く**ので、番号の欄で
-    // 2回押されたら行が選ばれたままになる（1回目と2回目が違うことをしない）。
-    let weak = window.as_weak();
-    let states = pane_states.clone();
-    let cache = render_cache.clone();
-    window.on_pane_word_selected(move |pane, x, y| {
-        if let Some(window) = weak.upgrade() {
-            let id = PaneId::from_index(pane);
-            let document = states.document(id);
-            let state = states.of(id);
-            select_word_in_pane(&window, &document, &state, &cache, id, x, y);
         }
     });
 
@@ -12543,24 +12568,52 @@ fn update_pane_selection(
         // 窓の外へポインタが出ると来ないことがあるので、次に押した回でも畳む。
         state.borrow_mut().line_drag = None;
     }
-    // E3: ダブルクリックのあと（書き手の報告 2026-09-10）。**離した合図が語を
-    // 崩さない**——`End`はカーソルを押した点へ置くので、素通しすると語の途中まで
-    // しか残らない。引いているあいだは語ごと伸びる。
-    let word = match phase {
+    // E3: ダブルクリックが選んだ語（書き手の報告 2026-09-10）。
+    let chosen_word = match phase {
         SelectionPhase::Begin => None,
         _ => state.borrow().word_drag,
     };
-    if phase == SelectionPhase::Begin {
-        state.borrow_mut().word_drag = None;
-    }
-    if let Some((first_start, first_end)) = word {
-        let (start, end) = document::word_around(&source, hit.letter);
-        let (start, end) = (first_start.min(start), first_end.max(end));
-        if phase == SelectionPhase::End {
-            state.borrow_mut().word_drag = None;
+    if let Some((first_start, first_end)) = chosen_word {
+        if phase == SelectionPhase::Update {
+            // **押したまま動かせば、語ごと伸びる。**押した語は必ず入る。
+            let (start, end) = document::word_around(&source, hit.letter);
+            let (start, end) = (first_start.min(start), first_end.max(end));
+            select_source_range(window, cache, document, state, id, &source, start, end);
+            return;
         }
-        select_source_range(window, cache, document, state, id, &source, start, end);
+        // **離した合図では、何もしない**（書き手の報告 2026-09-10：「white catは
+        // 2語です」「不安定に感じました」）。ここでカーソルを押した点へ置くと、
+        // アンカーは語の頭のままなので語の途中までの選択になり、離した点が隣の語に
+        // 寄っていれば2語ぶんに広がる——**選んだ語は、選んだそのままでよい。**
+        let mut state = state.borrow_mut();
+        state.word_drag = None;
+        state.mark = false;
         return;
+    }
+    // 2回目の押下は語を選ぶ（E3）。**数えるのはここ**——窓の`double-clicked`は
+    // 離した合図の前後どちらで来るか決まっておらず、3回目・4回目にも来る
+    // （それが「契機がわからないのですが、選択がはずれなくなります」であった）。
+    // ここで数えれば、2回目で区切って3回目は普通の押下に戻せる。
+    if phase == SelectionPhase::Begin {
+        let doubled = {
+            let mut state = state.borrow_mut();
+            state.word_drag = None;
+            state.double_click(x, y)
+        };
+        if doubled && !hit.in_numbers {
+            let (start, end) = document::word_around(&source, hit.letter);
+            state.borrow_mut().word_drag = Some((start, end));
+            cache.borrow_mut().log_diag(
+                &format!("pointer.{}", id.diag_suffix()),
+                &format!(
+                    "word pane={} letter={} span={start}..{end}",
+                    id.log_name(),
+                    hit.letter,
+                ),
+            );
+            select_source_range(window, cache, document, state, id, &source, start, end);
+            return;
+        }
     }
     if let Some(anchor) = from_numbers {
         let (first, _) = document::line_span(&source, anchor);
@@ -12655,75 +12708,6 @@ fn update_pane_selection(
         let line = format!("{label}ドラッグ選択: {ms:.1}ms", label = id.label(window));
         window.set_render_status(line.into());
     }
-}
-
-/// ダブルクリックが選ぶ語（E3）。
-///
-/// **語の切れ目は`Alt+F`／`Alt+B`と同じ**（`document::word_around`）。規則を2つ
-/// 持たないことのほうが、語の切り方の精度より大事である。
-///
-/// **番号の欄で2回押されたら、行のまま。**1回目が行を選んだのに2回目で語へ
-/// 変わると、押した回数で意味が変わることになる。
-///
-/// **端末には語が無い**（追加要件 Terminal）。画面に出ているのは出力の写しで、
-/// 選ぶ道もそちらが持っている——ここで本文を訊くと、裏の見えない文書に当たる。
-fn select_word_in_pane(
-    window: &AppWindow,
-    document: &Rc<OpenDocument>,
-    state: &Rc<RefCell<EditorState>>,
-    cache: &Rc<RefCell<RenderCache>>,
-    id: PaneId,
-    x: f32,
-    y: f32,
-) {
-    if cache.borrow_mut().pane(id).terminal.is_some() {
-        return;
-    }
-    let source = document.text.borrow().clone();
-    let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
-    let hit = {
-        let mut borrowed = cache.borrow_mut();
-        let cache = &mut *borrowed;
-        hit_test_pane(
-            window,
-            cache,
-            document,
-            id,
-            &source,
-            active_line_start,
-            x,
-            y,
-        )
-    };
-    let Some(hit) = hit else {
-        return;
-    };
-    let (start, end) = if hit.in_numbers {
-        document::line_span(&source, hit.byte)
-    } else {
-        document::word_around(&source, hit.letter)
-    };
-    cache.borrow_mut().log_diag(
-        &format!("pointer.{}", id.diag_suffix()),
-        &format!(
-            "word pane={} at={} span={start}..{end} numbers={}",
-            id.log_name(),
-            hit.byte,
-            u8::from(hit.in_numbers),
-        ),
-    );
-    {
-        let mut state = state.borrow_mut();
-        // **この選択は、次に押されるまで守られる**（上の`word_drag`／`line_drag`）。
-        // ダブルクリックの2回目を離した合図がすぐ後ろから来るので、素通しすると
-        // 語が崩れる——引けば語ごと・行ごと伸びるのも、同じ印による。
-        if hit.in_numbers {
-            state.line_drag = Some(hit.byte);
-        } else {
-            state.word_drag = Some((start, end));
-        }
-    }
-    select_source_range(window, cache, document, state, id, &source, start, end);
 }
 
 /// Move the caret and re-cut the selection without laying the document out.
@@ -14085,6 +14069,31 @@ mod tests {
     use crate::open_document::{Edit, History, UNDO_JOIN_IDLE};
     // 退避の刻みの規則（要件 8.1）は`saving`のもの。
     use crate::saving::work_copy_due;
+
+    /// E3（書き手の報告 2026-09-10）: **2回目で区切る。3回目は普通の押下。**
+    ///
+    /// 数え続けると、押すたびに語が選び直されて選択が外れなくなる
+    /// （「契機がわからないのですが、選択がはずれなくなります」）。
+    #[test]
+    fn the_third_click_is_a_first_click_again() {
+        let mut state = EditorState::default();
+
+        assert!(!state.double_click(100.0, 40.0), "1回目は2回目ではない");
+        assert!(state.double_click(101.0, 41.0), "手のぶれの内側なら2回目");
+        assert!(!state.double_click(101.0, 41.0), "3回目は次の1回目");
+        assert!(state.double_click(101.0, 41.0), "その次が2回目");
+    }
+
+    /// E3: **離れたところを2回押したのは、同じものを2回押したのではない。**
+    #[test]
+    fn a_click_somewhere_else_is_not_the_second_of_a_pair() {
+        let mut state = EditorState::default();
+
+        assert!(!state.double_click(100.0, 40.0));
+        assert!(!state.double_click(400.0, 40.0));
+        // 直前の押下として覚えているのは、いま押されたほうである。
+        assert!(state.double_click(400.0, 41.0));
+    }
 
     /// 要件 5.1, 7.7: a history is newest first, holds each path once, and
     /// never grows past what it is allowed to keep.

@@ -48,6 +48,10 @@ windows = { version = "0.62.2", features = [
     # so a colour is picked the way it is picked in every other Windows program.
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_Input_Ime",
+    # ダブルクリックの間隔（E3）。**書き手がWindowsで決めた速さ**を読むためだけに
+    # ここにある——この編集器が独自の秒数を持てば、他のアプリと違う速さで
+    # 反応することになる。
+    "Win32_UI_Input_KeyboardAndMouse",
     # The open and save dialogs. Features of a crate already vendored, so no
     # new package is fetched and `--offline` still resolves.
     "Win32_UI_Shell",

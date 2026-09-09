@@ -410,8 +410,6 @@ export component AppWindow inherits Window {
     // and nothing else tells the panes apart, so a repeater only has to pass
     // its `index` here instead of a literal (ペイン分割設計 5).
     callback pane-selection-start(int, float, float, bool);
-    /// E3: ダブルクリックで語（行番号の欄なら、その行のまま）。
-    callback pane-word-selected(int, float, float);
     callback pane-selection-update(int, float, float);
     callback pane-selection-end(int, float, float);
     callback pane-select-all(int);
@@ -1845,9 +1843,6 @@ export component AppWindow inherits Window {
                         scrolled(offset) => { root.pane-scroll-changed(pane.id, offset); }
                         selection-start(x, y, extend) => {
                             root.pane-selection-start(pane.id, x, y, extend);
-                        }
-                        word-selected(x, y) => {
-                            root.pane-word-selected(pane.id, x, y);
                         }
                         selection-update(x, y) => { root.pane-selection-update(pane.id, x, y); }
                         selection-end(x, y) => { root.pane-selection-end(pane.id, x, y); }
