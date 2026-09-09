@@ -410,6 +410,8 @@ export component AppWindow inherits Window {
     // and nothing else tells the panes apart, so a repeater only has to pass
     // its `index` here instead of a literal (ペイン分割設計 5).
     callback pane-selection-start(int, float, float, bool);
+    /// E3の②: 行そのものを動かす・写す・消す。
+    callback pane-line-edit(int, int);
     callback pane-selection-update(int, float, float);
     callback pane-selection-end(int, float, float);
     callback pane-select-all(int);
@@ -1843,6 +1845,9 @@ export component AppWindow inherits Window {
                         scrolled(offset) => { root.pane-scroll-changed(pane.id, offset); }
                         selection-start(x, y, extend) => {
                             root.pane-selection-start(pane.id, x, y, extend);
+                        }
+                        line-edit(what) => {
+                            root.pane-line-edit(pane.id, what);
                         }
                         selection-update(x, y) => { root.pane-selection-update(pane.id, x, y); }
                         selection-end(x, y) => { root.pane-selection-end(pane.id, x, y); }

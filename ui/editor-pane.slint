@@ -493,6 +493,10 @@ export component EditorPane inherits Rectangle {
     /// terminal has no half-lines to stop on.
     callback terminal-scrolled(float);
     callback tab-pressed();
+    /// E3の②: 行そのものを動かす・写す・消す。0=前へ、1=後へ、2=前へ写す、
+    /// 3=後へ写す、4=消す。**上下ではなく文書順の前と後**（書き手の選択
+    /// 2026-09-10）——縦書きでも`Alt+↑`が「前の行と入れ替える」である。
+    callback line-edit(int);
     callback preedit-changed(string);
     callback backspace-pressed();
     callback delete-pressed();
@@ -1994,6 +1998,14 @@ export component EditorPane inherits Rectangle {
                                         && (event.text == "g" || event.text == "G" || event.text == "\u{7}") {
                                         root.goto-requested(false);
                                         accept
+                                    // E3の②: 行を消す（要件 11.2）。**Shiftも
+                                    // 見る**——`Ctrl+K`だけならEmacsの「行末まで
+                                    // 消す」と読める鍵で、そちらは要件 11.4 の
+                                    // ものである。
+                                    } else if event.modifiers.control && event.modifiers.shift
+                                        && (event.text == "k" || event.text == "K" || event.text == "\u{b}") {
+                                        root.line-edit(4);
+                                        accept
                                     // E1: **本文に戻ってもF3で次／前へ。**帯は
                                     // 開いていなくてよい——最後に探した語は
                                     // `find-needle`に残っている。
@@ -2161,6 +2173,16 @@ export component EditorPane inherits Rectangle {
                                         accept
                                     } else if event.text == Key.Delete {
                                         root.delete-pressed();
+                                        accept
+                                    // E3の②（要件 11.2）: 行そのものを動かす。
+                                    // **Ctrlは付けない**——`Ctrl+Alt+矢印`は隣の
+                                    // ペインへ移る鍵である（要件 11.3）。
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                                        // 0=前へ 1=後へ 2=前へ写す 3=後へ写す
+                                        root.line-edit(
+                                            (event.modifiers.shift ? 2 : 0)
+                                            + (event.text == Key.DownArrow ? 1 : 0));
                                         accept
                                     } else if event.text == Key.UpArrow {
                                         // A step along the line in vertical text,

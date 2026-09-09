@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text_blocks::{
@@ -725,6 +727,146 @@ pub fn line_span(source: &str, byte: usize) -> (usize, usize) {
         .find('\n')
         .map_or(source.len(), |newline| head + newline + 1);
     (head, end)
+}
+
+/// 行そのものへの編集——動かす・複製する・消す（E3の②）。
+///
+/// **上下ではなく、文書順の前と後**（書き手の選択 2026-09-10）。E3が「縦書きでは
+/// 画面の上下ではなく文書順の前／後として説明する」と言っているとおりで、`Alt+↑`は
+/// どちらの向きの面でも「前の行と入れ替える」である——縦書きで画面に合わせると
+/// `Alt+←`が要件 11.2 の閲覧履歴とぶつかる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEdit {
+    /// `Alt+↑`——前の行と入れ替える。
+    MoveBefore,
+    /// `Alt+↓`——後の行と入れ替える。
+    MoveAfter,
+    /// `Shift+Alt+↑`——前へ写す。
+    CopyBefore,
+    /// `Shift+Alt+↓`——後へ写す。
+    CopyAfter,
+    /// `Ctrl+Shift+K`——行ごと消す。
+    Drop,
+}
+
+/// 選ばれているぶんが覆う論理行（E3の②）。
+///
+/// **カーソルだけでも1行。**行の編集は行に対する操作なので、選ばれていなければ
+/// カーソルのある行がその1行である。
+///
+/// **終わりがちょうど行頭なら、その行は入らない。**選択の終わりは「そこまで」で
+/// あって、次の行を指しているのではない——3行目の頭で止めた選択が3行目ごと
+/// 動いたら、書き手は選んでいないものを動かされたことになる。
+pub fn selected_lines(source: &str, start: usize, end: usize) -> (usize, usize) {
+    let (from, to) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let (first, first_end) = line_span(source, from);
+    let (last_start, last_end) = line_span(source, to);
+    let end = if to == last_start && to > first {
+        last_start
+    } else {
+        last_end.max(first_end)
+    };
+    (first, end)
+}
+
+/// 行の編集の結果——**書き換える範囲と、そこへ入る字と、選び直す範囲**（E3の②）。
+///
+/// **`None`は「できない」。**先頭の行を前へ、末尾の行を後へは動かせない
+/// ——黙って何もしないのではなく、呼ぶ側がそう言えるように`None`で返す。
+///
+/// **改行は行と行のあいだにある。**組み直しは本文だけを並べ、あいだに改行を1つずつ
+/// 置く——最後の改行は、元の範囲が持っていたときだけ付ける。**末尾に改行の無い
+/// 文書で最後の行を動かしても、改行が増えたり減ったりしない。**
+pub fn line_edit(
+    source: &str,
+    span: (usize, usize),
+    what: LineEdit,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    let (start, end) = span;
+    let moved = &source[start..end];
+    match what {
+        LineEdit::MoveBefore => {
+            if start == 0 {
+                return None;
+            }
+            let (above_start, _) = line_span(source, start - 1);
+            let above = &source[above_start..start];
+            let region = above_start..end;
+            let text = rejoin(&[moved, above], source[region.clone()].ends_with('\n'));
+            let chosen = (above_start, above_start + body(moved).len() + 1);
+            Some((region, text, chosen))
+        }
+        LineEdit::MoveAfter => {
+            if end >= source.len() {
+                return None;
+            }
+            let (_, below_end) = line_span(source, end);
+            let below = &source[end..below_end];
+            let region = start..below_end;
+            let ends_with_newline = source[region.clone()].ends_with('\n');
+            let text = rejoin(&[below, moved], ends_with_newline);
+            let head = start + body(below).len() + 1;
+            let chosen = (
+                head,
+                head + body(moved).len() + usize::from(ends_with_newline),
+            );
+            Some((region, text, chosen))
+        }
+        LineEdit::CopyBefore | LineEdit::CopyAfter => {
+            let region = start..end;
+            let ends_with_newline = moved.ends_with('\n');
+            let text = rejoin(&[moved, moved], ends_with_newline);
+            let second = start + body(moved).len() + 1;
+            // **写したほうが選ばれる。**押し続けた書き手の手元では、写しが次の
+            // 写しの元になる——`Shift+Alt+↓`を3回押せば3つ増える。
+            let chosen = if what == LineEdit::CopyBefore {
+                (start, second)
+            } else {
+                (
+                    second,
+                    second + body(moved).len() + usize::from(ends_with_newline),
+                )
+            };
+            Some((region, text, chosen))
+        }
+        LineEdit::Drop => {
+            // **末尾の行を消すときは、その手前の改行も。**行だけ消して改行を
+            // 置いていくと、空の行が1つ増える。
+            let region = if end == source.len() && start > 0 {
+                start - 1..end
+            } else {
+                start..end
+            };
+            let at = region.start;
+            Some((region, String::new(), (at, at)))
+        }
+    }
+}
+
+/// 行の本文——末尾の改行を落としたもの（[`line_edit`]）。
+fn body(block: &str) -> &str {
+    block.strip_suffix('\n').unwrap_or(block)
+}
+
+/// 行の並びを組み直す（[`line_edit`]）。
+///
+/// **改行はあいだに1つずつ、最後は言われたとおり。**
+fn rejoin(blocks: &[&str], newline_at_end: bool) -> String {
+    let mut out = String::new();
+    for (at, block) in blocks.iter().enumerate() {
+        if at > 0 {
+            out.push('\n');
+        }
+        out.push_str(body(block));
+    }
+    if newline_at_end {
+        out.push('\n');
+    }
+    out
 }
 
 /// Whether a character is inside a word, for 要件 11.4's `Alt+F` and `Alt+B`.
@@ -2324,6 +2466,117 @@ mod tests {
             line_span(source, source.len()),
             ("一\n二\n".len(), source.len())
         );
+    }
+
+    /// 行の編集を当てて、出来上がる本文と選び直される範囲を見る（E3の②）。
+    fn edited(source: &str, at: (usize, usize), what: LineEdit) -> Option<(String, String)> {
+        let span = selected_lines(source, at.0, at.1);
+        let (region, text, chosen) = line_edit(source, span, what)?;
+        let mut next = source.to_owned();
+        next.replace_range(region, &text);
+        let picked = next[chosen.0..chosen.1].to_owned();
+        Some((next, picked))
+    }
+
+    /// E3の②: 前の行と入れ替える。**選ばれているのは動いた行のまま**なので、
+    /// もう一度押せばさらに前へ行く。
+    #[test]
+    fn a_line_changes_places_with_the_one_before_it() {
+        let source = "一\n二\n三\n";
+        let second = "一\n".len();
+
+        let (next, picked) =
+            edited(source, (second, second), LineEdit::MoveBefore).expect("動かせる");
+
+        assert_eq!(next, "二\n一\n三\n");
+        assert_eq!(picked, "二\n");
+        // 先頭の行は前へ行けない。
+        assert!(edited(source, (0, 0), LineEdit::MoveBefore).is_none());
+    }
+
+    /// E3の②: 後の行と入れ替える。**末尾の行は後へ行けない。**
+    #[test]
+    fn a_line_changes_places_with_the_one_after_it() {
+        let source = "一\n二\n三\n";
+
+        let (next, picked) = edited(source, (0, 0), LineEdit::MoveAfter).expect("動かせる");
+
+        assert_eq!(next, "二\n一\n三\n");
+        assert_eq!(picked, "一\n");
+        assert!(edited(source, (source.len(), source.len()), LineEdit::MoveAfter).is_none());
+    }
+
+    /// E3の②: **末尾に改行の無い文書でも、改行は増えも減りもしない。**
+    #[test]
+    fn moving_the_last_line_neither_gains_nor_loses_a_line_break() {
+        let source = "一\n二";
+        let second = "一\n".len();
+
+        let (up, picked) =
+            edited(source, (second, second), LineEdit::MoveBefore).expect("動かせる");
+        assert_eq!(up, "二\n一");
+        assert_eq!(picked, "二\n");
+
+        let (down, picked) = edited(source, (0, 0), LineEdit::MoveAfter).expect("動かせる");
+        assert_eq!(down, "二\n一");
+        assert_eq!(picked, "一");
+    }
+
+    /// E3の②: いくつも選んでいれば、そのぶんが1つの塊として動く。
+    #[test]
+    fn every_line_the_selection_touches_moves_together() {
+        let source = "一\n二\n三\n四\n";
+        // 「二」の途中から「三」の途中まで。
+        let at = ("一\n".len() + 1, "一\n二\n".len() + 1);
+
+        let (next, picked) = edited(source, at, LineEdit::MoveAfter).expect("動かせる");
+
+        assert_eq!(next, "一\n四\n二\n三\n");
+        assert_eq!(picked, "二\n三\n");
+    }
+
+    /// E3の②: **終わりがちょうど行頭なら、その行は入らない。**
+    #[test]
+    fn a_selection_that_stops_at_a_line_head_leaves_that_line_alone() {
+        let source = "一\n二\n三\n";
+
+        assert_eq!(selected_lines(source, 0, "一\n".len()), (0, "一\n".len()));
+    }
+
+    /// E3の②: 写しは前へも後へも。**写したほうが選ばれる**ので、押し続ければ増える。
+    #[test]
+    fn a_copied_line_is_the_one_left_selected() {
+        let source = "一\n二\n";
+
+        let (next, picked) = edited(source, (0, 0), LineEdit::CopyAfter).expect("写せる");
+        assert_eq!(next, "一\n一\n二\n");
+        assert_eq!(picked, "一\n");
+
+        // 末尾の行（改行なし）を写しても、末尾に改行は生えない。
+        let last = "一\n".len();
+        let (next, _) = edited("一\n二", (last, last), LineEdit::CopyBefore).expect("写せる");
+        assert_eq!(next, "一\n二\n二");
+    }
+
+    /// E3の②: 消すと行ごと消える。**末尾の行では、その手前の改行も。**
+    #[test]
+    fn dropping_a_line_takes_its_line_break_with_it() {
+        let second = "一\n".len();
+        assert_eq!(
+            edited("一\n二\n三\n", (second, second), LineEdit::Drop)
+                .expect("消せる")
+                .0,
+            "一\n三\n"
+        );
+        // 末尾の行。改行を置いていくと空の行が増える。
+        assert_eq!(
+            edited("一\n二", (second, second), LineEdit::Drop)
+                .expect("消せる")
+                .0,
+            "一"
+        );
+        // 1行しかない文書は、空になる。
+        assert_eq!(edited("一", (0, 0), LineEdit::Drop).expect("消せる").0, "");
     }
 
     #[test]

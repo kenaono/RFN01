@@ -2130,6 +2130,24 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // E3の②: 行そのものを動かす・写す・消す。**番号は窓と1対1**で、増えたときに
+    // 片方だけ直すことがないよう、対応はここに1つだけ書く。
+    let weak = window.as_weak();
+    let line_live = live.clone();
+    window.on_pane_line_edit(move |pane, what| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let what = match what {
+            0 => document::LineEdit::MoveBefore,
+            1 => document::LineEdit::MoveAfter,
+            2 => document::LineEdit::CopyBefore,
+            3 => document::LineEdit::CopyAfter,
+            _ => document::LineEdit::Drop,
+        };
+        edit_lines(&window, &line_live, PaneId::from_index(pane), what);
+    });
+
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
@@ -13100,6 +13118,86 @@ fn insert_pane_text(
     id.draw_edit(window, states, cache, document, &source, next, change);
     let name = id.log_name();
     log_edit(cache, &name, &source, started, cloned_ms, stored_ms);
+}
+
+/// 行そのものを動かす・写す・消す（E3の②）。
+///
+/// **選ばれている行ぜんぶが1つの塊。**カーソルだけならその1行で、選択が3行を
+/// またいでいれば3行が一緒に動く（`document::selected_lines`）。
+///
+/// **普通の編集の道を通る**ので、取り消しは1回で戻り、同じ文書を出している別の面も
+/// 付いてくる（要件 7.6）——`draw_edit`が両方をやる。**1操作＝1つの取り消し**：
+/// 入れ替えは「消して入れる」の形なので、続けて押しても打鍵のようには繋がらない。
+///
+/// **先頭の行を前へ、末尾の行を後へは動かせない。**`line_edit`が`None`を返すので、
+/// ここは何もしない——動かないことは画面に出ている（行がそこにある）。
+fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineEdit) {
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let (from, to) = {
+        let state = state.borrow();
+        match selection_source_range(&state) {
+            Some((start, end)) => (start, end),
+            None => {
+                let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
+                (caret, caret)
+            }
+        }
+    };
+    let span = document::selected_lines(&source, from, to);
+    let Some((region, text, chosen)) = document::line_edit(&source, span, what) else {
+        return;
+    };
+    let mut next = source.clone();
+    next.replace_range(region.clone(), &text);
+    // **写しは文書を増やす**ので、打鍵や貼り付けと同じ上限を通る（要件 8.2）。
+    // 越えるなら何も起きない——保存はできて開き直せないファイルを作らない。
+    if next.chars().count() > MAX_DOCUMENT_CHARACTERS {
+        window.set_render_status(over_limit_message(&text).into());
+        return;
+    }
+    let change = Change {
+        at: region.start,
+        removed: region.len(),
+        inserted: text.len(),
+    };
+    document.record(region.start, source[region.clone()].to_owned(), text);
+    *document.text.borrow_mut() = next.clone();
+    {
+        let mut state = state.borrow_mut();
+        // **動いた行が選ばれたまま**なので、もう一度押せばさらに動く。
+        state.selection_anchor_source_byte = Some(chosen.0);
+        state.caret_source_byte = Some(chosen.1);
+        state.active_line_start = Some(source_line_start(&next, chosen.1));
+        state.preferred_line = None;
+        state.preedit.clear();
+        state.rectangular = false;
+        state.mark = false;
+        state.search_selection = None;
+        state.word_drag = None;
+        state.line_drag = None;
+    }
+    live.cache.borrow_mut().log_diag(
+        "lines",
+        &format!(
+            "pane={} {what:?} region={}..{} chose={}..{}",
+            id.log_name(),
+            region.start,
+            region.end,
+            chosen.0,
+            chosen.1,
+        ),
+    );
+    id.draw_edit(
+        window,
+        &live.states,
+        &live.cache,
+        &document,
+        &next,
+        chosen.1,
+        change,
+    );
 }
 
 /// Delete the grapheme cluster beside a pane's caret, or its selection.
