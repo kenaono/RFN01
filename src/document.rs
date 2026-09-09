@@ -564,6 +564,79 @@ pub fn caret_place(source: &str, byte: usize) -> (usize, usize) {
     (line, column)
 }
 
+/// 打たれた行番号を読む——`128`と`12:5`（E4、書き手の選択 2026-09-10）。
+///
+/// **ステータスバーが`Ln 12, Col 5`と出しているので、桁も受ける。**画面が言って
+/// いる形をそのまま打てるほうがよく、桁を言わなければ行頭に着く。
+///
+/// **全角の数字と`：`も受ける。**IMEを立てたまま帯へ来た書き手が`１２`と打つのは
+/// 打ち間違いではない——`半角で打ち直してください`と言うために、この機能はある
+/// わけではない。
+///
+/// `None`は「番号として読めない」。0行・0桁も`None`である——[`caret_place`]が
+/// 1から数えているのだから、0はこの編集器のどこにも無い位置である。
+pub fn read_place(input: &str) -> Option<(usize, Option<usize>)> {
+    let plain: String = input
+        .trim()
+        .chars()
+        .map(|character| match character {
+            // 全角の数字と、全角のコロン。
+            '０'..='９' => char::from(b'0' + (character as u32 - '０' as u32) as u8),
+            '：' => ':',
+            other => other,
+        })
+        .collect();
+    let (line, column) = match plain.split_once(':') {
+        Some((line, column)) => (line, Some(column)),
+        None => (plain.as_str(), None),
+    };
+    let line = read_number(line)?;
+    let column = match column {
+        Some(column) => Some(read_number(column)?),
+        None => None,
+    };
+    Some((line, column))
+}
+
+/// 1以上の数として読めるか。**空白は挟まっていてよい**（`12 : 5`）。
+fn read_number(input: &str) -> Option<usize> {
+    let number: usize = input.trim().parse().ok()?;
+    (number >= 1).then_some(number)
+}
+
+/// 行と桁が指すバイト位置——[`caret_place`]の逆（E4）。
+///
+/// **行が無ければ`None`。**書き手の選択（2026-09-10）：越えた番号で末尾へ
+/// 連れて行くのではなく、動かずに言う。E4は「他の人や別の道具から『何行目』と
+/// 示された箇所へ行くため」の機能なので、**無い行への着地は「手元の原稿が違う」
+/// という知らせを消してしまう。**
+///
+/// **桁は行の終わりで止まる。**行より長い桁は打ち間違いか、別の道具の数え方で
+/// あって、次の行へこぼれてよいものではない。桁を言わなければ行頭。
+///
+/// 返すのは必ず字の切れ目である（桁は書記素で数える、[`caret_place`]と同じ）
+/// ——**サロゲートや結合文字の途中へは入らない。**
+pub fn place_of(source: &str, line: usize, column: Option<usize>) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    let mut head = 0;
+    for _ in 1..line {
+        head += source[head..].find('\n')? + 1;
+    }
+    let tail = source[head..]
+        .find('\n')
+        .map_or(source.len(), |newline| head + newline);
+    let Some(column) = column else {
+        return Some(head);
+    };
+    let mut at = head;
+    for grapheme in source[head..tail].graphemes(true).take(column - 1) {
+        at += grapheme.len();
+    }
+    Some(at)
+}
+
 /// Whether a character is inside a word, for 要件 11.4's `Alt+F` and `Alt+B`.
 ///
 /// **Everything that is not punctuation or space.** 要件 11.4 says the move
@@ -2059,6 +2132,61 @@ mod tests {
         let levels = heading_levels(source);
         assert_eq!(levels.iter().filter(|level| **level > 0).count(), 3);
         assert!(outline("見出しのない文書").is_empty());
+    }
+
+    /// E4: 打たれた番号を読む。**画面が出している形をそのまま打てる。**
+    #[test]
+    fn a_typed_place_reads_as_a_line_and_a_column() {
+        assert_eq!(read_place("128"), Some((128, None)));
+        assert_eq!(read_place("  12 : 5 "), Some((12, Some(5))));
+        // IMEを立てたまま打った全角も同じ番号である。
+        assert_eq!(read_place("１２：５"), Some((12, Some(5))));
+        assert_eq!(read_place(""), None);
+        assert_eq!(read_place("さいご"), None);
+        // 1から数える編集器に0行目は無い。
+        assert_eq!(read_place("0"), None);
+        assert_eq!(read_place("12:0"), None);
+        assert_eq!(read_place("-3"), None);
+    }
+
+    /// E4: 行と桁の指す位置は、[`caret_place`]がそこで言うことと同じ。
+    #[test]
+    fn a_place_and_the_caret_agree_about_where_it_is() {
+        let source = "一行目\n二行目です\n三行目";
+
+        for (line, column) in [(1, 1), (2, 3), (3, 2)] {
+            let at = place_of(source, line, Some(column)).expect("その行はある");
+            assert_eq!(caret_place(source, at), (line, column));
+        }
+        // 桁を言わなければ行頭。
+        assert_eq!(place_of(source, 2, None), Some("一行目\n".len()));
+    }
+
+    /// E4: **無い行は`None`**——越えた番号で末尾へ連れて行かない
+    /// （書き手の選択 2026-09-10）。
+    #[test]
+    fn a_line_that_is_not_there_is_not_a_place() {
+        let source = "一行目\n二行目";
+
+        assert_eq!(place_of(source, 3, None), None);
+        assert_eq!(place_of(source, 0, None), None);
+        assert!(place_of(source, 2, None).is_some());
+        // 最後の行に改行が無くても、その行はある。
+        assert_eq!(place_of("一行だけ", 1, None), Some(0));
+        assert_eq!(place_of("", 1, None), Some(0));
+    }
+
+    /// E4: **桁は行の終わりで止まり、字の途中へは入らない。**
+    #[test]
+    fn a_column_stops_at_the_end_of_its_own_line() {
+        let source = "あい\n家族👨‍👩‍👧です";
+
+        // 行より長い桁は行末まで。次の行へはこぼれない。
+        assert_eq!(place_of(source, 1, Some(9)), Some("あい".len()));
+        // 4つのスカラーで書かれた絵文字も1桁ぶん。
+        let at = place_of(source, 2, Some(4)).expect("その行はある");
+        assert_eq!(&source["あい\n".len()..at], "家族👨‍👩‍👧");
+        assert!(source.is_char_boundary(at));
     }
 
     #[test]

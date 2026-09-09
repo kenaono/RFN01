@@ -28,15 +28,15 @@ use crate::{
     AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, add_word_to_group, choose_find_option, clear_find, close_word_naming,
     collect_search, colour_row, count_in_pane, drop_tree_row, edit_word_file, export_word_group,
-    file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
+    file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row, go_to_line,
     go_to_remembered_folder, hold_word_modes, ime, navigate, new_word_group, new_word_mode,
     next_word_colour, open_work_folder, pane_word_mode, paste_into_tab, paste_targets,
     pick_tree_row, publish_left, publish_tabs, publish_word_mode_of, publish_word_modes,
     quick_draft, read_word_source, remove_word_from_group, rename_word_group, rename_word_mode,
     replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
     schedule_relayout, search_in_folder, search_work_folder, selected_runs, set_colour,
-    set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command,
-    walk_find_history, word_modes_now,
+    set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tell_goto, toggle_goto,
+    tree_command, walk_find_history, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -526,6 +526,31 @@ pub fn wire_find(window: &AppWindow, live: &Live) {
     window.on_find_cleared(move || {
         if let Some(window) = weak.upgrade() {
             clear_find(&window, &clear_live);
+        }
+    });
+
+    // E4: `Ctrl+G`。**3つとも同じ帯の口**——出す・打つ・行く。
+    let weak = window.as_weak();
+    let goto_live = live.clone();
+    window.on_goto_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            toggle_goto(&window, &goto_live);
+        }
+    });
+
+    let weak = window.as_weak();
+    let goto_typed_live = live.clone();
+    window.on_goto_typed(move || {
+        if let Some(window) = weak.upgrade() {
+            tell_goto(&window, &goto_typed_live);
+        }
+    });
+
+    let weak = window.as_weak();
+    let goto_accepted_live = live.clone();
+    window.on_goto_accepted(move || {
+        if let Some(window) = weak.upgrade() {
+            go_to_line(&window, &goto_accepted_live);
         }
     });
 

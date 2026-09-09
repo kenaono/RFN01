@@ -3851,6 +3851,127 @@ fn clear_find(window: &AppWindow, live: &Live) {
     count_in_pane(window, live);
 }
 
+/// 行番号の帯が向いているペイン（E4）。
+///
+/// **帯は自分が動かす本文の中にある**——検索の帯と同じ約束である
+/// （`find_target`）。開いていなければ鍵盤のあるペイン。
+fn goto_target(window: &AppWindow) -> PaneId {
+    if window.get_goto_open() {
+        let bar = PaneId::from_index(window.get_goto_pane());
+        if bar.is_shown(window) {
+            return bar;
+        }
+    }
+    focused_pane(window)
+}
+
+/// 帯に、行けるところを言わせる（E4）。
+///
+/// **開いた瞬間から範囲が出ている。**「128行までです」を打ってから知るのでは
+/// 遅く、`1〜128行`はこの文書がどれだけあるかの答えでもある（要件 10 の行数と
+/// 同じ数え方——折り返しの表示行ではなく、論理行である）。
+///
+/// 打っているあいだも同じ道を通るので、**越えた番号はEnterの前に分かる。**
+fn tell_goto(window: &AppWindow, live: &Live) {
+    let id = goto_target(window);
+    let document = live.states.document(id);
+    let source = document.text.borrow();
+    // **ステータスバーと同じ数**（要件 10）。行数を数え直すのではなく、そこが
+    // 持っている数を訊く——2つの数え方があれば、いつか食い違う。
+    let lines = document
+        .counts
+        .borrow_mut()
+        .get(&source)
+        .stats()
+        .logical_lines;
+    let typed = window.get_goto_line().to_string();
+    let told = match document::read_place(&typed) {
+        _ if typed.trim().is_empty() => format!("1〜{lines}行"),
+        None => "行番号を打ってください".to_owned(),
+        Some((line, _)) if line > lines => format!("{lines}行までです"),
+        Some(_) => format!("1〜{lines}行"),
+    };
+    window.set_goto_status(told.into());
+}
+
+/// 行番号の帯を出す／閉じる——`Ctrl+G`（要件 11.2、E4）。
+///
+/// **同じ鍵が閉じる**（検索の帯と同じ、要件 7.7）。閉じるときは鍵盤を紙へ返す
+/// ——帯を閉じたのに打てないのは、閉じていないのと同じことである。
+fn toggle_goto(window: &AppWindow, live: &Live) {
+    let here = focused_pane(window);
+    if window.get_goto_open() && window.get_goto_pane() == here.index() {
+        close_goto(window);
+        return;
+    }
+    window.set_goto_pane(here.index());
+    window.set_goto_open(true);
+    window.set_goto_generation(window.get_goto_generation() + 1);
+    tell_goto(window, live);
+}
+
+/// 帯を畳んで、鍵盤を紙へ返す（E4）。
+fn close_goto(window: &AppWindow) {
+    window.set_goto_open(false);
+    restore_editor_focus(window);
+}
+
+/// 打たれた行へ行く（E4）。
+///
+/// **無い行では動かない**（書き手の選択 2026-09-10）。E4は「他の人や別の道具から
+/// 『何行目』と示された箇所へ行くため」の機能なので、越えた番号で末尾へ着地すると
+/// **「手元の原稿が違う」という知らせが消える**——行ったのに違う行、が起きる。
+///
+/// **着いたら帯は畳む。**行の指定は1回の用事で、探す語のように次があるものでは
+/// ない。畳めば鍵盤は紙へ戻り、書き手はその行から打ち始められる。
+///
+/// **横書きでも縦書きでも同じソース位置**（E4）。面の向きは組み方であって、
+/// 文書のどこかという話ではない（技術検証 3.12）。
+fn go_to_line(window: &AppWindow, live: &Live) {
+    let id = goto_target(window);
+    let typed = window.get_goto_line().to_string();
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let Some((line, column)) = document::read_place(&typed) else {
+        window.set_goto_status("行番号を打ってください".into());
+        return;
+    };
+    let lines = document
+        .counts
+        .borrow_mut()
+        .get(&source)
+        .stats()
+        .logical_lines;
+    let Some(at) = document::place_of(&source, line, column) else {
+        window.set_goto_status(format!("{lines}行までです").into());
+        live.cache.borrow_mut().log_diag(
+            "goto",
+            &format!("pane={} line={line} of={lines} outside", id.log_name()),
+        );
+        return;
+    };
+    let state = live.states.of(id);
+    {
+        let mut state = state.borrow_mut();
+        // **選択は残さない。**行を指すことは範囲を選ぶことではなく、着いた先で
+        // そのまま打てるほうがよい。
+        state.selection_anchor_source_byte = Some(at);
+        state.caret_source_byte = Some(at);
+        state.active_line_start = Some(source_line_start(&source, at));
+        state.preferred_line = None;
+        // **検索が置いた選択ではない**（E1の②が見分けているのはこれである）。
+        state.search_selection = None;
+    }
+    let told = format!(
+        "pane={} line={line} of={lines} column={} at={at}",
+        id.log_name(),
+        column.map_or_else(|| "-".to_owned(), |column| column.to_string()),
+    );
+    live.cache.borrow_mut().log_diag("goto", &told);
+    refresh_pane_from_state(window, &live.cache, &document, id, &state, &source);
+    close_goto(window);
+}
+
 /// 探した語を1つ遡る／戻る——検索欄と置換欄の↑↓（E1の④）。
 ///
 /// **欄の字が入れ替わるだけで、本文は動かない。**打っているあいだと同じ約束で

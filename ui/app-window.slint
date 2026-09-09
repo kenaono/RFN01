@@ -286,6 +286,16 @@ export component AppWindow inherits Window {
     callback find-option(int);
     /// E1の④: 探した語の履歴を1つ遡る／戻る。1つめは↑か、2つめは置換欄か。
     callback find-history(bool, bool);
+    // E4: 指定の行へ行く帯。**窓に1つ**——検索の帯と同じで、開いているペインが
+    // その帯の相手である。
+    in-out property <bool> goto-open: false;
+    in-out property <int> goto-pane: 0;
+    in-out property <string> goto-line;
+    in-out property <string> goto-status;
+    in-out property <int> goto-generation: 0;
+    callback goto-requested();
+    callback goto-typed();
+    callback goto-accepted();
     /// 探す条件を捨てる（E1、書き手の求め 2026-09-09）。
     callback find-cleared();
     /// Which pane the find bar is in, and whether it has its replace row
@@ -926,6 +936,17 @@ export component AppWindow inherits Window {
                                     root.find-generation += 1;
                                     root.focus-generation += 1;
                                     app-menu.close();
+                                }
+                            }
+                            // E4: 指定の行へ。**探す相手がいないときは出さない**
+                            // のは上の行と同じ理由で、シェルの立っているペインに
+                            // 行番号は無い。
+                            if !root.panes[root.focused-pane].terminal: MenuRow {
+                                title: "Go to Line…";
+                                shortcut: "Ctrl+G";
+                                activated => {
+                                    app-menu.close();
+                                    root.goto-requested();
                                 }
                             }
                             MenuRow {
@@ -1723,6 +1744,10 @@ export component AppWindow inherits Window {
                         find-regex: pane.find-regex;
                         find-in-scope: pane.find-scope-end > pane.find-scope-start;
                         find-generation: root.find-generation;
+                        goto-open: root.goto-open && pane.id == root.goto-pane;
+                        goto-line <=> root.goto-line;
+                        goto-status: root.goto-status;
+                        goto-generation: root.goto-generation;
                         width: parent.width;
                         height: parent.height;
 
@@ -1920,6 +1945,22 @@ export component AppWindow inherits Window {
                         }
                         find-history(back, replacing) => {
                             root.find-history(back, replacing);
+                        }
+                        // E4: 出すのはRust——**開いた瞬間に「1〜128行」と言う**
+                        // には、その文書に何行あるかを知っていなければならない。
+                        goto-requested => {
+                            root.focused-pane = pane.id;
+                            root.goto-requested();
+                        }
+                        goto-typed => {
+                            root.goto-typed();
+                        }
+                        goto-accepted => {
+                            root.goto-accepted();
+                        }
+                        goto-dismissed => {
+                            root.goto-open = false;
+                            root.focus-generation += 1;
                         }
                         find-cleared => {
                             root.find-cleared();

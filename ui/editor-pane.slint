@@ -313,6 +313,12 @@ export component EditorPane inherits Rectangle {
     in property <bool> find-regex;
     in property <bool> find-in-scope;
     in property <int> find-generation;
+    /// E4: 指定の行へ行く帯。**検索の帯と同じ場所・同じ作り**で、開いているのは
+    /// どちらか一方とは限らない（両方出ていれば上下に並ぶ）。
+    in property <bool> goto-open;
+    in-out property <string> goto-line;
+    in property <string> goto-status;
+    in property <int> goto-generation;
     /// 帯が出たときに鍵盤をそこへ置くか（E1、書き手の求め 2026-09-09）。
     /// **F3は本文で押される鍵**なので、そのとき帯は出るが鍵盤は動かない。
     in property <bool> find-focus: true;
@@ -557,6 +563,11 @@ export component EditorPane inherits Rectangle {
     callback find-option(int);
     /// 探した語を1つ遡る／戻る（E1の④）。1つめは↑か、2つめは置換欄か。
     callback find-history(bool, bool);
+    /// E4: 行番号の帯を出す／閉じる（`Ctrl+G`）、打っている、行く。
+    callback goto-requested();
+    callback goto-typed();
+    callback goto-accepted();
+    callback goto-dismissed();
     /// 探す条件を捨てる——語・置換語・3つの入切・範囲（E1、書き手の求め）。
     callback find-cleared();
     /// 帯を出す。**開いていれば何もしない**（`find-requested`は同じ鍵で閉じる
@@ -699,6 +710,17 @@ export component EditorPane inherits Rectangle {
     function find-keys(event: KeyEvent, replacing: bool) -> EventResult {
         if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
             root.find-history(event.text == Key.UpArrow, replacing);
+            return accept;
+        }
+        return root.find-shortcut(event);
+    }
+
+    /// 行番号の欄が受ける鍵（E4）。**同じ`Ctrl+G`が閉じる**（帯の約束、要件 7.7）。
+    /// 検索の鍵はそのまま通すので、番号の帯から`Ctrl+F`で語の帯へ移れる。
+    function goto-keys(event: KeyEvent) -> EventResult {
+        if (event.modifiers.control
+            && (event.text == "g" || event.text == "G" || event.text == "\u{7}")) {
+            root.goto-dismissed();
             return accept;
         }
         return root.find-shortcut(event);
@@ -1500,6 +1522,86 @@ export component EditorPane inherits Rectangle {
             }
         }
 
+        // E4: 指定の行へ行く帯。**検索の帯と同じ場所**——一行、Enterで行き、
+        // `Esc`で閉じる。行けたら畳んで鍵盤を紙へ返す（行の指定は1回の用事で、
+        // 探す語のように次があるものではない）。
+        if root.goto-open: Rectangle {
+            height: 34px;
+            background: Tok.chrome;
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Tok.rule;
+            }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                spacing: 6px;
+
+                Rectangle {
+                    width: 16px;
+                    horizontal-stretch: 0;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        commands: Icons.goto;
+                        tint: Tok.ink-faint;
+                    }
+                }
+
+                line-field := Field {
+                    horizontal-stretch: 1;
+                    min-width: 70px;
+                    max-width: 160px;
+                    placeholder: "Go to line";
+                    text <=> root.goto-line;
+                    property <int> asked: root.goto-generation;
+                    init => {
+                        self.take-focus-selecting-all();
+                    }
+                    changed asked => {
+                        self.take-focus-selecting-all();
+                    }
+                    accepted => {
+                        root.goto-accepted();
+                    }
+                    edited => {
+                        root.goto-typed();
+                    }
+                    escaped => {
+                        root.goto-dismissed();
+                    }
+                    shortcut(event) => {
+                        return root.goto-keys(event);
+                    }
+                }
+
+                // **どこまで行けるかが、開いた瞬間から出ている。**「128行までです」を
+                // 打ってから知るのでは遅い（E4）。
+                Text {
+                    text: root.goto-status;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+
+                IconButton {
+                    horizontal-stretch: 0;
+                    icon: Icons.close;
+                    tip: "Close";
+                    clicked => {
+                        root.goto-dismissed();
+                    }
+                }
+            }
+        }
+
         VerticalBox {
             padding-top: root.page-margin;
             padding-bottom: root.page-margin;
@@ -1871,6 +1973,12 @@ export component EditorPane inherits Rectangle {
                                     } else if event.modifiers.control
                                         && (event.text == "h" || event.text == "H" || event.text == "\u{8}") {
                                         root.find-requested(true);
+                                        accept
+                                    // E4: 指定の行へ（要件 11.2）。**端末は上で
+                                    // 先に返している**ので、ここには来ない。
+                                    } else if event.modifiers.control
+                                        && (event.text == "g" || event.text == "G" || event.text == "\u{7}") {
+                                        root.goto-requested();
                                         accept
                                     // E1: **本文に戻ってもF3で次／前へ。**帯は
                                     // 開いていなくてよい——最後に探した語は
