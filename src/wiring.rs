@@ -532,9 +532,9 @@ pub fn wire_find(window: &AppWindow, live: &Live) {
     // E4: `Ctrl+G`。**3つとも同じ帯の口**——出す・打つ・行く。
     let weak = window.as_weak();
     let goto_live = live.clone();
-    window.on_goto_requested(move || {
+    window.on_goto_requested(move |taking| {
         if let Some(window) = weak.upgrade() {
-            toggle_goto(&window, &goto_live);
+            toggle_goto(&window, &goto_live, taking);
         }
     });
 

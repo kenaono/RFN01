@@ -293,7 +293,7 @@ export component AppWindow inherits Window {
     in-out property <string> goto-line;
     in-out property <string> goto-status;
     in-out property <int> goto-generation: 0;
-    callback goto-requested();
+    callback goto-requested(bool);
     callback goto-typed();
     callback goto-accepted();
     /// 探す条件を捨てる（E1、書き手の求め 2026-09-09）。
@@ -941,12 +941,20 @@ export component AppWindow inherits Window {
                             // E4: 指定の行へ。**探す相手がいないときは出さない**
                             // のは上の行と同じ理由で、シェルの立っているペインに
                             // 行番号は無い。
+                            //
+                            // **頼んでから閉じる**（技術検証 6.24）。条件付きの行は
+                            // `repeater`なので、先に閉じるとハンドラが走っている当の
+                            // 要素ごと消え、次の行へ来ない——書き手の報告 2026-09-10：
+                            // 「6だけうまくいきませんでした」。上の`Find in File…`が
+                            // 頼んでから閉じているのは、同じ穴を踏んだからである。
                             if !root.panes[root.focused-pane].terminal: MenuRow {
                                 title: "Go to Line…";
                                 shortcut: "Ctrl+G";
                                 activated => {
+                                    // メニューから来た求めは「そちらへ移りたい」で
+                                    // あって、閉じてほしいという意味ではない。
+                                    root.goto-requested(true);
                                     app-menu.close();
-                                    root.goto-requested();
                                 }
                             }
                             MenuRow {
@@ -1948,9 +1956,9 @@ export component AppWindow inherits Window {
                         }
                         // E4: 出すのはRust——**開いた瞬間に「1〜128行」と言う**
                         // には、その文書に何行あるかを知っていなければならない。
-                        goto-requested => {
+                        goto-requested(taking) => {
                             root.focused-pane = pane.id;
-                            root.goto-requested();
+                            root.goto-requested(taking);
                         }
                         goto-typed => {
                             root.goto-typed();

@@ -564,7 +564,11 @@ export component EditorPane inherits Rectangle {
     /// 探した語を1つ遡る／戻る（E1の④）。1つめは↑か、2つめは置換欄か。
     callback find-history(bool, bool);
     /// E4: 行番号の帯を出す／閉じる（`Ctrl+G`）、打っている、行く。
-    callback goto-requested();
+    ///
+    /// **引数は「鍵盤を連れてくるだけか」**（書き手の報告 2026-09-10）。本文で
+    /// 押した`Ctrl+G`は同じ鍵で閉じるが、**検索の帯やメニューから来た求めは
+    /// 「そちらへ移りたい」**であって、閉じてほしいという意味ではない。
+    callback goto-requested(bool);
     callback goto-typed();
     callback goto-accepted();
     callback goto-dismissed();
@@ -710,6 +714,16 @@ export component EditorPane inherits Rectangle {
     function find-keys(event: KeyEvent, replacing: bool) -> EventResult {
         if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
             root.find-history(event.text == Key.UpArrow, replacing);
+            return accept;
+        }
+        // E4（書き手の報告 2026-09-10：「検索バーが出ている状態だとCtrl+Gが
+        // 効きません。切り替わるといいと思いました」）。**帯の中の鍵は、その帯の
+        // ものだけではない**——`Ctrl+F`が番号の帯から語の帯へ移れるのと同じ道を、
+        // 逆向きにも通す。**閉じるのではなく移る**ので、探している語の色は
+        // 残ったままである（E1の③）。
+        if (event.modifiers.control
+            && (event.text == "g" || event.text == "G" || event.text == "\u{7}")) {
+            root.goto-requested(true);
             return accept;
         }
         return root.find-shortcut(event);
@@ -1978,7 +1992,7 @@ export component EditorPane inherits Rectangle {
                                     // 先に返している**ので、ここには来ない。
                                     } else if event.modifiers.control
                                         && (event.text == "g" || event.text == "G" || event.text == "\u{7}") {
-                                        root.goto-requested();
+                                        root.goto-requested(false);
                                         accept
                                     // E1: **本文に戻ってもF3で次／前へ。**帯は
                                     // 開いていなくてよい——最後に探した語は

@@ -3898,9 +3898,20 @@ fn tell_goto(window: &AppWindow, live: &Live) {
 ///
 /// **同じ鍵が閉じる**（検索の帯と同じ、要件 7.7）。閉じるときは鍵盤を紙へ返す
 /// ——帯を閉じたのに打てないのは、閉じていないのと同じことである。
-fn toggle_goto(window: &AppWindow, live: &Live) {
+///
+/// `taking`は**「鍵盤を連れてくるだけ」**（書き手の報告 2026-09-10：「検索バーが
+/// 出ている状態だとCtrl+Gが効きません。切り替わるといいと思いました」）。検索の帯や
+/// メニューから来た求めは**そちらへ移りたい**という意味なので、開いている帯を
+/// 閉じてしまうと「効かない」と同じに見える——鍵盤だけを渡す。
+fn toggle_goto(window: &AppWindow, live: &Live, taking: bool) {
     let here = focused_pane(window);
     if window.get_goto_open() && window.get_goto_pane() == here.index() {
+        if taking {
+            // 出ている帯へ鍵盤を移すだけ。時計が欄を選び直す（`goto-generation`）。
+            window.set_goto_generation(window.get_goto_generation() + 1);
+            tell_goto(window, live);
+            return;
+        }
         close_goto(window);
         return;
     }
