@@ -443,6 +443,13 @@ struct EditorState {
     /// 潰れる**。ここに置いた最後の一致と今の選択を比べれば、書き手の手が
     /// 入ったかどうかが分かる。
     search_selection: Option<(usize, usize)>,
+    /// 行番号から始まった選択（E3）。**押した行の頭のバイト。**
+    ///
+    /// **これがあるあいだ、引くと行ごと選ばれる。**番号を押すことは行を指す
+    /// ことなので、そのまま引いた書き手が指しているのも行である——1画素の
+    /// ぶれで行の選択が字の選択へ変わってしまうと、押しただけのつもりが
+    /// 選び直しになる。ボタンを離すと消える。
+    line_drag: Option<usize>,
 }
 
 /// Both panes' states, so that a callback carrying a pane number can reach the
@@ -2074,6 +2081,20 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let state = states.of(id);
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
+        }
+    });
+
+    // E3: ダブルクリックで語を選ぶ。**押した位置は同じ道で訊く**ので、番号の欄で
+    // 2回押されたら行が選ばれたままになる（1回目と2回目が違うことをしない）。
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    window.on_pane_word_selected(move |pane, x, y| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let document = states.document(id);
+            let state = states.of(id);
+            select_word_in_pane(&window, &document, &state, &cache, id, x, y);
         }
     });
 
@@ -3962,24 +3983,15 @@ fn go_to_line(window: &AppWindow, live: &Live) {
         return;
     };
     let state = live.states.of(id);
-    {
-        let mut state = state.borrow_mut();
-        // **選択は残さない。**行を指すことは範囲を選ぶことではなく、着いた先で
-        // そのまま打てるほうがよい。
-        state.selection_anchor_source_byte = Some(at);
-        state.caret_source_byte = Some(at);
-        state.active_line_start = Some(source_line_start(&source, at));
-        state.preferred_line = None;
-        // **検索が置いた選択ではない**（E1の②が見分けているのはこれである）。
-        state.search_selection = None;
-    }
+    // **選択は残さない。**行を指すことは範囲を選ぶことではなく、着いた先でそのまま
+    // 打てるほうがよい——長さの無い範囲は、そこに立っているカーソルである。
+    select_source_range(window, &live.cache, &document, &state, id, &source, at, at);
     let told = format!(
         "pane={} line={line} of={lines} column={} at={at}",
         id.log_name(),
         column.map_or_else(|| "-".to_owned(), |column| column.to_string()),
     );
     live.cache.borrow_mut().log_diag("goto", &told);
-    refresh_pane_from_state(window, &live.cache, &document, id, &state, &source);
     close_goto(window);
 }
 
@@ -4369,17 +4381,53 @@ fn show_source_range(
 ) {
     let document = live.states.document(id);
     let state = live.states.of(id);
+    select_source_range(
+        window,
+        &live.cache,
+        &document,
+        &state,
+        id,
+        source,
+        start,
+        end,
+    );
+    // **これは検索が置いた選択である**（E1）。範囲内検索がこれを見て、書き手が
+    // 選び直したのかどうかを見分ける——**選び方が増えても見分けは1つ**なので、
+    // 置いたのが検索であることは、置いたあとにここだけが言う。
+    state.borrow_mut().search_selection = Some((start, end));
+}
+
+/// 範囲を選んで、そこを見せる（要件 7.1、E3）。
+///
+/// **選ぶ道は1つ。**検索が見つけた一致も、ダブルクリックの語も、行番号を押して
+/// 選んだ行も、選ばれている状態としては同じものである——別々に組み立てていると、
+/// どれか1つがIMEの下書きを消し忘れる（それが起きるのは、選んだ直後に打った
+/// 1文字が消えるときで、原因からいちばん遠いところで見つかる）。
+///
+/// **`search_selection`は消す。**検索が置いた選択だけがそれを名乗ってよい。
+#[allow(clippy::too_many_arguments)]
+fn select_source_range(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    document: &OpenDocument,
+    state: &Rc<RefCell<EditorState>>,
+    id: PaneId,
+    source: &str,
+    start: usize,
+    end: usize,
+) {
     {
         let mut state = state.borrow_mut();
         state.selection_anchor_source_byte = Some(start);
         state.caret_source_byte = Some(end);
         state.active_line_start = Some(source_line_start(source, end));
         state.preferred_line = None;
-        // **これは検索が置いた選択である**（E1）。範囲内検索がこれを見て、
-        // 書き手が選び直したのかどうかを見分ける。
-        state.search_selection = Some((start, end));
+        state.preedit.clear();
+        state.rectangular = false;
+        state.search_selection = None;
     }
-    refresh_pane_from_state(window, &live.cache, &document, id, &state, source);
+    id.set_ime_buffer(window, "");
+    refresh_pane_from_state(window, cache, document, id, state, source);
 }
 
 /// Replace what a search found, and go to the next one (要件 7.7).
@@ -10071,6 +10119,8 @@ fn view_top(
     };
     let mut borrowed = cache.borrow_mut();
     let cache = &mut *borrowed;
+    // **見えている先頭の位置だけが要る。**行番号の欄かどうかは、点を選んだのが
+    // 書き手ではなくここ自身である以上、訊く意味が無い。
     hit_test_pane(
         window,
         cache,
@@ -10081,6 +10131,7 @@ fn view_top(
         x,
         y,
     )
+    .map(|hit| hit.byte)
 }
 
 /// Hold a pane's view on a passage, until the writer looks somewhere else
@@ -12329,7 +12380,7 @@ fn hit_test_pane(
     active_line_start: Option<usize>,
     x: f32,
     y: f32,
-) -> Option<usize> {
+) -> Option<PaneHit> {
     let mut counts = document.counts.borrow_mut();
     let styles = counts.get(source).line_styles();
     // Split so the text and the engine can be borrowed at once, for the reason
@@ -12351,13 +12402,29 @@ fn hit_test_pane(
         window.set_render_status(format!("{label}整形: NG / {error}").into());
         return None;
     }
+    // E3: **番号を押したかどうかは、ここでしか分からない。**欄の広さを知って
+    // いるのは組版側で、返ってくるバイトは欄の中でも本文の位置（その行の頭）で
+    // ある——どちらの問いも同じ点に対する答えなので、一度に訊く。
+    let in_numbers = engine.in_number_column(x, y);
     match engine.hit_test(x, y) {
-        Ok(hit) => Some(shown.source_byte_at_utf16(hit.utf16_position as usize)),
+        Ok(hit) => Some(PaneHit {
+            byte: shown.source_byte_at_utf16(hit.utf16_position as usize),
+            in_numbers,
+        }),
         Err(error) => {
             window.set_render_status(format!("{label}ヒットテスト: NG / {error}").into());
             None
         }
     }
+}
+
+/// 点が当たった場所——本文のバイトと、そこが行番号の欄かどうか（要件 7.1、E3）。
+#[derive(Clone, Copy, Debug)]
+struct PaneHit {
+    /// いちばん近い本文の位置。**欄の中の点でも本文の位置が返る**（その行の頭）。
+    byte: usize,
+    /// 行番号の欄の中か（要件 9 の番号を出している面だけ）。
+    in_numbers: bool,
 }
 
 /// One pane's text and engine, measured and ready to be asked about a caret.
@@ -12447,6 +12514,41 @@ fn update_pane_selection(
     let Some(hit) = hit else {
         return;
     };
+    // E3: **行番号を押したら、その論理行が選ばれる。**番号は本文ではないので、
+    // そこへカーソルを置いても書き手の言ったことにならない——押した先が行その
+    // ものであるほうが、次にすること（動かす・複製する・消す）に繋がる。
+    // **押した瞬間だけ**：そのまま引けば、行の頭から普通の選択が伸びる。
+    let from_numbers = match phase {
+        SelectionPhase::Begin => hit.in_numbers.then_some(hit.byte),
+        // 引いているあいだは、始まりが番号だったかどうかで決まる——途中で
+        // ポインタが本文へ入っても、選んでいるのは行のままである。
+        _ => state.borrow().line_drag,
+    };
+    if from_numbers.is_none() && phase == SelectionPhase::Begin {
+        // **本文で押し直したら、行の選択は終わり。**離した合図（`End`）は
+        // 窓の外へポインタが出ると来ないことがあるので、次に押した回でも畳む。
+        state.borrow_mut().line_drag = None;
+    }
+    if let Some(anchor) = from_numbers {
+        let (first, _) = document::line_span(&source, anchor);
+        let (start, end) = document::line_span(&source, hit.byte);
+        // 上へ引けば上の行まで、下へ引けば下の行まで。**始めた行は必ず入る。**
+        let (start, end) = (first.min(start), first.max(end));
+        {
+            let mut state = state.borrow_mut();
+            state.line_drag = (phase != SelectionPhase::End).then_some(anchor);
+        }
+        cache.borrow_mut().log_diag(
+            &format!("pointer.{}", id.diag_suffix()),
+            &format!(
+                "numbers pane={} {phase:?} lines={start}..{end}",
+                id.log_name()
+            ),
+        );
+        select_source_range(window, cache, document, state, id, &source, start, end);
+        return;
+    }
+    let hit = hit.byte;
 
     let next_active_line_start = source_line_start(&source, hit);
     cache.borrow_mut().log_diag(
@@ -12520,6 +12622,64 @@ fn update_pane_selection(
         let line = format!("{label}ドラッグ選択: {ms:.1}ms", label = id.label(window));
         window.set_render_status(line.into());
     }
+}
+
+/// ダブルクリックが選ぶ語（E3）。
+///
+/// **語の切れ目は`Alt+F`／`Alt+B`と同じ**（`document::word_around`）。規則を2つ
+/// 持たないことのほうが、語の切り方の精度より大事である。
+///
+/// **番号の欄で2回押されたら、行のまま。**1回目が行を選んだのに2回目で語へ
+/// 変わると、押した回数で意味が変わることになる。
+///
+/// **端末には語が無い**（追加要件 Terminal）。画面に出ているのは出力の写しで、
+/// 選ぶ道もそちらが持っている——ここで本文を訊くと、裏の見えない文書に当たる。
+fn select_word_in_pane(
+    window: &AppWindow,
+    document: &Rc<OpenDocument>,
+    state: &Rc<RefCell<EditorState>>,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    x: f32,
+    y: f32,
+) {
+    if cache.borrow_mut().pane(id).terminal.is_some() {
+        return;
+    }
+    let source = document.text.borrow().clone();
+    let active_line_start = PaneId::revealed_line(id.vertical(window), state, &source);
+    let hit = {
+        let mut borrowed = cache.borrow_mut();
+        let cache = &mut *borrowed;
+        hit_test_pane(
+            window,
+            cache,
+            document,
+            id,
+            &source,
+            active_line_start,
+            x,
+            y,
+        )
+    };
+    let Some(hit) = hit else {
+        return;
+    };
+    let (start, end) = if hit.in_numbers {
+        document::line_span(&source, hit.byte)
+    } else {
+        document::word_around(&source, hit.byte)
+    };
+    cache.borrow_mut().log_diag(
+        &format!("pointer.{}", id.diag_suffix()),
+        &format!(
+            "word pane={} at={} span={start}..{end} numbers={}",
+            id.log_name(),
+            hit.byte,
+            u8::from(hit.in_numbers),
+        ),
+    );
+    select_source_range(window, cache, document, state, id, &source, start, end);
 }
 
 /// Move the caret and re-cut the selection without laying the document out.

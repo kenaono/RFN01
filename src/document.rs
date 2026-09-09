@@ -637,6 +637,89 @@ pub fn place_of(source: &str, line: usize, column: Option<usize>) -> Option<usiz
     Some(at)
 }
 
+/// ダブルクリックが選ぶ範囲——**その位置の語**（E3）。
+///
+/// **語の切れ目は`Alt+F`／`Alt+B`の規則とそろえる**（E3がそう言っている）。
+/// [`is_word`]が「句読点でも空白でもない字」なので、日本語では句読点までのひと続きが
+/// 語になる——`黒猫が鳴いた。`で`黒猫が鳴いた`。**規則を2つ持たない**ことのほうが、
+/// 語の切り方の精度より大事である：`Alt+F`が止まらないところでダブルクリックが
+/// 切れたら、書き手はどちらが本当かを覚えなければならない。
+///
+/// **行はまたがない。**改行は語の一部ではなく、行末で押した書き手が次の行まで
+/// 選ぶのは、選びたかったものより多い。
+///
+/// **行末（字の無いところ）で押されたら、手前の語。**打ち終えた語の後ろを押すのは、
+/// その語を指しているのと同じことである。
+pub fn word_around(source: &str, byte: usize) -> (usize, usize) {
+    let byte = crate::floor_char_boundary(source, byte.min(source.len()));
+    let head = source[..byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let tail = source[byte..]
+        .find('\n')
+        .map_or(source.len(), |newline| byte + newline);
+    let line = &source[head..tail];
+    let at = byte - head;
+    // ここの字、無ければ手前の字。どちらも無い（空の行）なら選ぶものが無い。
+    let kind = match line[at..].chars().next() {
+        Some(character) => letter_kind(character),
+        None => match line[..at].chars().next_back() {
+            Some(character) => letter_kind(character),
+            None => return (byte, byte),
+        },
+    };
+    let mut start = at.min(line.len());
+    let mut end = start;
+    for character in line[..start].chars().rev() {
+        if letter_kind(character) != kind {
+            break;
+        }
+        start -= character.len_utf8();
+    }
+    for character in line[end..].chars() {
+        if letter_kind(character) != kind {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    (head + start, head + end)
+}
+
+/// 語・空白・記号の3つ（[`word_around`]）。
+///
+/// **空白と記号を分けてある。**`。`を押して、その前後の空白まで選ばれるのは
+/// 「押したもの」より多い。語の側の規則は[`is_word`]そのままである。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LetterKind {
+    Word,
+    Space,
+    Mark,
+}
+
+fn letter_kind(character: char) -> LetterKind {
+    if is_word(character) {
+        LetterKind::Word
+    } else if character.is_whitespace() {
+        LetterKind::Space
+    } else {
+        LetterKind::Mark
+    }
+}
+
+/// 論理行のバイト範囲——**改行を含む**（E3）。
+///
+/// 行番号を押して選ぶのも、行を動かす・複製する・消すのも、この範囲である。
+/// **改行まで持つ**のは、行を動かすことが「字を動かす」ではなく「行を動かす」で
+/// あるから：改行を置いていくと、動かした先で2行が1行になる。
+///
+/// 最後の行に改行が無ければ、そこで終わる。
+pub fn line_span(source: &str, byte: usize) -> (usize, usize) {
+    let byte = crate::floor_char_boundary(source, byte.min(source.len()));
+    let head = source[..byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let end = source[head..]
+        .find('\n')
+        .map_or(source.len(), |newline| head + newline + 1);
+    (head, end)
+}
+
 /// Whether a character is inside a word, for 要件 11.4's `Alt+F` and `Alt+B`.
 ///
 /// **Everything that is not punctuation or space.** 要件 11.4 says the move
@@ -2187,6 +2270,49 @@ mod tests {
         let at = place_of(source, 2, Some(4)).expect("その行はある");
         assert_eq!(&source["あい\n".len()..at], "家族👨‍👩‍👧");
         assert!(source.is_char_boundary(at));
+    }
+
+    /// E3: ダブルクリックが選ぶのは、`Alt+F`／`Alt+B`と同じ切れ目の語。
+    #[test]
+    fn a_double_click_takes_the_word_the_walk_would_stop_at() {
+        let source = "黒猫が鳴いた。white cat";
+
+        // 日本語は句読点まで。
+        assert_eq!(word_around(source, 3), (0, "黒猫が鳴いた".len()));
+        // その句読点そのものを押せば、記号だけ。
+        let mark = "黒猫が鳴いた".len();
+        assert_eq!(word_around(source, mark), (mark, mark + "。".len()));
+        // 英語は語ごと。`Alt+F`が止まるところと同じである。
+        let white = source.find("white").expect("ある");
+        assert_eq!(word_around(source, white + 2), (white, white + 5));
+        // 空白は空白だけ（前後の語まで取らない）。
+        let space = white + 5;
+        assert_eq!(word_around(source, space), (space, space + 1));
+    }
+
+    /// E3: **行はまたがない。**行末で押したら手前の語。
+    #[test]
+    fn a_double_click_stays_on_its_own_line() {
+        let source = "一行目\n二行目";
+        let first_end = "一行目".len();
+
+        assert_eq!(word_around(source, first_end), (0, first_end));
+        // 空の行には選ぶものが無い。
+        assert_eq!(word_around("\n\n", 1), (1, 1));
+    }
+
+    /// E3: 行の範囲は改行を含む——行を動かすとき、改行を置いていくと2行が1行になる。
+    #[test]
+    fn a_line_span_carries_its_own_line_break() {
+        let source = "一\n二\n三";
+
+        assert_eq!(line_span(source, 0), (0, "一\n".len()));
+        assert_eq!(line_span(source, 4), ("一\n".len(), "一\n二\n".len()));
+        // 最後の行に改行は無い。
+        assert_eq!(
+            line_span(source, source.len()),
+            ("一\n二\n".len(), source.len())
+        );
     }
 
     #[test]

@@ -4850,6 +4850,23 @@ impl TextEngine {
         Ok(rects)
     }
 
+    /// この点は行番号の欄の中か（要件 9、E3）。
+    ///
+    /// **欄は余白の一部**（[`TextEngine::numbers`]）なので、行の軸で0から
+    /// `gutter`までがそれである——本文が始まるのは`margin`からで、`gutter`は
+    /// その手前にある。番号を出していない面では、いつでも`false`。
+    ///
+    /// 行がどれかは訊かない。**同じ点をそのまま[`Self::hit_test`]に渡せば、
+    /// その行の頭が返る**（余白の点は、いちばん近い字の位置へ寄る）ので、
+    /// 「番号を押したか」だけがここでしか答えられないことである。
+    pub fn in_number_column(&self, x: f32, y: f32) -> bool {
+        let Some(numbers) = self.numbers else {
+            return false;
+        };
+        let (_, line) = self.mode.to_axes(x, y);
+        (0.0..numbers.gutter).contains(&line)
+    }
+
     pub fn hit_test(&mut self, x: f32, y: f32) -> Result<HitTest> {
         if self.plan.is_empty() {
             return Ok(HitTest {
