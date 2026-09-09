@@ -181,6 +181,13 @@ pub struct Session {
     /// A window holds one work folder at a time, so the way back to the last
     /// one is a list kept for them rather than a second folder kept open.
     pub folders: Vec<PathBuf>,
+    /// 探した語と、置き換えに使った語、新しいものから（E1の④）。
+    ///
+    /// **窓に1つずつで、面ごとではない。**探し方の切り替えは面ごとに持っている
+    /// （②）が、それは「いまこの文書で何をしているか」である。履歴は打ち直さない
+    /// ためのもので、隣の面で探した語を持ってこられないなら、列が2つある意味が無い。
+    pub needles: Vec<String>,
+    pub replacements: Vec<String>,
 }
 
 /// Write the session down.
@@ -221,6 +228,15 @@ pub fn encode_session(session: &Session) -> String {
     }
     for path in &session.folders {
         out.push_str(&format!("visited: {}\n", path.display()));
+    }
+    // E1の④: 探した語と置き換えた語。**行に収まらない語は書かない**——欄は
+    // 一行で改行を打てないが、貼り付けで入ってくる道までは塞げない。1語1行の
+    // 決まりのほうを守る（読むほうは`split('\n')`で歩いている）。
+    for term in session.needles.iter().filter(|term| fits_a_line(term)) {
+        out.push_str(&format!("needle: {term}\n"));
+    }
+    for term in session.replacements.iter().filter(|term| fits_a_line(term)) {
+        out.push_str(&format!("replacement: {term}\n"));
     }
     for pane in &session.panes {
         out.push_str(&format!("pane: {} {}\n", pane.active, pane.zoom));
@@ -264,6 +280,15 @@ pub fn encode_session(session: &Session) -> String {
     out
 }
 
+/// 1行に収まる字か（E1の④）。
+///
+/// **セッションは1行1事実である。**改行を含む語をそのまま書けば、次に読むとき
+/// 語の後ろ半分が知らない鍵の行になる——読むほうは`(key, value)`が揃わない行で
+/// セッションぜんぶを捨てるので、探した語1つで前の run の並びが消えることになる。
+fn fits_a_line(term: &str) -> bool {
+    !term.is_empty() && !term.contains(['\n', '\r'])
+}
+
 /// Read a session back.
 ///
 /// `None` for a file this build cannot make sense of. **Never a reason to
@@ -298,6 +323,8 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "expanded" => session.expanded.push(PathBuf::from(value)),
             "recent" => session.recent.push(PathBuf::from(value)),
             "visited" => session.folders.push(PathBuf::from(value)),
+            "needle" => session.needles.push(value.to_owned()),
+            "replacement" => session.replacements.push(value.to_owned()),
             "pane" => {
                 let mut fields = value.split(' ');
                 session.panes.push(SessionPane {
@@ -1093,6 +1120,8 @@ mod tests {
                 PathBuf::from("D:\\書きかけ\\年表.txt"),
             ],
             folders: vec![PathBuf::from("D:\\書きかけ"), PathBuf::from("D:\\古い原稿")],
+            needles: vec!["白猫".to_owned(), "第[0-9]+章".to_owned()],
+            replacements: vec!["黒猫".to_owned()],
             panes: vec![
                 SessionPane {
                     active: 1,
@@ -1192,6 +1221,23 @@ mod tests {
         // visited (要件 5.1), which arrived later still.
         assert!(read.recent.is_empty());
         assert!(read.folders.is_empty());
+        // E1の④: 探した語の並びも、無ければ無いまま読める。
+        assert!(read.needles.is_empty());
+        assert!(read.replacements.is_empty());
+    }
+
+    /// E1の④: **改行を含む語は書かない。**書けば次の run が読む1行1事実の
+    /// 決まりが破れ、セッションぜんぶが読めない扱いになる。
+    #[test]
+    fn a_term_with_a_line_break_in_it_is_left_out() {
+        let session = Session {
+            needles: vec!["白猫".to_owned(), "二\n行".to_owned()],
+            ..Session::default()
+        };
+
+        let read = decode_session(&encode_session(&session)).expect("reads");
+
+        assert_eq!(read.needles, ["白猫"]);
     }
 
     /// 要件 9: the zoom is each pane's own, and a session written while it was

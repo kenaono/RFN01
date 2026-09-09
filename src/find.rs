@@ -312,6 +312,110 @@ impl Search {
     }
 }
 
+/// 覚えておく語の数（E1の④）。
+///
+/// **10は「↑を押して探すより打ち直したほうが早い」の手前**である。下書きの履歴
+/// （要件 12.4）が同じ10で、同じ理由で選ばれている——短い列だから読める。
+pub const REMEMBERED_TERMS: usize = 10;
+
+/// 探した語の並び——**打ち直さないための短い列**（E1の④）。
+///
+/// **↑と↓だけで歩く**（書き手の選択 2026-09-10）。帯に釦を足せば、半分の窓で
+/// 最初にはみ出すのはこの帯である（`Match case`と書ける幅がもう無い、②）。
+/// 一行の欄で↑↓は何も起こさない鍵なので、割り当てても書き手から取り上げるものが
+/// 無い。
+///
+/// **打ちかけの字は返ってくる。**↑で遡った書き手が↓で戻ると、遡る前に打っていた
+/// 字がそこにある——履歴を覗くことと、打った字を捨てることは別である。
+///
+/// **欄を変えたのが誰かで見分ける。**最後にこの列が置いた字と欄の字が違えば、
+/// 書き手の手が入ったとみなして遡りを畳む。打鍵のたびに知らせてもらわずに済み、
+/// 範囲の取り直し（`search_selection`、E1の②）と同じ見分け方である。
+#[derive(Clone, Debug, Default)]
+pub struct Terms {
+    /// 新しいものから。同じ語は1つだけ。
+    kept: Vec<String>,
+    /// どこまで遡ったか。`None`は「遡っていない＝欄にいる」。
+    at: Option<usize>,
+    /// 遡り始める前に欄にあった字。
+    typed: String,
+    /// この列が最後に欄へ置いた字。
+    placed: Option<String>,
+}
+
+impl Terms {
+    /// 前の run が残した並びから始める（E1の④、セッション）。
+    ///
+    /// **読むほうで整える。**セッションは手で直せるファイルで、空の語や同じ語が
+    /// 並んでいることがある——それを持ったまま歩くと、↑が同じ語を2回出す。
+    pub fn restored(kept: Vec<String>) -> Self {
+        let mut terms = Self::default();
+        // 古いほうから入れ直すと、`remember`の規則がそのまま並び直しになる。
+        for term in kept.into_iter().rev() {
+            terms.remember(&term);
+        }
+        terms
+    }
+
+    /// 覚えている語、新しいものから。
+    pub fn kept(&self) -> &[String] {
+        &self.kept
+    }
+
+    /// 探した語を頭へ（E1の④）。
+    ///
+    /// **同じ語は1つ**（下書きの履歴と同じ規則、要件 12.4）。10件しか無いので、
+    /// 繰り返しは書き手が要る語を端から押し出す。
+    ///
+    /// **見つかったかどうかは問わない。**見つからなかった語こそ打ち直したくない
+    /// ものである——次の一手は、たいていその語を少し変えてもう一度探すことだから。
+    pub fn remember(&mut self, term: &str) {
+        if term.is_empty() {
+            return;
+        }
+        self.kept.retain(|kept| kept != term);
+        self.kept.insert(0, term.to_owned());
+        self.kept.truncate(REMEMBERED_TERMS);
+        self.settle();
+    }
+
+    /// 遡りを畳む。次の↑は、いちばん新しい語から始まる。
+    pub fn settle(&mut self) {
+        self.at = None;
+        self.typed.clear();
+        self.placed = None;
+    }
+
+    /// ↑（`back`）と↓で、欄に入れる字（E1の④）。
+    ///
+    /// `None`は**動かない**——履歴の端と、遡っていないところでの↓である。
+    /// 端で止まるのは、押し続けた書き手の欄が空になって「消えた」と見えるより
+    /// よい：列の終わりは、列が無くなることではない。
+    pub fn step(&mut self, back: bool, field: &str) -> Option<String> {
+        if self.placed.as_deref() != Some(field) {
+            // 書き手が打っている。遡りはここで畳み、この字が戻る先になる。
+            self.at = None;
+            self.typed = field.to_owned();
+        }
+        let next = match (self.at, back) {
+            (None, true) => 0,
+            // 遡っていないところでの↓。**打った字より新しいものは無い。**
+            (None, false) => return None,
+            (Some(at), true) => at + 1,
+            (Some(0), false) => {
+                self.at = None;
+                self.placed = Some(self.typed.clone());
+                return Some(self.typed.clone());
+            }
+            (Some(at), false) => at - 1,
+        };
+        let term = self.kept.get(next)?.clone();
+        self.at = Some(next);
+        self.placed = Some(term.clone());
+        Some(term)
+    }
+}
+
 /// Where the needle is, at or after `from`, ignoring the case of ASCII letters.
 ///
 /// **The scan is over bytes and the answer is a byte position**, which is only
@@ -1029,5 +1133,107 @@ mod tests {
         assert!(preview.ends_with('…'));
         // Trimmed, so the indentation does not eat the width.
         assert!(preview.starts_with('あ'));
+    }
+
+    /// 履歴は新しいものが上で、同じ語は1つ（E1の④）。
+    #[test]
+    fn the_same_term_twice_is_one_entry() {
+        let mut terms = Terms::default();
+
+        terms.remember("白猫");
+        terms.remember("黒猫");
+        terms.remember("白猫");
+
+        assert_eq!(terms.kept(), ["白猫", "黒猫"]);
+    }
+
+    /// 空の語は覚えない——`Clear`のあとの欄は、探した語ではない。
+    #[test]
+    fn nothing_is_not_a_term() {
+        let mut terms = Terms::default();
+
+        terms.remember("");
+
+        assert!(terms.kept().is_empty());
+    }
+
+    /// 上限を越えたぶんは、古いほうから落ちる。
+    #[test]
+    fn only_the_last_ten_are_kept() {
+        let mut terms = Terms::default();
+
+        for number in 0..REMEMBERED_TERMS + 3 {
+            terms.remember(&format!("語{number}"));
+        }
+
+        assert_eq!(terms.kept().len(), REMEMBERED_TERMS);
+        assert_eq!(terms.kept()[0], format!("語{}", REMEMBERED_TERMS + 2));
+        assert_eq!(terms.kept()[REMEMBERED_TERMS - 1], "語3");
+    }
+
+    /// ↑で遡り、↓で戻る。**打ちかけの字は返ってくる**（E1の④）。
+    #[test]
+    fn stepping_back_and_forward_returns_what_was_typed() {
+        let mut terms = Terms::default();
+        terms.remember("黒猫");
+        terms.remember("白猫");
+
+        assert_eq!(terms.step(true, "しろ"), Some("白猫".to_owned()));
+        assert_eq!(terms.step(true, "白猫"), Some("黒猫".to_owned()));
+        assert_eq!(terms.step(false, "黒猫"), Some("白猫".to_owned()));
+        assert_eq!(terms.step(false, "白猫"), Some("しろ".to_owned()));
+        // 打ちかけの字より新しいものは無い。
+        assert_eq!(terms.step(false, "しろ"), None);
+    }
+
+    /// 列の端では止まる。**欄が空になることはない。**
+    #[test]
+    fn the_oldest_term_is_where_stepping_back_stops() {
+        let mut terms = Terms::default();
+        terms.remember("白猫");
+
+        assert_eq!(terms.step(true, ""), Some("白猫".to_owned()));
+        assert_eq!(terms.step(true, "白猫"), None);
+    }
+
+    /// **欄を打ち直したら、遡りは畳まれる。**次の↑はいちばん新しい語から。
+    #[test]
+    fn typing_in_the_field_folds_the_walk_away() {
+        let mut terms = Terms::default();
+        terms.remember("黒猫");
+        terms.remember("白猫");
+
+        assert_eq!(terms.step(true, ""), Some("白猫".to_owned()));
+        // 書き手が打った——置いた字と違う。
+        assert_eq!(terms.step(true, "三毛"), Some("白猫".to_owned()));
+        assert_eq!(terms.step(false, "白猫"), Some("三毛".to_owned()));
+    }
+
+    /// 探した語を覚えると、遡りは畳まれる（E1の④）。
+    #[test]
+    fn remembering_a_term_starts_the_walk_over() {
+        let mut terms = Terms::default();
+        terms.remember("黒猫");
+        terms.remember("白猫");
+        terms.step(true, "");
+
+        terms.remember("三毛");
+
+        assert_eq!(terms.step(true, "三毛"), Some("三毛".to_owned()));
+    }
+
+    /// セッションから読んだ並びも、同じ規則で整う（E1の④）。
+    #[test]
+    fn a_restored_list_drops_what_it_cannot_hold() {
+        let kept = vec![
+            "白猫".to_owned(),
+            "".to_owned(),
+            "黒猫".to_owned(),
+            "白猫".to_owned(),
+        ];
+
+        let terms = Terms::restored(kept);
+
+        assert_eq!(terms.kept(), ["白猫", "黒猫"]);
     }
 }

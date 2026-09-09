@@ -1334,6 +1334,12 @@ fn main() -> Result<(), slint::PlatformError> {
         Some(session) => session.folders.clone(),
         None => Vec::new(),
     };
+    // E1の④: 探した語と置き換えた語。**この版より前のセッションには無い**ので、
+    // そのときは空の列から始まる——履歴が無いことは、探せないことではない。
+    let (needles, replacements) = match &session {
+        Some(session) => (session.needles.clone(), session.replacements.clone()),
+        None => (Vec::new(), Vec::new()),
+    };
     // 要件 5.1, 8.5: the folder the writer was working in, and which of its
     // folders they had open. A folder that has since gone is simply not there.
     let work_folder = match &session {
@@ -1479,6 +1485,8 @@ fn main() -> Result<(), slint::PlatformError> {
         results: Rc::new(RefCell::new(Vec::new())),
         recent: Rc::new(RefCell::new(remembered)),
         recent_folders: Rc::new(RefCell::new(visited)),
+        find_terms: Rc::new(RefCell::new(find::Terms::restored(needles))),
+        replace_terms: Rc::new(RefCell::new(find::Terms::restored(replacements))),
         layout: layout.clone(),
         pending: Rc::new(RefCell::new(None)),
         close_run: Rc::new(RefCell::new(None)),
@@ -3442,6 +3450,12 @@ struct Live {
     /// time, so the menu is a list of the folders the writer can go to — and
     /// the one they are already in is not one of them (`offered_folders`).
     recent_folders: Rc<RefCell<Vec<PathBuf>>>,
+    /// 探した語と、置き換えに使った語（E1の④）。**窓に1つずつ。**探し方の
+    /// 切り替えは面ごとに持っているが、それは「いまこの文書で何をしているか」で
+    /// あって、履歴は打ち直さないための列である——隣の面で探した語を持って
+    /// こられないなら、列が面の数だけある意味が無い。
+    find_terms: Rc<RefCell<find::Terms>>,
+    replace_terms: Rc<RefCell<find::Terms>>,
     /// How the editing area is divided (要件 6.4). **The whole of the
     /// arrangement**: which panes are on screen, how they sit, and where the
     /// boundaries are.
@@ -3837,6 +3851,62 @@ fn clear_find(window: &AppWindow, live: &Live) {
     count_in_pane(window, live);
 }
 
+/// 探した語を1つ遡る／戻る——検索欄と置換欄の↑↓（E1の④）。
+///
+/// **欄の字が入れ替わるだけで、本文は動かない。**打っているあいだと同じ約束で
+/// あり（E1の①）、動かす鍵はEnter・Shift+Enter・F3のほうにある——↑で語を覗いた
+/// だけの書き手を、その語の一致へ連れて行くことはしない。
+///
+/// **数と色はその場で付け直す**（検索欄のとき）。入れ替えた語で何件あるかが
+/// 見えなければ、↑は「欄の字が変わっただけ」の鍵になる。
+fn walk_find_history(window: &AppWindow, live: &Live, back: bool, replacing: bool) {
+    let id = find_target(window);
+    let screen = id.screen(window);
+    let terms = if replacing {
+        &live.replace_terms
+    } else {
+        &live.find_terms
+    };
+    let field = if replacing {
+        screen.find_replacement.to_string()
+    } else {
+        screen.find_needle.to_string()
+    };
+    // **端では止まる。**遡り切ったところで欄を空にすると、書き手には語が消えた
+    // ように見える——列の終わりは、列が無くなることではない。
+    //
+    // 列を借りるのはこの一手だけ。**画面へ書く前に返す**——`update_screen`は
+    // 窓を通って戻ってくることがあり、借りたまま入ると二度目の借りで落ちる。
+    let stepped = {
+        let mut terms = terms.borrow_mut();
+        let stepped = terms.step(back, &field);
+        let held = terms.kept().len();
+        stepped.map(|term| (term, held))
+    };
+    let Some((term, held)) = stepped else {
+        return;
+    };
+    id.update_screen(window, |screen| {
+        if replacing {
+            screen.find_replacement = term.as_str().into();
+        } else {
+            screen.find_needle = term.as_str().into();
+        }
+    });
+    // **語そのものは書かない**——原稿の言葉である（`find`の他の行と同じ）。
+    let which = if replacing { "replacement" } else { "needle" };
+    let step = if back { "back" } else { "forward" };
+    let told = format!(
+        "history pane={} {which} {step} term={} kept={held}",
+        id.log_name(),
+        term.chars().count(),
+    );
+    live.cache.borrow_mut().log_diag("find", &told);
+    if !replacing {
+        count_in_pane(window, live);
+    }
+}
+
 /// この面の探し方で、1回ぶんの検索を組み立てる（E1）。
 ///
 /// **正しくない正規表現は、ここで分かる。**`(`だけ打った書き手に0件と答えるのは
@@ -3933,6 +4003,12 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
             return;
         }
     };
+    // E1の④: **探した語はここで覚える。**打っているあいだ（`count_in_pane`）では
+    // なく、書き手が「次へ」と言った回である——打鍵ごとに覚えると、`白`『白猫』の
+    // 途中の字が10件をすぐ埋める。**読めない正規表現は上で戻っている**ので、
+    // 覚えるのは探し方として成り立った語だけ。見つかったかどうかは問わない
+    // ——見つからなかった語こそ、打ち直したくないものである。
+    live.find_terms.borrow_mut().remember(&needle);
     let caret = id.caret_byte(&state, &source);
     // Forwards from the caret, which after a find sits at the end of the match
     // — so the next one is found rather than the same one again. Backwards from
@@ -4211,6 +4287,9 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
         return;
     }
     let replacement = id.screen(window).find_replacement.to_string();
+    // E1の④: 置き換えに使った語も列に入る。**空は入らない**——「消す」は
+    // 置換語ではなく、欄が空であることそのものだからである。
+    live.replace_terms.borrow_mut().remember(&replacement);
     shift_find_scope(
         window,
         id,
@@ -4268,6 +4347,10 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
         say_in_bar(window, id, told);
         return;
     }
+    // E1の④: 全置換も「探して直した」1回である。**ここまで来たら確かに起きる**
+    // ので、上限で取り消した回は覚えない。
+    live.find_terms.borrow_mut().remember(&needle);
+    live.replace_terms.borrow_mut().remember(&replacement);
     shift_find_scope(window, id, next.len() as isize - source.len() as isize);
     let (at, removed, inserted) = find::changed_span(&source, &next);
     let change = Change {

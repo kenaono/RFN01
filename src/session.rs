@@ -289,6 +289,10 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         tree_width: (window.get_tree_width() / 1.0) as u32,
         recent: live.recent.borrow().clone(),
         folders: live.recent_folders.borrow().clone(),
+        // E1の④: 打ち直さないための短い列。**書き出すのはここだけ**——語を
+        // 覚えるたびにセッションを書けば、F3のたびにファイルが1つ書かれる。
+        needles: live.find_terms.borrow().kept().to_vec(),
+        replacements: live.replace_terms.borrow().kept().to_vec(),
     }
 }
 

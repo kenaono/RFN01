@@ -555,6 +555,8 @@ export component EditorPane inherits Rectangle {
     callback find-typed();
     /// 探し方の入切を押した。0＝大小の別、1＝単語単位、2＝範囲の中だけ（E1）。
     callback find-option(int);
+    /// 探した語を1つ遡る／戻る（E1の④）。1つめは↑か、2つめは置換欄か。
+    callback find-history(bool, bool);
     /// 探す条件を捨てる——語・置換語・3つの入切・範囲（E1、書き手の求め）。
     callback find-cleared();
     /// 帯を出す。**開いていれば何もしない**（`find-requested`は同じ鍵で閉じる
@@ -686,6 +688,20 @@ export component EditorPane inherits Rectangle {
             return accept;
         }
         return reject;
+    }
+
+    /// 帯の欄が受ける鍵——履歴の↑↓と、上の2つ（E1の④）。
+    ///
+    /// **↑と↓を選んだのは、帯に足す幅が無いからである**（書き手の選択
+    /// 2026-09-10）。`Match case`と書ける幅がもう無い帯に釦を1つ足せば、
+    /// 半分の窓で最初にはみ出すのはこの帯である。一行の欄で↑↓は何も起こさない
+    /// 鍵なので、割り当てても書き手から取り上げるものが無い。
+    function find-keys(event: KeyEvent, replacing: bool) -> EventResult {
+        if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+            root.find-history(event.text == Key.UpArrow, replacing);
+            return accept;
+        }
+        return root.find-shortcut(event);
     }
 
     /// 次／前の一致へ（E1）。
@@ -1337,7 +1353,7 @@ export component EditorPane inherits Rectangle {
                                 root.find-dismissed();
                             }
                             shortcut(event) => {
-                                return root.find-shortcut(event);
+                                return root.find-keys(event, false);
                             }
                         }
 
@@ -1457,7 +1473,7 @@ export component EditorPane inherits Rectangle {
                                 root.find-dismissed();
                             }
                             shortcut(event) => {
-                                return root.find-shortcut(event);
+                                return root.find-keys(event, true);
                             }
                         }
 

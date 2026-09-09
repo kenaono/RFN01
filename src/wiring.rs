@@ -35,7 +35,8 @@ use crate::{
     quick_draft, read_word_source, remove_word_from_group, rename_word_group, rename_word_mode,
     replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
     schedule_relayout, search_in_folder, search_work_folder, selected_runs, set_colour,
-    set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command, word_modes_now,
+    set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command,
+    walk_find_history, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -507,6 +508,16 @@ pub fn wire_find(window: &AppWindow, live: &Live) {
     window.on_find_option(move |which| {
         if let Some(window) = weak.upgrade() {
             choose_find_option(&window, &option_live, which);
+        }
+    });
+
+    // E1の④: 履歴を↑↓で歩く。**帯には何も足していない**（書き手の選択
+    // 2026-09-10）——半分の窓に収まる帯を保ったまま、打ち直しだけを減らす。
+    let weak = window.as_weak();
+    let history_live = live.clone();
+    window.on_find_history(move |back, replacing| {
+        if let Some(window) = weak.upgrade() {
+            walk_find_history(&window, &history_live, back, replacing);
         }
     });
 

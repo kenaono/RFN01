@@ -284,6 +284,8 @@ export component AppWindow inherits Window {
     /// 探し方の入切（E1）。0＝大小の別、1＝単語単位、2＝範囲の中だけ。
     /// **範囲だけは入れるときに選択を写し取る**ので、Rustが答える。
     callback find-option(int);
+    /// E1の④: 探した語の履歴を1つ遡る／戻る。1つめは↑か、2つめは置換欄か。
+    callback find-history(bool, bool);
     /// 探す条件を捨てる（E1、書き手の求め 2026-09-09）。
     callback find-cleared();
     /// Which pane the find bar is in, and whether it has its replace row
@@ -1915,6 +1917,9 @@ export component AppWindow inherits Window {
                         }
                         find-option(which) => {
                             root.find-option(which);
+                        }
+                        find-history(back, replacing) => {
+                            root.find-history(back, replacing);
                         }
                         find-cleared => {
                             root.find-cleared();
