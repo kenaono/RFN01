@@ -1,6 +1,6 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
-import { Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Tab, TextButton } from "controls.slint";
+import { Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Tab, TextButton, ToggleChip } from "controls.slint";
 
 // One editing pane.
 //
@@ -108,6 +108,12 @@ export struct PaneScreen {
 
     tiles: [PreviewTile],
     selection-rects: [PreviewSelectionRect],
+    /// E1: 見えている一致（書き手の求め 2026-09-09）。**選択より薄い**——
+    /// 「どこにあるか」を出しつつ、「いまどれにいるか」を選択に譲る。
+    match-rects: [PreviewSelectionRect],
+    /// E1: 範囲内検索の範囲（書き手の求め 2026-09-09）。**いちばん薄い**——
+    /// 「ここを探している」だけを言い、一致と現在地はその上に重なる。
+    scope-rects: [PreviewSelectionRect],
     // The laid-out document's size, in pixels.
     content-width: int,
     content-height: int,
@@ -154,6 +160,14 @@ export struct PaneScreen {
     find-needle: string,
     find-replacement: string,
     find-status: string,
+    /// E1: この面の**探し方**。大小の別と、語の全体だけを見るかどうか。
+    find-match-case: bool,
+    find-whole-word: bool,
+    /// 範囲内だけを探すときの、その範囲（本文のバイト）。
+    /// **終わりが始まりより大きいときだけ効く**——0と0は「範囲は無い」である。
+    /// 書き手が選んだものそのもので、一致へ移っても動かない（E1）。
+    find-scope-start: int,
+    find-scope-end: int,
     /// 要件 7.9（2026-09-08）: この面の**単語チェックモード**の名前。
     ///
     /// **モードは文書ごと**（コードエディタの言語モードと同じ粒度）なので、
@@ -290,7 +304,15 @@ export component EditorPane inherits Rectangle {
     in-out property <string> find-needle;
     in-out property <string> find-replacement;
     in property <string> find-status;
+    /// E1: この面の探し方。**帯の中の3つの入切**——大小の別、単語単位、
+    /// 選んだ範囲の中だけ。
+    in property <bool> find-match-case;
+    in property <bool> find-whole-word;
+    in property <bool> find-in-scope;
     in property <int> find-generation;
+    /// 帯が出たときに鍵盤をそこへ置くか（E1、書き手の求め 2026-09-09）。
+    /// **F3は本文で押される鍵**なので、そのとき帯は出るが鍵盤は動かない。
+    in property <bool> find-focus: true;
     in property <int> active-tab: 0;
     in property <bool> preview: false;
     /// The tab in front of this pane is a shell (追加要件 Terminal).
@@ -384,6 +406,8 @@ export component EditorPane inherits Rectangle {
 
     in property <[PreviewTile]> tiles;
     in property <[PreviewSelectionRect]> selection-rects;
+    in property <[PreviewSelectionRect]> match-rects;
+    in property <[PreviewSelectionRect]> scope-rects;
     // The laid-out document's size, in pixels.
     in property <int> content-width;
     in property <int> content-height;
@@ -526,6 +550,13 @@ export component EditorPane inherits Rectangle {
     callback find-step(bool);
     /// 検索欄に1字打たれた。**数え直すだけで、どこへも動かない**（E1）。
     callback find-typed();
+    /// 探し方の入切を押した。0＝大小の別、1＝単語単位、2＝範囲の中だけ（E1）。
+    callback find-option(int);
+    /// 探す条件を捨てる——語・置換語・3つの入切・範囲（E1、書き手の求め）。
+    callback find-cleared();
+    /// 帯を出す。**開いていれば何もしない**（`find-requested`は同じ鍵で閉じる
+    /// ので、F3から呼ぶと閉じてしまう）。鍵盤は動かさない——F3は本文で押される。
+    callback find-shown();
     callback replace-one();
     callback replace-every();
     callback find-dismissed();
@@ -663,6 +694,10 @@ export component EditorPane inherits Rectangle {
         if (root.find-needle == "") {
             root.find-requested(false);
         } else {
+            // **何で探しているかが見えるように、帯を出してから探す**
+            // （書き手の求め 2026-09-09）。鍵盤は本文に置いたまま——F3は
+            // 本文で押される鍵である。
+            root.find-shown();
             root.find-step(forwards);
         }
     }
@@ -1277,10 +1312,14 @@ export component EditorPane inherits Rectangle {
                             // keyboard back (6.11).
                             property <int> asked: root.find-generation;
                             init => {
-                                self.take-focus-selecting-all();
+                                if (root.find-focus) {
+                                    self.take-focus-selecting-all();
+                                }
                             }
                             changed asked => {
-                                self.take-focus-selecting-all();
+                                if (root.find-focus) {
+                                    self.take-focus-selecting-all();
+                                }
                             }
                             // Enter is "the next one", which is what a writer
                             // expects from a search box they have just typed in.
@@ -1308,6 +1347,33 @@ export component EditorPane inherits Rectangle {
                             overflow: elide;
                         }
 
+                        // E1: 探し方の3つ。**語の隣に置く**——いま何件と
+                        // 言っているかは、この3つで変わるからである。
+                        ToggleChip {
+                            title: "Aa";
+                            tip: "Match case";
+                            checked: root.find-match-case;
+                            clicked => {
+                                root.find-option(0);
+                            }
+                        }
+                        ToggleChip {
+                            title: "W";
+                            tip: "Whole word";
+                            checked: root.find-whole-word;
+                            clicked => {
+                                root.find-option(1);
+                            }
+                        }
+                        ToggleChip {
+                            title: "[ ]";
+                            tip: "In selection";
+                            checked: root.find-in-scope;
+                            clicked => {
+                                root.find-option(2);
+                            }
+                        }
+
                         IconButton {
                             horizontal-stretch: 0;
                             icon: Icons.up;
@@ -1322,6 +1388,14 @@ export component EditorPane inherits Rectangle {
                             tip: "Next";
                             clicked => {
                                 root.find-step(true);
+                            }
+                        }
+                        IconButton {
+                            horizontal-stretch: 0;
+                            icon: Icons.clear;
+                            tip: "Clear";
+                            clicked => {
+                                root.find-cleared();
                             }
                         }
                         IconButton {
@@ -1535,6 +1609,34 @@ export component EditorPane inherits Rectangle {
                                     && self.x + scroll.viewport-x <= scroll.visible-width)
                                 : (self.y + self.height + scroll.viewport-y >= 0px
                                     && self.y + scroll.viewport-y <= scroll.visible-height);
+                        }
+
+                        // E1: 範囲はいちばん下、いちばん薄く（書き手の求め
+                        // 2026-09-09：「範囲を薄くハイライトしておいた方がいい」）
+                        // ——検索が選択を動かすので、**範囲は選択では見えない**。
+                        for scope in root.scope-rects: Rectangle {
+                            x: scope.x * 1px;
+                            y: scope.y * 1px;
+                            width: scope.width * 1px;
+                            height: scope.height * 1px;
+                            background: Tok.accent-soft.transparentize(0.86);
+                        }
+
+                        // E1: 一致は薄く、下に。**同じ色の弱いほう**なので、
+                        // 選択が重なれば自然に濃くなる——別の色を足すと、
+                        // 「選ばれている」と「見つかっている」が別のことに
+                        // 見えてしまう。
+                        for found in root.match-rects: Rectangle {
+                            x: found.x * 1px;
+                            y: found.y * 1px;
+                            width: found.width * 1px;
+                            height: found.height * 1px;
+                            // **`opacity`ではなく色そのものを薄くする。**
+                            // `opacity`は要素ごとに層を作るので、`の`のような
+                            // 語では画面に何百枚も重なる——それが「色の変わり方が
+                            // 壊れている」の正体である（書き手の報告 2026-09-09）。
+                            // 透けた色を1枚置くのは、ただの塗りである。
+                            background: Tok.accent-soft.transparentize(0.7);
                         }
 
                         for selection in root.selection-rects: Rectangle {

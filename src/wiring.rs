@@ -26,16 +26,16 @@ use crate::saving::{open_document, reveal_active_document, save_all, save_docume
 use crate::word_marks;
 use crate::{
     AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
-    activate_left_row, add_word_to_group, close_word_naming, collect_search, colour_row,
-    count_in_pane, drop_tree_row, edit_word_file, export_word_group, file_dialog, file_tree,
-    find_in_pane, focused_pane, font_name, font_row, go_to_remembered_folder, hold_word_modes, ime,
-    navigate, new_word_group, new_word_mode, next_word_colour, open_work_folder, pane_word_mode,
-    paste_into_tab, paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
-    publish_word_modes, quick_draft, read_word_source, remove_word_from_group, rename_word_group,
-    rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus,
-    save_settings, schedule_relayout, search_in_folder, search_work_folder, selected_runs,
-    set_colour, set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command,
-    word_modes_now,
+    activate_left_row, add_word_to_group, choose_find_option, clear_find, close_word_naming,
+    collect_search, colour_row, count_in_pane, drop_tree_row, edit_word_file, export_word_group,
+    file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
+    go_to_remembered_folder, hold_word_modes, ime, navigate, new_word_group, new_word_mode,
+    next_word_colour, open_work_folder, pane_word_mode, paste_into_tab, paste_targets,
+    pick_tree_row, publish_left, publish_tabs, publish_word_mode_of, publish_word_modes,
+    quick_draft, read_word_source, remove_word_from_group, rename_word_group, rename_word_mode,
+    replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus, save_settings,
+    schedule_relayout, search_in_folder, search_work_folder, selected_runs, set_colour,
+    set_word_mode_of, shell, shown_sheet, slint_colour, step_setting, tree_command, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -497,6 +497,24 @@ pub fn wire_find(window: &AppWindow, live: &Live) {
     window.on_find_typed(move || {
         if let Some(window) = weak.upgrade() {
             count_in_pane(&window, &typed_live);
+        }
+    });
+
+    // E1: 探し方の3つの入切。**範囲だけはRustが答える**——押した瞬間の選択を
+    // 写し取るのは、窓の側では書けない。
+    let weak = window.as_weak();
+    let option_live = live.clone();
+    window.on_find_option(move |which| {
+        if let Some(window) = weak.upgrade() {
+            choose_find_option(&window, &option_live, which);
+        }
+    });
+
+    let weak = window.as_weak();
+    let clear_live = live.clone();
+    window.on_find_cleared(move || {
+        if let Some(window) = weak.upgrade() {
+            clear_find(&window, &clear_live);
         }
     });
 

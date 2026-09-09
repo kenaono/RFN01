@@ -273,11 +273,19 @@ export component AppWindow inherits Window {
     /// so the field watches this instead and takes the keyboard itself, which
     /// is the same shape the panes use for 6.14.
     in-out property <int> find-generation: 0;
+    /// 帯が出たときに鍵盤をそこへ置くか（E1）。**F3から出したときだけ偽**
+    /// ——本文で押した鍵で書き手が欄へ連れて行かれるのは、探し直しではない。
+    in-out property <bool> find-focus: true;
     /// True searches on from the caret, false back towards the start.
     callback find-requested(bool);
     /// 検索の語が打ち変えられた。**数え直すだけ**で、本文のカーソルは動かない
     /// （E1）。
     callback find-typed();
+    /// 探し方の入切（E1）。0＝大小の別、1＝単語単位、2＝範囲の中だけ。
+    /// **範囲だけは入れるときに選択を写し取る**ので、Rustが答える。
+    callback find-option(int);
+    /// 探す条件を捨てる（E1、書き手の求め 2026-09-09）。
+    callback find-cleared();
     /// Which pane the find bar is in, and whether it has its replace row
     /// (要件 7.7). **The bar is one document's**, so it is drawn inside the
     /// pane holding that document rather than across the window.
@@ -1703,10 +1711,14 @@ export component AppWindow inherits Window {
                     if pane.width > 0: EditorPane {
                         // 要件 7.7: one bar, in the pane that asked for it.
                         find-open: root.find-open && pane.id == root.find-pane;
+                        find-focus: root.find-focus;
                         find-replacing: root.find-replacing;
                         find-needle <=> pane.find-needle;
                         find-replacement <=> pane.find-replacement;
                         find-status: pane.find-status;
+                        find-match-case: pane.find-match-case;
+                        find-whole-word: pane.find-whole-word;
+                        find-in-scope: pane.find-scope-end > pane.find-scope-start;
                         find-generation: root.find-generation;
                         width: parent.width;
                         height: parent.height;
@@ -1755,6 +1767,8 @@ export component AppWindow inherits Window {
 
                         tiles: pane.tiles;
                         selection-rects: pane.selection-rects;
+                        match-rects: pane.match-rects;
+                        scope-rects: pane.scope-rects;
                         content-width: pane.content-width;
                         content-height: pane.content-height;
                         caret-visible: pane.caret-visible;
@@ -1868,12 +1882,19 @@ export component AppWindow inherits Window {
                         // because that is what was asked for.
                         find-requested(replacing) => {
                             root.focused-pane = pane.id;
+                            // **同じ鍵は閉じる。ただし鍵盤がまだ欄に無いなら、
+                            // 先に連れて行く**（E1、書き手の求め 2026-09-09）
+                            // ——F3で静かに出た帯にCtrl+Fを押した書き手は、
+                            // 閉じたいのではなく打ちたい。
                             if (root.find-open
                                 && root.find-pane == pane.id
-                                && root.find-replacing == replacing) {
+                                && root.find-replacing == replacing
+                                && root.find-focus) {
                                 root.find-open = false;
                                 root.focus-generation += 1;
+                                root.find-typed();
                             } else {
+                                root.find-focus = true;
                                 root.find-pane = pane.id;
                                 root.find-replacing = replacing;
                                 root.find-open = true;
@@ -1891,6 +1912,24 @@ export component AppWindow inherits Window {
                         find-typed => {
                             root.find-typed();
                         }
+                        find-option(which) => {
+                            root.find-option(which);
+                        }
+                        find-cleared => {
+                            root.find-cleared();
+                        }
+                        // **出すだけ。**`find-requested`は同じ鍵で閉じるので、
+                        // F3から呼ぶと帯が消える。鍵盤も動かさない（世代を
+                        // 上げない）——F3は本文で押される鍵である。
+                        find-shown => {
+                            if (!root.find-open || root.find-pane != pane.id) {
+                                root.find-focus = false;
+                                root.find-pane = pane.id;
+                                root.find-replacing = false;
+                                root.find-open = true;
+                                root.find-typed();
+                            }
+                        }
                         replace-one => {
                             root.replace-requested();
                         }
@@ -1900,6 +1939,10 @@ export component AppWindow inherits Window {
                         find-dismissed => {
                             root.find-open = false;
                             root.focus-generation += 1;
+                            // **閉じる鍵が、色を消す鍵でもある**（E1の③）。
+                            // 帯が閉じたことは窓の中の出来事なので、こう言って
+                            // やらないとRustは塗り直しに来ない。
+                            root.find-typed();
                         }
                         tab-selected(index) => {
                             // The strip and its buttons belong to this pane, so

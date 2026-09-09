@@ -434,6 +434,15 @@ struct EditorState {
     /// the writer does anything but move — an edit, or a click — and when
     /// `Ctrl+Space` is pressed again.
     mark: bool,
+    /// 検索が置いた選択（E1、書き手の指摘 2026-09-09）。
+    ///
+    /// **「その範囲は書き手が選んだものか」を答えるためだけにある。**範囲内検索
+    /// （`[ ]`）は書き手が選んだ範囲を覚えているが、選び直したら新しい範囲に
+    /// なってほしい——ところが検索そのものも選択を動かす（一致を選ぶ）ので、
+    /// 「選択が変わったら取り直す」では**2回目の検索で範囲が一致そのものに
+    /// 潰れる**。ここに置いた最後の一致と今の選択を比べれば、書き手の手が
+    /// 入ったかどうかが分かる。
+    search_selection: Option<(usize, usize)>,
 }
 
 /// Both panes' states, so that a callback carrying a pane number can reach the
@@ -3791,6 +3800,106 @@ fn find_target(window: &AppWindow) -> PaneId {
     focused_pane(window)
 }
 
+/// 組版が返した矩形を、窓が読む形へ（要件 7.1、E1）。
+///
+/// **選択も一致も範囲も同じ形**である——違うのは描く側の色だけで、それが
+/// 「選ばれている」「見つかっている」「ここを探している」を一続きに見せる。
+fn preview_rects(rects: &[SelectionRect]) -> Vec<PreviewSelectionRect> {
+    rects
+        .iter()
+        .map(|rect| PreviewSelectionRect {
+            x: rect.left,
+            y: rect.top,
+            width: (rect.right - rect.left).max(0.0),
+            height: (rect.bottom - rect.top).max(0.0),
+        })
+        .collect()
+}
+
+/// 探す条件を捨てる（E1、書き手の求め 2026-09-09）。
+///
+/// **語だけでなく、探し方ぜんぶ。**大小の別も単語単位も範囲も、次に開いたとき
+/// 残っていると「なぜ見つからないのか」が画面から辿れない——`Clear`は
+/// 「まっさらから探し直す」と読める1つの動きでなければならない。
+fn clear_find(window: &AppWindow, live: &Live) {
+    let id = find_target(window);
+    id.update_screen(window, |screen| {
+        screen.find_needle = SharedString::new();
+        screen.find_replacement = SharedString::new();
+        screen.find_status = SharedString::new();
+        screen.find_match_case = false;
+        screen.find_whole_word = false;
+        screen.find_scope_start = 0;
+        screen.find_scope_end = 0;
+    });
+    // 数え直し＝塗り直し。色も帯の言葉も、これで消える。
+    count_in_pane(window, live);
+}
+
+/// 画面に色を付ける一致の上限（E1）。
+///
+/// **打鍵の費用の歯止めであって、見せられる数の決まりではない。**1画面に
+/// 収まる一致はせいぜい数十で、これはその桁の上にある。
+const MAX_SHOWN_MATCHES: usize = 400;
+
+/// この面の探し方（E1）。
+///
+/// **切り替えは面ごと**——語がそうなのだから、その語をどう探すかも同じところに
+/// ある（書き手の報告 2026-09-09）。範囲は「終わりが始まりより大きいときだけ」
+/// 効く：0と0は「範囲は無い」である。
+/// 書き手が選び直していたら、範囲を取り直す（E1、書き手の指摘 2026-09-09）。
+///
+/// **「検索のたびに取り直す」では潰れる。**検索は一致を選ぶので、2回目には
+/// その一致が範囲になってしまう——E1が「検索結果へ移動しても最初の対象範囲を
+/// 維持」と言っているのはそのためである。見るのは**選択が変わったかどうかでは
+/// なく、変えたのが誰か**：検索が置いた選択（[`EditorState::search_selection`]）
+/// と今の選択が違えば、そのあいだに書き手の手が入っている。
+///
+/// 選択が無いとき（クリックしただけ）は取り直さない。**範囲を捨てるのは
+/// `[ ]`を押したときだけ**である。
+fn refresh_find_scope(window: &AppWindow, live: &Live, id: PaneId) {
+    let screen = id.screen(window);
+    if screen.find_scope_end <= screen.find_scope_start {
+        return;
+    }
+    let state = live.states.of(id);
+    let state = state.borrow();
+    let Some((start, end)) = selection_source_range(&state) else {
+        return;
+    };
+    if state.search_selection == Some((start, end)) {
+        return;
+    }
+    id.update_screen(window, |screen| {
+        screen.find_scope_start = start as i32;
+        screen.find_scope_end = end as i32;
+    });
+    // **効いたかどうかを、画面の外から確かめられるようにしておく**
+    // （書き手の報告 2026-09-09：「効いていないように見えます」）。
+    let told = format!(
+        "scope pane={} took {start}..{end} was {}..{}",
+        id.log_name(),
+        screen.find_scope_start,
+        screen.find_scope_end,
+    );
+    live.cache.borrow_mut().log_diag("find", &told);
+}
+
+fn find_rules(window: &AppWindow, id: PaneId) -> find::Rules {
+    let screen = id.screen(window);
+    let scope = (screen.find_scope_end > screen.find_scope_start).then(|| {
+        (
+            screen.find_scope_start.max(0) as usize,
+            screen.find_scope_end.max(0) as usize,
+        )
+    });
+    find::Rules {
+        match_case: screen.find_match_case,
+        whole_word: screen.find_whole_word,
+        within: scope,
+    }
+}
+
 /// Find the next match and put the selection on it (要件 7.7).
 ///
 /// **The search runs in the pane the writer is in**, over the document that
@@ -3804,6 +3913,8 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
+    refresh_find_scope(window, live, id);
+    let rules = find_rules(window, id);
     let caret = id.caret_byte(&state, &source);
     // Forwards from the caret, which after a find sits at the end of the match
     // — so the next one is found rather than the same one again. Backwards from
@@ -3816,7 +3927,7 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
             .unwrap_or(caret)
     };
     let step = if forwards { "next" } else { "previous" };
-    let Some((start, end)) = find::next_match(&source, &needle, from, forwards) else {
+    let Some((start, end)) = find::next_match(&source, &needle, from, forwards, rules) else {
         // **見つからなかったことも、画面に出す。**帯は閉じていることがあり、
         // そのときF3の答えは選択が動くことだけなので、動かなかった回は画面の
         // どこにも現れない（要件 7.7 の「効かない」報告は、たいてい「効いたのが
@@ -3831,16 +3942,81 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
         live.cache.borrow_mut().log_diag("find", &told);
         return;
     };
-    let (total, which) = find::tally(&source, &needle, Some(start));
+    let (total, which) = find::tally(&source, &needle, Some(start), rules);
     let place = which.map_or_else(|| "-".to_owned(), |which| which.to_string());
+    let scope = match rules.within {
+        Some((from, to)) => format!("{from}..{to}"),
+        None => "-".to_owned(),
+    };
     let told = format!(
-        "step pane={} {step} needle={} at={place}/{total}",
+        "step pane={} {step} needle={} at={place}/{total} scope={scope}",
         id.log_name(),
         needle.chars().count(),
     );
     live.cache.borrow_mut().log_diag("find", &told);
     // 帯もステータスバーも、この選択から数え直される（`update_status`）。
     show_source_range(window, live, id, &source, start, end);
+}
+
+/// 置換で長さが変わったぶん、範囲の終わりをずらす（E1）。
+///
+/// **範囲は書き手が選んだものである**ので、置き換えの前と後で同じ本文を囲んで
+/// いなければならない——`猫`を`黒猫`にすれば、範囲は1字ぶん伸びる。ずらさない
+/// と、範囲の末尾が置き換えのたびに後ろの本文を切り落としていく。
+///
+/// **打鍵までは追わない。**範囲の中を手で打ち替えれば範囲は意味を失う——
+/// そのときは切って選び直すのが早く、編集のたびに範囲を繕うのは、書き手が
+/// 選んだものを編集器が黙って作り変えることでもある。
+fn shift_find_scope(window: &AppWindow, id: PaneId, by: isize) {
+    if by == 0 {
+        return;
+    }
+    id.update_screen(window, |screen| {
+        if screen.find_scope_end > screen.find_scope_start {
+            let end = screen.find_scope_end as isize + by;
+            screen.find_scope_end = end.max(screen.find_scope_start as isize) as i32;
+        }
+    });
+}
+
+/// 探し方の入切（E1）。0＝大小の別、1＝単語単位、2＝範囲の中だけ。
+///
+/// **範囲だけは押した瞬間に写し取る。**書き手が選んでいる範囲がその場の答えで、
+/// あとから訊けるものではない——一致へ移れば選択はその一致になっている。
+/// 選ばれていなければ**入らない**：範囲の無い「範囲の中だけ」は、何も見つから
+/// ない検索であり、そう見えない（要件 7.7 の「働いていない状態は画面に出て
+/// いなければならない」）。
+///
+/// 押したあとに数え直すので、`12件`が`3件`へ変わるのがその場で見える。
+fn choose_find_option(window: &AppWindow, live: &Live, which: i32) {
+    let id = find_target(window);
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let selected = selection_source_range(&state.borrow());
+    match which {
+        0 => id.update_screen(window, |screen| {
+            screen.find_match_case = !screen.find_match_case;
+        }),
+        1 => id.update_screen(window, |screen| {
+            screen.find_whole_word = !screen.find_whole_word;
+        }),
+        _ => {
+            let screen = id.screen(window);
+            let on = screen.find_scope_end > screen.find_scope_start;
+            let scope = if on { None } else { selected };
+            if !on && scope.is_none() {
+                say_in_bar(window, id, "範囲が選ばれていません".to_owned());
+                return;
+            }
+            let (start, end) = scope.unwrap_or((0, 0));
+            id.update_screen(window, |screen| {
+                screen.find_scope_start = start as i32;
+                screen.find_scope_end = end as i32;
+            });
+        }
+    }
+    tell_find(window, id, &source, selected);
 }
 
 /// 件数を数え直すだけで、どこへも動かない（E1）。
@@ -3854,8 +4030,13 @@ fn count_in_pane(window: &AppWindow, live: &Live) {
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
+    refresh_find_scope(window, live, id);
     let selected = selection_source_range(&state.borrow());
     tell_find(window, id, &source, selected);
+    // **色は打ちながら付いてくる**（E1の③）。一致の矩形は組んだあとにしか
+    // 出せないので、数え直しは面の描き直しでもある——帯を閉じたときもここを
+    // 通り、そのとき語は無いものとして扱われるので色が消える。
+    refresh_pane_from_state(window, &live.cache, &document, id, &state, &source);
 }
 
 /// 探している語と、その数を言う——帯の中と、ステータスバーに（E1）。
@@ -3880,18 +4061,27 @@ fn tell_find(window: &AppWindow, id: PaneId, source: &str, selected: Option<(usi
         });
         return;
     }
+    let rules = find_rules(window, id);
     let standing = selected
-        .filter(|(start, end)| find::is_match(source, &needle, *start, *end))
+        .filter(|(start, end)| find::is_match(source, &needle, *start, *end, rules))
         .map(|(start, _)| start);
-    let (total, which) = find::tally(source, &needle, standing);
+    let (total, which) = find::tally(source, &needle, standing, rules);
     let counted = found_status(total, which);
     // 帯の中では語を繰り返さない——書き手が打った欄がすぐ隣にある。
     // ステータスバーでは語を言う。帯が閉じていれば、何を探しているかは
     // 画面のどこにも無いからである。
-    let line = if total == 0 {
-        format!("「{needle}」は見つかりません")
+    // **範囲の中を数えているなら、そう言う**（書き手の報告 2026-09-09：
+    // 「`[]`の挙動が不安」）。`3 / 12`が文書ぜんぶの数なのか選んだ範囲の数なのか、
+    // 数だけでは見分けられない——見えない状態は、無い状態と同じに見える。
+    let scope = if rules.within.is_some() {
+        "・範囲内"
     } else {
-        format!("「{needle}」{counted}")
+        ""
+    };
+    let line = if total == 0 {
+        format!("「{needle}」は見つかりません{scope}")
+    } else {
+        format!("「{needle}」{counted}{scope}")
     };
     window.set_count_find(line.into());
     id.update_screen(window, |screen| {
@@ -3943,6 +4133,9 @@ fn show_source_range(
         state.caret_source_byte = Some(end);
         state.active_line_start = Some(source_line_start(source, end));
         state.preferred_line = None;
+        // **これは検索が置いた選択である**（E1）。範囲内検索がこれを見て、
+        // 書き手が選び直したのかどうかを見分ける。
+        state.search_selection = Some((start, end));
     }
     refresh_pane_from_state(window, &live.cache, &document, id, &state, source);
 }
@@ -3961,6 +4154,7 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
+    refresh_find_scope(window, live, id);
     let selected = selection_source_range(&state.borrow());
     // Only what the search found. A selection that is not the needle means the
     // writer has moved on, and replacing it would take out something they chose
@@ -3970,14 +4164,20 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
     // あいだ、`alpha`で見つけた`Alpha`は選ばれているのに置換されず、次の一致へ
     // 飛んでいた——検索が畳む大小を、置換だけが畳んでいなかった。見つける道と
     // 置き換える道で一致の意味が違えば、画面が言っていることと動作が違う。
+    let rules = find_rules(window, id);
     let on_a_match = selected
-        .filter(|(start, end)| find::is_match(&source, &needle, *start, *end))
+        .filter(|(start, end)| find::is_match(&source, &needle, *start, *end, rules))
         .is_some();
     if !on_a_match {
         find_in_pane(window, live, true);
         return;
     }
     let replacement = id.screen(window).find_replacement.to_string();
+    shift_find_scope(
+        window,
+        id,
+        replacement.len() as isize - needle.len() as isize,
+    );
     insert_pane_text(
         window,
         id,
@@ -4005,7 +4205,9 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     let replacement = screen.find_replacement.to_string();
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
-    let (next, replaced) = find::replace_all(&source, &needle, &replacement);
+    refresh_find_scope(window, live, id);
+    let rules = find_rules(window, id);
+    let (next, replaced) = find::replace_all(&source, &needle, &replacement, rules);
     if replaced == 0 {
         say_in_bar(window, id, format!("「{needle}」は見つかりません"));
         return;
@@ -4022,6 +4224,7 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
         say_in_bar(window, id, told);
         return;
     }
+    shift_find_scope(window, id, next.len() as isize - source.len() as isize);
     let (at, removed, inserted) = find::changed_span(&source, &next);
     let change = Change {
         at,
@@ -4361,7 +4564,11 @@ fn open_result(window: &AppWindow, live: &Live, index: usize) {
     }
     let needle = window.get_folder_needle().to_string();
     let source = document.text.borrow().clone();
-    let Some((start, end)) = find::next_match(&source, &needle, found.at, true) else {
+    // **フォルダ全文検索は帯の切り替えを持たない**ので、既定の探し方で探し直す
+    // ——`hits_in`がその規則で見つけたものを、同じ規則で指し直すのでなければ、
+    // 一覧の行と本文の位置が食い違う。
+    let rules = find::Rules::default();
+    let Some((start, end)) = find::next_match(&source, &needle, found.at, true, rules) else {
         return;
     };
     show_source_range(window, live, id, &source, start, end);
@@ -6886,6 +7093,8 @@ fn typography_for(
     // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。**寸法に効く**ので、
     // 切り替えれば組み直しが起きる。
     spec.upright_digits = number(Setting::UprightDigits) != 0;
+    // 要件 7.8（書き手の報告 2026-09-09）: ルビの入る空き。**行送りの下限**を
+    // 上げるだけなので、書き手が広く取った行間はそのままである。
     spec.character_spacing = percent(number(Setting::CharAdvance));
     // 要件 7.8: ルビと傍点の大きさと位置。**組版の仕様と一緒に運ぶ**ので、
     // タイルの署名（`hash_style_runs`が混ぜる`Typography`）にも自然に入る
@@ -9048,17 +9257,20 @@ impl PaneId {
         });
     }
 
+    /// E1: 範囲内検索の範囲の矩形。**いちばん薄く敷かれる。**
+    fn set_scope(self, window: &AppWindow, rects: &[SelectionRect]) {
+        let model = ModelRc::new(VecModel::from(preview_rects(rects)));
+        self.update_screen(window, |screen| screen.scope_rects = model);
+    }
+
+    /// E1: 見えている一致の矩形。**選択と同じ形で渡し、描く側が薄く敷く。**
+    fn set_matches(self, window: &AppWindow, rects: &[SelectionRect]) {
+        let model = ModelRc::new(VecModel::from(preview_rects(rects)));
+        self.update_screen(window, |screen| screen.match_rects = model);
+    }
+
     fn set_selection(self, window: &AppWindow, rects: &[SelectionRect]) {
-        let rects = rects
-            .iter()
-            .map(|rect| PreviewSelectionRect {
-                x: rect.left,
-                y: rect.top,
-                width: (rect.right - rect.left).max(0.0),
-                height: (rect.bottom - rect.top).max(0.0),
-            })
-            .collect::<Vec<_>>();
-        let model = ModelRc::new(VecModel::from(rects));
+        let model = ModelRc::new(VecModel::from(preview_rects(rects)));
         self.update_screen(window, |screen| screen.selection_rects = model);
     }
 
@@ -9670,6 +9882,13 @@ struct PaneLayout {
     selection: Vec<(u32, u32)>,
     /// The same runs in the document's bytes, for the status bar's count.
     selection_source: Vec<(usize, usize)>,
+    /// 見えている一致（E1、書き手の求め 2026-09-09：「ヒットした語がすべて
+    /// ハイライトされた上で、対象が動く」）。**組んだ本文の「始まりと長さ」**
+    /// ——選択の走りと同じ形で、同じ道で矩形になる。
+    matches: Vec<(u32, u32)>,
+    /// 範囲内検索の範囲（E1、書き手の求め 2026-09-09）。**検索が選択を動かす
+    /// ので、範囲は選択では見えない**——だから別に出す。
+    scope: Option<(u32, u32)>,
     /// How far the content reached before this layout, for the panes whose
     /// document start is not at the origin.
     previous_flow: u32,
@@ -9724,6 +9943,53 @@ fn lay_out_pane(
             shown.utf16_at_source_byte(end) as u32,
         )
     });
+    // E1: **探している語のありか**を、組んだ本文の位置へ写す。空の欄では
+    // 一周も歩かない——これは打鍵のたびに通る道である。
+    // **光るのは帯が出ているあいだだけ**（書き手の報告 2026-09-09：「その色を
+    // 解除できません」）。語は面に残り続けるので（F3のため）、語があるかぎり
+    // 光らせると、探し終えた紙が色を持ったままになる。**`Esc`で帯を閉じれば
+    // 消える**——閉じる鍵が消す鍵でもある、というのがいちばん短い説明になる。
+    let showing = window.get_find_open() && window.get_find_pane() == id.index();
+    let needle = if showing {
+        id.screen(window).find_needle.to_string()
+    } else {
+        String::new()
+    };
+    let rules = find_rules(window, id);
+    let scope = rules
+        .within
+        .filter(|_| showing)
+        .map(|(start, end)| {
+            let start = shown.utf16_at_source_byte(start) as u32;
+            let end = shown.utf16_at_source_byte(end) as u32;
+            (start, end.saturating_sub(start))
+        })
+        .filter(|(_, length)| *length > 0);
+    let matches = if needle.is_empty() {
+        Vec::new()
+    } else {
+        find::spans(source, &needle, rules, MAX_SHOWN_MATCHES)
+            .into_iter()
+            // **いま選ばれている一致には敷かない。**そこは選択が濃く出して
+            // いるので、下に薄いのを重ねると同じ語なのに3段の濃さになる
+            // （書き手の報告 2026-09-09：「色の変わり方が壊れています」）。
+            .filter(|span| Some(*span) != selection.ends)
+            .map(|(start, end)| {
+                let start = shown.utf16_at_source_byte(start) as u32;
+                let end = shown.utf16_at_source_byte(end) as u32;
+                // **`selection_rects`が取るのは「始まりと長さ」**であって
+                // 「始まりと終わり」ではない（書き手の報告 2026-09-09、
+                // `検索.png`：語ではなく行が塗られていた。終わりを長さとして
+                // 渡していたので、7文字目の2文字が「7文字目から9文字ぶん」に
+                // なっていた）。選択の走りも同じ形で持っている。
+                (start, end.saturating_sub(start))
+            })
+            // 組んだ本文で幅を持たないものは色を付けない——プレビューでは
+            // ルビの読みのように**隠れている字**があり、そこに入った一致は
+            // 写した先で長さ0になる。
+            .filter(|(_, length)| *length > 0)
+            .collect()
+    };
     let (render_text, render_caret, preedit_range) = text_with_preedit(&shown, caret, preedit);
     let preview_ms = elapsed_ms(preview_started);
 
@@ -9793,6 +10059,8 @@ fn lay_out_pane(
         anchor_utf16,
         selection: runs,
         selection_source,
+        matches,
+        scope,
         previous_flow,
         measured,
         preview_ms,
@@ -10889,6 +11157,8 @@ fn refresh_pane(
         anchor_utf16,
         selection,
         selection_source,
+        matches,
+        scope,
         previous_flow,
         measured,
         preview_ms,
@@ -11001,6 +11271,33 @@ fn refresh_pane(
             return;
         }
     };
+    // E1（書き手の求め 2026-09-09）: **見えている一致を薄く出す。**いま選ばれて
+    // いる一致は選択そのものが強く出しているので、ここは同じ色の弱いほうを
+    // 全部に敷く——「どこにあるか」と「いまどれにいるか」が一目で分かる。
+    //
+    // **画面の外の走りはその場で空を返す**ので、上限まで訊いても文書の長さには
+    // 効かない。
+    let match_rects = {
+        let engine = &mut cache.pane(id).graphics.engine;
+        let mut rects = Vec::new();
+        for run in &matches {
+            if let Ok(found) = engine.selection_rects(Some(*run), visible) {
+                rects.extend(found);
+            }
+        }
+        rects
+    };
+    id.set_matches(window, &match_rects);
+    let scope_rects = {
+        let engine = &mut cache.pane(id).graphics.engine;
+        match scope {
+            Some(run) => engine
+                .selection_rects(Some(run), visible)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    };
+    id.set_scope(window, &scope_rects);
     let rects = selection_rects.len();
     apply_pane_geometry(
         window,
