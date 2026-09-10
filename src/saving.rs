@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use slint::ComponentHandle;
 
 use crate::buffer::{DocumentFile, ExternalChange};
+use crate::file_io::{Encoding, LoadError};
 use crate::open_document::OpenDocument;
 use crate::{
     AUTOSAVE_SETTING, AppWindow, EditorState, Live, MAX_DOCUMENT_CHARACTERS, Opening, PaneId,
@@ -440,6 +441,79 @@ pub fn reload_from_file(window: &AppWindow, live: &Live) {
             live.cache
                 .borrow_mut()
                 .log_diag("external", &format!("reload failed error={error}"));
+        }
+        None => {}
+    }
+}
+
+/// この文書を、言われた文字コードで開き直す（要件 E2 の②）。
+///
+/// **未保存の本文があれば、先に訊く**のは呼ぶ側（`main.rs`の`reopen_as_asked`）で、
+/// ここへ来るのは訊き終わったあとである。ここがするのは読み直しそのものだけ。
+///
+/// **読めなければ何もしない。**文書は読めていたときのままで、ファイルにも触って
+/// いない——開き直しは、失敗しても何も失わない操作である。
+pub fn reopen_as(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>, encoding: Encoding) {
+    // **いま何で読んでいるか**を、読み直す前に控える。同じものを選んだのなら
+    // 字は1つも変わらない——書き手の報告 2026-09-10：「特に壊れて見えません」は
+    // **UTF-16 BEの見本をUTF-16 BEで開き直した**回で、答えとしては正しいのに
+    // 「開き直しました」としか言わなかったので、効かなかったのと区別が付かなかった。
+    let held = document.file.borrow().form().encoding;
+    let reopened = document
+        .file
+        .borrow_mut()
+        .reopen_as(MAX_DOCUMENT_CHARACTERS, encoding);
+    let name = encoding.as_str();
+    match reopened {
+        Some(Ok(text)) => {
+            let bytes = text.len();
+            let mixed = document.file.borrow().mixed_newlines();
+            replace_document(window, &live.states, &live.cache, document, text);
+            // 開き直したのだから、本文とファイルは定義により一致している
+            // ——退避も、いま捨てた本文のぶんは要らない。
+            document.text.mark_saved();
+            discard_work_copy(live, &work_identity(&document.file.borrow()));
+            publish_tabs(window, live);
+            // **揃えたことは言う**（読み込みと同じ規則）。混ざった改行は
+            // 1つへ揃えてあるので、黙っていると保存で揃ったことが画面の
+            // どこにも出ない。
+            // **同じ文字コードなら「そのまま」と言う。**選んだ行に既に印が
+            // 付いていたのだから、書き手が知りたいのは「字が変わらなかったのは
+            // 効かなかったからではない」ことである。
+            let done = if held == encoding {
+                format!("{name}のまま読み直しました（字は変わりません）")
+            } else {
+                format!("{name}で開き直しました")
+            };
+            let told = if mixed {
+                format!("{done}（改行コードは混在していました）")
+            } else {
+                done
+            };
+            window.set_render_status(told.into());
+            live.cache.borrow_mut().log_diag(
+                "encoding",
+                &format!(
+                    "reopened as={name} was={} bytes={bytes} mixed={}",
+                    held.as_str(),
+                    mixed as u8
+                ),
+            );
+        }
+        Some(Err(error)) => {
+            // **その文字コードでは読めなかった**のか、大きすぎたのか。前者は
+            // 判別の言葉（「どれとしても読めない」）では嘘になるので、ここで
+            // 言い直す——書き手が選んだのは1つの文字コードである。
+            let told = match error {
+                LoadError::Unreadable => {
+                    format!("{name}としては読めません。文書はそのままです")
+                }
+                other => format!("開き直せません: {other}"),
+            };
+            window.set_render_status(told.into());
+            live.cache
+                .borrow_mut()
+                .log_diag("encoding", &format!("refused as={name}"));
         }
         None => {}
     }

@@ -11,7 +11,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::file_io::{self, FileStamp, LoadError, TextForm};
+use crate::file_io::{self, Encoding, FileStamp, LoadError, TextForm};
 
 /// A file the document has been saved to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +70,23 @@ impl DocumentFile {
     /// The text comes back separately because it belongs to the editor's
     /// shared buffer, not to this.
     pub fn open(path: &Path, limit: usize) -> Result<(Self, String), LoadError> {
-        let loaded = file_io::read(path, limit)?;
+        Self::taken(path, file_io::read(path, limit)?)
+    }
+
+    /// 同じことを、**文字コードを言われて**する（要件 E2 の②）。
+    ///
+    /// **読めたときだけ文書になる**——`Err`のときここは何も作らないので、
+    /// 呼ぶ側が持っている本文は1字も動かない。
+    pub fn open_as(
+        path: &Path,
+        limit: usize,
+        encoding: Encoding,
+    ) -> Result<(Self, String), LoadError> {
+        Self::taken(path, file_io::read_as(path, limit, encoding)?)
+    }
+
+    /// 読めたファイルを、この文書の出どころとして受け取る。
+    fn taken(path: &Path, loaded: file_io::LoadedFile) -> Result<(Self, String), LoadError> {
         let saved = SavedFile {
             path: path.to_path_buf(),
             form: loaded.form,
@@ -219,8 +235,34 @@ impl DocumentFile {
     /// had just been opened — which is what 要件 8.3's「安全に再読み込みする」
     /// means for a document with nothing unsaved in it.
     pub fn reload(&mut self, limit: usize) -> Option<Result<String, LoadError>> {
+        self.read_again(limit, None)
+    }
+
+    /// 言われた文字コードで読み直す（要件 E2 の②）。
+    ///
+    /// **読めたときだけ入れ替わる。**CP932の原稿をUTF-8で開き直そうとすれば
+    /// `Err`が返り、文書は読めていたときのままである——**開き直しは、失敗して
+    /// も何も失わない操作**でなければならない（要件 E2：「文字化けした内容を
+    /// 確定しない」）。
+    pub fn reopen_as(
+        &mut self,
+        limit: usize,
+        encoding: Encoding,
+    ) -> Option<Result<String, LoadError>> {
+        self.read_again(limit, Some(encoding))
+    }
+
+    fn read_again(
+        &mut self,
+        limit: usize,
+        encoding: Option<Encoding>,
+    ) -> Option<Result<String, LoadError>> {
         let path = self.path()?.to_path_buf();
-        Some(match Self::open(&path, limit) {
+        let read = match encoding {
+            Some(encoding) => Self::open_as(&path, limit, encoding),
+            None => Self::open(&path, limit),
+        };
+        Some(match read {
             Ok((reopened, text)) => {
                 *self = reopened;
                 Ok(text)
@@ -395,6 +437,54 @@ mod tests {
         assert_eq!(document.form().newline, Newline::Crlf);
         // And the reload is the new baseline, so nothing is outstanding.
         assert_eq!(document.external_change(), ExternalChange::None);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// E2の②: **言われた文字コードで読み直す。**
+    #[test]
+    fn reopening_takes_the_encoding_it_is_told() {
+        let directory = scratch_directory("reopen-as");
+        let path = directory.join("note.txt");
+        let bytes = crate::code_page::encode(crate::code_page::CP932, "春の海").expect("書ける");
+        fs::write(&path, &bytes).expect("writes");
+
+        let (mut document, text) = DocumentFile::open(&path, LIMIT).expect("opens");
+        assert_eq!(text, "春の海");
+        assert_eq!(document.form().encoding, Encoding::Cp932);
+
+        // 同じバイト列をUTF-16 LEだと言えば、そう読む（読めた字は別物である）。
+        let text = document
+            .reopen_as(LIMIT, Encoding::Utf16Le)
+            .expect("ファイルがある")
+            .expect("読める");
+        assert_eq!(document.form().encoding, Encoding::Utf16Le);
+        assert_ne!(text, "春の海");
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// E2の②: **読めなかったときは、文書が動かない。**開き直しは失敗しても
+    /// 何も失わない操作でなければならない——ここが入れ替わってしまうと、
+    /// 呼ぶ側は「読めていたときの形」を二度と言えなくなる。
+    #[test]
+    fn a_reopen_that_cannot_read_leaves_the_document_alone() {
+        let directory = scratch_directory("reopen-refuses");
+        let path = directory.join("note.txt");
+        let bytes = crate::code_page::encode(crate::code_page::CP932, "日本語").expect("書ける");
+        fs::write(&path, &bytes).expect("writes");
+
+        let (mut document, _) = DocumentFile::open(&path, LIMIT).expect("opens");
+        let before = document.form();
+
+        let error = document
+            .reopen_as(LIMIT, Encoding::Utf8)
+            .expect("ファイルがある")
+            .expect_err("断る");
+
+        assert!(matches!(error, LoadError::Unreadable));
+        assert_eq!(document.form(), before);
+        assert_eq!(document.path(), Some(path.as_path()));
+
         let _ = fs::remove_dir_all(&directory);
     }
 

@@ -53,7 +53,7 @@ use pane_layout::{Layout, Rect, Split, Towards, neighbour};
 use saving::{
     check_external_change, collect_write_results, discard_all_work_copies, discard_work_copy,
     flush_work_copies, keep_work_copies_again, overwrite_the_outside_change, reload_from_file,
-    restore_tabs, save_all, save_document, work_identity, write_work_copy_if_due,
+    reopen_as, restore_tabs, save_all, save_document, work_identity, write_work_copy_if_due,
     write_work_copy_now, write_work_copy_of,
 };
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
@@ -1731,6 +1731,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 live.cache
                     .borrow_mut()
                     .log_diag("tab", &format!("choose pane={} at={index}", id.log_name()));
+                // 別の文書へ移るなら、前の文書についての知らせは畳む。
+                forget_render_status(&window);
                 switch_to_tab(&window, &live, id, index);
             }
         });
@@ -1746,6 +1748,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // tick for the same reason: the switch republishes the strip (6.18).
         Timer::single_shot(Duration::ZERO, move || {
             if let Some(window) = weak.upgrade() {
+                forget_render_status(&window);
                 step_tab(&window, &live, id, backwards);
             }
         });
@@ -5322,6 +5325,10 @@ fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, openi
 /// command line went to the hidden pane and looked like it had not opened at
 /// all.
 fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, opening: Opening) {
+    // **知らせは、いま前にある文書のものである**（書き手の報告 2026-09-10）。
+    // 別のものを開くならその知らせはもう古い——ここで消しておけば、この先で
+    // 出す言葉（「改行コードが混在していました」など）だけが残る。
+    forget_render_status(window);
     let (held, yielding) = {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
@@ -6593,6 +6600,14 @@ enum Question {
     /// （2026-09-08、要件 8.1・8.4）。**退避が働いていれば訊かない**——
     /// そちらは閉じても失われないので、問いは書き手の邪魔でしかない。
     CloseWindow,
+    /// 未保存の本文があるまま、別の文字コードで開き直そうとしている
+    /// （要件 E2 の②）。**文書は道で覚える**——答えは1周あとに返り、その
+    /// あいだに書き手は別のペインを触っているかもしれない（`CloseTab`が
+    /// ペインと位置を持ち歩くのと同じ理由）。
+    ReopenAs {
+        path: PathBuf,
+        encoding: file_io::Encoding,
+    },
     /// 終了の直前の退避が書けなかった（追加要件 2026-09-09、残り2）。
     /// **退避が働いているつもりで閉じようとしている**ときにだけ立つ問いで、
     /// 書けた件数が0のときは何も訊かない——要件 8.1 は静かな約束である。
@@ -6805,6 +6820,28 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             }
             window.hide().ok();
         }
+        // 要件 E2 の②: **保存してから開き直す。**保存が済まなかった（名前を
+        // 付けるのを取り消した、書けなかった、外部変更で別の問いが立った）
+        // ときは開き直さない——書き手が「保存して」と言ったのに、保存されない
+        // まま本文が入れ替わる。
+        (Question::ReopenAs { path, encoding }, 0) => {
+            let Some(document) = asked_document(window, live, &path) else {
+                return;
+            };
+            save_document(window, live, false);
+            if live.active(window).text.edited() {
+                return;
+            }
+            reopen_as(window, live, &document, encoding);
+        }
+        // 破棄して開き直す。**捨てるのは本文の変更だけ**で、ファイルは1バイトも
+        // 動かない——読み直せなければ、その変更さえ残っている。
+        (Question::ReopenAs { path, encoding }, 1) => {
+            let Some(document) = asked_document(window, live, &path) else {
+                return;
+            };
+            reopen_as(window, live, &document, encoding);
+        }
         (Question::SaveConflict, 0) => overwrite_the_outside_change(window, live),
         (Question::SaveConflict, 1) => reload_from_file(window, live),
         (Question::SaveConflict, 2) => save_document(window, live, true),
@@ -6820,6 +6857,68 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         }
         _ => {}
     }
+}
+
+/// 帯の知らせを畳む（書き手の報告 2026-09-10：「一度出ると出っぱなし」）。
+///
+/// **知らせは、その文書のその時のもの**である。「UTF-8としては読めません」は
+/// 押した瞬間の答えで、そのあと書き手が打ち始めたり別のタブへ移ったりすれば、
+/// 画面に残っている言葉はもう**いま見えているものについての話ではない**。
+/// 消す場所は3つ——**打つ**（`SharedText::borrow_mut`、編集はぜんぶそこを通る）、
+/// **別のタブへ移る**、**別のものを開く**。どれも「書き手が次へ動いた」ことで、
+/// 時間では消さない：読んでいる最中に消えるのは、出ていないのと同じである。
+///
+/// **失敗が続いていることは、別の場所が言っている**——保存できていない文書には
+/// タブと題に`*`が付いたままで、要件 7.7 の「働いていない状態」はそちらが持つ。
+fn forget_render_status(window: &AppWindow) {
+    if !window.get_render_status().is_empty() {
+        window.set_render_status(SharedString::new());
+    }
+}
+
+/// 問いが立っていたときに前にあった文書を、答えが返ってきたときに引き直す
+/// （要件 E2 の②）。
+///
+/// **問いは道を覚えている。**答えは1周あとに返るので、指す先を名前で確かめ直す
+/// ——問いが立っているあいだ書き手はタブを触れない（幕がクリックを飲む）ので
+/// 普段は同じものだが、**同じものだと確かめずに本文を入れ替える道は作らない**。
+fn asked_document(window: &AppWindow, live: &Live, path: &Path) -> Option<Rc<OpenDocument>> {
+    let document = live.active(window);
+    let same = document.file.borrow().path() == Some(path);
+    same.then_some(document)
+}
+
+/// ステータスバーの文字コードから選ばれた、開き直しの求め（要件 E2 の②）。
+///
+/// **未保存の本文があるときだけ訊く。**開き直しはファイルを読み直すことなので、
+/// 打ったばかりの字はそこで消える——要件 E2 は「未保存本文がある開き直しでは
+/// 保存・取り消しの道を残す」と言っている。何も編集していなければ失うものが
+/// 無いので、そのまま読み直す（外部変更の読み直しと同じ規則）。
+fn reopen_as_asked(window: &AppWindow, live: &Live, encoding: file_io::Encoding) {
+    let document = live.active(window);
+    let path = document.file.borrow().path().map(Path::to_path_buf);
+    // **ファイルが無ければ開き直せない。**新しい文書はまだどこにも無く、
+    // 読み直す相手がいない——③（指定文字コードで保存する）がその道である。
+    let Some(path) = path else {
+        window.set_render_status("まだ保存していない文書は開き直せません".into());
+        return;
+    };
+    let name = encoding.as_str();
+    if !document.text.edited() {
+        reopen_as(window, live, &document, encoding);
+        return;
+    }
+    let title = document.file.borrow().title();
+    ask_question(
+        window,
+        live,
+        Question::ReopenAs { path, encoding },
+        format!(
+            "「{title}」を{name}で開き直します。\n\n             保存していない変更は、ファイルを読み直したときに失われます。"
+        ),
+        &["保存して開き直す", "破棄して開き直す", "キャンセル"],
+        1,
+    );
 }
 
 /// Close a tab (要件 6.3).
@@ -12265,6 +12364,37 @@ fn update_status(
         newline_name(form.newline)
     );
     window.set_count_encoding(told.into());
+    // E2の②: **一覧の何番目に印を付けるか**と、**開き直せるか**。
+    // 開き直しはファイルを読み直すことなので、まだファイルの無い文書には
+    // その道が無い——一覧はそう言う（要件 7.7）。
+    window.set_count_encoding_id(encoding_id(form.encoding));
+    window.set_count_encoding_reopenable(document.file.borrow().path().is_some());
+}
+
+/// 開き直しの一覧に出る4つ（要件 E2 の②）。
+///
+/// **番号を作る場所は1つ。**画面は番号しか持てないので、その番号が何を指すかを
+/// 決める行がこの2つの外にあってはいけない——一覧の並びを変えた日に、指す先だけ
+/// が古いまま残る。**BOMの有無はここに無い**：読むときの印はファイルが持って
+/// いて、書き手が選ぶのは表のほうである（BOMを選ぶのは保存＝③の話）。
+fn encoding_id(encoding: file_io::Encoding) -> i32 {
+    match encoding {
+        file_io::Encoding::Utf8 => 0,
+        file_io::Encoding::Utf16Le => 1,
+        file_io::Encoding::Utf16Be => 2,
+        file_io::Encoding::Cp932 => 3,
+    }
+}
+
+/// その番号が指す文字コード。知らない番号には**何もしない**。
+fn encoding_of_id(id: i32) -> Option<file_io::Encoding> {
+    match id {
+        0 => Some(file_io::Encoding::Utf8),
+        1 => Some(file_io::Encoding::Utf16Le),
+        2 => Some(file_io::Encoding::Utf16Be),
+        3 => Some(file_io::Encoding::Cp932),
+        _ => None,
+    }
 }
 
 /// 改行の呼び名（要件 E2）。**書き手が他の道具で見る言葉**に合わせる。

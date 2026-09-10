@@ -272,6 +272,20 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
         }
     });
 
+    // 要件 E2 の②: **ステータスバーの文字コードから、開き直す。**
+    // 相手は「いま鍵盤を持っているペインが見ている文書」——帯に出ている
+    // 文字コードがその文書のものだからで、押した言葉と動く先が同じものを
+    // 指している。
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_reopen_encoding(move |id| {
+        if let Some(window) = weak.upgrade() {
+            if let Some(encoding) = crate::encoding_of_id(id) {
+                crate::reopen_as_asked(&window, &held, encoding);
+            }
+        }
+    });
+
     // 要件 7.9: **書きながら語を足す、いちばん普通の道。**
     let weak = window.as_weak();
     let held = live.clone();

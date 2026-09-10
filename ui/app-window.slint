@@ -334,6 +334,15 @@ export component AppWindow inherits Window {
     in property <string> count-warning;
     /// 要件 E2: この文書の文字コードと改行——`UTF-8 BOM・CRLF`。
     in property <string> count-encoding;
+    /// いまの文字コードが、開き直しの一覧の何番目か（要件 E2 の②）。
+    /// **番号はRust側でしか作らない**——UTF-8 0／UTF-16 LE 1／UTF-16 BE 2／
+    /// CP932 3で、BOMの有無は別に持っている（読むときは印を見るので、
+    /// 開き直しで選ぶのは表のほうだけである）。
+    in property <int> count-encoding-id;
+    /// 開き直せるか＝この文書にファイルがあるか（要件 E2 の②）。
+    in property <bool> count-encoding-reopenable;
+    /// この文字コードで読み直す（要件 E2 の②）。
+    callback reopen-encoding(int);
     /// E1: いま探している語と、その数——`「白猫」3 / 12`。**帯が閉じていても
     /// 見えている**唯一の場所で、打鍵のたびに数え直すので古くならない。
     in property <string> count-find;
@@ -2302,12 +2311,117 @@ export component AppWindow inherits Window {
 
                 // 要件 E2: **この文書が何で書かれているか。**開いたファイルの
                 // 文字コードと改行で、新しい文書はこの編集器が書く形（UTF-8・LF）。
-                if root.count-encoding != "": Text {
-                    text: root.count-encoding;
-                    color: Tok.ink-muted;
-                    font-size: 12px;
-                    vertical-alignment: center;
+                // **押せば選べる**（E2の②、2026-09-10）——単語モードと倍率が
+                // 同じ帯で押せるのと同じ形で、ここも「いま書いているものに
+                // ついての設定」である。
+                if root.count-encoding != "": Rectangle {
+                    width: encoding-text.preferred-width + 12px;
                     horizontal-stretch: 0;
+                    background: encoding-touch.has-hover ? Tok.chrome-raised : transparent;
+                    border-radius: 4px;
+
+                    encoding-text := Text {
+                        x: 6px;
+                        y: (parent.height - self.height) / 2;
+                        text: root.count-encoding;
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                    }
+
+                    encoding-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            encoding-menu.show();
+                        }
+                    }
+
+                    // **押した言葉の真上に出す**（技術検証 6.30：押した釦と
+                    // 同じ箱の中に置く）。**高さは数えて書く**——自分の高さを
+                    // 訊きながら位置を決めるのは輪になった問いである（倍率の
+                    // 一覧と同じ）。6+22+1+11+1+(4×28+3×1)+6＝162、開き直せない
+                    // ときは行の代わりに一言なので 6+22+1+11+1+40+6＝87。
+                    encoding-menu := PopupWindow {
+                        x: 0px;
+                        y: -6px - (root.count-encoding-reopenable ? 162px : 87px);
+                        width: 220px;
+                        close-policy: close-on-click-outside;
+
+                        MenuFrame {
+                            width: 220px;
+
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 1px;
+
+                                // **何をする一覧かを言う。**E2は「開き直す」と
+                                // 「保存する」を別の操作として示せと言っている
+                                // ので、見出しのほうが先にある——③で「この文字
+                                // コードで保存する」がこの下に並ぶ。
+                                Text {
+                                    height: 22px;
+                                    text: "この文字コードで開き直す";
+                                    color: Tok.ink-faint;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                }
+
+                                MenuSep { }
+
+                                // **ファイルが無ければ行を出さない**（要件 7.7）。
+                                // 押せて、何も起きない行は、働いていないことを
+                                // 隠している。
+                                if !root.count-encoding-reopenable: Text {
+                                    height: 40px;
+                                    text: "まだ保存していない文書は\n開き直せません";
+                                    color: Tok.ink-muted;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                }
+
+                                // **頼んでから閉じる**（技術検証 6.24）。条件の
+                                // 付いた行は繰り返し要素なので、先に閉じると
+                                // ハンドラごと消える。
+                                if root.count-encoding-reopenable: VerticalLayout {
+                                    spacing: 1px;
+
+                                    MenuRow {
+                                        title: "UTF-8";
+                                        checked: root.count-encoding-id == 0;
+                                        activated => {
+                                            root.reopen-encoding(0);
+                                            encoding-menu.close();
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "UTF-16 LE";
+                                        checked: root.count-encoding-id == 1;
+                                        activated => {
+                                            root.reopen-encoding(1);
+                                            encoding-menu.close();
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "UTF-16 BE";
+                                        checked: root.count-encoding-id == 2;
+                                        activated => {
+                                            root.reopen-encoding(2);
+                                            encoding-menu.close();
+                                        }
+                                    }
+                                    MenuRow {
+                                        title: "CP932";
+                                        checked: root.count-encoding-id == 3;
+                                        activated => {
+                                            root.reopen-encoding(3);
+                                            encoding-menu.close();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // 要件 10: only the source has a line and a column to give.

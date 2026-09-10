@@ -74,7 +74,25 @@ impl SharedText {
             self.pending_since.set(Some(now));
         }
         self.set_edited(true);
+        self.forget_status();
         self.text.borrow_mut()
+    }
+
+    /// 帯に出ている知らせを畳む（書き手の報告 2026-09-10：「一度出ると
+    /// 出っぱなし」）。
+    ///
+    /// **打ち始めたということは、その知らせは読み終わったということである。**
+    /// ここに置いてあるのは`set_edited`と同じ理由で、**編集はぜんぶこの door を
+    /// 通る**——どこか1つの編集経路で消し忘れる、ということが起きない。
+    /// **本文を入れ替える道（`replace_document`）もここを通る**ので、入れ替えた
+    /// あとに出す言葉（「CP932で開き直しました」）は消えない：先に畳んで、
+    /// それから言う、の順になる。
+    fn forget_status(&self) {
+        if let Some(window) = self.window.upgrade()
+            && !window.get_render_status().is_empty()
+        {
+            window.set_render_status(Default::default());
+        }
     }
 
     /// When the changes now waiting for a work copy began, if any are.

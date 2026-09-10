@@ -221,6 +221,34 @@ fn detect_newline(text: &str) -> (Newline, bool) {
 /// filesystem.
 pub fn decode(bytes: &[u8], limit: usize) -> Result<(String, TextForm), LoadError> {
     let (text, encoding, byte_order_mark) = read_bytes(bytes)?;
+    fold(text, encoding, byte_order_mark, limit)
+}
+
+/// 同じことを、**文字コードを言われて**する（要件 E2 の②）。
+///
+/// **判別を通らない**のが違いの全部で、折り返しも上限もBOMの扱いも[`decode`]と
+/// 同じ道である——「開き直した文書」と「開いた文書」が別の作りになれば、
+/// 保存で違いが出る。
+///
+/// **印の無いUTF-16も、言われれば読む。**[`read_bytes`]が自分では選ばないのは
+/// 向きを決める当てが無いからで、書き手が「LEだ」と言ったのならその当ては
+/// もうある——②はそのための操作である。
+pub fn decode_as(
+    bytes: &[u8],
+    limit: usize,
+    encoding: Encoding,
+) -> Result<(String, TextForm), LoadError> {
+    let (text, byte_order_mark) = read_bytes_as(bytes, encoding)?;
+    fold(text, encoding, byte_order_mark, limit)
+}
+
+/// 読めた字を、この編集器が持つ形へ（改行は`\n`ひとつ、上限は文書に対する数）。
+fn fold(
+    text: String,
+    encoding: Encoding,
+    byte_order_mark: bool,
+    limit: usize,
+) -> Result<(String, TextForm), LoadError> {
     let text = text.as_str();
     let (newline, mixed_newlines) = detect_newline(text);
     let folded = newline != Newline::Lf || mixed_newlines;
@@ -280,6 +308,49 @@ fn read_bytes(bytes: &[u8]) -> Result<(String, Encoding, bool), LoadError> {
     }
 }
 
+/// 言われた文字コードで読む（要件 E2 の②）。
+///
+/// **印は、あれば脱がせる。**BOMは字ではなく「この向きで読め」という言い残し
+/// なので、本文へ混ぜるとファイルの先頭に見えない字が1つ増える——UTF-8の
+/// `EF BB BF`とUTF-16の`FF FE`／`FE FF`は、その文字コードのものだけを外す。
+/// **印が無くても読む**：あるかどうかは[`TextForm`]が覚え、保存で書き戻す。
+///
+/// **CP932は印を持たない**ので、先頭の3バイトも字として読もうとする——UTF-8の
+/// BOM（`EF BB BF`）はCP932の表に無い並びなので、そこで断られる。断られたほうが
+/// 良い：読めない字を`?`にして開けば、書き手はBOMがあったことを二度と知れない。
+///
+/// 読めなければ[`LoadError::Unreadable`]で、**本文には触らない**（呼ぶ側は
+/// 元の文書をそのまま持っている）。
+fn read_bytes_as(bytes: &[u8], encoding: Encoding) -> Result<(String, bool), LoadError> {
+    match encoding {
+        Encoding::Utf8 => {
+            let (body, mark) = match bytes.strip_prefix(&BYTE_ORDER_MARK) {
+                Some(body) => (body, true),
+                None => (bytes, false),
+            };
+            let text = std::str::from_utf8(body).map_err(|_| LoadError::Unreadable)?;
+            Ok((text.to_owned(), mark))
+        }
+        Encoding::Utf16Le | Encoding::Utf16Be => {
+            let big_endian = encoding == Encoding::Utf16Be;
+            let own = if big_endian {
+                UTF16_BE_MARK
+            } else {
+                UTF16_LE_MARK
+            };
+            let (body, mark) = match bytes.strip_prefix(&own) {
+                Some(body) => (body, true),
+                None => (bytes, false),
+            };
+            Ok((utf16(body, big_endian), mark))
+        }
+        Encoding::Cp932 => match crate::code_page::decode(crate::code_page::CP932, bytes) {
+            Some(text) => Ok((text, false)),
+            None => Err(LoadError::Unreadable),
+        },
+    }
+}
+
 /// UTF-16のバイト列を文字へ。
 ///
 /// **奇数バイトで終わっていても読む。**最後の半端な1バイトは落とす——そこで断ると、
@@ -302,12 +373,30 @@ fn utf16(bytes: &[u8], big_endian: bool) -> String {
 
 /// Read a file into the shape the editor holds it in.
 pub fn read(path: &Path, limit: usize) -> Result<LoadedFile, LoadError> {
+    read_with(path, limit, None)
+}
+
+/// 同じことを、**文字コードを言われて**する（要件 E2 の②）。
+pub fn read_as(path: &Path, limit: usize, encoding: Encoding) -> Result<LoadedFile, LoadError> {
+    read_with(path, limit, Some(encoding))
+}
+
+/// 判別に任せるか、言われた文字コードで読むか。**ファイルに触る道は1本**
+/// ——印（`stamp`）を取る順番のような決めごとが2つに分かれない。
+fn read_with(
+    path: &Path,
+    limit: usize,
+    encoding: Option<Encoding>,
+) -> Result<LoadedFile, LoadError> {
     let bytes = fs::read(path)?;
     // Taken after the read rather than before, so that a file written while it
     // was being read leaves a stamp that does not match what was loaded, and
     // the watcher says so instead of missing it (要件 8.3).
     let stamp = FileStamp::read(path)?;
-    let (text, form) = decode(&bytes, limit)?;
+    let (text, form) = match encoding {
+        Some(encoding) => decode_as(&bytes, limit, encoding)?,
+        None => decode(&bytes, limit)?,
+    };
     Ok(LoadedFile { text, form, stamp })
 }
 
@@ -569,6 +658,119 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// E2の②: **印の無いUTF-16も、言われれば読む。**判別が自分では選ばない
+    /// のは向きを決める当てが無いからで、書き手が「LEだ」と言ったのならその
+    /// 当てはもうある——それが「指定文字コードで開き直す」という操作である。
+    #[test]
+    fn a_named_encoding_reads_utf16_without_a_mark() {
+        let mut bare = Vec::new();
+        for unit in "春の海".encode_utf16() {
+            bare.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        // 判別に任せれば、これはUTF-16にならない。
+        let (_, guessed) = decode(&bare, LIMIT).expect("何かとしては読める");
+        assert_ne!(guessed.encoding, Encoding::Utf16Le);
+
+        let (text, form) = decode_as(&bare, LIMIT, Encoding::Utf16Le).expect("読める");
+        assert_eq!(text, "春の海");
+        assert_eq!(form.encoding, Encoding::Utf16Le);
+        // 印は無かった、と覚えている。
+        assert!(!form.byte_order_mark);
+    }
+
+    /// E2の②: **自分の印は脱がせ、他人の印は字として読む。**
+    ///
+    /// 印は字ではなく「この向きで読め」という言い残しなので、その文字コードの
+    /// ものだけを外す。**外さなかった印は本文の1字になる**——UTF-16 LEの
+    /// ファイルをBEだと言って開けば、先頭に`U+FFFE`が立つ。それは間違いでは
+    /// なく「BEの表ではそういう字だ」という答えで、書き手はそれを見て選び直せる
+    /// （ファイルには触っていない）。
+    #[test]
+    fn a_named_encoding_only_takes_off_its_own_mark() {
+        let mut little = UTF16_LE_MARK.to_vec();
+        for unit in "本文".encode_utf16() {
+            little.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let (text, form) = decode_as(&little, LIMIT, Encoding::Utf16Le).expect("読める");
+        assert_eq!(text, "本文");
+        assert!(form.byte_order_mark);
+
+        let (text, form) = decode_as(&little, LIMIT, Encoding::Utf16Be).expect("読める");
+        assert!(text.starts_with('\u{FFFE}'), "{text:?}");
+        assert!(!form.byte_order_mark);
+
+        // UTF-8の印も、UTF-8だと言われたときだけ外れる。
+        let mut utf8 = BYTE_ORDER_MARK.to_vec();
+        utf8.extend_from_slice("本文".as_bytes());
+        let (text, form) = decode_as(&utf8, LIMIT, Encoding::Utf8).expect("読める");
+        assert_eq!(text, "本文");
+        assert!(form.byte_order_mark);
+    }
+
+    /// E2の②: **CP932は印を持たない**ので、UTF-8のBOMも字として読もうとする
+    /// ——`EF BB BF`はCP932の表に無い並びなので、そこで断られる。
+    /// **断られたほうが良い**：読めない字を`?`にして開けば、書き手はBOMが
+    /// あったことを二度と知れない。
+    #[test]
+    fn cp932_has_no_mark_to_take_off() {
+        let mut bytes = BYTE_ORDER_MARK.to_vec();
+        bytes.extend_from_slice("本文".as_bytes());
+        let error = decode_as(&bytes, LIMIT, Encoding::Cp932).expect_err("断る");
+        assert!(matches!(error, LoadError::Unreadable));
+    }
+
+    /// E2の②: **読めなければ断る。**呼ぶ側の本文はそのままで、開き直しは
+    /// 失敗しても何も失わない操作である。
+    #[test]
+    fn a_named_encoding_that_cannot_read_the_bytes_refuses() {
+        let bytes = crate::code_page::encode(crate::code_page::CP932, "日本語").expect("書ける");
+        let error = decode_as(&bytes, LIMIT, Encoding::Utf8).expect_err("断る");
+        assert!(matches!(error, LoadError::Unreadable));
+    }
+
+    /// E2の②: **開き直した文書と、開いた文書は同じ作りである。**改行の畳み方も
+    /// 上限の数え方も[`decode`]と同じ道（`fold`）を通る——別々になれば、
+    /// 開き直したあとの保存だけが違う形を書く。
+    #[test]
+    fn a_named_encoding_folds_line_breaks_the_same_way() {
+        let bytes =
+            crate::code_page::encode(crate::code_page::CP932, "春\r\n海\r\n").expect("書ける");
+
+        let (text, form) = decode_as(&bytes, LIMIT, Encoding::Cp932).expect("読める");
+        assert_eq!(text, "春\n海\n");
+        assert_eq!(form.newline, Newline::Crlf);
+        assert!(!form.mixed_newlines);
+
+        // 上限も同じ数え方（畳んだあとの字数）。
+        assert!(decode_as(&bytes, 4, Encoding::Cp932).is_ok());
+        assert!(matches!(
+            decode_as(&bytes, 3, Encoding::Cp932).expect_err("越える"),
+            LoadError::TooLarge { characters: 4, .. }
+        ));
+    }
+
+    /// E2の②: 見本のファイルを、**別の文字コードだと言って**開き直す。
+    #[test]
+    fn a_sample_file_can_be_opened_as_another_encoding() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let path = here.join("15_文字コード_CP932.txt");
+
+        // 言わなければCP932。
+        assert_eq!(
+            read(&path, LIMIT).expect("読める").form.encoding,
+            Encoding::Cp932
+        );
+        // UTF-8だと言えば、読めないので断られる——ファイルは元のままである。
+        let error = read_as(&path, LIMIT, Encoding::Utf8).expect_err("断る");
+        assert!(matches!(error, LoadError::Unreadable));
+        assert_eq!(
+            read(&path, LIMIT).expect("読める").form.encoding,
+            Encoding::Cp932
+        );
     }
 
     /// E2: **表せない字があれば、1バイトも書かない**——`?`に替えて保存しない。
