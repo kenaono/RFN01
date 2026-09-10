@@ -1620,7 +1620,11 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
         // the box rather than set in it, and `draw_marker_ink` takes it before
         // it ever asks what goes inside.
         Ornament::Hidden | Ornament::Indent => String::new(),
-        Ornament::Number => {
+        // **箱が覆っている字を、そのまま。**`Number`は`10.`が`9.`と違うことを
+        // 言うために、`Markup`は編集中の行の記号を見せるために——どちらも
+        // 「覆ったところを読み出して溝に描く」1つの道である（要件 7.3.1）。
+        // 末尾の空白は落とす：その空白は記号のあとの間で、間はいま箱である。
+        Ornament::Number | Ornament::Markup => {
             let start = byte_at_utf16(block_text, run.utf16_start);
             let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
             block_text[start..end].trim_end().to_owned()
@@ -5912,6 +5916,47 @@ mod tests {
 
     /// 要件 7.3.2: **every cell of a column begins at one place**, whatever the
     /// cells above it hold and whatever padding the writer typed around the
+    /// 要件 7.3.1（書き手の報告 2026-09-10）: **触っている行も、離れた行も、
+    /// 本文は同じところから始まる。**
+    ///
+    /// カーソルのある行は原文で出る（記号も見える）が、段下げは記号が隠れている
+    /// 前提のままだったので、その行だけ本文が記号の幅ぶん右にあり、離れると左へ
+    /// 戻っていた——「入力中に右に大きくズレて戻る」。記号を箱で覆って溝に描く
+    /// ようにしたので（`Ornament::Markup`）、位置は動かない。
+    #[test]
+    fn a_line_does_not_move_when_the_caret_is_on_it() {
+        let mode = WritingMode::Horizontal;
+        for line in [
+            "- 項目",
+            "10. 項目",
+            "- [x] 項目",
+            "> 項目",
+            "  - 項目",
+            "項目",
+        ] {
+            let source = format!("ふつうの本文\n{line}\n");
+            let head = "ふつうの本文\n".len();
+            let mut seen = Vec::new();
+            for active in [Some(head), None] {
+                let preview =
+                    crate::document::PreviewDocument::from_source_with_active_line(&source, active);
+                let styles = crate::document::line_styles(&source);
+                let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                    .with_markers(preview.markers())
+                    .with_source_line(preview.active_line());
+                let text = preview.text.clone();
+                let mut engine = engine_set(mode, styled, &plain());
+                seen.push(line_axis_at(&mut engine, mode, &text, "項目"));
+            }
+            assert!(
+                (seen[0] - seen[1]).abs() < 0.5,
+                "{line}: 触っていると{}、離れると{}",
+                seen[0],
+                seen[1]
+            );
+        }
+    }
+
     /// bars. This is the whole of what the boxes over a table's bars are for
     /// (技術検証 7.7).
     ///

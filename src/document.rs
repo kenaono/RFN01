@@ -78,13 +78,18 @@ impl PreviewLine {
     fn build(source_line: &str, active: bool, style: LineStyle, has_break: bool) -> Self {
         let mut visible = String::with_capacity(source_line.len() + 1);
         let mut marks = Vec::new();
-        let mut marker = None;
+        let marker;
         if active {
             // The line the caret is on is shown as it was written, markers and
-            // all (要件 7.3.1), so there is nothing hidden to mark — and nothing
-            // may stand over its marker either. A box hides the glyphs it
-            // covers, and on this line those are the ones being edited.
+            // all (要件 7.3.1).
             visible.push_str(source_line);
+            // **行頭の記号は溝へぶら下げる**（書き手の報告 2026-09-10：「入力中に
+            // 右に大きくズレて戻る」）。原文で出すだけだと、記号が幅を持つのに
+            // 段下げは記号が隠れている前提のままなので、**その行だけ本文が記号の
+            // 幅ぶん右にあり、離れると左へ戻る。**箱は字を隠すのではなく、
+            // 幅を取らせないためにある——覆った字はそのまま溝に描かれる
+            // （`Ornament::Markup`）ので、記号は見えたままである。
+            marker = active_markup(source_line, style);
         } else {
             push_visible_line(source_line, style, &mut visible, &mut marks);
             marker = line_marker(source_line, style);
@@ -1994,6 +1999,38 @@ fn marker_len(content: &str, kind: LineKind) -> Option<u32> {
 ///
 /// The kind comes from `style` instead of being worked out again, so this
 /// cannot reach a different conclusion than the pane about what a line is.
+/// 編集中の行で、行頭の記号が座る箱（要件 7.3.1、書き手の報告 2026-09-10）。
+///
+/// **隠すためではなく、幅を取らせないための箱。**覆った字はそのまま溝に描かれる
+/// （`Ornament::Markup`）ので、記号は原文のまま見えている——変わるのは、その字が
+/// 本文の流れから外れて溝に立つことだけである。おかげで**本文の位置が、その行に
+/// カーソルがあるかどうかで動かない。**
+///
+/// 覆うのは、組み上がりの行で消えているものと同じ範囲——引用の`>`、字下げの空白、
+/// 箇条書きの印。`line_marker`が数えるのは`>`を落としたあとなので、そのぶんを
+/// 足し直す（原文の行には`>`が残っている）。
+///
+/// **区切り線とフェンスは覆わない。**あれは行そのものが記号で、溝に立てるものが
+/// 無い——原文で出ている行を、二度描くことになる。
+fn active_markup(line: &str, style: LineStyle) -> Option<LineMarker> {
+    // `> `はASCIIなので、バイトの数がそのままUTF-16の数である。
+    let quote = (line.len() - quote_content(line).len()) as u32;
+    match line_marker(line, style) {
+        // **区切り線とフェンスは覆わない。**あれは行そのものが記号で、溝に立てる
+        // ものが無い——原文で出ている行を、二度描くことになる。
+        Some(hidden) if matches!(hidden.ornament, Ornament::Hidden) => None,
+        Some(hidden) => Some(LineMarker {
+            utf16_len: hidden.utf16_len + quote,
+            ornament: Ornament::Markup,
+        }),
+        // 印を持たない引用の行。**`>`も組み上がりでは消える印である。**
+        None => (quote > 0).then_some(LineMarker {
+            utf16_len: quote,
+            ornament: Ornament::Markup,
+        }),
+    }
+}
+
 fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
     let content = quote_content(line);
     let ornament = match style.kind {
@@ -3324,16 +3361,26 @@ mod tests {
         }
     }
 
-    /// **Nothing stands over the marker of the line the caret is on.** A box
-    /// hides the glyphs it covers, and on that line those are the ones being
-    /// edited (要件 7.3.1) — the same rule that keeps its markers showing.
+    /// **カーソルのある行の記号は、溝にぶら下がる**（要件 7.3.1、書き手の報告
+    /// 2026-09-10）。箱は字を隠すためではなく、幅を取らせないためにある
+    /// ——覆った字はそのまま溝に描かれるので、記号は原文のまま見えている。
+    /// おかげで本文の位置が、その行を触っているかどうかで動かない。
     #[test]
-    fn the_active_line_has_no_marker_standing_over_it() {
+    fn the_active_line_hangs_its_markup_in_the_gutter() {
         let source = "- 箇条書き\n- もう一行";
         let preview = PreviewDocument::from_source_with_active_line(source, Some(0));
 
-        assert_eq!(preview.markers()[0], None);
-        assert!(preview.markers()[1].is_some());
+        // 触っている行は原文のまま——`- `は本文の中にある。
+        assert!(preview.text.starts_with("- 箇条書き"));
+        assert_eq!(
+            preview.markers()[0].expect("箱はある").ornament,
+            Ornament::Markup
+        );
+        // 離れている行は、いつもの印。
+        assert_eq!(
+            preview.markers()[1].expect("箱はある").ornament,
+            Ornament::Bullet
+        );
     }
 
     /// Moving the caret away has to give the line its box back, which is the
@@ -3344,11 +3391,20 @@ mod tests {
         let mut preview = PreviewDocument::default();
 
         preview.refresh(source, Some(0));
-        assert_eq!(preview.markers()[0], None);
+        assert_eq!(
+            preview.markers()[0].expect("箱はある").ornament,
+            Ornament::Markup
+        );
 
         preview.refresh(source, Some("- 箇条書き\n".len()));
-        assert!(preview.markers()[0].is_some());
-        assert_eq!(preview.markers()[1], None);
+        assert_eq!(
+            preview.markers()[0].expect("箱はある").ornament,
+            Ornament::Bullet
+        );
+        assert_eq!(
+            preview.markers()[1].expect("箱はある").ornament,
+            Ornament::Markup
+        );
     }
 
     /// A fence reaches past its own line, so a line nobody touched may have to

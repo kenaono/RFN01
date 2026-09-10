@@ -626,6 +626,15 @@ pub enum Ornament {
     /// and its indent belongs to the block ([`BlockSpan::indent_steps`]) the
     /// way a list item's does.
     Hidden,
+    /// **編集中の行の、行頭の記号そのもの**（要件 7.3.1、書き手の報告 2026-09-10）。
+    ///
+    /// カーソルのある行は原文で出る（記号も見える）が、**段下げは記号が隠れている
+    /// 前提のまま**なので、その行だけ本文が記号の幅ぶん右にあった——触っているあいだ
+    /// だけ位置が違い、離れると左へ戻る（「入力中に右に大きくズレて戻る」）。
+    ///
+    /// **覆った字を、そのまま溝に描く**（`Number`と同じ道）。記号は見えたまま、
+    /// 本文の位置は組み上がりと同じになる。
+    Markup,
     /// **The white space a writer typed to line a continuation up under its
     /// item.** Nothing is drawn in its place and it keeps no room either: what
     /// sets the line in is the block, and space that also took room would set
