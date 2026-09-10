@@ -44,6 +44,10 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Memory",
     # The wall clock, for naming this run's diagnostic log.
     "Win32_System_SystemInformation",
+    # 文字コードの変換（E2）。**CP932はWindowsの表**であって、別の実装を持ち込むと
+    # 同じ原稿が道具によって違う字になる——`MultiByteToWideChar`と
+    # `WideCharToMultiByte`だけをここから使う。
+    "Win32_Globalization",
     # The colour dialog, for 要件 9's text and paper colours. Windows draws it,
     # so a colour is picked the way it is picked in every other Windows program.
     "Win32_UI_Controls_Dialogs",

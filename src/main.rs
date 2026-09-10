@@ -1,6 +1,7 @@
 mod app_data;
 mod buffer;
 mod clipboard;
+mod code_page;
 mod diag;
 mod directwrite_probe;
 mod directwrite_render;
@@ -12252,6 +12253,35 @@ fn update_status(
     window.set_count_selected(selected.into());
     window.set_count_caret(caret.into());
     window.set_count_warning(long_paragraph.into());
+    // 要件 E2: **この文書が何で書かれているか。**文字コードと改行を1つの言葉に
+    // する——`UTF-8 BOM・CRLF`。**混ざった改行はそう言う**（読んだときに1つへ
+    // 揃えてあるので、黙っていると保存で揃ったことが画面のどこにも出ない）。
+    let form = document.file.borrow().form();
+    let mark = if form.byte_order_mark && form.encoding == file_io::Encoding::Utf8 {
+        " BOM"
+    } else {
+        ""
+    };
+    let mixed = if form.mixed_newlines {
+        "（混在）"
+    } else {
+        ""
+    };
+    let told = format!(
+        "{}{mark}・{}{mixed}",
+        form.encoding.as_str(),
+        newline_name(form.newline)
+    );
+    window.set_count_encoding(told.into());
+}
+
+/// 改行の呼び名（要件 E2）。**書き手が他の道具で見る言葉**に合わせる。
+fn newline_name(newline: file_io::Newline) -> &'static str {
+    match newline {
+        file_io::Newline::Lf => "LF",
+        file_io::Newline::Crlf => "CRLF",
+        file_io::Newline::Cr => "CR",
+    }
 }
 
 /// A count with its thousands marked, for the status bar (要件 10).

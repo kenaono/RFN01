@@ -332,6 +332,8 @@ export component AppWindow inherits Window {
     /// file does not have.
     in property <string> count-caret;
     in property <string> count-warning;
+    /// 要件 E2: この文書の文字コードと改行——`UTF-8 BOM・CRLF`。
+    in property <string> count-encoding;
     /// E1: いま探している語と、その数——`「白猫」3 / 12`。**帯が閉じていても
     /// 見えている**唯一の場所で、打鍵のたびに数え直すので古くならない。
     in property <string> count-find;
@@ -2286,6 +2288,16 @@ export component AppWindow inherits Window {
                 }
                 Text {
                     text: root.count-selected;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+
+                // 要件 E2: **この文書が何で書かれているか。**開いたファイルの
+                // 文字コードと改行で、新しい文書はこの編集器が書く形（UTF-8・LF）。
+                if root.count-encoding != "": Text {
+                    text: root.count-encoding;
                     color: Tok.ink-muted;
                     font-size: 12px;
                     vertical-alignment: center;

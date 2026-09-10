@@ -129,7 +129,10 @@ impl DocumentFile {
 
     /// The shape a save should write: the file's own, or the default for a
     /// document that has never had one.
-    fn form(&self) -> TextForm {
+    ///
+    /// **画面に出すのもこれ**（要件 E2）——文字コードと改行は「この文書が何で
+    /// 書かれているか」であって、ステータスバーはそれを言う。
+    pub fn form(&self) -> TextForm {
         match &self.origin {
             Origin::Untitled(_) => TextForm::default(),
             Origin::Saved(saved) => saved.form,

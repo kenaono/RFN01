@@ -1,6 +1,8 @@
 //! Turning a file into the text the engine holds, and back again.
 //!
-//! Nothing here touches Windows, DirectWrite or Slint. A document is a single
+//! Windowsに触るのは文字コードの変換だけで、それは`code_page`にある（要件 E2）。
+//! ここにあるのは「何で読むか、読めなければどうするか」の判断で、表そのものは
+//! Windowsが持っている。DirectWriteにもSlintにも触らない。A document is a single
 //! `String` whose only line break is `\n` (技術検証 7.6), so everything a file
 //! had that the engine does not carry — a byte order mark, the kind of line
 //! break it used — comes off on the way in and goes back on the way out.
@@ -12,6 +14,7 @@
 //! file beside it and are renamed on top of it once they are all there, so a
 //! failure leaves the original as it was (要件 8.2).
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -22,6 +25,37 @@ use std::time::SystemTime;
 
 /// UTF-8 byte order mark.
 const BYTE_ORDER_MARK: [u8; 3] = [0xEF, 0xBB, 0xBF];
+/// UTF-16の印。**リトルエンディアンが先**——Windowsの「Unicode」はこれである。
+const UTF16_LE_MARK: [u8; 2] = [0xFF, 0xFE];
+const UTF16_BE_MARK: [u8; 2] = [0xFE, 0xFF];
+
+/// ファイルが使っていた文字コード（要件 E2）。
+///
+/// **初期版が受け持つのはこの4つ**（要件 E2）——UTF-8（BOMの有無は[`TextForm`]が
+/// 別に持つ）、UTF-16のLEとBE、そしてWindowsの日本語CP932。**判別の順は
+/// [`decode`]にあり、ここは「何だったか」を言うだけの型である。**
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Encoding {
+    #[default]
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+    /// Windowsの日本語（Shift_JISの拡張）。**日本語のWindowsで書かれた古い原稿は
+    /// たいていこれ**で、この編集器が読めなければ書き手はまず別の道具を開くことになる。
+    Cp932,
+}
+
+impl Encoding {
+    /// ステータスバーに出す名前（要件 E2）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "UTF-8",
+            Encoding::Utf16Le => "UTF-16 LE",
+            Encoding::Utf16Be => "UTF-16 BE",
+            Encoding::Cp932 => "CP932",
+        }
+    }
+}
 
 /// Suffix of the file a save writes before it renames.
 ///
@@ -59,6 +93,9 @@ impl Newline {
 /// which is what this editor writes when nothing says otherwise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TextForm {
+    /// 読んだときの文字コード（要件 E2）。**保存はこれで書き戻す**——無指定の
+    /// 保存が元の形式を保つ、というのがE2の完了の目安である。
+    pub encoding: Encoding,
     pub byte_order_mark: bool,
     pub newline: Newline,
     /// Whether the file used more than one kind of line break.
@@ -105,12 +142,15 @@ pub struct LoadedFile {
 
 #[derive(Debug)]
 pub enum LoadError {
-    /// The bytes are not UTF-8.
+    /// どの文字コードでも読めなかった（要件 E2）。
     ///
-    /// Turned away rather than guessed at. Reading a Shift_JIS file as if it
-    /// were UTF-8 produces text that merely looks broken but saves back as
-    /// real damage, and this editor's job is to not lose what it was given.
-    NotUtf8,
+    /// **推し量らずに断る。**Shift_JISのファイルをUTF-8として読めば、見た目が
+    /// 壊れるだけでなく、保存した瞬間に本当に壊れる——この編集器の仕事は、
+    /// 渡されたものを失わないことである。
+    ///
+    /// 2026-09-10（E2）まではUTF-8だけを試していた。いまはUTF-16（印つき）と
+    /// CP932も試すので、ここへ来るのは**本当にどれでもないもの**である。
+    Unreadable,
     /// Larger than this editor takes (技術検証 3.10).
     TooLarge {
         characters: usize,
@@ -122,7 +162,10 @@ pub enum LoadError {
 impl fmt::Display for LoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LoadError::NotUtf8 => write!(formatter, "UTF-8として読めないファイルです"),
+            LoadError::Unreadable => write!(
+                formatter,
+                "UTF-8・UTF-16・CP932のどれとしても読めないファイルです"
+            ),
             LoadError::TooLarge { characters, limit } => write!(
                 formatter,
                 "{characters}文字のファイルは、上限{limit}文字を超えるため開けません"
@@ -177,13 +220,8 @@ fn detect_newline(text: &str) -> (Newline, bool) {
 /// what the limit means, what a byte order mark does — can be tested without a
 /// filesystem.
 pub fn decode(bytes: &[u8], limit: usize) -> Result<(String, TextForm), LoadError> {
-    let byte_order_mark = bytes.starts_with(&BYTE_ORDER_MARK);
-    let body = if byte_order_mark {
-        &bytes[BYTE_ORDER_MARK.len()..]
-    } else {
-        bytes
-    };
-    let text = std::str::from_utf8(body).map_err(|_| LoadError::NotUtf8)?;
+    let (text, encoding, byte_order_mark) = read_bytes(bytes)?;
+    let text = text.as_str();
     let (newline, mixed_newlines) = detect_newline(text);
     let folded = newline != Newline::Lf || mixed_newlines;
     let text = if folded {
@@ -198,11 +236,68 @@ pub fn decode(bytes: &[u8], limit: usize) -> Result<(String, TextForm), LoadErro
         return Err(LoadError::TooLarge { characters, limit });
     }
     let form = TextForm {
+        encoding,
         byte_order_mark,
         newline,
         mixed_newlines,
     };
     Ok((text, form))
+}
+
+/// どの文字コードで読むかを決めて、読む（要件 E2）。
+///
+/// **順番が規則である。**
+///
+/// 1. **印があれば、それが答え。**UTF-16のLE／BEとUTF-8のBOMは、書いた側が
+///    「これで読め」と言い残したものである。
+/// 2. **UTF-8として読めれば、UTF-8。**いまの原稿はたいていこれで、しかも
+///    「たまたまUTF-8に見える」並びは短い文以外ではまず起きない。
+/// 3. **それからCP932。**日本語のWindowsで書かれた古い原稿はこれで、読めなければ
+///    書き手はまず別の道具を開くことになる。
+/// 4. どれでもなければ断る（[`LoadError::Unreadable`]）——**文字化けを確定しない。**
+///
+/// **印の無いUTF-16は読まない。**向きを決める当てが無く、日本語の原稿には
+/// 偶然そう読める並びが珍しくない——曖昧なものを黙って決めるのは、この順番が
+/// いちばんしてはいけないことである（E2は「曖昧なら候補を出す」と言っている。
+/// その画面は④）。
+fn read_bytes(bytes: &[u8]) -> Result<(String, Encoding, bool), LoadError> {
+    if let Some(body) = bytes.strip_prefix(&UTF16_LE_MARK) {
+        return Ok((utf16(body, false), Encoding::Utf16Le, true));
+    }
+    if let Some(body) = bytes.strip_prefix(&UTF16_BE_MARK) {
+        return Ok((utf16(body, true), Encoding::Utf16Be, true));
+    }
+    if let Some(body) = bytes.strip_prefix(&BYTE_ORDER_MARK) {
+        let text = std::str::from_utf8(body).map_err(|_| LoadError::Unreadable)?;
+        return Ok((text.to_owned(), Encoding::Utf8, true));
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Ok((text.to_owned(), Encoding::Utf8, false));
+    }
+    match crate::code_page::decode(crate::code_page::CP932, bytes) {
+        Some(text) => Ok((text, Encoding::Cp932, false)),
+        None => Err(LoadError::Unreadable),
+    }
+}
+
+/// UTF-16のバイト列を文字へ。
+///
+/// **奇数バイトで終わっていても読む。**最後の半端な1バイトは落とす——そこで断ると、
+/// 書きかけで途切れたファイルが開けなくなる。対になっていないサロゲートは
+/// `U+FFFD`になる（`from_utf16_lossy`）：**それは読めない字であって、
+/// 読めないファイルではない。**
+fn utf16(bytes: &[u8], big_endian: bool) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            if big_endian {
+                u16::from_be_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_le_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 /// Read a file into the shape the editor holds it in.
@@ -217,24 +312,52 @@ pub fn read(path: &Path, limit: usize) -> Result<LoadedFile, LoadError> {
 }
 
 /// The text as the file should hold it.
-pub fn encode(text: &str, form: TextForm) -> Vec<u8> {
-    let capacity = text.len() + BYTE_ORDER_MARK.len();
-    let mut bytes = Vec::with_capacity(capacity);
-    if form.byte_order_mark {
-        bytes.extend_from_slice(&BYTE_ORDER_MARK);
-    }
-    if form.newline == Newline::Lf {
-        bytes.extend_from_slice(text.as_bytes());
-        return bytes;
-    }
-    let break_bytes = form.newline.as_str().as_bytes();
-    for (index, line) in text.split('\n').enumerate() {
-        if index > 0 {
-            bytes.extend_from_slice(break_bytes);
+///
+/// **表せない字があれば書かない**（要件 E2）。`?`に替えて保存するのは、書き手の
+/// 原稿を編集器が黙って書き換えることである——返ってくるのは**入らなかった字**で、
+/// 呼ぶ側はそれを画面に出せる。UTF-8とUTF-16は何でも表せるので、この`Err`が
+/// 起きるのはCP932だけである。
+pub fn encode(text: &str, form: TextForm) -> Result<Vec<u8>, Vec<char>> {
+    let text = with_newlines(text, form.newline);
+    let mut bytes = Vec::with_capacity(text.len() + BYTE_ORDER_MARK.len());
+    match form.encoding {
+        Encoding::Utf8 => {
+            if form.byte_order_mark {
+                bytes.extend_from_slice(&BYTE_ORDER_MARK);
+            }
+            bytes.extend_from_slice(text.as_bytes());
         }
-        bytes.extend_from_slice(line.as_bytes());
+        // **UTF-16は印を必ず書く。**印の無いUTF-16は読み手が向きを決められない
+        // ——[`read_bytes`]がそれを読まないのと同じ理由である。
+        Encoding::Utf16Le | Encoding::Utf16Be => {
+            let big_endian = form.encoding == Encoding::Utf16Be;
+            bytes.extend_from_slice(if big_endian {
+                &UTF16_BE_MARK
+            } else {
+                &UTF16_LE_MARK
+            });
+            for unit in text.encode_utf16() {
+                let pair = if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                };
+                bytes.extend_from_slice(&pair);
+            }
+        }
+        Encoding::Cp932 => {
+            bytes = crate::code_page::encode(crate::code_page::CP932, &text)?;
+        }
     }
-    bytes
+    Ok(bytes)
+}
+
+/// 改行を、そのファイルの書き方へ戻す。
+fn with_newlines(text: &str, newline: Newline) -> Cow<'_, str> {
+    if newline == Newline::Lf {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.replace('\n', newline.as_str()))
 }
 
 /// Where a save puts its bytes before it renames them onto the target.
@@ -289,8 +412,19 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<FileStamp> {
 ///
 /// Returns the stamp of what was written, which becomes the new baseline the
 /// watcher compares against (要件 8.2).
+///
+/// **その文字コードで表せない字があれば、1バイトも書かない**（要件 E2）。
+/// 半分だけ書き換えたファイルを残さないのは`write_atomically`と同じ考え方で、
+/// ここではさらに手前——**書き始める前に断る。**
 pub fn save(path: &Path, text: &str, form: TextForm) -> io::Result<FileStamp> {
-    write_atomically(path, &encode(text, form))
+    let bytes = encode(text, form).map_err(|missing| {
+        let shown: String = missing.iter().take(8).collect();
+        io::Error::other(format!(
+            "{}では表せない字があります：{shown}",
+            form.encoding.as_str()
+        ))
+    })?;
+    write_atomically(path, &bytes)
 }
 
 #[cfg(test)]
@@ -354,10 +488,101 @@ mod tests {
         assert!(form_of(&bytes).byte_order_mark);
     }
 
+    /// E2（2026-09-10）: `82 A0`はCP932の「あ」なので、**もう読める**。
+    /// 断るのは、どの文字コードでもないバイト列だけ。
     #[test]
-    fn refuses_bytes_that_are_not_utf8() {
-        let error = decode(&[0x82, 0xA0], LIMIT).expect_err("refuses");
-        assert!(matches!(error, LoadError::NotUtf8));
+    fn refuses_bytes_that_are_not_text_in_any_encoding() {
+        let (text, form) = decode(&[0x82, 0xA0], LIMIT).expect("CP932として読める");
+        assert_eq!(text, "あ");
+        assert_eq!(form.encoding, Encoding::Cp932);
+
+        // CP932にもUTF-8にも無い並び。
+        let error = decode(&[0x81, 0x00, 0xFF, 0xFE], LIMIT).expect_err("refuses");
+        assert!(matches!(error, LoadError::Unreadable));
+    }
+
+    /// E2: 印のあるUTF-16は、その印が答え。**印の無いUTF-16は読まない**
+    /// ——向きを決める当てが無いからである。
+    #[test]
+    fn a_byte_order_mark_says_which_utf16_it_is() {
+        let mut le = UTF16_LE_MARK.to_vec();
+        let mut be = UTF16_BE_MARK.to_vec();
+        for unit in "春".encode_utf16() {
+            le.extend_from_slice(&unit.to_le_bytes());
+            be.extend_from_slice(&unit.to_be_bytes());
+        }
+
+        let (text, form) = decode(&le, LIMIT).expect("読める");
+        assert_eq!((text.as_str(), form.encoding), ("春", Encoding::Utf16Le));
+        let (text, form) = decode(&be, LIMIT).expect("読める");
+        assert_eq!((text.as_str(), form.encoding), ("春", Encoding::Utf16Be));
+
+        // 印を外すと、それはもうUTF-16として読まれない（この並びはCP932で読める）。
+        let bare = &le[UTF16_LE_MARK.len()..];
+        let (_, form) = decode(bare, LIMIT).expect("何かとしては読める");
+        assert_ne!(form.encoding, Encoding::Utf16Le);
+    }
+
+    /// E2: **CP932はUTF-8のあと。**いまの原稿はたいていUTF-8で、日本語のWindowsで
+    /// 書かれた古い原稿がCP932である。
+    #[test]
+    fn utf8_is_tried_before_cp932() {
+        let (_, form) = decode("日本語".as_bytes(), LIMIT).expect("読める");
+        assert_eq!(form.encoding, Encoding::Utf8);
+
+        let bytes = crate::code_page::encode(crate::code_page::CP932, "日本語").expect("書ける");
+        let (text, form) = decode(&bytes, LIMIT).expect("読める");
+        assert_eq!((text.as_str(), form.encoding), ("日本語", Encoding::Cp932));
+    }
+
+    /// E2: 見本の一式が、書いたとおりの文字コードとして読める。
+    ///
+    /// **実際のファイルで確かめる。**バイト列を試験の中で組み立てるのと、
+    /// 書き手が開くファイルを読むのは別のことである——この4つは
+    /// `testdata/15〜18_文字コード_*.txt`で、画面で確かめるときにも同じものを開く。
+    #[test]
+    fn the_sample_files_read_as_what_they_were_written_as() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let samples = [
+            ("15_文字コード_CP932.txt", Encoding::Cp932, Newline::Crlf),
+            (
+                "16_文字コード_UTF16LE.txt",
+                Encoding::Utf16Le,
+                Newline::Crlf,
+            ),
+            ("17_文字コード_UTF16BE.txt", Encoding::Utf16Be, Newline::Lf),
+            ("18_文字コード_UTF8BOM.txt", Encoding::Utf8, Newline::Lf),
+        ];
+        for (name, encoding, newline) in samples {
+            let loaded = read(&here.join(name), LIMIT).expect(name);
+            assert_eq!(loaded.form.encoding, encoding, "{name}");
+            assert_eq!(loaded.form.newline, newline, "{name}");
+            assert!(loaded.text.contains("春の海"), "{name}");
+            // 読んだ形で書き戻せば、同じバイト列になる。
+            let written = encode(&loaded.text, loaded.form).expect("書ける");
+            assert_eq!(
+                written,
+                fs::read(here.join(name)).expect("読める"),
+                "{name}"
+            );
+        }
+    }
+
+    /// E2: **表せない字があれば、1バイトも書かない**——`?`に替えて保存しない。
+    #[test]
+    fn a_save_that_cannot_hold_the_text_writes_nothing() {
+        let directory = scratch_directory("cp932-refuses");
+        let path = directory.join("note.txt");
+        let form = TextForm {
+            encoding: Encoding::Cp932,
+            ..TextForm::default()
+        };
+
+        let error = save(&path, "絵文字は🐈です", form).expect_err("断る");
+
+        assert!(error.to_string().contains('🐈'), "{error}");
+        assert!(!path.exists(), "ファイルは作られない");
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -389,21 +614,19 @@ mod tests {
     #[test]
     fn writes_back_the_line_break_the_file_had() {
         let form = TextForm {
-            byte_order_mark: false,
             newline: Newline::Crlf,
-            mixed_newlines: false,
+            ..TextForm::default()
         };
-        assert_eq!(encode("a\nb\n", form), b"a\r\nb\r\n");
+        assert_eq!(encode("a\nb\n", form).expect("書ける"), b"a\r\nb\r\n");
     }
 
     #[test]
     fn writes_back_the_byte_order_mark() {
         let form = TextForm {
             byte_order_mark: true,
-            newline: Newline::Lf,
-            mixed_newlines: false,
+            ..TextForm::default()
         };
-        let bytes = encode("本文", form);
+        let bytes = encode("本文", form).expect("書ける");
         assert!(bytes.starts_with(&BYTE_ORDER_MARK));
         let body = &bytes[BYTE_ORDER_MARK.len()..];
         assert_eq!(body, "本文".as_bytes());
@@ -411,7 +634,10 @@ mod tests {
 
     #[test]
     fn a_new_document_is_written_as_plain_utf8() {
-        assert_eq!(encode("a\nb", TextForm::default()), b"a\nb");
+        assert_eq!(
+            encode("a\nb", TextForm::default()).expect("書ける"),
+            b"a\nb"
+        );
     }
 
     /// Reading a file and saving it without editing must produce the same
@@ -420,16 +646,30 @@ mod tests {
     fn decoding_and_encoding_round_trips() {
         let mut with_mark = BYTE_ORDER_MARK.to_vec();
         with_mark.extend_from_slice("本文\r\n".as_bytes());
-        let files: [&[u8]; 5] = [
+        // E2（2026-09-10）: 文字コードも往復する——読んだときの形で書き戻すのが、
+        // 「無指定の保存では元の形式を維持する」（E2の完了の目安）である。
+        let mut utf16_le = UTF16_LE_MARK.to_vec();
+        for unit in "見出し\r\n".encode_utf16() {
+            utf16_le.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut utf16_be = UTF16_BE_MARK.to_vec();
+        for unit in "見出し\n".encode_utf16() {
+            utf16_be.extend_from_slice(&unit.to_be_bytes());
+        }
+        let cp932 = crate::code_page::encode(crate::code_page::CP932, "本文\r\n").expect("書ける");
+        let files: [&[u8]; 8] = [
             b"a\nb\n",
             b"a\r\nb\r\n",
             b"a\rb\r",
             "見出し\r\n本文\r\n".as_bytes(),
             &with_mark,
+            &utf16_le,
+            &utf16_be,
+            &cp932,
         ];
         for original in files {
             let (text, form) = decode(original, LIMIT).expect("decodes");
-            assert_eq!(encode(&text, form), original, "{form:?}");
+            assert_eq!(encode(&text, form).expect("書ける"), original, "{form:?}");
         }
     }
 
@@ -446,9 +686,8 @@ mod tests {
         let directory = scratch_directory("round-trip");
         let path = directory.join("note.md");
         let form = TextForm {
-            byte_order_mark: false,
             newline: Newline::Crlf,
-            mixed_newlines: false,
+            ..TextForm::default()
         };
         let stamp = save(&path, "見出し\n本文\n", form).expect("saves");
         let loaded = read(&path, LIMIT).expect("reads");
