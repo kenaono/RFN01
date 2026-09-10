@@ -623,20 +623,41 @@ struct PreviewSlot {
     active_line_start: Option<usize>,
     preview: PreviewDocument,
     started: bool,
+    /// 前回どちらで組んだか（要件 E9）。
+    ///
+    /// **古いかどうかを決めるのは、この枠である。**中の`PreviewDocument`も
+    /// 旗が変われば行を捨てるが、**そこへ行き着かない**——本文も活性行も同じ
+    /// なら、ここは`refresh`を呼ばずに前の答えを返す（書き手の報告 2026-09-10：
+    /// 「設定しただけでは反映されず……縦書き横書きを切り替えると反映されます」
+    /// ＝向きを変えたときだけ枠が作り直されていた）。
+    ruby: document::RubyMarks,
 }
 
 impl PreviewSlot {
-    fn get(&mut self, source: &str, active_line_start: Option<usize>) -> &PreviewDocument {
-        let stale =
-            !self.started || self.active_line_start != active_line_start || self.source != source;
+    /// 要件 E9: `ruby`は**この文書を組むときの読み方**。取り違えのないよう
+    /// 旗も持ち回るが、**古くなったかどうかを決めるのは`PreviewDocument`のほう**
+    /// ——切り替えたときに行を捨てるのはあちらの仕事で、ここはただ渡す。
+    fn get(
+        &mut self,
+        source: &str,
+        active_line_start: Option<usize>,
+        ruby: document::RubyMarks,
+    ) -> &PreviewDocument {
+        let stale = !self.started
+            || self.active_line_start != active_line_start
+            || self.source != source
+            // 要件 E9: **読み方も、古いかどうかの理由である。**同じ本文でも、
+            // 記法を読むかどうかで組み上がりが変わる。
+            || self.ruby != ruby;
         if stale {
             // Refreshed rather than rebuilt: the preview keeps its mapping a
             // line at a time, so this recounts the lines that changed and
             // leaves the rest (技術検証 7.1).
-            self.preview.refresh(source, active_line_start);
+            self.preview.refresh(source, active_line_start, ruby);
             self.source.clear();
             self.source.push_str(source);
             self.active_line_start = active_line_start;
+            self.ruby = ruby;
             self.started = true;
         }
         &self.preview
@@ -3962,7 +3983,7 @@ fn tell_goto(window: &AppWindow, live: &Live) {
     let lines = document
         .counts
         .borrow_mut()
-        .get(&source)
+        .get(&source, window.get_ruby_marks())
         .stats()
         .logical_lines;
     let typed = window.get_goto_line().to_string();
@@ -4031,7 +4052,7 @@ fn go_to_line(window: &AppWindow, live: &Live) {
     let lines = document
         .counts
         .borrow_mut()
-        .get(&source)
+        .get(&source, window.get_ruby_marks())
         .stats()
         .logical_lines;
     let Some(at) = document::place_of(&source, line, column) else {
@@ -8032,6 +8053,14 @@ const AUTOSAVE_SETTING: &str = "work.autosave";
 /// 決まりが変わるわけではない。
 const COUNT_RUBY_SETTING: &str = "count.ruby";
 
+/// ルビと傍点の記法を読むか（要件 E9）。
+///
+/// **紙の設定のシートには置かない**——`count.ruby`と同じ理由の一歩先である。
+/// シートが持つのは**組み方**で、これは**読み方**：`｜漢字《かんじ》`が記法なのか
+/// 11字の本文なのかを決める。**シートに置けば、同じ文書が2つのペインで別の本文に
+/// なる**（字数も食い違う）。
+const RUBY_MARKS_SETTING: &str = "ruby.marks";
+
 /// 追加要件 2026-09-08: the shell list, one entry per numbered name
 /// (`terminal.shell.0`, `terminal.shell.1`, …).
 ///
@@ -8802,6 +8831,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_count_ruby()).to_string(),
     ));
     values.push((
+        RUBY_MARKS_SETTING.to_owned(),
+        i32::from(window.get_ruby_marks()).to_string(),
+    ));
+    values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
         hex_colour(window.get_terminal_paper()),
     ));
@@ -8895,6 +8928,12 @@ fn apply_settings(
         // そちらへ倒す。
         if written == COUNT_RUBY_SETTING {
             window.set_count_ruby(value.trim() == "1");
+            continue;
+        }
+        // 要件 E9: **`0`だけがOff。**既定は読むほうなので、読めない値はそちらへ
+        // 倒す（要件 7.8 がその記法で組めと言っている）。
+        if written == RUBY_MARKS_SETTING {
+            window.set_ruby_marks(value.trim() != "0");
             continue;
         }
         // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
@@ -10401,7 +10440,7 @@ fn lay_out_pane(
     preedit: &str,
 ) -> Option<PaneLayout> {
     let mut counts = document.counts.borrow_mut();
-    let styles = counts.get(source).line_styles();
+    let styles = counts.get(source, window.get_ruby_marks()).line_styles();
     let pane = cache.pane(id);
 
     let preview_started = Instant::now();
@@ -12307,7 +12346,11 @@ fn update_status(
         _ => None,
     };
     tell_find(window, id, source, selected);
-    let stats = document.counts.borrow_mut().get(source).stats();
+    let stats = document
+        .counts
+        .borrow_mut()
+        .get(source, window.get_ruby_marks())
+        .stats();
     // Every run, because a rectangle is several (要件 7.1) — and what 要件 10
     // shows is how much text is selected, not how many pieces it is in.
     let selected_characters: usize = selection_source_bytes
@@ -12705,7 +12748,7 @@ fn hit_test_pane(
     y: f32,
 ) -> Option<PaneHit> {
     let mut counts = document.counts.borrow_mut();
-    let styles = counts.get(source).line_styles();
+    let styles = counts.get(source, window.get_ruby_marks()).line_styles();
     // Split so the text and the engine can be borrowed at once, for the reason
     // `lay_out_for_caret` gives (ペイン分割設計 7.3).
     let Pane { graphics, view, .. } = cache.pane(id);
@@ -12781,7 +12824,7 @@ fn lay_out_for_caret<'a>(
     active_line_start: Option<usize>,
 ) -> Option<MeasuredPane<'a>> {
     let mut counts = document.counts.borrow_mut();
-    let styles = counts.get(source).line_styles();
+    let styles = counts.get(source, window.get_ruby_marks()).line_styles();
     // Split so the text and the engine can be borrowed at once: one comes from
     // the pane's data and the other from its graphics (ペイン分割設計 7.3).
     let Pane { graphics, view, .. } = cache.pane(id);
@@ -13152,7 +13195,7 @@ fn pane_text<'a>(
     active_line_start: Option<usize>,
 ) -> PaneText<'a> {
     if id.shows_preview(window) {
-        PaneText::Preview(preview_slot.get(source, active_line_start))
+        PaneText::Preview(preview_slot.get(source, active_line_start, window.get_ruby_marks()))
     } else {
         PaneText::Source(source)
     }
@@ -13361,7 +13404,7 @@ fn insert_pane_text(
         let revealed = PaneId::revealed_line(id.vertical(window), &state, &source).unwrap_or(line);
         let mut borrowed = cache.borrow_mut();
         let slot = &mut borrowed.pane(id).view.preview_slot;
-        let preview = slot.get(&source, Some(revealed));
+        let preview = slot.get(&source, Some(revealed), window.get_ruby_marks());
         let shown = preview.utf16_at_source_byte(caret);
         let at = vertical_insertion_source_byte(&source, preview, shown, indent_line_start);
         drop(borrowed);
@@ -13550,7 +13593,7 @@ fn tab_in_pane(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
         document
             .counts
             .borrow_mut()
-            .get(&source)
+            .get(&source, window.get_ruby_marks())
             .line_styles()
             .get(index)
             .is_some_and(|style| style.kind.is_list())
@@ -13623,7 +13666,7 @@ fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId, soft: bool) {
     let styles = document
         .counts
         .borrow_mut()
-        .get(&source)
+        .get(&source, window.get_ruby_marks())
         .line_styles()
         .to_vec();
     let what = document::enter_continuation(&source, &styles, at, soft);
@@ -14299,7 +14342,7 @@ fn move_pane_caret(
         let styles = document
             .counts
             .borrow_mut()
-            .get(&source)
+            .get(&source, window.get_ruby_marks())
             .line_styles()
             .to_vec();
         match document::hidden_indent(&source, &styles, next) {
@@ -14701,6 +14744,23 @@ mod tests {
             assert_eq!(newline_id(newline), id);
         }
         assert!(newline_of_id(3).is_none(), "改行は3行しかない");
+    }
+
+    /// E9（書き手の報告 2026-09-10）: **枠が旗を見ないと、切り替えても何も
+    /// 起きない。**
+    ///
+    /// 中の`PreviewDocument`も旗が変われば行を捨てるが、**そこへ行き着かない**
+    /// ——本文も活性行も同じなら、枠は`refresh`を呼ばずに前の答えを返す。
+    /// 書き手には「設定しただけでは反映されず、縦書き横書きを切り替えると
+    /// 反映される」と見えていた（向きを変えたときだけ枠が作り直されていた）。
+    #[test]
+    fn the_preview_slot_notices_that_the_notation_is_read_differently() {
+        let source = "｜漢字《かんじ》を書く\n";
+        let mut slot = PreviewSlot::default();
+        assert_eq!(slot.get(source, None, true).text, "漢字《かんじ》を書く\n");
+        // **本文も活性行も変えていない。**変わったのは読み方だけである。
+        assert_eq!(slot.get(source, None, false).text, source);
+        assert_eq!(slot.get(source, None, true).text, "漢字《かんじ》を書く\n");
     }
 
     /// E2の③: **BOMが行を分けているのは保存の側だけ。**同じUTF-8でも、印を

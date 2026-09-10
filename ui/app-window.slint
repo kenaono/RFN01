@@ -596,6 +596,12 @@ export component AppWindow inherits Window {
     // 人には逆が要るので、これは「正解が二つある」たぐいで、選ばせる。
     in-out property <bool> count-ruby: false;
     callback count-ruby-toggled(bool);
+    // 要件 E9: ルビと傍点の記法を読むか。**既定はOn**——要件7.8がその記法で
+    // 組めと言っているので、切りたい書き手が切る側である。**切ったら記号を
+    // そのまま字として出す**（原稿のバイト列は元から変えていない）。
+    // 数え方ではなく読み方なので、`count-ruby`と違って本文そのものが変わる。
+    in-out property <bool> ruby-marks: true;
+    callback ruby-marks-toggled(bool);
     /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
     callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
@@ -2882,6 +2888,39 @@ export component AppWindow inherits Window {
                         text: root.count-ruby
                             ? "《よみ》も本文の字数に入れます。"
                             : "《よみ》は本文の字数に入れません。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+
+                    // 要件 E9: ルビと傍点の記法を読むか。**Markdownの標準では
+                    // ない**ので、切れなければ「この編集器でしか正しく見えない
+                    // 書き方」を書き手に強いることになる。ルビと傍点を1つの旗で
+                    // 切るのは、同じ記法の一族だからである。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Ruby markup";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        TextButton {
+                            title: root.ruby-marks ? "On" : "Off";
+                            role: root.ruby-marks ? Role.primary : Role.normal;
+                            clicked => {
+                                root.ruby-marks-toggled(!root.ruby-marks);
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.ruby-marks
+                            ? "｜漢字《かんじ》と《《傍点》》を記法として読みます。"
+                            : "記号をそのまま字として出します。";
                         color: Tok.ink-faint;
                         font-size: 11px;
                         overflow: elide;

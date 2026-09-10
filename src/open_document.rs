@@ -28,7 +28,7 @@ use slint::Weak;
 
 use crate::AppWindow;
 use crate::buffer::DocumentFile;
-use crate::document::DocumentCounts;
+use crate::document::{DocumentCounts, RubyMarks};
 
 /// The document's text, and whether it has changed since it last agreed with
 /// its file.
@@ -366,14 +366,22 @@ pub struct CountsSlot {
     pub source: String,
     pub counts: DocumentCounts,
     pub started: bool,
+    /// 前回どちらで数えたか（要件 E9）。**古いかどうかを決めるのはこの枠**
+    /// ——本文が同じなら`refresh`を呼ばないので、中の`DocumentCounts`が持つ
+    /// 同じ規則にはたどり着かない。
+    pub ruby: RubyMarks,
 }
 
 impl CountsSlot {
-    pub fn get(&mut self, source: &str) -> &DocumentCounts {
-        if !self.started || self.source != source {
-            self.counts.refresh(source);
+    /// 要件 E9: `ruby`は記法を読むかどうか。**古くなったかどうかを決めるのは
+    /// `DocumentCounts`のほう**——切り替えたときに行を捨てるのはあちらの仕事で、
+    /// ここはただ渡す。
+    pub fn get(&mut self, source: &str, ruby: RubyMarks) -> &DocumentCounts {
+        if !self.started || self.source != source || self.ruby != ruby {
+            self.counts.refresh(source, ruby);
             self.source.clear();
             self.source.push_str(source);
+            self.ruby = ruby;
             self.started = true;
         }
         &self.counts

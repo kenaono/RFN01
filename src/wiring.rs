@@ -585,7 +585,9 @@ pub fn wire_find(window: &AppWindow, live: &Live) {
     });
 }
 
-/// 要件 9: 表示設定を動かす六つの口。
+/// 要件 9: 表示設定を動かす口。**要件 E9 のルビ記法もここにいる**——紙の
+/// シートの設定ではないが、切り替えると同じ組み直しが要る（`spec_timer`は
+/// ここにしか無い）。
 ///
 /// **`spec_timer`は借りずに受け取る。**最後の`typography-reset`がそれを閉包へ
 /// 入れて持っていくので、ここから先で誰も使わない——`main()`でもそうだった。
@@ -632,6 +634,22 @@ pub fn wire_typography(
         if let Some(window) = weak.upgrade() {
             let (low, high) = setting.range();
             setting.write(&chosen, shown_sheet(&window), value.clamp(low, high));
+            schedule_relayout(&window, &states, &cache, &timer);
+        }
+    });
+
+    // 要件 E9: ルビと傍点の記法を読むか。**紙のシートではなく Settings → FILES に
+    // ある**（`count.ruby`と同じ理由の一歩先——シートが持つのは組み方で、これは
+    // 読み方である）が、**口はここにある**：切り替えると本文そのものが変わるので、
+    // 表示設定と同じ組み直しが要る。`spec_timer`はここにしか無い。
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    let timer = spec_timer.clone();
+    window.on_ruby_marks_toggled(move |wanted| {
+        if let Some(window) = weak.upgrade() {
+            window.set_ruby_marks(wanted);
+            save_settings(&window, &cache);
             schedule_relayout(&window, &states, &cache, &timer);
         }
     });
