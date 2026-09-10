@@ -418,9 +418,12 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<FileStamp> {
 /// ここではさらに手前——**書き始める前に断る。**
 pub fn save(path: &Path, text: &str, form: TextForm) -> io::Result<FileStamp> {
     let bytes = encode(text, form).map_err(|missing| {
+        // **どの字かを言い、ファイルは無事だと言う。**書き手が次にすることは
+        // 「その字を直す」か「別の文字コードで保存する」かで、どちらを選ぶにも
+        // 原稿が壊れていないことが要る（要件 E2、③でその選択を画面に出す）。
         let shown: String = missing.iter().take(8).collect();
         io::Error::other(format!(
-            "{}では表せない字があります：{shown}",
+            "{}では表せない字があります（{shown}）。ファイルは元のままです",
             form.encoding.as_str()
         ))
     })?;

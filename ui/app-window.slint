@@ -337,8 +337,12 @@ export component AppWindow inherits Window {
     /// E1: いま探している語と、その数——`「白猫」3 / 12`。**帯が閉じていても
     /// 見えている**唯一の場所で、打鍵のたびに数え直すので古くならない。
     in property <string> count-find;
-    // What to say above the paper when something went wrong: the document
-    // would not open, would not be laid out, would not be saved.
+    // 何かが起きたときに言うこと——開けない、組めない、保存できない、語を足した。
+    //
+    // **出る場所はステータスバー**（書き手の報告 2026-09-10：「何も言わないので、
+    // 何か出した方がいいと思いました」）。以前は縦書きのペインの紙の上にだけ出して
+    // いたので、**横書きで書いている書き手には一言も届いていなかった**——保存が
+    // 断られたことさえ画面のどこにも無かった。窓に1つの場所へ移してある。
     in property <string> render-status;
     // The three quantities the typography validation is about. Character
     // spacing is extra advance as a percentage of the character's own size, so
@@ -1791,7 +1795,9 @@ export component AppWindow inherits Window {
                         // **One pane says it, not both.** A failure is about the
                         // document rather than about a direction, and saying it
                         // twice reads as two failures.
-                        status: pane.vertical ? root.render-status : "";
+                        // **紙の上には出さない**（2026-09-10）。同じ知らせが2か所に
+                        // 出ると、書き手はどちらが新しいかを考えることになる。
+                        status: "";
                         // The vertical pane indents its own text instead of padding
                         // the column, because its scroll view has to reach the edge.
                         text-indent: pane.vertical ? 12px : 0px;
@@ -2325,6 +2331,20 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 0;
                     max-width: 280px;
                     overflow: elide;
+                }
+
+                // **起きたことは、どの向きの面で書いていても見える**（書き手の
+                // 報告 2026-09-10）。数の並びより先に読めるよう、色を持たせてある
+                // ——ここに出るのは「保存できません」のような、書き手が次の一手を
+                // 決めなければならない知らせである。
+                if root.render-status != "": Text {
+                    text: root.render-status;
+                    color: Tok.alert;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                    overflow: elide;
+                    max-width: 520px;
                 }
 
                 // 要件 7.3: a paragraph long enough to cost a keystroke. The
