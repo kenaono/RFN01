@@ -1623,11 +1623,15 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
         // **箱が覆っている字を、そのまま。**`Number`は`10.`が`9.`と違うことを
         // 言うために、`Markup`は編集中の行の記号を見せるために——どちらも
         // 「覆ったところを読み出して溝に描く」1つの道である（要件 7.3.1）。
-        // 末尾の空白は落とす：その空白は記号のあとの間で、間はいま箱である。
+        //
+        // **前後の空白は落とす。**後ろの空白は記号のあとの間で、間はいま箱である。
+        // 前の空白は**入れ子の字下げ**で、それは箱ではなくブロックが持っている
+        // ——落とさずに描くと、その空白が番号を溝の中で右へ押し、本文にくっついて
+        // 見える（書き手の報告 2026-09-10：「入れ子側は1文字も空いていない印象」）。
         Ornament::Number | Ornament::Markup => {
             let start = byte_at_utf16(block_text, run.utf16_start);
             let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
-            block_text[start..end].trim_end().to_owned()
+            block_text[start..end].trim().to_owned()
         }
         // 要件 7.8: **読みは本文に居残っている。**`《かんじ》`の`《`と`》`を
         // 外した中身がそのまま組む字で、箱はそれを本文の流れから隠している
@@ -4790,7 +4794,15 @@ impl TextEngine {
         let text = &self.text[block.span.byte_start..block.span.byte_end];
         let start = byte_at_utf16(text, run.utf16_start);
         let end = byte_at_utf16(text, run.utf16_start + run.utf16_len);
-        let markup = text[start..end].encode_utf16().collect::<Vec<u16>>();
+        // **測るのは、描いてある字。**墨は前後の空白を落として溝に描かれるので
+        // （`marker_ink`）、字下げのぶんを足したまま測るとカーソルだけが右にずれる。
+        let whole = &text[start..end];
+        let lead = whole.len() - whole.trim_start().len();
+        let ink = whole.trim();
+        let markup = ink.encode_utf16().collect::<Vec<u16>>();
+        // カーソルが字下げの中にいるあいだは、描いてある字の頭に立つ。
+        let inside = byte_at_utf16(text, local).saturating_sub(start + lead);
+        let inside = utf16_units(&ink[..inside.min(ink.len())]);
         let format = graphics.text_format(&self.typography, self.mode)?;
         // 短い字なので、その場で組んで訊く。**同じ書式で組む**ので、溝に描いた字と
         // 同じ幅が返る（描くのは`draw_marker_ink`の`DrawText`で、書式はこれである）。
@@ -4807,13 +4819,7 @@ impl TextEngine {
         let mut metrics = DWRITE_HIT_TEST_METRICS::default();
         // SAFETY: The layout is alive for the call and the position is inside it.
         unsafe {
-            layout.HitTestTextPosition(
-                local - run.utf16_start,
-                false,
-                &mut point_x,
-                &mut point_y,
-                &mut metrics,
-            )?;
+            layout.HitTestTextPosition(inside, false, &mut point_x, &mut point_y, &mut metrics)?;
         }
         let (flow, line) = self.mode.to_axes(point_x, point_y);
         // 溝は本文の1段手前から始まる（`draw_marker_ink`が墨を置くのと同じ場所）。
@@ -7976,6 +7982,18 @@ mod tests {
         };
 
         assert_eq!(marker_ink(Ornament::Number, text, &run), "10.");
+
+        // **入れ子の字下げは墨に入らない**（書き手の報告 2026-09-10：「入れ子側は
+        // 1文字も空いていない印象」）。字下げはブロックが持っているもので、
+        // 墨に混ぜると番号を溝の中で右へ押し、本文にくっついて見える。
+        let nested = "見出し\n    10. 番号";
+        let run = StyleRun {
+            utf16_len: 8,
+            ..run
+        };
+        assert_eq!(marker_ink(Ornament::Number, nested, &run), "10.");
+        // 編集中の行の記号も同じ道を通る。
+        assert_eq!(marker_ink(Ornament::Markup, nested, &run), "10.");
         assert_eq!(marker_ink(Ornament::Bullet, text, &run), "•");
         assert_eq!(marker_ink(Ornament::TaskOpen, text, &run), "☐");
         assert_eq!(marker_ink(Ornament::TaskDone, text, &run), "☑");

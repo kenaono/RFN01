@@ -13299,13 +13299,16 @@ fn tab_in_pane(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
     let Some(indented) = document::shift_indent(&source, from, to, !back) else {
         return;
     };
+    // **字下げと番号の振り直しは1つの編集。**2つに分けると取り消しが2回に割れる
+    // ——`Tab`を1回押したことは、書き手にとって1つの出来事である。
+    let (at, removed, inserted) = find::changed_span(&source, &indented.text);
     apply_span_edit(
         window,
         live,
         id,
         &source,
-        indented.region,
-        &indented.text,
+        at..at + removed,
+        &indented.text[at..at + inserted],
         indented.chosen,
         if back { "Outdent" } else { "Indent" },
     );
@@ -13340,20 +13343,17 @@ fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId, soft: bool) {
             }
         }
     };
-    let (line_start, line_end) = document::line_span(&source, at);
-    let line = source[line_start..line_end]
-        .strip_suffix('\n')
-        .unwrap_or(source.get(line_start..line_end).unwrap_or_default());
-    let index = source[..line_start].matches('\n').count();
-    let style = document
+    let (line_start, _) = document::line_span(&source, at);
+    // **行の見方は画面と同じもの。**`DocumentCounts`が持っている並びをそのまま
+    // 渡す——ここで数え直すと、画面が箇条書きとして組んでいる行をEnterが本文と
+    // して扱うことになる。継続行の親を探すのに、その行の前も要る。
+    let styles = document
         .counts
         .borrow_mut()
         .get(&source)
         .line_styles()
-        .get(index)
-        .copied()
-        .unwrap_or_default();
-    match document::enter_continuation(line, style, at - line_start, soft) {
+        .to_vec();
+    match document::enter_continuation(&source, &styles, at, soft) {
         document::Continuation::Insert(text) => insert_pane_text(
             window,
             id,
