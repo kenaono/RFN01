@@ -8744,7 +8744,9 @@ fn export_word_group(window: &AppWindow, mode: usize, at: usize) {
     // **文字コードの欄は出さない**（要件 E2 の③）。書き出すのは文書ではなく
     // 語の一覧で、読むほうがUTF-8しか受けない——選べると言って選ばせない
     // ほうが悪い（要件 7.7）。
-    let Some(target) = file_dialog::save_document_as(owner, &suggested, &[], 0) else {
+    let Some(target) =
+        file_dialog::save_document_as(owner, &suggested, file_dialog::SaveFields::none())
+    else {
         return;
     };
     let target = target.path;
@@ -12354,6 +12356,17 @@ fn update_status(
     window.set_count_selected(selected.into());
     window.set_count_caret(caret.into());
     window.set_count_warning(long_paragraph.into());
+    publish_encoding(window, document);
+}
+
+/// 帯の「この文書はこう読んだ」を書く（要件 E2）。
+///
+/// **打鍵とは別の理由で変わる。**文字コードと改行が変わるのは**ファイルを読み直した
+/// ときと、書いたとき**で、どちらも本文を1字も動かさない——[`update_status`]は
+/// 組み直しに乗っているので、そこにだけ置くと**保存で形を替えても帯が古いまま残る**
+/// （書き手の報告 2026-09-10：「保存しましたは出ますが、帯が替わってないですね」）。
+/// だから括り出してあり、保存の道からも呼ぶ。
+fn publish_encoding(window: &AppWindow, document: &OpenDocument) {
     // 要件 E2: **この文書が何で書かれているか。**文字コードと改行を1つの言葉に
     // する——`UTF-8 BOM・CRLF`。**混ざった改行はそう言う**（読んだときに1つへ
     // 揃えてあるので、黙っていると保存で揃ったことが画面のどこにも出ない）。
@@ -12381,6 +12394,14 @@ fn update_status(
     window.set_count_encoding_reopenable(document.file.borrow().path().is_some());
 }
 
+/// 同じことを、**いま前にある文書について**（要件 E2）。
+///
+/// **「全て保存」は前にない文書も書く**ので、書いた文書の形をそのまま帯へ入れては
+/// いけない——帯が言うのは、書き手がいま見ている文書のことである。
+fn publish_active_encoding(window: &AppWindow, live: &Live) {
+    publish_encoding(window, &live.active(window));
+}
+
 /// 開き直しの一覧に出る4つ（要件 E2 の②）。
 ///
 /// **番号を作る場所は1つ。**画面は番号しか持てないので、その番号が何を指すかを
@@ -12406,34 +12427,66 @@ fn encoding_id(encoding: file_io::Encoding) -> i32 {
 /// 誰かが決めなければならない——それが「UTF-8」と「UTF-8 (BOM)」が別の行である
 /// 理由で、**開き直しの4つとは並びが揃わない**（あちらは読み方の一覧で、BOMは
 /// ファイルが答える）。揃わないものに同じ番号を使うほうが危ないので、表は別である。
-pub fn save_form_labels() -> [&'static str; 5] {
-    [
-        "UTF-8",
-        "UTF-8 (BOM)",
-        "UTF-16 LE",
-        "UTF-16 BE",
-        "CP932 (Shift_JIS)",
-    ]
-}
+pub const SAVE_FORM_LABELS: [&str; 5] = [
+    "UTF-8",
+    "UTF-8 (BOM)",
+    "UTF-16 LE",
+    "UTF-16 BE",
+    "CP932 (Shift_JIS)",
+];
+
+/// 名前を付けて保存の、改行コードの欄に並ぶ3つ（要件 E2 の⑤）。
+///
+/// **帯と同じ言葉。**ステータスバーは`CP932・CRLF`と出ていて、欄もその言葉で並ぶ
+/// ——同じものを指す言葉が2か所で違えば、書き手はそのつど読み替えることになる
+/// （[`newline_name`]がその1か所である）。
+pub const NEWLINE_LABELS: [&str; 3] = [
+    newline_name(file_io::Newline::Lf),
+    newline_name(file_io::Newline::Crlf),
+    newline_name(file_io::Newline::Cr),
+];
 
 /// その番号が指す形。**知らない番号なら、いまの形のまま**——ダイアログが何を
 /// 返しても、保存が止まったり知らない文字コードで書かれたりしない。
 ///
-/// **改行は動かさない**：欄が受け持つのは文字コードだけで、改行はファイルが
-/// 持ってきたものをそのまま書き戻す（要件 E2 の「無指定の保存では元の形式を維持」）。
-pub fn save_form_of_id(id: u32, held: file_io::TextForm) -> file_io::TextForm {
-    let (encoding, byte_order_mark) = match id {
-        0 => (file_io::Encoding::Utf8, false),
-        1 => (file_io::Encoding::Utf8, true),
-        2 => (file_io::Encoding::Utf16Le, false),
-        3 => (file_io::Encoding::Utf16Be, false),
-        4 => (file_io::Encoding::Cp932, false),
-        _ => return held,
-    };
-    file_io::TextForm {
-        encoding,
-        byte_order_mark,
-        ..held
+/// **文字コードと改行は別々に決まる**（要件 E2 の⑤）。欄が2つあるので、片方が
+/// 知らない番号を返してももう片方は効く——`held`から始めて、分かったぶんだけ
+/// 置き換える。
+pub fn save_form_of_id(id: u32, newline: u32, held: file_io::TextForm) -> file_io::TextForm {
+    let mut form = held;
+    if let Some((encoding, byte_order_mark)) = match id {
+        0 => Some((file_io::Encoding::Utf8, false)),
+        1 => Some((file_io::Encoding::Utf8, true)),
+        2 => Some((file_io::Encoding::Utf16Le, false)),
+        3 => Some((file_io::Encoding::Utf16Be, false)),
+        4 => Some((file_io::Encoding::Cp932, false)),
+        _ => None,
+    } {
+        form.encoding = encoding;
+        form.byte_order_mark = byte_order_mark;
+    }
+    if let Some(chosen) = newline_of_id(newline) {
+        form.newline = chosen;
+    }
+    form
+}
+
+/// その番号が指す改行。知らない番号には**何もしない**。
+fn newline_of_id(id: u32) -> Option<file_io::Newline> {
+    match id {
+        0 => Some(file_io::Newline::Lf),
+        1 => Some(file_io::Newline::Crlf),
+        2 => Some(file_io::Newline::Cr),
+        _ => None,
+    }
+}
+
+/// いまの改行が、その並びの何番目か（初めから選ばれている行）。
+pub fn newline_id(newline: file_io::Newline) -> u32 {
+    match newline {
+        file_io::Newline::Lf => 0,
+        file_io::Newline::Crlf => 1,
+        file_io::Newline::Cr => 2,
     }
 }
 
@@ -12460,7 +12513,7 @@ fn encoding_of_id(id: i32) -> Option<file_io::Encoding> {
 }
 
 /// 改行の呼び名（要件 E2）。**書き手が他の道具で見る言葉**に合わせる。
-fn newline_name(newline: file_io::Newline) -> &'static str {
+pub const fn newline_name(newline: file_io::Newline) -> &'static str {
     match newline {
         file_io::Newline::Lf => "LF",
         file_io::Newline::Crlf => "CRLF",
@@ -14634,11 +14687,20 @@ mod tests {
         assert!(encoding_of_id(4).is_none(), "開き直しは4行しかない");
 
         let held = file_io::TextForm::default();
-        for id in 0..save_form_labels().len() as u32 {
-            assert_eq!(save_form_id(save_form_of_id(id, held)), id);
+        let kept = newline_id(held.newline);
+        for id in 0..SAVE_FORM_LABELS.len() as u32 {
+            assert_eq!(save_form_id(save_form_of_id(id, kept, held)), id);
         }
         // 知らない番号は、いまの形のまま（ダイアログが何を返しても壊れない）。
-        assert_eq!(save_form_of_id(99, held), held);
+        assert_eq!(save_form_of_id(99, 99, held), held);
+
+        // E2の⑤: 改行の欄も同じ往復をする。**表が別なのも同じ理由**——文字コードの
+        // 5行と改行の3行は数も中身も違うので、番号を兼ねれば行を足した日にずれる。
+        for id in 0..NEWLINE_LABELS.len() as u32 {
+            let newline = newline_of_id(id).expect("改行の行");
+            assert_eq!(newline_id(newline), id);
+        }
+        assert!(newline_of_id(3).is_none(), "改行は3行しかない");
     }
 
     /// E2の③: **BOMが行を分けているのは保存の側だけ。**同じUTF-8でも、印を
@@ -14653,12 +14715,20 @@ mod tests {
 
         assert_ne!(save_form_id(plain), save_form_id(marked));
         assert_eq!(encoding_id(plain.encoding), encoding_id(marked.encoding));
-        // 改行は欄の受け持ちではない——選び直しても持ち越される。
+
+        // E2の⑤: **2つの欄は別々に効く。**文字コードを選び直しても、改行の欄が
+        // 言っていないほうは動かない——`held`から始めて分かったぶんだけ置き換える。
         let crlf = file_io::TextForm {
             newline: file_io::Newline::Crlf,
             ..file_io::TextForm::default()
         };
-        assert_eq!(save_form_of_id(4, crlf).newline, file_io::Newline::Crlf);
+        let kept = save_form_of_id(4, newline_id(crlf.newline), crlf);
+        assert_eq!(kept.encoding, file_io::Encoding::Cp932);
+        assert_eq!(kept.newline, file_io::Newline::Crlf);
+        // 改行だけを選び直しても、文字コードは動かない。
+        let changed = save_form_of_id(4, newline_id(file_io::Newline::Lf), crlf);
+        assert_eq!(changed.encoding, file_io::Encoding::Cp932);
+        assert_eq!(changed.newline, file_io::Newline::Lf);
     }
 
     #[test]

@@ -519,6 +519,20 @@ pub fn reopen_as(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>, e
     }
 }
 
+/// 名前を付けて保存の欄に出すもの（要件 E2 の③⑤）。
+///
+/// **初めから選ばれているのは、いまこの文書が持っている形**——上書きの`Ctrl+S`が
+/// 何も訊かないのと同じ約束で、決め直さなければ元の形式のまま書かれる
+/// （要件 E2：「無指定の保存では元の形式を維持する」）。
+fn save_fields(held: file_io::TextForm) -> file_dialog::SaveFields<'static> {
+    file_dialog::SaveFields {
+        encodings: &crate::SAVE_FORM_LABELS,
+        encoding: crate::save_form_id(held),
+        newlines: &crate::NEWLINE_LABELS,
+        newline: crate::newline_id(held.newline),
+    }
+}
+
 /// The tabs left by the last run (要件 8.1, 8.4).
 ///
 /// Each work copy holds the text; the file it belongs to holds the shape to
@@ -611,13 +625,14 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     // いないので、この文書がいま持っている形で書く。
     let held = file.borrow().form();
     let (target, form) = if ask_for_name || existing.is_none() {
-        let labels = crate::save_form_labels();
-        let Some(chosen) =
-            file_dialog::save_document_as(owner, &suggested, &labels, crate::save_form_id(held))
+        let Some(chosen) = file_dialog::save_document_as(owner, &suggested, save_fields(held))
         else {
             return;
         };
-        (chosen.path, crate::save_form_of_id(chosen.encoding, held))
+        (
+            chosen.path,
+            crate::save_form_of_id(chosen.encoding, chosen.newline, held),
+        )
     } else {
         let Some(path) = existing.clone() else {
             return;
@@ -656,13 +671,23 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
         } else {
             ""
         };
-        window.set_render_status(format!("{}{mark}で保存しました", form.encoding.as_str()).into());
+        // **帯と同じ言葉で言う**（`CP932・CRLF`）——欄が2つになったので、
+        // 文字コードだけを言うと、改行を選び直した書き手には何も答えていない
+        // ことになる（要件 E2 の⑤）。
+        let told = format!(
+            "{}{mark}・{}で保存しました",
+            form.encoding.as_str(),
+            crate::newline_name(form.newline)
+        );
+        window.set_render_status(told.into());
         live.cache.borrow_mut().log_diag(
             "encoding",
             &format!(
-                "save as={}{mark} was={}",
+                "save as={}{mark}・{} was={}・{}",
                 form.encoding.as_str(),
-                held.encoding.as_str()
+                crate::newline_name(form.newline),
+                held.encoding.as_str(),
+                crate::newline_name(held.newline)
             ),
         );
     }
@@ -723,6 +748,10 @@ pub fn write_document_in(
             // The name in the strip changes with 名前を付けて保存, and the
             // unsaved marker changes with every save.
             publish_tabs(window, live);
+            // 要件 E2: **帯は、書いた形をすぐ言う**（書き手の報告 2026-09-10）。
+            // 打鍵で組み直すまで待たない——保存は本文を1字も動かさないので、
+            // その組み直しは来ない。
+            crate::publish_active_encoding(window, live);
             window.set_render_status("保存しました".into());
             // 単語チェックモード要件 5.4（2026-09-08）: **保存されたのが辞書
             // そのものなら、そこから読み直す。**書き手が直したのは表であって、
@@ -833,15 +862,13 @@ pub fn save_all(window: &AppWindow, live: &Live) {
         }
         let suggested = document.file.borrow().title();
         let held = document.file.borrow().form();
-        let labels = crate::save_form_labels();
-        let Some(chosen) =
-            file_dialog::save_document_as(owner, &suggested, &labels, crate::save_form_id(held))
+        let Some(chosen) = file_dialog::save_document_as(owner, &suggested, save_fields(held))
         else {
             stopped = true;
             left += 1;
             continue;
         };
-        let form = crate::save_form_of_id(chosen.encoding, held);
+        let form = crate::save_form_of_id(chosen.encoding, chosen.newline, held);
         if write_document_in(window, live, &document, chosen.path, form) {
             saved += 1;
         } else {

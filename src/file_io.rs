@@ -729,6 +729,23 @@ mod tests {
         }
     }
 
+    /// E2の⑤（書き手の報告 2026-09-10）: **改行が混ざった見本を、実際に読む。**
+    ///
+    /// 混在は①から画面に出ていたが、**testdataに混ざった見本が1つも無かった**
+    /// ——`08_CRLFとBOM.md`は名前のとおりCRLFとBOMのファイルで、混ざってはいない
+    /// （私はそれを確かめずに「これで見てください」と言った）。**見本が無ければ、
+    /// 画面で確かめようがない。**
+    #[test]
+    fn the_mixed_sample_reads_as_mixed_and_keeps_the_first_kind() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let loaded = read(&here.join("21_改行の混在.md"), LIMIT).expect("見本がある");
+        assert!(loaded.form.mixed_newlines);
+        // **覚えるのは最初に見た1つ**（要件 E2：無指定の保存では元の形式を維持する）。
+        assert_eq!(loaded.form.newline, Newline::Crlf);
+        // 本文が持つ改行は`\n`ひとつだけ（技術検証 7.6）。
+        assert!(!loaded.text.contains('\r'), "畳んである");
+    }
+
     /// E2の④（書き手の判断 2026-09-10）: **推定で開く。**
     ///
     /// 「推定で開いて、おかしければユーザーが読み直すのでいい」——**読み直す道は

@@ -176,7 +176,17 @@ impl DocumentFile {
     }
 
     /// 書けたファイルを、この文書の出どころとして受け取る。
+    ///
+    /// **書いた時点で、そのファイルの改行は1つ**（要件 E2 の⑤）。本文が持って
+    /// いるのは`\n`だけで、`file_io::encode`はそれを`form.newline`に揃えて書く
+    /// ——**混ざっていたのは読んだファイルのほうで、いま書いたファイルではない。**
+    /// ここで畳まないと、帯が`（混在）`と言い続ける（③の「書けた時点から、その
+    /// 文書はその形のもの」と同じ一文である）。
     fn took(&mut self, path: PathBuf, form: TextForm, stamp: FileStamp) {
+        let form = TextForm {
+            mixed_newlines: false,
+            ..form
+        };
         self.origin = Origin::Saved(SavedFile { path, form, stamp });
         // What the editor just wrote is not an outside change.
         self.reported = None;
@@ -573,6 +583,26 @@ mod tests {
         fs::write(&path, b"a\r\nb\nc").expect("writes");
         let (document, _) = DocumentFile::open(&path, LIMIT).expect("opens");
         assert!(document.mixed_newlines());
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// E2の⑤: **書いた時点で、そのファイルの改行は1つ。**混ざっていたのは
+    /// 読んだファイルのほうで、いま書いたファイルではない——ここで畳まないと、
+    /// 帯が`（混在）`と言い続ける。
+    #[test]
+    fn writing_a_file_leaves_its_breaks_no_longer_mixed() {
+        let directory = scratch_directory("mixed-saved");
+        let path = directory.join("note.md");
+        fs::write(&path, b"a\r\nb\nc").expect("writes");
+        let (mut document, text) = DocumentFile::open(&path, LIMIT).expect("opens");
+        assert!(document.form().mixed_newlines);
+
+        save_to(&mut document, path.clone(), &text).expect("saves");
+        assert!(!document.form().mixed_newlines);
+        // 揃えた先は、読んだときの1つ目（要件 E2：元の形式を維持する）。
+        assert_eq!(document.form().newline, Newline::Crlf);
+        assert_eq!(fs::read(&path).expect("reads"), b"a\r\nb\r\nc");
+
         let _ = fs::remove_dir_all(&directory);
     }
 

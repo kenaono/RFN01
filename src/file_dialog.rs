@@ -25,7 +25,7 @@ use windows::Win32::UI::Shell::{
     FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
     IFileDialog, IFileDialogCustomize, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
 };
-use windows::core::{HSTRING, Interface, w};
+use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 /// The window a dialog is modal to.
 pub type Owner = Option<HWND>;
@@ -163,20 +163,54 @@ fn open_folder_from(
     }
 }
 
-/// 文字コードの欄に付ける番号（要件 E2 の③）。
+/// 欄に付ける番号（要件 E2 の③⑤）。
 ///
 /// **1つのダイアログの中でしか意味を持たない**ので、外へは出さない。
 const ENCODING_GROUP: u32 = 1000;
 const ENCODING_COMBO: u32 = 1001;
+const NEWLINE_GROUP: u32 = 1002;
+const NEWLINE_COMBO: u32 = 1003;
 
-/// 名前を付けて保存で決めたこと：**行き先と、書く文字コード**（要件 E2 の③）。
+/// 名前を付けて保存の欄に出すもの（要件 E2）。
+///
+/// **書き方の決めごとは1つのダイアログに集まっている**——名前・場所・文字コード・
+/// 改行が一度に決まる。[`SaveChoice`]がその答えで、**並びと番号の対応を決める場所は
+/// 呼ぶ側に1つ**（`main.rs`の`save_form_labels`／`newline_labels`）：ここは言葉を
+/// 並べて番号を返すだけである。
+pub struct SaveFields<'a> {
+    pub encodings: &'a [&'a str],
+    /// 初めから選ばれている行＝**いまこの文書が持っている形**。
+    pub encoding: u32,
+    pub newlines: &'a [&'a str],
+    pub newline: u32,
+}
+
+impl SaveFields<'_> {
+    /// 欄を1つも出さない（語群の書き出し）。
+    ///
+    /// **読むほうがUTF-8しか受けないので、選べると言って選ばせないほうが悪い**
+    /// （要件 7.7）。改行も同じで、あれは原稿ではなく道具のための表である。
+    pub fn none() -> Self {
+        Self {
+            encodings: &[],
+            encoding: 0,
+            newlines: &[],
+            newline: 0,
+        }
+    }
+}
+
+/// 名前を付けて保存で決めたこと：**行き先と、書く文字コードと、改行**
+/// （要件 E2 の③⑤）。
 pub struct SaveChoice {
     pub path: PathBuf,
-    /// 選ばれた文字コードの番号（`labels`の並びの何番目か）。
+    /// 選ばれた文字コードの番号（並びの何番目か）。
     ///
     /// **欄を出せなかったときは、渡された番号がそのまま返る**——古いWindowsや
     /// 差し替えられたダイアログでも、保存が止まってしまわないようにである。
     pub encoding: u32,
+    /// 選ばれた改行の番号。**同じ決めごと**：欄が無ければ、いまの形のまま。
+    pub newline: u32,
 }
 
 /// Ask where to save, starting from the name the document already has.
@@ -187,13 +221,13 @@ pub struct SaveChoice {
 /// ——保存は行き先を決める操作なので、決めごとは1つのダイアログに集まっている
 /// ほうがよい（Windowsのメモ帳もそうしている）。
 ///
-/// `labels`は並びそのもので、`chosen`はその何番目が初めから選ばれているか
-/// （＝いまこの文書が持っている形）。
+/// **改行もここで選ぶ**（要件 E2 の⑤、書き手の選択 2026-09-10）。帯が受け持つのは
+/// 読み方だけ、という③の線をそのまま引いてある——文字コードの隣に置くのは、
+/// どちらも「書くときに決めること」で、決める時機が同じだからである。
 pub fn save_document_as(
     owner: Owner,
     suggested_name: &str,
-    labels: &[&str],
-    chosen: u32,
+    fields: SaveFields,
 ) -> Option<SaveChoice> {
     let filters = filters();
     let suggested = HSTRING::from(suggested_name);
@@ -220,27 +254,74 @@ pub fn save_document_as(
         // **欄が出せなくても保存は続く。**customizeが取れないダイアログでも
         // 行き先は選べるので、そのときは渡された文字コードのまま書く。
         let customize: Option<IFileDialogCustomize> = dialog.cast().ok();
-        if let Some(customize) = &customize
-            && !labels.is_empty()
-        {
-            let _ = customize.StartVisualGroup(ENCODING_GROUP, w!("文字コード"));
-            let _ = customize.AddComboBox(ENCODING_COMBO);
-            for (index, label) in labels.iter().enumerate() {
-                let text = HSTRING::from(*label);
-                let _ = customize.AddControlItem(ENCODING_COMBO, index as u32, &text);
-            }
-            let _ = customize.EndVisualGroup();
-            let _ = customize.SetSelectedControlItem(ENCODING_COMBO, chosen);
+        if let Some(customize) = &customize {
+            add_field(
+                customize,
+                ENCODING_GROUP,
+                ENCODING_COMBO,
+                w!("文字コード"),
+                fields.encodings,
+                fields.encoding,
+            );
+            add_field(
+                customize,
+                NEWLINE_GROUP,
+                NEWLINE_COMBO,
+                w!("改行コード"),
+                fields.newlines,
+                fields.newline,
+            );
         }
         dialog.Show(owner).ok()?;
         let item = dialog.GetResult().ok()?;
         let path = chosen_path(&item)?;
         // **選ばれた番号は、閉じたあとに訊く。**開いているあいだの変更を追う
-        // 必要はない——決まったことだけが要る。
-        let encoding = customize
-            .and_then(|customize| customize.GetSelectedControlItem(ENCODING_COMBO).ok())
-            .unwrap_or(chosen);
-        Some(SaveChoice { path, encoding })
+        // 必要はない——決まったことだけが要る。**訊けなければ渡された番号のまま**
+        // なので、欄を出せなかったダイアログでも保存は止まらない。
+        let taken = |combo: u32, fallback: u32| {
+            customize
+                .as_ref()
+                .and_then(|customize| customize.GetSelectedControlItem(combo).ok())
+                .unwrap_or(fallback)
+        };
+        Some(SaveChoice {
+            path,
+            encoding: taken(ENCODING_COMBO, fields.encoding),
+            newline: taken(NEWLINE_COMBO, fields.newline),
+        })
+    }
+}
+
+/// 欄を1つ、ダイアログへ足す（要件 E2 の③⑤）。
+///
+/// **並びが空なら、何も足さない**——出せると言って中身の無い欄が出るくらいなら、
+/// 欄そのものが無いほうがよい（要件 7.7）。返り値を見ないのは、**欄が出せなくても
+/// 保存は続く**からである：行き先は選べるので、そのときは渡された番号のまま書く。
+///
+/// # Safety
+///
+/// `customize`は生きているダイアログのもので、`Show`より前に呼ばれること。
+unsafe fn add_field(
+    customize: &IFileDialogCustomize,
+    group: u32,
+    combo: u32,
+    title: PCWSTR,
+    labels: &[&str],
+    chosen: u32,
+) {
+    if labels.is_empty() {
+        return;
+    }
+    // SAFETY: 呼ぶ側の決めごとのとおり。
+    unsafe {
+        let _ = customize.StartVisualGroup(group, title);
+        let _ = customize.AddComboBox(combo);
+        for (index, label) in labels.iter().enumerate() {
+            let text = HSTRING::from(*label);
+            let _ = customize.AddControlItem(combo, index as u32, &text);
+        }
+        let _ = customize.EndVisualGroup();
+        let _ = customize.SetSelectedControlItem(combo, chosen);
     }
 }
 
