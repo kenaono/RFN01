@@ -11761,20 +11761,13 @@ fn refresh_pane(
     // them too, because horizontal-only display could otherwise not be measured
     // at all — no line was written there, so no frame was ever counted (7.5).
     let frame = cache.frames.borrow_mut().take();
-    // One status line for every pane, and **the focused one owns it**
-    // (2026-09-06). Panes showing the same document all refresh on the same
-    // keystroke, so letting each write would leave the line flickering between
-    // as many sets of numbers as there are panes. The rule used to be "the
-    // right-hand pane", which was the same rule while there were two of them
-    // and the writer was always in one. Short enough to survive an unwrapped
-    // narrow pane; the full breakdown goes to the log, where nothing is clipped
-    // and every pane has a line of its own.
-    if id == focused_pane(window) {
-        window.set_render_status(
-            format!("縦書き {total_ms:.1}ms / tiles {tiles_ms:.1}ms {tile_count}枚{rendered}新 / 横 {push_ms:.1}ms")
-                .into(),
-        );
-    }
+    // **組み直しの所要は画面に出さない**（書き手の報告 2026-09-10：「赤字で表示時間が
+    // 出ています……画面確認することはないと思いますが、必要ですか」）。1打鍵ごとに
+    // 書かれる行で、検証の時代は縦書きのペインの紙の上にだけ出ていた——知らせを窓に
+    // 1つの場所へ集めた（同日）ので、そこへ出てくるようになっていた。
+    //
+    // **内訳はすぐ下の`log_perf`にある**（画面より詳しく、ペインごとに1行、
+    // 切り詰められもしない）。ステータスバーは書き手への知らせの場所である。
     // Taken before the line is built: the log borrows the cache for the whole
     // of it.
     let held = cache.pace_of(id).take_held();
