@@ -181,6 +181,41 @@ impl From<io::Error> for LoadError {
     }
 }
 
+/// 保存が断られた理由（要件 E2 の③）。
+///
+/// **`io::Error`に畳まない。**「表せない字がある」は書き手が選び直せる断りで
+/// あって、書けなかったという事故ではない——文字列にしてしまうと、呼ぶ側は
+/// **どの字か**を画面の選択肢にできない。
+#[derive(Debug)]
+pub enum SaveError {
+    /// この文字コードで表せない、**最初の**字。
+    ///
+    /// **数えない**（書き手の判断 2026-09-10）。3万字のうち1000字が入らないとき、
+    /// その1000という数は書き手の役に立たない——答えは「この文字コードでは
+    /// 保存できない」で、次にすることはUTF-8で保存することである。
+    ///
+    /// **まだ1バイトも書いていない。**ファイルは元のままである。
+    Unmappable(char),
+    Io(io::Error),
+}
+
+impl fmt::Display for SaveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SaveError::Unmappable(character) => {
+                write!(formatter, "表せない字があります（{character}）")
+            }
+            SaveError::Io(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl From<io::Error> for SaveError {
+    fn from(error: io::Error) -> Self {
+        SaveError::Io(error)
+    }
+}
+
 /// Which line break a file used, and whether it used more than one.
 ///
 /// One pass over the bytes. A `\r\n` counts as one break of its own kind
@@ -403,10 +438,10 @@ fn read_with(
 /// The text as the file should hold it.
 ///
 /// **表せない字があれば書かない**（要件 E2）。`?`に替えて保存するのは、書き手の
-/// 原稿を編集器が黙って書き換えることである——返ってくるのは**入らなかった字**で、
+/// 原稿を編集器が黙って書き換えることである——返ってくるのは**入らなかった最初の字**で、
 /// 呼ぶ側はそれを画面に出せる。UTF-8とUTF-16は何でも表せるので、この`Err`が
 /// 起きるのはCP932だけである。
-pub fn encode(text: &str, form: TextForm) -> Result<Vec<u8>, Vec<char>> {
+pub fn encode(text: &str, form: TextForm) -> Result<Vec<u8>, char> {
     let text = with_newlines(text, form.newline);
     let mut bytes = Vec::with_capacity(text.len() + BYTE_ORDER_MARK.len());
     match form.encoding {
@@ -505,18 +540,13 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<FileStamp> {
 /// **その文字コードで表せない字があれば、1バイトも書かない**（要件 E2）。
 /// 半分だけ書き換えたファイルを残さないのは`write_atomically`と同じ考え方で、
 /// ここではさらに手前——**書き始める前に断る。**
-pub fn save(path: &Path, text: &str, form: TextForm) -> io::Result<FileStamp> {
-    let bytes = encode(text, form).map_err(|missing| {
-        // **どの字かを言い、ファイルは無事だと言う。**書き手が次にすることは
-        // 「その字を直す」か「別の文字コードで保存する」かで、どちらを選ぶにも
-        // 原稿が壊れていないことが要る（要件 E2、③でその選択を画面に出す）。
-        let shown: String = missing.iter().take(8).collect();
-        io::Error::other(format!(
-            "{}では表せない字があります（{shown}）。ファイルは元のままです",
-            form.encoding.as_str()
-        ))
-    })?;
-    write_atomically(path, &bytes)
+pub fn save(path: &Path, text: &str, form: TextForm) -> Result<FileStamp, SaveError> {
+    // **どの字かは呼ぶ側へ返す**（要件 E2 の③）。書き手が次にすることは
+    // 「その字を直す」か「別の文字コードで保存する」か「無視して保存する」かで、
+    // どれを選ぶにも原稿が壊れていないことが要る——ここではまだ1バイトも
+    // 書いていない。
+    let bytes = encode(text, form).map_err(SaveError::Unmappable)?;
+    Ok(write_atomically(path, &bytes)?)
 }
 
 #[cfg(test)]

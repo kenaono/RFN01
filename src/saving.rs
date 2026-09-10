@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use slint::ComponentHandle;
 
 use crate::buffer::{DocumentFile, ExternalChange};
-use crate::file_io::{Encoding, LoadError};
+use crate::file_io::{self, Encoding, LoadError};
 use crate::open_document::OpenDocument;
 use crate::{
     AUTOSAVE_SETTING, AppWindow, EditorState, Live, MAX_DOCUMENT_CHARACTERS, Opening, PaneId,
@@ -588,17 +588,41 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
 /// loop, and Slint goes on delivering events from inside it.
 pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     let document = live.active(window);
+    // **求めが届いたことを、まず残す**（書き手の報告 2026-09-10：「縦書きだと
+    // 警告が出ていません」）。**鍵が届かなかった回は、ログのどこにも出ない**
+    // ——書けたか断られたかの行しか無ければ、「効かなかった」と「届いていない」を
+    // 見分けられない。面の向きも一緒に書くのは、報告がその違いだったからである。
+    live.cache.borrow_mut().log_diag(
+        "file",
+        &format!(
+            "save asked pane={} vertical={} name={}",
+            focused_pane(window).log_name(),
+            u8::from(focused_pane(window).vertical(window)),
+            u8::from(ask_for_name)
+        ),
+    );
     let file = &document.file;
     let owner = ime::window_handle(window);
     let existing = file.borrow().path().map(Path::to_path_buf);
     let suggested = file.borrow().title();
-    let target = if ask_for_name || existing.is_none() {
-        file_dialog::save_document_as(owner, &suggested)
+    // 要件 E2 の③: **書く文字コードは、行き先と一緒に決まる**（書き手の判断
+    // 2026-09-10：「コードを替えて保存したければ、Save Asからコード選択して
+    // 保存するべき」）。**上書きの`Ctrl+S`は訊かない**——そのときは何も決め直して
+    // いないので、この文書がいま持っている形で書く。
+    let held = file.borrow().form();
+    let (target, form) = if ask_for_name || existing.is_none() {
+        let labels = crate::save_form_labels();
+        let Some(chosen) =
+            file_dialog::save_document_as(owner, &suggested, &labels, crate::save_form_id(held))
+        else {
+            return;
+        };
+        (chosen.path, crate::save_form_of_id(chosen.encoding, held))
     } else {
-        existing.clone()
-    };
-    let Some(target) = target else {
-        return;
+        let Some(path) = existing.clone() else {
+            return;
+        };
+        (path, held)
     };
     // 要件 8.2: the ordinary Ctrl+S is silent, and the one thing it stops for
     // is a file that has changed underneath since it was opened. 要件 8.3 gives
@@ -624,7 +648,24 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
         );
         return;
     }
-    write_document_to(window, live, &document, target);
+    if write_document_in(window, live, &document, target, form) && form != held {
+        // **形が変わったことは言う。**ステータスバーの`CP932・CRLF`もそう変わるが、
+        // 書き手が欄で選んだ結果がそのとおりになったことは、言葉でも1度出す。
+        let mark = if form.byte_order_mark && form.encoding == Encoding::Utf8 {
+            " BOM"
+        } else {
+            ""
+        };
+        window.set_render_status(format!("{}{mark}で保存しました", form.encoding.as_str()).into());
+        live.cache.borrow_mut().log_diag(
+            "encoding",
+            &format!(
+                "save as={}{mark} was={}",
+                form.encoding.as_str(),
+                held.encoding.as_str()
+            ),
+        );
+    }
 }
 
 /// Overwrite the file with what is in the editor, outside change and all
@@ -648,6 +689,22 @@ pub fn write_document_to(
     document: &Rc<OpenDocument>,
     target: PathBuf,
 ) -> bool {
+    let form = document.file.borrow().form();
+    write_document_in(window, live, document, target, form)
+}
+
+/// 同じことを、**書く形を言われて**する（要件 E2 の③）。
+///
+/// `form`はこの保存で使う文字コード・BOM・改行で、**書けたらそれがこの文書の形に
+/// なる**。表せない字があれば断る——**替えるのは本文の側**（`replace_unmappable`）で、
+/// ここは替わったあとの本文を普通に書くだけである。
+pub fn write_document_in(
+    window: &AppWindow,
+    live: &Live,
+    document: &Rc<OpenDocument>,
+    target: PathBuf,
+    form: file_io::TextForm,
+) -> bool {
     let cache = &live.cache;
     let file = &document.file;
     let text = document.text.borrow().clone();
@@ -657,7 +714,7 @@ pub fn write_document_to(
     // another file and the copy on disk is still under the old name.
     let previous = work_identity(&file.borrow());
     let saved_to = target.clone();
-    let outcome = file.borrow_mut().save_to(target, &text);
+    let outcome = file.borrow_mut().save_to_as(target, &text, form);
     match outcome {
         Ok(()) => {
             document.text.mark_saved();
@@ -674,10 +731,47 @@ pub fn write_document_to(
             if crate::is_word_file(&saved_to) {
                 crate::adopt_word_file(window, live);
             }
-            cache
-                .borrow_mut()
-                .log_diag("file", &format!("save ok bytes={bytes} path={shown}"));
+            cache.borrow_mut().log_diag(
+                "file",
+                &format!(
+                    "save ok bytes={bytes} as={} path={shown}",
+                    form.encoding.as_str()
+                ),
+            );
             true
+        }
+        // 要件 E2 の③: **断って、次にすることを言う**（書き手の判断 2026-09-10）。
+        //
+        // 数えない。3万字のうち1000字が入らないとしても、その数は書き手の役に
+        // 立たない——答えは「この文字コードでは保存できない」で、次にすることは
+        // UTF-8で保存することである。**その道はすぐ隣にある**（同じ帯の一覧の
+        // 下の節）ので、言葉でそこを指す。
+        //
+        // **1字だけ見せる**のは「どこを直せばいいか」の取っ掛かりで、原稿を
+        // 直して済ませたい書き手のためである。
+        Err(file_io::SaveError::Unmappable(character)) => {
+            // **どの字かは言わない**（書き手の判断 2026-09-10：「一文字に限らない
+            // ので」）。1字だけ挙げれば、それを直せば済むように読める——実際には
+            // 次の字でまた断られる。書き手が次にすることは**UTF-8で保存する**で
+            // あって、字を1つずつ潰していくことではない。
+            //
+            // **見つけた字は診断ログに残す**（`first=`）。「なぜ保存できないのか」を
+            // 後から辿る手掛かりは要る——画面に出すかどうかとは別の話である。
+            window.set_render_status(
+                format!(
+                    "{}では表せない文字があるため保存できません。UTF-8で保存してください",
+                    form.encoding.as_str()
+                )
+                .into(),
+            );
+            cache.borrow_mut().log_diag(
+                "encoding",
+                &format!(
+                    "unmappable as={} first={character} path={shown}",
+                    form.encoding.as_str()
+                ),
+            );
+            false
         }
         Err(error) => {
             window.set_render_status(format!("保存できません: {error}").into());
@@ -720,6 +814,9 @@ pub fn save_all(window: &AppWindow, live: &Live) {
             conflicted += 1;
             continue;
         }
+        // **ここでは問わない。**一度に何枚も書く道で問いを立てると、答える
+        // まで残りが止まる——表せない字があった文書は「保存できなかった1件」
+        // として数え、書き手が`Ctrl+S`で1枚ずつ選べばよい（その道が③の問い）。
         if write_document_to(window, live, &document, path) {
             saved += 1;
         } else {
@@ -735,12 +832,17 @@ pub fn save_all(window: &AppWindow, live: &Live) {
             continue;
         }
         let suggested = document.file.borrow().title();
-        let Some(target) = file_dialog::save_document_as(owner, &suggested) else {
+        let held = document.file.borrow().form();
+        let labels = crate::save_form_labels();
+        let Some(chosen) =
+            file_dialog::save_document_as(owner, &suggested, &labels, crate::save_form_id(held))
+        else {
             stopped = true;
             left += 1;
             continue;
         };
-        if write_document_to(window, live, &document, target) {
+        let form = crate::save_form_of_id(chosen.encoding, held);
+        if write_document_in(window, live, &document, chosen.path, form) {
             saved += 1;
         } else {
             failed += 1;

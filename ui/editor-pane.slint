@@ -1977,7 +1977,20 @@ export component EditorPane inherits Rectangle {
                                     // with the key itself.
                                     if event.modifiers.control
                                         && (event.text == "s" || event.text == "S" || event.text == "\u{13}") {
-                                        root.save-requested();
+                                        // **Shiftは別の用事**（書き手の報告
+                                        // 2026-09-10：「Ctrl+Shift+Sが効いて
+                                        // いないと思います。Ctrl+Sと同じ動き」）。
+                                        // Shiftを押した`s`は大文字の`S`で届く
+                                        // ので、修飾を見ずに`S`まで拾っていた
+                                        // この行が、名前を付けて保存を飲み込んで
+                                        // いた——**メニューが`Ctrl+Shift+S`と
+                                        // 出しているのに受ける行が無い**のは、
+                                        // 2026-09-09の`Ctrl+W`と同じ穴である。
+                                        if (event.modifiers.shift) {
+                                            root.save-as-requested();
+                                        } else {
+                                            root.save-requested();
+                                        }
                                         accept
                                     // 追加要件 2026-09-09: **メニューが言って
                                     // いたことを、いま受ける。**ペインの`⋮`も

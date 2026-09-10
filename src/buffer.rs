@@ -8,10 +8,9 @@
 //!
 //! Nothing here touches Windows or Slint.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::file_io::{self, Encoding, FileStamp, LoadError, TextForm};
+use crate::file_io::{self, Encoding, FileStamp, LoadError, SaveError, TextForm};
 
 /// A file the document has been saved to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,13 +159,27 @@ impl DocumentFile {
     /// One call for both 上書き保存 and 名前を付けて保存: the two differ only in
     /// where the path came from, and either way the file just written becomes
     /// the baseline the watcher compares against (要件 8.2).
-    pub fn save_to(&mut self, path: PathBuf, text: &str) -> io::Result<()> {
-        let form = self.form();
+    ///
+    /// **書く形も言われる**（要件 E2 の③）。ふだんはこの文書がいま持っている形
+    /// （`form()`）がそのまま渡ってくるが、「この文字コードで保存する」を選んだ
+    /// ときは違う形が来る——**書けた時点から、この文書はその形のもの**である。
+    /// **断られたときは何も変えない**：形も、ファイルも。
+    pub fn save_to_as(
+        &mut self,
+        path: PathBuf,
+        text: &str,
+        form: TextForm,
+    ) -> Result<(), SaveError> {
         let stamp = file_io::save(&path, text, form)?;
+        self.took(path, form, stamp);
+        Ok(())
+    }
+
+    /// 書けたファイルを、この文書の出どころとして受け取る。
+    fn took(&mut self, path: PathBuf, form: TextForm, stamp: FileStamp) {
         self.origin = Origin::Saved(SavedFile { path, form, stamp });
         // What the editor just wrote is not an outside change.
         self.reported = None;
-        Ok(())
     }
 
     /// What has happened to the file since the editor last agreed with it.
@@ -289,6 +302,12 @@ mod tests {
 
     const LIMIT: usize = 1_000_000;
 
+    /// いまの文書の形のまま書く（本体では`write_document_in`がその形を渡す）。
+    fn save_to(document: &mut DocumentFile, path: PathBuf, text: &str) -> Result<(), SaveError> {
+        let form = document.form();
+        document.save_to_as(path, text, form)
+    }
+
     fn scratch_directory(name: &str) -> PathBuf {
         let temporary = std::env::temp_dir();
         let directory = temporary.join(format!("rfnedit-buffer-{name}"));
@@ -322,7 +341,7 @@ mod tests {
         let directory = scratch_directory("save-untitled");
         let path = directory.join("新規.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path.clone(), "本文").expect("saves");
+        save_to(&mut document, path.clone(), "本文").expect("saves");
         assert_eq!(document.title(), "新規.md");
         assert_eq!(fs::read(&path).expect("reads"), "本文".as_bytes());
         let _ = fs::remove_dir_all(&directory);
@@ -336,7 +355,7 @@ mod tests {
         fs::write(&path, b"a\r\nb\r\n").expect("writes");
         let (mut document, text) = DocumentFile::open(&path, LIMIT).expect("opens");
         assert_eq!(text, "a\nb\n");
-        document.save_to(path.clone(), &text).expect("saves");
+        save_to(&mut document, path.clone(), &text).expect("saves");
         assert_eq!(fs::read(&path).expect("reads"), b"a\r\nb\r\n");
         let _ = fs::remove_dir_all(&directory);
     }
@@ -348,7 +367,7 @@ mod tests {
         let second = directory.join("新.md");
         fs::write(&first, "本文").expect("writes");
         let (mut document, text) = DocumentFile::open(&first, LIMIT).expect("opens");
-        document.save_to(second.clone(), &text).expect("saves");
+        save_to(&mut document, second.clone(), &text).expect("saves");
         assert_eq!(document.path(), Some(second.as_path()));
         assert!(first.exists(), "the original is left alone");
         let _ = fs::remove_dir_all(&directory);
@@ -365,7 +384,7 @@ mod tests {
         let directory = scratch_directory("unchanged");
         let path = directory.join("note.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path, "本文").expect("saves");
+        save_to(&mut document, path, "本文").expect("saves");
         assert_eq!(document.external_change(), ExternalChange::None);
         let _ = fs::remove_dir_all(&directory);
     }
@@ -376,7 +395,7 @@ mod tests {
         let directory = scratch_directory("outside-write");
         let path = directory.join("note.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path.clone(), "本文").expect("saves");
+        save_to(&mut document, path.clone(), "本文").expect("saves");
         fs::write(&path, "別のアプリが書いた本文").expect("writes");
         let change = document.external_change();
         assert_eq!(change, ExternalChange::Modified);
@@ -388,7 +407,7 @@ mod tests {
         let directory = scratch_directory("deleted");
         let path = directory.join("note.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path.clone(), "本文").expect("saves");
+        save_to(&mut document, path.clone(), "本文").expect("saves");
         fs::remove_file(&path).expect("removes");
         assert_eq!(document.external_change(), ExternalChange::Missing);
         let _ = fs::remove_dir_all(&directory);
@@ -400,7 +419,7 @@ mod tests {
         let directory = scratch_directory("report-once");
         let path = directory.join("note.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path.clone(), "本文").expect("saves");
+        save_to(&mut document, path.clone(), "本文").expect("saves");
         fs::write(&path, "別のアプリが書いた").expect("writes");
         let stamp = document.current_stamp().expect("has a stamp");
         assert!(document.take_report(stamp), "the first time is news");
@@ -414,11 +433,11 @@ mod tests {
         let directory = scratch_directory("report-reset");
         let path = directory.join("note.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path.clone(), "一").expect("saves");
+        save_to(&mut document, path.clone(), "一").expect("saves");
         fs::write(&path, "外から").expect("writes");
         let stamp = document.current_stamp().expect("has a stamp");
         assert!(document.take_report(stamp));
-        document.save_to(path.clone(), "二").expect("saves again");
+        save_to(&mut document, path.clone(), "二").expect("saves again");
         let stamp = document.current_stamp().expect("has a stamp");
         assert!(document.take_report(stamp));
         let _ = fs::remove_dir_all(&directory);
@@ -429,7 +448,7 @@ mod tests {
         let directory = scratch_directory("reload");
         let path = directory.join("note.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path.clone(), "はじめ").expect("saves");
+        save_to(&mut document, path.clone(), "はじめ").expect("saves");
         fs::write(&path, "あと\r\nから").expect("writes");
         let text = document.reload(LIMIT).expect("has a file").expect("reads");
         assert_eq!(text, "あと\nから");
@@ -437,6 +456,59 @@ mod tests {
         assert_eq!(document.form().newline, Newline::Crlf);
         // And the reload is the new baseline, so nothing is outstanding.
         assert_eq!(document.external_change(), ExternalChange::None);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// E2の③: **書けたら、その形がこの文書のものになる。**次の`Ctrl+S`も
+    /// ステータスバーも、そこからはその文字コードで言う。
+    #[test]
+    fn saving_in_a_named_form_makes_it_the_documents_own() {
+        let directory = scratch_directory("save-in-form");
+        let path = directory.join("note.txt");
+        let (mut document, _) = (DocumentFile::untitled(1), ());
+
+        let form = TextForm {
+            encoding: Encoding::Cp932,
+            newline: Newline::Crlf,
+            ..TextForm::default()
+        };
+        document
+            .save_to_as(path.clone(), "春の海", form)
+            .expect("書ける");
+
+        assert_eq!(document.form().encoding, Encoding::Cp932);
+        assert_eq!(document.form().newline, Newline::Crlf);
+        // ファイルの側もそうなっている（判別が同じ答えを出す）。
+        let loaded = crate::file_io::read(&path, LIMIT).expect("読める");
+        assert_eq!(loaded.form.encoding, Encoding::Cp932);
+        assert_eq!(loaded.text, "春の海");
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// E2の③: **断られたら、形も変わらない。**「CP932で保存する」を選んで
+    /// 断られた文書がCP932のものになっていたら、次の`Ctrl+S`が同じ断りを
+    /// 繰り返すか、書き手の知らないうちに文字コードが変わっている。
+    #[test]
+    fn a_refused_save_leaves_the_form_where_it_was() {
+        let directory = scratch_directory("save-as-refused");
+        let path = directory.join("note.txt");
+        let (mut document, _) = (DocumentFile::untitled(1), ());
+        let before = document.form();
+
+        let form = TextForm {
+            encoding: Encoding::Cp932,
+            ..TextForm::default()
+        };
+        let error = document
+            .save_to_as(path.clone(), "猫は🐈です", form)
+            .expect_err("断る");
+
+        assert!(matches!(error, SaveError::Unmappable(_)));
+        assert_eq!(document.form(), before);
+        assert!(document.path().is_none(), "行き先も受け取っていない");
+        assert!(!path.exists(), "ファイルも作られていない");
+
         let _ = fs::remove_dir_all(&directory);
     }
 
@@ -509,7 +581,7 @@ mod tests {
         let directory = scratch_directory("default-form");
         let path = directory.join("note.md");
         let mut document = DocumentFile::untitled(1);
-        document.save_to(path, "a\nb").expect("saves");
+        save_to(&mut document, path, "a\nb").expect("saves");
         assert_eq!(document.form().newline, Newline::Lf);
         assert!(!document.form().byte_order_mark);
         let _ = fs::remove_dir_all(&directory);

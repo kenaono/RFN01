@@ -6466,6 +6466,12 @@ fn new_file_tab(window: &AppWindow, live: &Live, id: PaneId) {
 }
 
 fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
+    // **新しい紙に、前の紙の知らせは付いてこない**（書き手の報告 2026-09-10：
+    // 「New Tabで新規のファイルを作ったら、『保存しました』が出ているのは違和感が
+    // あります。新規のファイルはまだ保存されていないからです」）。
+    // **`add_tab`ではなくここで畳む**——`add_tab`はファイルを開く道も通っていて、
+    // そちらは開いた直後に言うことがある（「改行コードが混在していました」）。
+    forget_render_status(window);
     sync_active_tab(window, live);
     let number = {
         let tabs = live.tabs.borrow();
@@ -6639,7 +6645,7 @@ fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
         live,
         Question::LastWorkCopyFailed,
         format!(
-            "最後の自動退避を{lost}件書けませんでした。\n\n             このまま閉じると、退避していない変更は戻せません。"
+            "最後の自動退避を{lost}件書けませんでした。\n\nこのまま閉じると、退避していない変更は戻せません。"
         ),
         &["もう一度試す", "文書を保存する…", "閉じない"],
         -1,
@@ -6914,7 +6920,7 @@ fn reopen_as_asked(window: &AppWindow, live: &Live, encoding: file_io::Encoding)
         live,
         Question::ReopenAs { path, encoding },
         format!(
-            "「{title}」を{name}で開き直します。\n\n             保存していない変更は、ファイルを読み直したときに失われます。"
+            "「{title}」を{name}で開き直します。\n\n保存していない変更は、ファイルを読み直したときに失われます。"
         ),
         &["保存して開き直す", "破棄して開き直す", "キャンセル"],
         1,
@@ -8735,9 +8741,13 @@ fn export_word_group(window: &AppWindow, mode: usize, at: usize) {
     };
     let owner = ime::window_handle(window);
     let suggested = format!("{}.txt", group.name);
-    let Some(target) = file_dialog::save_document_as(owner, &suggested) else {
+    // **文字コードの欄は出さない**（要件 E2 の③）。書き出すのは文書ではなく
+    // 語の一覧で、読むほうがUTF-8しか受けない——選べると言って選ばせない
+    // ほうが悪い（要件 7.7）。
+    let Some(target) = file_dialog::save_document_as(owner, &suggested, &[], 0) else {
         return;
     };
+    let target = target.path;
     // **覚え書きごと書き出す。**取り込みの形も「1行1語、`#`は覚え書き」なので
     // （単語チェックモード要件 5.1）、書き出して直して取り込む道で並べ方が消えない。
     let mut out = String::with_capacity(group.words.len() * 8);
@@ -12386,6 +12396,58 @@ fn encoding_id(encoding: file_io::Encoding) -> i32 {
     }
 }
 
+/// 名前を付けて保存の、文字コードの欄に並ぶ5つ（要件 E2 の③）。
+///
+/// **並びが番号である。**`n`番目の行が番号`n`で、[`save_form_id`]と
+/// [`save_form_of_id`]はこの並びを読んでいる——**言葉と形の対応を決める場所は
+/// ここ1つ**で、ダイアログ（`file_dialog`）は言葉を並べるだけである。
+///
+/// **保存にはBOMの有無が要る。**読むときの印はファイルが持っているが、書くときは
+/// 誰かが決めなければならない——それが「UTF-8」と「UTF-8 (BOM)」が別の行である
+/// 理由で、**開き直しの4つとは並びが揃わない**（あちらは読み方の一覧で、BOMは
+/// ファイルが答える）。揃わないものに同じ番号を使うほうが危ないので、表は別である。
+pub fn save_form_labels() -> [&'static str; 5] {
+    [
+        "UTF-8",
+        "UTF-8 (BOM)",
+        "UTF-16 LE",
+        "UTF-16 BE",
+        "CP932 (Shift_JIS)",
+    ]
+}
+
+/// その番号が指す形。**知らない番号なら、いまの形のまま**——ダイアログが何を
+/// 返しても、保存が止まったり知らない文字コードで書かれたりしない。
+///
+/// **改行は動かさない**：欄が受け持つのは文字コードだけで、改行はファイルが
+/// 持ってきたものをそのまま書き戻す（要件 E2 の「無指定の保存では元の形式を維持」）。
+pub fn save_form_of_id(id: u32, held: file_io::TextForm) -> file_io::TextForm {
+    let (encoding, byte_order_mark) = match id {
+        0 => (file_io::Encoding::Utf8, false),
+        1 => (file_io::Encoding::Utf8, true),
+        2 => (file_io::Encoding::Utf16Le, false),
+        3 => (file_io::Encoding::Utf16Be, false),
+        4 => (file_io::Encoding::Cp932, false),
+        _ => return held,
+    };
+    file_io::TextForm {
+        encoding,
+        byte_order_mark,
+        ..held
+    }
+}
+
+/// いまの形が、その並びの何番目か（初めから選ばれている行）。
+pub fn save_form_id(form: file_io::TextForm) -> u32 {
+    match (form.encoding, form.byte_order_mark) {
+        (file_io::Encoding::Utf8, false) => 0,
+        (file_io::Encoding::Utf8, true) => 1,
+        (file_io::Encoding::Utf16Le, _) => 2,
+        (file_io::Encoding::Utf16Be, _) => 3,
+        (file_io::Encoding::Cp932, _) => 4,
+    }
+}
+
 /// その番号が指す文字コード。知らない番号には**何もしない**。
 fn encoding_of_id(id: i32) -> Option<file_io::Encoding> {
     match id {
@@ -14559,6 +14621,46 @@ mod tests {
     ///
     /// 数え続けると、押すたびに語が選び直されて選択が外れなくなる
     /// （「契機がわからないのですが、選択がはずれなくなります」）。
+    /// E2の②③: **画面の番号と文字コードの対応は、往復して同じでなければ
+    /// ならない。**一覧は2つあり（開き直す4行、保存する5行）、**並びが違う**
+    /// ——保存にはBOMの有無が要るからである。番号を1つの表で兼ねると、行を
+    /// 足した日に片方だけがずれる。
+    #[test]
+    fn the_encoding_lists_number_the_same_things_both_ways() {
+        for id in 0..4 {
+            let encoding = encoding_of_id(id).expect("開き直しの行");
+            assert_eq!(encoding_id(encoding), id);
+        }
+        assert!(encoding_of_id(4).is_none(), "開き直しは4行しかない");
+
+        let held = file_io::TextForm::default();
+        for id in 0..save_form_labels().len() as u32 {
+            assert_eq!(save_form_id(save_form_of_id(id, held)), id);
+        }
+        // 知らない番号は、いまの形のまま（ダイアログが何を返しても壊れない）。
+        assert_eq!(save_form_of_id(99, held), held);
+    }
+
+    /// E2の③: **BOMが行を分けているのは保存の側だけ。**同じUTF-8でも、印を
+    /// 書くかどうかは書き手が決めることである（読むときの印はファイルが持つ）。
+    #[test]
+    fn only_the_saving_list_tells_the_byte_order_mark_apart() {
+        let plain = file_io::TextForm::default();
+        let marked = file_io::TextForm {
+            byte_order_mark: true,
+            ..file_io::TextForm::default()
+        };
+
+        assert_ne!(save_form_id(plain), save_form_id(marked));
+        assert_eq!(encoding_id(plain.encoding), encoding_id(marked.encoding));
+        // 改行は欄の受け持ちではない——選び直しても持ち越される。
+        let crlf = file_io::TextForm {
+            newline: file_io::Newline::Crlf,
+            ..file_io::TextForm::default()
+        };
+        assert_eq!(save_form_of_id(4, crlf).newline, file_io::Newline::Crlf);
+    }
+
     #[test]
     fn the_third_click_is_a_first_click_again() {
         let mut state = EditorState::default();
