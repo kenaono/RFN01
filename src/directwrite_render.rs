@@ -4737,9 +4737,14 @@ impl TextEngine {
             // and the block's own indent (要件 7.3.2).
             let (_, line_point) = mode.to_axes(point_x, point_y);
             let inset = block_inset(&block.span, &self.typography);
+            // 要件 7.3.1（書き手の求め 2026-09-10）: **記号の中では、カーソルも溝を
+            // 歩く。**編集中の行の記号は本文の流れの外（溝）に描かれているので、
+            // 流れの中の位置をそのまま使うとカーソルは記号の頭で止まったまま動かない
+            // ——書き手には「←が効かない」に見える。
+            let (in_flow, in_line) = self.markup_offset(graphics, block_index, local)?;
             let (x, y) = mode.to_screen(
-                block.to_global_flow(mode.flow_of(&metrics) + cell_flow),
-                margin + inset + cell_line + line_point,
+                block.to_global_flow(mode.flow_of(&metrics) + cell_flow + in_flow),
+                margin + inset + cell_line + line_point + in_line,
             );
             Ok(CaretGeometry {
                 x,
@@ -4748,6 +4753,71 @@ impl TextEngine {
                 height: metrics.height.max(font_size),
             })
         })
+    }
+
+    /// 編集中の行の記号の中で、カーソルをどれだけずらすか（要件 7.3.1）。
+    ///
+    /// **描いてある場所と、立つ場所を1つにする。**記号は幅0の箱に覆われていて、
+    /// 墨は溝に描かれる（`Ornament::Markup`）——DirectWriteに訊くと、箱の中の
+    /// どの位置も箱の頭を答えるので、カーソルは記号の頭で止まったままになる。
+    /// ここで**溝へ1段戻し、溝に描いてある字の中での位置を足す。**
+    ///
+    /// 返すのは`(flow, line)`のずれ。**縦書きでも同じ道が通る**——溝に描かれた字は
+    /// その面の書字方向で組まれるので、測るのも同じ書式で、ずれは両軸で出る。
+    ///
+    /// **箱の外では0。**記号の直後（本文の頭）は本文の位置そのものであり、
+    /// 編集中の行を持たない面（ソース面）には箱そのものが無い。
+    fn markup_offset(
+        &self,
+        graphics: &mut Graphics,
+        block_index: usize,
+        local: u32,
+    ) -> Result<(f32, f32)> {
+        if self.source_line.is_none() {
+            return Ok((0.0, 0.0));
+        }
+        let runs = self.block_marks(block_index).runs;
+        let Some(run) = runs.iter().find(|run| {
+            run.ornament == Some(Ornament::Markup)
+                && local >= run.utf16_start
+                && local < run.utf16_start + run.utf16_len
+        }) else {
+            return Ok((0.0, 0.0));
+        };
+        let Some(block) = self.plan.blocks.get(block_index) else {
+            return Ok((0.0, 0.0));
+        };
+        let text = &self.text[block.span.byte_start..block.span.byte_end];
+        let start = byte_at_utf16(text, run.utf16_start);
+        let end = byte_at_utf16(text, run.utf16_start + run.utf16_len);
+        let markup = text[start..end].encode_utf16().collect::<Vec<u16>>();
+        let format = graphics.text_format(&self.typography, self.mode)?;
+        // 短い字なので、その場で組んで訊く。**同じ書式で組む**ので、溝に描いた字と
+        // 同じ幅が返る（描くのは`draw_marker_ink`の`DrawText`で、書式はこれである）。
+        let layout = unsafe {
+            graphics.dwrite.CreateTextLayout(
+                &markup,
+                &format,
+                self.typography.indent_step().max(1.0),
+                self.typography.font_size.max(1.0),
+            )?
+        };
+        let mut point_x = 0.0;
+        let mut point_y = 0.0;
+        let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+        // SAFETY: The layout is alive for the call and the position is inside it.
+        unsafe {
+            layout.HitTestTextPosition(
+                local - run.utf16_start,
+                false,
+                &mut point_x,
+                &mut point_y,
+                &mut metrics,
+            )?;
+        }
+        let (flow, line) = self.mode.to_axes(point_x, point_y);
+        // 溝は本文の1段手前から始まる（`draw_marker_ink`が墨を置くのと同じ場所）。
+        Ok((flow, line - self.typography.indent_step()))
     }
 
     /// Selection rectangles for the part of the range that the viewport shows.
@@ -5916,6 +5986,46 @@ mod tests {
 
     /// 要件 7.3.2: **every cell of a column begins at one place**, whatever the
     /// cells above it hold and whatever padding the writer typed around the
+    /// 要件 7.3.1（書き手の求め 2026-09-10）: **記号の中では、カーソルも溝を歩く。**
+    ///
+    /// 記号は幅0の箱に覆われて溝に描かれるので、DirectWriteに訊いた位置をそのまま
+    /// 使うと、`1. `の中のどこにいてもカーソルは本文の頭に立つ——「←が効かない」
+    /// ように見える。溝へ戻して、描いてある字の中での位置を足す。
+    #[test]
+    fn the_caret_walks_through_the_markup_it_is_editing() {
+        let source = "ふつうの本文\n1. あ";
+        let head = "ふつうの本文\n".len();
+        let mode = WritingMode::Horizontal;
+        let preview =
+            crate::document::PreviewDocument::from_source_with_active_line(source, Some(head));
+        let styles = crate::document::line_styles(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers())
+            .with_source_line(preview.active_line());
+        let mut engine = engine_set(mode, styled, &plain());
+        let base = utf16_units(&preview.text[..head]);
+
+        let at = |engine: &mut TextEngine, step: u32| -> f32 {
+            let caret = engine.caret_geometry(base + step).expect("caret");
+            mode.to_axes(caret.x, caret.y).1
+        };
+        let head_of_line = at(&mut engine, 0);
+        let after_digit = at(&mut engine, 1);
+        let after_dot = at(&mut engine, 2);
+        let body = at(&mut engine, 3);
+
+        // 記号は溝に描かれているので、その中の位置は本文より手前にある。
+        assert!(
+            head_of_line < body,
+            "行頭 {head_of_line} は本文 {body} より手前"
+        );
+        assert!(head_of_line < after_digit, "`1`のぶん進む");
+        assert!(after_digit < after_dot, "`.`のぶん進む");
+        assert!(after_dot < body, "空白のぶん進んで、本文の頭に着く");
+        // 4つ目は箱の外——本文そのものの位置である。
+        assert_eq!(body, at(&mut engine, 3));
+    }
+
     /// 要件 7.3.1（書き手の報告 2026-09-10）: **触っている行も、離れた行も、
     /// 本文は同じところから始まる。**
     ///

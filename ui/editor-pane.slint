@@ -492,10 +492,17 @@ export component EditorPane inherits Rectangle {
     /// towards what was written earlier. **Rust turns it into rows** — a
     /// terminal has no half-lines to stop on.
     callback terminal-scrolled(float);
-    callback tab-pressed();
+    /// E3の④: `Tab`と`Shift+Tab`。引数はShiftが押されているか。**行の字下げか、
+    /// 字を入れるかはRustが決める**——選んだものと、その行が箇条書きかどうかで
+    /// 分かれるので、本文を持っているあちらでしか決められない。
+    callback tab-pressed(bool);
     /// E3の③: Enter。**ただの改行ではない**——字下げと、箇条書き・引用の印を
     /// 継ぐかどうかをRustが決める（本文を持っているのはあちらである）。
-    callback enter-pressed();
+    ///
+    /// 引数はShiftが押されているか。**中身の無い項目でだけ意味が変わる**
+    /// （書き手の選択 2026-09-10）：Enterは段ごと捨てて素の行頭へ、Shift+Enterは
+    /// 印だけ捨てて項目の本文の列に残る。
+    callback enter-pressed(bool);
     /// E3の②: 行そのものを動かす・写す・消す。0=前へ、1=後へ、2=前へ写す、
     /// 3=後へ写す、4=消す。**上下ではなく文書順の前と後**（書き手の選択
     /// 2026-09-10）——縦書きでも`Alt+↑`が「前の行と入れ替える」である。
@@ -2166,13 +2173,13 @@ export component EditorPane inherits Rectangle {
                                             reject
                                         }
                                     } else if event.text == Key.Return {
-                                        root.enter-pressed();
+                                        root.enter-pressed(event.modifiers.shift);
                                         accept
                                     } else if event.text == Key.Backspace {
                                         root.backspace-pressed();
                                         accept
                                     } else if event.text == Key.Tab {
-                                        root.tab-pressed();
+                                        root.tab-pressed(event.modifiers.shift);
                                         accept
                                     } else if event.text == Key.Delete {
                                         root.delete-pressed();

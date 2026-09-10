@@ -883,9 +883,13 @@ pub enum Continuation {
     /// 中身の無い項目でEnter——**行頭から`upto`までを`keep`に置き換える**。
     ///
     /// **改行は入らない。**書き手が終えたいのは箇条書きであって、行ではない。
-    /// 残すのは**項目の本文が始まっていた列まで**の空白（書き手の選択 2026-09-10）
-    /// ——字下げに、印の幅ぶんの空白を足したもの。その項目に属する段落として
-    /// 書き続けられる位置であり、Markdownとしてもそう読まれる。
+    ///
+    /// 残すものは鍵で変わる（書き手の選択 2026-09-10）：
+    ///
+    /// - **Enterは段ごと捨てる。**何も残らず、素の行頭へ戻る——箇条書きを
+    ///   終えて本文へ戻る、いちばん多い用事がいちばん短い手数で済む。
+    /// - **Shift+Enterは印だけ捨てる。**カーソルは項目の本文が始まっていた列に
+    ///   残るので、その項目に属する段落としてそのまま書き続けられる。
     Clear { upto: usize, keep: String },
 }
 
@@ -897,7 +901,7 @@ pub enum Continuation {
 ///
 /// `at`は行の中のカーソル位置（バイト）。**頭の中で押されたEnterは、ただの改行**
 /// ——行を押し下げたいだけの書き手に、印を写して返さない。
-pub fn enter_continuation(line: &str, style: LineStyle, at: usize) -> Continuation {
+pub fn enter_continuation(line: &str, style: LineStyle, at: usize, soft: bool) -> Continuation {
     let at = at.min(line.len());
     let quote = line.len() - quote_content(line).len();
     let content = &line[quote..];
@@ -913,16 +917,24 @@ pub fn enter_continuation(line: &str, style: LineStyle, at: usize) -> Continuati
     // 終える」）。印を持たない行はここへ来ない——字下げだけの行でEnterが何も
     // しないと、効かない鍵に見える。
     if line[head..].trim().is_empty() && (marker > 0 || quote > 0) {
-        // **印の幅は空白で埋める**（書き手の選択 2026-09-10）。印は消えるが、
-        // 書き始める場所は動かない——その項目の本文が始まっていた列である。
-        // **引用の`>`は埋めない**：引用に「本文の列」は無く、終えた書き手が
-        // 戻るのは本文そのものである。印は`marker_len`が数えたASCIIなので、
-        // バイトの数がそのまま桁の数になる。
-        let mut keep = String::with_capacity(kept.len() + marker);
-        keep.push_str(kept);
-        for _ in 0..marker {
-            keep.push(' ');
-        }
+        // **Enterは段ごと捨てて、素の行頭へ**（書き手の選択 2026-09-10）。
+        // 箇条書きを終えて本文へ戻るのがいちばん多い用事で、字下げが残っていると
+        // 次の行がその字下げを継いでいく。
+        //
+        // **Shift+Enterは印だけ捨てる。**印の幅は空白で埋めるので、書き始める場所は
+        // 動かない——その項目の本文が始まっていた列である。**引用の`>`は埋めない**：
+        // 引用に「本文の列」は無く、終えた書き手が戻るのは本文そのものである。
+        // 印は`marker_len`が数えたASCIIなので、バイトの数がそのまま桁の数になる。
+        let keep = if soft {
+            let mut keep = String::with_capacity(kept.len() + marker);
+            keep.push_str(kept);
+            for _ in 0..marker {
+                keep.push(' ');
+            }
+            keep
+        } else {
+            String::new()
+        };
         return Continuation::Clear { upto: head, keep };
     }
     let mut next = String::from("\n");
@@ -953,6 +965,110 @@ fn continued_marker(body: &str, kind: LineKind, marker: usize) -> String {
             format!("{}{delimiter} ", number.saturating_add(1))
         }
         _ => String::new(),
+    }
+}
+
+/// 字下げの一段——`Tab`が足し、`Shift+Tab`が外す幅（E3の④）。
+///
+/// **空白で書く。**タブ文字は幅が読み手の道具で変わるので、原稿の中では
+/// 「何桁下げたか」が書き手の見たとおりにならない。入れ子の深さは桁数から
+/// 決まる（`ListLevels`）ので、そこが揺れるのは困る。
+///
+/// **一段は1つだけ。**本文へ入れる`Tab`も、箇条書きを入れ子にする`Tab`も同じ幅で
+/// ある——選んだものによって下がる量が変わったら、書き手は同じ鍵に2つの意味を
+/// 覚えることになる（`main`の`TAB_INDENT`がこれを指している）。
+pub const INDENT_STEP: &str = "    ";
+
+/// 字下げを一段深く／浅くした結果（E3の④）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Indented {
+    /// 書き換える範囲（行ぜんぶ）。
+    pub region: Range<usize>,
+    /// そこへ入る字。
+    pub text: String,
+    /// 書き換えたあとの選択。長さが無ければ、そこに立つカーソル。
+    pub chosen: (usize, usize),
+}
+
+/// 選んだ行の字下げを一段深く／浅くする（E3の④）。
+///
+/// **箇条書きなら、それが入れ子の深さになる。**深さは書き手が下げた桁数から
+/// 決まる（`ListLevels`）ので、字下げを足すことと入れ子にすることは同じ操作である
+/// ——`Tab`で内側の項目になり、`Shift+Tab`で戻る（書き手の求め 2026-09-10）。
+///
+/// **字下げは引用の`>`の後ろに入る。**`> - 項目`の`>`は行がどこにあるかを言う印で、
+/// その前に空白を入れると引用そのものが崩れる。
+///
+/// **浅くできる行が1つも無ければ`None`。**何も起きないことを、呼ぶ側が知れる。
+pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Option<Indented> {
+    let (start, end) = selected_lines(source, from, to);
+    let mut text = String::with_capacity(end - start);
+    let mut moved = [from, to];
+    let mut changed = false;
+    let mut at = start;
+    for line in source[start..end].split_inclusive('\n') {
+        let quote = line.len() - quote_content(line).len();
+        let body = at + quote;
+        text.push_str(&line[..quote]);
+        let rest = &line[quote..];
+        if deeper {
+            // **空の行は下げない。**選んだ範囲に挟まった空行まで下げると、
+            // そこで箇条書きが切れる（空行は字下げを持たない行である）。
+            if rest.trim_end_matches('\n').is_empty() {
+                text.push_str(rest);
+            } else {
+                text.push_str(INDENT_STEP);
+                text.push_str(rest);
+                shift_positions(&mut moved, body, INDENT_STEP.len() as isize);
+                changed = true;
+            }
+        } else {
+            let taken = outdent_width(rest);
+            if taken > 0 {
+                changed = true;
+                shift_positions(&mut moved, body + taken, -(taken as isize));
+            }
+            text.push_str(&rest[taken..]);
+        }
+        at += line.len();
+    }
+    changed.then(|| Indented {
+        region: start..end,
+        text,
+        chosen: (moved[0].min(moved[1]), moved[0].max(moved[1])),
+    })
+}
+
+/// 一段ぶん外せる字下げの幅（[`shift_indent`]）。
+///
+/// **タブ1つか、空白を一段まで。**書き手が他の道具でタブを入れた原稿も開くので、
+/// そこは1文字で一段とみなす。
+fn outdent_width(line: &str) -> usize {
+    if line.starts_with('\t') {
+        return 1;
+    }
+    line.chars()
+        .take(INDENT_STEP.len())
+        .take_while(|character| *character == ' ')
+        .count()
+}
+
+/// 位置を、`at`より後ろにあるぶんだけずらす（[`shift_indent`]）。
+///
+/// **`at`そのものは動く側**——行頭に立っていたカーソルは、足した字下げの後ろへ出る。
+/// 縮めるときは、消えた範囲の中にいた位置がその頭に集まる。
+fn shift_positions(positions: &mut [usize], at: usize, delta: isize) {
+    for position in positions {
+        if *position < at {
+            continue;
+        }
+        *position = if delta >= 0 {
+            *position + delta as usize
+        } else {
+            position
+                .saturating_sub((-delta) as usize)
+                .max(at - (-delta) as usize)
+        };
     }
 }
 
@@ -2701,7 +2817,13 @@ mod tests {
     /// Enterの継ぎ方を、その行の見方ごと当てる（E3の③）。
     fn continued(line: &str, at: usize) -> Continuation {
         let style = line_styles(line)[0];
-        enter_continuation(line, style, at)
+        enter_continuation(line, style, at, false)
+    }
+
+    /// Shift+Enterのほう——印だけ捨てて、本文の列に残る。
+    fn continued_softly(line: &str, at: usize) -> Continuation {
+        let style = line_styles(line)[0];
+        enter_continuation(line, style, at, true)
     }
 
     /// E3の③: 箇条書きは継ぐ。**番号は1つ進む**（書き手の選択 2026-09-10）。
@@ -2757,17 +2879,25 @@ mod tests {
         let line = "  - ";
 
         assert_eq!(styles[1].kind, LineKind::Bullet);
-        // 字下げ2つ＋印の幅2つ＝本文が始まっていた列。
+        // Shift+Enterなら、字下げ2つ＋印の幅2つ＝本文が始まっていた列。
         assert_eq!(
-            enter_continuation(line, styles[1], line.len()),
+            enter_continuation(line, styles[1], line.len(), true),
             Continuation::Clear {
                 upto: 4,
                 keep: "    ".to_owned()
             }
         );
-        // 行頭の項目でも、本文の列は印の幅のぶん右にある。
+        // Enterは段ごと捨てる——入れ子でも素の行頭へ。
         assert_eq!(
-            enter_continuation("- ", styles[0], 2),
+            enter_continuation(line, styles[1], line.len(), false),
+            Continuation::Clear {
+                upto: 4,
+                keep: String::new()
+            }
+        );
+        // 行頭の項目でも、Shift+Enterの本文の列は印の幅のぶん右にある。
+        assert_eq!(
+            enter_continuation("- ", styles[0], 2, true),
             Continuation::Clear {
                 upto: 2,
                 keep: "  ".to_owned()
@@ -2779,15 +2909,24 @@ mod tests {
     /// 字下げは残り、改行は入らない。
     #[test]
     fn an_empty_item_ends_the_list_instead_of_growing_it() {
+        // **Enterは段ごと捨てる**（書き手の選択 2026-09-10）。素の行頭へ戻る。
         assert_eq!(
             continued("- ", 2),
             Continuation::Clear {
                 upto: 2,
-                keep: "  ".to_owned()
+                keep: String::new()
             }
         );
         assert_eq!(
             continued("  - ", 4),
+            Continuation::Clear {
+                upto: 4,
+                keep: String::new()
+            }
+        );
+        // **Shift+Enterは印だけ捨てる**——カーソルは項目の本文の列に残る。
+        assert_eq!(
+            continued_softly("  - ", 4),
             Continuation::Clear {
                 upto: 4,
                 keep: "    ".to_owned()
@@ -2795,7 +2934,7 @@ mod tests {
         );
         // 番号は幅が広いぶん、本文の列も右にある。
         assert_eq!(
-            continued("10. ", 4),
+            continued_softly("10. ", 4),
             Continuation::Clear {
                 upto: 4,
                 keep: "    ".to_owned()
@@ -2834,6 +2973,66 @@ mod tests {
             continued("- 一つめ", 2),
             Continuation::Insert("\n- ".to_owned())
         );
+    }
+
+    /// E3の④: `Tab`は行を一段下げ、`Shift+Tab`が戻す。**箇条書きなら入れ子になる。**
+    #[test]
+    fn a_tab_makes_the_item_a_nested_one() {
+        let source = "- 一つめ\n- 二つめ\n";
+        let second = "- 一つめ\n".len();
+
+        let deeper = shift_indent(source, second, second, true).expect("下げられる");
+        let mut next = source.to_owned();
+        next.replace_range(deeper.region.clone(), &deeper.text);
+        assert_eq!(next, "- 一つめ\n    - 二つめ\n");
+        // 入れ子として読める（深さが1つ増える）。
+        let styles = line_styles(&next);
+        assert!(styles[1].list_indent > styles[0].list_indent);
+        // カーソルは同じ字の前に残る——字下げのぶんだけ後ろへ。
+        assert_eq!(
+            deeper.chosen,
+            (second + INDENT_STEP.len(), second + INDENT_STEP.len())
+        );
+
+        // `Shift+Tab`で戻る。
+        let back = shift_indent(&next, second, second, false).expect("戻せる");
+        let mut plain = next.clone();
+        plain.replace_range(back.region.clone(), &back.text);
+        assert_eq!(plain, source);
+    }
+
+    /// E3の④: 選んだ行はまとめて。**空の行は下げない**——そこで箇条書きが切れる。
+    #[test]
+    fn every_selected_line_moves_together_except_the_empty_ones() {
+        let source = "一\n\n二\n";
+
+        let deeper = shift_indent(source, 0, source.len(), true).expect("下げられる");
+        let mut next = source.to_owned();
+        next.replace_range(deeper.region.clone(), &deeper.text);
+
+        assert_eq!(next, "    一\n\n    二\n");
+    }
+
+    /// E3の④: **字下げは引用の`>`の後ろ。**前に入れると引用そのものが崩れる。
+    #[test]
+    fn an_indent_goes_after_the_quote_marker() {
+        let source = "> - 項目\n";
+
+        let deeper = shift_indent(source, 0, 0, true).expect("下げられる");
+        let mut next = source.to_owned();
+        next.replace_range(deeper.region.clone(), &deeper.text);
+
+        assert_eq!(next, ">     - 項目\n");
+        assert_eq!(line_styles(&next)[0].quote_depth, 1);
+    }
+
+    /// E3の④: **外せる字下げが無ければ、何も起きない**（`None`）。
+    #[test]
+    fn a_line_at_the_margin_has_nothing_to_give_back() {
+        assert_eq!(shift_indent("項目\n", 0, 0, false), None);
+        // タブ1つは一段とみなす（他の道具で書かれた原稿）。
+        let taken = shift_indent("\t項目\n", 0, 0, false).expect("外せる");
+        assert_eq!(taken.text, "項目\n");
     }
 
     #[test]

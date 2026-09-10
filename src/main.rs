@@ -279,7 +279,9 @@ const SAMPLE_MARKDOWN: &str = r#"# 縦書きライブ編集の技術検証
 
 > 右側をクリックするとキャレットを置き、日本語IMEでも直接入力できます。
 "#;
-const TAB_INDENT: &str = "    ";
+/// `Tab`が入れる字下げ（E3の④）。**`document::INDENT_STEP`と同じもの**——本文へ
+/// 入れる一段と、箇条書きを入れ子にする一段が違っていたら、同じ鍵に2つの意味が付く。
+const TAB_INDENT: &str = document::INDENT_STEP;
 const IME_CANDIDATE_GAP: f32 = 8.0;
 const CARET_SCROLL_PADDING: f32 = 24.0;
 /// Fallback column height, used before the pane reports its own size and by
@@ -2152,9 +2154,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // E3の③: Enter。**継ぐものはRustが決める**——画面と同じ行の見方を使うため。
     let weak = window.as_weak();
     let enter_live = live.clone();
-    window.on_pane_enter(move |pane| {
+    window.on_pane_enter(move |pane, soft| {
         if let Some(window) = weak.upgrade() {
-            enter_in_pane(&window, &enter_live, PaneId::from_index(pane));
+            enter_in_pane(&window, &enter_live, PaneId::from_index(pane), soft);
         }
     });
 
@@ -2240,16 +2242,10 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = window.as_weak();
-    let states = pane_states.clone();
-    let cache = render_cache.clone();
     let typed_live = live.clone();
-    window.on_pane_tab(move |pane| {
+    window.on_pane_tab(move |pane, back| {
         if let Some(window) = weak.upgrade() {
-            let id = PaneId::from_index(pane);
-            answer_new_tab(&window, &typed_live, id, None);
-            let document = states.document(id);
-            let indent = TAB_INDENT;
-            insert_pane_text(&window, id, &document, &states, &cache, indent, true);
+            tab_in_pane(&window, &typed_live, PaneId::from_index(pane), back);
         }
     });
 
@@ -13246,6 +13242,75 @@ fn apply_span_edit(
     );
 }
 
+/// `Tab`と`Shift+Tab`（E3の④）。
+///
+/// **行の字下げか、字を入れるか。**要件 E3 は「複数行へのTab／Shift+Tabで
+/// インデント／解除。通常入力のTabとの違いが分かるようにする」と言っている。
+/// 分かれ目は3つで、**どれも書き手が画面で見て言えること**である：
+///
+/// 1. **選んだものが2行以上にまたがっていれば、行の字下げ。**選んだ行が消えて
+///    タブ1つになったら、それは書き手の求めたことではない。
+/// 2. **箇条書きの行にいれば、その項目の入れ子の深さ**（書き手の求め 2026-09-10：
+///    「TABをすると内側に新しい箇条書きが出来て、Shift+TABで元の箇条書きに戻る」）。
+///    深さは書き手が下げた桁数から決まるので、字下げを足すことが入れ子にすることである。
+/// 3. **それ以外の`Tab`は字を入れる**（今までどおり）。`Shift+Tab`はいつでも
+///    行の字下げを外す——字を消す鍵ではないので、外すものが無ければ何も起きない。
+fn tab_in_pane(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
+    answer_new_tab(window, live, id, None);
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let (from, to) = {
+        let borrowed = state.borrow();
+        match selection_source_range(&borrowed) {
+            Some(range) => range,
+            None => {
+                drop(borrowed);
+                let caret = id.caret_byte(&state, &source);
+                (caret, caret)
+            }
+        }
+    };
+    let across_lines = source[from.min(to)..to.max(from)].contains('\n');
+    let in_item = {
+        let index = source[..from.min(to)].matches('\n').count();
+        document
+            .counts
+            .borrow_mut()
+            .get(&source)
+            .line_styles()
+            .get(index)
+            .is_some_and(|style| style.kind.is_list())
+    };
+    if !back && !across_lines && !in_item {
+        // 字を入れる道。**縦書きのプレビューでは行頭へ入る**ので、そこは
+        // `insert_pane_text`の`indent_line_start`が決める（要件 7.3.2）。
+        insert_pane_text(
+            window,
+            id,
+            &document,
+            &live.states,
+            &live.cache,
+            TAB_INDENT,
+            true,
+        );
+        return;
+    }
+    let Some(indented) = document::shift_indent(&source, from, to, !back) else {
+        return;
+    };
+    apply_span_edit(
+        window,
+        live,
+        id,
+        &source,
+        indented.region,
+        &indented.text,
+        indented.chosen,
+        if back { "Outdent" } else { "Indent" },
+    );
+}
+
 /// Enterを押した（E3の③）。
 ///
 /// **字下げと、箇条書き・引用の印を継ぐ。**継ぐものが無ければただの改行で、
@@ -13256,7 +13321,7 @@ fn apply_span_edit(
 ///
 /// **選んでいるものがあれば、その頭の行で決める**——選択は`insert_pane_text`が
 /// 取り除き、入る字はそこへ落ちるからである。
-fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId) {
+fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId, soft: bool) {
     // 追加要件 2026-09-07: **打ち始めたら、そのタブは文書になる。**Enterも打鍵で
     // ある——`on_pane_text_input`がこれを呼んでいたので、Enterだけ`New Tab`の上で
     // 何も起きない鍵になっていた。**文書を取り出す前に**呼ぶ：答えたあとのタブは、
@@ -13288,7 +13353,7 @@ fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId) {
         .get(index)
         .copied()
         .unwrap_or_default();
-    match document::enter_continuation(line, style, at - line_start) {
+    match document::enter_continuation(line, style, at - line_start, soft) {
         document::Continuation::Insert(text) => insert_pane_text(
             window,
             id,

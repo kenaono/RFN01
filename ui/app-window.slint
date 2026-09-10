@@ -412,8 +412,8 @@ export component AppWindow inherits Window {
     callback pane-selection-start(int, float, float, bool);
     /// E3の②: 行そのものを動かす・写す・消す。
     callback pane-line-edit(int, int);
-    /// E3の③: Enterで字下げ・箇条書き・引用を継ぐ。
-    callback pane-enter(int);
+    /// E3の③: Enterで字下げ・箇条書き・引用を継ぐ。2つめはShiftが押されているか。
+    callback pane-enter(int, bool);
     callback pane-selection-update(int, float, float);
     callback pane-selection-end(int, float, float);
     callback pane-select-all(int);
@@ -580,7 +580,8 @@ export component AppWindow inherits Window {
     // 人には逆が要るので、これは「正解が二つある」たぐいで、選ばせる。
     in-out property <bool> count-ruby: false;
     callback count-ruby-toggled(bool);
-    callback pane-tab(int);
+    /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
+    callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
     callback pane-backspace(int);
     callback pane-delete(int);
@@ -1851,8 +1852,8 @@ export component AppWindow inherits Window {
                         line-edit(what) => {
                             root.pane-line-edit(pane.id, what);
                         }
-                        enter-pressed => {
-                            root.pane-enter(pane.id);
+                        enter-pressed(soft) => {
+                            root.pane-enter(pane.id, soft);
                         }
                         selection-update(x, y) => { root.pane-selection-update(pane.id, x, y); }
                         selection-end(x, y) => { root.pane-selection-end(pane.id, x, y); }
@@ -1910,7 +1911,7 @@ export component AppWindow inherits Window {
                         // writer asked for a terminal, not for a distribution.
                         below-entered => { root.pane-below-focus(pane.id, true); }
                         below-left => { root.pane-below-focus(pane.id, false); }
-                        tab-pressed => { root.pane-tab(pane.id); }
+                        tab-pressed(back) => { root.pane-tab(pane.id, back); }
                         preedit-changed(text) => { root.pane-preedit-changed(pane.id, text); }
                         backspace-pressed => { root.pane-backspace(pane.id); }
                         delete-pressed => { root.pane-delete(pane.id); }
