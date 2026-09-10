@@ -11947,12 +11947,11 @@ fn refresh_after_scroll(
     let drawn = cache.refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
     let placed = match &drawn {
         Ok((count, want, new, _, _)) => {
-            if *new > 0 {
-                let ms = elapsed_ms(started);
-                let line = format!("{label}遅延スクロール: {count}枚{new}新 / {ms:.1}ms");
-                window.set_render_status(line.into());
-            }
-            format!("tiles={count}/{want} new={new}")
+            // **測った値は診断ログへ**（書き手の報告 2026-09-10：「画面確認する
+            // ことはないと思いますが、必要ですか」）。ステータスバーは書き手への
+            // 知らせの場所で、測定は`perf_log.txt`と診断ログにもう出ている。
+            let ms = elapsed_ms(started);
+            format!("tiles={count}/{want} new={new} ms={ms:.1}")
         }
         Err(error) => {
             let line = format!("{label}遅延タイル: NG / {error}");
@@ -12758,9 +12757,12 @@ fn update_pane_selection(
         "",
     );
     if phase == SelectionPhase::Update {
+        // 測った値は診断ログへ（上と同じ理由、2026-09-10）。
         let ms = elapsed_ms(drag_started);
-        let line = format!("{label}ドラッグ選択: {ms:.1}ms", label = id.label(window));
-        window.set_render_status(line.into());
+        cache.borrow_mut().log_diag(
+            &format!("pointer.{}", id.diag_suffix()),
+            &format!("drag pane={} ms={ms:.1}", id.log_name()),
+        );
     }
 }
 
@@ -12846,10 +12848,13 @@ fn drag_caret_only(
             let place = source_caret(window, id, Some(hit));
             update_status(window, id, document, source, selection, place);
             // Nothing reported the mid-drag cost before, which is exactly the
-            // path the slowness was reported on.
+            // path the slowness was reported on. 測った値は診断ログへ
+            // （2026-09-10）——ステータスバーは書き手への知らせの場所である。
             let ms = elapsed_ms(started);
-            let line = format!("{label}ドラッグ選択: {rect_count} rects / {ms:.1}ms");
-            window.set_render_status(line.into());
+            cache.diag.write(
+                &format!("pointer.{}", id.diag_suffix()),
+                &format!("drag pane={} rects={rect_count} ms={ms:.1}", id.log_name()),
+            );
         }
         (Err(error), _) | (_, Err(error)) => {
             let line = format!("{label}選択座標: NG / {error}");
