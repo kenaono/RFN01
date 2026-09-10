@@ -932,13 +932,14 @@ pub fn enter_continuation(
     // **中身の無い項目は、そこで終わる**（E3：「空の項目でEnterを押すと継続を
     // 終える」）。印を持たない行はここへ来ない——字下げだけの行でEnterが何も
     // しないと、効かない鍵に見える。
-    // **空の継続行でEnterを押したら、改行して次の項目が出る**（書き手の決定
-    // 2026-09-10：「続けてEnterすると改行して2.になる感じ。つまり、一行空く感じ」）。
-    // Shift+Enterで作った段落の行に何も書かなかったのだから、書き手はもう段落では
-    // なく次の項目を書こうとしている——**空いた行はそのまま残る**ので、項目と項目の
-    // あいだが一行空く。
-    if line[head..].trim().is_empty()
-        && marker == 0
+    // **項目の続きの段落でEnterを押したら、次の項目が出る**（書き手の決定
+    // 2026-09-10：「Shift-ENTERの間はその段落が続いている感じです。つまり、
+    // Shift+Enter、入力してShift+Enterとつづけて、Enterすると、次の箇条書きが
+    // 始まる感じ」）。**中身があってもなくても同じ**——`Shift+Enter`が「まだ
+    // この項目」と言う鍵で、`Enter`はいつでも「次の項目へ」である。
+    //
+    // 空いた行はそのまま残るので、項目と項目のあいだが一行空く。
+    if marker == 0
         && quote == 0
         && style.list_indent > 0
         && !soft
@@ -3298,11 +3299,11 @@ mod tests {
         );
     }
 
-    /// E3の③（書き手の決定 2026-09-10）: **空の継続行でEnterを押すと、改行して
-    /// 次の項目が出る。**Shift+Enterで作った段落に何も書かなかったのだから、
-    /// 書き手はもう次の項目を書こうとしている——空いた行は残るので一行空く。
+    /// E3の③（書き手の決定 2026-09-10）: **項目の続きの段落でEnterを押すと、
+    /// 次の項目が出る。**`Shift+Enter`が「まだこの項目」と言う鍵で、`Enter`は
+    /// いつでも「次の項目へ」——中身があってもなくても同じである。
     #[test]
-    fn an_empty_paragraph_under_an_item_opens_the_next_item() {
+    fn a_paragraph_under_an_item_opens_the_next_item() {
         let source = "1. aaa\n   ";
         let at = source.len();
 
@@ -3310,6 +3311,18 @@ mod tests {
         assert_eq!(
             enter_continuation(source, &line_styles(source), at, false),
             Continuation::Insert("\n2. ".to_owned())
+        );
+        // **書きかけの段落からでも同じ。**Shift+Enterを重ねて書いた続きの行で
+        // Enterを押した書き手は、その項目を書き終えている。
+        let written = "1. aaa\n   bbb";
+        assert_eq!(
+            enter_continuation(written, &line_styles(written), written.len(), false),
+            Continuation::Insert("\n2. ".to_owned())
+        );
+        // Shift+Enterのほうは、段落を続ける。
+        assert_eq!(
+            enter_continuation(written, &line_styles(written), written.len(), true),
+            Continuation::Insert("\n   ".to_owned())
         );
         // 箇条書きの中でも、深さの合う項目を継ぐ。
         let nested = "1. 親\n    1. 子\n       ";

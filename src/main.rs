@@ -13353,7 +13353,29 @@ fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId, soft: bool) {
         .get(&source)
         .line_styles()
         .to_vec();
-    match document::enter_continuation(&source, &styles, at, soft) {
+    let what = document::enter_continuation(&source, &styles, at, soft);
+    // **Enterが「効かない」と言われたら、ここが答える。**どの行を、どう読んで、
+    // 何を入れたか——行の中身は書かない（原稿の言葉である）。
+    let index = source[..line_start].matches('\n').count();
+    let style = styles.get(index).copied().unwrap_or_default();
+    live.cache.borrow_mut().log_diag(
+        "enter",
+        &format!(
+            "pane={} soft={} kind={:?} list={} at={} did={}",
+            id.log_name(),
+            u8::from(soft),
+            style.kind,
+            style.list_indent,
+            at - line_start,
+            match &what {
+                document::Continuation::Insert(text) => format!("insert={}", text.len()),
+                document::Continuation::Clear { upto, keep } => {
+                    format!("clear={upto} keep={}", keep.len())
+                }
+            },
+        ),
+    );
+    match what {
         document::Continuation::Insert(text) => insert_pane_text(
             window,
             id,
