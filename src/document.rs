@@ -932,11 +932,11 @@ pub fn enter_continuation(
     // **中身の無い項目は、そこで終わる**（E3：「空の項目でEnterを押すと継続を
     // 終える」）。印を持たない行はここへ来ない——字下げだけの行でEnterが何も
     // しないと、効かない鍵に見える。
-    // **空の継続行でEnterを押したら、その行が次の項目になる**（書き手の決定
-    // 2026-09-10：「続けてENTERとすると、2.となって、1の続きの箇条書きになるのが
-    // 自然です」）。Shift+Enterで作った段落の行に何も書かなかったのだから、
-    // 書き手はもう段落ではなく次の項目を書こうとしている。**改行は入らない**
-    // ——空の項目でEnterが段を捨てるのと同じ形で、その行そのものが変わる。
+    // **空の継続行でEnterを押したら、改行して次の項目が出る**（書き手の決定
+    // 2026-09-10：「続けてEnterすると改行して2.になる感じ。つまり、一行空く感じ」）。
+    // Shift+Enterで作った段落の行に何も書かなかったのだから、書き手はもう段落では
+    // なく次の項目を書こうとしている——**空いた行はそのまま残る**ので、項目と項目の
+    // あいだが一行空く。
     if line[head..].trim().is_empty()
         && marker == 0
         && quote == 0
@@ -944,10 +944,7 @@ pub fn enter_continuation(
         && !soft
         && let Some((item_head, next)) = item_above(source, styles, index, style.list_indent)
     {
-        return Continuation::Clear {
-            upto: head,
-            keep: format!("{item_head}{next}"),
-        };
+        return Continuation::Insert(format!("\n{item_head}{next}"));
     }
     if line[head..].trim().is_empty() && (marker > 0 || quote > 0) {
         // **Enterは段ごと捨てて、素の行頭へ**（書き手の選択 2026-09-10）。
@@ -2293,6 +2290,30 @@ fn marker_len(content: &str, kind: LineKind) -> Option<u32> {
 ///
 /// The kind comes from `style` instead of being worked out again, so this
 /// cannot reach a different conclusion than the pane about what a line is.
+/// 編集中の行で、**描かれない行頭の空白**（要件 7.3.1、書き手の報告 2026-09-10）。
+///
+/// 記号は箱の下にあり、墨は前後の空白を落として溝に描かれる（`marker_ink`）
+/// ——入れ子の字下げは**どこにも描かれない**ので、そこに立ったカーソルは記号の頭に
+/// 見える。書き手には「その間、止まっているように見えます」となる。
+///
+/// **描かれない字は、カーソルの止まり場所ではない。**返した範囲を、←と→は一息に
+/// 跨ぐ（`main`の`move_pane_caret`）。
+///
+/// 引用の`>`は描かれる（落とすのは空白だけ）ので、ここには入らない。
+pub fn hidden_indent(source: &str, styles: &[LineStyle], caret: usize) -> Option<Range<usize>> {
+    let (line_start, line_end) = line_span(source, caret);
+    let line = source[line_start..line_end]
+        .strip_suffix('\n')
+        .unwrap_or(&source[line_start..line_end]);
+    let index = source[..line_start].matches('\n').count();
+    let style = styles.get(index).copied().unwrap_or_default();
+    let marker = active_markup(line, style)?;
+    let hidden = line.len() - line.trim_start().len();
+    // 箱の外まで跨がない——覆われているぶんだけが隠れている。
+    let hidden = hidden.min(marker.utf16_len as usize);
+    (hidden > 0).then(|| line_start..line_start + hidden)
+}
+
 /// 編集中の行で、行頭の記号が座る箱（要件 7.3.1、書き手の報告 2026-09-10）。
 ///
 /// **隠すためではなく、幅を取らせないための箱。**覆った字はそのまま溝に描かれる
@@ -3238,6 +3259,27 @@ mod tests {
         assert_eq!(taken.text, "項目\n");
     }
 
+    /// E3（書き手の報告 2026-09-10）: **描かれない行頭の空白は、カーソルの
+    /// 止まり場所ではない。**入れ子の項目の字下げは箱の下にあってどこにも
+    /// 描かれないので、そこに立ったカーソルは記号の頭に見える。
+    #[test]
+    fn the_hidden_indent_of_a_nested_item_is_not_a_place_to_stand() {
+        let source = "1. 親\n    1. 子";
+        let styles = line_styles(source);
+        let line_start = "1. 親\n".len();
+
+        // 入れ子の行頭の4桁が隠れている。
+        assert_eq!(
+            hidden_indent(source, &styles, line_start + 2),
+            Some(line_start..line_start + 4)
+        );
+        // 字下げの無い項目には、隠れている空白が無い。
+        assert_eq!(hidden_indent(source, &styles, 1), None);
+        // 引用の`>`は描かれるので、跨ぐものではない。
+        let quoted = "> - 項目";
+        assert_eq!(hidden_indent(quoted, &line_styles(quoted), 1), None);
+    }
+
     /// E3の③（書き手の決定 2026-09-10）: **Shift+Enterは項目の続きの段落。**
     /// `1. aaa`で押した書き手が欲しいのは`2.`ではなく、`aaa`の下から続く行である。
     #[test]
@@ -3256,29 +3298,24 @@ mod tests {
         );
     }
 
-    /// E3の③（書き手の決定 2026-09-10）: **空の継続行でEnterを押すと、その行が
-    /// 次の項目になる。**Shift+Enterで作った段落に何も書かなかったのだから、
-    /// 書き手はもう次の項目を書こうとしている。
+    /// E3の③（書き手の決定 2026-09-10）: **空の継続行でEnterを押すと、改行して
+    /// 次の項目が出る。**Shift+Enterで作った段落に何も書かなかったのだから、
+    /// 書き手はもう次の項目を書こうとしている——空いた行は残るので一行空く。
     #[test]
-    fn an_empty_paragraph_under_an_item_turns_into_the_next_item() {
+    fn an_empty_paragraph_under_an_item_opens_the_next_item() {
         let source = "1. aaa\n   ";
         let at = source.len();
 
+        // **改行して次の項目**——空いた行はそのまま残るので、一行空く。
         assert_eq!(
             enter_continuation(source, &line_styles(source), at, false),
-            Continuation::Clear {
-                upto: 3,
-                keep: "2. ".to_owned()
-            }
+            Continuation::Insert("\n2. ".to_owned())
         );
         // 箇条書きの中でも、深さの合う項目を継ぐ。
         let nested = "1. 親\n    1. 子\n       ";
         assert_eq!(
             enter_continuation(nested, &line_styles(nested), nested.len(), false),
-            Continuation::Clear {
-                upto: 7,
-                keep: "    2. ".to_owned()
-            }
+            Continuation::Insert("\n    2. ".to_owned())
         );
         // Shift+Enterはそのまま改行——段落を続けたい書き手の鍵である。
         assert_eq!(

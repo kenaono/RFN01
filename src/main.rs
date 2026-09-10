@@ -13950,6 +13950,7 @@ fn move_pane_caret(
         match direction {
             -1 => Ok((shown.previous_grapheme(caret), None)),
             1 => Ok((shown.next_grapheme(caret), None)),
+            // 下の`hidden_indent`で跨ぐ。ここは1歩ぶんの答えだけを出す。
             // 要件 11.4's `Alt+B` and `Alt+F`. **Asked of the text the pane
             // laid out**, like the grapheme steps beside them (技術検証 3.12):
             // a word is a run of the characters the writer can see, and in the
@@ -13993,6 +13994,32 @@ fn move_pane_caret(
             window.set_render_status(format!("{label}キャレット移動: NG / {error}").into());
             return;
         }
+    };
+    // E3（書き手の報告 2026-09-10）: **描かれない字は、カーソルの止まり場所では
+    // ない。**入れ子の項目の行頭の空白は箱の下にあってどこにも描かれないので、
+    // そこに立ったカーソルは記号の頭に見える——「その間、止まっているように
+    // 見えます」。←と→はそこを一息に跨ぐ。**整形して見せている面だけ**：原文の面に
+    // 箱は無く、空白はそのまま字である。
+    let next = if direction.abs() == 1 && id.shows_preview(window) {
+        let styles = document
+            .counts
+            .borrow_mut()
+            .get(&source)
+            .line_styles()
+            .to_vec();
+        match document::hidden_indent(&source, &styles, next) {
+            Some(hidden) if hidden.contains(&next) => {
+                if direction < 0 {
+                    // 行の頭より前——ひとつ上の行の終わりへ。文書の頭なら、そこで止まる。
+                    hidden.start.saturating_sub(1)
+                } else {
+                    hidden.end
+                }
+            }
+            _ => next,
+        }
+    } else {
+        next
     };
     let selection = {
         let mut state = state.borrow_mut();
