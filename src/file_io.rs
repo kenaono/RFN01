@@ -317,12 +317,19 @@ fn fold(
 ///    「たまたまUTF-8に見える」並びは短い文以外ではまず起きない。
 /// 3. **それからCP932。**日本語のWindowsで書かれた古い原稿はこれで、読めなければ
 ///    書き手はまず別の道具を開くことになる。
-/// 4. どれでもなければ断る（[`LoadError::Unreadable`]）——**文字化けを確定しない。**
+/// 4. **それでも読めなければ、印の無いUTF-16 LEとして推定する**（要件 E2 の④、
+///    書き手の判断 2026-09-10）。**LEが先**——Windowsの「Unicode」はこれである。
+/// 5. その読みにも`NUL`が並ぶなら、**それは平文ではない**（[`LoadError::Unreadable`]）。
 ///
-/// **印の無いUTF-16は読まない。**向きを決める当てが無く、日本語の原稿には
-/// 偶然そう読める並びが珍しくない——曖昧なものを黙って決めるのは、この順番が
-/// いちばんしてはいけないことである（E2は「曖昧なら候補を出す」と言っている。
-/// その画面は④）。
+/// **推定して開き、違っていたら書き手が読み直す**（書き手の判断 2026-09-10：
+/// 「推定で開いて、おかしければユーザーが読み直すのでいい……少なくとも、私は普段
+/// そうしています」）。**読み直す道はもうある**——ステータスバーの帯を押せば
+/// `この文字コードで開き直す`が開く（②）。ここで問いを立てるのは、その道の手前に
+/// 関所をもう1つ作ることでしかない。
+///
+/// **要件 E2 の「文字化けした内容を確定しない」は、保存が守っている。**開くことは
+/// 確定ではない——ファイルは1バイトも動かず、帯は何として読んだかを言い、選び直せる。
+/// 確定するのは書くときで、そこは③が断る。
 fn read_bytes(bytes: &[u8]) -> Result<(String, Encoding, bool), LoadError> {
     if let Some(body) = bytes.strip_prefix(&UTF16_LE_MARK) {
         return Ok((utf16(body, false), Encoding::Utf16Le, true));
@@ -334,13 +341,40 @@ fn read_bytes(bytes: &[u8]) -> Result<(String, Encoding, bool), LoadError> {
         let text = std::str::from_utf8(body).map_err(|_| LoadError::Unreadable)?;
         return Ok((text.to_owned(), Encoding::Utf8, true));
     }
-    if let Ok(text) = std::str::from_utf8(bytes) {
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && !holds_nul(text)
+    {
         return Ok((text.to_owned(), Encoding::Utf8, false));
     }
-    match crate::code_page::decode(crate::code_page::CP932, bytes) {
-        Some(text) => Ok((text, Encoding::Cp932, false)),
-        None => Err(LoadError::Unreadable),
+    if let Some(text) = crate::code_page::decode(crate::code_page::CP932, bytes)
+        && !holds_nul(&text)
+    {
+        return Ok((text, Encoding::Cp932, false));
     }
+    let guessed = utf16(bytes, false);
+    if holds_nul(&guessed) {
+        return Err(LoadError::Unreadable);
+    }
+    Ok((guessed, Encoding::Utf16Le, false))
+}
+
+/// 読めた本文に`NUL`が混ざっているか（要件 E2 の④、書き手の判断 2026-09-10）。
+///
+/// **平文はこれを持たない。**印の無いUTF-16のファイルは、改行かASCIIが1字でも
+/// あれば必ず`NUL`を持つ——`春の海\n`をUTF-16 LEで書いた
+/// `25 66 6E 30 77 6D 0A 00`は**UTF-8として正しく読めてしまう**（`%fn0wm·`）ので、
+/// これが無ければ判別は文字化けを黙って確定する。
+///
+/// **この1つの規則が、判別の残り全部を決めている。**`NUL`が並ぶ読みを飛ばすから
+/// 印の無いUTF-16まで落ちてこられるし、**その推定にも`NUL`が並ぶなら平文ではない**
+/// ——実行ファイルや画像は`00 00`を必ず持つので、そこで断られる。推定して開く道と、
+/// 開かない道を分けているのはここだけである。
+///
+/// **これは判別だけの規則である。**[`read_bytes_as`]は見ない——書き手が
+/// 「CP932だ」と言ったのなら、`NUL`が並ぶのはその問いへの答えであって、
+/// 編集器が代わりに考え直すところではない（②の決めごと）。
+fn holds_nul(text: &str) -> bool {
+    text.contains('\0')
 }
 
 /// 言われた文字コードで読む（要件 E2 の②）。
@@ -618,8 +652,13 @@ mod tests {
         assert_eq!(text, "あ");
         assert_eq!(form.encoding, Encoding::Cp932);
 
-        // CP932にもUTF-8にも無い並び。
-        let error = decode(&[0x81, 0x00, 0xFF, 0xFE], LIMIT).expect_err("refuses");
+        // **平文でないものは、推定の先でも開かない**（要件 E2 の④）。PNGの頭は
+        // `00 00`を持つので、UTF-16 LEとして読んでも`NUL`が並ぶ——実行ファイルも
+        // 画像も、ここで断られる。
+        let png = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        ];
+        let error = decode(&png, LIMIT).expect_err("平文ではない");
         assert!(matches!(error, LoadError::Unreadable));
     }
 
@@ -688,6 +727,58 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// E2の④（書き手の判断 2026-09-10）: **推定で開く。**
+    ///
+    /// 「推定で開いて、おかしければユーザーが読み直すのでいい」——**読み直す道は
+    /// もうある**（②の帯の一覧）。印の無いUTF-16はUTF-8でもCP932でもないので、
+    /// 判別はそこまで落ちてきて**UTF-16 LEと見なす**。見本2つで確かめる：
+    /// 日本語のほう（19番）はUTF-8として読めずに落ちてきて、英字のほう（20番）は
+    /// **UTF-8として正しく読めてしまう**ので`NUL`の規則が要る。
+    #[test]
+    fn an_unmarked_utf16_file_is_guessed_rather_than_refused() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        for (name, opening) in [
+            ("19_文字コード_UTF16LE印なし.txt", "# 文字コードの見本"),
+            ("20_文字コード_UTF16LE印なし英字.txt", "# Encoding sample"),
+        ] {
+            let loaded = read(&here.join(name), LIMIT).expect(name);
+            assert_eq!(loaded.form.encoding, Encoding::Utf16Le, "{name}");
+            // 印は無かった、と覚えている（保存で書き戻さないために）。
+            assert!(!loaded.form.byte_order_mark, "{name}");
+            assert!(
+                loaded.text.starts_with(opening),
+                "{name}: {:?}",
+                loaded.text
+            );
+        }
+    }
+
+    /// E2の④（書き手の判断 2026-09-10）: **`NUL`が混ざる読みは、その文字コードの
+    /// 平文ではない。**
+    ///
+    /// `春の海\n`をUTF-16 LEで書いたバイト列は**UTF-8として正しく読める**
+    /// （`%fn0wm·`）——この規則が無ければ、判別はそこで止まって文字化けを配る。
+    /// **判別が採らないのと、読めないのは別**なので、言われれば読む（②）。
+    #[test]
+    fn a_reading_full_of_nul_bytes_is_not_taken_as_text() {
+        let mut bare = Vec::new();
+        for unit in "春の海\n".encode_utf16() {
+            bare.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert!(
+            std::str::from_utf8(&bare).is_ok(),
+            "UTF-8としては読めてしまう"
+        );
+
+        let (text, form) = decode(&bare, LIMIT).expect("推定で読める");
+        assert_eq!(text, "春の海\n");
+        assert_eq!(form.encoding, Encoding::Utf16Le);
+
+        // 言われればUTF-8としても読む——判別が採らないだけである。
+        let (mojibake, _) = decode_as(&bare, LIMIT, Encoding::Utf8).expect("読める");
+        assert!(mojibake.starts_with("%fn0wm"), "{mojibake:?}");
     }
 
     /// E2の②: **印の無いUTF-16も、言われれば読む。**判別が自分では選ばない
