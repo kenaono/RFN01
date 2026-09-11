@@ -639,6 +639,35 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
         };
         (path, held)
     };
+    // 書き手のレビュー 2026-09-11（P1）: **同じファイルに、別の本文を2つ作らない。**
+    // 要件 7.6 は「同じファイルは1つの文書」と言っている——名前を付けて保存の宛先を
+    // 別のタブが開いていると、**同じ保存先と同じ退避先を、別々の本文が使う**ことに
+    // なる（相手の未保存があれば、退避の削除まで干渉する）。
+    if let Some(other) = crate::document_at(live, &target)
+        && !Rc::ptr_eq(&other, &document)
+    {
+        // **捨てる前に訊く。**相手のタブが未保存の仕事を抱えているなら、この保存は
+        // それを上書きする。
+        if other.text.edited() {
+            let title = other.file.borrow().title();
+            crate::ask_question(
+                window,
+                live,
+                Question::SaveOverOpen {
+                    path: target.clone(),
+                    form,
+                },
+                format!(
+                    "「{title}」は別のタブで編集中です。\n\n                     そちらの保存していない変更は失われます。"
+                ),
+                &["保存する", "別の名前で", "やめる"],
+                2,
+            );
+            return;
+        }
+        save_over_open(window, live, &document, &other, target, form);
+        return;
+    }
     // 要件 8.2: the ordinary Ctrl+S is silent, and the one thing it stops for
     // is a file that has changed underneath since it was opened. 要件 8.3 gives
     // that four answers, so the writing waits for one.
@@ -694,6 +723,30 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
             ),
         );
     }
+}
+
+/// 名前を付けて保存の宛先を、別のタブが開いていた（書き手のレビュー 2026-09-11、P1）。
+///
+/// **書いてから、1つの文書へ合流させる**（要件 7.6：同じファイルは1つの文書）。
+/// 相手のタブは残り、**保存した本文を見る**ようになる——タブは2つ、文書は1つである。
+/// 合流しないと、**同じ保存先と同じ退避先を別々の本文が使う**ことになり、次にどちらかが
+/// 保存した拍子に、もう一方の原稿が消える。
+pub fn save_over_open(
+    window: &AppWindow,
+    live: &Live,
+    document: &Rc<OpenDocument>,
+    other: &Rc<OpenDocument>,
+    target: PathBuf,
+    form: file_io::TextForm,
+) {
+    // **書けなければ何も動かさない。**相手のタブも、相手の退避もそのままである
+    // ——保存は失敗しうる操作で、失敗したときに失われるものがあってはならない。
+    if !write_document_in(window, live, document, target, form) {
+        return;
+    }
+    // 相手の退避は`write_document_in`が捨てている（保存先が同じなので、書いたあとの
+    // この文書の退避先が、そのまま相手の退避先である）。
+    crate::merge_documents(window, live, other, document);
 }
 
 /// Write the document into a path that has already been decided.

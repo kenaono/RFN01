@@ -3785,6 +3785,55 @@ fn open_documents(live: &Live) -> Vec<Rc<OpenDocument>> {
     open
 }
 
+/// そのパスを開いている文書（要件 7.6、書き手のレビュー 2026-09-11）。
+///
+/// **同じファイルは1つの文書**であるはずなので、これが2つ見つかることはない。
+fn document_at(live: &Live, path: &Path) -> Option<Rc<OpenDocument>> {
+    open_documents(live)
+        .into_iter()
+        .find(|document| document.file.borrow().path() == Some(path))
+}
+
+/// 2つの文書を1つへ合流させる（要件 7.6、書き手のレビュー 2026-09-11）。
+///
+/// **`gone`を見ていたタブと面が、`kept`を見るようになる。**タブは残り、見るものが
+/// 替わる——同じファイルを2つのタブで開いているのと同じ形（7.6）になる。
+///
+/// **位置は捨てる。**`gone`の中で数えたバイトは`kept`の本文では別のところを指す
+/// （6.7）。
+fn merge_documents(
+    window: &AppWindow,
+    live: &Live,
+    gone: &Rc<OpenDocument>,
+    kept: &Rc<OpenDocument>,
+) {
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        for strip in &mut tabs.panes {
+            for tab in &mut strip.tabs {
+                if Rc::ptr_eq(&tab.document, gone) {
+                    tab.document = kept.clone();
+                }
+            }
+            // **閲覧履歴も持ち替える**（要件 11.2）。捨てた文書へ戻る道が残って
+            // いると、戻った先にはもう誰も持っていない本文がある。
+            for seen in &mut strip.history {
+                if Rc::ptr_eq(seen, gone) {
+                    *seen = kept.clone();
+                }
+            }
+        }
+    }
+    for id in PaneId::all(window) {
+        if Rc::ptr_eq(&live.states.document(id), gone) {
+            live.states.show(id, kept);
+            *live.states.of(id).borrow_mut() = EditorState::default();
+        }
+    }
+    publish_tabs(window, live);
+    relayout_panes(window, &live.states, &live.cache);
+}
+
 /// Point a pane at a writing direction (要件 7.2).
 ///
 /// **The engine is rebuilt when the direction moves**, so this costs the whole
@@ -6676,6 +6725,12 @@ enum Question {
         path: PathBuf,
         form: file_io::TextForm,
     },
+    /// 名前を付けて保存の宛先を、別のタブが開いていて、そちらに未保存がある
+    /// （書き手のレビュー 2026-09-11、P1）。**捨てる前に訊く。**
+    SaveOverOpen {
+        path: PathBuf,
+        form: file_io::TextForm,
+    },
     /// A new file in the folder named, waiting for its name (要件 5.2).
     NewFile(PathBuf),
     /// A new folder in the folder named, waiting for its name (要件 5.2).
@@ -6943,6 +6998,16 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             };
             saving::write_document_in(window, live, &document, path, form);
         }
+        // **保存する**——相手の未保存は失われると言ってある。
+        (Question::SaveOverOpen { path, form }, 0) => {
+            let document = live.active(window);
+            let Some(other) = document_at(live, &path) else {
+                return;
+            };
+            saving::save_over_open(window, live, &document, &other, path, form);
+        }
+        // **別の名前で**——同じ問いをもう一度、宛先から選び直す。
+        (Question::SaveOverOpen { .. }, 1) => save_document(window, live, true),
         (Question::SaveConflict { .. }, 1) => reload_from_file(window, live),
         (Question::SaveConflict { .. }, 2) => save_document(window, live, true),
         (Question::NewFile(parent), 0) => make_entry(window, live, &parent, false),
