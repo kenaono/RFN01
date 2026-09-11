@@ -1158,6 +1158,16 @@ fn set_markers(
     if !touched {
         return None;
     }
+    // **番号の連なりの上では、まずそろえる**（書き手の求め 2026-09-11）。書き手は
+    // 「開始数字を変える」ためにこの鍵を探した——**`Ctrl+Shift+7`は「そろえる→
+    // 外れる」の階段**である。振り直しても何も変わらなければ、次の一押しが外す。
+    //
+    // **印の鍵（`Ctrl+Shift+8`）はこの道を通らない。**印に数え直すところは無い。
+    if all_wanted && wanted == LineKind::Ordered {
+        if let Some(evened) = renumber_below(source, styles, from, to) {
+            return Some(evened);
+        }
+    }
     let mut text = String::with_capacity(end - start);
     let kept = [from.clamp(start, end), to.clamp(start, end)];
     let mut shifts = [0isize; 2];
@@ -1292,7 +1302,10 @@ fn renumber_below(
     if text == source[start..end] {
         return None;
     }
-    let chosen = chosen_range(settle(kept, shifts, start, &text));
+    // **数え直した連なりが選ばれたまま。**どこまで数え直したかが画面に出るのと、
+    // **もう一度押せば外れる**のが同じ一手になる（書き手の求め 2026-09-11の階段）
+    // ——外すのは選ばれている行なので、選ばれていなければ1行しか外れない。
+    let chosen = (start, start + text.len());
     Some((start..end, text, chosen))
 }
 
@@ -3615,6 +3628,25 @@ mod tests {
         // 1行目の印の2バイトだけ後ろへ——2行目の印は、この位置より後ろにある。
         assert_eq!(chosen.0, line_end + "- ".len());
         assert!(text.is_char_boundary(chosen.0), "字の切れ目に立っている");
+    }
+
+    /// E10（書き手の求め 2026-09-11）: **`Ctrl+Shift+7`は「そろえる→外れる」の
+    /// 階段。**開始数字を変えるのは、先頭を打ち直してこの鍵を押すことである。
+    #[test]
+    fn the_numbered_key_evens_the_run_before_it_takes_it_off() {
+        let source = "5. あああ\n2. いいい\n3. ううう\n";
+
+        // 一回目——先頭の数字から下がそろい、数え直した連なりが選ばれる。
+        let (region, evened, chosen) =
+            listed(source, 0, 0, ListEdit::Ordered, '-').expect("そろえられる");
+        assert_eq!(evened, "5. あああ\n6. いいい\n7. ううう\n");
+        assert_eq!(region, 0..source.len());
+        assert_eq!(chosen, (0, evened.len()));
+
+        // 二回目——もう変わらないので、選ばれている行の印が外れる。
+        let (_, off, _) =
+            listed(&evened, chosen.0, chosen.1, ListEdit::Ordered, '-').expect("外せる");
+        assert_eq!(off, "あああ\nいいい\nううう\n");
     }
 
     /// E10の②: **この行の番号から、下を数え直す**（書き手の選択 2026-09-11）。
