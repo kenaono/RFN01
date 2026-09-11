@@ -1248,6 +1248,11 @@ export component MenuRow inherits Rectangle {
     /// writer slides onto a row and lets go. A row that did both would answer
     /// twice for an ordinary click, so it is one or the other.
     in property <bool> on-release: false;
+    /// **ポインタがこの行の上にいるか**（書き手の求め 2026-09-11）。
+    ///
+    /// 右に開くメニューは、押されてではなく**乗せられて**開く——それを決めるのは
+    /// 行の側にしか無い。
+    out property <bool> hovered: touch.has-hover;
     callback activated();
 
     height: 28px;

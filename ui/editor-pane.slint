@@ -2371,7 +2371,10 @@ export component EditorPane inherits Rectangle {
                         context-menu := PopupWindow {
                             x: root.context-x;
                             y: root.context-y;
-                            width: 264px;
+                            // **右に開くぶんの場所を、開いているあいだだけ取る**
+                            // （書き手の求め 2026-09-11）。popupは自分の大きさの
+                            // 外を描かないので、広げておかないと右の面が切れる。
+                            width: root.bullet-rows-open ? 408px : 264px;
                             close-policy: close-on-click-outside;
 
                             MenuFrame {
@@ -2448,58 +2451,91 @@ export component EditorPane inherits Rectangle {
                                         // **`for`の中に`if`は書けない**ので
                                         // 3つ並べてある（技術検証の段階2b）。
                                         // 記号が3つしかないうちは、これが読める。
-                                        // 書き手の求め 2026-09-11: **階層にする。**
-                                        // 記号ぶんの行を並べると右クリックが長い
-                                        // ——**この行だけが出ていて、押すと開く。**
+                                        // 書き手の求め 2026-09-11: **右に開く階層に
+                                        // する。**記号ぶんの行を並べると右クリックが
+                                        // 長い——**この行だけが出ていて、乗せれば
+                                        // 右に開く**（Windowsのメニューの普通）。
                                         // 読む記号が1つも無ければ、開いても空である
                                         // （書き手の言葉：「何も選ばれていなければ、空」）。
-                                        MenuRow {
-                                            title: "Bullet List";
-                                            shortcut: root.bullet-rows-open ? "▾" : "▸";
-                                            // **ここでは閉じない。**開くための行で
-                                            // あって、頼むための行ではない。
-                                            activated => {
-                                                root.bullet-rows-open = !root.bullet-rows-open;
-                                            }
-                                        }
-                                        if root.bullet-rows-open: VerticalLayout {
-                                            spacing: 1px;
-                                            padding-left: 14px;
+                                        //
+                                        // **入れ子のpopupにはしない。**popupを閉じると
+                                        // その木ごと消え、消えた木から`root`へ登った
+                                        // 生成コードは黙って何もしない（6.24・6.30）
+                                        // ——同じ木の中で右へ出せば、その罠の外にいる。
+                                        Rectangle {
+                                            height: 28px;
 
-                                            if root.bullet-marks[0]: MenuRow {
-                                                title: "-";
-                                                shortcut: "Ctrl+Shift+8";
-                                                // **頼んでから閉じる**（6.24）。
+                                            bullet-row := MenuRow {
+                                                width: parent.width;
+                                                height: parent.height;
+                                                title: "Bullet List";
+                                                shortcut: "▸";
+                                                // **乗せれば開く。**押しても開く
+                                                // ——押した書き手を待たせない。
+                                                changed hovered => {
+                                                    if (self.hovered) {
+                                                        root.bullet-rows-open = true;
+                                                    }
+                                                }
                                                 activated => {
-                                                    root.list-edit(0, 0);
-                                                    context-menu.close();
+                                                    root.bullet-rows-open
+                                                        = !root.bullet-rows-open;
                                                 }
                                             }
-                                            if root.bullet-marks[1]: MenuRow {
-                                                title: "*";
-                                                shortcut: root.bullet-marks[0]
-                                                    ? ""
-                                                    : "Ctrl+Shift+8";
-                                                activated => {
-                                                    root.list-edit(0, 1);
-                                                    context-menu.close();
-                                                }
-                                            }
-                                            if root.bullet-marks[2]: MenuRow {
-                                                title: "+";
-                                                shortcut: root.bullet-marks[0]
-                                                    || root.bullet-marks[1]
-                                                    ? ""
-                                                    : "Ctrl+Shift+8";
-                                                activated => {
-                                                    root.list-edit(0, 2);
-                                                    context-menu.close();
+
+                                            if root.bullet-rows-open: MenuFrame {
+                                                x: parent.width - 8px;
+                                                y: -6px;
+                                                width: 136px;
+                                                height: bullet-rows.preferred-height;
+
+                                                bullet-rows := VerticalLayout {
+                                                    padding: 6px;
+                                                    spacing: 1px;
+
+                                                    if root.bullet-marks[0]: MenuRow {
+                                                        title: "-";
+                                                        shortcut: "Ctrl+Shift+8";
+                                                        // **頼んでから閉じる**（6.24）。
+                                                        activated => {
+                                                            root.list-edit(0, 0);
+                                                            context-menu.close();
+                                                        }
+                                                    }
+                                                    if root.bullet-marks[1]: MenuRow {
+                                                        title: "*";
+                                                        shortcut: root.bullet-marks[0]
+                                                            ? ""
+                                                            : "Ctrl+Shift+8";
+                                                        activated => {
+                                                            root.list-edit(0, 1);
+                                                            context-menu.close();
+                                                        }
+                                                    }
+                                                    if root.bullet-marks[2]: MenuRow {
+                                                        title: "+";
+                                                        shortcut: root.bullet-marks[0]
+                                                            || root.bullet-marks[1]
+                                                            ? ""
+                                                            : "Ctrl+Shift+8";
+                                                        activated => {
+                                                            root.list-edit(0, 2);
+                                                            context-menu.close();
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                         MenuRow {
                                             title: "Numbered List";
                                             shortcut: "Ctrl+Shift+7";
+                                            // **別の行へ移ったら畳む**（Windowsの
+                                            // メニューと同じ）。
+                                            changed hovered => {
+                                                if (self.hovered) {
+                                                    root.bullet-rows-open = false;
+                                                }
+                                            }
                                             activated => {
                                                 root.list-edit(1, -1);
                                                 context-menu.close();
@@ -2511,6 +2547,11 @@ export component EditorPane inherits Rectangle {
                                         // `6. 7. …`になる——数を訊く画面は無い。
                                         MenuRow {
                                             title: "Renumber";
+                                            changed hovered => {
+                                                if (self.hovered) {
+                                                    root.bullet-rows-open = false;
+                                                }
+                                            }
                                             activated => {
                                                 root.list-edit(2, -1);
                                                 context-menu.close();
