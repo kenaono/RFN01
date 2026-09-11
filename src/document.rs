@@ -1240,8 +1240,10 @@ fn renumber_below(
 ) -> Option<(Range<usize>, String, (usize, usize))> {
     let (start, _) = selected_lines(source, from, to);
     let first = source[..start].matches('\n').count();
-    let inside = |index: usize| styles.get(index).copied().unwrap_or_default().list_indent > 0;
-    if !inside(first) {
+    let style_of = |index: usize| styles.get(index).copied().unwrap_or_default();
+    // **数え始めるのは項目の行から。**空行の上でこれを頼まれても、どの番号から
+    // 続けるのかを言っていない。
+    if style_of(first).list_indent == 0 {
         return None;
     }
     let mut text = String::new();
@@ -1251,11 +1253,23 @@ fn renumber_below(
     let mut counts: Vec<(u8, u64)> = Vec::new();
     let mut at = start;
     let mut end = start;
+    // **最後の項目までが、数え直した範囲。**連なりの後ろにある空行は数えたものの
+    // 外である——選ばれたまま残るのは、番号を持てる行だけにする。
+    let mut settled = 0;
     for (offset, line) in source[start..].split_inclusive('\n').enumerate() {
-        if !inside(first + offset) {
+        let style = style_of(first + offset);
+        if !still_in_list(line, style) {
             break;
         }
-        let style = styles.get(first + offset).copied().unwrap_or_default();
+        // **数えるのは項目だけ。**あいだの空行も、項目の続きの段落も、番号を
+        // 持たない——ここで深さを数えると、**空行が深さ0として数を捨てる**
+        // （書き手の報告 2026-09-11：空行の下の項目が自分の番号から数え直され、
+        // 何も変わらなかった）。
+        if !style.kind.is_list() {
+            text.push_str(line);
+            at += line.len();
+            continue;
+        }
         let depth = style.list_indent;
         let quote = line.len() - quote_content(line).len();
         let content = &line[quote..];
@@ -1288,6 +1302,7 @@ fn renumber_below(
         end = at;
         if style.kind != LineKind::Ordered {
             text.push_str(line);
+            settled = text.len();
             continue;
         }
         let number = number.to_string();
@@ -1298,7 +1313,9 @@ fn renumber_below(
         text.push_str(&line[..quote + indent]);
         text.push_str(&number);
         text.push_str(&body[digits..]);
+        settled = text.len();
     }
+    text.truncate(settled);
     if text == source[start..end] {
         return None;
     }
@@ -1307,6 +1324,21 @@ fn renumber_below(
     // ——外すのは選ばれている行なので、選ばれていなければ1行しか外れない。
     let chosen = (start, start + text.len());
     Some((start..end, text, chosen))
+}
+
+/// この行はまだ箇条書きの連なりの中か（[`renumber_below`]・[`renumber_around`]）。
+///
+/// **空行は連なりを切らない**（書き手の報告 2026-09-11）。項目のあいだが空いていても
+/// Markdownでは1つのリスト（緩いリスト）であり、`testdata/01_行属性.md`にも
+/// 「空行をはさんでも深さは続きます」と書いてある。**後から箇条書きにする道
+/// （[`set_markers`]）も空行を跨いで1から数える**ので、ここで切ると**同じ文書に
+/// ついて2つの数え方**ができる——番号を振った直後に数え直しが「何も変わらない」と
+/// 言うのがそれだった。
+///
+/// **切るのは、字の入った行がリストの外にいるとき。**そこで止めないと、遠く上の
+/// リストの番号を継いでしまう。
+fn still_in_list(line: &str, style: LineStyle) -> bool {
+    style.list_indent > 0 || line.trim().is_empty()
 }
 
 /// 編集の前の位置に、1行ぶんのずれを積む（[`set_markers`]・[`renumber_below`]）。
@@ -1469,8 +1501,12 @@ fn renumber_around(source: &str, at: usize, positions: &mut [usize]) -> String {
     let styles = line_styles(source);
     let lines: Vec<&str> = source.split('\n').collect();
     let here = source[..at.min(source.len())].matches('\n').count();
-    let inside = |index: usize| styles.get(index).copied().unwrap_or_default().list_indent > 0;
-    if !inside(here) {
+    // **空行は連なりを切らない**（[`still_in_list`]）。数え方は1つである。
+    let inside = |index: usize| {
+        let line = lines.get(index).copied().unwrap_or_default();
+        still_in_list(line, styles.get(index).copied().unwrap_or_default())
+    };
+    if styles.get(here).copied().unwrap_or_default().list_indent == 0 {
         return source.to_owned();
     }
     let first = (0..=here).rev().take_while(|index| inside(*index)).last();
@@ -3630,6 +3666,27 @@ mod tests {
         assert!(text.is_char_boundary(chosen.0), "字の切れ目に立っている");
     }
 
+    /// E10（書き手の報告 2026-09-11）: **空行を挟んだ項目も1つの連なり。**
+    ///
+    /// 書き手が選んだのは空行で区切られた行の並びで、**印を付ける側は1から順に
+    /// 番号を振った**のに、**数え直す側は空行で止まって「何も変わらない」と言った**
+    /// ——同じ文書について2つの数え方があった。
+    #[test]
+    fn items_across_a_blank_line_are_one_run() {
+        let source = "あああ\n\nいいい\n\nううう\n";
+
+        // 印を付ける側——空行は飛ばし、番号は1から続く。
+        let (_, made, _) = listed(source, 0, source.len(), ListEdit::Ordered, '-').expect("付く");
+        assert_eq!(made, "1. あああ\n\n2. いいい\n\n3. ううう\n");
+
+        // 数え直す側——先頭を`5.`に打ち直せば、空行を跨いで下が続く。
+        let typed = made.replacen("1. ", "5. ", 1);
+        let (region, evened, _) = listed(&typed, 0, 0, ListEdit::Renumber, '-').expect("そろう");
+        assert_eq!(evened, "5. あああ\n\n6. いいい\n\n7. ううう\n");
+        // 連なりの後ろの空行は、数え直した範囲の外。
+        assert_eq!(region.end, typed.len());
+    }
+
     /// E10（書き手の求め 2026-09-11）: **`Ctrl+Shift+7`は「そろえる→外れる」の
     /// 階段。**開始数字を変えるのは、先頭を打ち直してこの鍵を押すことである。
     #[test]
@@ -3752,16 +3809,23 @@ mod tests {
         assert_eq!(back.text, "1. 一\n    1. 二\n2. 三\n");
     }
 
-    /// E3の④: **数え直しは空行で切れる**（要件 7.3.2：空行を挟むリストは別の
-    /// 連なり）。上の連なりの番号を継いでこない。
+    /// E3の④（2026-09-11に直した）: **空行は連なりを切らない。**
+    ///
+    /// **もとは「空行を挟めば別のリスト」と書いてあった**が、それは要件のどこにも
+    /// 無い決まりで、Markdown自身は逆を言う——項目のあいだが空いていても1つの
+    /// リスト（緩いリスト）である。**切らないほうを正にした**のは、後から箇条書きに
+    /// する道（E10）が空行を跨いで1から数えるからで、**同じ文書に2つの数え方が
+    /// あってはならない**（書き手の報告 2026-09-11：番号を振った直後に数え直しが
+    /// 「何も変わらない」と言った）。
     #[test]
-    fn renumbering_stops_at_the_blank_line_between_two_lists() {
+    fn a_blank_line_does_not_end_the_run_of_numbers() {
         let source = "1. 甲\n2. 乙\n\n1. 丙\n2. 丁\n";
         let last = source.find("2. 丁").expect("ある");
 
         let deeper = shift_indent(source, last, last, true).expect("下げられる");
 
-        assert_eq!(deeper.text, "1. 甲\n2. 乙\n\n1. 丙\n    1. 丁\n");
+        // 丙は3つめの項目である——空行の前の2つから続いている。
+        assert_eq!(deeper.text, "1. 甲\n2. 乙\n\n3. 丙\n    1. 丁\n");
     }
 
     /// E3の④: 選んだ行はまとめて。**空の行は下げない**——そこで箇条書きが切れる。
