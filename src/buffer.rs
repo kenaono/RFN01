@@ -52,6 +52,15 @@ pub struct DocumentFile {
     /// Without it a file being written over and over — a sync, a build — would
     /// say so at every check rather than once per change (要件 8.3).
     reported: Option<FileStamp>,
+    /// **書き手が言った文字コード**（要件 E2 の②、書き手のレビュー 2026-09-11）。
+    ///
+    /// 自動判別では文字化けする原稿を「指定文字コードで開き直す」で直したのなら、
+    /// **その読み方は読み直しでも引き継ぐ**——外のアプリが触った拍子に判別へ戻ると、
+    /// 化けがそのまま帰ってくる（書き手の指摘：「BOMなしUTF-16などで文字化けが戻り、
+    /// その後の保存形式まで変わる可能性があります」）。
+    ///
+    /// **書いたときも分かっている。**保存した文書は、書いた文字コードのものである。
+    said: Option<Encoding>,
 }
 
 impl DocumentFile {
@@ -61,6 +70,7 @@ impl DocumentFile {
             origin: Origin::Untitled(number),
             mixed_newlines: false,
             reported: None,
+            said: None,
         }
     }
 
@@ -95,6 +105,7 @@ impl DocumentFile {
             origin: Origin::Saved(saved),
             mixed_newlines: loaded.form.mixed_newlines,
             reported: None,
+            said: None,
         };
         Ok((document, loaded.text))
     }
@@ -190,6 +201,9 @@ impl DocumentFile {
         self.origin = Origin::Saved(SavedFile { path, form, stamp });
         // What the editor just wrote is not an outside change.
         self.reported = None;
+        // **書いた形は分かっている**（書き手のレビュー 2026-09-11）。判別に任せて
+        // 読み直すと、ここで書いたはずの文字コードが別のものに読まれうる。
+        self.said = Some(form.encoding);
     }
 
     /// What has happened to the file since the editor last agreed with it.
@@ -258,7 +272,25 @@ impl DocumentFile {
     /// had just been opened — which is what 要件 8.3's「安全に再読み込みする」
     /// means for a document with nothing unsaved in it.
     pub fn reload(&mut self, limit: usize) -> Option<Result<String, LoadError>> {
-        self.read_again(limit, None)
+        let read = self.read_again(limit, None)?;
+        let Some(said) = self.said else {
+            return Some(read);
+        };
+        let Ok(text) = read else {
+            return Some(read);
+        };
+        // **印（BOM）があれば、そちらが正。**印はファイル自身が「この文字コードで
+        // ある」と言っているもので、外のアプリが別の形で書き直したのなら、
+        // 言われた読み方はもう古い。
+        if self.form().byte_order_mark {
+            return Some(Ok(text));
+        }
+        // **言われた読み方で読めなければ、判別のままにする。**読み直しは、失敗して
+        // も何も失わない操作である（②と同じ決まり）。
+        match self.read_again(limit, Some(said)) {
+            Some(Ok(again)) => Some(Ok(again)),
+            _ => Some(Ok(text)),
+        }
     }
 
     /// 言われた文字コードで読み直す（要件 E2 の②）。
@@ -286,7 +318,10 @@ impl DocumentFile {
             None => Self::open(&path, limit),
         };
         Some(match read {
-            Ok((reopened, text)) => {
+            Ok((mut reopened, text)) => {
+                // **言われた読み方は持ち越す**（`said`）。読み直しは同じ文書の
+                // 続きであって、別の文書を開いたのではない。
+                reopened.said = encoding.or(self.said);
                 *self = reopened;
                 Ok(text)
             }
@@ -420,6 +455,50 @@ mod tests {
         save_to(&mut document, path.clone(), "本文").expect("saves");
         fs::remove_file(&path).expect("removes");
         assert_eq!(document.external_change(), ExternalChange::Missing);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// 書き手のレビュー 2026-09-11（P2）: **言われた文字コードは、読み直しても
+    /// 引き継ぐ。**自動判別では化ける原稿を②で直したのに、外のアプリが触った拍子に
+    /// 判別へ戻ったら、化けがそのまま帰ってくる。
+    #[test]
+    fn what_the_writer_said_survives_a_reload() {
+        let directory = scratch_directory("said-encoding");
+        let path = directory.join("note.txt");
+        // **印の無いUTF-16 LE**——判別は英字だけなら当てられるが、ここでは
+        // CP932として読めてしまうバイト列を置く。
+        let said = "日本語の原稿";
+        let bytes: Vec<u8> = said.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        fs::write(&path, &bytes).expect("writes");
+
+        let (mut document, text) = DocumentFile::open(&path, LIMIT).expect("opens");
+        assert_ne!(
+            text, said,
+            "判別では当たらない（当たるならこの試験は無意味）"
+        );
+
+        // 書き手が「これはUTF-16 LEだ」と言った。
+        let text = document
+            .reopen_as(LIMIT, Encoding::Utf16Le)
+            .expect("has a file")
+            .expect("reads");
+        assert_eq!(text, said);
+
+        // 外のアプリが書き直した——**言われた読み方のまま読む。**
+        let again = "書き足した日本語";
+        let bytes: Vec<u8> = again.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        fs::write(&path, &bytes).expect("writes");
+        let text = document.reload(LIMIT).expect("has a file").expect("reads");
+        assert_eq!(text, again);
+
+        // **印があれば、そちらが正**——外のアプリがUTF-8 BOMで書き直したのなら、
+        // 言われた読み方はもう古い。
+        let mut utf8 = vec![0xEF, 0xBB, 0xBF];
+        utf8.extend_from_slice("日本語".as_bytes());
+        fs::write(&path, &utf8).expect("writes");
+        let text = document.reload(LIMIT).expect("has a file").expect("reads");
+        assert_eq!(text, "日本語");
+
         let _ = fs::remove_dir_all(&directory);
     }
 

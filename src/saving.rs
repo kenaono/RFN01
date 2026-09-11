@@ -648,7 +648,10 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
         ask_question(
             window,
             live,
-            Question::SaveConflict,
+            Question::SaveConflict {
+                path: target.clone(),
+                form,
+            },
             format!(
                 "「{title}」は別のアプリで変更されています。\n\n\
                  読み込むと、保存していない変更は失われます。"
@@ -691,17 +694,6 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
             ),
         );
     }
-}
-
-/// Overwrite the file with what is in the editor, outside change and all
-/// (要件 8.3, the first of the four).
-pub fn overwrite_the_outside_change(window: &AppWindow, live: &Live) {
-    let document = live.active(window);
-    let path = document.file.borrow().path().map(Path::to_path_buf);
-    let Some(path) = path else {
-        return;
-    };
-    write_document_to(window, live, &document, path);
 }
 
 /// Write the document into a path that has already been decided.

@@ -52,9 +52,8 @@ use open_document::{Change, OpenDocument, replace_source_range};
 use pane_layout::{Layout, Rect, Split, Towards, neighbour};
 use saving::{
     check_external_change, collect_write_results, discard_all_work_copies, discard_work_copy,
-    flush_work_copies, keep_work_copies_again, overwrite_the_outside_change, reload_from_file,
-    reopen_as, restore_tabs, save_all, save_document, work_identity, write_work_copy_if_due,
-    write_work_copy_now, write_work_copy_of,
+    flush_work_copies, keep_work_copies_again, reload_from_file, reopen_as, restore_tabs, save_all,
+    save_document, work_identity, write_work_copy_if_due, write_work_copy_now, write_work_copy_of,
 };
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use session::{open_session, restore_window_place, write_session};
@@ -6663,7 +6662,20 @@ enum Question {
     DiscardOnClose { pane: PaneId, index: usize },
     /// Saving over a file another program has changed since it was opened
     /// (要件 8.3).
-    SaveConflict,
+    ///
+    /// **頼まれた保存を、そのまま持っている**（書き手のレビュー 2026-09-11、P2）。
+    /// どの文書を・どこへ・どの形で書くかは**訊く前に決まっている**——答えは
+    /// イベントループの一巡あとに来るので、そのあいだに書き手が別のタブへ
+    /// 移っていれば、`live.active()`はもう別の文書である（`CloseTab`が面を
+    /// 持ち歩いているのと同じ理由）。**形を持たずに訊くと、名前を付けて保存で
+    /// 選んだ文字コードと改行コードが、答えを待つあいだに落ちる。**
+    ///
+    /// 文書は`path`で引き直す（`ReopenAs`と同じ道）——答えが来るころには
+    /// 書き手が別のタブへ移っているかもしれない。
+    SaveConflict {
+        path: PathBuf,
+        form: file_io::TextForm,
+    },
     /// A new file in the folder named, waiting for its name (要件 5.2).
     NewFile(PathBuf),
     /// A new folder in the folder named, waiting for its name (要件 5.2).
@@ -6922,9 +6934,17 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             };
             reopen_as(window, live, &document, encoding);
         }
-        (Question::SaveConflict, 0) => overwrite_the_outside_change(window, live),
-        (Question::SaveConflict, 1) => reload_from_file(window, live),
-        (Question::SaveConflict, 2) => save_document(window, live, true),
+        // **訊く前に決まっていた保存を、そのまま書く**（書き手のレビュー
+        // 2026-09-11、P2）。`form`を持たずに書き直すと、名前を付けて保存で
+        // 選んだ文字コードと改行コードが、答えを待つあいだに落ちる。
+        (Question::SaveConflict { path, form }, 0) => {
+            let Some(document) = asked_document(window, live, &path) else {
+                return;
+            };
+            saving::write_document_in(window, live, &document, path, form);
+        }
+        (Question::SaveConflict { .. }, 1) => reload_from_file(window, live),
+        (Question::SaveConflict { .. }, 2) => save_document(window, live, true),
         (Question::NewFile(parent), 0) => make_entry(window, live, &parent, false),
         (Question::NewFolder(parent), 0) => make_entry(window, live, &parent, true),
         (Question::RenameEntry(path), 0) => rename_entry(window, live, &path),
