@@ -68,8 +68,9 @@ use std::sync::Arc;
 use terminal::{Key as TerminalKey, Modifiers as TerminalModifiers};
 use terminal_session::TerminalSession;
 use text_blocks::{
-    DEFAULT_BODY_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_FONT, DEFAULT_INK, DEFAULT_PAPER,
-    Emphasis, LineMarker, MAX_HEADING_LEVEL, StyledText, TileSpan, Typography, visible_flow_range,
+    DEFAULT_BODY_FONT, DEFAULT_BULLET, DEFAULT_CODE_FONT, DEFAULT_HEADING_FONT, DEFAULT_INK,
+    DEFAULT_PAPER, Emphasis, LineMarker, MAX_HEADING_LEVEL, StyledText, TileSpan, Typography,
+    visible_flow_range,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use writer::FileWriter;
@@ -284,12 +285,21 @@ const SAMPLE_MARKDOWN: &str = r#"# 縦書きライブ編集の技術検証
 /// 入れる一段と、箇条書きを入れ子にする一段が違っていたら、同じ鍵に2つの意味が付く。
 const TAB_INDENT: &str = document::INDENT_STEP;
 
-/// 箇条書きにするときに原稿へ入る印（E10）。
+/// 箇条書きにするときに原稿へ入る印の既定（E10）。
 ///
 /// **Markdownが認める3つ**（`-`／`*`／`+`）のうちの1つ。既定が`-`なのは、この
 /// 編集器がEnterで継ぐときに写している字であり、原稿の中で目にいちばん軽いから
-/// である。**書き手が選べるようにするのはE10の③**——そこでここが設定から来る。
+/// である。
 const LIST_BULLET: char = '-';
+
+/// 設定が言っている字、それがMarkdownの印なら（E10の③）。
+///
+/// **知らない字は`None`。**書き手が手で書いた設定ファイルも、押した覚えのない字も、
+/// ここで止まって既定のままになる。
+fn list_bullet_of(said: &str) -> Option<char> {
+    let mark = said.trim().chars().next()?;
+    matches!(mark, '-' | '*' | '+').then_some(mark)
+}
 const IME_CANDIDATE_GAP: f32 = 8.0;
 const CARET_SCROLL_PADDING: f32 = 24.0;
 /// Fallback column height, used before the pane reports its own size and by
@@ -7608,6 +7618,12 @@ fn typography_for(
     // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。**寸法に効く**ので、
     // 切り替えれば組み直しが起きる。
     spec.upright_digits = number(Setting::UprightDigits) != 0;
+    // E10の③（書き手の選択 2026-09-11）: 画面に出る印の字。**色と同じ側**——箱は
+    // 幅0なので幾何は動かないが、`hash_typography`に入れてあるのでタイルは捨てられる。
+    spec.bullet = BULLET_MARKS
+        .get(number(Setting::BulletMark).max(0) as usize)
+        .copied()
+        .unwrap_or(DEFAULT_BULLET);
     // 要件 7.8（書き手の報告 2026-09-09）: ルビの入る空き。**行送りの下限**を
     // 上げるだけなので、書き手が広く取った行間はそのままである。
     spec.character_spacing = percent(number(Setting::CharAdvance));
@@ -7685,7 +7701,7 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// to 12 the two places that had written the absolute row instead were missed —
 /// the vertical pane then took its page margin from the line height. One
 /// definition, sent over.
-const SHEET_NUMBERS: usize = 10 + MAX_HEADING_LEVEL;
+const SHEET_NUMBERS: usize = 11 + MAX_HEADING_LEVEL;
 /// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
 /// two values are `2`, the pane's own width, and `0`, not wrapping at all —
 /// **which is written down and not yet built**: tiles are cut along the flow
@@ -7814,7 +7830,21 @@ enum Setting {
     /// 横書きのシートに置けば「押しても何も起きない切り替え」になる
     /// ——働いていない状態を画面に置かない（単語チェックモード要件 2.1.1）。
     UprightDigits,
+    /// 箇条書きの印として**画面に出る字**（E10の③、書き手の選択 2026-09-11）。
+    ///
+    /// **シートが持つ。**これは組み方である——同じ原稿を別の紙で開けば別の丸に
+    /// 見えてよい。**原稿に入る字**（`-`／`*`／`+`）はこれではなく、Settings →
+    /// FILES の`list.bullet`である（あちらは読み書きの字）。
+    ///
+    /// 番号は[`BULLET_MARKS`]の並び。
+    BulletMark,
 }
+
+/// 画面に出る箇条書きの印（[`Setting::BulletMark`]）。
+///
+/// **3つで足りる**（案は少ない方から）。`•`はいままで描いていた字、`・`は日本語の
+/// 中黒、`○`は白丸——足りなければ書き手が言う。
+const BULLET_MARKS: [char; 3] = ['•', '・', '○'];
 
 impl Setting {
     /// The number the window sends, which is also the row it sits in.
@@ -7833,6 +7863,7 @@ impl Setting {
             13 => Some(Self::RubySize),
             14 => Some(Self::RubyOffset),
             15 => Some(Self::UprightDigits),
+            16 => Some(Self::BulletMark),
             _ => None,
         }
     }
@@ -7850,6 +7881,7 @@ impl Setting {
             Self::RubySize => 7 + MAX_HEADING_LEVEL,
             Self::RubyOffset => 8 + MAX_HEADING_LEVEL,
             Self::UprightDigits => 9 + MAX_HEADING_LEVEL,
+            Self::BulletMark => 10 + MAX_HEADING_LEVEL,
         }
     }
 
@@ -7860,6 +7892,7 @@ impl Setting {
             Self::WrapMode => 1,
             Self::LineNumbers => 1,
             Self::UprightDigits => 1,
+            Self::BulletMark => 1,
             Self::WrapChars => 2,
             Self::RubySize => 2,
             Self::RubyOffset => 2,
@@ -7882,6 +7915,7 @@ impl Setting {
             Self::WrapMode => (0, 2),
             Self::LineNumbers => (0, 1),
             Self::UprightDigits => (0, 1),
+            Self::BulletMark => (0, BULLET_MARKS.len() as i32 - 1),
             Self::WrapChars => (10, 200),
             // 親文字より大きいルビは、ルビではなく別の本文である。
             Self::RubySize => (20, 100),
@@ -7908,6 +7942,9 @@ impl Setting {
             // 入。要件 7.8 は「書き手が何も書かなくても効く」と言っている
             // ——切りたい書き手が切る側であって、既定が何もしない側ではない。
             Self::UprightDigits => 1,
+            // E10の③: いままで描いていた字（`•`）。設定になったからといって、
+            // 書き手の画面が動くいわれはない。
+            Self::BulletMark => 0,
             // 半分が日本語の組版の当たり前である。
             Self::RubySize => 50,
             // 行の箱の端。行間の空きがそのままルビの帯になる。
@@ -7945,6 +7982,7 @@ impl Setting {
             Self::WrapMode => "wrap-mode",
             Self::LineNumbers => "line-numbers",
             Self::UprightDigits => "upright-digits",
+            Self::BulletMark => "bullet-mark",
             Self::WrapChars => "wrap-chars",
             Self::RubySize => "ruby-size",
             Self::RubyOffset => "ruby-offset",
@@ -8083,6 +8121,8 @@ const COUNT_RUBY_SETTING: &str = "count.ruby";
 /// 11字の本文なのかを決める。**シートに置けば、同じ文書が2つのペインで別の本文に
 /// なる**（字数も食い違う）。
 const RUBY_MARKS_SETTING: &str = "ruby.marks";
+/// 箇条書きにするとき原稿へ入る字（E10の③）。
+const LIST_BULLET_SETTING: &str = "list.bullet";
 
 /// 追加要件 2026-09-08: the shell list, one entry per numbered name
 /// (`terminal.shell.0`, `terminal.shell.1`, …).
@@ -8858,6 +8898,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_ruby_marks()).to_string(),
     ));
     values.push((
+        LIST_BULLET_SETTING.to_owned(),
+        window.get_list_bullet().to_string(),
+    ));
+    values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
         hex_colour(window.get_terminal_paper()),
     ));
@@ -8957,6 +9001,14 @@ fn apply_settings(
         // 倒す（要件 7.8 がその記法で組めと言っている）。
         if written == RUBY_MARKS_SETTING {
             window.set_ruby_marks(value.trim() != "0");
+            continue;
+        }
+        // E10の③: **Markdownが認める3つだけ。**読めない値は既定（`-`）へ倒す
+        // ——手で書いた設定ファイルが、Markdownでない字を原稿へ入れてはならない。
+        if written == LIST_BULLET_SETTING {
+            if let Some(mark) = list_bullet_of(value) {
+                window.set_list_bullet(mark.to_string().into());
+            }
             continue;
         }
         // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
@@ -13543,7 +13595,8 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
     // ものではない——2つ並べないと「一行前から効く」の原因（頭が前の行の行末に
     // 立っていた）が読めない（書き手の報告 2026-09-11）。
     let told = format!("{what:?} asked={from}..{to}");
-    let edit = document::list_edit(&source, &styles, from, to, what, LIST_BULLET);
+    let bullet = list_bullet_of(&window.get_list_bullet()).unwrap_or(LIST_BULLET);
+    let edit = document::list_edit(&source, &styles, from, to, what, bullet);
     let Some((region, text, chosen)) = edit else {
         // **何も起きなかったことを、ログが言う**（E1の`find`と同じ）。触れる行が
         // 1つも無かったのか、鍵が届いていないのかを、往復せずに切り分けられる。
@@ -16477,6 +16530,21 @@ mod tests {
             PreviewDocument::from_source(&indented_blank_line).text,
             "前\n    \n後"
         );
+    }
+
+    /// E10の③（書き手の選択 2026-09-11）: **原稿へ入るのはMarkdownの印だけ。**
+    /// 手で書いた設定ファイルも、押した覚えのない字も、ここで止まって既定のまま
+    /// になる——設定が原稿にMarkdownでない字を書かせてはならない。
+    #[test]
+    fn only_a_markdown_bullet_reaches_the_manuscript() {
+        assert_eq!(list_bullet_of("-"), Some('-'));
+        assert_eq!(list_bullet_of("*"), Some('*'));
+        assert_eq!(list_bullet_of(" + "), Some('+'));
+
+        assert_eq!(list_bullet_of("・"), None, "画面に出る印は原稿の字ではない");
+        assert_eq!(list_bullet_of("•"), None);
+        assert_eq!(list_bullet_of(""), None);
+        assert_eq!(list_bullet_of("1."), None);
     }
 
     #[test]

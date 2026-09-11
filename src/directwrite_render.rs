@@ -1606,9 +1606,11 @@ fn byte_at_utf16(text: &str, utf16: u32) -> usize {
 /// box is standing over. The trailing space is dropped: that space was the gap
 /// after the marker, and the gap is now the box.
 ///
-fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
+fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun, bullet: char) -> String {
     match ornament {
-        Ornament::Bullet => "•".to_owned(),
+        // E10の③: **画面に出る印は紙のものである**（`Typography::bullet`）。原稿に
+        // 入る字（`-`／`*`／`+`）とは別で、決めているのは1か所ずつ。
+        Ornament::Bullet => bullet.to_string(),
         Ornament::TaskOpen => "☐".to_owned(),
         Ornament::TaskDone => "☑".to_owned(),
         // A box that is there only to hide what it covers. The stroke across a
@@ -1628,31 +1630,33 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun) -> String {
         // 前の空白は**入れ子の字下げ**で、それは箱ではなくブロックが持っている
         // ——落とさずに描くと、その空白が番号を溝の中で右へ押し、本文にくっついて
         // 見える（書き手の報告 2026-09-10：「入れ子側は1文字も空いていない印象」）。
-        Ornament::Number | Ornament::Markup => {
-            let start = byte_at_utf16(block_text, run.utf16_start);
-            let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
-            block_text[start..end].trim().to_owned()
-        }
+        Ornament::Number | Ornament::Markup => covered(block_text, run).trim().to_owned(),
         // 要件 7.8: **読みは本文に居残っている。**`《かんじ》`の`《`と`》`を
         // 外した中身がそのまま組む字で、箱はそれを本文の流れから隠している
         // だけである。`Number`が数字を読み出すのと同じ道——`Emphasis`にも
         // `StyleRun`にも文字列を持たせずに済む理由がこれ。
         // 要件 7.8: **箱が覆っている数字を、そのまま正立で描く。**`Number`と
         // 同じ道で、違うのは置き場所だけ——あちらは溝、これは箱の中。
-        Ornament::Upright => {
-            let start = byte_at_utf16(block_text, run.utf16_start);
-            let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
-            block_text[start..end].to_owned()
-        }
-        Ornament::Ruby { .. } => {
-            let start = byte_at_utf16(block_text, run.utf16_start);
-            let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
-            block_text[start..end]
-                .trim_start_matches('《')
-                .trim_end_matches('》')
-                .to_owned()
-        }
+        Ornament::Upright => covered(block_text, run).to_owned(),
+        Ornament::Ruby { .. } => ruby_reading(block_text, run).to_owned(),
     }
+}
+
+/// 箱が覆っている字（[`marker_ink`]）。
+///
+/// **覆った字を読み出す道は1本。**`Number`も`Markup`も`Upright`もルビも、箱の中や
+/// 溝に出すのは「本文に居残っている字」そのものである。
+fn covered<'a>(block_text: &'a str, run: &StyleRun) -> &'a str {
+    let start = byte_at_utf16(block_text, run.utf16_start);
+    let end = byte_at_utf16(block_text, run.utf16_start + run.utf16_len);
+    &block_text[start..end]
+}
+
+/// ルビの読み——`《》`を外した中身（要件 7.8）。
+fn ruby_reading<'a>(block_text: &'a str, run: &StyleRun) -> &'a str {
+    covered(block_text, run)
+        .trim_start_matches('《')
+        .trim_end_matches('》')
 }
 
 /// Draw what stands in each of a block's boxes (要件 7.3.2).
@@ -1676,6 +1680,7 @@ fn draw_marker_ink(
     origin: windows_numerics::Vector2,
     mode: WritingMode,
     indent: f32,
+    bullet: char,
 ) -> Result<()> {
     // 要件 7.8: **箱の中に立つものは、あとでまとめて。**溝へ置くものと置き場所
     // の決め方が違うだけなので、輪の中に二つ目の`if`を積むより読める。
@@ -1720,7 +1725,7 @@ fn draw_marker_ink(
             continue;
         }
         let region = regions[0];
-        let ink = marker_ink(ornament, text, run);
+        let ink = marker_ink(ornament, text, run, bullet);
         let utf16 = ink.encode_utf16().collect::<Vec<u16>>();
         // **The box takes no room now**, so what comes back is a sliver at the
         // head of the item's text rather than a space to draw in. The glyph
@@ -1803,7 +1808,7 @@ fn draw_upright_digits(
             continue;
         }
         let region = regions[0];
-        let digits = marker_ink(Ornament::Upright, text, run);
+        let digits = covered(text, run);
         let utf16 = digits.encode_utf16().collect::<Vec<u16>>();
         let rect = D2D_RECT_F {
             left: region.left,
@@ -1952,7 +1957,7 @@ fn draw_ruby(
         if count == 0 {
             continue;
         }
-        let reading = marker_ink(Ornament::Ruby { base_utf16 }, text, run);
+        let reading = ruby_reading(text, run);
         if reading.is_empty() {
             continue;
         }
@@ -3001,6 +3006,7 @@ fn draw_tile(
                 origin,
                 mode,
                 typography.indent_step(),
+                typography.bullet,
             )?;
         }
         // 要件 7.8: ルビと傍点は行の脇の帯に出る。**本文の上に描く**ので、
@@ -3452,6 +3458,9 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // 要件 7.8（2026-09-09）: 縦中横。**こちらは寸法の側**——3桁の数字は
     // 1マスに収まるのと1桁ずつ縦に並ぶのとで占める長さが違う。
     typography.upright_digits.hash(hasher);
+    // E10の③（2026-09-11）: 画面に出る印の字。**ルビと同じ色の側**——箱は幅0なので
+    // 幾何は動かず、古くなるのはタイルだけである。
+    typography.bullet.hash(hasher);
 }
 
 /// The colours a tile is drawn in (要件 9).
@@ -7981,7 +7990,10 @@ mod tests {
             ornament: Some(Ornament::Number),
         };
 
-        assert_eq!(marker_ink(Ornament::Number, text, &run), "10.");
+        assert_eq!(
+            marker_ink(Ornament::Number, text, &run, plain().bullet),
+            "10."
+        );
 
         // **入れ子の字下げは墨に入らない**（書き手の報告 2026-09-10：「入れ子側は
         // 1文字も空いていない印象」）。字下げはブロックが持っているもので、
@@ -7991,12 +8003,65 @@ mod tests {
             utf16_len: 8,
             ..run
         };
-        assert_eq!(marker_ink(Ornament::Number, nested, &run), "10.");
+        assert_eq!(
+            marker_ink(Ornament::Number, nested, &run, plain().bullet),
+            "10."
+        );
         // 編集中の行の記号も同じ道を通る。
-        assert_eq!(marker_ink(Ornament::Markup, nested, &run), "10.");
-        assert_eq!(marker_ink(Ornament::Bullet, text, &run), "•");
-        assert_eq!(marker_ink(Ornament::TaskOpen, text, &run), "☐");
-        assert_eq!(marker_ink(Ornament::TaskDone, text, &run), "☑");
+        assert_eq!(
+            marker_ink(Ornament::Markup, nested, &run, plain().bullet),
+            "10."
+        );
+        assert_eq!(
+            marker_ink(Ornament::Bullet, text, &run, plain().bullet),
+            "•"
+        );
+        // E10の③: 紙が別の字を言えば、その字が出る。
+        assert_eq!(marker_ink(Ornament::Bullet, text, &run, '・'), "・");
+        assert_eq!(
+            marker_ink(Ornament::TaskOpen, text, &run, plain().bullet),
+            "☐"
+        );
+        assert_eq!(
+            marker_ink(Ornament::TaskDone, text, &run, plain().bullet),
+            "☑"
+        );
+    }
+
+    /// E10の③（書き手の選択 2026-09-11）: **画面に出る印を替えると、絵が古くなる。**
+    /// 箱は幅0なので幾何は動かない——だからタイルの署名に入っていないと、**設定を
+    /// 替えても絵置き場の古い絵がそのまま出る**（6.18の罠）。
+    #[test]
+    fn the_bullet_on_the_page_is_part_of_a_tiles_signature() {
+        let text = "- 箇条書き\n";
+        let levels = [LineStyle::of_kind(LineKind::Bullet)];
+        let marker = LineMarker {
+            utf16_len: 2,
+            ornament: Ornament::Bullet,
+        };
+        let markers = [Some(marker)];
+        let styled = |typography: &Typography| {
+            let styled = StyledText::new(text, &levels).with_markers(&markers);
+            engine_set(WritingMode::Horizontal, styled, typography)
+        };
+
+        let dot = plain();
+        let mut ring = plain();
+        ring.bullet = '○';
+
+        let with_dot = styled(&dot);
+        let with_ring = styled(&ring);
+        let flow = with_dot.total_flow_size() as f32;
+        let span = *with_dot
+            .visible_tiles(0.0, flow, 0, 0.0, LINE_EXTENT as f32)
+            .first()
+            .expect("タイルがある");
+
+        assert_ne!(
+            with_dot.tile_signature(span, None),
+            with_ring.tile_signature(span, None),
+            "印を替えたら、その絵はもう古い"
+        );
     }
 
     /// **A marker that closes changes what came before it**, so a paragraph's

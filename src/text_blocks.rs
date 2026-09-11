@@ -148,6 +148,16 @@ pub struct Typography {
     /// 横書きの面には初めから効かない（縦中横は縦書きの中でだけ起きる）ので、
     /// シートに出すのは縦書きの面だけ——**働かない切り替えを画面に置かない。**
     pub upright_digits: bool,
+    /// 箇条書きの印として**画面に出る字**（要件 9、E10の③）。
+    ///
+    /// **原稿に入る字ではない。**原文の`-`／`*`／`+`は書き手が選んで原稿に書く字
+    /// （`list.bullet`）で、これはその上に立つ箱の中に描く字である——同じ原稿を
+    /// 別の紙で開けば別の丸に見えてよい。
+    ///
+    /// **色と同じ側にいる。**箱は幅0なので、この字が変わっても折り返しも行送りも
+    /// 1画素も動かない——古くなるのはタイルだけである（`hash_typography`に入れて
+    /// あるのはそのため。6.18の罠）。
+    pub bullet: char,
 }
 
 /// What the editor sets text in until the writer says otherwise (要件 9).
@@ -161,6 +171,12 @@ pub const DEFAULT_HEADING_FONT: &str = "Yu Mincho";
 /// Consolas' case — DirectWrite falls back for, so this narrows the Latin and
 /// leaves the rest.
 pub const DEFAULT_CODE_FONT: &str = "Consolas";
+
+/// 箇条書きの印として画面に出る字の既定（要件 9、E10の③）。
+///
+/// **いままで描いていた字。**設定になったからといって、書き手の画面が動くいわれは
+/// ない（`DEFAULT_BODY_FONT`と同じ考え方）。
+pub const DEFAULT_BULLET: char = '•';
 
 /// The ink `doc-ink` in `ui/tokens.slint`: the one colour in the app with no
 /// purple in it, because it is the one a reader looks at for an hour.
@@ -201,6 +217,8 @@ impl Typography {
             line_numbers: false,
             // 要件 7.8: 書き手が何も書かなくても効く、が既定。
             upright_digits: true,
+            // E10の③: いままで描いていた字。
+            bullet: DEFAULT_BULLET,
         }
     }
 

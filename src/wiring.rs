@@ -654,6 +654,17 @@ pub fn wire_typography(
         }
     });
 
+    // E10の③: 箇条書きにするとき原稿へ入る字。**組み直しは要らない**——本文は
+    // 変わらず、次に印を付けるときから使われるだけである（ルビの旗とはそこが違う）。
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_list_bullet_picked(move |mark| {
+        if let Some(window) = weak.upgrade() {
+            window.set_list_bullet(mark);
+            save_settings(&window, &cache);
+        }
+    });
+
     // 要件 9: the colour the writer picks in the window Windows draws.
     //
     // **From the event loop, not from the click.** The dialog runs a message

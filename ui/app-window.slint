@@ -604,6 +604,10 @@ export component AppWindow inherits Window {
     // 数え方ではなく読み方なので、`count-ruby`と違って本文そのものが変わる。
     in-out property <bool> ruby-marks: true;
     callback ruby-marks-toggled(bool);
+    /// E10の③: 箇条書きにするとき**原稿へ入る字**（`-`／`*`／`+`）。画面に出る
+    /// 印（`•`／`・`／`○`）は紙のシートのほうにある。
+    in-out property <string> list-bullet: "-";
+    callback list-bullet-picked(string);
     /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
     callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
@@ -2931,6 +2935,36 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
 
+                    // E10の③（書き手の選択 2026-09-11）: 後から箇条書きにするとき
+                    // **原稿へ入る字**。Markdownが認める3つで、読み方の側の設定で
+                    // ある——画面に出る丸は紙のシート（Typography）が決める。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "List bullet";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        for mark in ["-", "*", "+"]: TextButton {
+                            title: mark;
+                            role: root.list-bullet == mark ? Role.primary : Role.normal;
+                            clicked => {
+                                root.list-bullet-picked(mark);
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Ctrl+Shift+8 が原稿へ入れる字です（画面に出る印は Typography）。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+
                     // **折り返さない。**`wrap: word-wrap`のTextは、`min-width`が
                     // 0になる代わりに`preferred-width`が「一行に伸ばしたときの
                     // 幅」のまま残る（`builtins.slint`, Text）。popupは開くとき
@@ -3975,6 +4009,32 @@ export component AppWindow inherits Window {
                                     root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
                                         ? 0
                                         : 1);
+                            }
+                        }
+                    }
+
+                    // E10の③（書き手の選択 2026-09-11）: 箇条書きの印として
+                    // **画面に出る字**。原稿に入る字（`-`／`*`／`+`）は
+                    // Settings → FILES にある——あちらは読み書きの字で、
+                    // こちらは組み方である（同じ原稿が別の紙で別の丸に見えてよい）。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Bullet mark";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        for mark[index] in ["•", "・", "○"]: TextButton {
+                            title: mark;
+                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 16] == index
+                                ? Role.primary
+                                : Role.normal;
+                            clicked => {
+                                root.typography-chose(16, index);
                             }
                         }
                     }
