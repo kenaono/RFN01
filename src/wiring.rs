@@ -609,7 +609,7 @@ pub fn wire_typography(
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
     let steps = numbers.clone();
-    window.on_typography_step(move |setting, by| {
+    window.on_sheet_step(move |setting, by| {
         let Some(setting) = Setting::from_index(setting) else {
             return;
         };
@@ -620,14 +620,14 @@ pub fn wire_typography(
     });
 
     // 要件 9: a setting whose values are a choice rather than a quantity —
-    // the same door as `typography-step`, told what to be instead of by how
+    // the same door as `sheet-step`, told what to be instead of by how
     // much to move.
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
     let chosen = numbers.clone();
-    window.on_typography_chose(move |setting, value| {
+    window.on_sheet_chose(move |setting, value| {
         let Some(setting) = Setting::from_index(setting) else {
             return;
         };

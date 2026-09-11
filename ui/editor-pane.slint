@@ -555,7 +555,8 @@ export component EditorPane inherits Rectangle {
     callback save-as-requested();
     /// Show this document's file in Explorer (要件 5.2).
     callback reveal-requested();
-    callback typography-requested();
+    /// 紙のシート（Settings の`Layout`タブ）を開く。
+    callback layout-requested();
     /// 要件 9, 11.5: magnify this pane, in notches — positive in, negative out.
     /// **The pane the wheel is over, not the focused one**: `Ctrl+ホイール` is
     /// pointed at something, and pointing at a pane is asking about that pane.
@@ -1277,11 +1278,17 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         MenuSep { }
+                        // 書き手の報告 2026-09-11: **画面とソースを合わせる。**
+                        // ここは`Typography…`と言っていたが、開くのは`SETTINGS`の
+                        // 面で、組み方が載っているタブの名前は`Layout`である
+                        // ——3つの名前が別々を指していた。**この行が開くタブの名前で
+                        // 呼ぶ**（開く先もその
+                        // タブへ合わせてある）。
                         MenuRow {
-                            title: "Typography…";
+                            title: "Layout…";
                             activated => {
                                 pane-menu.close();
-                                root.typography-requested();
+                                root.layout-requested();
                             }
                         }
                         // **These three take the keyboard back themselves**,

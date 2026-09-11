@@ -7834,7 +7834,7 @@ enum Setting {
     ///
     /// **シートが持つ。**これは組み方である——同じ原稿を別の紙で開けば別の丸に
     /// 見えてよい。**原稿に入る字**（`-`／`*`／`+`）はこれではなく、Settings →
-    /// General の FILES にある`list.bullet`である（あちらは読み書きの字）。
+    /// General の MARKUP にある`list.bullet`である（あちらは読み書きの字）。
     ///
     /// 番号は[`BULLET_MARKS`]の並び。
     BulletMark,

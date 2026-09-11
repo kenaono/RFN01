@@ -657,10 +657,10 @@ export component AppWindow inherits Window {
     /// order the panel draws them: 0 body size, 1 line height, 2 char spacing,
     /// 3 column gap, 4 to 9 the six heading levels. One callback rather than
     /// one each, the way `tree-command` carries the file commands.
-    callback typography-step(int, int);
+    callback sheet-step(int, int);
     /// 要件 9: a setting given a value outright rather than stepped, for the
     /// ones whose values are a choice and not a quantity.
-    callback typography-chose(int, int);
+    callback sheet-chose(int, int);
     /// How many numbers one sheet holds in `sheet-numbers` (要件 9).
     ///
     /// **Rust owns it** (`SHEET_NUMBERS`) and sets it here, because the model is
@@ -748,7 +748,7 @@ export component AppWindow inherits Window {
             app-menu.close();
             return true;
         }
-        // **`typography-panel.is-open` is not read**, and closing it blind is
+        // **`settings-panel.is-open` is not read**, and closing it blind is
         // the price. Reading it makes the compiler generate a setter for
         // `is-open`, and the code it writes for a `show()` that reaches up
         // through two components does not compile (技術検証 6.22). This one is
@@ -756,7 +756,7 @@ export component AppWindow inherits Window {
         // are opened from the component that declares them. Closing a popup
         // that is not open does nothing, so what is lost is only the answer:
         // Escape closes this panel without being able to say that it did.
-        typography-panel.close();
+        settings-panel.close();
         // The folder history is closed blind for the same reason, and it is
         // the same case: it is opened from a row inside the app menu, which is
         // two components up from here (要件 5.1). Reading its `is-open` is what
@@ -1006,7 +1006,7 @@ export component AppWindow inherits Window {
 
                 // 要件 5.1: the folders worked in before this one. A menu of its
                 // own rather than a submenu — the row above closes `app-menu` and
-                // shows this one, which is how `Typography…` already opens a panel
+                // shows this one, which is how `Layout…` already opens a panel
                 // from a menu. It stands in the same place, so the list appears
                 // where the writer was looking.
                 // 追加要件 Terminal: which shell the new tab runs. **A list
@@ -1083,7 +1083,7 @@ export component AppWindow inherits Window {
                     icon: Icons.settings;
                     tip: "Settings";
                     clicked => {
-                        typography-panel.show();
+                        settings-panel.show();
                         root.focus-generation += 1;
                     }
                 }
@@ -2174,8 +2174,10 @@ export component AppWindow inherits Window {
                             root.pane-close-all(pane.id);
                             root.focus-generation += 1;
                         }
-                        typography-requested => {
-                            typography-panel.show();
+                        layout-requested => {
+                            // **この面の組み方を開く**ので、開く先はそのタブ。
+                            root.settings-tab = 4;
+                            settings-panel.show();
                         }
                         // **No `focus-generation` here**: the wheel sends
                         // this from wherever the pointer is, and taking the
@@ -2730,7 +2732,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    typography-panel := PopupWindow {
+    settings-panel := PopupWindow {
         // Wider than a menu: 要件 9's six heading sizes are three to a row, and
         // three of them do not fit in a menu's 250px.
         x: (root.width - 380px) / 2;
@@ -2866,6 +2868,18 @@ export component AppWindow inherits Window {
                                 root.autosave-toggled(!root.autosave);
                             }
                         }
+                    }
+
+                    // 書き手の報告 2026-09-11: **見出しが中身を言っていなかった。**
+                    // `FILES`の下にルビの記法も箇条書きの字も並んでいて、どれも
+                    // ファイルの話ではない——**画面とソースが食い違えば、書き手と
+                    // 私が別のものを指して話すことになる。**記法の読み書きは
+                    // ここから下である。
+                    Text {
+                        text: "MARKUP";
+                        color: Tok.ink-faint;
+                        font-size: 10px;
+                        letter-spacing: 0.9px;
                     }
 
                     // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。
@@ -3670,7 +3684,7 @@ export component AppWindow inherits Window {
                             // 書き手はもうこの画面を見ていない。
                             clicked => {
                                 root.word-file-edited();
-                                typography-panel.close();
+                                settings-panel.close();
                             }
                         }
                         Text {
@@ -3725,7 +3739,7 @@ export component AppWindow inherits Window {
                         shown: root.palette[root.sheet * 8 + 0];
                         family: root.sheet-fonts[root.sheet * 8 + 0];
                         stepped(by) => {
-                            root.typography-step(0, by);
+                            root.sheet-step(0, by);
                         }
                         picked => {
                             root.color-picked(0);
@@ -3742,7 +3756,7 @@ export component AppWindow inherits Window {
                         shown: root.palette[root.sheet * 8 + 1];
                         family: root.sheet-fonts[root.sheet * 8 + 1];
                         stepped(by) => {
-                            root.typography-step(4, by);
+                            root.sheet-step(4, by);
                         }
                         picked => {
                             root.color-picked(1);
@@ -3759,7 +3773,7 @@ export component AppWindow inherits Window {
                         shown: root.palette[root.sheet * 8 + 2];
                         family: root.sheet-fonts[root.sheet * 8 + 2];
                         stepped(by) => {
-                            root.typography-step(5, by);
+                            root.sheet-step(5, by);
                         }
                         picked => {
                             root.color-picked(2);
@@ -3776,7 +3790,7 @@ export component AppWindow inherits Window {
                         shown: root.palette[root.sheet * 8 + 3];
                         family: root.sheet-fonts[root.sheet * 8 + 3];
                         stepped(by) => {
-                            root.typography-step(6, by);
+                            root.sheet-step(6, by);
                         }
                         picked => {
                             root.color-picked(3);
@@ -3793,7 +3807,7 @@ export component AppWindow inherits Window {
                         shown: root.palette[root.sheet * 8 + 4];
                         family: root.sheet-fonts[root.sheet * 8 + 4];
                         stepped(by) => {
-                            root.typography-step(7, by);
+                            root.sheet-step(7, by);
                         }
                         picked => {
                             root.color-picked(4);
@@ -3810,7 +3824,7 @@ export component AppWindow inherits Window {
                         shown: root.palette[root.sheet * 8 + 5];
                         family: root.sheet-fonts[root.sheet * 8 + 5];
                         stepped(by) => {
-                            root.typography-step(8, by);
+                            root.sheet-step(8, by);
                         }
                         picked => {
                             root.color-picked(5);
@@ -3827,7 +3841,7 @@ export component AppWindow inherits Window {
                         shown: root.palette[root.sheet * 8 + 6];
                         family: root.sheet-fonts[root.sheet * 8 + 6];
                         stepped(by) => {
-                            root.typography-step(9, by);
+                            root.sheet-step(9, by);
                         }
                         picked => {
                             root.color-picked(6);
@@ -3850,7 +3864,7 @@ export component AppWindow inherits Window {
                         label: root.sheet == 0 ? "Line height" : "Column gap";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 1] + "%";
                         stepped(by) => {
-                            root.typography-step(1, by);
+                            root.sheet-step(1, by);
                         }
                     }
 
@@ -3858,7 +3872,7 @@ export component AppWindow inherits Window {
                         label: "Char advance";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 2] + "%";
                         stepped(by) => {
-                            root.typography-step(2, by);
+                            root.sheet-step(2, by);
                         }
                     }
 
@@ -3866,7 +3880,7 @@ export component AppWindow inherits Window {
                         label: "Page margin";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 3] + " px";
                         stepped(by) => {
-                            root.typography-step(3, by);
+                            root.sheet-step(3, by);
                         }
                     }
 
@@ -3903,7 +3917,7 @@ export component AppWindow inherits Window {
                                 ? Role.primary
                                 : Role.normal;
                             clicked => {
-                                root.typography-chose(10,
+                                root.sheet-chose(10,
                                     root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
                                         ? 0
                                         : 1);
@@ -3915,7 +3929,7 @@ export component AppWindow inherits Window {
                                 ? Role.primary
                                 : Role.normal;
                             clicked => {
-                                root.typography-chose(10,
+                                root.sheet-chose(10,
                                     root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
                                         ? 0
                                         : 2);
@@ -3930,7 +3944,7 @@ export component AppWindow inherits Window {
                         label: "Line length";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 11] + " chars";
                         stepped(by) => {
-                            root.typography-step(11, by);
+                            root.sheet-step(11, by);
                         }
                     }
 
@@ -3956,7 +3970,7 @@ export component AppWindow inherits Window {
                                 ? Role.primary
                                 : Role.normal;
                             clicked => {
-                                root.typography-chose(12,
+                                root.sheet-chose(12,
                                     root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
                                         ? 0
                                         : 1);
@@ -3973,7 +3987,7 @@ export component AppWindow inherits Window {
                         label: "Ruby size";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 13] + "%";
                         stepped(by) => {
-                            root.typography-step(13, by);
+                            root.sheet-step(13, by);
                         }
                     }
 
@@ -3981,7 +3995,7 @@ export component AppWindow inherits Window {
                         label: "Ruby position";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 14] + "%";
                         stepped(by) => {
-                            root.typography-step(14, by);
+                            root.sheet-step(14, by);
                         }
                     }
 
@@ -4009,7 +4023,7 @@ export component AppWindow inherits Window {
                                 ? Role.primary
                                 : Role.normal;
                             clicked => {
-                                root.typography-chose(15,
+                                root.sheet-chose(15,
                                     root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
                                         ? 0
                                         : 1);
@@ -4019,7 +4033,7 @@ export component AppWindow inherits Window {
 
                     // E10の③（書き手の選択 2026-09-11）: 箇条書きの印として
                     // **画面に出る字**。原稿に入る字（`-`／`*`／`+`）は
-                    // Settings → General の FILES にある——あちらは読み書きの字で、
+                    // Settings → General の MARKUP にある——あちらは読み書きの字で、
                     // こちらは組み方である（同じ原稿が別の紙で別の丸に見えてよい）。
                     HorizontalLayout {
                         spacing: 2px;
@@ -4038,7 +4052,7 @@ export component AppWindow inherits Window {
                                 ? Role.primary
                                 : Role.normal;
                             clicked => {
-                                root.typography-chose(16, index);
+                                root.sheet-chose(16, index);
                             }
                         }
                     }
