@@ -842,6 +842,11 @@ pub fn selected_lines(source: &str, start: usize, end: usize) -> (usize, usize) 
 /// **`None`は「できない」。**先頭の行を前へ、末尾の行を後へは動かせない
 /// ——黙って何もしないのではなく、呼ぶ側がそう言えるように`None`で返す。
 ///
+/// **選び直す範囲は、行の字までで、後ろの改行は含めない**（書き手の報告
+/// 2026-09-11：「キャレットが行末から次の行の先頭に移動します」）。改行は行と行の
+/// あいだにあるもので、**それを選びに入れるとカーソルは次の行の頭へ出る**——動かした
+/// のは行であって、書き手を次の行へ連れて行ったのではない。
+///
 /// **改行は行と行のあいだにある。**組み直しは本文だけを並べ、あいだに改行を1つずつ
 /// 置く——最後の改行は、元の範囲が持っていたときだけ付ける。**末尾に改行の無い
 /// 文書で最後の行を動かしても、改行が増えたり減ったりしない。**
@@ -861,7 +866,7 @@ pub fn line_edit(
             let above = &source[above_start..start];
             let region = above_start..end;
             let text = rejoin(&[moved, above], source[region.clone()].ends_with('\n'));
-            let chosen = (above_start, above_start + body(moved).len() + 1);
+            let chosen = (above_start, above_start + body(moved).len());
             Some((region, text, chosen))
         }
         LineEdit::MoveAfter => {
@@ -874,10 +879,7 @@ pub fn line_edit(
             let ends_with_newline = source[region.clone()].ends_with('\n');
             let text = rejoin(&[below, moved], ends_with_newline);
             let head = start + body(below).len() + 1;
-            let chosen = (
-                head,
-                head + body(moved).len() + usize::from(ends_with_newline),
-            );
+            let chosen = (head, head + body(moved).len());
             Some((region, text, chosen))
         }
         LineEdit::CopyBefore | LineEdit::CopyAfter => {
@@ -888,12 +890,9 @@ pub fn line_edit(
             // **写したほうが選ばれる。**押し続けた書き手の手元では、写しが次の
             // 写しの元になる——`Shift+Alt+↓`を3回押せば3つ増える。
             let chosen = if what == LineEdit::CopyBefore {
-                (start, second)
+                (start, start + body(moved).len())
             } else {
-                (
-                    second,
-                    second + body(moved).len() + usize::from(ends_with_newline),
-                )
+                (second, second + body(moved).len())
             };
             Some((region, text, chosen))
         }
@@ -1336,7 +1335,11 @@ fn renumber_below(
     // **数え直した連なりが選ばれたまま。**どこまで数え直したかが画面に出るのと、
     // **もう一度押せば外れる**のが同じ一手になる（書き手の求め 2026-09-11の階段）
     // ——外すのは選ばれている行なので、選ばれていなければ1行しか外れない。
-    let chosen = (start, start + text.len());
+    //
+    // **最後の改行は入れない**（[`line_edit`]と同じ理由）——入れるとカーソルが
+    // 連なりの次の行の頭へ出る。
+    let without_break = text.strip_suffix('\n').unwrap_or(&text).len();
+    let chosen = (start, start + without_break);
     Some((start..end, text, chosen))
 }
 
@@ -3333,7 +3336,9 @@ mod tests {
             edited(source, (second, second), LineEdit::MoveBefore).expect("動かせる");
 
         assert_eq!(next, "二\n一\n三\n");
-        assert_eq!(picked, "二\n");
+        // **改行は選びに入れない**（書き手の報告 2026-09-11）——入れるとカーソルが
+        // 次の行の頭へ出る。
+        assert_eq!(picked, "二");
         // 先頭の行は前へ行けない。
         assert!(edited(source, (0, 0), LineEdit::MoveBefore).is_none());
     }
@@ -3346,7 +3351,7 @@ mod tests {
         let (next, picked) = edited(source, (0, 0), LineEdit::MoveAfter).expect("動かせる");
 
         assert_eq!(next, "二\n一\n三\n");
-        assert_eq!(picked, "一\n");
+        assert_eq!(picked, "一");
         assert!(edited(source, (source.len(), source.len()), LineEdit::MoveAfter).is_none());
     }
 
@@ -3359,7 +3364,7 @@ mod tests {
         let (up, picked) =
             edited(source, (second, second), LineEdit::MoveBefore).expect("動かせる");
         assert_eq!(up, "二\n一");
-        assert_eq!(picked, "二\n");
+        assert_eq!(picked, "二");
 
         let (down, picked) = edited(source, (0, 0), LineEdit::MoveAfter).expect("動かせる");
         assert_eq!(down, "二\n一");
@@ -3376,7 +3381,7 @@ mod tests {
         let (next, picked) = edited(source, at, LineEdit::MoveAfter).expect("動かせる");
 
         assert_eq!(next, "一\n四\n二\n三\n");
-        assert_eq!(picked, "二\n三\n");
+        assert_eq!(picked, "二\n三");
     }
 
     /// E3の②・E10（書き手の報告 2026-09-11）: **頭がちょうど行末なら、その行も
@@ -3424,7 +3429,7 @@ mod tests {
 
         let (next, picked) = edited(source, (0, 0), LineEdit::CopyAfter).expect("写せる");
         assert_eq!(next, "一\n一\n二\n");
-        assert_eq!(picked, "一\n");
+        assert_eq!(picked, "一");
 
         // 末尾の行（改行なし）を写しても、末尾に改行は生えない。
         let last = "一\n".len();
@@ -3783,7 +3788,8 @@ mod tests {
             listed(source, 0, 0, ListEdit::Ordered, '-').expect("そろえられる");
         assert_eq!(evened, "5. あああ\n6. いいい\n7. ううう\n");
         assert_eq!(region, 0..source.len());
-        assert_eq!(chosen, (0, evened.len()));
+        // 最後の改行は選びに入れない（カーソルを次の行へ出さない）。
+        assert_eq!(chosen, (0, evened.len() - "\n".len()));
 
         // 二回目——もう変わらないので、選ばれている行の印が外れる。
         let (_, off, _) =
