@@ -655,14 +655,18 @@ pub fn wire_typography(
         }
     });
 
-    // E10の③: 箇条書きにするとき原稿へ入る字。**組み直しは要らない**——本文は
-    // 変わらず、次に印を付けるときから使われるだけである（ルビの旗とはそこが違う）。
+    // E10の③（書き手の決定 2026-09-11）: 標準でない箇条書きの印（`*`と`+`）を
+    // 読むか。**組み直しが要る**——`* 項目`が項目なのか本文の1行なのかが変わるので、
+    // ルビの旗とまったく同じ道を通る（`spec_timer`はここにしか無い）。
     let weak = window.as_weak();
+    let states = pane_states.clone();
     let cache = render_cache.clone();
-    window.on_list_bullet_picked(move |mark| {
+    let timer = spec_timer.clone();
+    window.on_other_bullets_toggled(move |wanted| {
         if let Some(window) = weak.upgrade() {
-            window.set_list_bullet(mark);
+            window.set_other_bullets(wanted);
             save_settings(&window, &cache);
+            schedule_relayout(&window, &states, &cache, &timer);
         }
     });
 

@@ -604,10 +604,10 @@ export component AppWindow inherits Window {
     // 数え方ではなく読み方なので、`count-ruby`と違って本文そのものが変わる。
     in-out property <bool> ruby-marks: true;
     callback ruby-marks-toggled(bool);
-    /// E10の③: 箇条書きにするとき**原稿へ入る字**（`-`／`*`／`+`）。画面に出る
-    /// 印（`•`／`・`／`○`）は紙のシートのほうにある。
-    in-out property <string> list-bullet: "-";
-    callback list-bullet-picked(string);
+    /// E10の③（書き手の決定 2026-09-11）: **標準でない箇条書きの印**（`*`と`+`）も
+    /// 印として読むか。**`-`はいつでも印である**——標準の書き方が否定されることはない。
+    in-out property <bool> other-bullets: true;
+    callback other-bullets-toggled(bool);
     /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
     callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
@@ -2949,35 +2949,37 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
 
-                    // E10の③（書き手の選択 2026-09-11）: 後から箇条書きにするとき
-                    // **原稿へ入る字**。画面に出る丸は紙のシート（Layout）が決める。
+                    // E10の③（書き手の決定 2026-09-11）: 標準でない箇条書きの印を
+                    // 読むか。**`-`はいつでも印**で、この釦が切るのは`*`と`+`だけ
+                    // ——書き手の言葉：「標準形式が否定されるのは避けた方がいい」。
                     //
-                    // **書くときだけの設定である**（書き手の報告 2026-09-11）。
-                    // 読むときは`-`も`*`も`+`も箇条書きのまま——設定を`*`にした
-                    // からといって、`- 項目`と書かれた他人の原稿が本文になっては
-                    // ならない。`Ctrl+Shift+8`は「その字にそろえる→外す」の階段。
+                    // **原稿へ入れる字は`-`に固定**である（`Ctrl+Shift+8`も`Enter`の
+                    // 継続も）。「印の字を変える」のは**画面に出る丸**のほうで、
+                    // それは紙のシート（Layout の`Bullet mark`）が決める。
                     HorizontalLayout {
                         spacing: 2px;
 
                         Text {
-                            text: "List bullet";
+                            text: "Other bullets";
                             color: Tok.ink;
                             font-size: 12px;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
 
-                        for mark in ["-", "*", "+"]: TextButton {
-                            title: mark;
-                            role: root.list-bullet == mark ? Role.primary : Role.normal;
+                        TextButton {
+                            title: root.other-bullets ? "On" : "Off";
+                            role: root.other-bullets ? Role.primary : Role.normal;
                             clicked => {
-                                root.list-bullet-picked(mark);
+                                root.other-bullets-toggled(!root.other-bullets);
                             }
                         }
                     }
 
                     Text {
-                        text: "Ctrl+Shift+8 が原稿へ入れる字。読むときは - * + のどれも箇条書きです。";
+                        text: root.other-bullets
+                            ? "- のほかに * と + も箇条書きとして読みます。"
+                            : "箇条書きは - だけ。* と + はただの本文です。";
                         color: Tok.ink-faint;
                         font-size: 11px;
                         overflow: elide;

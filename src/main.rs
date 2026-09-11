@@ -285,6 +285,17 @@ const SAMPLE_MARKDOWN: &str = r#"# 縦書きライブ編集の技術検証
 /// 入れる一段と、箇条書きを入れ子にする一段が違っていたら、同じ鍵に2つの意味が付く。
 const TAB_INDENT: &str = document::INDENT_STEP;
 
+/// 窓が言っている**記法の読み方**（要件 E9・E10の③）。
+///
+/// **2つの旗は同じところから来て、同じところへ行く**（`DocumentCounts`と
+/// `PreviewDocument`）ので、1つの値で運ぶ——片方だけ渡し忘れる道が無い。
+fn reading_of(window: &AppWindow) -> document::Reading {
+    document::Reading {
+        ruby: window.get_ruby_marks(),
+        other_bullets: window.get_other_bullets(),
+    }
+}
+
 /// 箇条書きにするときに原稿へ入る印の既定（E10）。
 ///
 /// **Markdownが認める3つ**（`-`／`*`／`+`）のうちの1つ。既定が`-`なのは、この
@@ -292,14 +303,6 @@ const TAB_INDENT: &str = document::INDENT_STEP;
 /// である。
 const LIST_BULLET: char = '-';
 
-/// 設定が言っている字、それがMarkdownの印なら（E10の③）。
-///
-/// **知らない字は`None`。**書き手が手で書いた設定ファイルも、押した覚えのない字も、
-/// ここで止まって既定のままになる。
-fn list_bullet_of(said: &str) -> Option<char> {
-    let mark = said.trim().chars().next()?;
-    matches!(mark, '-' | '*' | '+').then_some(mark)
-}
 const IME_CANDIDATE_GAP: f32 = 8.0;
 const CARET_SCROLL_PADDING: f32 = 24.0;
 /// Fallback column height, used before the pane reports its own size and by
@@ -647,7 +650,7 @@ struct PreviewSlot {
     /// なら、ここは`refresh`を呼ばずに前の答えを返す（書き手の報告 2026-09-10：
     /// 「設定しただけでは反映されず……縦書き横書きを切り替えると反映されます」
     /// ＝向きを変えたときだけ枠が作り直されていた）。
-    ruby: document::RubyMarks,
+    reading: document::Reading,
 }
 
 impl PreviewSlot {
@@ -658,23 +661,23 @@ impl PreviewSlot {
         &mut self,
         source: &str,
         active_line_start: Option<usize>,
-        ruby: document::RubyMarks,
+        reading: document::Reading,
     ) -> &PreviewDocument {
         let stale = !self.started
             || self.active_line_start != active_line_start
             || self.source != source
             // 要件 E9: **読み方も、古いかどうかの理由である。**同じ本文でも、
             // 記法を読むかどうかで組み上がりが変わる。
-            || self.ruby != ruby;
+            || self.reading != reading;
         if stale {
             // Refreshed rather than rebuilt: the preview keeps its mapping a
             // line at a time, so this recounts the lines that changed and
             // leaves the rest (技術検証 7.1).
-            self.preview.refresh(source, active_line_start, ruby);
+            self.preview.refresh(source, active_line_start, reading);
             self.source.clear();
             self.source.push_str(source);
             self.active_line_start = active_line_start;
-            self.ruby = ruby;
+            self.reading = reading;
             self.started = true;
         }
         &self.preview
@@ -4016,7 +4019,7 @@ fn tell_goto(window: &AppWindow, live: &Live) {
     let lines = document
         .counts
         .borrow_mut()
-        .get(&source, window.get_ruby_marks())
+        .get(&source, reading_of(window))
         .stats()
         .logical_lines;
     let typed = window.get_goto_line().to_string();
@@ -4085,7 +4088,7 @@ fn go_to_line(window: &AppWindow, live: &Live) {
     let lines = document
         .counts
         .borrow_mut()
-        .get(&source, window.get_ruby_marks())
+        .get(&source, reading_of(window))
         .stats()
         .logical_lines;
     let Some(at) = document::place_of(&source, line, column) else {
@@ -8121,8 +8124,8 @@ const COUNT_RUBY_SETTING: &str = "count.ruby";
 /// 11字の本文なのかを決める。**シートに置けば、同じ文書が2つのペインで別の本文に
 /// なる**（字数も食い違う）。
 const RUBY_MARKS_SETTING: &str = "ruby.marks";
-/// 箇条書きにするとき原稿へ入る字（E10の③）。
-const LIST_BULLET_SETTING: &str = "list.bullet";
+/// 標準でない箇条書きの印（`*`と`+`）も読むか（E10の③）。
+const OTHER_BULLETS_SETTING: &str = "list.other-marks";
 
 /// 追加要件 2026-09-08: the shell list, one entry per numbered name
 /// (`terminal.shell.0`, `terminal.shell.1`, …).
@@ -8898,8 +8901,8 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_ruby_marks()).to_string(),
     ));
     values.push((
-        LIST_BULLET_SETTING.to_owned(),
-        window.get_list_bullet().to_string(),
+        OTHER_BULLETS_SETTING.to_owned(),
+        i32::from(window.get_other_bullets()).to_string(),
     ));
     values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
@@ -9003,12 +9006,10 @@ fn apply_settings(
             window.set_ruby_marks(value.trim() != "0");
             continue;
         }
-        // E10の③: **Markdownが認める3つだけ。**読めない値は既定（`-`）へ倒す
-        // ——手で書いた設定ファイルが、Markdownでない字を原稿へ入れてはならない。
-        if written == LIST_BULLET_SETTING {
-            if let Some(mark) = list_bullet_of(value) {
-                window.set_list_bullet(mark.to_string().into());
-            }
+        // E10の③: **`0`だけがOff。**既定は読むほうなので、読めない値はそちらへ
+        // 倒す（Markdownが`*`も`+`も印だと言っている）。
+        if written == OTHER_BULLETS_SETTING {
+            window.set_other_bullets(value.trim() != "0");
             continue;
         }
         // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
@@ -10519,7 +10520,7 @@ fn lay_out_pane(
     preedit: &str,
 ) -> Option<PaneLayout> {
     let mut counts = document.counts.borrow_mut();
-    let styles = counts.get(source, window.get_ruby_marks()).line_styles();
+    let styles = counts.get(source, reading_of(window)).line_styles();
     let pane = cache.pane(id);
 
     let preview_started = Instant::now();
@@ -12428,7 +12429,7 @@ fn update_status(
     let stats = document
         .counts
         .borrow_mut()
-        .get(source, window.get_ruby_marks())
+        .get(source, reading_of(window))
         .stats();
     // Every run, because a rectangle is several (要件 7.1) — and what 要件 10
     // shows is how much text is selected, not how many pieces it is in.
@@ -12827,7 +12828,7 @@ fn hit_test_pane(
     y: f32,
 ) -> Option<PaneHit> {
     let mut counts = document.counts.borrow_mut();
-    let styles = counts.get(source, window.get_ruby_marks()).line_styles();
+    let styles = counts.get(source, reading_of(window)).line_styles();
     // Split so the text and the engine can be borrowed at once, for the reason
     // `lay_out_for_caret` gives (ペイン分割設計 7.3).
     let Pane { graphics, view, .. } = cache.pane(id);
@@ -12903,7 +12904,7 @@ fn lay_out_for_caret<'a>(
     active_line_start: Option<usize>,
 ) -> Option<MeasuredPane<'a>> {
     let mut counts = document.counts.borrow_mut();
-    let styles = counts.get(source, window.get_ruby_marks()).line_styles();
+    let styles = counts.get(source, reading_of(window)).line_styles();
     // Split so the text and the engine can be borrowed at once: one comes from
     // the pane's data and the other from its graphics (ペイン分割設計 7.3).
     let Pane { graphics, view, .. } = cache.pane(id);
@@ -13274,7 +13275,7 @@ fn pane_text<'a>(
     active_line_start: Option<usize>,
 ) -> PaneText<'a> {
     if id.shows_preview(window) {
-        PaneText::Preview(preview_slot.get(source, active_line_start, window.get_ruby_marks()))
+        PaneText::Preview(preview_slot.get(source, active_line_start, reading_of(window)))
     } else {
         PaneText::Source(source)
     }
@@ -13483,7 +13484,7 @@ fn insert_pane_text(
         let revealed = PaneId::revealed_line(id.vertical(window), &state, &source).unwrap_or(line);
         let mut borrowed = cache.borrow_mut();
         let slot = &mut borrowed.pane(id).view.preview_slot;
-        let preview = slot.get(&source, Some(revealed), window.get_ruby_marks());
+        let preview = slot.get(&source, Some(revealed), reading_of(window));
         let shown = preview.utf16_at_source_byte(caret);
         let at = vertical_insertion_source_byte(&source, preview, shown, indent_line_start);
         drop(borrowed);
@@ -13588,15 +13589,14 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
     let styles = document
         .counts
         .borrow_mut()
-        .get(&source, window.get_ruby_marks())
+        .get(&source, reading_of(window))
         .line_styles()
         .to_vec();
     // **頼まれた範囲も書く。**`region`は行へ伸ばしたあとのもので、書き手が選んだ
     // ものではない——2つ並べないと「一行前から効く」の原因（頭が前の行の行末に
     // 立っていた）が読めない（書き手の報告 2026-09-11）。
     let told = format!("{what:?} asked={from}..{to}");
-    let bullet = list_bullet_of(&window.get_list_bullet()).unwrap_or(LIST_BULLET);
-    let edit = document::list_edit(&source, &styles, from, to, what, bullet);
+    let edit = document::list_edit(&source, &styles, from, to, what, LIST_BULLET);
     let Some((region, text, chosen)) = edit else {
         // **何も起きなかったことを、ログが言う**（E1の`find`と同じ）。触れる行が
         // 1つも無かったのか、鍵が届いていないのかを、往復せずに切り分けられる。
@@ -13737,7 +13737,7 @@ fn tab_in_pane(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
         document
             .counts
             .borrow_mut()
-            .get(&source, window.get_ruby_marks())
+            .get(&source, reading_of(window))
             .line_styles()
             .get(index)
             .is_some_and(|style| style.kind.is_list())
@@ -13756,7 +13756,8 @@ fn tab_in_pane(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
         );
         return;
     }
-    let Some(indented) = document::shift_indent(&source, from, to, !back) else {
+    let other_bullets = window.get_other_bullets();
+    let Some(indented) = document::shift_indent(&source, from, to, !back, other_bullets) else {
         return;
     };
     // **字下げと番号の振り直しは1つの編集。**2つに分けると取り消しが2回に割れる
@@ -13813,7 +13814,7 @@ fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId, soft: bool) {
     let styles = document
         .counts
         .borrow_mut()
-        .get(&source, window.get_ruby_marks())
+        .get(&source, reading_of(window))
         .line_styles()
         .to_vec();
     let what = document::enter_continuation(&source, &styles, at, soft);
@@ -14505,7 +14506,7 @@ fn move_pane_caret(
         let styles = document
             .counts
             .borrow_mut()
-            .get(&source, window.get_ruby_marks())
+            .get(&source, reading_of(window))
             .line_styles()
             .to_vec();
         match document::hidden_indent(&source, &styles, next) {
@@ -14920,10 +14921,27 @@ mod tests {
     fn the_preview_slot_notices_that_the_notation_is_read_differently() {
         let source = "｜漢字《かんじ》を書く\n";
         let mut slot = PreviewSlot::default();
-        assert_eq!(slot.get(source, None, true).text, "漢字《かんじ》を書く\n");
+        assert_eq!(
+            slot.get(source, None, document::Reading::all()).text,
+            "漢字《かんじ》を書く\n"
+        );
         // **本文も活性行も変えていない。**変わったのは読み方だけである。
-        assert_eq!(slot.get(source, None, false).text, source);
-        assert_eq!(slot.get(source, None, true).text, "漢字《かんじ》を書く\n");
+        assert_eq!(
+            slot.get(
+                source,
+                None,
+                document::Reading {
+                    ruby: false,
+                    other_bullets: true
+                }
+            )
+            .text,
+            source
+        );
+        assert_eq!(
+            slot.get(source, None, document::Reading::all()).text,
+            "漢字《かんじ》を書く\n"
+        );
     }
 
     /// E2の③: **BOMが行を分けているのは保存の側だけ。**同じUTF-8でも、印を
@@ -16530,21 +16548,6 @@ mod tests {
             PreviewDocument::from_source(&indented_blank_line).text,
             "前\n    \n後"
         );
-    }
-
-    /// E10の③（書き手の選択 2026-09-11）: **原稿へ入るのはMarkdownの印だけ。**
-    /// 手で書いた設定ファイルも、押した覚えのない字も、ここで止まって既定のまま
-    /// になる——設定が原稿にMarkdownでない字を書かせてはならない。
-    #[test]
-    fn only_a_markdown_bullet_reaches_the_manuscript() {
-        assert_eq!(list_bullet_of("-"), Some('-'));
-        assert_eq!(list_bullet_of("*"), Some('*'));
-        assert_eq!(list_bullet_of(" + "), Some('+'));
-
-        assert_eq!(list_bullet_of("・"), None, "画面に出る印は原稿の字ではない");
-        assert_eq!(list_bullet_of("•"), None);
-        assert_eq!(list_bullet_of(""), None);
-        assert_eq!(list_bullet_of("1."), None);
     }
 
     #[test]
