@@ -1213,7 +1213,7 @@ fn set_markers(
     if text == source[start..end] {
         return None;
     }
-    let chosen = chosen_range(settle(kept, shifts, start, &text));
+    let chosen = chosen_range(settle(kept, shifts, start, start, &text));
     Some((start..end, text, chosen))
 }
 
@@ -1362,16 +1362,33 @@ fn note_shift(positions: &[usize], shifts: &mut [isize; 2], at: usize, delta: is
     }
 }
 
-/// 積んだずれを当てて、選び直す範囲にする（[`set_markers`]・[`renumber_below`]）。
+/// 積んだずれを当てて、書き換えたあとの位置にする（[`set_markers`]・
+/// [`renumber_below`]・[`shift_indent`]）。
+///
+/// `at`は`text`が文書の中で始まる位置、`held`は**書き換えた範囲の頭**である。
+///
+/// **選んでいる範囲の頭は動かない。**`held`はその範囲の外側の境目なので、そこに
+/// 立っていた端は足した印や字下げの**前**にいる——動かすと**先頭の行だけ印が
+/// 選択から落ちる**（書き手の報告 2026-09-11：「先頭行の先頭文字(Numberなら1)だけ
+/// 選択範囲から落ちます」）。
+///
+/// **カーソル1つだけなら動く。**そこには「範囲の頭」は無く、あるのは書き手が立って
+/// いた字である——`Tab`で行頭のカーソルが字下げの後ろへ出るのは、書き手が見て
+/// 通したことである（E3の④）。
 ///
 /// **字の切れ目へ丸める。**位置はバイトで数えるので、丸めないと字の途中に立ちうる
 /// ——そこを頭にした`&str`の借り方はどこで落ちてもおかしくない（6.7）。
-fn settle(kept: [usize; 2], shifts: [isize; 2], start: usize, text: &str) -> [usize; 2] {
-    let mut moved = [start; 2];
+fn settle(kept: [usize; 2], shifts: [isize; 2], at: usize, held: usize, text: &str) -> [usize; 2] {
+    let selecting = kept[0] != kept[1];
+    let mut moved = [at; 2];
     for ((position, shift), out) in kept.iter().zip(shifts).zip(moved.iter_mut()) {
-        let moved = position.saturating_add_signed(shift);
-        let inside = moved.clamp(start, start + text.len()) - start;
-        *out = start + crate::floor_char_boundary(text, inside);
+        let moved = if selecting && *position == held {
+            held
+        } else {
+            position.saturating_add_signed(shift)
+        };
+        let inside = moved.clamp(at, at + text.len()) - at;
+        *out = at + crate::floor_char_boundary(text, inside);
     }
     moved
 }
@@ -1479,7 +1496,7 @@ pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Optio
     // 変わっている——**同じ一手の中で直す**ので、取り消しは1回で戻る。
     // **動かすのは最後に一度**（[`note_shift`]）。ここまでは編集の前の座標で
     // 数えてあるので、行末に立っていた端が次の行の字下げまで送られない。
-    let mut moved = settle(kept, shifts, 0, &text);
+    let mut moved = settle(kept, shifts, 0, start, &text);
     let renumbered = renumber_around(&text, start, &mut moved);
     Some(Indented {
         text: renumbered,
@@ -3594,8 +3611,9 @@ mod tests {
             listed(source, 0, source.len(), ListEdit::Bullet, '-').expect("付けられる");
         assert_eq!(region, 0..source.len());
         assert_eq!(text, "- あああ\n- いいい\n- ううう\n");
-        // 選んだところは選ばれたまま——続けて`Tab`で入れ子にできる。
-        assert_eq!(chosen, ("- ".len(), text.len()));
+        // **選んだところは選ばれたまま、足した印も内側**（書き手の報告 2026-09-11）。
+        // 続けて`Tab`を押せばそのまま入れ子になる。
+        assert_eq!(chosen, (0, text.len()));
 
         // 全部がもうその印なら、同じ鍵が外す。
         let (_, back, _) =
@@ -3664,6 +3682,27 @@ mod tests {
         // 1行目の印の2バイトだけ後ろへ——2行目の印は、この位置より後ろにある。
         assert_eq!(chosen.0, line_end + "- ".len());
         assert!(text.is_char_boundary(chosen.0), "字の切れ目に立っている");
+    }
+
+    /// E10・E3の④（書き手の報告 2026-09-11）: **選んだ範囲の頭は動かない。**
+    /// 足した印も字下げも、選ばれている側の内側に入る——先頭の行だけ印が選択から
+    /// 落ちていた。**カーソル1つだけなら動く**（E3の④で通したとおり）。
+    #[test]
+    fn what_was_added_at_the_head_stays_inside_the_selection() {
+        let source = "あああ\nいいい\n";
+
+        // 印を足す側。
+        let (_, _, chosen) =
+            listed(source, 0, source.len(), ListEdit::Bullet, '-').expect("付けられる");
+        assert_eq!(chosen.0, 0, "先頭の印も選ばれている");
+
+        // 字下げの側（同じ`settle`を通る）。
+        let deeper = shift_indent(source, 0, source.len(), true).expect("下げられる");
+        assert_eq!(deeper.chosen.0, 0, "先頭の字下げも選ばれている");
+
+        // カーソル1つだけなら、字下げの後ろへ出る。
+        let caret = shift_indent(source, 0, 0, true).expect("下げられる");
+        assert_eq!(caret.chosen, (INDENT_STEP.len(), INDENT_STEP.len()));
     }
 
     /// E10（書き手の報告 2026-09-11）: **空行を挟んだ項目も1つの連なり。**
