@@ -2378,6 +2378,11 @@ export component EditorPane inherits Rectangle {
                             close-policy: close-on-click-outside;
 
                             MenuFrame {
+                                // **左端に釘を打つ**（書き手の報告 2026-09-11：
+                                // 「元のメニューも右に動きます」）。popupの中で
+                                // 置き場所を言われていない子は**真ん中に寄る**ので、
+                                // 右に開くぶんを広げた幅の半分だけメニューが動いていた。
+                                x: 0px;
                                 width: 264px;
 
                                 VerticalLayout {
