@@ -428,8 +428,9 @@ export component AppWindow inherits Window {
     callback pane-selection-start(int, float, float, bool);
     /// E3の②: 行そのものを動かす・写す・消す。
     callback pane-line-edit(int, int);
-    /// E10: 選んだ行を箇条書きにする、やめる。0=印、1=番号。
-    callback pane-list-edit(int, int);
+    /// E10: 選んだ行を箇条書きにする、やめる。0=印、1=番号、2=数え直す。
+    /// 3つめは**どの記号か**（`-1`は読む記号のいちばん前）。
+    callback pane-list-edit(int, int, int);
     /// E3の③: Enterで字下げ・箇条書き・引用を継ぐ。2つめはShiftが押されているか。
     callback pane-enter(int, bool);
     callback pane-selection-update(int, float, float);
@@ -1774,6 +1775,9 @@ export component AppWindow inherits Window {
                     // and takes the keyboard at `init` as well as on change,
                     // because it is built when it becomes visible.
                     if pane.width > 0: EditorPane {
+                        // 書き手の決定 2026-09-11: 読む記号ぶんの行を右クリックに
+                        // 出すために、窓の言っていることをそのまま渡す。
+                        bullet-marks: root.bullet-marks;
                         // 要件 7.7: one bar, in the pane that asked for it.
                         find-open: root.find-open && pane.id == root.find-pane;
                         find-focus: root.find-focus;
@@ -1883,8 +1887,8 @@ export component AppWindow inherits Window {
                         line-edit(what) => {
                             root.pane-line-edit(pane.id, what);
                         }
-                        list-edit(what) => {
-                            root.pane-list-edit(pane.id, what);
+                        list-edit(what, mark) => {
+                            root.pane-list-edit(pane.id, what, mark);
                         }
                         enter-pressed(soft) => {
                             root.pane-enter(pane.id, soft);

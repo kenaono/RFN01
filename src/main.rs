@@ -2217,7 +2217,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // 形で、対応はここに1つだけ書く。
     let weak = window.as_weak();
     let list_live = live.clone();
-    window.on_pane_list_edit(move |pane, what| {
+    window.on_pane_list_edit(move |pane, what, mark| {
         let Some(window) = weak.upgrade() else {
             return;
         };
@@ -2226,7 +2226,7 @@ fn main() -> Result<(), slint::PlatformError> {
             1 => document::ListEdit::Ordered,
             _ => document::ListEdit::Renumber,
         };
-        edit_list(&window, &list_live, PaneId::from_index(pane), what);
+        edit_list(&window, &list_live, PaneId::from_index(pane), what, mark);
     });
 
     // E3の③: Enter。**継ぐものはRustが決める**——画面と同じ行の見方を使うため。
@@ -13593,7 +13593,7 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
 ///
 /// **編集の道は1本**（`apply_span_edit`）なので、取り消しは1回で戻り、同じ文書を
 /// 出している別の面も付いてくる。
-fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEdit) {
+fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEdit, mark: i32) {
     // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
     answer_new_tab(window, live, id, None);
     let document = live.states.document(id);
@@ -13618,10 +13618,17 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
     // **頼まれた範囲も書く。**`region`は行へ伸ばしたあとのもので、書き手が選んだ
     // ものではない——2つ並べないと「一行前から効く」の原因（頭が前の行の行末に
     // 立っていた）が読めない（書き手の報告 2026-09-11）。
-    // 書き手の決定 2026-09-11: **入れるのは、読むと決めた記号のいちばん前のもの**
-    // （案C）。1つも読まないなら入れる字が無いので、何もしない——**印として読まない
-    // 字を原稿へ入れたら、書いた行が箇条書きにならない。**
-    let bullet = bullet_marks_of(window).first();
+    // 書き手の決定 2026-09-11（案C）: **どの記号で書くかは書き手が選ぶ。**右クリックの
+    // 行は記号を名指しし（`mark`）、鍵は`-1`＝「読む記号のいちばん前」と言う。
+    //
+    // **読まないと決めた記号は入れない。**入れたら、書いたその行が箇条書きにならない
+    // ——1つも読まないなら入れる字が無いので、何も起きない。
+    let marks = bullet_marks_of(window);
+    let bullet = document::BULLET_MARKS
+        .get(usize::try_from(mark).unwrap_or(usize::MAX))
+        .copied()
+        .filter(|mark| marks.reads(*mark))
+        .or_else(|| marks.first());
     let told = format!("{what:?} asked={from}..{to} mark={bullet:?}");
     let edit =
         bullet.and_then(|bullet| document::list_edit(&source, &styles, from, to, what, bullet));

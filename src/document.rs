@@ -1179,10 +1179,11 @@ fn set_markers(
             continue;
         }
         touched = true;
-        // **`-`も`*`も`+`も同格の印である**（書き手の言葉 2026-09-11：「CommonMarkの
-        // 仕様が同格に認めているなら、同格に扱ってあげるべき」）——どれで書かれて
-        // いても「もう箇条書き」なので、同じ鍵が次に言うのは「外す」である。
-        all_wanted &= style.kind == wanted;
+        // **頼まれた記号になっていて、はじめて「もうその印である」**（書き手の決定
+        // 2026-09-11：記号ごとに画面の印が違うので、記号は選ぶもの）。`*`の行の上で
+        // 「`-`の箇条書き」を頼まれたら、**その記号にそろえる**のが頼まれたこと
+        // ——`Ctrl+Shift+7`の「そろえる→外れる」と同じ階段で、次の一押しが外す。
+        all_wanted &= style.kind == wanted && (wanted != LineKind::Bullet || wears(line, bullet));
     }
     if !touched {
         return None;
@@ -1429,6 +1430,16 @@ fn settle(kept: [usize; 2], shifts: [isize; 2], at: usize, held: usize, text: &s
 /// 2つの位置を、選び直す範囲にする（[`settle`]）。
 fn chosen_range(moved: [usize; 2]) -> (usize, usize) {
     (moved[0].min(moved[1]), moved[0].max(moved[1]))
+}
+
+/// この行が、その記号で書かれているか（[`set_markers`]）。
+///
+/// **読むほうは`list_kind`が決める。**こちらは「もうその記号になっているか」だけを
+/// 答える——頼まれた記号にそろえるのか、外すのかを分ける問いである。
+fn wears(line: &str, bullet: char) -> bool {
+    let content = quote_content(line);
+    let (_, body) = leading_indent(content);
+    body.starts_with(bullet)
 }
 
 /// 印を付け替えられる行（[`list_edit`]）。
@@ -3988,26 +3999,24 @@ mod tests {
         assert_eq!(BulletMarks::from_said("・-").as_said(), "-");
     }
 
-    /// E10の③（書き手の言葉 2026-09-11）: **`-`も`*`も`+`も同格の印。**
-    /// CommonMarkが同格に認めているので、この編集器も同じに扱う——どれで書かれて
-    /// いても「もう箇条書き」で、同じ鍵が次に言うのは「外す」である。
-    ///
-    /// **入れるときはどれか1つを選ぶしかない**ので、`Enter`が継ぐ字と同じ`-`を入れる。
+    /// E10の③（書き手の選択 2026-09-11、案C）: **頼まれた記号にそろえる→外す。**
+    /// 記号ごとに画面の印が違うので、**どの記号で書くかは選ぶもの**である。
     #[test]
-    fn every_markdown_mark_counts_as_a_bullet_already() {
-        let starred = "* 一つめ\n+ 二つめ\n";
+    fn the_asked_for_mark_is_what_the_lines_end_up_wearing() {
+        let starred = "* 一つめ\n* 二つめ\n";
 
-        // どれも印なので、外れる。
-        let (_, off, _) = listed(starred, 0, starred.len(), ListEdit::Bullet, '-').expect("外せる");
+        // `-`の箇条書きを頼まれた——`*`の行はその記号にそろう。
+        let (_, hyphened, chosen) =
+            listed(starred, 0, starred.len(), ListEdit::Bullet, '-').expect("そろえられる");
+        assert_eq!(hyphened, "- 一つめ\n- 二つめ\n");
+
+        // もう一度同じことを頼まれれば、もうそろっているので外れる。
+        let (_, off, _) =
+            listed(&hyphened, chosen.0, chosen.1, ListEdit::Bullet, '-').expect("外せる");
         assert_eq!(off, "一つめ\n二つめ\n");
 
-        // 印の無い行に入れるのは`-`。
-        let (_, on, _) = listed(&off, 0, off.len(), ListEdit::Bullet, '-').expect("付けられる");
-        assert_eq!(on, "- 一つめ\n- 二つめ\n");
-
-        // 読むほうも同格である。
+        // **読むほうは3つとも同格のまま**（`*`の行も箇条書きである）。
         assert_eq!(line_styles(starred)[0].kind, LineKind::Bullet);
-        assert_eq!(line_styles(starred)[1].kind, LineKind::Bullet);
     }
 
     /// E10（書き手の報告 2026-09-11）: **空行を挟んだ項目も1つの連なり。**

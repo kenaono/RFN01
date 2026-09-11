@@ -492,6 +492,9 @@ export component EditorPane inherits Rectangle {
     /// towards what was written earlier. **Rust turns it into rows** — a
     /// terminal has no half-lines to stop on.
     callback terminal-scrolled(float);
+    /// 書き手の決定 2026-09-11: どの記号を箇条書きの印として読むか（窓のもの）。
+    /// **この面は表示に使うだけ**——読む記号ぶんの行を右クリックに出す。
+    in property <[bool]> bullet-marks: [true, true, true];
     /// E3の④: `Tab`と`Shift+Tab`。引数はShiftが押されているか。**行の字下げか、
     /// 字を入れるかはRustが決める**——選んだものと、その行が箇条書きかどうかで
     /// 分かれるので、本文を持っているあちらでしか決められない。
@@ -507,10 +510,11 @@ export component EditorPane inherits Rectangle {
     /// 3=後へ写す、4=消す。**上下ではなく文書順の前と後**（書き手の選択
     /// 2026-09-10）——縦書きでも`Alt+↑`が「前の行と入れ替える」である。
     callback line-edit(int);
-    /// E10: 選んだ行を箇条書きにする、やめる。0=印、1=番号。**もう一度頼めば
-    /// 外れる**（書き手の選択 2026-09-10）——選んだ行がそろってその印を持って
-    /// いるかどうかを見るのは、本文を持っているRustである。
-    callback list-edit(int);
+    /// E10: 選んだ行を箇条書きにする、やめる。1つめは0=印、1=番号、2=数え直す。
+    /// **2つめはどの記号か**（`-`／`*`／`+`の並び順。`-1`は「読む記号のいちばん前」＝
+    /// 鍵が頼むときの言い方）。**もう一度頼めば外れる**（書き手の選択 2026-09-10）
+    /// ——そろっているかどうかを見るのは、本文を持っているRustである。
+    callback list-edit(int, int);
     callback preedit-changed(string);
     callback backspace-pressed();
     callback delete-pressed();
@@ -2049,11 +2053,11 @@ export component EditorPane inherits Rectangle {
                                     // `+`でも来るのと同じ）。
                                     } else if event.modifiers.control && event.modifiers.shift
                                         && (event.text == "8" || event.text == "*" || event.text == "(") {
-                                        root.list-edit(0);
+                                        root.list-edit(0, -1);
                                         accept
                                     } else if event.modifiers.control && event.modifiers.shift
                                         && (event.text == "7" || event.text == "&" || event.text == "'") {
-                                        root.list-edit(1);
+                                        root.list-edit(1, -1);
                                         accept
                                     // E1: **本文に戻ってもF3で次／前へ。**帯は
                                     // 開いていなくてよい——最後に探した語は
@@ -2425,12 +2429,39 @@ export component EditorPane inherits Rectangle {
 
                                         MenuSep { }
 
-                                        MenuRow {
-                                            title: "Bullet List";
+                                        // 書き手の選択 2026-09-11（案C）:
+                                        // **読む記号ぶんの行を出す。**記号ごとに
+                                        // 画面の印が違うので、どれで書くかは
+                                        // 書き手が選ぶ——**鍵はいちばん前の記号**
+                                        // で、その行にだけ鍵を書く。
+                                        //
+                                        // **`for`の中に`if`は書けない**ので
+                                        // 3つ並べてある（技術検証の段階2b）。
+                                        // 記号が3つしかないうちは、これが読める。
+                                        if root.bullet-marks[0]: MenuRow {
+                                            title: "Bullet List  -";
                                             shortcut: "Ctrl+Shift+8";
                                             // **頼んでから閉じる**（6.24）。
                                             activated => {
-                                                root.list-edit(0);
+                                                root.list-edit(0, 0);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if root.bullet-marks[1]: MenuRow {
+                                            title: "Bullet List  *";
+                                            shortcut: root.bullet-marks[0] ? "" : "Ctrl+Shift+8";
+                                            activated => {
+                                                root.list-edit(0, 1);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if root.bullet-marks[2]: MenuRow {
+                                            title: "Bullet List  +";
+                                            shortcut: root.bullet-marks[0] || root.bullet-marks[1]
+                                                ? ""
+                                                : "Ctrl+Shift+8";
+                                            activated => {
+                                                root.list-edit(0, 2);
                                                 context-menu.close();
                                             }
                                         }
@@ -2438,7 +2469,7 @@ export component EditorPane inherits Rectangle {
                                             title: "Numbered List";
                                             shortcut: "Ctrl+Shift+7";
                                             activated => {
-                                                root.list-edit(1);
+                                                root.list-edit(1, -1);
                                                 context-menu.close();
                                             }
                                         }
@@ -2449,7 +2480,7 @@ export component EditorPane inherits Rectangle {
                                         MenuRow {
                                             title: "Renumber";
                                             activated => {
-                                                root.list-edit(2);
+                                                root.list-edit(2, -1);
                                                 context-menu.close();
                                             }
                                         }
