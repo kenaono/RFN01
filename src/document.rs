@@ -1159,7 +1159,8 @@ fn set_markers(
         return None;
     }
     let mut text = String::with_capacity(end - start);
-    let mut moved = [from.clamp(start, end), to.clamp(start, end)];
+    let kept = [from.clamp(start, end), to.clamp(start, end)];
+    let mut shifts = [0isize; 2];
     // 字下げの桁ごとの数。**内側へ入れば積み、外側へ戻れば捨てる**——捨てたぶんは
     // もう一度入ったときに1から始まる（`renumber_around`と同じ数え方）。
     let mut counts: Vec<(usize, u64)> = Vec::new();
@@ -1191,10 +1192,9 @@ fn set_markers(
         } else {
             format!("{bullet} ")
         };
-        // **消したぶんの中にいた位置は、その頭に集まる**（`shift_positions`）。
-        // 足すときは印の後ろへ出る——カーソルは本文に付いて動く。
+        // 足した印の後ろにいた位置は、その印のぶんだけ後ろへ出る。
         let delta = head.len() as isize - marker as isize;
-        shift_positions(&mut moved, at + quote + indent + marker, delta);
+        note_shift(&kept, &mut shifts, at + quote + indent + marker, delta);
         text.push_str(&line[..quote + indent]);
         text.push_str(&head);
         text.push_str(&body[marker..]);
@@ -1203,7 +1203,7 @@ fn set_markers(
     if text == source[start..end] {
         return None;
     }
-    let chosen = (moved[0].min(moved[1]), moved[0].max(moved[1]));
+    let chosen = chosen_range(settle(kept, shifts, start, &text));
     Some((start..end, text, chosen))
 }
 
@@ -1235,7 +1235,8 @@ fn renumber_below(
         return None;
     }
     let mut text = String::new();
-    let mut moved = [from.max(start), to.max(start)];
+    let kept = [from.max(start), to.max(start)];
+    let mut shifts = [0isize; 2];
     // 深さごとの**次の番号**。内側へ入れば積み、外側へ戻れば捨てる。
     let mut counts: Vec<(u8, u64)> = Vec::new();
     let mut at = start;
@@ -1282,7 +1283,8 @@ fn renumber_below(
         let number = number.to_string();
         // 桁が変われば、その行の後ろにいる位置もずれる。
         let delta = number.len() as isize - digits as isize;
-        shift_positions(&mut moved, at - line.len() + quote + indent + digits, delta);
+        let head = at - line.len() + quote + indent + digits;
+        note_shift(&kept, &mut shifts, head, delta);
         text.push_str(&line[..quote + indent]);
         text.push_str(&number);
         text.push_str(&body[digits..]);
@@ -1290,8 +1292,48 @@ fn renumber_below(
     if text == source[start..end] {
         return None;
     }
-    let chosen = (moved[0].min(moved[1]), moved[1].max(moved[0]));
+    let chosen = chosen_range(settle(kept, shifts, start, &text));
     Some((start..end, text, chosen))
+}
+
+/// 編集の前の位置に、1行ぶんのずれを積む（[`set_markers`]・[`renumber_below`]）。
+///
+/// **比べるのは編集の前の座標で、動かすのは最後に一度**（`renumber_around`と同じ
+/// 形）。**1行ごとに動かしながら次の行の閾値と比べてはいけない**——積んだぶんだけ
+/// 位置が前へ出るので、**行末に立っていた端が次の行の印の後ろまで送られる**
+/// （書き手の報告 2026-09-11、Panic：送られた先が字の途中だとそこで落ちる）。
+fn note_shift(positions: &[usize], shifts: &mut [isize; 2], at: usize, delta: isize) {
+    let taken = delta.unsigned_abs();
+    for (position, shift) in positions.iter().zip(shifts.iter_mut()) {
+        if *position >= at {
+            *shift += delta;
+            continue;
+        }
+        // **消したぶんの中にいた位置は、その頭に集まる。**外した字下げの中に
+        // 立っていたカーソルが、残った字下げの中に立ったままになることはない。
+        if delta < 0 && *position > at - taken {
+            *shift -= (*position - (at - taken)) as isize;
+        }
+    }
+}
+
+/// 積んだずれを当てて、選び直す範囲にする（[`set_markers`]・[`renumber_below`]）。
+///
+/// **字の切れ目へ丸める。**位置はバイトで数えるので、丸めないと字の途中に立ちうる
+/// ——そこを頭にした`&str`の借り方はどこで落ちてもおかしくない（6.7）。
+fn settle(kept: [usize; 2], shifts: [isize; 2], start: usize, text: &str) -> [usize; 2] {
+    let mut moved = [start; 2];
+    for ((position, shift), out) in kept.iter().zip(shifts).zip(moved.iter_mut()) {
+        let moved = position.saturating_add_signed(shift);
+        let inside = moved.clamp(start, start + text.len()) - start;
+        *out = start + crate::floor_char_boundary(text, inside);
+    }
+    moved
+}
+
+/// 2つの位置を、選び直す範囲にする（[`settle`]）。
+fn chosen_range(moved: [usize; 2]) -> (usize, usize) {
+    (moved[0].min(moved[1]), moved[0].max(moved[1]))
 }
 
 /// 印を付け替えられる行（[`list_edit`]）。
@@ -1352,7 +1394,8 @@ pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Optio
     let (start, end) = selected_lines(source, from, to);
     let mut text = String::with_capacity(source.len());
     text.push_str(&source[..start]);
-    let mut moved = [from, to];
+    let kept = [from, to];
+    let mut shifts = [0isize; 2];
     let mut changed = false;
     let mut at = start;
     for line in source[start..end].split_inclusive('\n') {
@@ -1368,14 +1411,14 @@ pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Optio
             } else {
                 text.push_str(INDENT_STEP);
                 text.push_str(rest);
-                shift_positions(&mut moved, body, INDENT_STEP.len() as isize);
+                note_shift(&kept, &mut shifts, body, INDENT_STEP.len() as isize);
                 changed = true;
             }
         } else {
             let taken = outdent_width(rest);
             if taken > 0 {
                 changed = true;
-                shift_positions(&mut moved, body + taken, -(taken as isize));
+                note_shift(&kept, &mut shifts, body + taken, -(taken as isize));
             }
             text.push_str(&rest[taken..]);
         }
@@ -1389,10 +1432,13 @@ pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Optio
     // なると、次の番号は1からです。Shift+TABで元の箇条書きに復帰すると、番号が元の
     // 箇条書きの番号を継続します」）。深さを変えたのだから、その連なりの数え方も
     // 変わっている——**同じ一手の中で直す**ので、取り消しは1回で戻る。
+    // **動かすのは最後に一度**（[`note_shift`]）。ここまでは編集の前の座標で
+    // 数えてあるので、行末に立っていた端が次の行の字下げまで送られない。
+    let mut moved = settle(kept, shifts, 0, &text);
     let renumbered = renumber_around(&text, start, &mut moved);
     Some(Indented {
         text: renumbered,
-        chosen: (moved[0].min(moved[1]), moved[0].max(moved[1])),
+        chosen: chosen_range(moved),
     })
 }
 
@@ -1501,25 +1547,6 @@ fn outdent_width(line: &str) -> usize {
         .take(INDENT_STEP.len())
         .take_while(|character| *character == ' ')
         .count()
-}
-
-/// 位置を、`at`より後ろにあるぶんだけずらす（[`shift_indent`]）。
-///
-/// **`at`そのものは動く側**——行頭に立っていたカーソルは、足した字下げの後ろへ出る。
-/// 縮めるときは、消えた範囲の中にいた位置がその頭に集まる。
-fn shift_positions(positions: &mut [usize], at: usize, delta: isize) {
-    for position in positions {
-        if *position < at {
-            continue;
-        }
-        *position = if delta >= 0 {
-            *position + delta as usize
-        } else {
-            position
-                .saturating_sub((-delta) as usize)
-                .max(at - (-delta) as usize)
-        };
-    }
 }
 
 /// Whether a character is inside a word, for 要件 11.4's `Alt+F` and `Alt+B`.
@@ -3570,6 +3597,26 @@ mod tests {
         assert_eq!(text, "> * あああ\n* いいい\n");
     }
 
+    /// E10（書き手の報告 2026-09-11、Panic）: **行末に立っていた端が、次の行の
+    /// 印の後ろまで送られてはいけない。**
+    ///
+    /// 1行ごとに動かした位置を次の行の閾値と比べていたので、積んだぶんだけ前へ
+    /// ずれて見え、余分に送られていた。送られた先が字の途中だと、そこで
+    /// `source_line_start`が落ちる（診断ログ`panic … not a char boundary`）。
+    #[test]
+    fn a_position_at_the_end_of_a_line_is_not_carried_into_the_next() {
+        let source = "今日は\n明日は\n昨日は\n";
+        let line_end = "今日は".len();
+
+        let (_, text, chosen) =
+            listed(source, line_end, source.len(), ListEdit::Bullet, '-').expect("付けられる");
+
+        assert_eq!(text, "- 今日は\n- 明日は\n- 昨日は\n");
+        // 1行目の印の2バイトだけ後ろへ——2行目の印は、この位置より後ろにある。
+        assert_eq!(chosen.0, line_end + "- ".len());
+        assert!(text.is_char_boundary(chosen.0), "字の切れ目に立っている");
+    }
+
     /// E10の②: **この行の番号から、下を数え直す**（書き手の選択 2026-09-11）。
     /// 上の行は触らず、連なりの外で止まる。
     #[test]
@@ -3601,6 +3648,53 @@ mod tests {
         let source = "本文です\n1. 一\n";
 
         assert_eq!(listed(source, 0, 0, ListEdit::Renumber, '-'), None);
+    }
+
+    /// E10（書き手の報告 2026-09-11、Panic）: **どこを選んでも、選び直す範囲は
+    /// 字の切れ目に立つ。**
+    ///
+    /// 本物の原稿（`testdata/01_行属性.md`——見出し・箇条書き・番号・タスク・引用・
+    /// コード・入れ子が全部ある）の上を、**後ろ向きの選択も含めて**総当たりする。
+    /// 落ちた場所は`source_line_start`だったが、**原因は数え方**なので、確かめる
+    /// のはここである。
+    #[test]
+    fn every_selection_settles_on_a_character_boundary() {
+        let source = include_str!("../testdata/01_行属性.md");
+        let styles = line_styles(source);
+        let boundary = |byte: usize| crate::floor_char_boundary(source, byte.min(source.len()));
+
+        for what in [ListEdit::Bullet, ListEdit::Ordered, ListEdit::Renumber] {
+            for head in (0..source.len()).step_by(5) {
+                // 前向き・後ろ向き・カーソルだけの3つ。行末も行頭も通る。
+                for tail in [head, head + 37, head.saturating_sub(83)] {
+                    let (from, to) = (boundary(head), boundary(tail));
+                    let edit = list_edit(source, &styles, from, to, what, '-');
+                    let Some((region, text, chosen)) = edit else {
+                        continue;
+                    };
+                    let mut next = source.to_owned();
+                    next.replace_range(region, &text);
+                    assert!(
+                        next.is_char_boundary(chosen.0) && next.is_char_boundary(chosen.1),
+                        "{what:?} {from}..{to} が字の途中へ立った（{chosen:?}）"
+                    );
+                }
+            }
+        }
+    }
+
+    /// E3の④（E10で見つけた同じ傷、2026-09-11）: **`Tab`でも、行末に立っていた端が
+    /// 次の行の字下げまで送られてはいけない。**数えるのは編集の前の座標である。
+    #[test]
+    fn indenting_does_not_carry_a_line_end_into_the_next_line() {
+        let source = "今日は\n明日は\n";
+        let line_end = "今日は".len();
+
+        let deeper = shift_indent(source, line_end, source.len(), true).expect("下げられる");
+
+        assert_eq!(deeper.text, "    今日は\n    明日は\n");
+        // 1行目の字下げの4バイトだけ後ろへ——2行目の字下げは、この位置より後ろ。
+        assert_eq!(deeper.chosen.0, line_end + INDENT_STEP.len());
     }
 
     /// E3の④（書き手の報告 2026-09-10）: **番号は階層ごとに1から。**内側へ入れば

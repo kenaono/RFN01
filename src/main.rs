@@ -13577,6 +13577,20 @@ fn apply_span_edit(
         window.set_render_status(over_limit_message(text).into());
         return;
     }
+    // **落ちるくらいなら、1字手前に立つ**（書き手の報告 2026-09-11、Panic）。
+    // 選び直す範囲はバイトで数えたもので、数え違いがあれば字の途中に立つ
+    // ——そこを頭にした`&str`の借り方は落ち、書き手の手が止まる。**丸めたことは
+    // ログに出す**：黙って直すと、次に同じ数え違いをしたとき見つからない。
+    let asked = chosen;
+    let chosen = (
+        floor_char_boundary(&next, chosen.0),
+        floor_char_boundary(&next, chosen.1),
+    );
+    let rounded = if asked == chosen {
+        String::new()
+    } else {
+        format!(" asked={}..{}", asked.0, asked.1)
+    };
     let change = Change {
         at: region.start,
         removed: region.len(),
@@ -13605,7 +13619,7 @@ fn apply_span_edit(
     live.cache.borrow_mut().log_diag(
         "lines",
         &format!(
-            "pane={} {told} region={}..{} chose={}..{}",
+            "pane={} {told} region={}..{} chose={}..{}{rounded}",
             id.log_name(),
             region.start,
             region.end,
