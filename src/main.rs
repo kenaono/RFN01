@@ -283,6 +283,13 @@ const SAMPLE_MARKDOWN: &str = r#"# 縦書きライブ編集の技術検証
 /// `Tab`が入れる字下げ（E3の④）。**`document::INDENT_STEP`と同じもの**——本文へ
 /// 入れる一段と、箇条書きを入れ子にする一段が違っていたら、同じ鍵に2つの意味が付く。
 const TAB_INDENT: &str = document::INDENT_STEP;
+
+/// 箇条書きにするときに原稿へ入る印（E10）。
+///
+/// **Markdownが認める3つ**（`-`／`*`／`+`）のうちの1つ。既定が`-`なのは、この
+/// 編集器がEnterで継ぐときに写している字であり、原稿の中で目にいちばん軽いから
+/// である。**書き手が選べるようにするのはE10の③**——そこでここが設定から来る。
+const LIST_BULLET: char = '-';
 const IME_CANDIDATE_GAP: f32 = 8.0;
 const CARET_SCROLL_PADDING: f32 = 24.0;
 /// Fallback column height, used before the pane reports its own size and by
@@ -2174,6 +2181,21 @@ fn main() -> Result<(), slint::PlatformError> {
             _ => document::LineEdit::Drop,
         };
         edit_lines(&window, &line_live, PaneId::from_index(pane), what);
+    });
+
+    // E10: 選んだ行を箇条書きにする、やめる。**番号は窓と1対1**——E3の②と同じ
+    // 形で、対応はここに1つだけ書く。
+    let weak = window.as_weak();
+    let list_live = live.clone();
+    window.on_pane_list_edit(move |pane, what| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let what = match what {
+            0 => document::ListEdit::Bullet,
+            _ => document::ListEdit::Ordered,
+        };
+        edit_list(&window, &list_live, PaneId::from_index(pane), what);
     });
 
     // E3の③: Enter。**継ぐものはRustが決める**——画面と同じ行の見方を使うため。
@@ -13481,6 +13503,49 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
         chosen,
         &format!("{what:?}"),
     );
+}
+
+/// 選んだ行を箇条書きにする、やめる（E10）。
+///
+/// **行の見方は画面と同じもの**（`DocumentCounts`の`line_styles`）を渡す——E3の
+/// ③と同じ理由で、ここで決め直すと画面が見出しとして組んでいる行に印が付く。
+///
+/// **編集の道は1本**（`apply_span_edit`）なので、取り消しは1回で戻り、同じ文書を
+/// 出している別の面も付いてくる。
+fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEdit) {
+    // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
+    answer_new_tab(window, live, id, None);
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let (from, to) = {
+        let state = state.borrow();
+        match selection_source_range(&state) {
+            Some((start, end)) => (start, end),
+            None => {
+                let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
+                (caret, caret)
+            }
+        }
+    };
+    let styles = document
+        .counts
+        .borrow_mut()
+        .get(&source, window.get_ruby_marks())
+        .line_styles()
+        .to_vec();
+    let told = format!("{what:?}");
+    let edit = document::list_edit(&source, &styles, from, to, what, LIST_BULLET);
+    let Some((region, text, chosen)) = edit else {
+        // **何も起きなかったことを、ログが言う**（E1の`find`と同じ）。触れる行が
+        // 1つも無かったのか、鍵が届いていないのかを、往復せずに切り分けられる。
+        live.cache.borrow_mut().log_diag(
+            "lines",
+            &format!("pane={} {told} region={from}..{to} nothing", id.log_name()),
+        );
+        return;
+    };
+    apply_span_edit(window, live, id, &source, region, &text, chosen, &told);
 }
 
 /// 本文のひと続きを、別の字で置き換える——1回の編集として（E3）。

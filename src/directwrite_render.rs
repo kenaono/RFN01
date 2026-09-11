@@ -8366,10 +8366,6 @@ mod tests {
         assert_eq!(with_box.total_flow_size(), without.total_flow_size());
     }
 
-    /// Hit testing and caret geometry must agree in horizontal writing too, which
-    /// is the round trip that says the flow axis was mapped onto screen y
-    /// consistently in both directions.
-    #[test]
     /// E3（書き手の報告 2026-09-10）: **押された字は、字の後ろ半分でも変わらない。**
     ///
     /// `utf16_position`はカーソルの置き場所なので後ろ半分で次へ送るが、
@@ -8392,6 +8388,9 @@ mod tests {
         assert_eq!(hit.utf16_letter, 4, "押されたのは`e`そのもの");
     }
 
+    /// Hit testing and caret geometry must agree in horizontal writing too, which
+    /// is the round trip that says the flow axis was mapped onto screen y
+    /// consistently in both directions.
     #[test]
     fn horizontal_hit_testing_agrees_with_caret_geometry() {
         let paragraph = "横書きのヒットテスト検証。日本語ABC123と句読点、を含む段落です。\n\n";

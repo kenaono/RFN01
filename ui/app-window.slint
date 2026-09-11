@@ -428,6 +428,8 @@ export component AppWindow inherits Window {
     callback pane-selection-start(int, float, float, bool);
     /// E3の②: 行そのものを動かす・写す・消す。
     callback pane-line-edit(int, int);
+    /// E10: 選んだ行を箇条書きにする、やめる。0=印、1=番号。
+    callback pane-list-edit(int, int);
     /// E3の③: Enterで字下げ・箇条書き・引用を継ぐ。2つめはShiftが押されているか。
     callback pane-enter(int, bool);
     callback pane-selection-update(int, float, float);
@@ -1875,6 +1877,9 @@ export component AppWindow inherits Window {
                         }
                         line-edit(what) => {
                             root.pane-line-edit(pane.id, what);
+                        }
+                        list-edit(what) => {
+                            root.pane-list-edit(pane.id, what);
                         }
                         enter-pressed(soft) => {
                             root.pane-enter(pane.id, soft);

@@ -1087,6 +1087,141 @@ fn continued_marker(body: &str, kind: LineKind, marker: usize) -> String {
     }
 }
 
+/// 選んだ行を箇条書きにする、やめる（E10）。
+///
+/// **もう一度頼めば外れる**（書き手の選択 2026-09-10）。選んだ行がそろって
+/// 頼まれた印を持っていれば、それは「もう箇条書きである」ということで、そこで
+/// 押された同じ鍵が言っているのは「やめる」である。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListEdit {
+    /// `Ctrl+Shift+8`——印の箇条書き。印の字は書き手が選ぶ（既定は`-`）。
+    Bullet,
+    /// `Ctrl+Shift+7`——番号の箇条書き。**選んだ範囲の中で1から**数える。
+    Ordered,
+}
+
+impl ListEdit {
+    /// この頼みが付ける印を持つ行（[`list_edit`]）。
+    fn kind(self) -> LineKind {
+        match self {
+            Self::Bullet => LineKind::Bullet,
+            Self::Ordered => LineKind::Ordered,
+        }
+    }
+}
+
+/// 選んだ行に箇条書きの印を付ける、外す（E10）。
+///
+/// **行の見方は`line_styles`のもの**（`styles`で受け取る）——画面が見出しとして
+/// 組んでいる行に印を付けたら、画面と操作が別々のことを言う（E3の③と同じ）。
+///
+/// 触るのは**本文の行と、既に箇条書きの行だけ**（[`takes_marker`]）。
+///
+/// **番号は選んだ範囲の中で1から**、字下げの桁ごとに数える（入れ子は入れ子で
+/// 1から）。範囲の外にいる番号は書き換えない——打っていないところは動かさない
+/// （E3の③で書き手が選んだこと）。開始番号を変えるのは`Renumber`の仕事である。
+///
+/// **`None`は「何も変わらない」。**触れる行が1つも無ければ、呼ぶ側がそう言える。
+pub fn list_edit(
+    source: &str,
+    styles: &[LineStyle],
+    from: usize,
+    to: usize,
+    what: ListEdit,
+    bullet: char,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    let (start, end) = selected_lines(source, from, to);
+    let first = source[..start].matches('\n').count();
+    let line_style = |offset: usize| styles.get(first + offset).copied().unwrap_or_default();
+    // **外すのは、全部がもうその印のときだけ。**1行でも印の無い行が混じって
+    // いれば、書き手が頼んでいるのは「そろえる」ほうである。
+    let mut touched = false;
+    let mut all_wanted = true;
+    for (offset, line) in source[start..end].split_inclusive('\n').enumerate() {
+        let style = line_style(offset);
+        if !takes_marker(line, style) {
+            continue;
+        }
+        touched = true;
+        all_wanted &= style.kind == what.kind();
+    }
+    if !touched {
+        return None;
+    }
+    let mut text = String::with_capacity(end - start);
+    let mut moved = [from.clamp(start, end), to.clamp(start, end)];
+    // 字下げの桁ごとの数。**内側へ入れば積み、外側へ戻れば捨てる**——捨てたぶんは
+    // もう一度入ったときに1から始まる（`renumber_around`と同じ数え方）。
+    let mut counts: Vec<(usize, u64)> = Vec::new();
+    let mut at = start;
+    for (offset, line) in source[start..end].split_inclusive('\n').enumerate() {
+        let style = line_style(offset);
+        if !takes_marker(line, style) {
+            text.push_str(line);
+            at += line.len();
+            continue;
+        }
+        let quote = line.len() - quote_content(line).len();
+        let content = &line[quote..];
+        let (columns, body) = leading_indent(content);
+        let indent = content.len() - body.len();
+        let marker = marker_len(body, style.kind).unwrap_or(0) as usize;
+        while counts.last().is_some_and(|(held, _)| *held > columns) {
+            counts.pop();
+        }
+        match counts.last_mut() {
+            Some((held, count)) if *held == columns => *count += 1,
+            _ => counts.push((columns, 1)),
+        }
+        let head = if all_wanted {
+            String::new()
+        } else {
+            match what {
+                ListEdit::Bullet => format!("{bullet} "),
+                ListEdit::Ordered => {
+                    let number = counts.last().map_or(1, |(_, count)| *count);
+                    format!("{number}. ")
+                }
+            }
+        };
+        // **消したぶんの中にいた位置は、その頭に集まる**（`shift_positions`）。
+        // 足すときは印の後ろへ出る——カーソルは本文に付いて動く。
+        let delta = head.len() as isize - marker as isize;
+        shift_positions(&mut moved, at + quote + indent + marker, delta);
+        text.push_str(&line[..quote + indent]);
+        text.push_str(&head);
+        text.push_str(&body[marker..]);
+        at += line.len();
+    }
+    if text == source[start..end] {
+        return None;
+    }
+    let chosen = (moved[0].min(moved[1]), moved[0].max(moved[1]));
+    Some((start..end, text, chosen))
+}
+
+/// 印を付け替えられる行（[`list_edit`]）。
+///
+/// **本文の行と、既に箇条書きの行だけ。**見出し・区切り線・表・コードは行その
+/// ものが別の意味を持っていて、行頭に印を足せばその意味が壊れる——`# 章`は
+/// `- # 章`になれば見出しでなくなり、コードは書いてあるとおりでなくなる。
+///
+/// **空の行は触らない**（`shift_indent`が空の行を下げないのと同じ理由）。中身の
+/// 無い項目が増えるだけで、書き手はそれを消すことになる。
+///
+/// **タスクも触らない。**`- [ ]`は既に箇条書きで、印を付け替えれば箱が消える
+/// ——済んだかどうかは書き手が付けた印であって、並べ方を変えた拍子に捨てて
+/// よいものではない（E3の③の「済んだ印を写さない」と同じ根）。
+fn takes_marker(line: &str, style: LineStyle) -> bool {
+    if style.heading_level > 0 || style.kind.is_code() || style.kind.is_table() {
+        return false;
+    }
+    if matches!(style.kind, LineKind::Rule | LineKind::Task { .. }) {
+        return false;
+    }
+    !quote_content(line).trim().is_empty()
+}
+
 /// 字下げの一段——`Tab`が足し、`Shift+Tab`が外す幅（E3の④）。
 ///
 /// **空白で書く。**タブ文字は幅が読み手の道具で変わるので、原稿の中では
@@ -3266,6 +3401,79 @@ mod tests {
         // `Shift+Tab`で戻る。
         let back = shift_indent(&next, second, second, false).expect("戻せる");
         assert_eq!(back.text, source);
+    }
+
+    /// [`list_edit`]を、その文書の行の見方で呼ぶ（試験）。
+    fn listed(
+        source: &str,
+        from: usize,
+        to: usize,
+        what: ListEdit,
+        bullet: char,
+    ) -> Option<(Range<usize>, String, (usize, usize))> {
+        list_edit(source, &line_styles(source), from, to, what, bullet)
+    }
+
+    /// E10: **選んだ行が箇条書きになる。**もう一度頼めば外れる（書き手の選択
+    /// 2026-09-10）。
+    #[test]
+    fn the_chosen_lines_take_a_marker_and_give_it_back() {
+        let source = "あああ\nいいい\nううう\n";
+
+        let (region, text, chosen) =
+            listed(source, 0, source.len(), ListEdit::Bullet, '-').expect("付けられる");
+        assert_eq!(region, 0..source.len());
+        assert_eq!(text, "- あああ\n- いいい\n- ううう\n");
+        // 選んだところは選ばれたまま——続けて`Tab`で入れ子にできる。
+        assert_eq!(chosen, ("- ".len(), text.len()));
+
+        // 全部がもうその印なら、同じ鍵が外す。
+        let (_, back, _) =
+            listed(&text, chosen.0, chosen.1, ListEdit::Bullet, '-').expect("外せる");
+        assert_eq!(back, source);
+    }
+
+    /// E10: **番号は選んだ範囲の中で1から**、字下げの桁ごとに数える。範囲の外の
+    /// 番号は書き換えない——打っていないところは動かさない（E3の③と同じ）。
+    #[test]
+    fn numbers_count_from_one_inside_what_was_chosen() {
+        let source = "あああ\n    いいい\nううう\n9. そのまま\n";
+        let chosen_end = "あああ\n    いいい\nううう\n".len();
+
+        let (_, text, _) =
+            listed(source, 0, chosen_end, ListEdit::Ordered, '-').expect("付けられる");
+
+        assert_eq!(text, "1. あああ\n    1. いいい\n2. ううう\n");
+    }
+
+    /// E10: **触るのは本文の行と、既に箇条書きの行だけ。**見出し・タスク・空の行は
+    /// そのまま残り、コードだけの範囲では何も起きない。
+    #[test]
+    fn a_heading_a_task_and_an_empty_line_keep_what_they_are() {
+        let source = "# 見出し\n\n- [ ] やること\nあああ\n";
+
+        let (_, text, _) =
+            listed(source, 0, source.len(), ListEdit::Bullet, '-').expect("本文の行がある");
+        assert_eq!(text, "# 見出し\n\n- [ ] やること\n- あああ\n");
+
+        let fenced = "```\nコード\n```\n";
+        assert_eq!(
+            listed(fenced, 0, fenced.len(), ListEdit::Bullet, '-'),
+            None,
+            "コードだけなら触れる行が無い"
+        );
+    }
+
+    /// E10: **印は引用の`>`の後ろに入り、別の印は置き換わる**（`shift_indent`が
+    /// 字下げを`>`の後ろへ入れるのと同じ場所）。
+    #[test]
+    fn a_marker_goes_inside_the_quote_and_replaces_another() {
+        let source = "> あああ\n1. いいい\n";
+
+        let (_, text, _) =
+            listed(source, 0, source.len(), ListEdit::Bullet, '*').expect("付けられる");
+
+        assert_eq!(text, "> * あああ\n* いいい\n");
     }
 
     /// E3の④（書き手の報告 2026-09-10）: **番号は階層ごとに1から。**内側へ入れば
