@@ -1098,16 +1098,10 @@ pub enum ListEdit {
     Bullet,
     /// `Ctrl+Shift+7`——番号の箇条書き。**選んだ範囲の中で1から**数える。
     Ordered,
-}
-
-impl ListEdit {
-    /// この頼みが付ける印を持つ行（[`list_edit`]）。
-    fn kind(self) -> LineKind {
-        match self {
-            Self::Bullet => LineKind::Bullet,
-            Self::Ordered => LineKind::Ordered,
-        }
-    }
+    /// `Renumber`——**この行の番号から、下を数え直す**（E10の②）。印は付け替え
+    /// ない。開始番号を変えるのは、先頭を手で打ち直してこれを頼むことである
+    /// （書き手の選択 2026-09-11：数を訊く画面は作らない）。
+    Renumber,
 }
 
 /// 選んだ行に箇条書きの印を付ける、外す（E10）。
@@ -1130,6 +1124,22 @@ pub fn list_edit(
     what: ListEdit,
     bullet: char,
 ) -> Option<(Range<usize>, String, (usize, usize))> {
+    match what {
+        ListEdit::Bullet => set_markers(source, styles, from, to, LineKind::Bullet, bullet),
+        ListEdit::Ordered => set_markers(source, styles, from, to, LineKind::Ordered, bullet),
+        ListEdit::Renumber => renumber_below(source, styles, from, to),
+    }
+}
+
+/// 選んだ行の印を、頼まれた種類にそろえる／外す（[`list_edit`]）。
+fn set_markers(
+    source: &str,
+    styles: &[LineStyle],
+    from: usize,
+    to: usize,
+    wanted: LineKind,
+    bullet: char,
+) -> Option<(Range<usize>, String, (usize, usize))> {
     let (start, end) = selected_lines(source, from, to);
     let first = source[..start].matches('\n').count();
     let line_style = |offset: usize| styles.get(first + offset).copied().unwrap_or_default();
@@ -1143,7 +1153,7 @@ pub fn list_edit(
             continue;
         }
         touched = true;
-        all_wanted &= style.kind == what.kind();
+        all_wanted &= style.kind == wanted;
     }
     if !touched {
         return None;
@@ -1175,14 +1185,11 @@ pub fn list_edit(
         }
         let head = if all_wanted {
             String::new()
+        } else if wanted == LineKind::Ordered {
+            let number = counts.last().map_or(1, |(_, count)| *count);
+            format!("{number}. ")
         } else {
-            match what {
-                ListEdit::Bullet => format!("{bullet} "),
-                ListEdit::Ordered => {
-                    let number = counts.last().map_or(1, |(_, count)| *count);
-                    format!("{number}. ")
-                }
-            }
+            format!("{bullet} ")
         };
         // **消したぶんの中にいた位置は、その頭に集まる**（`shift_positions`）。
         // 足すときは印の後ろへ出る——カーソルは本文に付いて動く。
@@ -1197,6 +1204,93 @@ pub fn list_edit(
         return None;
     }
     let chosen = (moved[0].min(moved[1]), moved[0].max(moved[1]));
+    Some((start..end, text, chosen))
+}
+
+/// この行の番号から、下の項目を数え直す（E10の②）。
+///
+/// **開始番号を変えるのは、先頭を打ち直してこれを頼むこと**（書き手の選択
+/// 2026-09-11）。`5.`と打ち直した行にカーソルを置いてこれを頼めば、その下が
+/// `6. 7. …`になる——数を訊く画面は無い。
+///
+/// **数え直すのはカーソルの行から下だけ。**上は書き手が打ったところであり、
+/// 打っていないところは動かさない（E3の③と同じ）。
+///
+/// **連なりが切れるところで止まる。**箇条書きに属さない行——空行も本文の段落も
+/// ——がリストの終わりで、そこを越えて遠くのリストを数えない（要件 7.3.2）。
+///
+/// **深さごとに数える。**内側の連なりはその連なりの先頭の番号から始まり、外側へ
+/// 戻れば外側の続きになる（`renumber_around`と同じ数え方）。番号を持たない項目も
+/// 1つと数え、書き換えはしない。
+fn renumber_below(
+    source: &str,
+    styles: &[LineStyle],
+    from: usize,
+    to: usize,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    let (start, _) = selected_lines(source, from, to);
+    let first = source[..start].matches('\n').count();
+    let inside = |index: usize| styles.get(index).copied().unwrap_or_default().list_indent > 0;
+    if !inside(first) {
+        return None;
+    }
+    let mut text = String::new();
+    let mut moved = [from.max(start), to.max(start)];
+    // 深さごとの**次の番号**。内側へ入れば積み、外側へ戻れば捨てる。
+    let mut counts: Vec<(u8, u64)> = Vec::new();
+    let mut at = start;
+    let mut end = start;
+    for (offset, line) in source[start..].split_inclusive('\n').enumerate() {
+        if !inside(first + offset) {
+            break;
+        }
+        let style = styles.get(first + offset).copied().unwrap_or_default();
+        let depth = style.list_indent;
+        let quote = line.len() - quote_content(line).len();
+        let content = &line[quote..];
+        let (_, body) = leading_indent(content);
+        let indent = content.len() - body.len();
+        let digits = body.chars().take_while(char::is_ascii_digit).count();
+        let written = || body[..digits].parse::<u64>().unwrap_or(1);
+        while counts.last().is_some_and(|(held, _)| *held > depth) {
+            counts.pop();
+        }
+        let number = match counts.last_mut() {
+            Some((held, next)) if *held == depth => {
+                let number = *next;
+                *next += 1;
+                number
+            }
+            // **新しい深さは、その先頭が書いている番号から。**打ち直した数が
+            // そのまま開始番号である。
+            _ => {
+                let start = if style.kind == LineKind::Ordered {
+                    written()
+                } else {
+                    1
+                };
+                counts.push((depth, start + 1));
+                start
+            }
+        };
+        at += line.len();
+        end = at;
+        if style.kind != LineKind::Ordered {
+            text.push_str(line);
+            continue;
+        }
+        let number = number.to_string();
+        // 桁が変われば、その行の後ろにいる位置もずれる。
+        let delta = number.len() as isize - digits as isize;
+        shift_positions(&mut moved, at - line.len() + quote + indent + digits, delta);
+        text.push_str(&line[..quote + indent]);
+        text.push_str(&number);
+        text.push_str(&body[digits..]);
+    }
+    if text == source[start..end] {
+        return None;
+    }
+    let chosen = (moved[0].min(moved[1]), moved[1].max(moved[0]));
     Some((start..end, text, chosen))
 }
 
@@ -3474,6 +3568,39 @@ mod tests {
             listed(source, 0, source.len(), ListEdit::Bullet, '*').expect("付けられる");
 
         assert_eq!(text, "> * あああ\n* いいい\n");
+    }
+
+    /// E10の②: **この行の番号から、下を数え直す**（書き手の選択 2026-09-11）。
+    /// 上の行は触らず、連なりの外で止まる。
+    #[test]
+    fn renumbering_starts_at_the_number_that_was_typed() {
+        let source = "1. 一\n5. 二\n1. 三\n本文\n9. 別のリスト\n";
+        let second = "1. 一\n".len();
+
+        let (region, text, _) =
+            listed(source, second, second, ListEdit::Renumber, '-').expect("数え直せる");
+
+        assert_eq!(text, "5. 二\n6. 三\n");
+        assert_eq!(region, second.."1. 一\n5. 二\n1. 三\n".len());
+    }
+
+    /// E10の②: **深さごとに数える。**内側はその連なりの先頭の番号から始まり、
+    /// 外へ戻れば外側の続きになる（`renumber_around`と同じ数え方）。
+    #[test]
+    fn renumbering_counts_each_depth_on_its_own() {
+        let source = "1. 一\n    3. 内側\n    9. 内側の次\n5. 外へ戻る\n";
+
+        let (_, text, _) = listed(source, 0, 0, ListEdit::Renumber, '-').expect("数え直せる");
+
+        assert_eq!(text, "1. 一\n    3. 内側\n    4. 内側の次\n2. 外へ戻る\n");
+    }
+
+    /// E10の②: **箇条書きの外では何も起きない。**呼ぶ側がそう言えるように`None`。
+    #[test]
+    fn renumbering_outside_a_list_does_nothing() {
+        let source = "本文です\n1. 一\n";
+
+        assert_eq!(listed(source, 0, 0, ListEdit::Renumber, '-'), None);
     }
 
     /// E3の④（書き手の報告 2026-09-10）: **番号は階層ごとに1から。**内側へ入れば

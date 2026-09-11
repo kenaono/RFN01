@@ -2193,7 +2193,8 @@ fn main() -> Result<(), slint::PlatformError> {
         };
         let what = match what {
             0 => document::ListEdit::Bullet,
-            _ => document::ListEdit::Ordered,
+            1 => document::ListEdit::Ordered,
+            _ => document::ListEdit::Renumber,
         };
         edit_list(&window, &list_live, PaneId::from_index(pane), what);
     });

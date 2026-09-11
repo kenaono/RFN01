@@ -2435,6 +2435,17 @@ export component EditorPane inherits Rectangle {
                                                 context-menu.close();
                                             }
                                         }
+                                        // E10の②: **開始番号は打ち直して
+                                        // 揃える**（書き手の選択 2026-09-11）。
+                                        // 先頭を`5.`に直してここを押せば、下が
+                                        // `6. 7. …`になる——数を訊く画面は無い。
+                                        MenuRow {
+                                            title: "Renumber";
+                                            activated => {
+                                                root.list-edit(2);
+                                                context-menu.close();
+                                            }
+                                        }
                                     }
                                     // 要件 7.9（2026-09-08）: **書きながら語を
                                     // 足す、いちばん普通の道。**選んだものを
