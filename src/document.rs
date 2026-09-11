@@ -807,11 +807,25 @@ pub enum LineEdit {
 /// **終わりがちょうど行頭なら、その行は入らない。**選択の終わりは「そこまで」で
 /// あって、次の行を指しているのではない——3行目の頭で止めた選択が3行目ごと
 /// 動いたら、書き手は選んでいないものを動かされたことになる。
+///
+/// **頭がちょうど行末なら、その行も入らない**（書き手の報告 2026-09-11：「選択範囲
+/// より一行前から箇条書きになります」）。同じ話の裏側で、**行末に立てた頭では、
+/// その行の字は1つも選ばれていない**。行の頭のすぐ近くを押すと、当たり判定は
+/// **前の行の末尾**を返す（それが上の行を指す普通の振る舞いである）——そこを
+/// 「その行も選ばれている」と読むと、書き手が見ていない行に印が付く。
 pub fn selected_lines(source: &str, start: usize, end: usize) -> (usize, usize) {
     let (from, to) = if start <= end {
         (start, end)
     } else {
         (end, start)
+    };
+    // 改行そのものの上に頭があれば、次の行から。**バイトで見る**——`from`は字の
+    // 切れ目とは限らず、`&source[from..]`はそこで落ちる（改行はASCIIなので、
+    // バイトが合えば改行そのものである）。
+    let from = if to > from && source.as_bytes().get(from) == Some(&b'\n') {
+        from + 1
+    } else {
+        from
     };
     let (first, first_end) = line_span(source, from);
     let (last_start, last_end) = line_span(source, to);
@@ -3365,6 +3379,36 @@ mod tests {
         assert_eq!(picked, "二\n三\n");
     }
 
+    /// E3の②・E10（書き手の報告 2026-09-11）: **頭がちょうど行末なら、その行も
+    /// 入らない。**「選択範囲より一行前から箇条書きになります」——行の頭の近くを
+    /// 押すと当たり判定は前の行の末尾を返すので、そこを「その行も選ばれている」と
+    /// 読むと、書き手が見ていない行に印が付く。
+    #[test]
+    fn a_selection_that_starts_at_a_line_end_leaves_that_line_alone() {
+        let source = "一\n二\n三\n";
+        let first_end = "一".len();
+
+        // 「一」の行末から「二」の途中まで——選ばれているのは「二」だけ。
+        assert_eq!(
+            selected_lines(source, first_end, "一\n二".len()),
+            ("一\n".len(), "一\n二\n".len())
+        );
+
+        // 空の行でも同じ（押した先が空行の改行だった、というのが報告の形）。
+        let blank = "あ\n\nい\nう\n";
+        let at = "あ\n".len();
+        assert_eq!(
+            selected_lines(blank, at, blank.len()),
+            ("あ\n\n".len(), blank.len())
+        );
+
+        // **カーソル1つだけなら、その行。**行末に立っているカーソルは、その行にいる。
+        assert_eq!(
+            selected_lines(source, first_end, first_end),
+            (0, "一\n".len())
+        );
+    }
+
     /// E3の②: **終わりがちょうど行頭なら、その行は入らない。**
     #[test]
     fn a_selection_that_stops_at_a_line_head_leaves_that_line_alone() {
@@ -3672,15 +3716,17 @@ mod tests {
     /// `source_line_start`が落ちる（診断ログ`panic … not a char boundary`）。
     #[test]
     fn a_position_at_the_end_of_a_line_is_not_carried_into_the_next() {
-        let source = "今日は\n明日は\n昨日は\n";
-        let line_end = "今日は".len();
+        // **1行目を短くしておく**（`abc`）。次の行の閾値が近い位置ほど、積んだぶんで
+        // 追い越しやすい——長い行では起きないので、ここが起きる形である。
+        let source = "abc\n明日は\n昨日は\n";
+        let inside = "ab".len();
 
         let (_, text, chosen) =
-            listed(source, line_end, source.len(), ListEdit::Bullet, '-').expect("付けられる");
+            listed(source, inside, source.len(), ListEdit::Bullet, '-').expect("付けられる");
 
-        assert_eq!(text, "- 今日は\n- 明日は\n- 昨日は\n");
+        assert_eq!(text, "- abc\n- 明日は\n- 昨日は\n");
         // 1行目の印の2バイトだけ後ろへ——2行目の印は、この位置より後ろにある。
-        assert_eq!(chosen.0, line_end + "- ".len());
+        assert_eq!(chosen.0, inside + "- ".len());
         assert!(text.is_char_boundary(chosen.0), "字の切れ目に立っている");
     }
 
@@ -3815,14 +3861,14 @@ mod tests {
     /// 次の行の字下げまで送られてはいけない。**数えるのは編集の前の座標である。
     #[test]
     fn indenting_does_not_carry_a_line_end_into_the_next_line() {
-        let source = "今日は\n明日は\n";
-        let line_end = "今日は".len();
+        let source = "abc\n明日は\n";
+        let inside = "ab".len();
 
-        let deeper = shift_indent(source, line_end, source.len(), true).expect("下げられる");
+        let deeper = shift_indent(source, inside, source.len(), true).expect("下げられる");
 
-        assert_eq!(deeper.text, "    今日は\n    明日は\n");
-        // 1行目の字下げの4バイトだけ後ろへ——2行目の字下げは、この位置より後ろ。
-        assert_eq!(deeper.chosen.0, line_end + INDENT_STEP.len());
+        assert_eq!(deeper.text, "    abc\n    明日は\n");
+        // 1行目の字下げの4桁だけ後ろへ——2行目の字下げは、この位置より後ろ。
+        assert_eq!(deeper.chosen.0, inside + INDENT_STEP.len());
     }
 
     /// E3の④（書き手の報告 2026-09-10）: **番号は階層ごとに1から。**内側へ入れば

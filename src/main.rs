@@ -13506,7 +13506,7 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
         region,
         &text,
         chosen,
-        &format!("{what:?}"),
+        &format!("{what:?} asked={from}..{to}"),
     );
 }
 
@@ -13539,7 +13539,10 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
         .get(&source, window.get_ruby_marks())
         .line_styles()
         .to_vec();
-    let told = format!("{what:?}");
+    // **頼まれた範囲も書く。**`region`は行へ伸ばしたあとのもので、書き手が選んだ
+    // ものではない——2つ並べないと「一行前から効く」の原因（頭が前の行の行末に
+    // 立っていた）が読めない（書き手の報告 2026-09-11）。
+    let told = format!("{what:?} asked={from}..{to}");
     let edit = document::list_edit(&source, &styles, from, to, what, LIST_BULLET);
     let Some((region, text, chosen)) = edit else {
         // **何も起きなかったことを、ログが言う**（E1の`find`と同じ）。触れる行が
@@ -13714,7 +13717,10 @@ fn tab_in_pane(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
         at..at + removed,
         &indented.text[at..at + inserted],
         indented.chosen,
-        if back { "Outdent" } else { "Indent" },
+        &format!(
+            "{} asked={from}..{to}",
+            if back { "Outdent" } else { "Indent" }
+        ),
     );
 }
 
