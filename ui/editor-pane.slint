@@ -2377,323 +2377,329 @@ export component EditorPane inherits Rectangle {
                             width: root.bullet-rows-open ? 408px : 264px;
                             close-policy: close-on-click-outside;
 
-                            MenuFrame {
-                                // **左端に釘を打つ**（書き手の報告 2026-09-11：
-                                // 「元のメニューも右に動きます」）。popupの中で
-                                // 置き場所を言われていない子は**真ん中に寄る**ので、
-                                // 右に開くぶんを広げた幅の半分だけメニューが動いていた。
-                                x: 0px;
-                                width: 264px;
+                            // **左端に寄せる**（書き手の報告 2026-09-11：「元の
+                            // メニューも右に動きます」「メニューが透明になりました」）。
+                            // popupの中の子は**真ん中に寄る**ので、右に開くぶんを
+                            // 広げた幅の半分だけメニューが動いていた。**`x`で釘を
+                            // 打つと、その子はpopupの並べ方から外れて枠の高さを
+                            // 失う**（透明になったのはそれ）——寄せ方そのものを
+                            // 言うほうが正しい。
+                            HorizontalLayout {
+                                alignment: start;
 
-                                VerticalLayout {
-                                    padding: 6px;
-                                    spacing: 1px;
+                                MenuFrame {
+                                    width: 264px;
 
-                                    // 追加要件 2026-09-08: **押しても何も
-                                    // 起きない行は出さない。**シェルが前に
-                                    // 出ているとき、この面の下にある文書は
-                                    // 見えていない——`Cut`はその見えない文書
-                                    // から切り取り、`Ctrl+Space`はその中に印を
-                                    // 置いていた。
-                                    //
-                                    // **`if`の中の行は頼んでから閉じる**
-                                    // （技術検証 6.24・6.30）。`close`はこの木を
-                                    // 捨て、捨てられた木から`root`へ登ろうと
-                                    // した生成コードは黙って何もしない。
-                                    if !root.terminal: MenuRow {
-                                        title: "Cut";
-                                        shortcut: "Ctrl+X";
-                                        activated => {
-                                            root.copy-requested(true);
-                                            context-menu.close();
-                                        }
-                                    }
-                                    // **Copyは両方にある。**シェルにも選択は
-                                    // あり（要件 11.2）、選ばれているものを
-                                    // 写すのがこの行の意味——どちらから写すかは
-                                    // Rustが前に出ているものを見て決める。
-                                    // 綴じ目だけが違うので、そこは文言で言う。
-                                    MenuRow {
-                                        title: "Copy";
-                                        shortcut: root.terminal ? "Ctrl+Shift+C" : "Ctrl+C";
-                                        activated => {
-                                            context-menu.close();
-                                            root.copy-requested(false);
-                                        }
-                                    }
-                                    MenuRow {
-                                        title: "Paste";
-                                        shortcut: "Ctrl+V";
-                                        activated => {
-                                            context-menu.close();
-                                            // **The field pastes, and what it
-                                            // takes comes in as typing** — the
-                                            // same road every paste travels,
-                                            // shell included.
-                                            ime-input.focus();
-                                            ime-input.paste();
-                                        }
-                                    }
-                                    // E10（2026-09-11）: 選んだ行を後から
-                                    // 箇条書きにする。**もう一度押せば外れる**
-                                    // ので、行は2つで足りる（書き手の選択）。
-                                    //
-                                    // **選択が無くても出す。**カーソルの行1行が
-                                    // そのまま選ばれているものである（E3の②の
-                                    // `selected_lines`と同じ見方）——押せない行を
-                                    // 出さないのと、機能の入口を隠すのは違う。
-                                    if !root.terminal: VerticalLayout {
+                                    VerticalLayout {
+                                        padding: 6px;
                                         spacing: 1px;
 
-                                        MenuSep { }
-
-                                        // 書き手の選択 2026-09-11（案C）:
-                                        // **読む記号ぶんの行を出す。**記号ごとに
-                                        // 画面の印が違うので、どれで書くかは
-                                        // 書き手が選ぶ——**鍵はいちばん前の記号**
-                                        // で、その行にだけ鍵を書く。
+                                        // 追加要件 2026-09-08: **押しても何も
+                                        // 起きない行は出さない。**シェルが前に
+                                        // 出ているとき、この面の下にある文書は
+                                        // 見えていない——`Cut`はその見えない文書
+                                        // から切り取り、`Ctrl+Space`はその中に印を
+                                        // 置いていた。
                                         //
-                                        // **`for`の中に`if`は書けない**ので
-                                        // 3つ並べてある（技術検証の段階2b）。
-                                        // 記号が3つしかないうちは、これが読める。
-                                        // 書き手の求め 2026-09-11: **右に開く階層に
-                                        // する。**記号ぶんの行を並べると右クリックが
-                                        // 長い——**この行だけが出ていて、乗せれば
-                                        // 右に開く**（Windowsのメニューの普通）。
-                                        // 読む記号が1つも無ければ、開いても空である
-                                        // （書き手の言葉：「何も選ばれていなければ、空」）。
+                                        // **`if`の中の行は頼んでから閉じる**
+                                        // （技術検証 6.24・6.30）。`close`はこの木を
+                                        // 捨て、捨てられた木から`root`へ登ろうと
+                                        // した生成コードは黙って何もしない。
+                                        if !root.terminal: MenuRow {
+                                            title: "Cut";
+                                            shortcut: "Ctrl+X";
+                                            activated => {
+                                                root.copy-requested(true);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        // **Copyは両方にある。**シェルにも選択は
+                                        // あり（要件 11.2）、選ばれているものを
+                                        // 写すのがこの行の意味——どちらから写すかは
+                                        // Rustが前に出ているものを見て決める。
+                                        // 綴じ目だけが違うので、そこは文言で言う。
+                                        MenuRow {
+                                            title: "Copy";
+                                            shortcut: root.terminal ? "Ctrl+Shift+C" : "Ctrl+C";
+                                            activated => {
+                                                context-menu.close();
+                                                root.copy-requested(false);
+                                            }
+                                        }
+                                        MenuRow {
+                                            title: "Paste";
+                                            shortcut: "Ctrl+V";
+                                            activated => {
+                                                context-menu.close();
+                                                // **The field pastes, and what it
+                                                // takes comes in as typing** — the
+                                                // same road every paste travels,
+                                                // shell included.
+                                                ime-input.focus();
+                                                ime-input.paste();
+                                            }
+                                        }
+                                        // E10（2026-09-11）: 選んだ行を後から
+                                        // 箇条書きにする。**もう一度押せば外れる**
+                                        // ので、行は2つで足りる（書き手の選択）。
                                         //
-                                        // **入れ子のpopupにはしない。**popupを閉じると
-                                        // その木ごと消え、消えた木から`root`へ登った
-                                        // 生成コードは黙って何もしない（6.24・6.30）
-                                        // ——同じ木の中で右へ出せば、その罠の外にいる。
-                                        Rectangle {
-                                            height: 28px;
+                                        // **選択が無くても出す。**カーソルの行1行が
+                                        // そのまま選ばれているものである（E3の②の
+                                        // `selected_lines`と同じ見方）——押せない行を
+                                        // 出さないのと、機能の入口を隠すのは違う。
+                                        if !root.terminal: VerticalLayout {
+                                            spacing: 1px;
 
-                                            bullet-row := MenuRow {
-                                                width: parent.width;
-                                                height: parent.height;
-                                                title: "Bullet List";
-                                                shortcut: "▸";
-                                                // **乗せれば開く。**押しても開く
-                                                // ——押した書き手を待たせない。
+                                            MenuSep { }
+
+                                            // 書き手の選択 2026-09-11（案C）:
+                                            // **読む記号ぶんの行を出す。**記号ごとに
+                                            // 画面の印が違うので、どれで書くかは
+                                            // 書き手が選ぶ——**鍵はいちばん前の記号**
+                                            // で、その行にだけ鍵を書く。
+                                            //
+                                            // **`for`の中に`if`は書けない**ので
+                                            // 3つ並べてある（技術検証の段階2b）。
+                                            // 記号が3つしかないうちは、これが読める。
+                                            // 書き手の求め 2026-09-11: **右に開く階層に
+                                            // する。**記号ぶんの行を並べると右クリックが
+                                            // 長い——**この行だけが出ていて、乗せれば
+                                            // 右に開く**（Windowsのメニューの普通）。
+                                            // 読む記号が1つも無ければ、開いても空である
+                                            // （書き手の言葉：「何も選ばれていなければ、空」）。
+                                            //
+                                            // **入れ子のpopupにはしない。**popupを閉じると
+                                            // その木ごと消え、消えた木から`root`へ登った
+                                            // 生成コードは黙って何もしない（6.24・6.30）
+                                            // ——同じ木の中で右へ出せば、その罠の外にいる。
+                                            Rectangle {
+                                                height: 28px;
+
+                                                bullet-row := MenuRow {
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    title: "Bullet List";
+                                                    shortcut: "▸";
+                                                    // **乗せれば開く。**押しても開く
+                                                    // ——押した書き手を待たせない。
+                                                    changed hovered => {
+                                                        if (self.hovered) {
+                                                            root.bullet-rows-open = true;
+                                                        }
+                                                    }
+                                                    activated => {
+                                                        root.bullet-rows-open
+                                                            = !root.bullet-rows-open;
+                                                    }
+                                                }
+
+                                                if root.bullet-rows-open: MenuFrame {
+                                                    x: parent.width - 8px;
+                                                    y: -6px;
+                                                    width: 136px;
+                                                    height: bullet-rows.preferred-height;
+
+                                                    bullet-rows := VerticalLayout {
+                                                        padding: 6px;
+                                                        spacing: 1px;
+
+                                                        if root.bullet-marks[0]: MenuRow {
+                                                            title: "-";
+                                                            shortcut: "Ctrl+Shift+8";
+                                                            // **頼んでから閉じる**（6.24）。
+                                                            activated => {
+                                                                root.list-edit(0, 0);
+                                                                context-menu.close();
+                                                            }
+                                                        }
+                                                        if root.bullet-marks[1]: MenuRow {
+                                                            title: "*";
+                                                            shortcut: root.bullet-marks[0]
+                                                                ? ""
+                                                                : "Ctrl+Shift+8";
+                                                            activated => {
+                                                                root.list-edit(0, 1);
+                                                                context-menu.close();
+                                                            }
+                                                        }
+                                                        if root.bullet-marks[2]: MenuRow {
+                                                            title: "+";
+                                                            shortcut: root.bullet-marks[0]
+                                                                || root.bullet-marks[1]
+                                                                ? ""
+                                                                : "Ctrl+Shift+8";
+                                                            activated => {
+                                                                root.list-edit(0, 2);
+                                                                context-menu.close();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            MenuRow {
+                                                title: "Numbered List";
+                                                shortcut: "Ctrl+Shift+7";
+                                                // **別の行へ移ったら畳む**（Windowsの
+                                                // メニューと同じ）。
                                                 changed hovered => {
                                                     if (self.hovered) {
-                                                        root.bullet-rows-open = true;
+                                                        root.bullet-rows-open = false;
                                                     }
                                                 }
                                                 activated => {
-                                                    root.bullet-rows-open
-                                                        = !root.bullet-rows-open;
+                                                    root.list-edit(1, -1);
+                                                    context-menu.close();
                                                 }
                                             }
-
-                                            if root.bullet-rows-open: MenuFrame {
-                                                x: parent.width - 8px;
-                                                y: -6px;
-                                                width: 136px;
-                                                height: bullet-rows.preferred-height;
-
-                                                bullet-rows := VerticalLayout {
-                                                    padding: 6px;
-                                                    spacing: 1px;
-
-                                                    if root.bullet-marks[0]: MenuRow {
-                                                        title: "-";
-                                                        shortcut: "Ctrl+Shift+8";
-                                                        // **頼んでから閉じる**（6.24）。
-                                                        activated => {
-                                                            root.list-edit(0, 0);
-                                                            context-menu.close();
-                                                        }
-                                                    }
-                                                    if root.bullet-marks[1]: MenuRow {
-                                                        title: "*";
-                                                        shortcut: root.bullet-marks[0]
-                                                            ? ""
-                                                            : "Ctrl+Shift+8";
-                                                        activated => {
-                                                            root.list-edit(0, 1);
-                                                            context-menu.close();
-                                                        }
-                                                    }
-                                                    if root.bullet-marks[2]: MenuRow {
-                                                        title: "+";
-                                                        shortcut: root.bullet-marks[0]
-                                                            || root.bullet-marks[1]
-                                                            ? ""
-                                                            : "Ctrl+Shift+8";
-                                                        activated => {
-                                                            root.list-edit(0, 2);
-                                                            context-menu.close();
-                                                        }
+                                            // E10の②: **開始番号は打ち直して
+                                            // 揃える**（書き手の選択 2026-09-11）。
+                                            // 先頭を`5.`に直してここを押せば、下が
+                                            // `6. 7. …`になる——数を訊く画面は無い。
+                                            MenuRow {
+                                                title: "Renumber";
+                                                changed hovered => {
+                                                    if (self.hovered) {
+                                                        root.bullet-rows-open = false;
                                                     }
                                                 }
-                                            }
-                                        }
-                                        MenuRow {
-                                            title: "Numbered List";
-                                            shortcut: "Ctrl+Shift+7";
-                                            // **別の行へ移ったら畳む**（Windowsの
-                                            // メニューと同じ）。
-                                            changed hovered => {
-                                                if (self.hovered) {
-                                                    root.bullet-rows-open = false;
+                                                activated => {
+                                                    root.list-edit(2, -1);
+                                                    context-menu.close();
                                                 }
                                             }
-                                            activated => {
-                                                root.list-edit(1, -1);
-                                                context-menu.close();
-                                            }
                                         }
-                                        // E10の②: **開始番号は打ち直して
-                                        // 揃える**（書き手の選択 2026-09-11）。
-                                        // 先頭を`5.`に直してここを押せば、下が
-                                        // `6. 7. …`になる——数を訊く画面は無い。
-                                        MenuRow {
-                                            title: "Renumber";
-                                            changed hovered => {
-                                                if (self.hovered) {
-                                                    root.bullet-rows-open = false;
+                                        // 要件 7.9（2026-09-08）: **書きながら語を
+                                        // 足す、いちばん普通の道。**選んだものを
+                                        // そのままセットへ入れる——一覧を開いて
+                                        // 打ち込むのは、その次である（要件 3）。
+                                        //
+                                        // **選択があるときだけ**出す。セットが1冊
+                                        // なら行は1つ、複数なら名前が並ぶ。
+                                        if !root.terminal && root.has-selection
+                                            && root.word-sets.length > 0: VerticalLayout {
+                                            spacing: 1px;
+
+                                            MenuSep { }
+
+                                            for name[index] in root.word-sets: MenuRow {
+                                                title: "単語帳へ追加：" + name;
+                                                // **頼んでから閉じる**（6.24）。
+                                                activated => {
+                                                    root.word-add-requested(index);
+                                                    context-menu.close();
                                                 }
                                             }
-                                            activated => {
-                                                root.list-edit(2, -1);
-                                                context-menu.close();
+                                        }
+
+                                        if !root.terminal: VerticalLayout {
+                                            spacing: 1px;
+
+                                            MenuSep { }
+
+                                            MenuRow {
+                                                title: "Start Selection";
+                                                shortcut: "Ctrl+Space";
+                                                activated => {
+                                                    root.mark-toggled(false);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                            MenuRow {
+                                                title: "Start Rectangle Selection";
+                                                shortcut: "Ctrl+Shift+Space";
+                                                activated => {
+                                                    root.mark-toggled(true);
+                                                    context-menu.close();
+                                                }
                                             }
                                         }
-                                    }
-                                    // 要件 7.9（2026-09-08）: **書きながら語を
-                                    // 足す、いちばん普通の道。**選んだものを
-                                    // そのままセットへ入れる——一覧を開いて
-                                    // 打ち込むのは、その次である（要件 3）。
-                                    //
-                                    // **選択があるときだけ**出す。セットが1冊
-                                    // なら行は1つ、複数なら名前が並ぶ。
-                                    if !root.terminal && root.has-selection
-                                        && root.word-sets.length > 0: VerticalLayout {
-                                        spacing: 1px;
-
                                         MenuSep { }
-
-                                        for name[index] in root.word-sets: MenuRow {
-                                            title: "単語帳へ追加：" + name;
-                                            // **頼んでから閉じる**（6.24）。
+                                        MenuRow {
+                                            title: root.terminal ? "Editor Below" : "Terminal Below";
+                                            shortcut: "Ctrl+`";
                                             activated => {
-                                                root.word-add-requested(index);
                                                 context-menu.close();
+                                                root.below-toggled();
                                             }
                                         }
-                                    }
-
-                                    if !root.terminal: VerticalLayout {
-                                        spacing: 1px;
-
+                                        MenuRow {
+                                            title: "Quick Draft…";
+                                            activated => {
+                                                context-menu.close();
+                                                root.quick-draft-requested();
+                                            }
+                                        }
                                         MenuSep { }
-
                                         MenuRow {
-                                            title: "Start Selection";
-                                            shortcut: "Ctrl+Space";
+                                            title: "Back";
+                                            shortcut: "Alt+←";
                                             activated => {
-                                                root.mark-toggled(false);
                                                 context-menu.close();
+                                                root.navigate-requested(false);
                                             }
                                         }
                                         MenuRow {
-                                            title: "Start Rectangle Selection";
-                                            shortcut: "Ctrl+Shift+Space";
+                                            title: "Forward";
+                                            shortcut: "Alt+→";
                                             activated => {
-                                                root.mark-toggled(true);
                                                 context-menu.close();
+                                                root.navigate-requested(true);
                                             }
                                         }
-                                    }
-                                    MenuSep { }
-                                    MenuRow {
-                                        title: root.terminal ? "Editor Below" : "Terminal Below";
-                                        shortcut: "Ctrl+`";
-                                        activated => {
-                                            context-menu.close();
-                                            root.below-toggled();
-                                        }
-                                    }
-                                    MenuRow {
-                                        title: "Quick Draft…";
-                                        activated => {
-                                            context-menu.close();
-                                            root.quick-draft-requested();
-                                        }
-                                    }
-                                    MenuSep { }
-                                    MenuRow {
-                                        title: "Back";
-                                        shortcut: "Alt+←";
-                                        activated => {
-                                            context-menu.close();
-                                            root.navigate-requested(false);
-                                        }
-                                    }
-                                    MenuRow {
-                                        title: "Forward";
-                                        shortcut: "Alt+→";
-                                        activated => {
-                                            context-menu.close();
-                                            root.navigate-requested(true);
-                                        }
-                                    }
-                                    MenuSep { }
-                                    MenuRow {
-                                        title: "Split Right";
-                                        activated => {
-                                            context-menu.close();
-                                            root.split-requested(true);
-                                        }
-                                    }
-                                    MenuRow {
-                                        title: "Split Down";
-                                        activated => {
-                                            context-menu.close();
-                                            root.split-requested(false);
-                                        }
-                                    }
-                                    MenuRow {
-                                        title: "Close Other Panes";
-                                        activated => {
-                                            context-menu.close();
-                                            root.close-others-requested();
-                                        }
-                                    }
-                                    // 追加要件 2026-09-08: **倍率は文書のもの。**
-                                    // シェルの升目は`TerminalLook::default()`が
-                                    // 決めていて、要件 9 の倍率は通っていない
-                                    // ——3行とも押せて何も変わらなかった。
-                                    if !root.terminal: VerticalLayout {
-                                        spacing: 1px;
-
                                         MenuSep { }
+                                        MenuRow {
+                                            title: "Split Right";
+                                            activated => {
+                                                context-menu.close();
+                                                root.split-requested(true);
+                                            }
+                                        }
+                                        MenuRow {
+                                            title: "Split Down";
+                                            activated => {
+                                                context-menu.close();
+                                                root.split-requested(false);
+                                            }
+                                        }
+                                        MenuRow {
+                                            title: "Close Other Panes";
+                                            activated => {
+                                                context-menu.close();
+                                                root.close-others-requested();
+                                            }
+                                        }
+                                        // 追加要件 2026-09-08: **倍率は文書のもの。**
+                                        // シェルの升目は`TerminalLook::default()`が
+                                        // 決めていて、要件 9 の倍率は通っていない
+                                        // ——3行とも押せて何も変わらなかった。
+                                        if !root.terminal: VerticalLayout {
+                                            spacing: 1px;
 
-                                        MenuRow {
-                                            title: "Zoom In";
-                                            shortcut: "Ctrl+=";
-                                            activated => {
-                                                root.zoom-stepped(1);
-                                                context-menu.close();
+                                            MenuSep { }
+
+                                            MenuRow {
+                                                title: "Zoom In";
+                                                shortcut: "Ctrl+=";
+                                                activated => {
+                                                    root.zoom-stepped(1);
+                                                    context-menu.close();
+                                                }
                                             }
-                                        }
-                                        MenuRow {
-                                            title: "Zoom Out";
-                                            shortcut: "Ctrl+-";
-                                            activated => {
-                                                root.zoom-stepped(-1);
-                                                context-menu.close();
+                                            MenuRow {
+                                                title: "Zoom Out";
+                                                shortcut: "Ctrl+-";
+                                                activated => {
+                                                    root.zoom-stepped(-1);
+                                                    context-menu.close();
+                                                }
                                             }
-                                        }
-                                        MenuRow {
-                                            title: "Reset Zoom";
-                                            shortcut: "Ctrl+0";
-                                            activated => {
-                                                root.zoom-reset-requested();
-                                                context-menu.close();
+                                            MenuRow {
+                                                title: "Reset Zoom";
+                                                shortcut: "Ctrl+0";
+                                                activated => {
+                                                    root.zoom-reset-requested();
+                                                    context-menu.close();
+                                                }
                                             }
                                         }
                                     }
