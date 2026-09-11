@@ -3785,6 +3785,40 @@ fn open_documents(live: &Live) -> Vec<Rc<OpenDocument>> {
     open
 }
 
+/// 外で変わったまま片付いていない文書について、どうするかを訊く（要件 8.3、
+/// 書き手のレビュー 2026-09-11、S2）。
+///
+/// **保存のときに出る問いと同じもの**（`SaveConflict`）——訊くことも、答えも同じで
+/// あって、違うのは**書き手が気づいたときに自分から開ける**ことだけである。
+fn ask_outside_change(window: &AppWindow, live: &Live) {
+    let document = live.active(window);
+    if !document.outside.get() {
+        return;
+    }
+    let (path, form, title) = {
+        let file = document.file.borrow();
+        let Some(path) = file.path().map(Path::to_path_buf) else {
+            return;
+        };
+        (path, file.form(), file.title())
+    };
+    ask_question(
+        window,
+        live,
+        Question::SaveConflict { path, form },
+        format!(
+            "「{title}」は別のアプリで変更されています。\n\n             読み込むと、保存していない変更は失われます。"
+        ),
+        &[
+            "作業中の内容で上書き",
+            "外部の変更を読み込む",
+            "別名で保存",
+            "キャンセル",
+        ],
+        1,
+    );
+}
+
 /// そのパスを開いている文書（要件 7.6、書き手のレビュー 2026-09-11）。
 ///
 /// **同じファイルは1つの文書**であるはずなので、これが2つ見つかることはない。
@@ -6227,6 +6261,9 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                     // neither is one.
                     title: tab_title(tab).into(),
                     edited: tab.terminal.is_none() && !tab.empty && tab.document.text.edited(),
+                    // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **外で変わった
+                    // まま片付いていない。**端末のタブは文書を持たないので出ない。
+                    outside: tab.terminal.is_none() && !tab.empty && tab.document.outside.get(),
                     // 追加要件 2026-09-06: only a tab standing for a file has a
                     // name on disk to change. 無題1 reads like a name on screen,
                     // and nothing is filed under it.
@@ -12618,6 +12655,8 @@ fn publish_encoding(window: &AppWindow, document: &OpenDocument) {
         newline_name(form.newline)
     );
     window.set_count_encoding(told.into());
+    // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **片付くまで消えない印。**
+    window.set_count_outside(document.outside.get());
     // E2の②: **一覧の何番目に印を付けるか**と、**開き直せるか**。
     // 開き直しはファイルを読み直すことなので、まだファイルの無い文書には
     // その道が無い——一覧はそう言う（要件 7.7）。

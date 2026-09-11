@@ -169,6 +169,15 @@ impl SharedText {
 pub struct OpenDocument {
     pub file: RefCell<DocumentFile>,
     pub text: SharedText,
+    /// **外で変わったまま、まだ片付いていない**（要件 8.3、書き手のレビュー S2）。
+    ///
+    /// **消えない印**である——知らせは`render_status`にも出るが、あちらは書き手が
+    /// 次へ動けば畳む（6.6）。外部変更は**片付くまで残っていなければならない**：
+    /// 長く書き続けているあいだに外の原稿も変わったことを、保存のときに初めて
+    /// 知るのでは、そこでどちらかを捨てることになる。
+    ///
+    /// 下りるのは**読み直したときと、書いたとき**だけ。
+    pub outside: Cell<bool>,
     /// What has been done to this text and can be taken back (要件 7.1). It
     /// belongs to the document because 要件 7.6 says it does: one file, one
     /// history, however many panes are showing it.
@@ -189,6 +198,7 @@ impl OpenDocument {
         Rc::new(Self {
             file: RefCell::new(file),
             text: SharedText::new(text, window),
+            outside: Cell::new(false),
             history: RefCell::new(History::default()),
             counts: RefCell::new(CountsSlot::default()),
         })

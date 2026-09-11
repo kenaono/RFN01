@@ -355,6 +355,8 @@ export component Field inherits Rectangle {
 export component Tab inherits Rectangle {
     in property <string> title;
     in property <bool> edited;
+    /// 要件 8.3（書き手のレビュー 2026-09-11、S2）: 外で変わったまま片付いていない。
+    in property <bool> outside;
     in property <bool> current;
     /// This is the tab being written in: the one in front of the pane that has
     /// the keyboard (要件 6.3).
@@ -625,6 +627,17 @@ export component Tab inherits Rectangle {
             font-italic: root.provisional;
             font-size: 13px;
             overflow: elide;
+            vertical-alignment: center;
+        }
+
+        // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **外で変わったことは、
+        // 片付くまで見えている。**未保存の丸の前に置く——書き手が書いたことより、
+        // **外で起きたこと**のほうが先に目に入るべきである（気づくのが遅れると、
+        // 保存のときにどちらかを捨てることになる）。
+        if root.outside: Text {
+            text: "⚠";
+            color: Tok.alert;
+            font-size: 11px;
             vertical-alignment: center;
         }
 

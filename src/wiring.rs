@@ -287,6 +287,17 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
         }
     });
 
+    // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **押せる印。**外で変わったことは
+    // 片付くまで画面に出ていて、押せばどうするかを訊く——保存のときに初めて
+    // 気づくのでは、そこでどちらかを捨てることになる。
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_outside_asked(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::ask_outside_change(&window, &held);
+        }
+    });
+
     // 要件 7.9: **書きながら語を足す、いちばん普通の道。**
     let weak = window.as_weak();
     let held = live.clone();

@@ -393,25 +393,49 @@ pub fn report_write_results(
 /// edited one is only reported: either side could be the one worth keeping, and
 /// choosing without being told is how work disappears.
 pub fn check_external_change(window: &AppWindow, live: &Live) {
-    let document = live.active(window);
-    let file = &document.file;
-    if file.borrow().external_change() != ExternalChange::Modified {
-        return;
+    // **開いている文書を全部見る**（書き手のレビュー 2026-09-11、S2）。前にある
+    // 文書だけを見ていると、**後ろのタブで起きた変更は、そのタブへ移るまで誰も
+    // 気づかない**——戻ったときには、書き手はもうそのファイルのことを忘れている。
+    let active = live.active(window);
+    // **何も起きていなければ、画面に触らない。**この見回りは2秒ごとに来るので、
+    // 毎回タブを組み直すと、何事もない時間のほうが高くつく。
+    let mut noticed = false;
+    for document in crate::open_documents(live) {
+        let file = &document.file;
+        if file.borrow().external_change() != ExternalChange::Modified {
+            continue;
+        }
+        let Some(stamp) = file.borrow().current_stamp() else {
+            continue;
+        };
+        if !file.borrow_mut().take_report(stamp) {
+            continue;
+        }
+        noticed = true;
+        if !document.text.edited() {
+            // **失うものが無ければ読み直す**（要件 8.3）。書き手が手でするのと
+            // 同じことで、前にある文書でなくても同じである。
+            reload_document(window, live, &document);
+            continue;
+        }
+        // **印は片付くまで消えない**（S2）。`render_status`は書き手が次へ動けば
+        // 畳むので、そちらは「いま気づいた」ことだけを言う。
+        document.outside.set(true);
+        if Rc::ptr_eq(&document, &active) {
+            window.set_render_status("別のアプリがこのファイルを変更しました".into());
+        }
+        live.cache.borrow_mut().log_diag(
+            "external",
+            &format!(
+                "modified edited=1 active={} action=mark",
+                u8::from(Rc::ptr_eq(&document, &active))
+            ),
+        );
     }
-    let Some(stamp) = file.borrow().current_stamp() else {
-        return;
-    };
-    if !file.borrow_mut().take_report(stamp) {
-        return;
+    if noticed {
+        crate::publish_tabs(window, live);
+        crate::publish_active_encoding(window, live);
     }
-    if document.text.edited() {
-        window.set_render_status("別のアプリがこのファイルを変更しました".into());
-        live.cache
-            .borrow_mut()
-            .log_diag("external", "modified edited=1 action=notify");
-        return;
-    }
-    reload_from_file(window, live);
 }
 
 /// Take the file as it now is, in place of what the editor holds (要件 8.3).
@@ -421,14 +445,23 @@ pub fn check_external_change(window: &AppWindow, live: &Live) {
 /// held exactly what is being given up, so it goes too — left behind, it would
 /// bring the discarded text back at the next start.
 pub fn reload_from_file(window: &AppWindow, live: &Live) {
-    let document = live.active(window);
+    reload_document(window, live, &live.active(window));
+}
+
+/// 同じことを、**どの文書かを言われて**する（書き手のレビュー 2026-09-11、S2）。
+///
+/// **前にある文書とは限らない**——後ろのタブで起きた外部変更も、失うものが無ければ
+/// そこで読み直す（要件 8.3）。
+pub fn reload_document(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) {
     let reloaded = document.file.borrow_mut().reload(MAX_DOCUMENT_CHARACTERS);
     match reloaded {
         Some(Ok(text)) => {
             let bytes = text.len();
-            replace_document(window, &live.states, &live.cache, &document, text);
+            replace_document(window, &live.states, &live.cache, document, text);
             // Reloaded, not edited: the text and the file agree by definition.
             document.text.mark_saved();
+            // **片付いたので、印は下りる**（書き手のレビュー 2026-09-11、S2）。
+            document.outside.set(false);
             discard_work_copy(live, &work_identity(&document.file.borrow()));
             publish_tabs(window, live);
             window.set_render_status("外部の変更を読み込みました".into());
@@ -788,6 +821,9 @@ pub fn write_document_in(
     match outcome {
         Ok(()) => {
             document.text.mark_saved();
+            // **書けば片付く**（書き手のレビュー 2026-09-11、S2）。いま書いたものが
+            // そのファイルの中身で、外の版はもう無い。
+            document.outside.set(false);
             discard_work_copy(live, &previous);
             discard_work_copy(live, &work_identity(&file.borrow()));
             // The name in the strip changes with 名前を付けて保存, and the

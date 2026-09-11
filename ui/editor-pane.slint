@@ -31,6 +31,10 @@ export struct PreviewTile {
 export struct TabInfo {
     title: string,
     edited: bool,
+    /// 要件 8.3（書き手のレビュー 2026-09-11、S2）: **外で変わったまま、まだ
+    /// 片付いていない。**未保存の丸とは別の印である——片方は書き手が書いたこと、
+    /// もう片方は**外で起きたこと**を言う。読み込むか上書きするまで消えない。
+    outside: bool,
     // 追加要件 2026-09-06: whether this tab stands for a file on disk, and so
     // has a name the writer can change by holding the tab down. **Told rather
     // than guessed from the title**: 無題1 is a name like any other on screen,
@@ -879,6 +883,7 @@ export component EditorPane inherits Rectangle {
                     for tab[index] in root.tabs: Tab {
                         title: tab.title;
                         edited: tab.edited;
+                        outside: tab.outside;
                         provisional: tab.provisional;
                         current: index == root.active-tab;
                         // 要件 6.3: the tab being written in. **Both halves** —
@@ -1123,7 +1128,7 @@ export component EditorPane inherits Rectangle {
                             // The unsaved dot the tab itself carries, in the
                             // column the shortcuts use. There are no shortcuts
                             // in this menu to be confused with.
-                            shortcut: tab.edited ? "●" : "";
+                            shortcut: (tab.outside ? "⚠" : "") + (tab.edited ? "●" : "");
                             checked: index == root.active-tab;
                             // **Chosen first, closed second**, which is the
                             // opposite of every row in the pane's menu below.

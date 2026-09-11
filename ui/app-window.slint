@@ -341,6 +341,12 @@ export component AppWindow inherits Window {
     in property <int> count-encoding-id;
     /// 開き直せるか＝この文書にファイルがあるか（要件 E2 の②）。
     in property <bool> count-encoding-reopenable;
+    /// 要件 8.3（書き手のレビュー 2026-09-11、S2）: **前にある文書が、外で変わった
+    /// まま片付いていない。**`render-status`の知らせは書き手が次へ動けば畳むが、
+    /// これは**片付くまで消えない**——保存のときに初めて気づくのでは、そこで
+    /// どちらかを捨てることになる。
+    in property <bool> count-outside;
+    callback outside-asked();
     /// この文字コードで読み直す（要件 E2 の②）。
     callback reopen-encoding(int);
 
@@ -2337,6 +2343,29 @@ export component AppWindow inherits Window {
                 // **押せば選べる**（E2の②、2026-09-10）——単語モードと倍率が
                 // 同じ帯で押せるのと同じ形で、ここも「いま書いているものに
                 // ついての設定」である。
+                // 要件 8.3（S2）: **押せる印**。押すと、どうするかを訊く。
+                if root.count-outside: Rectangle {
+                    width: outside-text.preferred-width + 12px;
+                    horizontal-stretch: 0;
+                    background: outside-touch.has-hover ? Tok.alert-soft : transparent;
+                    border-radius: 4px;
+
+                    outside-text := Text {
+                        x: 6px;
+                        y: (parent.height - self.height) / 2;
+                        text: "⚠ 外で変更";
+                        color: Tok.alert;
+                        font-size: 12px;
+                    }
+
+                    outside-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.outside-asked();
+                        }
+                    }
+                }
+
                 if root.count-encoding != "": Rectangle {
                     width: encoding-text.preferred-width + 12px;
                     horizontal-stretch: 0;
