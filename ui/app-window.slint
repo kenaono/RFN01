@@ -604,6 +604,11 @@ export component AppWindow inherits Window {
     // 数え方ではなく読み方なので、`count-ruby`と違って本文そのものが変わる。
     in-out property <bool> ruby-marks: true;
     callback ruby-marks-toggled(bool);
+    /// 書き手の決定 2026-09-11: **どの記号を箇条書きの印として読むか**（`-`／`*`／`+`の
+    /// 順に、読むなら真）。切った記号の行はただの本文になる。**3つとも同格**
+    /// （CommonMarkがそう認めている）なので、`-`も切れる。
+    in-out property <[bool]> bullet-marks: [true, true, true];
+    callback bullet-mark-toggled(int);
     /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
     callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
@@ -2940,6 +2945,44 @@ export component AppWindow inherits Window {
                         text: root.ruby-marks
                             ? "｜漢字《かんじ》と《《傍点》》を記法として読みます。"
                             : "記号をそのまま字として出します。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+
+                    // 書き手の決定 2026-09-11: **どれを箇条書きの印として読むか。**
+                    // CommonMarkは`-`・`*`・`+`を同格に認めているので、この編集器も
+                    // 同格に扱う——**`-`も切れる**（「*も標準ということなら、扱いは
+                    // 同じであるべき」）。切った記号の行はただの本文になり、記号も
+                    // そのまま字として出る（原稿のバイト列は変えない）。
+                    HorizontalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Bullet marks";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        for mark[index] in ["-", "*", "+"]: TextButton {
+                            title: mark;
+                            role: root.bullet-marks[index] ? Role.primary : Role.normal;
+                            clicked => {
+                                root.bullet-mark-toggled(index);
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: !root.bullet-marks[0] && !root.bullet-marks[1]
+                            && !root.bullet-marks[2]
+                            ? "箇条書きの印はありません（どの記号もただの本文です）。"
+                            : (root.bullet-marks[0] ? "- " : "")
+                                + (root.bullet-marks[1] ? "* " : "")
+                                + (root.bullet-marks[2] ? "+ " : "")
+                                + "を箇条書きの印として読みます。";
                         color: Tok.ink-faint;
                         font-size: 11px;
                         overflow: elide;

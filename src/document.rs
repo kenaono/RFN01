@@ -80,7 +80,7 @@ impl PreviewLine {
         active: bool,
         style: LineStyle,
         has_break: bool,
-        ruby: RubyMarks,
+        reading: Reading,
     ) -> Self {
         let mut visible = String::with_capacity(source_line.len() + 1);
         let mut marks = Vec::new();
@@ -97,7 +97,7 @@ impl PreviewLine {
             // （`Ornament::Markup`）ので、記号は見えたままである。
             marker = active_markup(source_line, style);
         } else {
-            push_visible_line(source_line, style, &mut visible, &mut marks, ruby);
+            push_visible_line(source_line, style, &mut visible, &mut marks, reading);
             marker = line_marker(source_line, style);
         }
         let mut source = String::with_capacity(source_line.len() + 1);
@@ -195,7 +195,7 @@ pub struct PreviewDocument {
     /// 「本文と組み方が同じなら数え直さない」で、記法を読むかどうかは
     /// **その行が何の字でできているか**を変える——`｜漢字《かんじ》`は
     /// 記法として6字、字として11字である。
-    ruby: RubyMarks,
+    reading: Reading,
 }
 
 impl PreviewDocument {
@@ -210,14 +210,18 @@ impl PreviewDocument {
 
     #[cfg(test)]
     pub fn from_source_with_active_line(source: &str, active_line_start: Option<usize>) -> Self {
-        Self::from_source_as(source, active_line_start, true)
+        Self::from_source_as(source, active_line_start, Reading::all())
     }
 
     /// 同じことを、**記法を読むかどうかを言われて**する（要件 E9）。
     #[cfg(test)]
-    pub fn from_source_as(source: &str, active_line_start: Option<usize>, ruby: RubyMarks) -> Self {
+    pub fn from_source_as(
+        source: &str,
+        active_line_start: Option<usize>,
+        reading: Reading,
+    ) -> Self {
         let mut preview = Self::default();
-        preview.refresh(source, active_line_start, ruby);
+        preview.refresh(source, active_line_start, reading);
         preview
     }
 
@@ -226,10 +230,10 @@ impl PreviewDocument {
     /// **本文でも組み方でもない3つ目の理由。**行を取っておく条件（`matches`）は
     /// 本文と組み方と活性行を見ているので、旗が変わったことには気づけない
     /// ——気づけないまま使えば、切り替えても画面が変わらない。
-    fn forget_if_read_differently(&mut self, ruby: RubyMarks) {
-        if self.ruby != ruby {
+    fn forget_if_read_differently(&mut self, reading: Reading) {
+        if self.reading != reading {
             self.lines.clear();
-            self.ruby = ruby;
+            self.reading = reading;
         }
     }
 
@@ -238,8 +242,8 @@ impl PreviewDocument {
     /// A line is rebuilt when its text changed, and when it became or stopped
     /// being the active line — moving the caret to another line changes the form
     /// of exactly two lines, and leaves every other line's table alone.
-    pub fn refresh(&mut self, source: &str, active_line_start: Option<usize>, ruby: RubyMarks) {
-        self.forget_if_read_differently(ruby);
+    pub fn refresh(&mut self, source: &str, active_line_start: Option<usize>, reading: Reading) {
+        self.forget_if_read_differently(reading);
         let lines = source.split('\n').collect::<Vec<&str>>();
         let mut active_index = None;
         let mut line_start = 0;
@@ -252,7 +256,10 @@ impl PreviewDocument {
 
         // 要件 7.3.2: how every line is set, which is where a fence reaches
         // past its own line (`line_styles`).
-        let styles = line_styles(source);
+        //
+        // 書き手の決定 2026-09-11: **読むと決めた記号だけが印**——切った記号の行は
+        // プレビューでも本文の1行で、記号は字として出る。
+        let styles = line_styles_as(source, reading.bullets);
         let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
         let last = lines.len() - 1;
         let matches = |kept: &PreviewLine, index: usize, line: &str| {
@@ -287,7 +294,13 @@ impl PreviewDocument {
             .clone()
             .map(|index| {
                 let active = active_index == Some(index);
-                PreviewLine::build(lines[index], active, style_at(index), index != last, ruby)
+                PreviewLine::build(
+                    lines[index],
+                    active,
+                    style_at(index),
+                    index != last,
+                    reading,
+                )
             })
             .collect::<Vec<PreviewLine>>();
         let removed = shared_head..self.lines.len() - shared_tail;
@@ -468,13 +481,13 @@ struct LineCounts {
 }
 
 impl LineCounts {
-    fn of(line: &str, style: LineStyle, ruby: RubyMarks) -> Self {
+    fn of(line: &str, style: LineStyle, reading: Reading) -> Self {
         let mut visible = String::with_capacity(line.len());
         // The counts are about how much text there is, not how it is set.
         // **印は要る**（要件 7.8）：ルビの読みは本文に居残るので、どこからどこ
         // までが読みかを言えるのは印だけである。
         let mut marks = Vec::new();
-        push_visible_line(line, style, &mut visible, &mut marks, ruby);
+        push_visible_line(line, style, &mut visible, &mut marks, reading);
         Self {
             source_graphemes: line.graphemes(true).count(),
             body_graphemes: visible.graphemes(true).count(),
@@ -508,24 +521,24 @@ pub struct DocumentCounts {
     /// 「本文と組み方が同じなら数え直さない」で、記法を読むかどうかは
     /// **その行が何の字でできているか**を変える——`｜漢字《かんじ》`は
     /// 記法として6字、字として11字である。
-    ruby: RubyMarks,
+    reading: Reading,
 }
 
 impl DocumentCounts {
     /// Bring the counts up to date with `source`, recounting only what changed.
-    pub fn refresh(&mut self, source: &str, ruby: RubyMarks) {
+    pub fn refresh(&mut self, source: &str, reading: Reading) {
         // 要件 E9: **旗が変われば取っておいた行は全部使えない**（`PreviewDocument`の
         // ほうに同じ一文がある）。
-        if self.ruby != ruby {
+        if self.reading != reading {
             self.lines.clear();
-            self.ruby = ruby;
+            self.reading = reading;
         }
         let lines = source.split('\n').collect::<Vec<&str>>();
         // 要件 7.3.2: how every line is set, which is where a fence reaches
         // past its own line. A line whose text did not change may still be
         // counted differently because a fence opened above it, so the flag is
         // part of what makes a kept line still usable.
-        let styles = line_styles(source);
+        let styles = line_styles_as(source, reading.bullets);
         let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
         let matches = |kept: &LineCounts, index: usize, line: &str| {
             kept.text == *line && kept.style == style_at(index)
@@ -548,7 +561,7 @@ impl DocumentCounts {
 
         let changed = shared_head..lines.len() - shared_tail;
         let replacement = changed
-            .map(|index| LineCounts::of(lines[index], style_at(index), ruby))
+            .map(|index| LineCounts::of(lines[index], style_at(index), reading))
             .collect::<Vec<LineCounts>>();
         let removed = shared_head..self.lines.len() - shared_tail;
         self.lines.splice(removed, replacement);
@@ -1472,7 +1485,13 @@ pub struct Indented {
 /// その前に空白を入れると引用そのものが崩れる。
 ///
 /// **浅くできる行が1つも無ければ`None`。**何も起きないことを、呼ぶ側が知れる。
-pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Option<Indented> {
+pub fn shift_indent(
+    source: &str,
+    from: usize,
+    to: usize,
+    deeper: bool,
+    marks: BulletMarks,
+) -> Option<Indented> {
     let (start, end) = selected_lines(source, from, to);
     let mut text = String::with_capacity(source.len());
     text.push_str(&source[..start]);
@@ -1517,7 +1536,7 @@ pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Optio
     // **動かすのは最後に一度**（[`note_shift`]）。ここまでは編集の前の座標で
     // 数えてあるので、行末に立っていた端が次の行の字下げまで送られない。
     let mut moved = settle(kept, shifts, 0, start, &text);
-    let renumbered = renumber_around(&text, start, &mut moved);
+    let renumbered = renumber_around(&text, start, &mut moved, marks);
     Some(Indented {
         text: renumbered,
         chosen: chosen_range(moved),
@@ -1534,8 +1553,10 @@ pub fn shift_indent(source: &str, from: usize, to: usize, deeper: bool) -> Optio
 /// 番号を継いでしまう。
 ///
 /// 番号を持つ行だけが書き換わる——`-`や`- [x]`は数えるが、書き換えない。
-fn renumber_around(source: &str, at: usize, positions: &mut [usize]) -> String {
-    let styles = line_styles(source);
+fn renumber_around(source: &str, at: usize, positions: &mut [usize], marks: BulletMarks) -> String {
+    // **数え方は読み方と同じ**——印として読まない記号の行は項目ではないので、
+    // 数にも入らない（同じ文書に2つの数え方があってはならない）。
+    let styles = line_styles_as(source, marks);
     let lines: Vec<&str> = source.split('\n').collect();
     let here = source[..at.min(source.len())].matches('\n').count();
     // **空行は連なりを切らない**（[`still_in_list`]）。数え方は1つである。
@@ -1708,7 +1729,14 @@ pub fn logical_line_count(source: &str) -> usize {
     }
 }
 
-/// ルビと傍点の記法を読むか（要件 E9）。
+/// 原稿の記法をどう読むか（要件 E9、書き手の決定 2026-09-11）。
+///
+/// **読み方であって、組み方ではない。**紙のシートに置けば、同じ文書が2つのペインで
+/// 別の本文になる（字数も食い違う）——だから窓が1つ持つ（Settings → General の
+/// MARKUP）。**2つの旗は同じところから来て同じところへ行く**ので1つの値で運ぶ
+/// ——片方だけ渡し忘れる道が無い。
+///
+/// ## ルビと傍点（要件 E9）
 ///
 /// **Markdownの標準ではない。**`｜漢字《かんじ》`も`《《傍点》》`も青空文庫／なろう／
 /// カクヨムの記法で、切れなければ「この編集器でしか正しく見えない書き方」を書き手に
@@ -1720,17 +1748,120 @@ pub fn logical_line_count(source: &str) -> usize {
 /// **ルビと傍点は1つの旗で切る。**同じ記法の一族（`《》`を使い、同じ道具が書き、
 /// 同じ理由でMarkdownに無い）で、片方だけ読む書き手は考えにくい
 /// ——足りなければ書き手が2つに分けるよう言う。
-pub type RubyMarks = bool;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reading {
+    /// ルビと傍点の記法を読むか（要件 E9）。
+    pub ruby: bool,
+    /// どの記号を箇条書きの印として読むか（書き手の決定 2026-09-11）。
+    pub bullets: BulletMarks,
+}
+
+impl Reading {
+    /// 記法を全部読む——**既定**（Markdownがそう言っており、切りたい書き手が
+    /// 切る側である）。
+    pub fn all() -> Self {
+        Self {
+            ruby: true,
+            bullets: BulletMarks::all(),
+        }
+    }
+}
+
+impl Default for Reading {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// 箇条書きの印として読める記号（要件 7.3.2、書き手の決定 2026-09-11）。
+///
+/// **CommonMarkは3つを同格に認めている**ので、この編集器も同格に扱う——どれを
+/// 読むかは書き手が1つずつ選ぶ（`-`も切れる：「\*も標準ということなら、扱いは
+/// 同じであるべき」）。
+pub const BULLET_MARKS: [char; 3] = ['-', '*', '+'];
+
+/// そのうち、いま箇条書きとして読む記号（書き手の決定 2026-09-11）。
+///
+/// **読み方であって、組み方ではない。**切った記号は本文の1行になり、記号もそのまま
+/// 字として出る——**原稿のバイト列は変えない**（ルビの旗と同じ作り）。字数まで変わる
+/// ので、紙のシートではなく窓が1つ持つ（Settings → General の MARKUP）。
+///
+/// **全部切ることもできる。**そのとき箇条書きの印は1つも無く、`Ctrl+Shift+8`は
+/// 何も入れられない——**選べるとはそういうこと**であって、編集器が1つ残して
+/// 「これは切らせない」と言う筋は無い。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BulletMarks([bool; BULLET_MARKS.len()]);
+
+impl BulletMarks {
+    /// 3つとも読む——**既定**（CommonMarkがそう言っている）。
+    pub fn all() -> Self {
+        Self([true; BULLET_MARKS.len()])
+    }
+
+    /// この記号を箇条書きとして読むか。
+    pub fn reads(self, mark: char) -> bool {
+        BULLET_MARKS
+            .iter()
+            .zip(self.0)
+            .any(|(known, on)| *known == mark && on)
+    }
+
+    /// 読む記号を、`BULLET_MARKS`の並び順に。
+    pub fn chars(self) -> impl Iterator<Item = char> {
+        BULLET_MARKS
+            .into_iter()
+            .zip(self.0)
+            .filter_map(|(mark, on)| on.then_some(mark))
+    }
+
+    /// **鍵が入れる字**——読む記号のうち、いちばん前のもの（書き手の選択
+    /// 2026-09-11の案C）。1つも読まないなら`None`で、そのとき鍵は何もしない。
+    pub fn first(self) -> Option<char> {
+        self.chars().next()
+    }
+
+    /// 1つを入切した形。
+    pub fn toggled(self, mark: char) -> Self {
+        let mut marks = self.0;
+        for (index, known) in BULLET_MARKS.iter().enumerate() {
+            if *known == mark {
+                marks[index] = !marks[index];
+            }
+        }
+        Self(marks)
+    }
+
+    /// 設定ファイルが言っている形（読む記号を並べた字）。
+    pub fn as_said(self) -> String {
+        self.chars().collect()
+    }
+
+    /// その逆——**知らない字は読み飛ばす**。手で書いた設定ファイルが、Markdownで
+    /// ない字を印にすることはない。
+    pub fn from_said(said: &str) -> Self {
+        let mut marks = [false; BULLET_MARKS.len()];
+        for (index, known) in BULLET_MARKS.iter().enumerate() {
+            marks[index] = said.contains(*known);
+        }
+        Self(marks)
+    }
+}
+
+impl Default for BulletMarks {
+    fn default() -> Self {
+        Self::all()
+    }
+}
 
 #[cfg(test)]
 pub fn visible_markdown_text(source: &str) -> String {
-    visible_markdown_text_as(source, true)
+    visible_markdown_text_as(source, Reading::all())
 }
 
 /// 同じことを、**記法を読むかどうかを言われて**する（要件 E9）。
 #[cfg(test)]
-pub fn visible_markdown_text_as(source: &str, ruby: RubyMarks) -> String {
-    visible_markdown_text_with_active_line(source, None, ruby)
+pub fn visible_markdown_text_as(source: &str, reading: Reading) -> String {
+    visible_markdown_text_with_active_line(source, None, reading)
 }
 
 /// The preview built in one pass over the whole document.
@@ -1742,7 +1873,7 @@ pub fn visible_markdown_text_as(source: &str, ruby: RubyMarks) -> String {
 fn visible_markdown_text_with_active_line(
     source: &str,
     active_line_start: Option<usize>,
-    ruby: RubyMarks,
+    reading: Reading,
 ) -> String {
     let styles = line_styles(source);
     let mut visible = String::with_capacity(source.len());
@@ -1753,7 +1884,7 @@ fn visible_markdown_text_with_active_line(
             visible.push_str(line);
         } else {
             let style = styles.get(index).copied().unwrap_or_default();
-            push_visible_line(line, style, &mut visible, &mut Vec::new(), ruby);
+            push_visible_line(line, style, &mut visible, &mut Vec::new(), reading);
         }
         visible.push('\n');
         line_start += line.len() + 1;
@@ -1776,7 +1907,7 @@ fn push_visible_line(
     style: LineStyle,
     visible: &mut String,
     marks: &mut Vec<Emphasis>,
-    ruby: RubyMarks,
+    reading: Reading,
 ) {
     // **The style decides, here too.** An indented line is shown as written —
     // markers and all — unless a list set it in (要件 7.3.2), which is either a
@@ -1860,7 +1991,7 @@ fn push_visible_line(
         }
         None => content,
     };
-    push_marked(content, visible, marks, &mut at, ruby);
+    push_marked(content, visible, marks, &mut at, reading);
 }
 
 /// The kind a callout announces on its first line, and what follows it
@@ -1931,7 +2062,7 @@ fn push_marked(
     visible: &mut String,
     marks: &mut Vec<Emphasis>,
     at: &mut u32,
-    ruby: RubyMarks,
+    reading: Reading,
 ) {
     let mut rest = content;
     let mut previous = None;
@@ -1939,10 +2070,12 @@ fn push_marked(
         // 要件 7.8: **傍点はルビより先に読む。**`《《強調》》`はルビの`《》`で
         // 始まるので、後から見ると「《強調《」という読みのおかしなルビとして
         // 当たってしまう。長いほうを先に訊く、というだけの順である。
-        if ruby && let Some((inner, after)) = dots_here(rest) {
+        if reading.ruby
+            && let Some((inner, after)) = dots_here(rest)
+        {
             let start = *at;
             // 中は普通の本文なので、太字も斜体もそのまま入れ子になる。
-            push_marked(inner, visible, marks, at, ruby);
+            push_marked(inner, visible, marks, at, reading);
             marks.push(Emphasis {
                 utf16_start: start,
                 utf16_len: *at - start,
@@ -1959,7 +2092,9 @@ fn push_marked(
         // 要件 7.8: 青空文庫の注記形式（`［＃「本当に」に傍点］`）。
         // **これだけが後ろを向いている。**注記は自分より前にある語を指すので、
         // いま書き出した`visible`の中をさかのぼって、その語に点を打つ。
-        if ruby && let Some((word, after)) = dots_note_here(rest) {
+        if reading.ruby
+            && let Some((word, after)) = dots_note_here(rest)
+        {
             if let Some(found) = visible.rfind(word) {
                 let start = visible[..found].encode_utf16().count() as u32;
                 marks.push(Emphasis {
@@ -1980,7 +2115,9 @@ fn push_marked(
         // 要件 7.8: ルビ。`｜親《よみ》`と、親が漢字の連なりで明らかなときの
         // `漢字《かんじ》`。**縦線は消え、読みは居残って箱で隠れる**
         // （`Ornament::Ruby`にその理由が書いてある）。
-        if ruby && let Some((base, reading, after, already_shown)) = ruby_here(rest, visible) {
+        if reading.ruby
+            && let Some((base, said, after, already_shown)) = ruby_here(rest, visible)
+        {
             let base_start = *at;
             for character in base.chars() {
                 visible.push(character);
@@ -1990,7 +2127,7 @@ fn push_marked(
             // 親はもう`visible`に出ているので、そのぶんを数えに足す。
             let base_utf16 = already_shown + (*at - base_start);
             let reading_start = *at;
-            for character in reading.chars() {
+            for character in said.chars() {
                 visible.push(character);
                 *at += character.len_utf16() as u32;
             }
@@ -2040,7 +2177,7 @@ fn push_marked(
             // Emphasis inside the shown text is still emphasis: `[**太字**](x)`
             // is a bold link, and this is the same recursion that nests one
             // marker inside another.
-            push_marked(shown, visible, marks, at, ruby);
+            push_marked(shown, visible, marks, at, reading);
             marks.push(Emphasis {
                 utf16_start: start,
                 utf16_len: *at - start,
@@ -2065,7 +2202,7 @@ fn push_marked(
                     *at += character.len_utf16() as u32;
                 }
             } else {
-                push_marked(inner, visible, marks, at, ruby);
+                push_marked(inner, visible, marks, at, reading);
             }
             marks.push(Emphasis {
                 utf16_start: start,
@@ -2219,7 +2356,7 @@ fn ruby_graphemes_in(source: &str) -> usize {
             let style = styles.get(index).copied().unwrap_or_default();
             let mut visible = String::with_capacity(line.len());
             let mut marks = Vec::new();
-            push_visible_line(line, style, &mut visible, &mut marks, true);
+            push_visible_line(line, style, &mut visible, &mut marks, Reading::all());
             ruby_graphemes(&visible, &marks)
         })
         .sum()
@@ -2519,8 +2656,11 @@ fn is_rule(content: &str) -> bool {
 ///
 /// **A marker counts only with a space after it**, the rule a heading's hashes
 /// already follow: `-1` is a negative number and `*text*` is emphasis.
-fn list_kind(content: &str) -> Option<LineKind> {
-    if let Some(rest) = content.strip_prefix(['-', '*', '+']) {
+fn list_kind(content: &str, marks: BulletMarks) -> Option<LineKind> {
+    // 書き手の決定 2026-09-11: **読むと決めた記号だけが印である。**切った記号の行は
+    // 本文の1行で、記号もそのまま字として出る（原稿は変えていない）。
+    if let Some(mark) = content.chars().next().filter(|mark| marks.reads(*mark)) {
+        let rest = &content[mark.len_utf8()..];
         let item = rest.strip_prefix(' ')?;
         return Some(task_kind(item).unwrap_or(LineKind::Bullet));
     }
@@ -2624,14 +2764,14 @@ impl ListLevels {
 }
 
 /// How one line outside every fence is set.
-fn outside_fence(line: &str, levels: &mut ListLevels) -> LineStyle {
+fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> LineStyle {
     let quote = quoted(line);
     let content = quote.unwrap_or(line);
     let (columns, body) = leading_indent(content);
     let kind = if is_rule(body) {
         LineKind::Rule
     } else {
-        list_kind(body).unwrap_or_default()
+        list_kind(body, marks).unwrap_or_default()
     };
     let quote_depth = u8::from(quote.is_some());
     if kind.is_list() {
@@ -2868,6 +3008,7 @@ fn line_style(
     fence: &mut Option<Fence>,
     levels: &mut ListLevels,
     table: &mut Option<TablePlace>,
+    marks: BulletMarks,
 ) -> LineStyle {
     let style = match (*fence, fence_marker(line)) {
         (None, Some(opened)) => {
@@ -2891,7 +3032,7 @@ fn line_style(
             if let Some(style) = table_line(line, next, levels, table) {
                 return style;
             }
-            outside_fence(line, levels)
+            outside_fence(line, levels, marks)
         }
     };
     // Anything a fence decides ends whatever table was open: a table's rows are
@@ -2914,7 +3055,13 @@ fn line_style(
 ///
 /// One entry per `split('\n')` line, which is also one entry per line of the
 /// preview: the preview emits exactly one line for each source line.
+#[cfg(test)]
 pub fn line_styles(source: &str) -> Vec<LineStyle> {
+    line_styles_as(source, BulletMarks::all())
+}
+
+/// 同じことを、**どの記号を印として読むかを言われて**する（書き手の決定 2026-09-11）。
+pub fn line_styles_as(source: &str, marks: BulletMarks) -> Vec<LineStyle> {
     let mut fence = None;
     let mut levels = ListLevels::default();
     let mut table = None;
@@ -2925,7 +3072,14 @@ pub fn line_styles(source: &str) -> Vec<LineStyle> {
         // bars at the end of the document has no delimiter row under it and is
         // not a table.
         let next = lines.peek().copied().unwrap_or_default();
-        styles.push(line_style(line, next, &mut fence, &mut levels, &mut table));
+        styles.push(line_style(
+            line,
+            next,
+            &mut fence,
+            &mut levels,
+            &mut table,
+            marks,
+        ));
     }
     styles
 }
@@ -2961,7 +3115,17 @@ pub fn outline(source: &str) -> Vec<Heading> {
         let next = lines.peek().copied().unwrap_or_default();
         // Through `line_style` rather than `heading_level`, so a hash inside a
         // fenced block is as much not-a-heading here as it is in the pane.
-        let level = line_style(line, next, &mut fence, &mut levels, &mut table).heading_level;
+        // **アウトラインは見出しだけを見る。**どの記号を印として読むかは、ここの
+        // 答えを変えない（`- 項目`は見出しではない）ので、全部読む側で通す。
+        let style = line_style(
+            line,
+            next,
+            &mut fence,
+            &mut levels,
+            &mut table,
+            BulletMarks::all(),
+        );
+        let level = style.heading_level;
         if level > 0 {
             headings.push(Heading {
                 level,
@@ -3078,7 +3242,7 @@ mod tests {
     #[test]
     fn renaming_the_language_re_marks_the_lines_under_it() {
         let mut preview = PreviewDocument::default();
-        preview.refresh("```rust\nlet a = 1; // 説明\n```\n", None, true);
+        preview.refresh("```rust\nlet a = 1; // 説明\n```\n", None, Reading::all());
         let commented = |preview: &PreviewDocument| {
             preview
                 .marks()
@@ -3090,10 +3254,10 @@ mod tests {
         assert_eq!(commented(&preview), 1);
 
         // `//` is nothing in a language whose comments begin with `#`.
-        preview.refresh("```python\nlet a = 1; // 説明\n```\n", None, true);
+        preview.refresh("```python\nlet a = 1; // 説明\n```\n", None, Reading::all());
         assert_eq!(commented(&preview), 0, "the line is code again");
 
-        preview.refresh("```なにか\nlet a = 1; // 説明\n```\n", None, true);
+        preview.refresh("```なにか\nlet a = 1; // 説明\n```\n", None, Reading::all());
         assert_eq!(commented(&preview), 0, "and an unnamed block says nothing");
     }
 
@@ -3625,7 +3789,8 @@ mod tests {
         let source = "- 一つめ\n- 二つめ\n";
         let second = "- 一つめ\n".len();
 
-        let deeper = shift_indent(source, second, second, true).expect("下げられる");
+        let deeper =
+            shift_indent(source, second, second, true, BulletMarks::all()).expect("下げられる");
         let next = deeper.text.clone();
         assert_eq!(next, "- 一つめ\n    - 二つめ\n");
         // 入れ子として読める（深さが1つ増える）。
@@ -3638,7 +3803,7 @@ mod tests {
         );
 
         // `Shift+Tab`で戻る。
-        let back = shift_indent(&next, second, second, false).expect("戻せる");
+        let back = shift_indent(&next, second, second, false, BulletMarks::all()).expect("戻せる");
         assert_eq!(back.text, source);
     }
 
@@ -3751,12 +3916,76 @@ mod tests {
         assert_eq!(chosen.0, 0, "先頭の印も選ばれている");
 
         // 字下げの側（同じ`settle`を通る）。
-        let deeper = shift_indent(source, 0, source.len(), true).expect("下げられる");
+        let deeper =
+            shift_indent(source, 0, source.len(), true, BulletMarks::all()).expect("下げられる");
         assert_eq!(deeper.chosen.0, 0, "先頭の字下げも選ばれている");
 
         // カーソル1つだけなら、字下げの後ろへ出る。
-        let caret = shift_indent(source, 0, 0, true).expect("下げられる");
+        let caret = shift_indent(source, 0, 0, true, BulletMarks::all()).expect("下げられる");
         assert_eq!(caret.chosen, (INDENT_STEP.len(), INDENT_STEP.len()));
+    }
+
+    /// 書き手の決定 2026-09-11: **どれを箇条書きの印として読むかは、3つとも選べる。**
+    /// `-`も切れる——「`*`も標準ということなら、扱いは同じであるべき」。
+    #[test]
+    fn each_mark_can_be_read_or_not() {
+        let source = "- ハイフン\n* アスタリスク\n+ プラス\n";
+
+        let all = line_styles_as(source, BulletMarks::all());
+        assert!(all[..3].iter().all(|style| style.kind == LineKind::Bullet));
+
+        // `-`だけ読む——Obsidianなどが入れる字だけの原稿と同じ見え方になる。
+        let hyphen = BulletMarks::from_said("-");
+        let only_hyphen = line_styles_as(source, hyphen);
+        assert_eq!(only_hyphen[0].kind, LineKind::Bullet);
+        assert_eq!(only_hyphen[1].kind, LineKind::Body);
+        assert_eq!(only_hyphen[2].kind, LineKind::Body);
+
+        // **`-`も切れる。**扱いは3つとも同じである。
+        let starred = BulletMarks::from_said("*+");
+        let without_hyphen = line_styles_as(source, starred);
+        assert_eq!(without_hyphen[0].kind, LineKind::Body);
+        assert_eq!(without_hyphen[1].kind, LineKind::Bullet);
+        assert_eq!(without_hyphen[2].kind, LineKind::Bullet);
+
+        // **全部切ることもできる。**そのとき箇条書きの印は1つも無い。
+        let none = BulletMarks::from_said("");
+        assert!(
+            line_styles_as(source, none)[..3]
+                .iter()
+                .all(|style| style.kind == LineKind::Body)
+        );
+        assert_eq!(none.first(), None, "入れる字が無い");
+    }
+
+    /// 書き手の決定 2026-09-11: **読まない印には、箱も立たない。**プレビューでも
+    /// 本文の1行で、記号はそのまま字として出る——**原稿のバイト列は変えていない。**
+    #[test]
+    fn a_mark_that_is_not_read_gets_no_box_in_the_preview() {
+        let source = "- ハイフン\n* アスタリスク\n";
+        let hyphen = Reading {
+            ruby: true,
+            bullets: BulletMarks::from_said("-"),
+        };
+
+        let all = PreviewDocument::from_source_as(source, None, Reading::all());
+        let only_hyphen = PreviewDocument::from_source_as(source, None, hyphen);
+
+        assert!(all.markers()[1].is_some(), "読むなら箱が立つ");
+        assert!(only_hyphen.markers()[1].is_none(), "読まないなら立たない");
+        assert!(only_hyphen.markers()[0].is_some(), "読む`-`は立つ");
+        assert_eq!(all.text, only_hyphen.text, "本文は1字も変わらない");
+    }
+
+    /// 書き手の決定 2026-09-11: **入れるのは、読む記号のいちばん前のもの**（案C）。
+    #[test]
+    fn the_key_writes_a_mark_that_will_be_read() {
+        assert_eq!(BulletMarks::all().first(), Some('-'));
+        assert_eq!(BulletMarks::from_said("*+").first(), Some('*'));
+        assert_eq!(BulletMarks::from_said("+").first(), Some('+'));
+        assert_eq!(BulletMarks::from_said("").first(), None);
+        // 設定ファイルの知らない字は読み飛ばす。
+        assert_eq!(BulletMarks::from_said("・-").as_said(), "-");
     }
 
     /// E10の③（書き手の言葉 2026-09-11）: **`-`も`*`も`+`も同格の印。**
@@ -3895,7 +4124,8 @@ mod tests {
         let source = "abc\n明日は\n";
         let inside = "ab".len();
 
-        let deeper = shift_indent(source, inside, source.len(), true).expect("下げられる");
+        let deeper = shift_indent(source, inside, source.len(), true, BulletMarks::all())
+            .expect("下げられる");
 
         assert_eq!(deeper.text, "    abc\n    明日は\n");
         // 1行目の字下げの4桁だけ後ろへ——2行目の字下げは、この位置より後ろ。
@@ -3912,16 +4142,19 @@ mod tests {
         let third = "1. 一\n2. 二\n".len();
 
         // 2つめを内側へ——そこは1から、外の3つめは2へ繰り上がる。
-        let deeper = shift_indent(source, second, second, true).expect("下げられる");
+        let deeper =
+            shift_indent(source, second, second, true, BulletMarks::all()).expect("下げられる");
         assert_eq!(deeper.text, "1. 一\n    1. 二\n2. 三\n");
 
         // 3つめも内側へ——内側の連なりの続きになる。
         let third = third + INDENT_STEP.len();
-        let deeper = shift_indent(&deeper.text, third, third, true).expect("下げられる");
+        let deeper =
+            shift_indent(&deeper.text, third, third, true, BulletMarks::all()).expect("下げられる");
         assert_eq!(deeper.text, "1. 一\n    1. 二\n    2. 三\n");
 
         // 戻せば、外の連なりの続きへ。
-        let back = shift_indent(&deeper.text, third, third, false).expect("戻せる");
+        let back =
+            shift_indent(&deeper.text, third, third, false, BulletMarks::all()).expect("戻せる");
         assert_eq!(back.text, "1. 一\n    1. 二\n2. 三\n");
     }
 
@@ -3938,7 +4171,8 @@ mod tests {
         let source = "1. 甲\n2. 乙\n\n1. 丙\n2. 丁\n";
         let last = source.find("2. 丁").expect("ある");
 
-        let deeper = shift_indent(source, last, last, true).expect("下げられる");
+        let deeper =
+            shift_indent(source, last, last, true, BulletMarks::all()).expect("下げられる");
 
         // 丙は3つめの項目である——空行の前の2つから続いている。
         assert_eq!(deeper.text, "1. 甲\n2. 乙\n\n3. 丙\n    1. 丁\n");
@@ -3949,7 +4183,8 @@ mod tests {
     fn every_selected_line_moves_together_except_the_empty_ones() {
         let source = "一\n\n二\n";
 
-        let deeper = shift_indent(source, 0, source.len(), true).expect("下げられる");
+        let deeper =
+            shift_indent(source, 0, source.len(), true, BulletMarks::all()).expect("下げられる");
 
         assert_eq!(deeper.text, "    一\n\n    二\n");
     }
@@ -3959,7 +4194,7 @@ mod tests {
     fn an_indent_goes_after_the_quote_marker() {
         let source = "> - 項目\n";
 
-        let deeper = shift_indent(source, 0, 0, true).expect("下げられる");
+        let deeper = shift_indent(source, 0, 0, true, BulletMarks::all()).expect("下げられる");
 
         assert_eq!(deeper.text, ">     - 項目\n");
         assert_eq!(line_styles(&deeper.text)[0].quote_depth, 1);
@@ -3968,9 +4203,12 @@ mod tests {
     /// E3の④: **外せる字下げが無ければ、何も起きない**（`None`）。
     #[test]
     fn a_line_at_the_margin_has_nothing_to_give_back() {
-        assert_eq!(shift_indent("項目\n", 0, 0, false), None);
+        assert_eq!(
+            shift_indent("項目\n", 0, 0, false, BulletMarks::all()),
+            None
+        );
         // タブ1つは一段とみなす（他の道具で書かれた原稿）。
-        let taken = shift_indent("\t項目\n", 0, 0, false).expect("外せる");
+        let taken = shift_indent("\t項目\n", 0, 0, false, BulletMarks::all()).expect("外せる");
         assert_eq!(taken.text, "項目\n");
     }
 
@@ -4073,14 +4311,20 @@ mod tests {
 
     /// One line as the preview shows it, and what it marks.
     fn preview_of(line: &str) -> (String, Vec<Emphasis>) {
-        preview_of_as(line, true)
+        preview_of_as(line, Reading::all())
     }
 
     /// 同じことを、**記法を読むかどうかを言われて**（要件 E9）。
-    fn preview_of_as(line: &str, ruby: RubyMarks) -> (String, Vec<Emphasis>) {
+    fn preview_of_as(line: &str, reading: Reading) -> (String, Vec<Emphasis>) {
         let mut visible = String::new();
         let mut marks = Vec::new();
-        push_visible_line(line, line_styles(line)[0], &mut visible, &mut marks, ruby);
+        push_visible_line(
+            line,
+            line_styles(line)[0],
+            &mut visible,
+            &mut marks,
+            reading,
+        );
         (visible, marks)
     }
 
@@ -4163,7 +4407,13 @@ mod tests {
             "これは《《本当に》》おかしい",
             "これは本当におかしい［＃「本当に」に傍点］",
         ] {
-            let (visible, marks) = preview_of_as(line, false);
+            let (visible, marks) = preview_of_as(
+                line,
+                Reading {
+                    ruby: false,
+                    ..Reading::all()
+                },
+            );
             assert_eq!(visible, line, "そのまま出る");
             assert!(marks.is_empty(), "{line}: {marks:?}");
         }
@@ -4173,7 +4423,7 @@ mod tests {
     /// というのがこの設定の全部である。
     #[test]
     fn the_notation_is_still_read_when_it_is_on() {
-        let (visible, marks) = preview_of_as("｜漢字《かんじ》を書く", true);
+        let (visible, marks) = preview_of_as("｜漢字《かんじ》を書く", Reading::all());
         assert_eq!(visible, "漢字《かんじ》を書く");
         assert!(
             marks
@@ -4181,7 +4431,7 @@ mod tests {
                 .any(|mark| matches!(mark.ornament, Some(Ornament::Ruby { .. })))
         );
 
-        let (_, dots) = preview_of_as("これは《《本当に》》おかしい", true);
+        let (_, dots) = preview_of_as("これは《《本当に》》おかしい", Reading::all());
         assert!(dots.iter().any(|mark| mark.marks.dots));
     }
 
@@ -4193,15 +4443,22 @@ mod tests {
         let source = "｜漢字《かんじ》を書く
 ";
         let mut preview = PreviewDocument::default();
-        preview.refresh(source, None, true);
+        preview.refresh(source, None, Reading::all());
         assert_eq!(
             preview.text,
             "漢字《かんじ》を書く
 "
         );
-        preview.refresh(source, None, false);
+        preview.refresh(
+            source,
+            None,
+            Reading {
+                ruby: false,
+                ..Reading::all()
+            },
+        );
         assert_eq!(preview.text, source);
-        preview.refresh(source, None, true);
+        preview.refresh(source, None, Reading::all());
         assert_eq!(
             preview.text,
             "漢字《かんじ》を書く
@@ -4210,9 +4467,15 @@ mod tests {
 
         // 数え方も同じ——**記法をやめれば`｜`も本文の1字**である。
         let mut counts = DocumentCounts::default();
-        counts.refresh(source, true);
+        counts.refresh(source, Reading::all());
         let read = counts.stats();
-        counts.refresh(source, false);
+        counts.refresh(
+            source,
+            Reading {
+                ruby: false,
+                ..Reading::all()
+            },
+        );
         let literal = counts.stats();
         assert!(literal.body_characters > read.body_characters);
         assert_eq!(literal.ruby_characters, 0);
@@ -4694,13 +4957,13 @@ mod tests {
         let source = "- 箇条書き\n- もう一行";
         let mut preview = PreviewDocument::default();
 
-        preview.refresh(source, Some(0), true);
+        preview.refresh(source, Some(0), Reading::all());
         assert_eq!(
             preview.markers()[0].expect("箱はある").ornament,
             Ornament::Markup
         );
 
-        preview.refresh(source, Some("- 箇条書き\n".len()), true);
+        preview.refresh(source, Some("- 箇条書き\n".len()), Reading::all());
         assert_eq!(
             preview.markers()[0].expect("箱はある").ornament,
             Ornament::Bullet
@@ -4719,11 +4982,11 @@ mod tests {
     fn opening_a_fence_recounts_the_lines_it_swallows() {
         let mut counts = DocumentCounts::default();
         let before = "本文\n**強調**";
-        counts.refresh(before, true);
+        counts.refresh(before, Reading::all());
         assert_eq!(counts.stats(), DocumentStats::from_source(before));
 
         let after = "```\n本文\n**強調**";
-        counts.refresh(after, true);
+        counts.refresh(after, Reading::all());
         assert_eq!(counts.stats(), DocumentStats::from_source(after));
     }
 
@@ -4740,7 +5003,7 @@ mod tests {
                      ```\nlet x = **1**;\n```\n";
         let mut source = String::from(start);
         let mut counts = DocumentCounts::default();
-        counts.refresh(&source, true);
+        counts.refresh(&source, Reading::all());
         assert_eq!(counts.stats(), DocumentStats::from_source(&source));
 
         // An edit of each shape, each starting from where the last left off.
@@ -4759,7 +5022,7 @@ mod tests {
                 .find(|by| source.is_char_boundary(*by))
                 .unwrap();
             source.insert_str(at, insertion);
-            counts.refresh(&source, true);
+            counts.refresh(&source, Reading::all());
 
             assert_eq!(
                 counts.stats(),
@@ -4776,7 +5039,7 @@ mod tests {
 
         // And back to nothing.
         source.clear();
-        counts.refresh(&source, true);
+        counts.refresh(&source, Reading::all());
         assert_eq!(counts.stats(), DocumentStats::from_source(&source));
     }
 
@@ -4813,7 +5076,7 @@ mod tests {
 人々《ひとびと》の話
 ";
         let mut counts = DocumentCounts::default();
-        counts.refresh(source, true);
+        counts.refresh(source, Reading::all());
 
         assert_eq!(counts.stats(), DocumentStats::from_source(source));
         assert!(counts.stats().ruby_characters > 0);
@@ -4894,11 +5157,11 @@ mod tests {
         let mut active = None;
 
         for step in 0..8 {
-            preview.refresh(&source, active, true);
+            preview.refresh(&source, active, Reading::all());
             assert_lookups_match_a_linear_scan(&preview, &source);
             assert_eq!(
                 preview.text,
-                visible_markdown_text_with_active_line(&source, active, true),
+                visible_markdown_text_with_active_line(&source, active, Reading::all()),
                 "the refreshed text drifted at step {step}"
             );
 
