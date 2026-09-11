@@ -4663,7 +4663,7 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
         &live.cache,
         &document,
         &next,
-        caret,
+        Some(caret),
         change,
     );
     say_in_bar(window, id, format!("{replaced}件置換しました"));
@@ -9905,6 +9905,10 @@ impl PaneId {
     /// reports the push's cost in the performance log; the horizontal pane
     /// refreshes first because the push back writes the status line when the
     /// vertical pane is hidden, and that has to be the line left standing.
+    /// **`caret`が`None`なら、画面は状態を見て描く**（`draw_both`）——選び直した
+    /// 範囲がある編集はこちらである（書き手の報告 2026-09-11：「選択が外れますが、
+    /// もう一度実行すると内部的に選択範囲は維持されているように見えます」）。
+    /// 打鍵は選択を畳むので、あちらは`Some(caret)`で足りる。
     fn draw_edit(
         self,
         window: &AppWindow,
@@ -9912,7 +9916,7 @@ impl PaneId {
         cache: &Rc<RefCell<RenderCache>>,
         document: &OpenDocument,
         source: &str,
-        caret: usize,
+        caret: Option<usize>,
         change: Change,
     ) {
         // **Only a pane showing this document follows the edit** (要件 7.6).
@@ -9943,7 +9947,7 @@ impl PaneId {
             return;
         }
         let started = Instant::now();
-        self.draw_both(window, states, cache, document, source, Some(caret));
+        self.draw_both(window, states, cache, document, source, caret);
         let took = elapsed_ms(started);
         cache.borrow_mut().pace_of(self).drew(took);
     }
@@ -13460,7 +13464,7 @@ fn insert_pane_text(
     let stored = Instant::now();
     *document.text.borrow_mut() = source.clone();
     let stored_ms = elapsed_ms(stored);
-    id.draw_edit(window, states, cache, document, &source, next, change);
+    id.draw_edit(window, states, cache, document, &source, Some(next), change);
     let name = id.log_name();
     log_edit(cache, &name, &source, started, cloned_ms, stored_ms);
 }
@@ -13627,13 +13631,17 @@ fn apply_span_edit(
             chosen.1,
         ),
     );
+    // **選び直した範囲は状態にある**ので、画面もそこから描く（`None`）。カーソルの
+    // 位置だけを渡すと、**選択は state に入っているのに一度も塗られない**
+    // ——書き手には「外れた」ように見え、もう一度押すと効くので「内部では
+    // 残っている」ように見える（書き手の報告 2026-09-11）。
     id.draw_edit(
         window,
         &live.states,
         &live.cache,
         &document,
         &next,
-        chosen.1,
+        None,
         change,
     );
 }
@@ -13837,7 +13845,15 @@ fn undo_in_pane(
         state.preferred_line = None;
     }
     *document.text.borrow_mut() = source.clone();
-    id.draw_edit(window, states, cache, document, &source, caret, change);
+    id.draw_edit(
+        window,
+        states,
+        cache,
+        document,
+        &source,
+        Some(caret),
+        change,
+    );
     let name = id.log_name();
     let kind = if forwards { "redo" } else { "undo" };
     cache
@@ -14329,7 +14345,15 @@ fn splice_source(
     };
     document.record(start, removed, text.to_owned());
     *document.text.borrow_mut() = source.clone();
-    id.draw_edit(window, states, cache, document, &source, caret, change);
+    id.draw_edit(
+        window,
+        states,
+        cache,
+        document,
+        &source,
+        Some(caret),
+        change,
+    );
 }
 
 /// Move a pane's caret: one grapheme along the line, or one line across.
