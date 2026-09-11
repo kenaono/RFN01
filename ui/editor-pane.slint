@@ -495,6 +495,13 @@ export component EditorPane inherits Rectangle {
     /// 書き手の決定 2026-09-11: どの記号を箇条書きの印として読むか（窓のもの）。
     /// **この面は表示に使うだけ**——読む記号ぶんの行を右クリックに出す。
     in property <[bool]> bullet-marks: [true, true, true];
+    /// 書き手の報告 2026-09-11: 右クリックの`Bullet List`を開いているか。
+    ///
+    /// **右クリックの行が長くなった**ので階層にした（書き手の求め）。**入れ子の
+    /// ポップアップにはしない**——popupを閉じるとその木ごと消え、消えた木から
+    /// `root`へ登った生成コードは黙って何もしない（技術検証 6.24・6.30）。
+    /// その場で開く形なら、木は1つのままである。
+    property <bool> bullet-rows-open: false;
     /// E3の④: `Tab`と`Shift+Tab`。引数はShiftが押されているか。**行の字下げか、
     /// 字を入れるかはRustが決める**——選んだものと、その行が箇条書きかどうかで
     /// 分かれるので、本文を持っているあちらでしか決められない。
@@ -2323,6 +2330,9 @@ export component EditorPane inherits Rectangle {
                                     root.context-x = self.mouse-x;
                                     root.context-y = self.mouse-y;
                                     root.menu-opened();
+                                    // **開くたびに畳んでおく**——前に開いた形が
+                                    // 残っていると、右クリックの長さが回ごとに違う。
+                                    root.bullet-rows-open = false;
                                     context-menu.show();
                                     return;
                                 }
@@ -2438,31 +2448,53 @@ export component EditorPane inherits Rectangle {
                                         // **`for`の中に`if`は書けない**ので
                                         // 3つ並べてある（技術検証の段階2b）。
                                         // 記号が3つしかないうちは、これが読める。
-                                        if root.bullet-marks[0]: MenuRow {
-                                            title: "Bullet List  -";
-                                            shortcut: "Ctrl+Shift+8";
-                                            // **頼んでから閉じる**（6.24）。
+                                        // 書き手の求め 2026-09-11: **階層にする。**
+                                        // 記号ぶんの行を並べると右クリックが長い
+                                        // ——**この行だけが出ていて、押すと開く。**
+                                        // 読む記号が1つも無ければ、開いても空である
+                                        // （書き手の言葉：「何も選ばれていなければ、空」）。
+                                        MenuRow {
+                                            title: "Bullet List";
+                                            shortcut: root.bullet-rows-open ? "▾" : "▸";
+                                            // **ここでは閉じない。**開くための行で
+                                            // あって、頼むための行ではない。
                                             activated => {
-                                                root.list-edit(0, 0);
-                                                context-menu.close();
+                                                root.bullet-rows-open = !root.bullet-rows-open;
                                             }
                                         }
-                                        if root.bullet-marks[1]: MenuRow {
-                                            title: "Bullet List  *";
-                                            shortcut: root.bullet-marks[0] ? "" : "Ctrl+Shift+8";
-                                            activated => {
-                                                root.list-edit(0, 1);
-                                                context-menu.close();
+                                        if root.bullet-rows-open: VerticalLayout {
+                                            spacing: 1px;
+                                            padding-left: 14px;
+
+                                            if root.bullet-marks[0]: MenuRow {
+                                                title: "-";
+                                                shortcut: "Ctrl+Shift+8";
+                                                // **頼んでから閉じる**（6.24）。
+                                                activated => {
+                                                    root.list-edit(0, 0);
+                                                    context-menu.close();
+                                                }
                                             }
-                                        }
-                                        if root.bullet-marks[2]: MenuRow {
-                                            title: "Bullet List  +";
-                                            shortcut: root.bullet-marks[0] || root.bullet-marks[1]
-                                                ? ""
-                                                : "Ctrl+Shift+8";
-                                            activated => {
-                                                root.list-edit(0, 2);
-                                                context-menu.close();
+                                            if root.bullet-marks[1]: MenuRow {
+                                                title: "*";
+                                                shortcut: root.bullet-marks[0]
+                                                    ? ""
+                                                    : "Ctrl+Shift+8";
+                                                activated => {
+                                                    root.list-edit(0, 1);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                            if root.bullet-marks[2]: MenuRow {
+                                                title: "+";
+                                                shortcut: root.bullet-marks[0]
+                                                    || root.bullet-marks[1]
+                                                    ? ""
+                                                    : "Ctrl+Shift+8";
+                                                activated => {
+                                                    root.list-edit(0, 2);
+                                                    context-menu.close();
+                                                }
                                             }
                                         }
                                         MenuRow {
