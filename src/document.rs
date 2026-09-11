@@ -1279,8 +1279,11 @@ fn renumber_below(
     let mut text = String::new();
     let kept = [from.max(start), to.max(start)];
     let mut shifts = [0isize; 2];
-    // 深さごとの**次の番号**。内側へ入れば積み、外側へ戻れば捨てる。
-    let mut counts: Vec<(u8, u64)> = Vec::new();
+    // 深さごとの**次の番号と、その連なりの種類**。内へ入れば積み、外へ戻れば捨てる。
+    let mut counts: Vec<(u8, char, u64)> = Vec::new();
+    // **この連なりの深さと種類**（CommonMark §5.3）。ここが変わったら、そこから
+    // 先はもう別のリストである。
+    let base = style_of(first).list_indent;
     let mut at = start;
     let mut end = start;
     // **最後の項目までが、数え直した範囲。**連なりの後ろにある空行は数えたものの
@@ -1301,30 +1304,44 @@ fn renumber_below(
             continue;
         }
         let depth = style.list_indent;
+        let kind = item_type(line, style).unwrap_or('-');
         let quote = line.len() - quote_content(line).len();
         let content = &line[quote..];
         let (_, body) = leading_indent(content);
         let indent = content.len() - body.len();
         let digits = body.chars().take_while(char::is_ascii_digit).count();
         let written = || body[..digits].parse::<u64>().unwrap_or(1);
-        while counts.last().is_some_and(|(held, _)| *held > depth) {
+        while counts.last().is_some_and(|(held, ..)| *held > depth) {
             counts.pop();
         }
+        // **記号が変われば、そこから別のリスト**（CommonMark §5.3、書き手の決定
+        // 2026-09-11）。この連なりの深さで種類が変わったら、そこで止める
+        // ——「連なりが切れるところで止まる」に、切れ目が1つ増えたのである。
+        if depth == base
+            && counts
+                .iter()
+                .any(|(held, was, _)| *held == depth && *was != kind)
+        {
+            break;
+        }
         let number = match counts.last_mut() {
-            Some((held, next)) if *held == depth => {
+            Some((held, was, next)) if *held == depth && *was == kind => {
                 let number = *next;
                 *next += 1;
                 number
             }
-            // **新しい深さは、その先頭が書いている番号から。**打ち直した数が
-            // そのまま開始番号である。
+            // **新しい深さ、あるいは別の種類は、その先頭が書いている番号から。**
+            // 打ち直した数がそのまま開始番号である。
             _ => {
+                while counts.last().is_some_and(|(held, ..)| *held == depth) {
+                    counts.pop();
+                }
                 let start = if style.kind == LineKind::Ordered {
                     written()
                 } else {
                     1
                 };
-                counts.push((depth, start + 1));
+                counts.push((depth, kind, start + 1));
                 start
             }
         };
@@ -1358,6 +1375,27 @@ fn renumber_below(
     let without_break = text.strip_suffix('\n').unwrap_or(&text).len();
     let chosen = (start, start + without_break);
     Some((start..end, text, chosen))
+}
+
+/// この項目の**種類**——CommonMark §5.3 の「同じ種類の項目の並び」（書き手の決定
+/// 2026-09-11：「記号を変えるとそこから別のリストが始まる。これはそうするべき」）。
+///
+/// **箇条書きなら印の字、番号なら区切りの字**（`.`か`)`）。`- あ`と`* い`は別の
+/// リストであり、`1. あ`と`1) い`も別のリストである——他のツールはそこで連なりを
+/// 切り、番号も数え直す。
+///
+/// **印を持たない行は`None`**（空行も、項目の続きの段落も、種類を持たない）。
+fn item_type(line: &str, style: LineStyle) -> Option<char> {
+    if !style.kind.is_list() {
+        return None;
+    }
+    let content = quote_content(line);
+    let (_, body) = leading_indent(content);
+    if style.kind == LineKind::Ordered {
+        let digits = body.chars().take_while(char::is_ascii_digit).count();
+        return body[digits..].chars().next();
+    }
+    body.chars().next()
 }
 
 /// この行はまだ箇条書きの連なりの中か（[`renumber_below`]・[`renumber_around`]）。
@@ -1585,9 +1623,10 @@ fn renumber_around(source: &str, at: usize, positions: &mut [usize], marks: Bull
     let (Some(first), Some(last)) = (first, last) else {
         return source.to_owned();
     };
-    // 深さごとの数。**内側へ入れば積み、外側へ戻れば捨てる**——捨てたぶんは
-    // もう一度入ったときに1から始まる。
-    let mut counts: Vec<(u8, u64)> = Vec::new();
+    // 深さごとの数と、その連なりの種類。**内側へ入れば積み、外側へ戻れば捨てる**
+    // ——捨てたぶんはもう一度入ったときに1から始まる。**記号が変わればそこから
+    // 別のリスト**（CommonMark §5.3）なので、種類も鍵の一部である。
+    let mut counts: Vec<(u8, char, u64)> = Vec::new();
     let mut out = String::with_capacity(source.len());
     let mut moved: Vec<isize> = vec![0; positions.len()];
     let mut at = 0;
@@ -1604,14 +1643,31 @@ fn renumber_around(source: &str, at: usize, positions: &mut [usize], marks: Bull
             continue;
         }
         let depth = style.list_indent;
-        while counts.last().is_some_and(|(held, _)| *held > depth) {
+        let kind = item_type(line, style).unwrap_or('-');
+        while counts.last().is_some_and(|(held, ..)| *held > depth) {
             counts.pop();
         }
         match counts.last_mut() {
-            Some((held, count)) if *held == depth => *count += 1,
-            _ => counts.push((depth, 1)),
+            Some((held, was, count)) if *held == depth && *was == kind => *count += 1,
+            // **同じ深さで種類が変われば、そこから別のリスト**（CommonMark §5.3）
+            // ——`1. 甲 / 2. 乙 / 1) 丙`の丙は3つめではない。**その項目が書いている
+            // 番号から**数える：打ったのは書き手で、ここが振り直すのはその下である。
+            Some((held, ..)) if *held == depth => {
+                counts.pop();
+                let quote = line.len() - quote_content(line).len();
+                let (_, body) = leading_indent(&line[quote..]);
+                let digits = body.chars().take_while(char::is_ascii_digit).count();
+                let start = if style.kind == LineKind::Ordered {
+                    body[..digits].parse::<u64>().unwrap_or(1)
+                } else {
+                    1
+                };
+                counts.push((depth, kind, start));
+            }
+            // **内側へ入れば1から**（書き手が画面で通した数え方）。
+            _ => counts.push((depth, kind, 1)),
         }
-        let number = counts.last().map_or(1, |(_, count)| *count);
+        let number = counts.last().map_or(1, |(.., count)| *count);
         if style.kind != LineKind::Ordered {
             push_line(&mut out, line, index + 1 < lines.len());
             continue;
@@ -4058,6 +4114,42 @@ mod tests {
         let (_, off, _) =
             listed(&evened, chosen.0, chosen.1, ListEdit::Ordered, '-').expect("外せる");
         assert_eq!(off, "あああ\nいいい\nううう\n");
+    }
+
+    /// E10の④（書き手の決定 2026-09-11、CommonMark §5.3）: **記号を変えると、そこから
+    /// 別のリストが始まる。**他のツールはそこで連なりを切り、番号も数え直す
+    /// ——この編集器も同じにする。
+    #[test]
+    fn changing_the_mark_starts_a_new_list() {
+        // 区切りが`.`から`)`へ変わる——丙は3つめではなく、その連なりの1つめ。
+        let mixed = "1. 甲\n2. 乙\n1) 丙\n5) 丁\n";
+
+        // `Tab`の数え直し（`renumber_around`）：丙は自分の番号のまま、丁が続く。
+        let last = mixed.find("5) 丁").expect("ある");
+        let deeper = shift_indent(mixed, last, last, true, BulletMarks::all()).expect("下げられる");
+        assert_eq!(deeper.text, "1. 甲\n2. 乙\n1) 丙\n    1) 丁\n");
+
+        // `Renumber`：種類の変わるところで止まる。**丙と丁には触れない。**
+        let typed = "5. 甲\n2. 乙\n1) 丙\n5) 丁\n";
+        let (region, text, _) = listed(typed, 0, 0, ListEdit::Renumber, '-').expect("数え直せる");
+        assert_eq!(text, "5. 甲\n6. 乙\n");
+        assert_eq!(region.end, "5. 甲\n2. 乙\n".len(), "丙から先は別のリスト");
+    }
+
+    /// E10の④: **印の字が変われば、箇条書きでも別のリスト**（§5.3）。番号を持たない
+    /// 項目も1つと数えるので、そこが切れることは数にも効く。
+    #[test]
+    fn a_different_bullet_is_a_different_list_too() {
+        let mixed = "- 甲\n* 乙\n";
+
+        assert_eq!(item_type("- 甲", line_styles(mixed)[0]), Some('-'));
+        assert_eq!(item_type("* 乙", line_styles(mixed)[1]), Some('*'));
+        // 番号の区切りも同じ問いで答える。
+        let ordered = "1. 甲\n2) 乙\n";
+        assert_eq!(item_type("1. 甲", line_styles(ordered)[0]), Some('.'));
+        assert_eq!(item_type("2) 乙", line_styles(ordered)[1]), Some(')'));
+        // 印を持たない行は種類を持たない。
+        assert_eq!(item_type("本文", LineStyle::default()), None);
     }
 
     /// E10の②: **この行の番号から、下を数え直す**（書き手の選択 2026-09-11）。
