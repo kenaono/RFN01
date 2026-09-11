@@ -2936,8 +2936,12 @@ export component AppWindow inherits Window {
                     }
 
                     // E10の③（書き手の選択 2026-09-11）: 後から箇条書きにするとき
-                    // **原稿へ入る字**。Markdownが認める3つで、読み方の側の設定で
-                    // ある——画面に出る丸は紙のシート（Typography）が決める。
+                    // **原稿へ入る字**。画面に出る丸は紙のシート（Layout）が決める。
+                    //
+                    // **書くときだけの設定である**（書き手の報告 2026-09-11）。
+                    // 読むときは`-`も`*`も`+`も箇条書きのまま——設定を`*`にした
+                    // からといって、`- 項目`と書かれた他人の原稿が本文になっては
+                    // ならない。`Ctrl+Shift+8`は「その字にそろえる→外す」の階段。
                     HorizontalLayout {
                         spacing: 2px;
 
@@ -2959,7 +2963,7 @@ export component AppWindow inherits Window {
                     }
 
                     Text {
-                        text: "Ctrl+Shift+8 が原稿へ入れる字です（画面に出る印は Typography）。";
+                        text: "Ctrl+Shift+8 が原稿へ入れる字。読むときは - * + のどれも箇条書きです。";
                         color: Tok.ink-faint;
                         font-size: 11px;
                         overflow: elide;
@@ -4015,7 +4019,7 @@ export component AppWindow inherits Window {
 
                     // E10の③（書き手の選択 2026-09-11）: 箇条書きの印として
                     // **画面に出る字**。原稿に入る字（`-`／`*`／`+`）は
-                    // Settings → FILES にある——あちらは読み書きの字で、
+                    // Settings → General の FILES にある——あちらは読み書きの字で、
                     // こちらは組み方である（同じ原稿が別の紙で別の丸に見えてよい）。
                     HorizontalLayout {
                         spacing: 2px;

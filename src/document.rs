@@ -1166,7 +1166,12 @@ fn set_markers(
             continue;
         }
         touched = true;
-        all_wanted &= style.kind == wanted;
+        // **印の字までそろっていて、はじめて「もうその印である」。**設定を`*`に
+        // してから`- 項目`の上で押した書き手が頼んでいるのは、**その字にそろえる**
+        // ことである（書き手の報告 2026-09-11）——`Ctrl+Shift+7`の「そろえる→
+        // 外れる」と同じ階段で、字が違えば替え、同じなら外す。
+        all_wanted &=
+            style.kind == wanted && (wanted != LineKind::Bullet || same_mark(line, bullet));
     }
     if !touched {
         return None;
@@ -1413,6 +1418,17 @@ fn settle(kept: [usize; 2], shifts: [isize; 2], at: usize, held: usize, text: &s
 /// 2つの位置を、選び直す範囲にする（[`settle`]）。
 fn chosen_range(moved: [usize; 2]) -> (usize, usize) {
     (moved[0].min(moved[1]), moved[0].max(moved[1]))
+}
+
+/// この行の印が、頼まれた字そのものか（[`set_markers`]）。
+///
+/// **読むときはMarkdownの3つとも印である**（`list_kind`）——設定を`*`にしたからと
+/// いって、`- 項目`と書かれた他人の原稿が本文になってしまってはならない。この問いは
+/// **書くときだけ**のもので、「もうその印になっているか」を答える。
+fn same_mark(line: &str, bullet: char) -> bool {
+    let content = quote_content(line);
+    let (_, body) = leading_indent(content);
+    body.starts_with(bullet)
 }
 
 /// 印を付け替えられる行（[`list_edit`]）。
@@ -3754,6 +3770,27 @@ mod tests {
         // カーソル1つだけなら、字下げの後ろへ出る。
         let caret = shift_indent(source, 0, 0, true).expect("下げられる");
         assert_eq!(caret.chosen, (INDENT_STEP.len(), INDENT_STEP.len()));
+    }
+
+    /// E10の③（書き手の報告 2026-09-11）: **印の鍵も「そろえる→外れる」の階段。**
+    /// 設定の字と違う印なら、その字にそろえる。同じなら外す——`Ctrl+Shift+7`と
+    /// 同じ形である。**読むときは3つとも印のまま**（他人の原稿が本文にならない）。
+    #[test]
+    fn the_bullet_key_evens_the_marks_before_it_takes_them_off() {
+        let source = "- 一つめ\n- 二つめ\n";
+
+        // 設定が`*`なら、`-`の並びは`*`にそろう。
+        let (_, starred, _) =
+            listed(source, 0, source.len(), ListEdit::Bullet, '*').expect("そろえられる");
+        assert_eq!(starred, "* 一つめ\n* 二つめ\n");
+
+        // もう一度押せば外れる（そろっているので）。
+        let (_, off, _) =
+            listed(&starred, 0, starred.len(), ListEdit::Bullet, '*').expect("外せる");
+        assert_eq!(off, "一つめ\n二つめ\n");
+
+        // **読むほうは変わらない。**`*`の行は、設定が`-`でも箇条書きである。
+        assert_eq!(line_styles(&starred)[0].kind, LineKind::Bullet);
     }
 
     /// E10（書き手の報告 2026-09-11）: **空行を挟んだ項目も1つの連なり。**
