@@ -7638,12 +7638,15 @@ fn typography_for(
     // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。**寸法に効く**ので、
     // 切り替えれば組み直しが起きる。
     spec.upright_digits = number(Setting::UprightDigits) != 0;
-    // E10の③（書き手の選択 2026-09-11）: 画面に出る印の字。**色と同じ側**——箱は
-    // 幅0なので幾何は動かないが、`hash_typography`に入れてあるのでタイルは捨てられる。
-    spec.bullet = BULLET_MARKS
-        .get(number(Setting::BulletMark).max(0) as usize)
-        .copied()
-        .unwrap_or(DEFAULT_BULLET);
+    // 書き手の決定 2026-09-11: 画面に出る印の字を、**原稿の記号ごとに**。**色と同じ
+    // 側**——箱は幅0なので幾何は動かないが、`hash_typography`に入れてあるのでタイルは
+    // 捨てられる。
+    for (at, glyph) in spec.bullets.iter_mut().enumerate() {
+        *glyph = BULLET_GLYPHS
+            .get(number(Setting::BulletMark(at)).max(0) as usize)
+            .copied()
+            .unwrap_or(DEFAULT_BULLET);
+    }
     // 要件 7.8（書き手の報告 2026-09-09）: ルビの入る空き。**行送りの下限**を
     // 上げるだけなので、書き手が広く取った行間はそのままである。
     spec.character_spacing = percent(number(Setting::CharAdvance));
@@ -7721,7 +7724,7 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// to 12 the two places that had written the absolute row instead were missed —
 /// the vertical pane then took its page margin from the line height. One
 /// definition, sent over.
-const SHEET_NUMBERS: usize = 11 + MAX_HEADING_LEVEL;
+const SHEET_NUMBERS: usize = 13 + MAX_HEADING_LEVEL;
 /// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
 /// two values are `2`, the pane's own width, and `0`, not wrapping at all —
 /// **which is written down and not yet built**: tiles are cut along the flow
@@ -7857,14 +7860,15 @@ enum Setting {
     /// General の MARKUP にある`list.bullet`である（あちらは読み書きの字）。
     ///
     /// 番号は[`BULLET_MARKS`]の並び。
-    BulletMark,
+    /// **原稿の記号1つにつき1行**（`document::BULLET_MARKS`の並び）。
+    BulletMark(usize),
 }
 
-/// 画面に出る箇条書きの印（[`Setting::BulletMark`]）。
+/// 画面に出る箇条書きの印として選べる字（[`Setting::BulletMark`]）。
 ///
 /// **3つで足りる**（案は少ない方から）。`•`はいままで描いていた字、`・`は日本語の
 /// 中黒、`○`は白丸——足りなければ書き手が言う。
-const BULLET_MARKS: [char; 3] = ['•', '・', '○'];
+const BULLET_GLYPHS: [char; 3] = ['•', '・', '○'];
 
 impl Setting {
     /// The number the window sends, which is also the row it sits in.
@@ -7883,7 +7887,7 @@ impl Setting {
             13 => Some(Self::RubySize),
             14 => Some(Self::RubyOffset),
             15 => Some(Self::UprightDigits),
-            16 => Some(Self::BulletMark),
+            16..=18 => Some(Self::BulletMark(index as usize - 16)),
             _ => None,
         }
     }
@@ -7901,7 +7905,7 @@ impl Setting {
             Self::RubySize => 7 + MAX_HEADING_LEVEL,
             Self::RubyOffset => 8 + MAX_HEADING_LEVEL,
             Self::UprightDigits => 9 + MAX_HEADING_LEVEL,
-            Self::BulletMark => 10 + MAX_HEADING_LEVEL,
+            Self::BulletMark(mark) => 10 + MAX_HEADING_LEVEL + mark.min(2),
         }
     }
 
@@ -7912,7 +7916,7 @@ impl Setting {
             Self::WrapMode => 1,
             Self::LineNumbers => 1,
             Self::UprightDigits => 1,
-            Self::BulletMark => 1,
+            Self::BulletMark(_) => 1,
             Self::WrapChars => 2,
             Self::RubySize => 2,
             Self::RubyOffset => 2,
@@ -7935,7 +7939,7 @@ impl Setting {
             Self::WrapMode => (0, 2),
             Self::LineNumbers => (0, 1),
             Self::UprightDigits => (0, 1),
-            Self::BulletMark => (0, BULLET_MARKS.len() as i32 - 1),
+            Self::BulletMark(_) => (0, BULLET_GLYPHS.len() as i32 - 1),
             Self::WrapChars => (10, 200),
             // 親文字より大きいルビは、ルビではなく別の本文である。
             Self::RubySize => (20, 100),
@@ -7962,9 +7966,9 @@ impl Setting {
             // 入。要件 7.8 は「書き手が何も書かなくても効く」と言っている
             // ——切りたい書き手が切る側であって、既定が何もしない側ではない。
             Self::UprightDigits => 1,
-            // E10の③: いままで描いていた字（`•`）。設定になったからといって、
-            // 書き手の画面が動くいわれはない。
-            Self::BulletMark => 0,
+            // 書き手の決定 2026-09-11: いままで描いていた字（`•`）。設定になった
+            // からといって、書き手の画面が動くいわれはない——3つの記号とも同じ丸から。
+            Self::BulletMark(_) => 0,
             // 半分が日本語の組版の当たり前である。
             Self::RubySize => 50,
             // 行の箱の端。行間の空きがそのままルビの帯になる。
@@ -8002,7 +8006,9 @@ impl Setting {
             Self::WrapMode => "wrap-mode",
             Self::LineNumbers => "line-numbers",
             Self::UprightDigits => "upright-digits",
-            Self::BulletMark => "bullet-mark",
+            Self::BulletMark(0) => "bullet-mark-hyphen",
+            Self::BulletMark(1) => "bullet-mark-star",
+            Self::BulletMark(_) => "bullet-mark-plus",
             Self::WrapChars => "wrap-chars",
             Self::RubySize => "ruby-size",
             Self::RubyOffset => "ruby-offset",

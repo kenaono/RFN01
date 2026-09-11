@@ -4036,29 +4036,53 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // E10の③（書き手の選択 2026-09-11）: 箇条書きの印として
-                    // **画面に出る字**。原稿に入る字（`-`／`*`／`+`）は
-                    // Settings → General の MARKUP にある——あちらは読み書きの字で、
-                    // こちらは組み方である（同じ原稿が別の紙で別の丸に見えてよい）。
-                    HorizontalLayout {
+                    // 書き手の決定 2026-09-11: **原稿の記号ごとに、画面へ出る字。**
+                    // 「三種類の文字に箇条書きの意味を与え、それぞれに、表現として
+                    // どう見せるかを設定できるように」——`- 項目`と`* 項目`を別の
+                    // 丸で出せる、というのがその意味である。
+                    //
+                    // **読むと決めていない記号は、見せ方も設定できない**（書き手の
+                    // 求めた依存関係）。切ってある記号の行はただの本文で、印そのものが
+                    // 出ないので、ここで丸を選んでも効くところが無い——**働かない
+                    // 切り替えを画面に置かない**（単語チェックモード要件 2.1.1）。
+                    for mark[at] in ["-", "*", "+"]: HorizontalLayout {
                         spacing: 2px;
 
                         Text {
-                            text: "Bullet mark";
+                            text: at == 0 ? "Bullet marks" : "";
                             color: Tok.ink;
                             font-size: 12px;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
 
-                        for mark[index] in ["•", "・", "○"]: TextButton {
-                            title: mark;
-                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 16] == index
-                                ? Role.primary
-                                : Role.normal;
-                            clicked => {
-                                root.sheet-chose(16, index);
+                        Text {
+                            text: mark;
+                            color: root.bullet-marks[at] ? Tok.ink : Tok.ink-faint;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        if root.bullet-marks[at]: HorizontalLayout {
+                            spacing: 2px;
+
+                            for glyph[index] in ["•", "・", "○"]: TextButton {
+                                title: glyph;
+                                role: root.sheet-numbers[root.sheet * root.sheet-stride
+                                    + 16 + at] == index
+                                    ? Role.primary
+                                    : Role.normal;
+                                clicked => {
+                                    root.sheet-chose(16 + at, index);
+                                }
                             }
+                        }
+
+                        if !root.bullet-marks[at]: Text {
+                            text: "General で切ってあります";
+                            color: Tok.ink-faint;
+                            font-size: 11px;
+                            vertical-alignment: center;
                         }
                     }
                 }

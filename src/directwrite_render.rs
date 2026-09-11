@@ -1606,11 +1606,12 @@ fn byte_at_utf16(text: &str, utf16: u32) -> usize {
 /// box is standing over. The trailing space is dropped: that space was the gap
 /// after the marker, and the gap is now the box.
 ///
-fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun, bullet: char) -> String {
+fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun, bullets: [char; 3]) -> String {
     match ornament {
-        // E10の③: **画面に出る印は紙のものである**（`Typography::bullet`）。原稿に
-        // 入る字（`-`／`*`／`+`）とは別で、決めているのは1か所ずつ。
-        Ornament::Bullet => bullet.to_string(),
+        // 書き手の決定 2026-09-11: **原稿にどの記号で書かれているかで、出る字が違う。**
+        // 箱が覆っている字をそのまま読み出す道（`Number`と同じ）で記号を取り、紙が
+        // その記号に与えた字を描く——**記号に意味を与えるとはこのこと**である。
+        Ornament::Bullet => bullet_ink(covered(block_text, run), bullets).to_string(),
         Ornament::TaskOpen => "☐".to_owned(),
         Ornament::TaskDone => "☑".to_owned(),
         // A box that is there only to hide what it covers. The stroke across a
@@ -1640,6 +1641,21 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun, bullet: char
         Ornament::Upright => covered(block_text, run).to_owned(),
         Ornament::Ruby { .. } => ruby_reading(block_text, run).to_owned(),
     }
+}
+
+/// 原稿のこの印に、紙が与えている字（[`marker_ink`]）。
+///
+/// **知らない記号は先頭の字で描く。**`marker`は`document::BULLET_MARKS`のどれかで
+/// 始まるはずだが、そうでない字が来たとき**印が消えるより、丸が1つ出るほうがよい。**
+fn bullet_ink(marker: &str, bullets: [char; 3]) -> char {
+    let Some(mark) = marker.chars().next() else {
+        return bullets[0];
+    };
+    crate::document::BULLET_MARKS
+        .iter()
+        .position(|known| *known == mark)
+        .and_then(|at| bullets.get(at).copied())
+        .unwrap_or(bullets[0])
 }
 
 /// 箱が覆っている字（[`marker_ink`]）。
@@ -1680,7 +1696,7 @@ fn draw_marker_ink(
     origin: windows_numerics::Vector2,
     mode: WritingMode,
     indent: f32,
-    bullet: char,
+    bullets: [char; 3],
 ) -> Result<()> {
     // 要件 7.8: **箱の中に立つものは、あとでまとめて。**溝へ置くものと置き場所
     // の決め方が違うだけなので、輪の中に二つ目の`if`を積むより読める。
@@ -1725,7 +1741,7 @@ fn draw_marker_ink(
             continue;
         }
         let region = regions[0];
-        let ink = marker_ink(ornament, text, run, bullet);
+        let ink = marker_ink(ornament, text, run, bullets);
         let utf16 = ink.encode_utf16().collect::<Vec<u16>>();
         // **The box takes no room now**, so what comes back is a sliver at the
         // head of the item's text rather than a space to draw in. The glyph
@@ -3006,7 +3022,7 @@ fn draw_tile(
                 origin,
                 mode,
                 typography.indent_step(),
-                typography.bullet,
+                typography.bullets,
             )?;
         }
         // 要件 7.8: ルビと傍点は行の脇の帯に出る。**本文の上に描く**ので、
@@ -3458,9 +3474,9 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // 要件 7.8（2026-09-09）: 縦中横。**こちらは寸法の側**——3桁の数字は
     // 1マスに収まるのと1桁ずつ縦に並ぶのとで占める長さが違う。
     typography.upright_digits.hash(hasher);
-    // E10の③（2026-09-11）: 画面に出る印の字。**ルビと同じ色の側**——箱は幅0なので
-    // 幾何は動かず、古くなるのはタイルだけである。
-    typography.bullet.hash(hasher);
+    // 書き手の決定 2026-09-11: 画面に出る印の字（記号ごとに1つ）。**ルビと同じ色の
+    // 側**——箱は幅0なので幾何は動かず、古くなるのはタイルだけである。
+    typography.bullets.hash(hasher);
 }
 
 /// The colours a tile is drawn in (要件 9).
@@ -7991,7 +8007,7 @@ mod tests {
         };
 
         assert_eq!(
-            marker_ink(Ornament::Number, text, &run, plain().bullet),
+            marker_ink(Ornament::Number, text, &run, plain().bullets),
             "10."
         );
 
@@ -8004,28 +8020,54 @@ mod tests {
             ..run
         };
         assert_eq!(
-            marker_ink(Ornament::Number, nested, &run, plain().bullet),
+            marker_ink(Ornament::Number, nested, &run, plain().bullets),
             "10."
         );
         // 編集中の行の記号も同じ道を通る。
         assert_eq!(
-            marker_ink(Ornament::Markup, nested, &run, plain().bullet),
+            marker_ink(Ornament::Markup, nested, &run, plain().bullets),
             "10."
         );
         assert_eq!(
-            marker_ink(Ornament::Bullet, text, &run, plain().bullet),
+            marker_ink(Ornament::Bullet, text, &run, plain().bullets),
             "•"
         );
         // E10の③: 紙が別の字を言えば、その字が出る。
-        assert_eq!(marker_ink(Ornament::Bullet, text, &run, '・'), "・");
+        // 書き手の決定 2026-09-11: **記号ごとに違う字。**`- `の行はこの紙では`・`。
         assert_eq!(
-            marker_ink(Ornament::TaskOpen, text, &run, plain().bullet),
+            marker_ink(Ornament::Bullet, text, &run, ['・', '○', '‐']),
+            "・"
+        );
+        assert_eq!(
+            marker_ink(Ornament::TaskOpen, text, &run, plain().bullets),
             "☐"
         );
         assert_eq!(
-            marker_ink(Ornament::TaskDone, text, &run, plain().bullet),
+            marker_ink(Ornament::TaskDone, text, &run, plain().bullets),
             "☑"
         );
+    }
+
+    /// 書き手の決定 2026-09-11: **原稿の記号ごとに、出る字が違う。**「三種類の文字に
+    /// 箇条書きの意味を与え、それぞれに、表現としてどう見せるかを設定できるように」。
+    #[test]
+    fn each_source_mark_draws_the_glyph_its_sheet_gives_it() {
+        let text = "- ハイフン\n* アスタリスク\n+ プラス\n";
+        let bullets = ['・', '○', '‐'];
+        let run = |at: u32| StyleRun {
+            utf16_start: at,
+            utf16_len: 2,
+            heading_level: 0,
+            marks: Marks::default(),
+            ornament: Some(Ornament::Bullet),
+        };
+
+        // 箱が覆っているのは記号と、その後ろの空き1つ。
+        assert_eq!(marker_ink(Ornament::Bullet, text, &run(0), bullets), "・");
+        let star = "- ハイフン\n".encode_utf16().count() as u32;
+        assert_eq!(marker_ink(Ornament::Bullet, text, &run(star), bullets), "○");
+        let plus = "- ハイフン\n* アスタリスク\n".encode_utf16().count() as u32;
+        assert_eq!(marker_ink(Ornament::Bullet, text, &run(plus), bullets), "‐");
     }
 
     /// E10の③（書き手の選択 2026-09-11）: **画面に出る印を替えると、絵が古くなる。**
@@ -8047,7 +8089,7 @@ mod tests {
 
         let dot = plain();
         let mut ring = plain();
-        ring.bullet = '○';
+        ring.bullets = ['○'; 3];
 
         let with_dot = styled(&dot);
         let with_ring = styled(&ring);
