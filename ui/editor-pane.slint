@@ -161,6 +161,10 @@ export struct PaneScreen {
     // (追加要件 2026-09-07). The document behind the page is real and empty;
     // what stands over it is three words.
     empty: bool,
+    /// 追加要件 2026-09-14（書き手）: **設定はTABで開く。**前に出ているタブが
+    /// 設定の面なら、本文の場所には窓が差し込む設定の中身が立つ。下の文書は
+    /// 端末と同じく空の代役で、字は入らない。
+    settings: bool,
     /// E1（書き手の報告 2026-09-09）: **探している語は、その面のもの。**
     ///
     /// 窓に1つだけ持っていたので、Pane1で探してPane2で探し、Pane1へ戻ると
@@ -346,6 +350,12 @@ export component EditorPane inherits Rectangle {
     /// would be the editor deciding what a shell means.
     in property <bool> terminal: false;
     in property <bool> empty: false;
+    /// 前に出ているタブが設定の面か（追加要件 2026-09-14）。**中身は窓が
+    /// 差し込む**（`@children`）——設定は窓のもので、ペインは場所を貸すだけ。
+    in property <bool> settings: false;
+    /// **本文を書いているタブか。**シェルにも設定の面にも本文は無いので、
+    /// 文書にしか意味の無い行とボタンは、この1つで出し入れする。
+    property <bool> writing: !root.terminal && !root.settings;
     /// 要件 7.9（2026-09-08）: いまこの面に効いている語群の名前。**選んだ語を
     /// 足す先**として右ボタンのメニューに並ぶ。空なら行そのものが出ない。
     in property <[string]> word-sets;
@@ -1106,7 +1116,7 @@ export component EditorPane inherits Rectangle {
                         // The grid is rows of cells across; there is nothing
                         // here for 要件 7.2's other mode to mean, so the two
                         // buttons are dimmed rather than left to do nothing.
-                        enabled: !root.terminal;
+                        enabled: root.writing;
                         clicked => {
                             if (root.vertical) {
                                 root.direction-toggled();
@@ -1117,7 +1127,7 @@ export component EditorPane inherits Rectangle {
                         icon: Icons.vertical;
                         tip: "Vertical" + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
                         checked: root.vertical;
-                        enabled: !root.terminal;
+                        enabled: root.writing;
                         clicked => {
                             if (!root.vertical) {
                                 root.direction-toggled();
@@ -1128,7 +1138,7 @@ export component EditorPane inherits Rectangle {
                         icon: Icons.preview;
                         tip: "Live Preview" + (root.shortcut-keys[43] == "" ? "" : " · " + root.shortcut-keys[43]);
                         checked: root.preview;
-                        enabled: !root.viewer;
+                        enabled: !root.viewer && !root.settings;
                         clicked => {
                             root.preview-toggled();
                         }
@@ -1137,7 +1147,7 @@ export component EditorPane inherits Rectangle {
                         icon: "M1 2h5l2 2 2-2h5v12h-5l-2 1-2-1H1z M8 4v11";
                         tip: (root.viewer ? "Viewerを終了" : "Viewerモード") + (root.shortcut-keys[44] == "" ? "" : " · " + root.shortcut-keys[44]);
                         checked: root.viewer;
-                        enabled: !root.terminal;
+                        enabled: root.writing;
                         clicked => { root.viewer-toggled(); }
                     }
                     IconButton {
@@ -1220,7 +1230,7 @@ export component EditorPane inherits Rectangle {
                         // ことを2か所で言っている限り、片方だけ直す日が来る。
                         //
                         // **`if`の中の行は頼んでから閉じる**（技術検証 6.24）。
-                        if !root.terminal: VerticalLayout {
+                        if root.writing: VerticalLayout {
                             spacing: 1px;
 
                             MenuRow {
@@ -1337,7 +1347,7 @@ export component EditorPane inherits Rectangle {
                         // 追加要件 Terminal: **the strip along the foot.** Which
                         // of the two it is follows from the tab in front, so the
                         // row says which one the writer will get.
-                        MenuRow {
+                        if !root.settings: MenuRow {
                             title: root.terminal ? "Editor Below" : "Terminal Below";
                             shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                             activated => {
@@ -1359,7 +1369,7 @@ export component EditorPane inherits Rectangle {
                                 root.layout-requested();
                             }
                         }
-                        if !root.terminal: MenuRow {
+                        if root.writing: MenuRow {
                             title: "Go to Line…";
                             shortcut: root.shortcut-keys[6];
                             activated => {
@@ -1367,19 +1377,19 @@ export component EditorPane inherits Rectangle {
                                 pane-menu.close();
                             }
                         }
-                        if !root.terminal: MenuRow {
+                        if root.writing: MenuRow {
                             title: "閉じたTABを開き直す";
                             shortcut: root.shortcut-keys[7];
                             activated => { root.reopen-closed-requested(); pane-menu.close(); }
                         }
-                        if !root.terminal: MenuRow {
+                        if root.writing: MenuRow {
                             title: "保存版と比較";
                             activated => {
                                 root.compare-saved-requested();
                                 pane-menu.close();
                             }
                         }
-                        if !root.terminal: MenuRow {
+                        if root.writing: MenuRow {
                             title: "別のファイルと比較…";
                             activated => {
                                 root.compare-requested();
@@ -1396,7 +1406,7 @@ export component EditorPane inherits Rectangle {
                         // that knows.
                         // 追加要件 2026-09-08: 倍率は文書のもの——シェルの
                         // 升目には効かない（右ボタンのメニューと同じ理由）。
-                        if !root.terminal: VerticalLayout {
+                        if root.writing: VerticalLayout {
                             spacing: 1px;
 
                             MenuRow {
@@ -2033,7 +2043,12 @@ export component EditorPane inherits Rectangle {
                             single-line: false;
 
                             edited => {
-                                if root.had-preedit {
+                                // 追加要件 2026-09-14: **設定の面に字は入らない。**
+                                // 下の文書は代役で、打った字を受け取る先ではない。
+                                if root.settings {
+                                    root.had-preedit = false;
+                                    self.text = "";
+                                } else if root.had-preedit {
                                     root.had-preedit = false;
                                     root.commit-just-finished = true;
                                     commit-reset.start();
@@ -2051,7 +2066,9 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             accepted => {
-                                if root.commit-just-finished {
+                                if root.settings {
+                                    self.text = "";
+                                } else if root.commit-just-finished {
                                     root.commit-just-finished = false;
                                     commit-reset.stop();
                                 } else {
@@ -2059,10 +2076,12 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             changed preedit-text => {
-                                if self.preedit-text != "" {
-                                    root.had-preedit = true;
+                                if !root.settings {
+                                    if self.preedit-text != "" {
+                                        root.had-preedit = true;
+                                    }
+                                    root.preedit-changed(self.preedit-text);
                                 }
-                                root.preedit-changed(self.preedit-text);
                             }
                             key-pressed(event) => {
                                 if (event.modifiers.control && (event.text == "f" || event.text == "F" || event.text == "\u{6}" || event.text == "h" || event.text == "H" || event.text == "\u{8}")) {
@@ -2075,6 +2094,17 @@ export component EditorPane inherits Rectangle {
                                     if (root.terminal) { root.focus-trace("ctrl-w-terminal"); }
                                     if (self.preedit-text != "") { root.focus-trace("ctrl-w-preedit-active"); }
                                     if (self.text != "") { root.focus-trace("ctrl-w-input-pending"); }
+                                }
+                                // 追加要件 2026-09-14: **設定の面が通すのは窓の
+                                // 鍵だけ。**TABを閉じる・移る、ペインを移る、
+                                // ファイルを開く——どれを通すかはRustが1か所で
+                                // 決める（`shortcuts::wire`）。残りの鍵は、ここで
+                                // 飲む：本文へ落ちれば代役の文書に字が入る。
+                                if (root.settings) {
+                                    if (self.preedit-text == "") {
+                                        root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                                    }
+                                    return accept;
                                 }
                                 // **A shell takes every key.** Nothing below
                                 // applies to it: those rows are the editor's
@@ -2593,7 +2623,7 @@ export component EditorPane inherits Rectangle {
                                         // （技術検証 6.24・6.30）。`close`はこの木を
                                         // 捨て、捨てられた木から`root`へ登ろうと
                                         // した生成コードは黙って何もしない。
-                                        if !root.terminal: MenuRow {
+                                        if root.writing: MenuRow {
                                             title: "Undo";
                                             shortcut: root.shortcut-keys[8];
                                             enabled: root.can-undo;
@@ -2602,7 +2632,7 @@ export component EditorPane inherits Rectangle {
                                                 context-menu.close();
                                             }
                                         }
-                                        if !root.terminal: MenuRow {
+                                        if root.writing: MenuRow {
                                             title: "Redo";
                                             shortcut: root.shortcut-keys[9];
                                             enabled: root.can-redo;
@@ -2611,8 +2641,8 @@ export component EditorPane inherits Rectangle {
                                                 context-menu.close();
                                             }
                                         }
-                                        if !root.terminal: MenuSep { }
-                                        if !root.terminal: MenuRow {
+                                        if root.writing: MenuSep { }
+                                        if root.writing: MenuRow {
                                             title: "Cut";
                                             shortcut: "Ctrl+X";
                                             activated => {
@@ -2646,7 +2676,7 @@ export component EditorPane inherits Rectangle {
                                                 ime-input.paste();
                                             }
                                         }
-                                        if !root.terminal: MenuRow {
+                                        if root.writing: MenuRow {
                                             title: "本文だけをコピー";
                                             activated => {
                                                 root.copy-body-requested();
@@ -2661,7 +2691,7 @@ export component EditorPane inherits Rectangle {
                                         // そのまま選ばれているものである（E3の②の
                                         // `selected_lines`と同じ見方）——押せない行を
                                         // 出さないのと、機能の入口を隠すのは違う。
-                                        if !root.terminal: VerticalLayout {
+                                        if root.writing: VerticalLayout {
                                             spacing: 1px;
 
                                             MenuSep { }
@@ -2789,7 +2819,7 @@ export component EditorPane inherits Rectangle {
                                         //
                                         // **選択があるときだけ**出す。セットが1冊
                                         // なら行は1つ、複数なら名前が並ぶ。
-                                        if !root.terminal && root.has-selection
+                                        if root.writing && root.has-selection
                                             && root.word-sets.length > 0: VerticalLayout {
                                             spacing: 1px;
 
@@ -2805,7 +2835,7 @@ export component EditorPane inherits Rectangle {
                                             }
                                         }
 
-                                        if !root.terminal: VerticalLayout {
+                                        if root.writing: VerticalLayout {
                                             spacing: 1px;
 
                                             MenuSep { }
@@ -3509,6 +3539,16 @@ export component EditorPane inherits Rectangle {
             }
 
         }
+
+            // 追加要件 2026-09-14（書き手）: **設定の面が立つ場所。**本文と同じ
+            // 大きさで、中身は窓が`EditorPane`の子として渡す——設定は窓のもので、
+            // 何百行もの値をペインへ通すより、場所を貸すほうが短い。何も
+            // 渡されていなければ空の箱で、押しても何も受け取らない。
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                @children
+            }
         }
     }
 
@@ -3587,7 +3627,7 @@ export component EditorPane inherits Rectangle {
                 // 在るのがいちばん素直**である——ステータスバーだけに置いて
                 // いたときは、どのタブに効くのかが画面から読めなかった。
                 // 端末のタブには本文が無いので出さない。
-                if !root.terminal && root.word-modes.length > 1: VerticalLayout {
+                if root.writing && root.word-modes.length > 1: VerticalLayout {
                     spacing: 1px;
 
                     MenuSep { }
@@ -3614,7 +3654,7 @@ export component EditorPane inherits Rectangle {
                 // `changed rename-asked`）——長押しが何も起こさないのと同じ
                 // 理由で、右ボタンからも消える。無題の文書は`Save`で名前を
                 // もらう側なので、そちらの2行は残る。
-                if !root.terminal && root.tabs[root.tab-menu-target].renamable:
+                if root.writing && root.tabs[root.tab-menu-target].renamable:
                 VerticalLayout {
                     spacing: 1px;
 
@@ -3648,7 +3688,7 @@ export component EditorPane inherits Rectangle {
                     }
                 }
 
-                if !root.terminal: VerticalLayout {
+                if root.writing: VerticalLayout {
                     spacing: 1px;
 
                     MenuSep { }

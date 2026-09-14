@@ -88,6 +88,7 @@ pub fn open_session(
                     preview: tab.preview,
                 },
                 empty: tab.empty,
+                settings: false,
                 provisional: Cell::new(false),
                 // A session remembers documents. **A shell is not one** — it is
                 // a process that ended when the editor did, so a restored
@@ -127,6 +128,7 @@ pub fn open_session(
             terminal: None,
             below: TabBelow::default(),
             empty: false,
+            settings: false,
             provisional: Cell::new(false),
         });
     }
@@ -242,6 +244,7 @@ pub fn open_without_session(
                 terminal: None,
                 below: TabBelow::default(),
                 empty: false,
+                settings: false,
                 provisional: Cell::new(false),
             })
             .collect(),
@@ -266,13 +269,13 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
                     .tabs
                     .iter()
                     .take(strip.active)
-                    .filter(|tab| tab.terminal.is_none() && !tab.document.read_only())
+                    .filter(|tab| !tab.stands_in() && !tab.document.read_only())
                     .count()
                     .min(
                         strip
                             .tabs
                             .iter()
-                            .filter(|tab| tab.terminal.is_none() && !tab.document.read_only())
+                            .filter(|tab| !tab.stands_in() && !tab.document.read_only())
                             .count()
                             .saturating_sub(1),
                     ),
@@ -284,7 +287,9 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
                 tabs: strip
                     .tabs
                     .iter()
-                    .filter(|tab| tab.terminal.is_none())
+                    // 設定のTABも同じ（追加要件 2026-09-14）：開き直せば済み、
+                    // 戻ってきても代役の空文書でしかない。
+                    .filter(|tab| !tab.stands_in())
                     .filter(|tab| !tab.document.read_only())
                     .map(session_tab)
                     .collect(),

@@ -146,8 +146,10 @@ fn typography_settings_roundtrip_and_render() {
         state.caret_source_byte = None;
         state.active_line_start = None;
     }
+    // 追加要件 2026-09-14: the settings stand in the pane, as its tab.
     window.set_settings_tab(3);
-    window.invoke_show_settings();
+    id.update_screen(&window, |screen| screen.settings = true);
+    window.window().request_redraw();
     let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];
     surface.draw_if_needed(|renderer| {
         renderer.render(&mut pixels, 1100);
@@ -157,33 +159,7 @@ fn typography_settings_roundtrip_and_render() {
         ppm.extend([pixel.r, pixel.g, pixel.b]);
     }
     std::fs::write(output.join("settings.ppm"), ppm).unwrap();
-    // Drag the settings header, keeping the mouse grab across movement.
     use slint::platform::{PointerEventButton, WindowEvent};
-    window.window().dispatch_event(WindowEvent::PointerPressed {
-        position: slint::LogicalPosition::new(410.0, 62.0),
-        button: PointerEventButton::Left,
-    });
-    window.window().dispatch_event(WindowEvent::PointerMoved {
-        position: slint::LogicalPosition::new(510.0, 112.0),
-    });
-    window
-        .window()
-        .dispatch_event(WindowEvent::PointerReleased {
-            position: slint::LogicalPosition::new(510.0, 112.0),
-            button: PointerEventButton::Left,
-        });
-    assert!((window.get_settings_offset_x() - 100.0).abs() < 1.0);
-    assert!((window.get_settings_offset_y() - 50.0).abs() < 1.0);
-    slint::platform::update_timers_and_animations();
-    let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];
-    surface.draw_if_needed(|renderer| {
-        renderer.render(&mut pixels, 1100);
-    });
-    let mut ppm = b"P6\n1100 760\n255\n".to_vec();
-    for pixel in pixels {
-        ppm.extend([pixel.r, pixel.g, pixel.b]);
-    }
-    std::fs::write(output.join("settings-moved.ppm"), ppm).unwrap();
     let click = |x, y| {
         let position = slint::LogicalPosition::new(x, y);
         window.window().dispatch_event(WindowEvent::PointerPressed {
@@ -197,13 +173,8 @@ fn typography_settings_roundtrip_and_render() {
                 button: PointerEventButton::Left,
             });
     };
-    click(480.0, 140.0);
-    assert!(
-        window.get_settings_open(),
-        "clicking the frame must not close settings"
-    );
-    // H1's background menu follows the moved settings panel.
-    click(670.0, 328.0);
+    click(446.0, 202.0);
+    window.window().request_redraw();
     let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];
     surface.draw_if_needed(|renderer| {
         renderer.render(&mut pixels, 1100);
@@ -213,7 +184,8 @@ fn typography_settings_roundtrip_and_render() {
         ppm.extend([pixel.r, pixel.g, pixel.b]);
     }
     std::fs::write(output.join("background-menu.ppm"), ppm).unwrap();
-    click(530.0, 364.0);
+    // 「Paperに合わせる」
+    click(295.0, 236.0);
     assert_eq!(Setting::Decoration(1, 3).read(&window, 0), 0);
     let saved_background = palette.row_data(colour_row(0, 9)).unwrap();
     set_colour(&palette, 0, PAPER_SLOT, [0.9, 1.0, 0.9]);
@@ -226,15 +198,8 @@ fn typography_settings_roundtrip_and_render() {
     apply_settings(&window, &numbers, &palette, &fonts, &stored);
     assert_eq!(Setting::Decoration(1, 3).read(&window, 0), 0);
     assert_eq!(palette.row_data(colour_row(0, 9)), Some(saved_background));
-    click(50.0, 700.0);
-    assert!(
-        !window.get_settings_open(),
-        "clicking outside closes settings"
-    );
-    window.invoke_show_settings();
-    assert!((window.get_settings_offset_x() - 100.0).abs() < 1.0);
+    id.update_screen(&window, |screen| screen.settings = false);
     assert_eq!(&*document.text.borrow(), source);
-    window.set_settings_open(false);
     let copied = Rc::new(Cell::new(0));
     let saved_requests = Rc::new(Cell::new(0));
     let received = saved_requests.clone();
@@ -366,6 +331,10 @@ fn typography_settings_roundtrip_and_render() {
     assert_eq!(undo_calls.get(), 0, "disabled Undo must not dispatch");
     click(700.0, 700.0);
     insert_pane_text(&window, id, &document, &states, &cache, "追加", false);
+    // The debug build draws this in about 14ms, over `PACE_FREE_MS`, and the
+    // undo below would then be drawn by a timer this test never runs. What is
+    // checked here is the menu, not the pacing.
+    cache.borrow_mut().pace_of(id).took = 0.0;
     let edited = document.text.borrow().clone();
     assert_ne!(edited, source);
     assert!(id.screen(&window).can_undo);

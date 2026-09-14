@@ -913,7 +913,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
         window.set_shortcut_query("".into());
         window.invoke_shortcut_filter();
         window.set_settings_tab(6);
-        window.set_settings_open(true);
+        focused_pane(&window).update_screen(&window, |screen| screen.settings = true);
         window.show().unwrap();
         let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
         surface.draw_if_needed(|renderer| {

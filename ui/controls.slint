@@ -986,6 +986,50 @@ export component PanelTab inherits Rectangle {
     }
 }
 
+// 設定の面の左に縦に並ぶ群（追加要件 2026-09-14、書き手：「設定カテゴリーも
+// 左側に縦に並べる」）。
+//
+// **`PanelTab`の縦の兄弟。**横に並べたときは下の線で「いまここ」を言ったが、
+// 縦に積むと線が行と行の間に落ちて、どちらの行のものか読めない。だから
+// 行そのものを淡く塗り、左端にアクセントの棒を立てる——鍵盤がここにある、と
+// 言う色はこの窓で1つだけで、開いている群はまさにそれである。
+export component SideTab inherits Rectangle {
+    in property <string> title;
+    in property <bool> current;
+    callback clicked();
+
+    height: 30px;
+    border-radius: 4px;
+    background: root.current ? Tok.accent-faint : (touch.has-hover ? Tok.chrome-sunken : transparent);
+
+    if root.current: Rectangle {
+        x: 0px;
+        y: 6px;
+        width: 3px;
+        height: parent.height - 12px;
+        border-radius: 1.5px;
+        background: Tok.accent;
+    }
+
+    Text {
+        x: 14px;
+        width: parent.width - 20px;
+        height: parent.height;
+        vertical-alignment: center;
+        overflow: elide;
+        text: root.title;
+        font-size: 13px;
+        font-weight: root.current ? 600 : 400;
+        color: root.current ? Tok.ink-strong : Tok.ink-muted;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // The mark on a setting that only does something in one writing direction
 // (要件 9): `H` for horizontal, `V` for vertical.
 //

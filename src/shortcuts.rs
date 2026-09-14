@@ -98,6 +98,11 @@ const CATEGORIES: &[i32] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
     5, 0, 0, 0, 0, 0, 6, 6, 6, 6, 4, 4, 4,
 ];
+/// 追加要件 2026-09-14: 設定のTABが前にあるときに通す操作。**TABとペインを
+/// 移る・閉じる・開く**だけで、本文に効くもの（保存・検索・Undo・字の編集）は
+/// 通さない——設定のTABの下にあるのは代役の空文書で、保存すれば空の無題が
+/// ディスクへ出ていく。
+const SETTINGS_PASS: &[i32] = &[0, 3, 7, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20];
 const SCOPES: &[i32] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0,
@@ -341,6 +346,15 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return true;
         }
         let pane = crate::focused_pane(&app);
+        let on_settings = keyed_live
+            .tabs
+            .borrow()
+            .of(pane)
+            .current()
+            .is_some_and(|tab| tab.settings);
+        if on_settings && !SETTINGS_PASS.contains(&command) {
+            return true;
+        }
         let weak = weak.clone();
         let live = keyed_live.clone();
         slint::Timer::single_shot(std::time::Duration::ZERO, move || {

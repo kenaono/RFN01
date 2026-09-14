@@ -2,7 +2,7 @@ import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
-import { ColorCell, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, StepRow, TextButton, TextRow } from "controls.slint";
+import { ColorCell, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
 // **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
 // 窓の外から見えない。
 export { Ime }
@@ -420,16 +420,16 @@ export component AppWindow inherits Window {
     in property <[string]> sheet-fonts;
     /// Which sheet the panel is showing: 0 horizontal, 1 vertical.
     in-out property <int> sheet: 0;
-    /// 追加要件 2026-09-08: どの群を出しているか——0 General、1 Text、
-    /// 2 Layout、3 Page。
+    /// 追加要件 2026-09-08: どの群を出しているか——0 General、1 Terminal、
+    /// 2 Words、3 Text、4 Layout、5 Page、6 Keys。
     ///
-    /// **窓が持つ**（パネルの中ではなく）。`PopupWindow`の中身は開くたびに
-    /// 作り直されるので、そこに置いた値は毎回0へ戻る——書き手が Layout を
-    /// 見ていて閉じ、また開けば、見たいのは Layout である。
+    /// **窓が持つ**（設定のTABの中ではなく）。TABの中身はそのTABが前に出る
+    /// たびに作り直されるので、そこに置いた値は毎回0へ戻る——書き手が Layout
+    /// を見ていて別のTABへ移り、戻ってくれば、見たいのは Layout である。
     in-out property <int> settings-tab: 0;
-    in-out property <bool> settings-open: false;
-    in-out property <length> settings-offset-x: 0px;
-    in-out property <length> settings-offset-y: 0px;
+    /// 追加要件 2026-09-14: 設定のTABを出す（窓に1つ。開いていればそこへ移る）。
+    /// 開く群は`settings-tab`を先に置いてから頼む。
+    callback settings-requested();
     /// What the picker lists, and what it is picking for. The list is read from
     /// the system the first time it is opened.
     in property <[string]> font-names;
@@ -841,21 +841,12 @@ export component AppWindow inherits Window {
     /// The tree's row menus are not here: each one belongs to the row it hangs
     /// from, inside a repeater, and there is nothing to name from out here.
     /// They close by being clicked away from.
-    public function show-settings() {
-        root.settings-open = true;
-    }
-
     function dismiss-menus() -> bool {
-        if (root.settings-open) {
-            root.settings-open = false;
-            return true;
-        }
         if (app-menu.is-open) {
             app-menu.close();
             return true;
         }
-        // Settings is a movable in-window panel; settings-open is its visibility.
-        // The folder history is closed blind for the same reason, and it is
+        // The folder history is closed blind, and it is
         // the same case: it is opened from a row inside the app menu, which is
         // two components up from here (要件 5.1). Reading its `is-open` is what
         // makes that `show()` fail to compile — tried, and it does.
@@ -1162,8 +1153,7 @@ export component AppWindow inherits Window {
                     icon: Icons.settings;
                     tip: "Settings";
                     clicked => {
-                                    root.show-settings();
-                        root.focus-generation += 1;
+                        root.settings-requested();
                     }
                 }
             }
@@ -1968,6 +1958,7 @@ export component AppWindow inherits Window {
                         }
                         terminal: pane.terminal;
                         empty: pane.empty;
+                        settings: pane.settings;
                         terminal-shells: root.terminal-shells;
                         default-shell: root.default-shell;
                         terminal-key(text, number, ctrl, alt, shift) => {
@@ -2241,7 +2232,7 @@ export component AppWindow inherits Window {
                         layout-requested => {
                             // **この面の組み方を開く**ので、開く先はそのタブ。
                             root.settings-tab = 4;
-                            root.show-settings();
+                            root.settings-requested();
                         }
                         // **No `focus-generation` here**: the wheel sends
                         // this from wherever the pointer is, and taking the
@@ -2290,6 +2281,1539 @@ export component AppWindow inherits Window {
                             root.focused-pane = pane.id;
                         }
                         focus-trace(event) => { root.pane-focus-trace(pane.id, event); }
+
+                        // 追加要件 2026-09-14（書き手）: **設定はTABで開く。**
+                        // 「設定を押すと、新たなダイアログを出さずに設定Paneと
+                        // してTABで開く。設定カテゴリーも左側に縦に並べる」。
+                        //
+                        // 中身は窓の値を読み書きするので、窓がここへ差し込む
+                        // （`EditorPane`の`@children`）。**窓に1つ**——どの
+                        // ペインのTABであっても同じ設定を指している（要件 9）。
+                        if pane.settings: Rectangle {
+                            background: Tok.chrome;
+                            // 字の上でない場所を押しても、下の本文へは落ちない。
+                            // 押したペインがキーボードのあるペインになる。
+                            TouchArea {
+                                clicked => {
+                                    root.focused-pane = pane.id;
+                                    root.focus-generation += 1;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                VerticalLayout {
+                                    width: 168px;
+                                    padding: 12px;
+                                    padding-top: 18px;
+                                    spacing: 2px;
+                                    alignment: start;
+
+                                    Text {
+                                        text: "SETTINGS";
+                                        color: Tok.ink-faint;
+                                        font-size: 11px;
+                                        letter-spacing: 0.9px;
+                                        height: 26px;
+                                        vertical-alignment: top;
+                                    }
+
+                                    // 面の並びは**書字方向を持つかどうか**で切れて
+                                    // いる：General・Terminal・Words は方向を持たず、
+                                    // Text・Layout・Page はシート（横書き／縦書き）
+                                    // の上の値である。Keys は最後。
+                                    for category[index] in ["General", "Terminal", "Words", "Text", "Layout", "Page", "Keys"]: SideTab {
+                                        title: category;
+                                        current: root.settings-tab == index;
+                                        clicked => {
+                                            root.settings-tab = index;
+                                            if (index == 6) {
+                                                root.shortcut-filter();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 1px;
+                                    background: Tok.rule;
+                                }
+
+                                ScrollView {
+                                    horizontal-stretch: 1;
+
+                                    HorizontalLayout {
+                                        padding: 20px;
+                                        padding-top: 18px;
+                                        alignment: start;
+
+                                        VerticalLayout {
+                                            width: root.settings-tab == 6 ? 620px : 460px;
+                                            spacing: 8px;
+                                            alignment: start;
+
+                                        if root.settings-tab == 6: VerticalLayout {
+                                            spacing: 8px;
+                                            Text { text: "ショートカット"; color: Tok.ink; font-size: 16px; }
+                                            HorizontalLayout {
+                                                spacing: 4px;
+                                                for category[index] in ["本文の操作", "基本編集", "Terminal", "入力欄", "Pane・TAB", "Emacs", "Quick Draft"]: PanelTab {
+                                                    title: category;
+                                                    current: root.shortcut-category == index;
+                                                    clicked => { root.shortcut-category = index; root.shortcut-query = ""; root.shortcut-selected = -1; root.shortcut-edit = ""; root.shortcut-status = "操作を選んでください"; root.shortcut-filter(); }
+                                                }
+                                            }
+                                            Text {
+                                                text: root.shortcut-category == 0 ? "変更可能 · 本文にフォーカスがあり、IME変換中でないときに有効です。"
+                                                    : root.shortcut-category == 4 ? "変更可能 · 本文からのPane・TAB操作です。Terminal内のキーは固定です。"
+                                                    : root.shortcut-category == 5 ? "変更可能 · 本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。"
+                                                    : root.shortcut-category == 6 ? "変更可能 · 本文から開く操作と、Quick Draft内の操作を区別します。"
+                                                    : root.shortcut-category == 1 ? "固定 · 本文の編集時に使います。Viewerでは編集できません。"
+                                                    : root.shortcut-category == 2 ? "固定 · Terminalにフォーカスがあるときに有効です。"
+                                                    : "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。";
+                                                color: Tok.ink-muted; font-size: 12px; wrap: word-wrap;
+                                            }
+                                            if root.shortcut-category == 0 || root.shortcut-category >= 4: VerticalLayout {
+                                                spacing: 8px;
+                                        Field { placeholder: "操作名・キーで検索"; text <=> root.shortcut-query; init => { self.take-focus(); } edited => { root.shortcut-filter(); } escaped => { root.focus-generation += 1; } }
+                                        ScrollView {
+                                            height: 210px;
+                                            VerticalLayout {
+                                                alignment: start;
+                                                for item in root.shortcut-rows: TextButton {
+                                                    title: item.name + "　" + (item.key == "" ? "未割り当て" : item.key);
+                                                    clicked => { root.shortcut-selected = item.id; root.shortcut-edit = item.key; root.shortcut-status = item.name; shortcut-capture.focus(); }
+                                                }
+                                            }
+                                        }
+                                        Text { text: "操作を選び、下の欄で割り当てるキーを同時に押してください。"; color: Tok.ink; font-size: 12px; }
+                                        shortcut-capture := FocusScope {
+                                            height: 34px;
+                                            key-pressed(event) => {
+                                                if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt { return reject; }
+                                                if event.text == Key.Escape {
+                                                    root.focus-generation += 1;
+                                                } else {
+                                                    root.shortcut-capture(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                                                }
+                                                accept
+                                            }
+                                            Rectangle {
+                                                background: Tok.paper;
+                                                border-width: 1px;
+                                                border-color: shortcut-capture.has-focus ? #8064b3 : Tok.rule-strong;
+                                                border-radius: 4px;
+                                                Text {
+                                                    x: 10px; width: parent.width - 20px;
+                                                    text: root.shortcut-edit == "" ? "ここをクリックしてキーを押す" : root.shortcut-edit;
+                                                    color: Tok.ink;
+                                                    vertical-alignment: center;
+                                                }
+                                                TouchArea { clicked => { shortcut-capture.focus(); } }
+                                            }
+                                        }
+                                        Text { text: root.shortcut-status; color: Tok.ink; font-size: 12px; wrap: word-wrap; }
+                                        Text { text: "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"; color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
+                                        HorizontalLayout {
+                                            TextButton { title: "適用して保存"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(false); } }
+                                            TextButton { title: "割り当て解除"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-edit = ""; root.shortcut-save(false); } }
+                                            TextButton { title: "この操作を既定に戻す"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(true); } }
+                                        }
+                                            }
+                                            if root.shortcut-category > 0 && root.shortcut-category < 4: Text {
+                                                text: root.shortcut-category == 1 ? "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A"
+                                                    : root.shortcut-category == 2 ? "選択した文字をコピー　Ctrl+Shift+C\n貼り付け　Ctrl+V\n下段を表示・閉じる　Ctrl+`\n下段から本文へ戻る　Ctrl+Alt+↑\nその他のキーは実行中のシェル・プログラムへ渡します。"
+                                                    : "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A\nEnter・Escの動作は、入力欄ごとの用途に従います。";
+                                                color: Tok.ink; font-size: 13px; wrap: word-wrap;
+                                            }
+                                        }
+
+                                        if root.settings-tab == 0: VerticalLayout {
+                                            spacing: 8px;
+
+                                            Text {
+                                                text: "FILES";
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
+                                            // Offが何を意味するかを、同じ場所で言う**——「切ってある
+                                            // 間は書かない」だけなら、置いてある古い退避が次の起動で
+                                            // 戻ってきて、書き手の言ったこととちょうど逆になる。
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "自動退避";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.autosave ? "On" : "Off";
+                                                    role: root.autosave ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.autosave-toggled(!root.autosave);
+                                                    }
+                                                }
+                                            }
+
+                                            // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
+                                            Text {
+                                                text: root.autosave
+                                                    ? "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
+                                                    : "退避しません。Offにすると作業コピーも削除します。";
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: "元ファイルへの反映は Ctrl+S。";
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+                                            // 書き手の報告 2026-09-11: **見出しが中身を言っていなかった。**
+                                            // `FILES`の下にルビの記法も箇条書きの字も並んでいて、どれも
+                                            // ファイルの話ではない——**画面とソースが食い違えば、書き手と
+                                            // 私が別のものを指して話すことになる。**記法の読み書きは
+                                            // ここから下である。
+                                            Text {
+                                                text: "MARKUP";
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。
+                                            // **「正解が二つある」から選ばせる**——投稿サイトへ出す
+                                            // ための字数はルビを含まず、打ち込んだ量を知りたいときは
+                                            // 含む。編集器がどちらかに決めると、もう一方の用事の人が
+                                            // 毎回数え直すことになる。
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "Count ruby";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.count-ruby ? "On" : "Off";
+                                                    role: root.count-ruby ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.count-ruby-toggled(!root.count-ruby);
+                                                    }
+                                                }
+                                            }
+
+                                            Text {
+                                                text: root.count-ruby
+                                                    ? "《よみ》も本文の字数に入れます。"
+                                                    : "《よみ》は本文の字数に入れません。";
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+                                            // 要件 E9: ルビと傍点の記法を読むか。**Markdownの標準では
+                                            // ない**ので、切れなければ「この編集器でしか正しく見えない
+                                            // 書き方」を書き手に強いることになる。ルビと傍点を1つの旗で
+                                            // 切るのは、同じ記法の一族だからである。
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "Ruby markup";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.ruby-marks ? "On" : "Off";
+                                                    role: root.ruby-marks ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.ruby-marks-toggled(!root.ruby-marks);
+                                                    }
+                                                }
+                                            }
+
+                                            Text {
+                                                text: root.ruby-marks
+                                                    ? "｜漢字《かんじ》と《《傍点》》を記法として読みます。"
+                                                    : "記号をそのまま字として出します。";
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+                                            // 書き手の決定 2026-09-11: **どれを箇条書きの印として読むか。**
+                                            // CommonMarkは`-`・`*`・`+`を同格に認めているので、この編集器も
+                                            // 同格に扱う——**`-`も切れる**（「*も標準ということなら、扱いは
+                                            // 同じであるべき」）。切った記号の行はただの本文になり、記号も
+                                            // そのまま字として出る（原稿のバイト列は変えない）。
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "Bullet marks";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                for mark[index] in ["-", "*", "+"]: TextButton {
+                                                    title: mark;
+                                                    role: root.bullet-marks[index] ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.bullet-mark-toggled(index);
+                                                    }
+                                                }
+                                            }
+
+                                            Text {
+                                                text: !root.bullet-marks[0] && !root.bullet-marks[1]
+                                                    && !root.bullet-marks[2]
+                                                    ? "箇条書きの印はありません（どの記号もただの本文です）。"
+                                                    : (root.bullet-marks[0] ? "- " : "")
+                                                        + (root.bullet-marks[1] ? "* " : "")
+                                                        + (root.bullet-marks[2] ? "+ " : "")
+                                                        + "を箇条書きの印として読みます。";
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+                                        }
+
+                                        // 追加要件 2026-09-08（要件 6.8）: **端末は紙とは別の設定を持つ。**
+                                        // 黒地で使う人が多く、要件9のシート（原稿の紙）と同じ値で決める
+                                        // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
+                                        // 無い。
+                                        if root.settings-tab == 1: VerticalLayout {
+                                            spacing: 8px;
+
+                                            // 追加要件 2026-09-07: **書字方向を持たない設定はここ**。
+                                            // 2026-09-08 からはこの面が丸ごとそれで、シートを選ぶ釦は
+                                            // 隣の3面にある。
+                                            Text {
+                                                text: "TERMINAL";
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            PickRow {
+                                                label: "Default";
+                                                value: root.terminal-shells[root.default-shell];
+                                                pressed => {
+                                                    default-shell-menu.show();
+                                                }
+                                            }
+
+                                            // **原点はこの群の左上**（技術検証 6.30：popupを
+                                            // レイアウトに直に置くと、そのレイアウトの左上から
+                                            // 数える）。帯の下に群が入ったので、パネルの上端から
+                                            // 数えていた78pxは、この群の中の78pxになった——
+                                            // 見出し13px＋間8px＋行28pxの、行の下。
+                                            default-shell-menu := PopupWindow {
+                                                x: 60px;
+                                                y: 52px;
+                                                width: 240px;
+                                                close-policy: close-on-click-outside;
+
+                                                MenuFrame {
+                                                    width: 240px;
+
+                                                    VerticalLayout {
+                                                        padding: 6px;
+                                                        spacing: 1px;
+
+                                                        // **頼んでから閉じる**（書き手の報告 2026-09-07:
+                                                        // WSL以外に変えられない）。`close`はこのメニューの
+                                                        // 木を——この行と、行を包む`for`ごと——捨てるので、
+                                                        // その後で`root`へ登ろうとすると生成されたコードは
+                                                        // `parent.upgrade()`に失敗し、**黙って何もしない**。
+                                                        // タブの接続先の一覧で同じことを踏んだ。
+                                                        for shell[index] in root.terminal-shells: MenuRow {
+                                                            title: shell;
+                                                            checked: index == root.default-shell;
+                                                            activated => {
+                                                                root.default-shell-chosen(index);
+                                                                default-shell-menu.close();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                height: 1px;
+                                                background: Tok.rule;
+                                            }
+
+                                            Text {
+                                                text: "APPEARANCE";
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            // **黒地と紙を、ひとまとめで置く。**背景だけ黒くして文字が
+                                            // 黒のままの画面は読めない——そこを通らせないために、2つを
+                                            // 一度に決める道を先に出す。細かく決めたい人のために、下に
+                                            // 1色ずつの行も残してある。
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "Theme";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: "Paper";
+                                                    clicked => {
+                                                        root.terminal-theme-chosen(false);
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: "Dark";
+                                                    clicked => {
+                                                        root.terminal-theme-chosen(true);
+                                                    }
+                                                }
+                                            }
+
+                                            ColorCell {
+                                                label: "Background";
+                                                shown: root.terminal-paper;
+                                                picked => {
+                                                    root.terminal-colour-picked(0);
+                                                }
+                                            }
+
+                                            ColorCell {
+                                                label: "Text Color";
+                                                shown: root.terminal-ink;
+                                                picked => {
+                                                    root.terminal-colour-picked(1);
+                                                }
+                                            }
+
+                                            PickRow {
+                                                label: "Font";
+                                                value: root.terminal-font;
+                                                pressed => {
+                                                    root.terminal-font-picked();
+                                                    font-menu.show();
+                                                }
+                                            }
+
+                                            StepRow {
+                                                label: "Size";
+                                                value: root.terminal-size + " px";
+                                                stepped(by) => {
+                                                    root.terminal-size-stepped(by);
+                                                }
+                                            }
+
+                                            // **16色は選ばせない**（要件 6.8）。選ばせれば16回選ぶことに
+                                            // なり、しかも選び終えるまで読めない。
+                                            Text {
+                                                text: "SGRの16色は背景の明るさから選びます。";
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        // 要件 7.9（2026-09-08）: **単語チェックモード。**書き手の指摘の
+                                        // とおり、考え方はソースの予約語の色分けと同じ——C言語モードが
+                                        // 予約語・型・前処理をそれぞれの色で持つように、**モードが語群を
+                                        // 持ち、語群が色を持つ**。
+                                        //
+                                        // **どのモードを使うかはここで決めない。**それは文書ごとの話で、
+                                        // ステータスバーから選ぶ（要件 10）。ここは中身を作る場所である。
+                                        if root.settings-tab == 2: VerticalLayout {
+                                            spacing: 8px;
+
+                                            Text {
+                                                text: "MODES";
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            for mode[index] in root.word-mode-names: HorizontalLayout {
+                                                spacing: 6px;
+
+                                                // **先頭の「なし」は作ったモードではない**ので出さない。
+                                                if index > 0 && !(root.word-naming == 3
+                                                    && root.word-naming-at == index - 1): TextButton {
+                                                    wide: true;
+                                                    title: mode.name;
+                                                    role: root.word-mode-opened-at == index - 1
+                                                        ? Role.primary
+                                                        : Role.normal;
+                                                    // **開くのはRustに頼む**（書き手の報告 2026-09-08：
+                                                    // モードを選んでも何も出ない）。中身（語群・語・重複）は
+                                                    // Rustが作って窓へ渡すモデルなので、こちら側で数字を
+                                                    // 変えただけでは**誰も作り直さない**——押した先が
+                                                    // 空のままだったのはそれである。
+                                                    clicked => {
+                                                        root.word-mode-opened(
+                                                            root.word-mode-opened-at == index - 1 ? -1 : index - 1);
+                                                    }
+                                                    // **長押しで名前を変える**（書き手の求め 2026-09-08）。
+                                                    // タブの名前と同じ手つきで、**作るときと同じ欄**が
+                                                    // その場に出る（単語チェックモード要件 7.4）。
+                                                    holdable: true;
+                                                    held => {
+                                                        root.word-new-name = mode.name;
+                                                        root.word-naming-trouble = "";
+                                                        root.word-naming-at = index - 1;
+                                                        root.word-naming = 3;
+                                                    }
+                                                }
+                                                // **いまこの文書が使っているモード**（同日追加、書き手の
+                                                // 報告：設定上どちらも同じに見える）。開いて中を見ている
+                                                // ことと、いま色が付いていることは別のことである。
+                                                if index > 0 && mode.id == root.word-mode
+                                                    && !(root.word-naming == 3
+                                                        && root.word-naming-at == index - 1): Text {
+                                                    text: "この文書";
+                                                    color: Tok.accent;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 0;
+                                                }
+                                                if index > 0 && !(root.word-naming == 3
+                                                    && root.word-naming-at == index - 1): TextButton {
+                                                    title: "×";
+                                                    role: Role.quiet;
+                                                    clicked => {
+                                                        root.word-mode-removed(index - 1);
+                                                    }
+                                                }
+
+                                                // 名前を変えているあいだ、この行はその欄になる。
+                                                if root.word-naming == 3 && root.word-naming-at == index - 1: Field {
+                                                    placeholder: "モードの名前";
+                                                    text <=> root.word-new-name;
+                                                    init => {
+                                                        self.take-focus();
+                                                    }
+                                                    accepted => {
+                                                        root.word-mode-renamed(index - 1, root.word-new-name);
+                                                    }
+                                                    escaped => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                                if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
+                                                    title: "決定";
+                                                    role: Role.primary;
+                                                    clicked => {
+                                                        root.word-mode-renamed(index - 1, root.word-new-name);
+                                                    }
+                                                }
+                                                if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
+                                                    title: "取消";
+                                                    role: Role.quiet;
+                                                    clicked => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                            }
+
+                                            // 書き手の求め 2026-09-08: **設定は一枚で終える。**
+                                            // 名前は別の問いにしない——問いは窓の中に描くもの（要件
+                                            // 8.3・8.4）で、このパネルはその上に浮いている別の窓だから、
+                                            // **訊くたびにパネルが消えて戻る**ことになる。「決定すると
+                                            // 次の画面」が続くと、何をしているのか分からなくなる。
+                                            // **欄はこの場に出し、この場で終える。**
+                                            if root.word-naming != 1: HorizontalLayout {
+                                                alignment: start;
+
+                                                TextButton {
+                                                    title: "New Mode";
+                                                    role: Role.primary;
+                                                    clicked => {
+                                                        root.word-new-name = "";
+                                                        root.word-naming-trouble = "";
+                                                        root.word-naming = 1;
+                                                    }
+                                                }
+                                            }
+
+                                            if root.word-naming == 1: HorizontalLayout {
+                                                spacing: 6px;
+
+                                                Field {
+                                                    placeholder: "モードの名前";
+                                                    text <=> root.word-new-name;
+                                                    // **出たときに鍵盤をここへ。**押した手はもう名前を
+                                                    // 打つつもりでいる。`if`の中の要素はここからしか
+                                                    // 触れないので、外から呼ばずに自分で取る。
+                                                    init => {
+                                                        self.take-focus();
+                                                    }
+                                                    accepted => {
+                                                        root.word-mode-added(root.word-new-name);
+                                                    }
+                                                    escaped => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: "追加";
+                                                    role: Role.primary;
+                                                    clicked => {
+                                                        root.word-mode-added(root.word-new-name);
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: "取消";
+                                                    role: Role.quiet;
+                                                    clicked => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                            }
+
+                                            if root.word-naming != 0 && root.word-naming-trouble != "": Text {
+                                                text: root.word-naming-trouble;
+                                                color: Tok.alert;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+
+                                            if root.word-mode-names.length <= 1: Text {
+                                                text: "モードを作り、その中に語群（人物・地名など）を作ります。"
+                                                    + "文書ごとにモードを選ぶのは下のステータスバーからです。";
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+
+                                            if root.word-mode-opened-at >= 0: Rectangle {
+                                                height: 1px;
+                                                background: Tok.rule;
+                                            }
+
+                                            // **開いたモードの名前を出す。**「GROUPS」だけでは、どの
+                                            // モードの中を見ているのか画面に無かった（書き手の報告
+                                            // 2026-09-08）。`+ 1`は先頭の「なし」の分。
+                                            if root.word-mode-opened-at >= 0: Text {
+                                                text: "GROUPS — "
+                                                    + root.word-mode-names[root.word-mode-opened-at + 1].name;
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            if root.word-mode-opened-at >= 0: VerticalLayout {
+                                                spacing: 8px;
+
+                                                for row[index] in root.word-group-rows: HorizontalLayout {
+                                                    spacing: 6px;
+
+                                                    // 色見本。押すとWindowsの色ダイアログ（要件 9 と同じ道）。
+                                                    Rectangle {
+                                                        width: 24px;
+                                                        horizontal-stretch: 0;
+
+                                                        Rectangle {
+                                                            y: (parent.height - self.height) / 2;
+                                                            width: 24px;
+                                                            height: 20px;
+                                                            border-radius: 4px;
+                                                            border-width: 1px;
+                                                            border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
+                                                            // **色を持たない語群は、色の無い升目**
+                                                            // （除外語群、2026-09-08）。
+                                                            background: row.paints ? row.shown : Tok.chrome-sunken;
+
+                                                            if !row.paints: Text {
+                                                                width: 100%;
+                                                                height: 100%;
+                                                                text: "—";
+                                                                color: Tok.ink-faint;
+                                                                font-size: 11px;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+
+                                                            swatch := TouchArea {
+                                                                mouse-cursor: pointer;
+                                                                clicked => {
+                                                                    root.word-group-colour-picked(index);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // **名前も釦である**（書き手の求め 2026-09-08）。
+                                                    // 押せば語の一覧が開き、**長押しすれば名前を変えられる**
+                                                    // ——モードの行と同じ手つきにする。
+                                                    if !(root.word-naming == 4
+                                                        && root.word-naming-at == index): TextButton {
+                                                        wide: true;
+                                                        // **開いている語群には印を付ける。**下に出ている
+                                                        // `Import…`と`この語群を消す`がどれに効くのかは、
+                                                        // この印だけが言う。
+                                                        role: root.word-group-opened-at == index
+                                                            ? Role.primary
+                                                            : Role.quiet;
+                                                        title: row.name;
+                                                        clicked => {
+                                                            root.word-group-opened(
+                                                                root.word-group-opened-at == index ? -1 : index);
+                                                        }
+                                                        holdable: true;
+                                                        held => {
+                                                            root.word-new-name = row.name;
+                                                            root.word-naming-trouble = "";
+                                                            root.word-naming-at = index;
+                                                            root.word-naming = 4;
+                                                        }
+                                                    }
+
+                                                    // **語数と、色を付けられなかった数。**押すと一覧が開く
+                                                    // ——アプリの中で見て、アプリの中で消せることが、辞書を
+                                                    // 書き手に管理させないということである。
+                                                    if !(root.word-naming == 4
+                                                        && root.word-naming-at == index): TextButton {
+                                                        role: Role.quiet;
+                                                        title: row.conflicts > 0
+                                                            ? row.words + "語 / 重複" + row.conflicts
+                                                            : (row.repeated > 0
+                                                                ? row.words + "語 (二重" + row.repeated + ")"
+                                                                : row.words + "語");
+                                                        clicked => {
+                                                            root.word-group-opened(
+                                                                root.word-group-opened-at == index ? -1 : index);
+                                                        }
+                                                    }
+
+                                                    // 名前を変えているあいだ、この行はその欄になる
+                                                    // （色見本だけは残す——どの語群かはそれで分かる）。
+                                                    if root.word-naming == 4 && root.word-naming-at == index: Field {
+                                                        placeholder: "語群の名前";
+                                                        text <=> root.word-new-name;
+                                                        init => {
+                                                            self.take-focus();
+                                                        }
+                                                        accepted => {
+                                                            root.word-group-renamed(index, root.word-new-name);
+                                                        }
+                                                        escaped => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                    if root.word-naming == 4 && root.word-naming-at == index: TextButton {
+                                                        title: "決定";
+                                                        role: Role.primary;
+                                                        clicked => {
+                                                            root.word-group-renamed(index, root.word-new-name);
+                                                        }
+                                                    }
+                                                    if root.word-naming == 4 && root.word-naming-at == index: TextButton {
+                                                        title: "取消";
+                                                        role: Role.quiet;
+                                                        clicked => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                }
+
+                                                // **語群が1つも無いモード。**作った直後はここに来る——
+                                                // 何も出ないのは「効かなかった」に見える（書き手の報告
+                                                // 2026-09-08）ので、**次にすることを書いておく**。
+                                                if root.word-group-rows.length == 0: Text {
+                                                    text: "このモードにはまだ語群がありません。"
+                                                        + "`New Group`で人物・地名などの語群を作り、色を決めます。";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    wrap: word-wrap;
+                                                }
+
+                                                // 開いている語群の語。**アプリの中で消せる**（要件 7.9）。
+                                                if root.word-group-opened-at >= 0: Rectangle {
+                                                    height: 152px;
+                                                    background: Tok.chrome-raised;
+                                                    border-radius: 6px;
+
+                                                    ScrollView {
+                                                        x: 8px;
+                                                        y: 6px;
+                                                        width: parent.width - 16px;
+                                                        height: parent.height - 12px;
+
+                                                        VerticalLayout {
+                                                            alignment: start;
+                                                            spacing: 1px;
+
+                                                            for word in root.word-group-words: HorizontalLayout {
+                                                                spacing: 6px;
+
+                                                                Text {
+                                                                    text: word.text;
+                                                                    // **覚え書きは薄く。**語の並びの中で
+                                                                    // 見出しとして読めればよく、語と同じ
+                                                                    // 濃さで出ると語の数が分からなくなる。
+                                                                    color: word.note ? Tok.ink-faint : Tok.ink;
+                                                                    font-size: 12px;
+                                                                    vertical-alignment: center;
+                                                                    overflow: elide;
+                                                                    horizontal-stretch: 1;
+                                                                }
+                                                                TextButton {
+                                                                    title: "×";
+                                                                    role: Role.quiet;
+                                                                    clicked => {
+                                                                        root.word-removed(
+                                                                            root.word-group-opened-at, word.text);
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            if root.word-group-words.length == 0: Text {
+                                                                text: "まだ語がありません。本文で語を選んで右ボタン、"
+                                                                    + "`単語帳へ追加`から入れられます。"
+                                                                    + "`#`で始まる行は覚え書きです。";
+                                                                color: Tok.ink-faint;
+                                                                font-size: 11px;
+                                                                wrap: word-wrap;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                // **開いている語群についてすることは、その語群の下に置く**
+                                                // （書き手の報告 2026-09-08：名前が「…」に潰れていた）。
+                                                // 行に釦を5つ並べると、380pxの幅では**いちばん大事な名前が
+                                                // 先に潰れる**——名前は行に、することは開いた先に。
+                                                //
+                                                // **消すのもここである。**語を1万まで入れられるものを、
+                                                // 一覧の行の`×`ひとつで消せてよいはずがない。
+                                                if root.word-group-opened-at >= 0: HorizontalLayout {
+                                                    alignment: start;
+                                                    spacing: 6px;
+
+                                                    TextButton {
+                                                        title: "Import…";
+                                                        clicked => {
+                                                            root.word-group-imported(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: "Export…";
+                                                        clicked => {
+                                                            root.word-group-exported(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                    // **除外語群にする／やめる**（書き手と決めた 2026-09-08）。
+                                                    // 色を持たない語群は木に積まれて最長一致で勝ち、しかし
+                                                    // 何も塗らない——`カリオン`を入れておくと、その中で
+                                                    // `リオン`が光らなくなる。
+                                                    TextButton {
+                                                        title: root.word-group-rows[root.word-group-opened-at].paints
+                                                            ? "色を付けない"
+                                                            : "色を付ける";
+                                                        clicked => {
+                                                            root.word-group-paint-toggled(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: "この語群を消す";
+                                                        role: Role.danger;
+                                                        clicked => {
+                                                            root.word-group-removed(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                }
+
+                                                if root.word-naming == 2: HorizontalLayout {
+                                                    spacing: 6px;
+
+                                                    Field {
+                                                        placeholder: "語群の名前";
+                                                        text <=> root.word-new-name;
+                                                        init => {
+                                                            self.take-focus();
+                                                        }
+                                                        accepted => {
+                                                            root.word-group-added(
+                                                                root.word-mode-opened-at, root.word-new-name);
+                                                        }
+                                                        escaped => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: "追加";
+                                                        role: Role.primary;
+                                                        clicked => {
+                                                            root.word-group-added(
+                                                                root.word-mode-opened-at, root.word-new-name);
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: "取消";
+                                                        role: Role.quiet;
+                                                        clicked => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                }
+
+                                                HorizontalLayout {
+                                                    alignment: start;
+                                                    spacing: 6px;
+
+                                                    if root.word-naming != 2: TextButton {
+                                                        title: "New Group";
+                                                        // **一枚で終える**（`New Mode`の注記）。
+                                                        clicked => {
+                                                            root.word-new-name = "";
+                                                            root.word-naming-trouble = "";
+                                                            root.word-naming = 2;
+                                                        }
+                                                    }
+                                                    // **重複は畳んで置く。**普段は数だけ見えていればよく、
+                                                    // 直すときにだけ開く。
+                                                    if root.word-trouble-count > 0: TextButton {
+                                                        title: root.word-troubles-shown
+                                                            ? "重複を閉じる"
+                                                            : "重複 " + root.word-trouble-count + " 件";
+                                                        clicked => {
+                                                            root.word-troubles-shown = !root.word-troubles-shown;
+                                                        }
+                                                    }
+                                                }
+
+                                                // 要件 7.9: **参照画面。**どの語が、どこで、色が付いているのか
+                                                // いないのか。
+                                                if root.word-troubles-shown: Rectangle {
+                                                    height: 152px;
+                                                    background: Tok.chrome-raised;
+                                                    border-radius: 6px;
+
+                                                    ScrollView {
+                                                        x: 8px;
+                                                        y: 6px;
+                                                        width: parent.width - 16px;
+                                                        height: parent.height - 12px;
+
+                                                        VerticalLayout {
+                                                            alignment: start;
+                                                            spacing: 2px;
+
+                                                            for trouble in root.word-troubles: HorizontalLayout {
+                                                                spacing: 6px;
+
+                                                                Text {
+                                                                    text: trouble.conflict ? "色なし" : "二重";
+                                                                    color: trouble.conflict ? Tok.alert : Tok.ink-faint;
+                                                                    font-size: 11px;
+                                                                    horizontal-stretch: 0;
+                                                                    min-width: 44px;
+                                                                }
+                                                                Text {
+                                                                    text: trouble.word;
+                                                                    color: Tok.ink;
+                                                                    font-size: 12px;
+                                                                    overflow: elide;
+                                                                    horizontal-stretch: 1;
+                                                                }
+                                                                Text {
+                                                                    text: trouble.told;
+                                                                    color: Tok.ink-faint;
+                                                                    font-size: 11px;
+                                                                    overflow: elide;
+                                                                    horizontal-stretch: 1;
+                                                                }
+                                                            }
+
+                                                            if root.word-trouble-count > root.word-troubles.length: Text {
+                                                                text: "ほかに "
+                                                                    + (root.word-trouble-count - root.word-troubles.length)
+                                                                    + " 件";
+                                                                color: Tok.ink-faint;
+                                                                font-size: 11px;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                height: 1px;
+                                                background: Tok.rule;
+                                            }
+
+                                            // 単語チェックモード要件 5.4（書き手の求め 2026-09-08）:
+                                            // **辞書そのものを開く。**画面から作った表と同じものを、
+                                            // この編集器で直接直せる——**行に1つの形にしてあるのは、
+                                            // 人が読んで直せるためでもある**（同要件 4.2）。
+                                            HorizontalLayout {
+                                                spacing: 6px;
+
+                                                TextButton {
+                                                    title: "Edit…";
+                                                    // **頼んでから閉じる**（技術検証 6.24）。開く先はタブで、
+                                                    // 書き手はもうこの画面を見ていない。
+                                                    clicked => {
+                                                        root.word-file-edited();
+                                                    }
+                                                }
+                                                Text {
+                                                    text: "単語帳のファイルをタブで開きます。保存すると取り込みます。";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                        }
+
+
+                                        // どの面にいても、値はいまのシートのもの——だから帯のすぐ
+                                        // 下に在る（要件 9）。
+                                        if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
+                                            spacing: 8px;
+
+                                            // 要件 9: which sheet is being set. **Everything below belongs
+                                            // to it** — there is nothing to mark, because a value that is
+                                            // on screen while 縦書き is chosen is the vertical one.
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                TextButton {
+                                                    title: "Horizontal";
+                                                    role: root.sheet == 0 ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.sheet = 0;
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: "Vertical";
+                                                    role: root.sheet == 1 ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.sheet = 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if root.settings-tab == 3: VerticalLayout {
+                                            spacing: 8px;
+
+                                            // One row per kind of text: how large, what colour, which
+                                            // family. The numbers are the rows of the models — ten numbers,
+                                            // eight colours and eight families to a sheet — and the same
+                                            // numbers are what the callbacks carry.
+                                            TextRow {
+                                                label: "Body";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride] + " px";
+                                                shown: root.palette[root.sheet * 15 + 0];
+                                                family: root.sheet-fonts[root.sheet * 8 + 0];
+                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 19] != 0;
+                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 20] != 0;
+                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 21] != 0;
+                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 22] != 0;
+                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 23] != 0;
+                                                heading: false;
+                                                background-colour: root.palette[root.sheet * 15 + 8];
+                                                paper-colour: root.palette[root.sheet * 15 + 7];
+                                                decoration-toggled(kind, on) => { root.sheet-step(19 + kind, on ? -1 : 1); }
+                                                background-picked => { root.color-picked(8); }
+                                                stepped(by) => {
+                                                    root.sheet-step(0, by);
+                                                }
+                                                picked => {
+                                                    root.color-picked(0);
+                                                }
+                                                chose-font => {
+                                                    root.font-picked(0);
+                                                    font-menu.show();
+                                                }
+                                            }
+
+                                            TextRow {
+                                                label: "H1";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 4] + "%";
+                                                shown: root.palette[root.sheet * 15 + 1];
+                                                family: root.sheet-fonts[root.sheet * 8 + 1];
+                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 24] != 0;
+                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 25] != 0;
+                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 26] != 0;
+                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 27] != 0;
+                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 28] != 0;
+                                                heading: true;
+                                                background-colour: root.palette[root.sheet * 15 + 9];
+                                                paper-colour: root.palette[root.sheet * 15 + 7];
+                                                decoration-toggled(kind, on) => { root.sheet-step(24 + kind, on ? -1 : 1); }
+                                                background-picked => { root.color-picked(9); }
+                                                stepped(by) => {
+                                                    root.sheet-step(4, by);
+                                                }
+                                                picked => {
+                                                    root.color-picked(1);
+                                                }
+                                                chose-font => {
+                                                    root.font-picked(1);
+                                                    font-menu.show();
+                                                }
+                                            }
+
+                                            TextRow {
+                                                label: "H2";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 5] + "%";
+                                                shown: root.palette[root.sheet * 15 + 2];
+                                                family: root.sheet-fonts[root.sheet * 8 + 2];
+                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 29] != 0;
+                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 30] != 0;
+                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 31] != 0;
+                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 32] != 0;
+                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 33] != 0;
+                                                heading: true;
+                                                background-colour: root.palette[root.sheet * 15 + 10];
+                                                paper-colour: root.palette[root.sheet * 15 + 7];
+                                                decoration-toggled(kind, on) => { root.sheet-step(29 + kind, on ? -1 : 1); }
+                                                background-picked => { root.color-picked(10); }
+                                                stepped(by) => {
+                                                    root.sheet-step(5, by);
+                                                }
+                                                picked => {
+                                                    root.color-picked(2);
+                                                }
+                                                chose-font => {
+                                                    root.font-picked(2);
+                                                    font-menu.show();
+                                                }
+                                            }
+
+                                            TextRow {
+                                                label: "H3";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 6] + "%";
+                                                shown: root.palette[root.sheet * 15 + 3];
+                                                family: root.sheet-fonts[root.sheet * 8 + 3];
+                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 34] != 0;
+                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 35] != 0;
+                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 36] != 0;
+                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 37] != 0;
+                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 38] != 0;
+                                                heading: true;
+                                                background-colour: root.palette[root.sheet * 15 + 11];
+                                                paper-colour: root.palette[root.sheet * 15 + 7];
+                                                decoration-toggled(kind, on) => { root.sheet-step(34 + kind, on ? -1 : 1); }
+                                                background-picked => { root.color-picked(11); }
+                                                stepped(by) => {
+                                                    root.sheet-step(6, by);
+                                                }
+                                                picked => {
+                                                    root.color-picked(3);
+                                                }
+                                                chose-font => {
+                                                    root.font-picked(3);
+                                                    font-menu.show();
+                                                }
+                                            }
+
+                                            TextRow {
+                                                label: "H4";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 7] + "%";
+                                                shown: root.palette[root.sheet * 15 + 4];
+                                                family: root.sheet-fonts[root.sheet * 8 + 4];
+                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 39] != 0;
+                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 40] != 0;
+                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 41] != 0;
+                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 42] != 0;
+                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 43] != 0;
+                                                heading: true;
+                                                background-colour: root.palette[root.sheet * 15 + 12];
+                                                paper-colour: root.palette[root.sheet * 15 + 7];
+                                                decoration-toggled(kind, on) => { root.sheet-step(39 + kind, on ? -1 : 1); }
+                                                background-picked => { root.color-picked(12); }
+                                                stepped(by) => {
+                                                    root.sheet-step(7, by);
+                                                }
+                                                picked => {
+                                                    root.color-picked(4);
+                                                }
+                                                chose-font => {
+                                                    root.font-picked(4);
+                                                    font-menu.show();
+                                                }
+                                            }
+
+                                            TextRow {
+                                                label: "H5";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 8] + "%";
+                                                shown: root.palette[root.sheet * 15 + 5];
+                                                family: root.sheet-fonts[root.sheet * 8 + 5];
+                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 44] != 0;
+                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 45] != 0;
+                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 46] != 0;
+                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 47] != 0;
+                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 48] != 0;
+                                                heading: true;
+                                                background-colour: root.palette[root.sheet * 15 + 13];
+                                                paper-colour: root.palette[root.sheet * 15 + 7];
+                                                decoration-toggled(kind, on) => { root.sheet-step(44 + kind, on ? -1 : 1); }
+                                                background-picked => { root.color-picked(13); }
+                                                stepped(by) => {
+                                                    root.sheet-step(8, by);
+                                                }
+                                                picked => {
+                                                    root.color-picked(5);
+                                                }
+                                                chose-font => {
+                                                    root.font-picked(5);
+                                                    font-menu.show();
+                                                }
+                                            }
+
+                                            TextRow {
+                                                label: "H6";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 9] + "%";
+                                                shown: root.palette[root.sheet * 15 + 6];
+                                                family: root.sheet-fonts[root.sheet * 8 + 6];
+                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 49] != 0;
+                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 50] != 0;
+                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 51] != 0;
+                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 52] != 0;
+                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 53] != 0;
+                                                heading: true;
+                                                background-colour: root.palette[root.sheet * 15 + 14];
+                                                paper-colour: root.palette[root.sheet * 15 + 7];
+                                                decoration-toggled(kind, on) => { root.sheet-step(49 + kind, on ? -1 : 1); }
+                                                background-picked => { root.color-picked(14); }
+                                                stepped(by) => {
+                                                    root.sheet-step(9, by);
+                                                }
+                                                picked => {
+                                                    root.color-picked(6);
+                                                }
+                                                chose-font => {
+                                                    root.font-picked(6);
+                                                    font-menu.show();
+                                                }
+                                            }
+                                        }
+
+                                        if root.settings-tab == 4: VerticalLayout {
+                                            spacing: 8px;
+
+                                            // 要件 9 calls the flow advance 行間 in horizontal writing and
+                                            // 列間隔 in vertical writing. **One quantity, two names**: the
+                                            // label follows the sheet, because on this sheet that is what
+                                            // it is.
+                                            StepRow {
+                                                label: root.sheet == 0 ? "Line height" : "Column gap";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 1] + "%";
+                                                stepped(by) => {
+                                                    root.sheet-step(1, by);
+                                                }
+                                            }
+
+                                            StepRow {
+                                                label: "Char advance";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 2] + "%";
+                                                stepped(by) => {
+                                                    root.sheet-step(2, by);
+                                                }
+                                            }
+
+                                            StepRow {
+                                                label: "Page margin";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 3] + " px";
+                                                stepped(by) => {
+                                                    root.sheet-step(3, by);
+                                                }
+                                            }
+
+                                            // 要件 9: how long a line may be. **Two switches that cannot
+                                            // both be on**, and neither of them on is the third answer: the
+                                            // line is not wrapped at all. One value holds all three, so
+                                            // "both on" is not a state this can reach — and pressing the
+                                            // one that is on turns it off, which is how the writer says
+                                            // "neither" without a button for it.
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "Wrap";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                // **The state that is an absence is still named.** With
+                                                // neither switch on, a row of unlit buttons reads as a
+                                                // setting nobody has made rather than as the setting it is.
+                                                if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 0: Text {
+                                                    text: "not wrapped";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                TextButton {
+                                                    title: "Width";
+                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
+                                                        ? Role.primary
+                                                        : Role.normal;
+                                                    clicked => {
+                                                        root.sheet-chose(10,
+                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
+                                                                ? 0
+                                                                : 1);
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: "Pane";
+                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
+                                                        ? Role.primary
+                                                        : Role.normal;
+                                                    clicked => {
+                                                        root.sheet-chose(10,
+                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
+                                                                ? 0
+                                                                : 2);
+                                                    }
+                                                }
+                                            }
+
+                                            // In characters of body text, because that is what a line
+                                            // length means: the number stays true when the body size or the
+                                            // zoom changes, and a width in pixels would not.
+                                            if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1: StepRow {
+                                                label: "Line length";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 11] + " chars";
+                                                stepped(by) => {
+                                                    root.sheet-step(11, by);
+                                                }
+                                            }
+
+                                            // 要件 9（2026-09-07追加）: 行番号。**どちらの面にも置く**
+                                            // ——横書きでは行の頭の余白に、縦書きでは列の頭（面の上端）に、
+                                            // 同じ形で立つ。数字はどちらでも正立させる。
+                                            HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "Line numbers";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
+                                                        ? "Shown"
+                                                        : "Hidden";
+                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
+                                                        ? Role.primary
+                                                        : Role.normal;
+                                                    clicked => {
+                                                        root.sheet-chose(12,
+                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
+                                                                ? 0
+                                                                : 1);
+                                                    }
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                Text {
+                                                    text: "空白・改行を表示";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+                                                TextButton {
+                                                    title: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? "Shown" : "Hidden";
+                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.sheet-chose(54, root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? 0 : 1);
+                                                    }
+                                                }
+                                            }
+
+                                            // 要件 7.8（2026-09-09）: ルビと傍点。**大きさも位置も
+                                            // 親文字に対する比率**で、面ごとに持つ——縦書きと横書きでは
+                                            // ルビの置き場所そのものが違うので、読める大きさも同じとは
+                                            // 限らない。位置は0が行の箱の端（行間の空きの外側）で、
+                                            // 上げるほど字に近づく。
+                                            StepRow {
+                                                label: "Ruby size";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 13] + "%";
+                                                stepped(by) => {
+                                                    root.sheet-step(13, by);
+                                                }
+                                            }
+
+                                            StepRow {
+                                                label: "Ruby position";
+                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 14] + "%";
+                                                stepped(by) => {
+                                                    root.sheet-step(14, by);
+                                                }
+                                            }
+
+                                            // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。半角の数字を
+                                            // 1〜2桁なら1マスに正立させ、3桁以上は1桁ずつ縦に並べる。
+                                            // **縦書きのシートにだけ出す**——縦中横は縦書きの中でしか
+                                            // 起きないので、横書きの面に置けば「押しても何も起きない
+                                            // 切り替え」になる。
+                                            if root.sheet == 1: HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: "Tate-chu-yoko";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
+                                                        ? "Upright"
+                                                        : "Sideways";
+                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
+                                                        ? Role.primary
+                                                        : Role.normal;
+                                                    clicked => {
+                                                        root.sheet-chose(15,
+                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
+                                                                ? 0
+                                                                : 1);
+                                                    }
+                                                }
+                                            }
+
+                                            // 書き手の決定 2026-09-11: **原稿の記号ごとに、画面へ出る字。**
+                                            // 「三種類の文字に箇条書きの意味を与え、それぞれに、表現として
+                                            // どう見せるかを設定できるように」——`- 項目`と`* 項目`を別の
+                                            // 丸で出せる、というのがその意味である。
+                                            //
+                                            // **読むと決めていない記号は、見せ方も設定できない**（書き手の
+                                            // 求めた依存関係）。切ってある記号の行はただの本文で、印そのものが
+                                            // 出ないので、ここで丸を選んでも効くところが無い——**働かない
+                                            // 切り替えを画面に置かない**（単語チェックモード要件 2.1.1）。
+                                            for mark[at] in ["-", "*", "+"]: HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: at == 0 ? "Bullet marks" : "";
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                Text {
+                                                    text: mark;
+                                                    color: root.bullet-marks[at] ? Tok.ink : Tok.ink-faint;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                if root.bullet-marks[at]: HorizontalLayout {
+                                                    spacing: 2px;
+
+                                                    for glyph[index] in ["•", "・", "○"]: TextButton {
+                                                        title: glyph;
+                                                        role: root.sheet-numbers[root.sheet * root.sheet-stride
+                                                            + 16 + at] == index
+                                                            ? Role.primary
+                                                            : Role.normal;
+                                                        clicked => {
+                                                            root.sheet-chose(16 + at, index);
+                                                        }
+                                                    }
+                                                }
+
+                                                if !root.bullet-marks[at]: Text {
+                                                    text: "General で切ってあります";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        if root.settings-tab == 5: VerticalLayout {
+                                            spacing: 8px;
+
+                                            // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
+                                            // ——この面には紙の**色**と、コードの**書体**が並んでいて、
+                                            // どちらも「紙」「コード」としか言っていなかった。
+                                            ColorCell {
+                                                label: "Paper Color";
+                                                shown: root.palette[root.sheet * 15 + 7];
+                                                picked => {
+                                                    root.color-picked(7);
+                                                }
+                                            }
+
+                                            PickRow {
+                                                label: "Code Font";
+                                                value: root.sheet-fonts[root.sheet * 8 + 7];
+                                                pressed => {
+                                                    root.font-picked(7);
+                                                    font-menu.show();
+                                                }
+                                            }
+                                        }
+
+                                        // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
+                                        // なので、書式の面にだけ置く。General の2つはこれで戻らない。
+                                        if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
+                                            spacing: 8px;
+
+                                            Rectangle {
+                                                height: 1px;
+                                                background: Tok.rule;
+                                            }
+
+                                            HorizontalLayout {
+                                                spacing: 8px;
+
+                                                TextButton {
+                                                    title: "Reset";
+                                                    clicked => {
+                                                        root.typography-reset();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2851,1596 +4375,6 @@ export component AppWindow inherits Window {
                             activated => {
                                 root.font-chosen(root.font-slot, family);
                                 font-menu.close();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    settings-panel := Rectangle {
-        visible: root.settings-open;
-        width: root.width;
-        height: root.height;
-        TouchArea {
-            clicked => { root.settings-open = false; }
-        }
-        settings-frame := MenuFrame {
-            x: clamp((root.width - self.width) / 2 + root.settings-offset-x, 0px, max(0px, root.width - self.width));
-            y: clamp(40px + root.settings-offset-y, 0px, max(0px, root.height - self.height));
-            width: root.settings-tab == 6 ? min(620px, root.width - 24px) : 440px;
-            height: self.preferred-height;
-            // Absorb clicks in the frame so only its outside closes Settings.
-            TouchArea { }
-
-            VerticalLayout {
-                padding: 14px;
-                spacing: 8px;
-
-                Rectangle {
-                    height: 22px;
-                    HorizontalLayout {
-                    spacing: 10px;
-
-                    Text {
-                        text: "SETTINGS";
-                        color: Tok.ink-muted;
-                        font-size: 11px;
-                        letter-spacing: 0.9px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-
-                    Text {
-                        // 要件 9: the settings are the app's, not a pane's, and
-                        // they are the formatted view's — the source is drawn
-                        // plain whatever is set here.
-                        text: "ドラッグで移動";
-                        color: Tok.ink-faint;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                    }
-                    }
-                    TouchArea {
-                        mouse-cursor: move;
-                        moved => {
-                            if self.pressed {
-                                root.settings-offset-x = clamp(root.settings-offset-x + self.mouse-x - self.pressed-x, -(root.width - 380px) / 2, max(0px, (root.width - 380px) / 2));
-                                root.settings-offset-y = clamp(root.settings-offset-y + self.mouse-y - self.pressed-y, -40px, max(-40px, root.height - 80px));
-                            }
-                        }
-                    }
-                }
-
-                Rectangle {
-                    height: 1px;
-                    background: Tok.rule;
-                }
-
-                // 追加要件 2026-09-08: **一度に一つの群だけ出す。**
-                // 設定は増える一方で、一枚に積むと下のほうは窓から
-                // 落ちる。帯で群を選び、下はその群だけになる。
-                //
-                // 面の並びは**書字方向を持つかどうか**で切れている：
-                // General だけが方向を持たず、残りの3面はどれも
-                // シート（横書き／縦書き）の上の値である。だから
-                // シートを選ぶ釦は General には無く、他の3面に在る。
-                HorizontalLayout {
-                    alignment: start;
-                    spacing: 2px;
-
-                    PanelTab {
-                        title: "General";
-                        current: root.settings-tab == 0;
-                        clicked => {
-                            root.settings-tab = 0;
-                        }
-                    }
-                    PanelTab {
-                        title: "Terminal";
-                        current: root.settings-tab == 1;
-                        clicked => {
-                            root.settings-tab = 1;
-                        }
-                    }
-                    PanelTab {
-                        title: "Words";
-                        current: root.settings-tab == 2;
-                        clicked => {
-                            root.settings-tab = 2;
-                        }
-                    }
-                    PanelTab {
-                        title: "Text";
-                        current: root.settings-tab == 3;
-                        clicked => {
-                            root.settings-tab = 3;
-                        }
-                    }
-                    PanelTab {
-                        title: "Layout";
-                        current: root.settings-tab == 4;
-                        clicked => {
-                            root.settings-tab = 4;
-                        }
-                    }
-                    PanelTab {
-                        title: "Page";
-                        current: root.settings-tab == 5;
-                        clicked => {
-                            root.settings-tab = 5;
-                        }
-                    }
-                    PanelTab {
-                        title: "Keys";
-                        current: root.settings-tab == 6;
-                        clicked => { root.settings-tab = 6; root.shortcut-filter(); }
-                    }
-                }
-
-                Rectangle {
-                    height: 1px;
-                    background: Tok.rule;
-                }
-
-                if root.settings-tab == 6: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: "ショートカット"; color: Tok.ink; font-size: 16px; }
-                    HorizontalLayout {
-                        spacing: 4px;
-                        for category[index] in ["本文の操作", "基本編集", "Terminal", "入力欄", "Pane・TAB", "Emacs", "Quick Draft"]: PanelTab {
-                            title: category;
-                            current: root.shortcut-category == index;
-                            clicked => { root.shortcut-category = index; root.shortcut-query = ""; root.shortcut-selected = -1; root.shortcut-edit = ""; root.shortcut-status = "操作を選んでください"; root.shortcut-filter(); }
-                        }
-                    }
-                    Text {
-                        text: root.shortcut-category == 0 ? "変更可能 · 本文にフォーカスがあり、IME変換中でないときに有効です。"
-                            : root.shortcut-category == 4 ? "変更可能 · 本文からのPane・TAB操作です。Terminal内のキーは固定です。"
-                            : root.shortcut-category == 5 ? "変更可能 · 本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。"
-                            : root.shortcut-category == 6 ? "変更可能 · 本文から開く操作と、Quick Draft内の操作を区別します。"
-                            : root.shortcut-category == 1 ? "固定 · 本文の編集時に使います。Viewerでは編集できません。"
-                            : root.shortcut-category == 2 ? "固定 · Terminalにフォーカスがあるときに有効です。"
-                            : "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。";
-                        color: Tok.ink-muted; font-size: 12px; wrap: word-wrap;
-                    }
-                    if root.shortcut-category == 0 || root.shortcut-category >= 4: VerticalLayout {
-                        spacing: 8px;
-                Field { placeholder: "操作名・キーで検索"; text <=> root.shortcut-query; init => { self.take-focus(); } edited => { root.shortcut-filter(); } escaped => { root.settings-open = false; root.focus-generation += 1; } }
-                ScrollView {
-                    height: 210px;
-                    VerticalLayout {
-                        alignment: start;
-                        for item in root.shortcut-rows: TextButton {
-                            title: item.name + "　" + (item.key == "" ? "未割り当て" : item.key);
-                            clicked => { root.shortcut-selected = item.id; root.shortcut-edit = item.key; root.shortcut-status = item.name; shortcut-capture.focus(); }
-                        }
-                    }
-                }
-                Text { text: "操作を選び、下の欄で割り当てるキーを同時に押してください。"; color: Tok.ink; font-size: 12px; }
-                shortcut-capture := FocusScope {
-                    height: 34px;
-                    key-pressed(event) => {
-                        if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt { return reject; }
-                        if event.text == Key.Escape {
-                            root.settings-open = false;
-                            root.focus-generation += 1;
-                        } else {
-                            root.shortcut-capture(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-                        }
-                        accept
-                    }
-                    Rectangle {
-                        background: Tok.paper;
-                        border-width: 1px;
-                        border-color: shortcut-capture.has-focus ? #8064b3 : Tok.rule-strong;
-                        border-radius: 4px;
-                        Text {
-                            x: 10px; width: parent.width - 20px;
-                            text: root.shortcut-edit == "" ? "ここをクリックしてキーを押す" : root.shortcut-edit;
-                            color: Tok.ink;
-                            vertical-alignment: center;
-                        }
-                        TouchArea { clicked => { shortcut-capture.focus(); } }
-                    }
-                }
-                Text { text: root.shortcut-status; color: Tok.ink; font-size: 12px; wrap: word-wrap; }
-                Text { text: "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"; color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
-                HorizontalLayout {
-                    TextButton { title: "適用して保存"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(false); } }
-                    TextButton { title: "割り当て解除"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-edit = ""; root.shortcut-save(false); } }
-                    TextButton { title: "この操作を既定に戻す"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(true); } }
-                    TextButton { title: "閉じる"; clicked => { root.settings-open = false; root.focus-generation += 1; } }
-                }
-                    }
-                    if root.shortcut-category > 0 && root.shortcut-category < 4: Text {
-                        text: root.shortcut-category == 1 ? "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A"
-                            : root.shortcut-category == 2 ? "選択した文字をコピー　Ctrl+Shift+C\n貼り付け　Ctrl+V\n下段を表示・閉じる　Ctrl+`\n下段から本文へ戻る　Ctrl+Alt+↑\nその他のキーは実行中のシェル・プログラムへ渡します。"
-                            : "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A\nEnter・Escの動作は、入力欄ごとの用途に従います。";
-                        color: Tok.ink; font-size: 13px; wrap: word-wrap;
-                    }
-                }
-
-                if root.settings-tab == 0: VerticalLayout {
-                    spacing: 8px;
-
-                    Text {
-                        text: "FILES";
-                        color: Tok.ink-faint;
-                        font-size: 10px;
-                        letter-spacing: 0.9px;
-                    }
-
-                    // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
-                    // Offが何を意味するかを、同じ場所で言う**——「切ってある
-                    // 間は書かない」だけなら、置いてある古い退避が次の起動で
-                    // 戻ってきて、書き手の言ったこととちょうど逆になる。
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "自動退避";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        TextButton {
-                            title: root.autosave ? "On" : "Off";
-                            role: root.autosave ? Role.primary : Role.normal;
-                            clicked => {
-                                root.autosave-toggled(!root.autosave);
-                            }
-                        }
-                    }
-
-                    // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
-                    Text {
-                        text: root.autosave
-                            ? "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
-                            : "退避しません。Offにすると作業コピーも削除します。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: "元ファイルへの反映は Ctrl+S。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
-
-                    // 書き手の報告 2026-09-11: **見出しが中身を言っていなかった。**
-                    // `FILES`の下にルビの記法も箇条書きの字も並んでいて、どれも
-                    // ファイルの話ではない——**画面とソースが食い違えば、書き手と
-                    // 私が別のものを指して話すことになる。**記法の読み書きは
-                    // ここから下である。
-                    Text {
-                        text: "MARKUP";
-                        color: Tok.ink-faint;
-                        font-size: 10px;
-                        letter-spacing: 0.9px;
-                    }
-
-                    // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。
-                    // **「正解が二つある」から選ばせる**——投稿サイトへ出す
-                    // ための字数はルビを含まず、打ち込んだ量を知りたいときは
-                    // 含む。編集器がどちらかに決めると、もう一方の用事の人が
-                    // 毎回数え直すことになる。
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "Count ruby";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        TextButton {
-                            title: root.count-ruby ? "On" : "Off";
-                            role: root.count-ruby ? Role.primary : Role.normal;
-                            clicked => {
-                                root.count-ruby-toggled(!root.count-ruby);
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: root.count-ruby
-                            ? "《よみ》も本文の字数に入れます。"
-                            : "《よみ》は本文の字数に入れません。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
-
-                    // 要件 E9: ルビと傍点の記法を読むか。**Markdownの標準では
-                    // ない**ので、切れなければ「この編集器でしか正しく見えない
-                    // 書き方」を書き手に強いることになる。ルビと傍点を1つの旗で
-                    // 切るのは、同じ記法の一族だからである。
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "Ruby markup";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        TextButton {
-                            title: root.ruby-marks ? "On" : "Off";
-                            role: root.ruby-marks ? Role.primary : Role.normal;
-                            clicked => {
-                                root.ruby-marks-toggled(!root.ruby-marks);
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: root.ruby-marks
-                            ? "｜漢字《かんじ》と《《傍点》》を記法として読みます。"
-                            : "記号をそのまま字として出します。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
-
-                    // 書き手の決定 2026-09-11: **どれを箇条書きの印として読むか。**
-                    // CommonMarkは`-`・`*`・`+`を同格に認めているので、この編集器も
-                    // 同格に扱う——**`-`も切れる**（「*も標準ということなら、扱いは
-                    // 同じであるべき」）。切った記号の行はただの本文になり、記号も
-                    // そのまま字として出る（原稿のバイト列は変えない）。
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "Bullet marks";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        for mark[index] in ["-", "*", "+"]: TextButton {
-                            title: mark;
-                            role: root.bullet-marks[index] ? Role.primary : Role.normal;
-                            clicked => {
-                                root.bullet-mark-toggled(index);
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: !root.bullet-marks[0] && !root.bullet-marks[1]
-                            && !root.bullet-marks[2]
-                            ? "箇条書きの印はありません（どの記号もただの本文です）。"
-                            : (root.bullet-marks[0] ? "- " : "")
-                                + (root.bullet-marks[1] ? "* " : "")
-                                + (root.bullet-marks[2] ? "+ " : "")
-                                + "を箇条書きの印として読みます。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
-
-                }
-
-                // 追加要件 2026-09-08（要件 6.8）: **端末は紙とは別の設定を持つ。**
-                // 黒地で使う人が多く、要件9のシート（原稿の紙）と同じ値で決める
-                // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
-                // 無い。
-                if root.settings-tab == 1: VerticalLayout {
-                    spacing: 8px;
-
-                    // 追加要件 2026-09-07: **書字方向を持たない設定はここ**。
-                    // 2026-09-08 からはこの面が丸ごとそれで、シートを選ぶ釦は
-                    // 隣の3面にある。
-                    Text {
-                        text: "TERMINAL";
-                        color: Tok.ink-faint;
-                        font-size: 10px;
-                        letter-spacing: 0.9px;
-                    }
-
-                    PickRow {
-                        label: "Default";
-                        value: root.terminal-shells[root.default-shell];
-                        pressed => {
-                            default-shell-menu.show();
-                        }
-                    }
-
-                    // **原点はこの群の左上**（技術検証 6.30：popupを
-                    // レイアウトに直に置くと、そのレイアウトの左上から
-                    // 数える）。帯の下に群が入ったので、パネルの上端から
-                    // 数えていた78pxは、この群の中の78pxになった——
-                    // 見出し13px＋間8px＋行28pxの、行の下。
-                    default-shell-menu := PopupWindow {
-                        x: 60px;
-                        y: 52px;
-                        width: 240px;
-                        close-policy: close-on-click-outside;
-
-                        MenuFrame {
-                            width: 240px;
-
-                            VerticalLayout {
-                                padding: 6px;
-                                spacing: 1px;
-
-                                // **頼んでから閉じる**（書き手の報告 2026-09-07:
-                                // WSL以外に変えられない）。`close`はこのメニューの
-                                // 木を——この行と、行を包む`for`ごと——捨てるので、
-                                // その後で`root`へ登ろうとすると生成されたコードは
-                                // `parent.upgrade()`に失敗し、**黙って何もしない**。
-                                // タブの接続先の一覧で同じことを踏んだ。
-                                for shell[index] in root.terminal-shells: MenuRow {
-                                    title: shell;
-                                    checked: index == root.default-shell;
-                                    activated => {
-                                        root.default-shell-chosen(index);
-                                        default-shell-menu.close();
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        height: 1px;
-                        background: Tok.rule;
-                    }
-
-                    Text {
-                        text: "APPEARANCE";
-                        color: Tok.ink-faint;
-                        font-size: 10px;
-                        letter-spacing: 0.9px;
-                    }
-
-                    // **黒地と紙を、ひとまとめで置く。**背景だけ黒くして文字が
-                    // 黒のままの画面は読めない——そこを通らせないために、2つを
-                    // 一度に決める道を先に出す。細かく決めたい人のために、下に
-                    // 1色ずつの行も残してある。
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "Theme";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        TextButton {
-                            title: "Paper";
-                            clicked => {
-                                root.terminal-theme-chosen(false);
-                            }
-                        }
-                        TextButton {
-                            title: "Dark";
-                            clicked => {
-                                root.terminal-theme-chosen(true);
-                            }
-                        }
-                    }
-
-                    ColorCell {
-                        label: "Background";
-                        shown: root.terminal-paper;
-                        picked => {
-                            root.terminal-colour-picked(0);
-                        }
-                    }
-
-                    ColorCell {
-                        label: "Text Color";
-                        shown: root.terminal-ink;
-                        picked => {
-                            root.terminal-colour-picked(1);
-                        }
-                    }
-
-                    PickRow {
-                        label: "Font";
-                        value: root.terminal-font;
-                        pressed => {
-                            root.terminal-font-picked();
-                            font-menu.show();
-                        }
-                    }
-
-                    StepRow {
-                        label: "Size";
-                        value: root.terminal-size + " px";
-                        stepped(by) => {
-                            root.terminal-size-stepped(by);
-                        }
-                    }
-
-                    // **16色は選ばせない**（要件 6.8）。選ばせれば16回選ぶことに
-                    // なり、しかも選び終えるまで読めない。
-                    Text {
-                        text: "SGRの16色は背景の明るさから選びます。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
-                }
-
-                // 要件 7.9（2026-09-08）: **単語チェックモード。**書き手の指摘の
-                // とおり、考え方はソースの予約語の色分けと同じ——C言語モードが
-                // 予約語・型・前処理をそれぞれの色で持つように、**モードが語群を
-                // 持ち、語群が色を持つ**。
-                //
-                // **どのモードを使うかはここで決めない。**それは文書ごとの話で、
-                // ステータスバーから選ぶ（要件 10）。ここは中身を作る場所である。
-                if root.settings-tab == 2: VerticalLayout {
-                    spacing: 8px;
-
-                    Text {
-                        text: "MODES";
-                        color: Tok.ink-faint;
-                        font-size: 10px;
-                        letter-spacing: 0.9px;
-                    }
-
-                    for mode[index] in root.word-mode-names: HorizontalLayout {
-                        spacing: 6px;
-
-                        // **先頭の「なし」は作ったモードではない**ので出さない。
-                        if index > 0 && !(root.word-naming == 3
-                            && root.word-naming-at == index - 1): TextButton {
-                            wide: true;
-                            title: mode.name;
-                            role: root.word-mode-opened-at == index - 1
-                                ? Role.primary
-                                : Role.normal;
-                            // **開くのはRustに頼む**（書き手の報告 2026-09-08：
-                            // モードを選んでも何も出ない）。中身（語群・語・重複）は
-                            // Rustが作って窓へ渡すモデルなので、こちら側で数字を
-                            // 変えただけでは**誰も作り直さない**——押した先が
-                            // 空のままだったのはそれである。
-                            clicked => {
-                                root.word-mode-opened(
-                                    root.word-mode-opened-at == index - 1 ? -1 : index - 1);
-                            }
-                            // **長押しで名前を変える**（書き手の求め 2026-09-08）。
-                            // タブの名前と同じ手つきで、**作るときと同じ欄**が
-                            // その場に出る（単語チェックモード要件 7.4）。
-                            holdable: true;
-                            held => {
-                                root.word-new-name = mode.name;
-                                root.word-naming-trouble = "";
-                                root.word-naming-at = index - 1;
-                                root.word-naming = 3;
-                            }
-                        }
-                        // **いまこの文書が使っているモード**（同日追加、書き手の
-                        // 報告：設定上どちらも同じに見える）。開いて中を見ている
-                        // ことと、いま色が付いていることは別のことである。
-                        if index > 0 && mode.id == root.word-mode
-                            && !(root.word-naming == 3
-                                && root.word-naming-at == index - 1): Text {
-                            text: "この文書";
-                            color: Tok.accent;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 0;
-                        }
-                        if index > 0 && !(root.word-naming == 3
-                            && root.word-naming-at == index - 1): TextButton {
-                            title: "×";
-                            role: Role.quiet;
-                            clicked => {
-                                root.word-mode-removed(index - 1);
-                            }
-                        }
-
-                        // 名前を変えているあいだ、この行はその欄になる。
-                        if root.word-naming == 3 && root.word-naming-at == index - 1: Field {
-                            placeholder: "モードの名前";
-                            text <=> root.word-new-name;
-                            init => {
-                                self.take-focus();
-                            }
-                            accepted => {
-                                root.word-mode-renamed(index - 1, root.word-new-name);
-                            }
-                            escaped => {
-                                root.word-naming = 0;
-                            }
-                        }
-                        if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
-                            title: "決定";
-                            role: Role.primary;
-                            clicked => {
-                                root.word-mode-renamed(index - 1, root.word-new-name);
-                            }
-                        }
-                        if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
-                            title: "取消";
-                            role: Role.quiet;
-                            clicked => {
-                                root.word-naming = 0;
-                            }
-                        }
-                    }
-
-                    // 書き手の求め 2026-09-08: **設定は一枚で終える。**
-                    // 名前は別の問いにしない——問いは窓の中に描くもの（要件
-                    // 8.3・8.4）で、このパネルはその上に浮いている別の窓だから、
-                    // **訊くたびにパネルが消えて戻る**ことになる。「決定すると
-                    // 次の画面」が続くと、何をしているのか分からなくなる。
-                    // **欄はこの場に出し、この場で終える。**
-                    if root.word-naming != 1: HorizontalLayout {
-                        alignment: start;
-
-                        TextButton {
-                            title: "New Mode";
-                            role: Role.primary;
-                            clicked => {
-                                root.word-new-name = "";
-                                root.word-naming-trouble = "";
-                                root.word-naming = 1;
-                            }
-                        }
-                    }
-
-                    if root.word-naming == 1: HorizontalLayout {
-                        spacing: 6px;
-
-                        Field {
-                            placeholder: "モードの名前";
-                            text <=> root.word-new-name;
-                            // **出たときに鍵盤をここへ。**押した手はもう名前を
-                            // 打つつもりでいる。`if`の中の要素はここからしか
-                            // 触れないので、外から呼ばずに自分で取る。
-                            init => {
-                                self.take-focus();
-                            }
-                            accepted => {
-                                root.word-mode-added(root.word-new-name);
-                            }
-                            escaped => {
-                                root.word-naming = 0;
-                            }
-                        }
-                        TextButton {
-                            title: "追加";
-                            role: Role.primary;
-                            clicked => {
-                                root.word-mode-added(root.word-new-name);
-                            }
-                        }
-                        TextButton {
-                            title: "取消";
-                            role: Role.quiet;
-                            clicked => {
-                                root.word-naming = 0;
-                            }
-                        }
-                    }
-
-                    if root.word-naming != 0 && root.word-naming-trouble != "": Text {
-                        text: root.word-naming-trouble;
-                        color: Tok.alert;
-                        font-size: 11px;
-                        wrap: word-wrap;
-                    }
-
-                    if root.word-mode-names.length <= 1: Text {
-                        text: "モードを作り、その中に語群（人物・地名など）を作ります。"
-                            + "文書ごとにモードを選ぶのは下のステータスバーからです。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        wrap: word-wrap;
-                    }
-
-                    if root.word-mode-opened-at >= 0: Rectangle {
-                        height: 1px;
-                        background: Tok.rule;
-                    }
-
-                    // **開いたモードの名前を出す。**「GROUPS」だけでは、どの
-                    // モードの中を見ているのか画面に無かった（書き手の報告
-                    // 2026-09-08）。`+ 1`は先頭の「なし」の分。
-                    if root.word-mode-opened-at >= 0: Text {
-                        text: "GROUPS — "
-                            + root.word-mode-names[root.word-mode-opened-at + 1].name;
-                        color: Tok.ink-faint;
-                        font-size: 10px;
-                        letter-spacing: 0.9px;
-                    }
-
-                    if root.word-mode-opened-at >= 0: VerticalLayout {
-                        spacing: 8px;
-
-                        for row[index] in root.word-group-rows: HorizontalLayout {
-                            spacing: 6px;
-
-                            // 色見本。押すとWindowsの色ダイアログ（要件 9 と同じ道）。
-                            Rectangle {
-                                width: 24px;
-                                horizontal-stretch: 0;
-
-                                Rectangle {
-                                    y: (parent.height - self.height) / 2;
-                                    width: 24px;
-                                    height: 20px;
-                                    border-radius: 4px;
-                                    border-width: 1px;
-                                    border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
-                                    // **色を持たない語群は、色の無い升目**
-                                    // （除外語群、2026-09-08）。
-                                    background: row.paints ? row.shown : Tok.chrome-sunken;
-
-                                    if !row.paints: Text {
-                                        width: 100%;
-                                        height: 100%;
-                                        text: "—";
-                                        color: Tok.ink-faint;
-                                        font-size: 11px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-
-                                    swatch := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.word-group-colour-picked(index);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // **名前も釦である**（書き手の求め 2026-09-08）。
-                            // 押せば語の一覧が開き、**長押しすれば名前を変えられる**
-                            // ——モードの行と同じ手つきにする。
-                            if !(root.word-naming == 4
-                                && root.word-naming-at == index): TextButton {
-                                wide: true;
-                                // **開いている語群には印を付ける。**下に出ている
-                                // `Import…`と`この語群を消す`がどれに効くのかは、
-                                // この印だけが言う。
-                                role: root.word-group-opened-at == index
-                                    ? Role.primary
-                                    : Role.quiet;
-                                title: row.name;
-                                clicked => {
-                                    root.word-group-opened(
-                                        root.word-group-opened-at == index ? -1 : index);
-                                }
-                                holdable: true;
-                                held => {
-                                    root.word-new-name = row.name;
-                                    root.word-naming-trouble = "";
-                                    root.word-naming-at = index;
-                                    root.word-naming = 4;
-                                }
-                            }
-
-                            // **語数と、色を付けられなかった数。**押すと一覧が開く
-                            // ——アプリの中で見て、アプリの中で消せることが、辞書を
-                            // 書き手に管理させないということである。
-                            if !(root.word-naming == 4
-                                && root.word-naming-at == index): TextButton {
-                                role: Role.quiet;
-                                title: row.conflicts > 0
-                                    ? row.words + "語 / 重複" + row.conflicts
-                                    : (row.repeated > 0
-                                        ? row.words + "語 (二重" + row.repeated + ")"
-                                        : row.words + "語");
-                                clicked => {
-                                    root.word-group-opened(
-                                        root.word-group-opened-at == index ? -1 : index);
-                                }
-                            }
-
-                            // 名前を変えているあいだ、この行はその欄になる
-                            // （色見本だけは残す——どの語群かはそれで分かる）。
-                            if root.word-naming == 4 && root.word-naming-at == index: Field {
-                                placeholder: "語群の名前";
-                                text <=> root.word-new-name;
-                                init => {
-                                    self.take-focus();
-                                }
-                                accepted => {
-                                    root.word-group-renamed(index, root.word-new-name);
-                                }
-                                escaped => {
-                                    root.word-naming = 0;
-                                }
-                            }
-                            if root.word-naming == 4 && root.word-naming-at == index: TextButton {
-                                title: "決定";
-                                role: Role.primary;
-                                clicked => {
-                                    root.word-group-renamed(index, root.word-new-name);
-                                }
-                            }
-                            if root.word-naming == 4 && root.word-naming-at == index: TextButton {
-                                title: "取消";
-                                role: Role.quiet;
-                                clicked => {
-                                    root.word-naming = 0;
-                                }
-                            }
-                        }
-
-                        // **語群が1つも無いモード。**作った直後はここに来る——
-                        // 何も出ないのは「効かなかった」に見える（書き手の報告
-                        // 2026-09-08）ので、**次にすることを書いておく**。
-                        if root.word-group-rows.length == 0: Text {
-                            text: "このモードにはまだ語群がありません。"
-                                + "`New Group`で人物・地名などの語群を作り、色を決めます。";
-                            color: Tok.ink-faint;
-                            font-size: 11px;
-                            wrap: word-wrap;
-                        }
-
-                        // 開いている語群の語。**アプリの中で消せる**（要件 7.9）。
-                        if root.word-group-opened-at >= 0: Rectangle {
-                            height: 152px;
-                            background: Tok.chrome-raised;
-                            border-radius: 6px;
-
-                            ScrollView {
-                                x: 8px;
-                                y: 6px;
-                                width: parent.width - 16px;
-                                height: parent.height - 12px;
-
-                                VerticalLayout {
-                                    alignment: start;
-                                    spacing: 1px;
-
-                                    for word in root.word-group-words: HorizontalLayout {
-                                        spacing: 6px;
-
-                                        Text {
-                                            text: word.text;
-                                            // **覚え書きは薄く。**語の並びの中で
-                                            // 見出しとして読めればよく、語と同じ
-                                            // 濃さで出ると語の数が分からなくなる。
-                                            color: word.note ? Tok.ink-faint : Tok.ink;
-                                            font-size: 12px;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                            horizontal-stretch: 1;
-                                        }
-                                        TextButton {
-                                            title: "×";
-                                            role: Role.quiet;
-                                            clicked => {
-                                                root.word-removed(
-                                                    root.word-group-opened-at, word.text);
-                                            }
-                                        }
-                                    }
-
-                                    if root.word-group-words.length == 0: Text {
-                                        text: "まだ語がありません。本文で語を選んで右ボタン、"
-                                            + "`単語帳へ追加`から入れられます。"
-                                            + "`#`で始まる行は覚え書きです。";
-                                        color: Tok.ink-faint;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-                        }
-
-                        // **開いている語群についてすることは、その語群の下に置く**
-                        // （書き手の報告 2026-09-08：名前が「…」に潰れていた）。
-                        // 行に釦を5つ並べると、380pxの幅では**いちばん大事な名前が
-                        // 先に潰れる**——名前は行に、することは開いた先に。
-                        //
-                        // **消すのもここである。**語を1万まで入れられるものを、
-                        // 一覧の行の`×`ひとつで消せてよいはずがない。
-                        if root.word-group-opened-at >= 0: HorizontalLayout {
-                            alignment: start;
-                            spacing: 6px;
-
-                            TextButton {
-                                title: "Import…";
-                                clicked => {
-                                    root.word-group-imported(root.word-group-opened-at);
-                                }
-                            }
-                            TextButton {
-                                title: "Export…";
-                                clicked => {
-                                    root.word-group-exported(root.word-group-opened-at);
-                                }
-                            }
-                            // **除外語群にする／やめる**（書き手と決めた 2026-09-08）。
-                            // 色を持たない語群は木に積まれて最長一致で勝ち、しかし
-                            // 何も塗らない——`カリオン`を入れておくと、その中で
-                            // `リオン`が光らなくなる。
-                            TextButton {
-                                title: root.word-group-rows[root.word-group-opened-at].paints
-                                    ? "色を付けない"
-                                    : "色を付ける";
-                                clicked => {
-                                    root.word-group-paint-toggled(root.word-group-opened-at);
-                                }
-                            }
-                            TextButton {
-                                title: "この語群を消す";
-                                role: Role.danger;
-                                clicked => {
-                                    root.word-group-removed(root.word-group-opened-at);
-                                }
-                            }
-                        }
-
-                        if root.word-naming == 2: HorizontalLayout {
-                            spacing: 6px;
-
-                            Field {
-                                placeholder: "語群の名前";
-                                text <=> root.word-new-name;
-                                init => {
-                                    self.take-focus();
-                                }
-                                accepted => {
-                                    root.word-group-added(
-                                        root.word-mode-opened-at, root.word-new-name);
-                                }
-                                escaped => {
-                                    root.word-naming = 0;
-                                }
-                            }
-                            TextButton {
-                                title: "追加";
-                                role: Role.primary;
-                                clicked => {
-                                    root.word-group-added(
-                                        root.word-mode-opened-at, root.word-new-name);
-                                }
-                            }
-                            TextButton {
-                                title: "取消";
-                                role: Role.quiet;
-                                clicked => {
-                                    root.word-naming = 0;
-                                }
-                            }
-                        }
-
-                        HorizontalLayout {
-                            alignment: start;
-                            spacing: 6px;
-
-                            if root.word-naming != 2: TextButton {
-                                title: "New Group";
-                                // **一枚で終える**（`New Mode`の注記）。
-                                clicked => {
-                                    root.word-new-name = "";
-                                    root.word-naming-trouble = "";
-                                    root.word-naming = 2;
-                                }
-                            }
-                            // **重複は畳んで置く。**普段は数だけ見えていればよく、
-                            // 直すときにだけ開く。
-                            if root.word-trouble-count > 0: TextButton {
-                                title: root.word-troubles-shown
-                                    ? "重複を閉じる"
-                                    : "重複 " + root.word-trouble-count + " 件";
-                                clicked => {
-                                    root.word-troubles-shown = !root.word-troubles-shown;
-                                }
-                            }
-                        }
-
-                        // 要件 7.9: **参照画面。**どの語が、どこで、色が付いているのか
-                        // いないのか。
-                        if root.word-troubles-shown: Rectangle {
-                            height: 152px;
-                            background: Tok.chrome-raised;
-                            border-radius: 6px;
-
-                            ScrollView {
-                                x: 8px;
-                                y: 6px;
-                                width: parent.width - 16px;
-                                height: parent.height - 12px;
-
-                                VerticalLayout {
-                                    alignment: start;
-                                    spacing: 2px;
-
-                                    for trouble in root.word-troubles: HorizontalLayout {
-                                        spacing: 6px;
-
-                                        Text {
-                                            text: trouble.conflict ? "色なし" : "二重";
-                                            color: trouble.conflict ? Tok.alert : Tok.ink-faint;
-                                            font-size: 11px;
-                                            horizontal-stretch: 0;
-                                            min-width: 44px;
-                                        }
-                                        Text {
-                                            text: trouble.word;
-                                            color: Tok.ink;
-                                            font-size: 12px;
-                                            overflow: elide;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Text {
-                                            text: trouble.told;
-                                            color: Tok.ink-faint;
-                                            font-size: 11px;
-                                            overflow: elide;
-                                            horizontal-stretch: 1;
-                                        }
-                                    }
-
-                                    if root.word-trouble-count > root.word-troubles.length: Text {
-                                        text: "ほかに "
-                                            + (root.word-trouble-count - root.word-troubles.length)
-                                            + " 件";
-                                        color: Tok.ink-faint;
-                                        font-size: 11px;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        height: 1px;
-                        background: Tok.rule;
-                    }
-
-                    // 単語チェックモード要件 5.4（書き手の求め 2026-09-08）:
-                    // **辞書そのものを開く。**画面から作った表と同じものを、
-                    // この編集器で直接直せる——**行に1つの形にしてあるのは、
-                    // 人が読んで直せるためでもある**（同要件 4.2）。
-                    HorizontalLayout {
-                        spacing: 6px;
-
-                        TextButton {
-                            title: "Edit…";
-                            // **頼んでから閉じる**（技術検証 6.24）。開く先はタブで、
-                            // 書き手はもうこの画面を見ていない。
-                            clicked => {
-                                root.word-file-edited();
-                                root.settings-open = false;
-                            }
-                        }
-                        Text {
-                            text: "単語帳のファイルをタブで開きます。保存すると取り込みます。";
-                            color: Tok.ink-faint;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                    }
-                }
-
-
-                // どの面にいても、値はいまのシートのもの——だから帯のすぐ
-                // 下に在る（要件 9）。
-                if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
-                    spacing: 8px;
-
-                    // 要件 9: which sheet is being set. **Everything below belongs
-                    // to it** — there is nothing to mark, because a value that is
-                    // on screen while 縦書き is chosen is the vertical one.
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        TextButton {
-                            title: "Horizontal";
-                            role: root.sheet == 0 ? Role.primary : Role.normal;
-                            clicked => {
-                                root.sheet = 0;
-                            }
-                        }
-                        TextButton {
-                            title: "Vertical";
-                            role: root.sheet == 1 ? Role.primary : Role.normal;
-                            clicked => {
-                                root.sheet = 1;
-                            }
-                        }
-                    }
-                }
-
-                if root.settings-tab == 3: VerticalLayout {
-                    spacing: 8px;
-
-                    // One row per kind of text: how large, what colour, which
-                    // family. The numbers are the rows of the models — ten numbers,
-                    // eight colours and eight families to a sheet — and the same
-                    // numbers are what the callbacks carry.
-                    TextRow {
-                        label: "Body";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride] + " px";
-                        shown: root.palette[root.sheet * 15 + 0];
-                        family: root.sheet-fonts[root.sheet * 8 + 0];
-                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 19] != 0;
-                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 20] != 0;
-                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 21] != 0;
-                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 22] != 0;
-                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 23] != 0;
-                        heading: false;
-                        background-colour: root.palette[root.sheet * 15 + 8];
-                        paper-colour: root.palette[root.sheet * 15 + 7];
-                        decoration-toggled(kind, on) => { root.sheet-step(19 + kind, on ? -1 : 1); }
-                        background-picked => { root.color-picked(8); }
-                        stepped(by) => {
-                            root.sheet-step(0, by);
-                        }
-                        picked => {
-                            root.color-picked(0);
-                        }
-                        chose-font => {
-                            root.font-picked(0);
-                            font-menu.show();
-                        }
-                    }
-
-                    TextRow {
-                        label: "H1";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 4] + "%";
-                        shown: root.palette[root.sheet * 15 + 1];
-                        family: root.sheet-fonts[root.sheet * 8 + 1];
-                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 24] != 0;
-                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 25] != 0;
-                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 26] != 0;
-                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 27] != 0;
-                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 28] != 0;
-                        heading: true;
-                        background-colour: root.palette[root.sheet * 15 + 9];
-                        paper-colour: root.palette[root.sheet * 15 + 7];
-                        decoration-toggled(kind, on) => { root.sheet-step(24 + kind, on ? -1 : 1); }
-                        background-picked => { root.color-picked(9); }
-                        stepped(by) => {
-                            root.sheet-step(4, by);
-                        }
-                        picked => {
-                            root.color-picked(1);
-                        }
-                        chose-font => {
-                            root.font-picked(1);
-                            font-menu.show();
-                        }
-                    }
-
-                    TextRow {
-                        label: "H2";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 5] + "%";
-                        shown: root.palette[root.sheet * 15 + 2];
-                        family: root.sheet-fonts[root.sheet * 8 + 2];
-                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 29] != 0;
-                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 30] != 0;
-                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 31] != 0;
-                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 32] != 0;
-                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 33] != 0;
-                        heading: true;
-                        background-colour: root.palette[root.sheet * 15 + 10];
-                        paper-colour: root.palette[root.sheet * 15 + 7];
-                        decoration-toggled(kind, on) => { root.sheet-step(29 + kind, on ? -1 : 1); }
-                        background-picked => { root.color-picked(10); }
-                        stepped(by) => {
-                            root.sheet-step(5, by);
-                        }
-                        picked => {
-                            root.color-picked(2);
-                        }
-                        chose-font => {
-                            root.font-picked(2);
-                            font-menu.show();
-                        }
-                    }
-
-                    TextRow {
-                        label: "H3";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 6] + "%";
-                        shown: root.palette[root.sheet * 15 + 3];
-                        family: root.sheet-fonts[root.sheet * 8 + 3];
-                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 34] != 0;
-                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 35] != 0;
-                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 36] != 0;
-                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 37] != 0;
-                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 38] != 0;
-                        heading: true;
-                        background-colour: root.palette[root.sheet * 15 + 11];
-                        paper-colour: root.palette[root.sheet * 15 + 7];
-                        decoration-toggled(kind, on) => { root.sheet-step(34 + kind, on ? -1 : 1); }
-                        background-picked => { root.color-picked(11); }
-                        stepped(by) => {
-                            root.sheet-step(6, by);
-                        }
-                        picked => {
-                            root.color-picked(3);
-                        }
-                        chose-font => {
-                            root.font-picked(3);
-                            font-menu.show();
-                        }
-                    }
-
-                    TextRow {
-                        label: "H4";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 7] + "%";
-                        shown: root.palette[root.sheet * 15 + 4];
-                        family: root.sheet-fonts[root.sheet * 8 + 4];
-                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 39] != 0;
-                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 40] != 0;
-                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 41] != 0;
-                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 42] != 0;
-                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 43] != 0;
-                        heading: true;
-                        background-colour: root.palette[root.sheet * 15 + 12];
-                        paper-colour: root.palette[root.sheet * 15 + 7];
-                        decoration-toggled(kind, on) => { root.sheet-step(39 + kind, on ? -1 : 1); }
-                        background-picked => { root.color-picked(12); }
-                        stepped(by) => {
-                            root.sheet-step(7, by);
-                        }
-                        picked => {
-                            root.color-picked(4);
-                        }
-                        chose-font => {
-                            root.font-picked(4);
-                            font-menu.show();
-                        }
-                    }
-
-                    TextRow {
-                        label: "H5";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 8] + "%";
-                        shown: root.palette[root.sheet * 15 + 5];
-                        family: root.sheet-fonts[root.sheet * 8 + 5];
-                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 44] != 0;
-                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 45] != 0;
-                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 46] != 0;
-                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 47] != 0;
-                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 48] != 0;
-                        heading: true;
-                        background-colour: root.palette[root.sheet * 15 + 13];
-                        paper-colour: root.palette[root.sheet * 15 + 7];
-                        decoration-toggled(kind, on) => { root.sheet-step(44 + kind, on ? -1 : 1); }
-                        background-picked => { root.color-picked(13); }
-                        stepped(by) => {
-                            root.sheet-step(8, by);
-                        }
-                        picked => {
-                            root.color-picked(5);
-                        }
-                        chose-font => {
-                            root.font-picked(5);
-                            font-menu.show();
-                        }
-                    }
-
-                    TextRow {
-                        label: "H6";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 9] + "%";
-                        shown: root.palette[root.sheet * 15 + 6];
-                        family: root.sheet-fonts[root.sheet * 8 + 6];
-                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 49] != 0;
-                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 50] != 0;
-                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 51] != 0;
-                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 52] != 0;
-                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 53] != 0;
-                        heading: true;
-                        background-colour: root.palette[root.sheet * 15 + 14];
-                        paper-colour: root.palette[root.sheet * 15 + 7];
-                        decoration-toggled(kind, on) => { root.sheet-step(49 + kind, on ? -1 : 1); }
-                        background-picked => { root.color-picked(14); }
-                        stepped(by) => {
-                            root.sheet-step(9, by);
-                        }
-                        picked => {
-                            root.color-picked(6);
-                        }
-                        chose-font => {
-                            root.font-picked(6);
-                            font-menu.show();
-                        }
-                    }
-                }
-
-                if root.settings-tab == 4: VerticalLayout {
-                    spacing: 8px;
-
-                    // 要件 9 calls the flow advance 行間 in horizontal writing and
-                    // 列間隔 in vertical writing. **One quantity, two names**: the
-                    // label follows the sheet, because on this sheet that is what
-                    // it is.
-                    StepRow {
-                        label: root.sheet == 0 ? "Line height" : "Column gap";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 1] + "%";
-                        stepped(by) => {
-                            root.sheet-step(1, by);
-                        }
-                    }
-
-                    StepRow {
-                        label: "Char advance";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 2] + "%";
-                        stepped(by) => {
-                            root.sheet-step(2, by);
-                        }
-                    }
-
-                    StepRow {
-                        label: "Page margin";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 3] + " px";
-                        stepped(by) => {
-                            root.sheet-step(3, by);
-                        }
-                    }
-
-                    // 要件 9: how long a line may be. **Two switches that cannot
-                    // both be on**, and neither of them on is the third answer: the
-                    // line is not wrapped at all. One value holds all three, so
-                    // "both on" is not a state this can reach — and pressing the
-                    // one that is on turns it off, which is how the writer says
-                    // "neither" without a button for it.
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "Wrap";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        // **The state that is an absence is still named.** With
-                        // neither switch on, a row of unlit buttons reads as a
-                        // setting nobody has made rather than as the setting it is.
-                        if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 0: Text {
-                            text: "not wrapped";
-                            color: Tok.ink-faint;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-
-                        TextButton {
-                            title: "Width";
-                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
-                                ? Role.primary
-                                : Role.normal;
-                            clicked => {
-                                root.sheet-chose(10,
-                                    root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
-                                        ? 0
-                                        : 1);
-                            }
-                        }
-                        TextButton {
-                            title: "Pane";
-                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
-                                ? Role.primary
-                                : Role.normal;
-                            clicked => {
-                                root.sheet-chose(10,
-                                    root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
-                                        ? 0
-                                        : 2);
-                            }
-                        }
-                    }
-
-                    // In characters of body text, because that is what a line
-                    // length means: the number stays true when the body size or the
-                    // zoom changes, and a width in pixels would not.
-                    if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1: StepRow {
-                        label: "Line length";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 11] + " chars";
-                        stepped(by) => {
-                            root.sheet-step(11, by);
-                        }
-                    }
-
-                    // 要件 9（2026-09-07追加）: 行番号。**どちらの面にも置く**
-                    // ——横書きでは行の頭の余白に、縦書きでは列の頭（面の上端）に、
-                    // 同じ形で立つ。数字はどちらでも正立させる。
-                    HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "Line numbers";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        TextButton {
-                            title: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                                ? "Shown"
-                                : "Hidden";
-                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                                ? Role.primary
-                                : Role.normal;
-                            clicked => {
-                                root.sheet-chose(12,
-                                    root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                                        ? 0
-                                        : 1);
-                            }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        Text {
-                            text: "空白・改行を表示";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        TextButton {
-                            title: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? "Shown" : "Hidden";
-                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? Role.primary : Role.normal;
-                            clicked => {
-                                root.sheet-chose(54, root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? 0 : 1);
-                            }
-                        }
-                    }
-
-                    // 要件 7.8（2026-09-09）: ルビと傍点。**大きさも位置も
-                    // 親文字に対する比率**で、面ごとに持つ——縦書きと横書きでは
-                    // ルビの置き場所そのものが違うので、読める大きさも同じとは
-                    // 限らない。位置は0が行の箱の端（行間の空きの外側）で、
-                    // 上げるほど字に近づく。
-                    StepRow {
-                        label: "Ruby size";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 13] + "%";
-                        stepped(by) => {
-                            root.sheet-step(13, by);
-                        }
-                    }
-
-                    StepRow {
-                        label: "Ruby position";
-                        value: root.sheet-numbers[root.sheet * root.sheet-stride + 14] + "%";
-                        stepped(by) => {
-                            root.sheet-step(14, by);
-                        }
-                    }
-
-                    // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。半角の数字を
-                    // 1〜2桁なら1マスに正立させ、3桁以上は1桁ずつ縦に並べる。
-                    // **縦書きのシートにだけ出す**——縦中横は縦書きの中でしか
-                    // 起きないので、横書きの面に置けば「押しても何も起きない
-                    // 切り替え」になる。
-                    if root.sheet == 1: HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: "Tate-chu-yoko";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        TextButton {
-                            title: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
-                                ? "Upright"
-                                : "Sideways";
-                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
-                                ? Role.primary
-                                : Role.normal;
-                            clicked => {
-                                root.sheet-chose(15,
-                                    root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
-                                        ? 0
-                                        : 1);
-                            }
-                        }
-                    }
-
-                    // 書き手の決定 2026-09-11: **原稿の記号ごとに、画面へ出る字。**
-                    // 「三種類の文字に箇条書きの意味を与え、それぞれに、表現として
-                    // どう見せるかを設定できるように」——`- 項目`と`* 項目`を別の
-                    // 丸で出せる、というのがその意味である。
-                    //
-                    // **読むと決めていない記号は、見せ方も設定できない**（書き手の
-                    // 求めた依存関係）。切ってある記号の行はただの本文で、印そのものが
-                    // 出ないので、ここで丸を選んでも効くところが無い——**働かない
-                    // 切り替えを画面に置かない**（単語チェックモード要件 2.1.1）。
-                    for mark[at] in ["-", "*", "+"]: HorizontalLayout {
-                        spacing: 2px;
-
-                        Text {
-                            text: at == 0 ? "Bullet marks" : "";
-                            color: Tok.ink;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-
-                        Text {
-                            text: mark;
-                            color: root.bullet-marks[at] ? Tok.ink : Tok.ink-faint;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                        }
-
-                        if root.bullet-marks[at]: HorizontalLayout {
-                            spacing: 2px;
-
-                            for glyph[index] in ["•", "・", "○"]: TextButton {
-                                title: glyph;
-                                role: root.sheet-numbers[root.sheet * root.sheet-stride
-                                    + 16 + at] == index
-                                    ? Role.primary
-                                    : Role.normal;
-                                clicked => {
-                                    root.sheet-chose(16 + at, index);
-                                }
-                            }
-                        }
-
-                        if !root.bullet-marks[at]: Text {
-                            text: "General で切ってあります";
-                            color: Tok.ink-faint;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                if root.settings-tab == 5: VerticalLayout {
-                    spacing: 8px;
-
-                    // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
-                    // ——この面には紙の**色**と、コードの**書体**が並んでいて、
-                    // どちらも「紙」「コード」としか言っていなかった。
-                    ColorCell {
-                        label: "Paper Color";
-                        shown: root.palette[root.sheet * 15 + 7];
-                        picked => {
-                            root.color-picked(7);
-                        }
-                    }
-
-                    PickRow {
-                        label: "Code Font";
-                        value: root.sheet-fonts[root.sheet * 8 + 7];
-                        pressed => {
-                            root.font-picked(7);
-                            font-menu.show();
-                        }
-                    }
-                }
-
-                // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
-                // なので、書式の面にだけ置く。General の2つはこれで戻らない。
-                if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
-                    spacing: 8px;
-
-                    Rectangle {
-                        height: 1px;
-                        background: Tok.rule;
-                    }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-
-                        TextButton {
-                            title: "Reset";
-                            clicked => {
-                                root.typography-reset();
                             }
                         }
                     }

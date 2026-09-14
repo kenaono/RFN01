@@ -29,6 +29,8 @@ mod quick_draft;
 mod saving;
 mod searcher;
 mod session;
+#[cfg(test)]
+mod settings_ui_tests;
 mod shell;
 mod shortcuts;
 mod terminal;
@@ -2177,6 +2179,14 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let weak = window.as_weak();
+    let settings_live = live.clone();
+    window.on_settings_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            open_settings(&window, &settings_live);
+        }
+    });
+
     // 追加要件 2026-09-07: the three words on a New Tab. **`New File` makes
     // nothing** — the tab is already carrying the untitled document — and
     // `Open File` is not here at all, because the dialog already opens into
@@ -3606,6 +3616,15 @@ struct PaneTab {
     /// from the same run of untitled numbers, so `New File` is this flag going
     /// down and nothing else.
     empty: bool,
+    /// Whether this tab is the window's settings (追加要件 2026-09-14, 書き手:
+    /// 「設定を押すと、新たなダイアログを出さずに設定PaneとしてTABで開く」).
+    ///
+    /// **The same shape as a shell**: the document under it is an empty
+    /// stand-in, so every path that closes, carries or counts a tab still has
+    /// one to reach for. What stands in front of it is drawn by the window,
+    /// because the settings are the window's (要件 9) — and there is only ever
+    /// one such tab ([`open_settings`]).
+    settings: bool,
     /// Whether this tab is only being looked through (書き手の報告 2026-09-07).
     ///
     /// **A row clicked in the left panel is a question, not a decision.** A
@@ -3650,7 +3669,7 @@ struct TabBelow {
 
 impl PaneTab {
     fn another_view(&self) -> Option<Self> {
-        if self.terminal.is_some() || self.empty {
+        if self.stands_in() || self.empty {
             return None;
         }
         self.provisional.set(false);
@@ -3665,6 +3684,14 @@ impl PaneTab {
         self.document.clone()
     }
 
+    /// Whether the document under this tab is only a stand-in: a shell's, or
+    /// the settings' (追加要件 2026-09-14). **Neither is written in**, so
+    /// neither has a name, an unsaved mark, a place to go back to or a line in
+    /// the session.
+    fn stands_in(&self) -> bool {
+        self.terminal.is_some() || self.settings
+    }
+
     /// A tab showing a document this pane has not looked at yet.
     fn showing(window: &AppWindow, id: PaneId, document: Rc<OpenDocument>) -> Self {
         Self {
@@ -3677,6 +3704,7 @@ impl PaneTab {
             terminal: None,
             below: TabBelow::default(),
             empty: false,
+            settings: false,
             provisional: Cell::new(false),
         }
     }
@@ -3699,7 +3727,7 @@ impl PaneTab {
     /// the strips are published, and this is asked in between: a tab holding
     /// work is not one to write over.
     fn is_provisional(&self) -> bool {
-        self.provisional.get() && self.terminal.is_none() && !self.document.text.edited()
+        self.provisional.get() && !self.stands_in() && !self.document.text.edited()
     }
 }
 
@@ -4023,10 +4051,12 @@ impl Live {
             (below_kind(pane), pane.below_height)
         };
         let asking = tab.empty;
+        let showing_settings = tab.settings;
         let mode_id = tab.word_mode;
         id.update_screen(window, |screen| {
             screen.terminal = showing_shell;
             screen.empty = asking;
+            screen.settings = showing_settings;
             // 要件 7.9（2026-09-08）: **モードはタブと一緒に動く。**組版はこの
             // 行から読むので（`lay_out_pane`）、タブを切り替えれば色分けも
             // 切り替わる——コードエディタで別の言語のファイルへ移るのと同じ。
@@ -4334,6 +4364,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                     terminal: None,
                     below: TabBelow::default(),
                     empty: false,
+                    settings: false,
                     provisional: Cell::new(false),
                 });
                 strip.tabs.len() - 1
@@ -6919,14 +6950,14 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                     // 2026-09-07). **Both carry an untitled document**, and
                     // neither is one.
                     title: tab_title(tab).into(),
-                    edited: tab.terminal.is_none() && !tab.empty && tab.document.text.edited(),
+                    edited: !tab.stands_in() && !tab.empty && tab.document.text.edited(),
                     // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **外で変わった
                     // まま片付いていない。**端末のタブは文書を持たないので出ない。
-                    outside: tab.terminal.is_none() && !tab.empty && tab.document.outside.get(),
+                    outside: !tab.stands_in() && !tab.empty && tab.document.outside.get(),
                     // 追加要件 2026-09-06: only a tab standing for a file has a
                     // name on disk to change. 無題1 reads like a name on screen,
                     // and nothing is filed under it.
-                    renamable: tab.terminal.is_none()
+                    renamable: !tab.stands_in()
                         && !tab.empty
                         && tab.document.file.borrow().path().is_some(),
                     stem_length: stem_length(&tab.document.file.borrow().title()),
@@ -6982,7 +7013,7 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
 /// A shell is not a place. Its document is an empty stand-in (`PaneTab`), and
 /// going back to one would open an empty untitled tab rather than the terminal.
 fn note_navigation(live: &Live, id: PaneId, tab: &PaneTab) {
-    if tab.terminal.is_some() {
+    if tab.stands_in() {
         return;
     }
     let mut tabs = live.tabs.borrow_mut();
@@ -7095,6 +7126,7 @@ fn tab_title(tab: &PaneTab) -> String {
     match &tab.terminal {
         Some(session) => session.borrow().name().to_owned(),
         None if tab.empty => NEW_TAB_NAME.to_owned(),
+        None if tab.settings => SETTINGS_TAB_NAME.to_owned(),
         None => tab
             .document
             .external_snapshot
@@ -7106,6 +7138,10 @@ fn tab_title(tab: &PaneTab) -> String {
 
 /// 追加要件 2026-09-07: what a tab is called before it is anything.
 const NEW_TAB_NAME: &str = "New Tab";
+
+/// 追加要件 2026-09-14: what the settings are called in a strip — the same word
+/// as the button at the foot of the rail that opens them.
+const SETTINGS_TAB_NAME: &str = "Settings";
 
 /// Show another tab in one pane (要件 6.3).
 fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
@@ -7339,6 +7375,81 @@ fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
         ..PaneTab::showing(window, id, document)
     };
     add_tab(window, live, id, tab);
+}
+
+/// Put the settings in front of the writer (追加要件 2026-09-14, 書き手:
+/// 「設定を押すと、新たなダイアログを出さずに設定PaneとしてTABで開く」).
+///
+/// **One settings tab in the window.** The settings are the window's (要件 9),
+/// so a second tab would be the same page twice, and two copies of one page are
+/// two places to wonder which is current. Asked again, the writer is taken to
+/// the one already open, in whichever pane holds it.
+///
+/// Otherwise it opens in the pane the writer is in — and **a New Tab becomes
+/// it** rather than gaining a neighbour, for the reason a shell or a file does
+/// (追加要件 2026-09-07).
+fn open_settings(window: &AppWindow, live: &Live) {
+    let held = PaneId::all(window).into_iter().find_map(|id| {
+        live.tabs
+            .borrow()
+            .of(id)
+            .tabs
+            .iter()
+            .position(|tab| tab.settings)
+            .map(|index| (id, index))
+    });
+    if let Some((id, index)) = held {
+        window.set_focused_pane(id.index());
+        switch_to_tab(window, live, id, index);
+        restore_editor_focus(window);
+        return;
+    }
+    let id = focused_pane(window);
+    forget_render_status(window);
+    let asking = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.empty);
+    if asking {
+        sync_active_tab(window, live);
+        {
+            let mut tabs = live.tabs.borrow_mut();
+            let strip = tabs.of_mut(id);
+            let active = strip.active;
+            if let Some(tab) = strip.tabs.get_mut(active) {
+                tab.empty = false;
+                tab.settings = true;
+            }
+        }
+        if let Some(showing) = live.tabs.borrow().of(id).current().cloned() {
+            live.show_tab(window, id, &showing);
+        }
+        publish_tabs(window, live);
+    } else {
+        let number = {
+            let tabs = live.tabs.borrow();
+            let taken: Vec<u32> = tabs
+                .panes
+                .iter()
+                .flat_map(|strip| strip.tabs.iter())
+                .map(|tab| tab.document.file.borrow().untitled_number())
+                .collect();
+            next_untitled_number(&taken)
+        };
+        let document = OpenDocument::untitled(number, window.as_weak());
+        let tab = PaneTab {
+            settings: true,
+            ..PaneTab::showing(window, id, document)
+        };
+        add_tab(window, live, id, tab);
+    }
+    live.cache
+        .borrow_mut()
+        .log_diag("tab", &format!("settings pane={}", id.log_name()));
+    window.set_focused_pane(id.index());
+    restore_editor_focus(window);
 }
 
 /// The writer answered the New Tab (追加要件 2026-09-07).
@@ -8169,7 +8280,7 @@ fn finish_close_inner(window: &AppWindow, live: &Live, id: PaneId, index: usize,
         let before = strip.tabs.len();
         let mut closing = strip.tabs.remove(index);
         if remember
-            && closing.terminal.is_none()
+            && !closing.stands_in()
             && !closing.empty
             && (closing.document.file.borrow().path().is_some()
                 || !closing.document.text.borrow().is_empty())
@@ -17613,6 +17724,7 @@ mod tests {
             below: TabBelow::default(),
             view: TabView::default(),
             empty: false,
+            settings: false,
             provisional: Cell::new(false),
         };
         let mut empty = tab.clone();
@@ -17650,6 +17762,7 @@ mod tests {
             below: TabBelow::default(),
             view: TabView::default(),
             empty: false,
+            settings: false,
             provisional: Cell::new(true),
         };
         let mut viewer = original.another_view().unwrap();
