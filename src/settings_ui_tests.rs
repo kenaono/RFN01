@@ -42,7 +42,7 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     let id = PaneId::from_index(0);
     id.update_screen(&window, |screen| {
         screen.width = 950.0;
-        screen.height = 620.0;
+        screen.height = 700.0;
     });
     window.set_autosave(false);
     let document = OpenDocument::untitled(1, window.as_weak());

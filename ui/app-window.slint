@@ -2338,7 +2338,7 @@ export component AppWindow inherits Window {
                                     background: Tok.rule;
                                 }
 
-                                ScrollView {
+                                settings-scroll := ScrollView {
                                     horizontal-stretch: 1;
 
                                     HorizontalLayout {
@@ -2347,83 +2347,101 @@ export component AppWindow inherits Window {
                                         alignment: start;
 
                                         VerticalLayout {
-                                            width: root.settings-tab == 6 ? 620px : 460px;
+                                            // Keys は一覧が主役なので、ペインの幅に合わせて広げる（左の群168px・線1px・
+                                            // 両側の余白40px・スクロールバーを除く）。
+                                            width: root.settings-tab == 6 ? min(860px, max(460px, pane.width * 1px - 228px)) : 460px;
                                             spacing: 8px;
                                             alignment: start;
 
                                         if root.settings-tab == 6: VerticalLayout {
                                             spacing: 8px;
                                             Text { text: "ショートカット"; color: Tok.ink; font-size: 16px; }
+                                            // 書き手の求め 2026-09-15: **分類も縦に。**設定の群と同じ並べ方で、
+                                            // 横の帯に7つ詰めるより読める。空いた高さは一覧へ回す。
                                             HorizontalLayout {
-                                                spacing: 4px;
-                                                for category[index] in ["本文の操作", "基本編集", "Terminal", "入力欄", "Pane・TAB", "Emacs", "Quick Draft"]: PanelTab {
-                                                    title: category;
-                                                    current: root.shortcut-category == index;
-                                                    clicked => { root.shortcut-category = index; root.shortcut-query = ""; root.shortcut-selected = -1; root.shortcut-edit = ""; root.shortcut-status = "操作を選んでください"; root.shortcut-filter(); }
+                                                spacing: 16px;
+                                                VerticalLayout {
+                                                    width: 132px;
+                                                    spacing: 2px;
+                                                    alignment: start;
+                                                    for category[index] in ["本文の操作", "基本編集", "Terminal", "入力欄", "Pane・TAB", "Emacs", "Quick Draft"]: SideTab {
+                                                        title: category;
+                                                        current: root.shortcut-category == index;
+                                                        clicked => { root.shortcut-category = index; root.shortcut-query = ""; root.shortcut-selected = -1; root.shortcut-edit = ""; root.shortcut-status = "操作を選んでください"; root.shortcut-filter(); }
+                                                    }
                                                 }
-                                            }
-                                            Text {
-                                                text: root.shortcut-category == 0 ? "変更可能 · 本文にフォーカスがあり、IME変換中でないときに有効です。"
-                                                    : root.shortcut-category == 4 ? "変更可能 · 本文からのPane・TAB操作です。Terminal内のキーは固定です。"
-                                                    : root.shortcut-category == 5 ? "変更可能 · 本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。"
-                                                    : root.shortcut-category == 6 ? "変更可能 · 本文から開く操作と、Quick Draft内の操作を区別します。"
-                                                    : root.shortcut-category == 1 ? "固定 · 本文の編集時に使います。Viewerでは編集できません。"
-                                                    : root.shortcut-category == 2 ? "固定 · Terminalにフォーカスがあるときに有効です。"
-                                                    : "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。";
-                                                color: Tok.ink-muted; font-size: 12px; wrap: word-wrap;
-                                            }
-                                            if root.shortcut-category == 0 || root.shortcut-category >= 4: VerticalLayout {
-                                                spacing: 8px;
-                                        Field { placeholder: "操作名・キーで検索"; text <=> root.shortcut-query; init => { self.take-focus(); } edited => { root.shortcut-filter(); } escaped => { root.focus-generation += 1; } }
-                                        ScrollView {
-                                            height: 210px;
-                                            VerticalLayout {
-                                                alignment: start;
-                                                for item in root.shortcut-rows: TextButton {
-                                                    title: item.name + "　" + (item.key == "" ? "未割り当て" : item.key);
-                                                    clicked => { root.shortcut-selected = item.id; root.shortcut-edit = item.key; root.shortcut-status = item.name; shortcut-capture.focus(); }
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    spacing: 8px;
+                                                    alignment: start;
+                                                    Text {
+                                                                                                    text: root.shortcut-category == 0 ? "変更可能 · 本文にフォーカスがあり、IME変換中でないときに有効です。"
+                                                                                                        : root.shortcut-category == 4 ? "変更可能 · 本文からのPane・TAB操作です。Terminal内のキーは固定です。"
+                                                                                                        : root.shortcut-category == 5 ? "変更可能 · 本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。"
+                                                                                                        : root.shortcut-category == 6 ? "変更可能 · 本文から開く操作と、Quick Draft内の操作を区別します。"
+                                                                                                        : root.shortcut-category == 1 ? "固定 · 本文の編集時に使います。Viewerでは編集できません。"
+                                                                                                        : root.shortcut-category == 2 ? "固定 · Terminalにフォーカスがあるときに有効です。"
+                                                                                                        : "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。";
+                                                                                                    color: Tok.ink-muted; font-size: 12px; wrap: word-wrap;
+                                                                                                }
+                                                    if root.shortcut-category == 0 || root.shortcut-category >= 4: VerticalLayout {
+                                                        spacing: 8px;
+                                                        Field { placeholder: "操作名・キーで検索"; text <=> root.shortcut-query; init => { self.take-focus(); } edited => { root.shortcut-filter(); } escaped => { root.focus-generation += 1; } }
+                                                                                                ScrollView {
+                                                                                                    // 一覧の上下に並ぶ欄のぶん（約290px）を除いた高さを、全部一覧に使う。
+                                                            height: max(210px, settings-scroll.visible-height - 290px);
+                                                                                                    VerticalLayout {
+                                                                                                        alignment: start;
+                                                                                                        for item in root.shortcut-rows: TextButton {
+                                                                                                            title: item.name + "　" + (item.key == "" ? "未割り当て" : item.key);
+                                                                                                            clicked => { root.shortcut-selected = item.id; root.shortcut-edit = item.key; root.shortcut-status = item.name; shortcut-capture.focus(); }
+                                                                                                        }
+                                                                                                    }
+                                                                                                }
+                                                                                                Text { text: "操作を選び、下の欄で割り当てるキーを同時に押してください。"; color: Tok.ink; font-size: 12px; }
+                                                                                                shortcut-capture := FocusScope {
+                                                                                                    height: 34px;
+                                                                                                    key-pressed(event) => {
+                                                                                                        if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt { return reject; }
+                                                                                                        if event.text == Key.Escape {
+                                                                                                            root.focus-generation += 1;
+                                                                                                        } else {
+                                                                                                            root.shortcut-capture(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                                                                                                        }
+                                                                                                        accept
+                                                                                                    }
+                                                                                                    Rectangle {
+                                                                                                        background: Tok.paper;
+                                                                                                        border-width: 1px;
+                                                                                                        border-color: shortcut-capture.has-focus ? #8064b3 : Tok.rule-strong;
+                                                                                                        border-radius: 4px;
+                                                                                                        Text {
+                                                                                                            x: 10px; width: parent.width - 20px;
+                                                                                                            text: root.shortcut-edit == "" ? "ここをクリックしてキーを押す" : root.shortcut-edit;
+                                                                                                            color: Tok.ink;
+                                                                                                            vertical-alignment: center;
+                                                                                                        }
+                                                                                                        TouchArea { clicked => { shortcut-capture.focus(); } }
+                                                                                                    }
+                                                                                                }
+                                                                                                Text { text: root.shortcut-status; color: Tok.ink; font-size: 12px; wrap: word-wrap; }
+                                                                                                Text { text: "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"; color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
+                                                                                                HorizontalLayout {
+                                                                                                    // 左寄せにしないと、3つのボタンの幅の和が列全体の最大幅になり、
+                                                                                                    // 一覧も検索欄もその幅で止まる。
+                                                                                                    alignment: start;
+                                                                                                    TextButton { title: "適用して保存"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(false); } }
+                                                                                                    TextButton { title: "割り当て解除"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-edit = ""; root.shortcut-save(false); } }
+                                                                                                    TextButton { title: "この操作を既定に戻す"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(true); } }
+                                                                                                }
+                                                    }
+                                                    if root.shortcut-category > 0 && root.shortcut-category < 4: Text {
+                                                                                                    text: root.shortcut-category == 1 ? "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A"
+                                                                                                        : root.shortcut-category == 2 ? "選択した文字をコピー　Ctrl+Shift+C\n貼り付け　Ctrl+V\n下段を表示・閉じる　Ctrl+`\n下段から本文へ戻る　Ctrl+Alt+↑\nその他のキーは実行中のシェル・プログラムへ渡します。"
+                                                                                                        : "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A\nEnter・Escの動作は、入力欄ごとの用途に従います。";
+                                                                                                    color: Tok.ink; font-size: 13px; wrap: word-wrap;
+                                                                                                }
                                                 }
-                                            }
-                                        }
-                                        Text { text: "操作を選び、下の欄で割り当てるキーを同時に押してください。"; color: Tok.ink; font-size: 12px; }
-                                        shortcut-capture := FocusScope {
-                                            height: 34px;
-                                            key-pressed(event) => {
-                                                if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt { return reject; }
-                                                if event.text == Key.Escape {
-                                                    root.focus-generation += 1;
-                                                } else {
-                                                    root.shortcut-capture(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
-                                                }
-                                                accept
-                                            }
-                                            Rectangle {
-                                                background: Tok.paper;
-                                                border-width: 1px;
-                                                border-color: shortcut-capture.has-focus ? #8064b3 : Tok.rule-strong;
-                                                border-radius: 4px;
-                                                Text {
-                                                    x: 10px; width: parent.width - 20px;
-                                                    text: root.shortcut-edit == "" ? "ここをクリックしてキーを押す" : root.shortcut-edit;
-                                                    color: Tok.ink;
-                                                    vertical-alignment: center;
-                                                }
-                                                TouchArea { clicked => { shortcut-capture.focus(); } }
-                                            }
-                                        }
-                                        Text { text: root.shortcut-status; color: Tok.ink; font-size: 12px; wrap: word-wrap; }
-                                        Text { text: "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"; color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
-                                        HorizontalLayout {
-                                            TextButton { title: "適用して保存"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(false); } }
-                                            TextButton { title: "割り当て解除"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-edit = ""; root.shortcut-save(false); } }
-                                            TextButton { title: "この操作を既定に戻す"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(true); } }
-                                        }
-                                            }
-                                            if root.shortcut-category > 0 && root.shortcut-category < 4: Text {
-                                                text: root.shortcut-category == 1 ? "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A"
-                                                    : root.shortcut-category == 2 ? "選択した文字をコピー　Ctrl+Shift+C\n貼り付け　Ctrl+V\n下段を表示・閉じる　Ctrl+`\n下段から本文へ戻る　Ctrl+Alt+↑\nその他のキーは実行中のシェル・プログラムへ渡します。"
-                                                    : "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A\nEnter・Escの動作は、入力欄ごとの用途に従います。";
-                                                color: Tok.ink; font-size: 13px; wrap: word-wrap;
                                             }
                                         }
 
