@@ -332,6 +332,20 @@ pub fn wire(app: &AppWindow, live: &Live) {
         crate::write_session(&app, &saved_live);
         app.set_shortcut_status(format!("{}の設定を保存しました", NAMES[i]).into());
     });
+    // 書き手の求め 2026-09-15: Keys の面の Reset。割り当てを全部既定へ。
+    let weak = app.as_weak();
+    let reset_live = live.clone();
+    app.on_shortcut_reset_all(move || {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        app.set_shortcut_bindings("".into());
+        app.set_shortcut_selected(-1);
+        app.set_shortcut_edit("".into());
+        publish(&app);
+        crate::write_session(&app, &reset_live);
+        app.set_shortcut_status("すべてのキーを既定に戻しました".into());
+    });
     let weak = app.as_weak();
     let keyed_live = live.clone();
     app.on_shortcut_key(move |text, control, alt, shift| {

@@ -37,6 +37,17 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
     surface.set_size(slint::PhysicalSize::new(1000, 740));
     publish_panes(&window, 1);
     let id = PaneId::from_index(0);
@@ -152,4 +163,57 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     assert_eq!(&*document.text.borrow(), "本文");
     drop(live);
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// 書き手の求め 2026-09-15: 各面の Reset はその面の値だけを、両方のシートで戻す。
+#[test]
+fn each_page_reset_stays_on_its_page() {
+    let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
+    let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+    let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+    reset_settings(&numbers, &palette, &fonts);
+    let number = |setting: Setting, sheet: usize| {
+        numbers
+            .row_data(sheet * SHEET_NUMBERS + setting.row_in_sheet())
+            .unwrap()
+    };
+    let change = || {
+        for sheet in 0..2 {
+            Setting::BodySize.write(&numbers, sheet, 40);
+            Setting::LineAdvance.write(&numbers, sheet, 300);
+            set_colour(&palette, sheet, 0, [1.0, 0.0, 0.0]);
+            set_colour(&palette, sheet, PAPER_SLOT, [0.0, 1.0, 0.0]);
+            fonts.set_row_data(font_row(sheet, 0), "Meiryo".into());
+            fonts.set_row_data(font_row(sheet, CODE_SLOT), "Meiryo".into());
+        }
+    };
+    let paper = |sheet| palette.row_data(colour_row(sheet, PAPER_SLOT)).unwrap();
+    let ink = |sheet| palette.row_data(colour_row(sheet, 0)).unwrap();
+
+    change();
+    reset_settings_group(&numbers, &palette, &fonts, 3);
+    for sheet in 0..2 {
+        assert_eq!(number(Setting::BodySize, sheet), BASE_FONT_SIZE);
+        assert_eq!(ink(sheet), slint_colour(default_colour(sheet, 0)));
+        assert_eq!(number(Setting::LineAdvance, sheet), 300, "Layout stays");
+        assert_ne!(paper(sheet), slint_colour(default_colour(sheet, PAPER_SLOT)));
+        assert_eq!(
+            fonts.row_data(font_row(sheet, CODE_SLOT)).unwrap(),
+            "Meiryo"
+        );
+    }
+
+    change();
+    reset_settings_group(&numbers, &palette, &fonts, 4);
+    assert_eq!(number(Setting::LineAdvance, 1), 100);
+    assert_eq!(number(Setting::BodySize, 1), 40, "Text stays");
+
+    change();
+    reset_settings_group(&numbers, &palette, &fonts, 5);
+    assert_eq!(paper(0), slint_colour(default_colour(0, PAPER_SLOT)));
+    assert_eq!(
+        fonts.row_data(font_row(0, CODE_SLOT)).unwrap(),
+        default_font(CODE_SLOT)
+    );
+    assert_eq!(fonts.row_data(font_row(0, 0)).unwrap(), "Meiryo", "Text stays");
 }

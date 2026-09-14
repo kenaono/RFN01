@@ -103,10 +103,11 @@ use crate::{
     new_word_mode, next_word_colour, open_work_folder, pane_word_mode, paste_into_tab,
     paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
     publish_word_modes, quick_draft, read_word_source, remove_word_from_group, rename_word_group,
-    rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus,
-    save_settings, schedule_relayout, search_in_folder, search_work_folder, selected_runs,
-    set_picked_colour, set_word_mode_of, shell, show_bullet_marks, shown_sheet, slint_colour,
-    step_setting, tell_goto, toggle_goto, tree_command, walk_find_history, word_modes_now,
+    rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings_group,
+    restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
+    selected_runs, set_picked_colour, set_word_mode_of, shell, show_bullet_marks, shown_sheet,
+    slint_colour, step_setting, tell_goto, toggle_goto, tree_command, walk_find_history,
+    word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -184,6 +185,22 @@ pub fn wire_terminal_look(
             window.set_font_for_terminal(true);
             let standing = window.get_terminal_font();
             window.set_font_current(standing);
+        }
+    });
+
+    // 書き手の求め 2026-09-15: Terminal の面の Reset。**この面の値だけ**——
+    // 既定の接続先、紙の地、書体と大きさ。シェルの一覧は設定ファイルのもので、
+    // 画面から足したものではないので触らない。
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_terminal_reset(move || {
+        if let Some(window) = weak.upgrade() {
+            window.set_default_shell(0);
+            window.set_terminal_font(crate::TERMINAL_FONT_DEFAULT.into());
+            window.set_terminal_size(crate::TERMINAL_SIZE_DEFAULT);
+            cache.borrow_mut().log_diag("spec", "terminal reset");
+            // 地と字をひとまとめで戻し、書き出しと描き直しもそこで済む。
+            window.invoke_terminal_theme_chosen(false);
         }
     });
 
@@ -867,12 +884,12 @@ pub fn wire_typography(
     let steps = numbers;
     let colours = palette;
     let families = sheet_fonts;
-    window.on_typography_reset(move || {
+    window.on_typography_reset(move |group| {
         if let Some(window) = weak.upgrade() {
-            // **Both sheets.** 「初期値へ戻す」 is about the settings, and the
-            // settings are two sheets of them; putting back only the one on
-            // screen would leave the other holding whatever it held.
-            reset_settings(&steps, &colours, &families);
+            // **Both sheets**, which are both on the page now (書き手の求め
+            // 2026-09-15) — and **only the page's own values**: the Reset on
+            // Text leaves the page margin where the writer put it.
+            reset_settings_group(&steps, &colours, &families, group);
             schedule_relayout(&window, &states, &cache, &timer);
         }
     });

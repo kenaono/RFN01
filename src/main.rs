@@ -2978,6 +2978,22 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 書き手の求め 2026-09-15: General の「Reset All」。**訊いてから**戻す。
+    let weak = window.as_weak();
+    let reset_live = live.clone();
+    window.on_reset_all_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            ask_question(
+                &window,
+                &reset_live,
+                Question::ResetAll,
+                "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻ります。単語帳とモードは残ります。".to_owned(),
+                &["既定に戻す", "キャンセル"],
+                0,
+            );
+        }
+    });
+
     // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。**数え直しは要らない**
     // ——両方の数はもう出ている（`DocumentStats::ruby_characters`）ので、
     // 変わるのは status bar の引き算だけである。
@@ -7596,6 +7612,9 @@ enum Question {
         path: PathBuf,
         encoding: file_io::Encoding,
     },
+    /// General の「Reset All」（書き手の求め 2026-09-15）。**確かめてから戻す**
+    /// ——書体・色・キーの割り当てを一度に失う押し間違いは、戻し方が無い。
+    ResetAll,
     /// 終了の直前の退避が書けなかった（追加要件 2026-09-09、残り2）。
     /// **退避が働いているつもりで閉じようとしている**ときにだけ立つ問いで、
     /// 書けた件数が0のときは何も訊かない——要件 8.1 は静かな約束である。
@@ -7633,6 +7652,23 @@ fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
         -1,
     );
     true
+}
+
+/// Everything the settings pages hold, back to how it came, except the word
+/// lists and their modes (書き手の選択 2026-09-15: 「単語帳以外すべて」).
+///
+/// **Through the same doors the pages use**, so each value does what it does
+/// when the writer changes it by hand — turning 自動退避 back on keeps the work
+/// copies again, and every one of them writes the settings file.
+fn reset_all_settings(window: &AppWindow) {
+    show_bullet_marks(window, document::BulletMarks::all());
+    window.invoke_count_ruby_toggled(false);
+    window.invoke_ruby_marks_toggled(true);
+    window.invoke_autosave_toggled(true);
+    window.invoke_terminal_reset();
+    window.invoke_shortcut_reset_all();
+    window.invoke_typography_reset(-1);
+    window.set_render_status("すべての設定を既定に戻しました".into());
 }
 
 /// Put a question in front of the writer.
@@ -7915,6 +7951,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         ) => {
             cancel_close_run(live);
         }
+        (Question::ResetAll, 0) => reset_all_settings(window),
         _ => {}
     }
 }
@@ -9029,6 +9066,16 @@ impl Setting {
         }
     }
 
+    /// Which settings page it stands on (書き手の求め 2026-09-15): 3 Text for
+    /// how large a kind of text is and how it is decorated, 4 Layout for
+    /// everything else. Page holds colours and families only.
+    fn page(self) -> i32 {
+        match self {
+            Self::BodySize | Self::Heading(_) | Self::Decoration(_, _) => 3,
+            _ => 4,
+        }
+    }
+
     /// How far one press moves it.
     fn step(self) -> i32 {
         match self {
@@ -9353,6 +9400,10 @@ const TERMINAL_FONT_SETTING: &str = "terminal.font";
 const TERMINAL_SIZE_SETTING: &str = "terminal.size";
 /// 端末の字の大きさの幅。**紙より狭い**——升目が壊れるほど大きくしても読めない。
 const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
+/// What the terminal is set in until the writer says otherwise — the values
+/// `app-window.slint` starts with, and what Terminal's Reset puts back.
+const TERMINAL_FONT_DEFAULT: &str = "Consolas";
+const TERMINAL_SIZE_DEFAULT: i32 = 15;
 
 thread_local! {
     /// 鍵盤を持っている素の欄の数（書き手の報告 2026-09-08）。
@@ -10298,6 +10349,45 @@ fn reset_settings(
         }
         for slot in 0..SHEET_FONTS {
             fonts.set_row_data(font_row(sheet, slot), default_font(slot).into());
+        }
+    }
+}
+
+/// Put one settings page back to how it came (書き手の求め 2026-09-15:
+/// 「各画面のリセットボタンは画面内にとどまり」).
+///
+/// `group` is the page's number in the window — 3 Text, 4 Layout, 5 Page — and
+/// **a negative one is all three**, for Reset All. Both sheets either way: the
+/// two are side by side on every one of those pages.
+fn reset_settings_group(
+    numbers: &VecModel<i32>,
+    palette: &VecModel<Color>,
+    fonts: &VecModel<SharedString>,
+    group: i32,
+) {
+    if group < 0 {
+        reset_settings(numbers, palette, fonts);
+        return;
+    }
+    for sheet in 0..2 {
+        for setting in Setting::all() {
+            if setting.page() == group {
+                setting.write(numbers, sheet, setting.default_value());
+            }
+        }
+        for slot in 0..SHEET_COLOURS {
+            // The paper is Page's; every other colour is a kind of text's.
+            let page = if slot == PAPER_SLOT { 5 } else { 3 };
+            if page == group {
+                set_colour(palette, sheet, slot, default_colour(sheet, slot));
+            }
+        }
+        for slot in 0..SHEET_FONTS {
+            // The code font is Page's; the rest are the body's and headings'.
+            let page = if slot == CODE_SLOT { 5 } else { 3 };
+            if page == group {
+                fonts.set_row_data(font_row(sheet, slot), default_font(slot).into());
+            }
         }
     }
 }

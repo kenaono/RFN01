@@ -745,7 +745,13 @@ export component AppWindow inherits Window {
     /// draws is opened by Rust, from the event loop rather than from this
     /// click: it runs a message loop of its own (6.18).
     callback color-picked(int);
-    callback typography-reset();
+    /// 書き手の求め 2026-09-15: どの面を初期値へ戻すか——3 Text、4 Layout、5 Page、
+    /// 負の数なら書式の全部（「Reset All」から）。
+    callback typography-reset(int);
+    callback terminal-reset();
+    callback shortcut-reset-all();
+    /// General の「Reset All」。確かめてから戻す（Rustが問いを出す）。
+    callback reset-all-requested();
     callback open-file-requested();
     callback compare-files-requested();
     callback compare-saved-requested();
@@ -2612,6 +2618,25 @@ export component AppWindow inherits Window {
                                                 overflow: elide;
                                             }
 
+
+                                            // 書き手の求め 2026-09-15: **全部を戻す口は General に1つ。**各面の Reset は
+                                            // その面だけを戻す。単語帳とモードは書き手が作ったものなので戻さない。
+                                            Rectangle { height: 1px; background: Tok.rule; }
+                                            HorizontalLayout {
+                                                alignment: start;
+                                                spacing: 10px;
+                                                TextButton {
+                                                    title: "Reset All";
+                                                    role: Role.danger;
+                                                    clicked => { root.reset-all-requested(); }
+                                                }
+                                                Text {
+                                                    text: "General・Terminal・Text・Layout・Page・Keys を既定に戻します。単語帳とモードは残ります。";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
                                         }
 
                                         // 追加要件 2026-09-08（要件 6.8）: **端末は紙とは別の設定を持つ。**
@@ -2756,6 +2781,16 @@ export component AppWindow inherits Window {
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 overflow: elide;
+                                            }
+
+                                            // 書き手の求め 2026-09-15: **この面のResetは、この面だけを戻す。**
+                                            Rectangle { height: 1px; background: Tok.rule; }
+                                            HorizontalLayout {
+                                                alignment: start;
+                                                TextButton {
+                                                    title: "Reset";
+                                                    clicked => { root.terminal-reset(); }
+                                                }
                                             }
                                         }
 
@@ -3313,496 +3348,509 @@ export component AppWindow inherits Window {
 
                                         // どの面にいても、値はいまのシートのもの——だから帯のすぐ
                                         // 下に在る（要件 9）。
-                                        if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
-                                            spacing: 8px;
-
-                                            // 要件 9: which sheet is being set. **Everything below belongs
-                                            // to it** — there is nothing to mark, because a value that is
-                                            // on screen while 縦書き is chosen is the vertical one.
-                                            HorizontalLayout {
-                                                spacing: 2px;
-
-                                                TextButton {
-                                                    title: "Horizontal";
-                                                    role: root.sheet == 0 ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.sheet = 0;
-                                                    }
-                                                }
-                                                TextButton {
-                                                    title: "Vertical";
-                                                    role: root.sheet == 1 ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.sheet = 1;
-                                                    }
-                                                }
-                                            }
-                                        }
-
                                         if root.settings-tab == 3: VerticalLayout {
-                                            spacing: 8px;
+                                            spacing: 20px;
+                                            // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
+                                            // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
+                                            // 値かは見出しが言う。押した欄のシートを`root.sheet`へ置いてから
+                                            // 頼む——Rustはそれを「どのシートの値か」として読む。
+                                            for sheet-index in [0, 1]: VerticalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: sheet-index == 0 ? "HORIZONTAL" : "VERTICAL";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    letter-spacing: 0.9px;
+                                                }
 
-                                            // One row per kind of text: how large, what colour, which
-                                            // family. The numbers are the rows of the models — ten numbers,
-                                            // eight colours and eight families to a sheet — and the same
-                                            // numbers are what the callbacks carry.
-                                            TextRow {
-                                                label: "Body";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride] + " px";
-                                                shown: root.palette[root.sheet * 15 + 0];
-                                                family: root.sheet-fonts[root.sheet * 8 + 0];
-                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 19] != 0;
-                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 20] != 0;
-                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 21] != 0;
-                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 22] != 0;
-                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 23] != 0;
-                                                heading: false;
-                                                background-colour: root.palette[root.sheet * 15 + 8];
-                                                paper-colour: root.palette[root.sheet * 15 + 7];
-                                                decoration-toggled(kind, on) => { root.sheet-step(19 + kind, on ? -1 : 1); }
-                                                background-picked => { root.color-picked(8); }
-                                                stepped(by) => {
-                                                    root.sheet-step(0, by);
-                                                }
-                                                picked => {
-                                                    root.color-picked(0);
-                                                }
-                                                chose-font => {
-                                                    root.font-picked(0);
-                                                    font-menu.show();
-                                                }
-                                            }
+                                                    // One row per kind of text: how large, what colour, which
+                                                    // family. The numbers are the rows of the models — ten numbers,
+                                                    // eight colours and eight families to a sheet — and the same
+                                                    // numbers are what the callbacks carry.
+                                                    TextRow {
+                                                        label: "Body";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride] + " px";
+                                                        shown: root.palette[sheet-index * 15 + 0];
+                                                        family: root.sheet-fonts[sheet-index * 8 + 0];
+                                                        bold: root.sheet-numbers[sheet-index * root.sheet-stride + 19] != 0;
+                                                        italic: root.sheet-numbers[sheet-index * root.sheet-stride + 20] != 0;
+                                                        strike: root.sheet-numbers[sheet-index * root.sheet-stride + 21] != 0;
+                                                        background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 22] != 0;
+                                                        rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 23] != 0;
+                                                        heading: false;
+                                                        background-colour: root.palette[sheet-index * 15 + 8];
+                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(19 + kind, on ? -1 : 1); }
+                                                        background-picked => { root.sheet = sheet-index; root.color-picked(8); }
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(0, by);
+                                                        }
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(0);
+                                                        }
+                                                        chose-font => {
+                                                            root.sheet = sheet-index; root.font-picked(0);
+                                                            font-menu.show();
+                                                        }
+                                                    }
 
-                                            TextRow {
-                                                label: "H1";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 4] + "%";
-                                                shown: root.palette[root.sheet * 15 + 1];
-                                                family: root.sheet-fonts[root.sheet * 8 + 1];
-                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 24] != 0;
-                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 25] != 0;
-                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 26] != 0;
-                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 27] != 0;
-                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 28] != 0;
-                                                heading: true;
-                                                background-colour: root.palette[root.sheet * 15 + 9];
-                                                paper-colour: root.palette[root.sheet * 15 + 7];
-                                                decoration-toggled(kind, on) => { root.sheet-step(24 + kind, on ? -1 : 1); }
-                                                background-picked => { root.color-picked(9); }
-                                                stepped(by) => {
-                                                    root.sheet-step(4, by);
-                                                }
-                                                picked => {
-                                                    root.color-picked(1);
-                                                }
-                                                chose-font => {
-                                                    root.font-picked(1);
-                                                    font-menu.show();
-                                                }
-                                            }
+                                                    TextRow {
+                                                        label: "H1";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 4] + "%";
+                                                        shown: root.palette[sheet-index * 15 + 1];
+                                                        family: root.sheet-fonts[sheet-index * 8 + 1];
+                                                        bold: root.sheet-numbers[sheet-index * root.sheet-stride + 24] != 0;
+                                                        italic: root.sheet-numbers[sheet-index * root.sheet-stride + 25] != 0;
+                                                        strike: root.sheet-numbers[sheet-index * root.sheet-stride + 26] != 0;
+                                                        background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 27] != 0;
+                                                        rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 28] != 0;
+                                                        heading: true;
+                                                        background-colour: root.palette[sheet-index * 15 + 9];
+                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(24 + kind, on ? -1 : 1); }
+                                                        background-picked => { root.sheet = sheet-index; root.color-picked(9); }
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(4, by);
+                                                        }
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(1);
+                                                        }
+                                                        chose-font => {
+                                                            root.sheet = sheet-index; root.font-picked(1);
+                                                            font-menu.show();
+                                                        }
+                                                    }
 
-                                            TextRow {
-                                                label: "H2";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 5] + "%";
-                                                shown: root.palette[root.sheet * 15 + 2];
-                                                family: root.sheet-fonts[root.sheet * 8 + 2];
-                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 29] != 0;
-                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 30] != 0;
-                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 31] != 0;
-                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 32] != 0;
-                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 33] != 0;
-                                                heading: true;
-                                                background-colour: root.palette[root.sheet * 15 + 10];
-                                                paper-colour: root.palette[root.sheet * 15 + 7];
-                                                decoration-toggled(kind, on) => { root.sheet-step(29 + kind, on ? -1 : 1); }
-                                                background-picked => { root.color-picked(10); }
-                                                stepped(by) => {
-                                                    root.sheet-step(5, by);
-                                                }
-                                                picked => {
-                                                    root.color-picked(2);
-                                                }
-                                                chose-font => {
-                                                    root.font-picked(2);
-                                                    font-menu.show();
-                                                }
-                                            }
+                                                    TextRow {
+                                                        label: "H2";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 5] + "%";
+                                                        shown: root.palette[sheet-index * 15 + 2];
+                                                        family: root.sheet-fonts[sheet-index * 8 + 2];
+                                                        bold: root.sheet-numbers[sheet-index * root.sheet-stride + 29] != 0;
+                                                        italic: root.sheet-numbers[sheet-index * root.sheet-stride + 30] != 0;
+                                                        strike: root.sheet-numbers[sheet-index * root.sheet-stride + 31] != 0;
+                                                        background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 32] != 0;
+                                                        rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 33] != 0;
+                                                        heading: true;
+                                                        background-colour: root.palette[sheet-index * 15 + 10];
+                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(29 + kind, on ? -1 : 1); }
+                                                        background-picked => { root.sheet = sheet-index; root.color-picked(10); }
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(5, by);
+                                                        }
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(2);
+                                                        }
+                                                        chose-font => {
+                                                            root.sheet = sheet-index; root.font-picked(2);
+                                                            font-menu.show();
+                                                        }
+                                                    }
 
-                                            TextRow {
-                                                label: "H3";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 6] + "%";
-                                                shown: root.palette[root.sheet * 15 + 3];
-                                                family: root.sheet-fonts[root.sheet * 8 + 3];
-                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 34] != 0;
-                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 35] != 0;
-                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 36] != 0;
-                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 37] != 0;
-                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 38] != 0;
-                                                heading: true;
-                                                background-colour: root.palette[root.sheet * 15 + 11];
-                                                paper-colour: root.palette[root.sheet * 15 + 7];
-                                                decoration-toggled(kind, on) => { root.sheet-step(34 + kind, on ? -1 : 1); }
-                                                background-picked => { root.color-picked(11); }
-                                                stepped(by) => {
-                                                    root.sheet-step(6, by);
-                                                }
-                                                picked => {
-                                                    root.color-picked(3);
-                                                }
-                                                chose-font => {
-                                                    root.font-picked(3);
-                                                    font-menu.show();
-                                                }
-                                            }
+                                                    TextRow {
+                                                        label: "H3";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 6] + "%";
+                                                        shown: root.palette[sheet-index * 15 + 3];
+                                                        family: root.sheet-fonts[sheet-index * 8 + 3];
+                                                        bold: root.sheet-numbers[sheet-index * root.sheet-stride + 34] != 0;
+                                                        italic: root.sheet-numbers[sheet-index * root.sheet-stride + 35] != 0;
+                                                        strike: root.sheet-numbers[sheet-index * root.sheet-stride + 36] != 0;
+                                                        background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 37] != 0;
+                                                        rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 38] != 0;
+                                                        heading: true;
+                                                        background-colour: root.palette[sheet-index * 15 + 11];
+                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(34 + kind, on ? -1 : 1); }
+                                                        background-picked => { root.sheet = sheet-index; root.color-picked(11); }
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(6, by);
+                                                        }
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(3);
+                                                        }
+                                                        chose-font => {
+                                                            root.sheet = sheet-index; root.font-picked(3);
+                                                            font-menu.show();
+                                                        }
+                                                    }
 
-                                            TextRow {
-                                                label: "H4";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 7] + "%";
-                                                shown: root.palette[root.sheet * 15 + 4];
-                                                family: root.sheet-fonts[root.sheet * 8 + 4];
-                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 39] != 0;
-                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 40] != 0;
-                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 41] != 0;
-                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 42] != 0;
-                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 43] != 0;
-                                                heading: true;
-                                                background-colour: root.palette[root.sheet * 15 + 12];
-                                                paper-colour: root.palette[root.sheet * 15 + 7];
-                                                decoration-toggled(kind, on) => { root.sheet-step(39 + kind, on ? -1 : 1); }
-                                                background-picked => { root.color-picked(12); }
-                                                stepped(by) => {
-                                                    root.sheet-step(7, by);
-                                                }
-                                                picked => {
-                                                    root.color-picked(4);
-                                                }
-                                                chose-font => {
-                                                    root.font-picked(4);
-                                                    font-menu.show();
-                                                }
-                                            }
+                                                    TextRow {
+                                                        label: "H4";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 7] + "%";
+                                                        shown: root.palette[sheet-index * 15 + 4];
+                                                        family: root.sheet-fonts[sheet-index * 8 + 4];
+                                                        bold: root.sheet-numbers[sheet-index * root.sheet-stride + 39] != 0;
+                                                        italic: root.sheet-numbers[sheet-index * root.sheet-stride + 40] != 0;
+                                                        strike: root.sheet-numbers[sheet-index * root.sheet-stride + 41] != 0;
+                                                        background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 42] != 0;
+                                                        rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 43] != 0;
+                                                        heading: true;
+                                                        background-colour: root.palette[sheet-index * 15 + 12];
+                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(39 + kind, on ? -1 : 1); }
+                                                        background-picked => { root.sheet = sheet-index; root.color-picked(12); }
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(7, by);
+                                                        }
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(4);
+                                                        }
+                                                        chose-font => {
+                                                            root.sheet = sheet-index; root.font-picked(4);
+                                                            font-menu.show();
+                                                        }
+                                                    }
 
-                                            TextRow {
-                                                label: "H5";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 8] + "%";
-                                                shown: root.palette[root.sheet * 15 + 5];
-                                                family: root.sheet-fonts[root.sheet * 8 + 5];
-                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 44] != 0;
-                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 45] != 0;
-                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 46] != 0;
-                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 47] != 0;
-                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 48] != 0;
-                                                heading: true;
-                                                background-colour: root.palette[root.sheet * 15 + 13];
-                                                paper-colour: root.palette[root.sheet * 15 + 7];
-                                                decoration-toggled(kind, on) => { root.sheet-step(44 + kind, on ? -1 : 1); }
-                                                background-picked => { root.color-picked(13); }
-                                                stepped(by) => {
-                                                    root.sheet-step(8, by);
-                                                }
-                                                picked => {
-                                                    root.color-picked(5);
-                                                }
-                                                chose-font => {
-                                                    root.font-picked(5);
-                                                    font-menu.show();
-                                                }
-                                            }
+                                                    TextRow {
+                                                        label: "H5";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 8] + "%";
+                                                        shown: root.palette[sheet-index * 15 + 5];
+                                                        family: root.sheet-fonts[sheet-index * 8 + 5];
+                                                        bold: root.sheet-numbers[sheet-index * root.sheet-stride + 44] != 0;
+                                                        italic: root.sheet-numbers[sheet-index * root.sheet-stride + 45] != 0;
+                                                        strike: root.sheet-numbers[sheet-index * root.sheet-stride + 46] != 0;
+                                                        background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 47] != 0;
+                                                        rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 48] != 0;
+                                                        heading: true;
+                                                        background-colour: root.palette[sheet-index * 15 + 13];
+                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(44 + kind, on ? -1 : 1); }
+                                                        background-picked => { root.sheet = sheet-index; root.color-picked(13); }
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(8, by);
+                                                        }
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(5);
+                                                        }
+                                                        chose-font => {
+                                                            root.sheet = sheet-index; root.font-picked(5);
+                                                            font-menu.show();
+                                                        }
+                                                    }
 
-                                            TextRow {
-                                                label: "H6";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 9] + "%";
-                                                shown: root.palette[root.sheet * 15 + 6];
-                                                family: root.sheet-fonts[root.sheet * 8 + 6];
-                                                bold: root.sheet-numbers[root.sheet * root.sheet-stride + 49] != 0;
-                                                italic: root.sheet-numbers[root.sheet * root.sheet-stride + 50] != 0;
-                                                strike: root.sheet-numbers[root.sheet * root.sheet-stride + 51] != 0;
-                                                background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 52] != 0;
-                                                rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 53] != 0;
-                                                heading: true;
-                                                background-colour: root.palette[root.sheet * 15 + 14];
-                                                paper-colour: root.palette[root.sheet * 15 + 7];
-                                                decoration-toggled(kind, on) => { root.sheet-step(49 + kind, on ? -1 : 1); }
-                                                background-picked => { root.color-picked(14); }
-                                                stepped(by) => {
-                                                    root.sheet-step(9, by);
-                                                }
-                                                picked => {
-                                                    root.color-picked(6);
-                                                }
-                                                chose-font => {
-                                                    root.font-picked(6);
-                                                    font-menu.show();
-                                                }
+                                                    TextRow {
+                                                        label: "H6";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 9] + "%";
+                                                        shown: root.palette[sheet-index * 15 + 6];
+                                                        family: root.sheet-fonts[sheet-index * 8 + 6];
+                                                        bold: root.sheet-numbers[sheet-index * root.sheet-stride + 49] != 0;
+                                                        italic: root.sheet-numbers[sheet-index * root.sheet-stride + 50] != 0;
+                                                        strike: root.sheet-numbers[sheet-index * root.sheet-stride + 51] != 0;
+                                                        background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 52] != 0;
+                                                        rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 53] != 0;
+                                                        heading: true;
+                                                        background-colour: root.palette[sheet-index * 15 + 14];
+                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(49 + kind, on ? -1 : 1); }
+                                                        background-picked => { root.sheet = sheet-index; root.color-picked(14); }
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(9, by);
+                                                        }
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(6);
+                                                        }
+                                                        chose-font => {
+                                                            root.sheet = sheet-index; root.font-picked(6);
+                                                            font-menu.show();
+                                                        }
+                                                    }
                                             }
                                         }
 
                                         if root.settings-tab == 4: VerticalLayout {
-                                            spacing: 8px;
-
-                                            // 要件 9 calls the flow advance 行間 in horizontal writing and
-                                            // 列間隔 in vertical writing. **One quantity, two names**: the
-                                            // label follows the sheet, because on this sheet that is what
-                                            // it is.
-                                            StepRow {
-                                                label: root.sheet == 0 ? "Line height" : "Column gap";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 1] + "%";
-                                                stepped(by) => {
-                                                    root.sheet-step(1, by);
-                                                }
-                                            }
-
-                                            StepRow {
-                                                label: "Char advance";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 2] + "%";
-                                                stepped(by) => {
-                                                    root.sheet-step(2, by);
-                                                }
-                                            }
-
-                                            StepRow {
-                                                label: "Page margin";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 3] + " px";
-                                                stepped(by) => {
-                                                    root.sheet-step(3, by);
-                                                }
-                                            }
-
-                                            // 要件 9: how long a line may be. **Two switches that cannot
-                                            // both be on**, and neither of them on is the third answer: the
-                                            // line is not wrapped at all. One value holds all three, so
-                                            // "both on" is not a state this can reach — and pressing the
-                                            // one that is on turns it off, which is how the writer says
-                                            // "neither" without a button for it.
-                                            HorizontalLayout {
-                                                spacing: 2px;
-
+                                            spacing: 20px;
+                                            // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
+                                            // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
+                                            // 値かは見出しが言う。押した欄のシートを`root.sheet`へ置いてから
+                                            // 頼む——Rustはそれを「どのシートの値か」として読む。
+                                            for sheet-index in [0, 1]: VerticalLayout {
+                                                spacing: 8px;
                                                 Text {
-                                                    text: "Wrap";
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                // **The state that is an absence is still named.** With
-                                                // neither switch on, a row of unlit buttons reads as a
-                                                // setting nobody has made rather than as the setting it is.
-                                                if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 0: Text {
-                                                    text: "not wrapped";
+                                                    text: sheet-index == 0 ? "HORIZONTAL" : "VERTICAL";
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
-                                                    vertical-alignment: center;
+                                                    letter-spacing: 0.9px;
                                                 }
 
-                                                TextButton {
-                                                    title: "Width";
-                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
-                                                        ? Role.primary
-                                                        : Role.normal;
-                                                    clicked => {
-                                                        root.sheet-chose(10,
-                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1
-                                                                ? 0
-                                                                : 1);
-                                                    }
-                                                }
-                                                TextButton {
-                                                    title: "Pane";
-                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
-                                                        ? Role.primary
-                                                        : Role.normal;
-                                                    clicked => {
-                                                        root.sheet-chose(10,
-                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 2
-                                                                ? 0
-                                                                : 2);
-                                                    }
-                                                }
-                                            }
-
-                                            // In characters of body text, because that is what a line
-                                            // length means: the number stays true when the body size or the
-                                            // zoom changes, and a width in pixels would not.
-                                            if root.sheet-numbers[root.sheet * root.sheet-stride + 10] == 1: StepRow {
-                                                label: "Line length";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 11] + " chars";
-                                                stepped(by) => {
-                                                    root.sheet-step(11, by);
-                                                }
-                                            }
-
-                                            // 要件 9（2026-09-07追加）: 行番号。**どちらの面にも置く**
-                                            // ——横書きでは行の頭の余白に、縦書きでは列の頭（面の上端）に、
-                                            // 同じ形で立つ。数字はどちらでも正立させる。
-                                            HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: "Line numbers";
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                TextButton {
-                                                    title: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                                                        ? "Shown"
-                                                        : "Hidden";
-                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                                                        ? Role.primary
-                                                        : Role.normal;
-                                                    clicked => {
-                                                        root.sheet-chose(12,
-                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 12] == 1
-                                                                ? 0
-                                                                : 1);
-                                                    }
-                                                }
-                                            }
-
-                                            HorizontalLayout {
-                                                Text {
-                                                    text: "空白・改行を表示";
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-                                                TextButton {
-                                                    title: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? "Shown" : "Hidden";
-                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.sheet-chose(54, root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? 0 : 1);
-                                                    }
-                                                }
-                                            }
-
-                                            // 要件 7.8（2026-09-09）: ルビと傍点。**大きさも位置も
-                                            // 親文字に対する比率**で、面ごとに持つ——縦書きと横書きでは
-                                            // ルビの置き場所そのものが違うので、読める大きさも同じとは
-                                            // 限らない。位置は0が行の箱の端（行間の空きの外側）で、
-                                            // 上げるほど字に近づく。
-                                            StepRow {
-                                                label: "Ruby size";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 13] + "%";
-                                                stepped(by) => {
-                                                    root.sheet-step(13, by);
-                                                }
-                                            }
-
-                                            StepRow {
-                                                label: "Ruby position";
-                                                value: root.sheet-numbers[root.sheet * root.sheet-stride + 14] + "%";
-                                                stepped(by) => {
-                                                    root.sheet-step(14, by);
-                                                }
-                                            }
-
-                                            // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。半角の数字を
-                                            // 1〜2桁なら1マスに正立させ、3桁以上は1桁ずつ縦に並べる。
-                                            // **縦書きのシートにだけ出す**——縦中横は縦書きの中でしか
-                                            // 起きないので、横書きの面に置けば「押しても何も起きない
-                                            // 切り替え」になる。
-                                            if root.sheet == 1: HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: "Tate-chu-yoko";
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                TextButton {
-                                                    title: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
-                                                        ? "Upright"
-                                                        : "Sideways";
-                                                    role: root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
-                                                        ? Role.primary
-                                                        : Role.normal;
-                                                    clicked => {
-                                                        root.sheet-chose(15,
-                                                            root.sheet-numbers[root.sheet * root.sheet-stride + 15] == 1
-                                                                ? 0
-                                                                : 1);
-                                                    }
-                                                }
-                                            }
-
-                                            // 書き手の決定 2026-09-11: **原稿の記号ごとに、画面へ出る字。**
-                                            // 「三種類の文字に箇条書きの意味を与え、それぞれに、表現として
-                                            // どう見せるかを設定できるように」——`- 項目`と`* 項目`を別の
-                                            // 丸で出せる、というのがその意味である。
-                                            //
-                                            // **読むと決めていない記号は、見せ方も設定できない**（書き手の
-                                            // 求めた依存関係）。切ってある記号の行はただの本文で、印そのものが
-                                            // 出ないので、ここで丸を選んでも効くところが無い——**働かない
-                                            // 切り替えを画面に置かない**（単語チェックモード要件 2.1.1）。
-                                            for mark[at] in ["-", "*", "+"]: HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: at == 0 ? "Bullet marks" : "";
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                Text {
-                                                    text: mark;
-                                                    color: root.bullet-marks[at] ? Tok.ink : Tok.ink-faint;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                }
-
-                                                if root.bullet-marks[at]: HorizontalLayout {
-                                                    spacing: 2px;
-
-                                                    for glyph[index] in ["•", "・", "○"]: TextButton {
-                                                        title: glyph;
-                                                        role: root.sheet-numbers[root.sheet * root.sheet-stride
-                                                            + 16 + at] == index
-                                                            ? Role.primary
-                                                            : Role.normal;
-                                                        clicked => {
-                                                            root.sheet-chose(16 + at, index);
+                                                    // 要件 9 calls the flow advance 行間 in horizontal writing and
+                                                    // 列間隔 in vertical writing. **One quantity, two names**: the
+                                                    // label follows the sheet, because on this sheet that is what
+                                                    // it is.
+                                                    StepRow {
+                                                        label: sheet-index == 0 ? "Line height" : "Column gap";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 1] + "%";
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(1, by);
                                                         }
                                                     }
-                                                }
 
-                                                if !root.bullet-marks[at]: Text {
-                                                    text: "General で切ってあります";
-                                                    color: Tok.ink-faint;
-                                                    font-size: 11px;
-                                                    vertical-alignment: center;
-                                                }
+                                                    StepRow {
+                                                        label: "Char advance";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 2] + "%";
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(2, by);
+                                                        }
+                                                    }
+
+                                                    StepRow {
+                                                        label: "Page margin";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 3] + " px";
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(3, by);
+                                                        }
+                                                    }
+
+                                                    // 要件 9: how long a line may be. **Two switches that cannot
+                                                    // both be on**, and neither of them on is the third answer: the
+                                                    // line is not wrapped at all. One value holds all three, so
+                                                    // "both on" is not a state this can reach — and pressing the
+                                                    // one that is on turns it off, which is how the writer says
+                                                    // "neither" without a button for it.
+                                                    HorizontalLayout {
+                                                        spacing: 2px;
+
+                                                        Text {
+                                                            text: "Wrap";
+                                                            color: Tok.ink;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                            horizontal-stretch: 1;
+                                                        }
+
+                                                        // **The state that is an absence is still named.** With
+                                                        // neither switch on, a row of unlit buttons reads as a
+                                                        // setting nobody has made rather than as the setting it is.
+                                                        if root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 0: Text {
+                                                            text: "not wrapped";
+                                                            color: Tok.ink-faint;
+                                                            font-size: 11px;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        TextButton {
+                                                            title: "Width";
+                                                            role: root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 1
+                                                                ? Role.primary
+                                                                : Role.normal;
+                                                            clicked => {
+                                                                root.sheet = sheet-index; root.sheet-chose(10,
+                                                                    root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 1
+                                                                        ? 0
+                                                                        : 1);
+                                                            }
+                                                        }
+                                                        TextButton {
+                                                            title: "Pane";
+                                                            role: root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 2
+                                                                ? Role.primary
+                                                                : Role.normal;
+                                                            clicked => {
+                                                                root.sheet = sheet-index; root.sheet-chose(10,
+                                                                    root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 2
+                                                                        ? 0
+                                                                        : 2);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // In characters of body text, because that is what a line
+                                                    // length means: the number stays true when the body size or the
+                                                    // zoom changes, and a width in pixels would not.
+                                                    if root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 1: StepRow {
+                                                        label: "Line length";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 11] + " chars";
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(11, by);
+                                                        }
+                                                    }
+
+                                                    // 要件 9（2026-09-07追加）: 行番号。**どちらの面にも置く**
+                                                    // ——横書きでは行の頭の余白に、縦書きでは列の頭（面の上端）に、
+                                                    // 同じ形で立つ。数字はどちらでも正立させる。
+                                                    HorizontalLayout {
+                                                        spacing: 2px;
+
+                                                        Text {
+                                                            text: "Line numbers";
+                                                            color: Tok.ink;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                            horizontal-stretch: 1;
+                                                        }
+
+                                                        TextButton {
+                                                            title: root.sheet-numbers[sheet-index * root.sheet-stride + 12] == 1
+                                                                ? "Shown"
+                                                                : "Hidden";
+                                                            role: root.sheet-numbers[sheet-index * root.sheet-stride + 12] == 1
+                                                                ? Role.primary
+                                                                : Role.normal;
+                                                            clicked => {
+                                                                root.sheet = sheet-index; root.sheet-chose(12,
+                                                                    root.sheet-numbers[sheet-index * root.sheet-stride + 12] == 1
+                                                                        ? 0
+                                                                        : 1);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    HorizontalLayout {
+                                                        Text {
+                                                            text: "空白・改行を表示";
+                                                            color: Tok.ink;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                            horizontal-stretch: 1;
+                                                        }
+                                                        TextButton {
+                                                            title: root.sheet-numbers[sheet-index * root.sheet-stride + 54] == 1 ? "Shown" : "Hidden";
+                                                            role: root.sheet-numbers[sheet-index * root.sheet-stride + 54] == 1 ? Role.primary : Role.normal;
+                                                            clicked => {
+                                                                root.sheet = sheet-index; root.sheet-chose(54, root.sheet-numbers[sheet-index * root.sheet-stride + 54] == 1 ? 0 : 1);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // 要件 7.8（2026-09-09）: ルビと傍点。**大きさも位置も
+                                                    // 親文字に対する比率**で、面ごとに持つ——縦書きと横書きでは
+                                                    // ルビの置き場所そのものが違うので、読める大きさも同じとは
+                                                    // 限らない。位置は0が行の箱の端（行間の空きの外側）で、
+                                                    // 上げるほど字に近づく。
+                                                    StepRow {
+                                                        label: "Ruby size";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 13] + "%";
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(13, by);
+                                                        }
+                                                    }
+
+                                                    StepRow {
+                                                        label: "Ruby position";
+                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 14] + "%";
+                                                        stepped(by) => {
+                                                            root.sheet = sheet-index; root.sheet-step(14, by);
+                                                        }
+                                                    }
+
+                                                    // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。半角の数字を
+                                                    // 1〜2桁なら1マスに正立させ、3桁以上は1桁ずつ縦に並べる。
+                                                    // **縦書きのシートにだけ出す**——縦中横は縦書きの中でしか
+                                                    // 起きないので、横書きの面に置けば「押しても何も起きない
+                                                    // 切り替え」になる。
+                                                    if sheet-index == 1: HorizontalLayout {
+                                                        spacing: 2px;
+
+                                                        Text {
+                                                            text: "Tate-chu-yoko";
+                                                            color: Tok.ink;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                            horizontal-stretch: 1;
+                                                        }
+
+                                                        TextButton {
+                                                            title: root.sheet-numbers[sheet-index * root.sheet-stride + 15] == 1
+                                                                ? "Upright"
+                                                                : "Sideways";
+                                                            role: root.sheet-numbers[sheet-index * root.sheet-stride + 15] == 1
+                                                                ? Role.primary
+                                                                : Role.normal;
+                                                            clicked => {
+                                                                root.sheet = sheet-index; root.sheet-chose(15,
+                                                                    root.sheet-numbers[sheet-index * root.sheet-stride + 15] == 1
+                                                                        ? 0
+                                                                        : 1);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // 書き手の決定 2026-09-11: **原稿の記号ごとに、画面へ出る字。**
+                                                    // 「三種類の文字に箇条書きの意味を与え、それぞれに、表現として
+                                                    // どう見せるかを設定できるように」——`- 項目`と`* 項目`を別の
+                                                    // 丸で出せる、というのがその意味である。
+                                                    //
+                                                    // **読むと決めていない記号は、見せ方も設定できない**（書き手の
+                                                    // 求めた依存関係）。切ってある記号の行はただの本文で、印そのものが
+                                                    // 出ないので、ここで丸を選んでも効くところが無い——**働かない
+                                                    // 切り替えを画面に置かない**（単語チェックモード要件 2.1.1）。
+                                                    for mark[at] in ["-", "*", "+"]: HorizontalLayout {
+                                                        spacing: 2px;
+
+                                                        Text {
+                                                            text: at == 0 ? "Bullet marks" : "";
+                                                            color: Tok.ink;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                            horizontal-stretch: 1;
+                                                        }
+
+                                                        Text {
+                                                            text: mark;
+                                                            color: root.bullet-marks[at] ? Tok.ink : Tok.ink-faint;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        if root.bullet-marks[at]: HorizontalLayout {
+                                                            spacing: 2px;
+
+                                                            for glyph[index] in ["•", "・", "○"]: TextButton {
+                                                                title: glyph;
+                                                                role: root.sheet-numbers[sheet-index * root.sheet-stride
+                                                                    + 16 + at] == index
+                                                                    ? Role.primary
+                                                                    : Role.normal;
+                                                                clicked => {
+                                                                    root.sheet = sheet-index; root.sheet-chose(16 + at, index);
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if !root.bullet-marks[at]: Text {
+                                                            text: "General で切ってあります";
+                                                            color: Tok.ink-faint;
+                                                            font-size: 11px;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
                                             }
                                         }
 
                                         if root.settings-tab == 5: VerticalLayout {
-                                            spacing: 8px;
-
-                                            // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
-                                            // ——この面には紙の**色**と、コードの**書体**が並んでいて、
-                                            // どちらも「紙」「コード」としか言っていなかった。
-                                            ColorCell {
-                                                label: "Paper Color";
-                                                shown: root.palette[root.sheet * 15 + 7];
-                                                picked => {
-                                                    root.color-picked(7);
+                                            spacing: 20px;
+                                            // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
+                                            // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
+                                            // 値かは見出しが言う。押した欄のシートを`root.sheet`へ置いてから
+                                            // 頼む——Rustはそれを「どのシートの値か」として読む。
+                                            for sheet-index in [0, 1]: VerticalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: sheet-index == 0 ? "HORIZONTAL" : "VERTICAL";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    letter-spacing: 0.9px;
                                                 }
-                                            }
 
-                                            PickRow {
-                                                label: "Code Font";
-                                                value: root.sheet-fonts[root.sheet * 8 + 7];
-                                                pressed => {
-                                                    root.font-picked(7);
-                                                    font-menu.show();
-                                                }
+                                                    // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
+                                                    // ——この面には紙の**色**と、コードの**書体**が並んでいて、
+                                                    // どちらも「紙」「コード」としか言っていなかった。
+                                                    ColorCell {
+                                                        label: "Paper Color";
+                                                        shown: root.palette[sheet-index * 15 + 7];
+                                                        picked => {
+                                                            root.sheet = sheet-index; root.color-picked(7);
+                                                        }
+                                                    }
+
+                                                    PickRow {
+                                                        label: "Code Font";
+                                                        value: root.sheet-fonts[sheet-index * 8 + 7];
+                                                        pressed => {
+                                                            root.sheet = sheet-index; root.font-picked(7);
+                                                            font-menu.show();
+                                                        }
+                                                    }
                                             }
                                         }
 
@@ -3822,7 +3870,7 @@ export component AppWindow inherits Window {
                                                 TextButton {
                                                     title: "Reset";
                                                     clicked => {
-                                                        root.typography-reset();
+                                                        root.typography-reset(root.settings-tab);
                                                     }
                                                 }
                                             }
