@@ -9260,6 +9260,62 @@ fn step_setting(window: &AppWindow, numbers: &VecModel<i32>, setting: Setting, b
     setting.write(numbers, sheet, next);
 }
 
+/// A number the writer typed into a settings field (書き手の求め 2026-09-15).
+///
+/// **Full-width digits are digits**: with the IME on, `３０` is how 30 arrives,
+/// and refusing it would be a field that ignores what was typed. A trailing
+/// unit (`px`, `%`, `pt`) is allowed for the same reason — it is what the field
+/// says beside the number.
+fn typed_number(typed: &str) -> Option<f64> {
+    let plain: String = typed
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '０'..='９' => char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c),
+            '．' => '.',
+            '－' => '-',
+            _ => c,
+        })
+        .collect();
+    let number = plain
+        .trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%')
+        .trim();
+    number.parse::<f64>().ok().filter(|value| value.is_finite())
+}
+
+/// Points to the editor's pixels: a point is 1/72 inch and a pixel 1/96.
+const PIXELS_PER_POINT: f64 = 96.0 / 72.0;
+
+/// Set a size from a typed number (書き手の求め 2026-09-15). `setting` is the
+/// row the window names it by; the value is held to its range.
+fn type_setting(window: &AppWindow, numbers: &VecModel<i32>, setting: Setting, typed: &str) {
+    let Some(value) = typed_number(typed) else {
+        return;
+    };
+    let (low, high) = setting.range();
+    let value = (value.round() as i32).clamp(low, high);
+    setting.write(numbers, shown_sheet(window), value);
+}
+
+/// The same, typed in points: `slot` 0 is the body (held in px), 1〜6 are the
+/// headings (held as a percentage of the body, so the body's size decides what
+/// a point of heading is).
+fn type_points(window: &AppWindow, numbers: &VecModel<i32>, slot: i32, typed: &str) {
+    let Some(points) = typed_number(typed) else {
+        return;
+    };
+    let sheet = shown_sheet(window);
+    let pixels = points * PIXELS_PER_POINT;
+    let (setting, value) = if slot <= 0 {
+        (Setting::BodySize, pixels)
+    } else {
+        let body = f64::from(Setting::BodySize.read(window, sheet).max(1));
+        (Setting::Heading(slot as usize - 1), pixels / body * 100.0)
+    };
+    let (low, high) = setting.range();
+    setting.write(numbers, sheet, (value.round() as i32).clamp(low, high));
+}
+
 /// Which sheet the panel is showing, held to one that exists.
 fn shown_sheet(window: &AppWindow) -> usize {
     usize::from(window.get_sheet() != 0)

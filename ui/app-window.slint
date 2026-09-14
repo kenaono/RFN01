@@ -747,6 +747,11 @@ export component AppWindow inherits Window {
     callback color-picked(int);
     /// 書き手の求め 2026-09-15: どの面を初期値へ戻すか——3 Text、4 Layout、5 Page、
     /// 負の数なら書式の全部（「Reset All」から）。
+    /// 書き手の求め 2026-09-15: 打って決めた数。本文は px、見出しは %（行の番号は
+    /// `sheet-step`と同じ）。
+    callback sheet-typed(int, string);
+    /// 同じ大きさを pt で。0 が本文、1〜6 が H1〜H6。
+    callback sheet-typed-points(int, string);
     callback typography-reset(int);
     callback terminal-reset();
     callback shortcut-reset-all();
@@ -3369,7 +3374,11 @@ export component AppWindow inherits Window {
                                                     // numbers are what the callbacks carry.
                                                     TextRow {
                                                         label: "Body";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride] + " px";
+                                                        number: root.sheet-numbers[sheet-index * root.sheet-stride];
+                                                        unit: "px";
+                                                        points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * 7.5) / 10;
+                                                        typed(text) => { root.sheet = sheet-index; root.sheet-typed(0, text); }
+                                                        typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(0, text); }
                                                         shown: root.palette[sheet-index * 15 + 0];
                                                         family: root.sheet-fonts[sheet-index * 8 + 0];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 19] != 0;
@@ -3396,7 +3405,11 @@ export component AppWindow inherits Window {
 
                                                     TextRow {
                                                         label: "H1";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 4] + "%";
+                                                        number: root.sheet-numbers[sheet-index * root.sheet-stride + 4];
+                                                        unit: "%";
+                                                        points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 4] * 0.075) / 10;
+                                                        typed(text) => { root.sheet = sheet-index; root.sheet-typed(4, text); }
+                                                        typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(1, text); }
                                                         shown: root.palette[sheet-index * 15 + 1];
                                                         family: root.sheet-fonts[sheet-index * 8 + 1];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 24] != 0;
@@ -3423,7 +3436,11 @@ export component AppWindow inherits Window {
 
                                                     TextRow {
                                                         label: "H2";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 5] + "%";
+                                                        number: root.sheet-numbers[sheet-index * root.sheet-stride + 5];
+                                                        unit: "%";
+                                                        points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 5] * 0.075) / 10;
+                                                        typed(text) => { root.sheet = sheet-index; root.sheet-typed(5, text); }
+                                                        typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(2, text); }
                                                         shown: root.palette[sheet-index * 15 + 2];
                                                         family: root.sheet-fonts[sheet-index * 8 + 2];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 29] != 0;
@@ -3450,7 +3467,11 @@ export component AppWindow inherits Window {
 
                                                     TextRow {
                                                         label: "H3";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 6] + "%";
+                                                        number: root.sheet-numbers[sheet-index * root.sheet-stride + 6];
+                                                        unit: "%";
+                                                        points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 6] * 0.075) / 10;
+                                                        typed(text) => { root.sheet = sheet-index; root.sheet-typed(6, text); }
+                                                        typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(3, text); }
                                                         shown: root.palette[sheet-index * 15 + 3];
                                                         family: root.sheet-fonts[sheet-index * 8 + 3];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 34] != 0;
@@ -3477,7 +3498,11 @@ export component AppWindow inherits Window {
 
                                                     TextRow {
                                                         label: "H4";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 7] + "%";
+                                                        number: root.sheet-numbers[sheet-index * root.sheet-stride + 7];
+                                                        unit: "%";
+                                                        points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 7] * 0.075) / 10;
+                                                        typed(text) => { root.sheet = sheet-index; root.sheet-typed(7, text); }
+                                                        typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(4, text); }
                                                         shown: root.palette[sheet-index * 15 + 4];
                                                         family: root.sheet-fonts[sheet-index * 8 + 4];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 39] != 0;
@@ -3504,7 +3529,11 @@ export component AppWindow inherits Window {
 
                                                     TextRow {
                                                         label: "H5";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 8] + "%";
+                                                        number: root.sheet-numbers[sheet-index * root.sheet-stride + 8];
+                                                        unit: "%";
+                                                        points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 8] * 0.075) / 10;
+                                                        typed(text) => { root.sheet = sheet-index; root.sheet-typed(8, text); }
+                                                        typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(5, text); }
                                                         shown: root.palette[sheet-index * 15 + 5];
                                                         family: root.sheet-fonts[sheet-index * 8 + 5];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 44] != 0;
@@ -3531,7 +3560,11 @@ export component AppWindow inherits Window {
 
                                                     TextRow {
                                                         label: "H6";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 9] + "%";
+                                                        number: root.sheet-numbers[sheet-index * root.sheet-stride + 9];
+                                                        unit: "%";
+                                                        points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 9] * 0.075) / 10;
+                                                        typed(text) => { root.sheet = sheet-index; root.sheet-typed(9, text); }
+                                                        typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(6, text); }
                                                         shown: root.palette[sheet-index * 15 + 6];
                                                         family: root.sheet-fonts[sheet-index * 8 + 6];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 49] != 0;

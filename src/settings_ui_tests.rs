@@ -131,6 +131,62 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     slint::platform::update_timers_and_animations();
     assert_eq!(steps.get(), 1);
 
+    // A size typed into the field takes effect on Enter (書き手の求め 2026-09-15).
+    {
+        use slint::platform::{Key, PointerEventButton, WindowEvent};
+        let typed = Rc::new(RefCell::new(Vec::new()));
+        let seen = typed.clone();
+        let sheets = window.as_weak();
+        window.on_sheet_typed(move |setting, text| {
+            let sheet = sheets.upgrade().unwrap().get_sheet();
+            seen.borrow_mut().push((sheet, setting, text.to_string()));
+        });
+        window.set_tree_open(false);
+        window.set_settings_tab(3);
+        window.show().unwrap();
+        let draw = || {
+            slint::platform::update_timers_and_animations();
+            window.window().request_redraw();
+            surface.draw_if_needed(|renderer| {
+                let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+                renderer.render(&mut pixels, 1000);
+            });
+        };
+        draw();
+        let position = slint::LogicalPosition::new(322.0, 158.0);
+        window.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+        draw();
+        let key = |text: SharedString| {
+            window
+                .window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            window
+                .window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        key(Key::End.into());
+        for _ in 0..3 {
+            key(Key::Backspace.into());
+        }
+        assert!(typed.borrow().is_empty(), "nothing is set while typing");
+        for c in ["2", "5", "0"] {
+            key(c.into());
+        }
+        key(Key::Return.into());
+        draw();
+        assert_eq!(&*typed.borrow(), &[(0, 4, "250".to_owned())]);
+        window.hide().unwrap();
+    }
+
     // Every group, as the writer will see it: `EDITOR_SETTINGS_SNAPSHOT` names
     // a folder for the images.
     if let Ok(output) = std::env::var("EDITOR_SETTINGS_SNAPSHOT") {
@@ -196,7 +252,10 @@ fn each_page_reset_stays_on_its_page() {
         assert_eq!(number(Setting::BodySize, sheet), BASE_FONT_SIZE);
         assert_eq!(ink(sheet), slint_colour(default_colour(sheet, 0)));
         assert_eq!(number(Setting::LineAdvance, sheet), 300, "Layout stays");
-        assert_ne!(paper(sheet), slint_colour(default_colour(sheet, PAPER_SLOT)));
+        assert_ne!(
+            paper(sheet),
+            slint_colour(default_colour(sheet, PAPER_SLOT))
+        );
         assert_eq!(
             fonts.row_data(font_row(sheet, CODE_SLOT)).unwrap(),
             "Meiryo"
@@ -215,5 +274,55 @@ fn each_page_reset_stays_on_its_page() {
         fonts.row_data(font_row(0, CODE_SLOT)).unwrap(),
         default_font(CODE_SLOT)
     );
-    assert_eq!(fonts.row_data(font_row(0, 0)).unwrap(), "Meiryo", "Text stays");
+    assert_eq!(
+        fonts.row_data(font_row(0, 0)).unwrap(),
+        "Meiryo",
+        "Text stays"
+    );
+}
+
+/// 書き手の求め 2026-09-15: 打った数は全角でも単位付きでも読み、pt は px と % へ直す。
+#[test]
+fn typed_sizes_read_full_width_and_points() {
+    assert_eq!(typed_number("30"), Some(30.0));
+    assert_eq!(typed_number("３０"), Some(30.0));
+    assert_eq!(typed_number(" 16.5pt "), Some(16.5));
+    assert_eq!(typed_number("１２．５"), Some(12.5));
+    assert_eq!(typed_number("200%"), Some(200.0));
+    assert_eq!(typed_number("abc"), None);
+    assert_eq!(typed_number(""), None);
+
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+    let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_sheet(1);
+    type_setting(&window, &numbers, Setting::Heading(0), "３０");
+    assert_eq!(
+        Setting::Heading(0).read(&window, 1),
+        50,
+        "held to the range"
+    );
+    type_setting(&window, &numbers, Setting::Heading(0), "250");
+    assert_eq!(Setting::Heading(0).read(&window, 1), 250);
+    assert_eq!(
+        Setting::Heading(0).read(&window, 0),
+        200,
+        "other sheet stays"
+    );
+    type_points(&window, &numbers, 0, "12");
+    assert_eq!(Setting::BodySize.read(&window, 1), 16);
+    type_points(&window, &numbers, 1, "24");
+    assert_eq!(Setting::Heading(0).read(&window, 1), 200);
+    type_setting(&window, &numbers, Setting::BodySize, "不正");
+    assert_eq!(
+        Setting::BodySize.read(&window, 1),
+        16,
+        "unreadable changes nothing"
+    );
 }

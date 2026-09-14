@@ -729,6 +729,33 @@ pub fn wire_typography(
         }
     });
 
+    // 書き手の求め 2026-09-15: 大きさを打って決める——px／% と pt の2つの口。
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    let timer = spec_timer.clone();
+    let typed = numbers.clone();
+    window.on_sheet_typed(move |setting, text| {
+        let Some(setting) = Setting::from_index(setting) else {
+            return;
+        };
+        if let Some(window) = weak.upgrade() {
+            crate::type_setting(&window, &typed, setting, &text);
+            schedule_relayout(&window, &states, &cache, &timer);
+        }
+    });
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    let timer = spec_timer.clone();
+    let typed = numbers.clone();
+    window.on_sheet_typed_points(move |slot, text| {
+        if let Some(window) = weak.upgrade() {
+            crate::type_points(&window, &typed, slot, &text);
+            schedule_relayout(&window, &states, &cache, &timer);
+        }
+    });
+
     // 要件 9: a setting whose values are a choice rather than a quantity —
     // the same door as `sheet-step`, told what to be instead of by how
     // much to move.

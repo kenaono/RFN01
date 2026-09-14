@@ -1205,6 +1205,62 @@ export component MenuFrame inherits Rectangle {
 }
 
 // Everything about one kind of text: size, colour, font and decorations (要件 9).
+// 打って決める数（書き手の求め 2026-09-15：「手動で30とか入力できると良い」）。
+//
+// **決まるのは Enter か、欄を離れたとき。**打っている途中の「3」で本文が組み
+// 直されては、30へ行く前に画面が跳ねる。決めた値はRustが範囲へ収めて書き戻し、
+// 欄はその値を出し直す——範囲の外を打っても、欄に残るのは効いている数である。
+export component NumberField inherits Rectangle {
+    /// いま効いている値。
+    in property <string> shown;
+    in property <string> unit;
+    callback committed(string);
+
+    property <bool> focused: field.has-focus;
+    changed shown => {
+        if (!field.has-focus) {
+            field.text = root.shown;
+        }
+    }
+    changed focused => {
+        if (!root.focused) {
+            root.settle();
+        }
+    }
+
+    function settle() {
+        if (field.text != root.shown) {
+            root.committed(field.text);
+        }
+        field.text = root.shown;
+    }
+
+    HorizontalLayout {
+        spacing: 3px;
+
+        field := Field {
+            width: 50px;
+            height: 24px;
+            y: 2px;
+            text: root.shown;
+            accepted => {
+                root.settle();
+            }
+            escaped => {
+                self.text = root.shown;
+            }
+        }
+
+        Text {
+            text: root.unit;
+            color: Tok.ink-muted;
+            font-size: 12px;
+            vertical-alignment: center;
+            min-width: 14px;
+        }
+    }
+}
+
 export component TextRow inherits Rectangle {
     in property <bool> bold;
     in property <bool> italic;
@@ -1217,10 +1273,16 @@ export component TextRow inherits Rectangle {
     callback decoration-toggled(int, bool);
     callback background-picked();
     in property <string> label;
-    in property <string> value;
+    /// 大きさの数と単位：本文は px、見出しは本文に対する %。
+    in property <string> number;
+    in property <string> unit;
+    /// 同じ大きさを pt で（書き手の求め 2026-09-15）。1pt = 96/72px。
+    in property <string> points;
     in property <color> shown;
     in property <string> family;
     callback stepped(int);
+    callback typed(string);
+    callback typed-points(string);
     callback picked();
     callback chose-font();
 
@@ -1294,14 +1356,13 @@ export component TextRow inherits Rectangle {
             }
         }
 
-        Text {
-            text: root.value;
-            color: Tok.ink;
-            font-size: 12px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        NumberField {
             horizontal-stretch: 0;
-            min-width: 46px;
+            shown: root.number;
+            unit: root.unit;
+            committed(text) => {
+                root.typed(text);
+            }
         }
 
         IconButton {
@@ -1310,6 +1371,21 @@ export component TextRow inherits Rectangle {
             icon: Icons.plus;
             clicked => {
                 root.stepped(1);
+            }
+        }
+
+        // 刻みの釦は左の数のもの。pt はその隣に少し離して置く。
+        Rectangle {
+            width: 6px;
+            horizontal-stretch: 0;
+        }
+
+        NumberField {
+            horizontal-stretch: 0;
+            shown: root.points;
+            unit: "pt";
+            committed(text) => {
+                root.typed-points(text);
             }
         }
 
