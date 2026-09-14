@@ -112,6 +112,8 @@ export struct PaneScreen {
 
     tiles: [PreviewTile],
     selection-rects: [PreviewSelectionRect],
+    difference-rects: [PreviewSelectionRect],
+    comparison-note: string,
     /// E1: 見えている一致（書き手の求め 2026-09-09）。**選択より薄い**——
     /// 「どこにあるか」を出しつつ、「いまどれにいるか」を選択に譲る。
     match-rects: [PreviewSelectionRect],
@@ -148,6 +150,9 @@ export struct PaneScreen {
     // than as its source: half of the four modes (要件 7.2). **Per pane per
     // tab**, which is why it is here and not on the window.
     preview: bool,
+    viewer: bool,
+    can-undo: bool,
+    can-redo: bool,
     // Whether the tab in front of this pane is a shell (追加要件 Terminal).
     // **The pane draws the same way either way** — one image and no caret of
     // its own — so this changes nothing here but what the keyboard does.
@@ -226,6 +231,7 @@ export struct PaneScreen {
     scroll-generation: int,
     shown-width: length,
     shown-height: length,
+    wrap-height: length,
 }
 
 export component EditorPane inherits Rectangle {
@@ -304,6 +310,7 @@ export component EditorPane inherits Rectangle {
     /// it over the tabs of the pane holding that document is what says so.
     /// The window decides which pane has it, so this is `in`.
     in property <bool> find-open;
+    property <length> find-bar-height: root.find-open ? (root.find-replacing ? 68px : 34px) : 0px;
     /// `Ctrl+H` rather than `Ctrl+F`: the second row is only in the way when
     /// nothing is being replaced.
     in property <bool> find-replacing;
@@ -328,6 +335,9 @@ export component EditorPane inherits Rectangle {
     in property <bool> find-focus: true;
     in property <int> active-tab: 0;
     in property <bool> preview: false;
+    in property <bool> viewer: false;
+    in property <bool> can-undo: false;
+    in property <bool> can-redo: false;
     /// The tab in front of this pane is a shell (追加要件 Terminal).
     ///
     /// **Then the keyboard belongs to the shell**, all of it: Ctrl+C interrupts
@@ -419,6 +429,9 @@ export component EditorPane inherits Rectangle {
 
     in property <[PreviewTile]> tiles;
     in property <[PreviewSelectionRect]> selection-rects;
+    in property <[PreviewSelectionRect]> difference-rects;
+    in property <string> comparison-note;
+    callback comparison-dismissed();
     in property <[PreviewSelectionRect]> match-rects;
     in property <[PreviewSelectionRect]> scope-rects;
     // The laid-out document's size, in pixels.
@@ -471,6 +484,9 @@ export component EditorPane inherits Rectangle {
     // of the document to lay out.
     in-out property <length> shown-width: 640px;
     in-out property <length> shown-height: 520px;
+    // Measured together with the viewport, so opening a bar does not briefly
+    // combine the old viewport with the new bar height on the Rust side.
+    in-out property <length> wrap-height: 0px;
 
     // Whether this pane answers a request for the keyboard. The parent decides,
     // because it is the one that knows which pane the writer was last in.
@@ -479,7 +495,9 @@ export component EditorPane inherits Rectangle {
 
     callback resized();
     callback scrolled(float);
+    callback across-scrolled(float);
     callback selection-start(float, float, bool);
+    callback link-open(float, float) -> bool;
     callback selection-update(float, float);
     callback selection-end(float, float);
     callback select-all();
@@ -533,6 +551,7 @@ export component EditorPane inherits Rectangle {
     callback home-end(bool, bool, bool);
     /// This pane now has the keyboard.
     callback focus-taken();
+    callback focus-trace(string);
     callback save-requested();
     /// Show another of this pane's tabs, close one, or open a new one. The
     /// position is in this pane's strip and nobody else's.
@@ -603,6 +622,12 @@ export component EditorPane inherits Rectangle {
     /// 押した`Ctrl+G`は同じ鍵で閉じるが、**検索の帯やメニューから来た求めは
     /// 「そちらへ移りたい」**であって、閉じてほしいという意味ではない。
     callback goto-requested(bool);
+    callback compare-requested();
+    callback compare-saved-requested();
+    callback reopen-closed-requested();
+    in property <[string]> shortcut-keys: ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+T", "Ctrl+Z", "Ctrl+Y"];
+    callback shortcut-key(string, bool, bool, bool) -> bool;
+
     callback goto-typed();
     callback goto-accepted();
     callback goto-dismissed();
@@ -618,6 +643,7 @@ export component EditorPane inherits Rectangle {
     /// way the text runs, and whether it is shown formatted or as its source.
     /// **The mode belongs to the tab, so the controls sit beside the tabs.**
     callback preview-toggled();
+    callback viewer-toggled();
     callback direction-toggled();
     /// Take back the last change to this document, or put it back
     /// (要件 7.1, 11.2). True is the way forwards.
@@ -625,6 +651,7 @@ export component EditorPane inherits Rectangle {
     /// Put the selection on the clipboard (要件 11.2). **True also takes it out
     /// of the document** — a cut is a copy that succeeded, followed by a delete.
     callback copy-requested(bool);
+    callback copy-body-requested();
     /// Bring this pane's next tab out in front, or its previous one (要件 11.3).
     /// True steps backwards. Wraps at either end of the strip.
     callback tab-stepped(bool);
@@ -668,6 +695,7 @@ export component EditorPane inherits Rectangle {
     callback close-clean-tabs();
     /// 追加要件 2026-09-06: the path of the file in a tab, to the clipboard.
     callback copy-path-requested(int);
+    callback duplicate-tab-requested(int);
     /// Open a file, asked for from the strip's own menu.
     callback open-file-requested();
     /// A new shell in this pane, asked for from the strip's own menu.
@@ -678,6 +706,20 @@ export component EditorPane inherits Rectangle {
     /// the window closed something of its own** — the app menu, or the
     /// typography panel — so that the key is not passed on twice.
     callback escaped() -> bool;
+
+    /// Escapeが、窓にも畳むものが無いときに来る（書き手の報告 2026-09-12）。
+    /// **選んでいる途中ならそこから戻り、`true`を返す。**
+    callback selection-escaped() -> bool;
+
+    /// 届いたShiftを、Windowsの答えと突き合わせて返す（書き手の報告 2026-09-12）。
+    ///
+    /// **旗は変換をまたぐと古くなる。**IMEが受け取った打鍵はSlintの手前で消えるので、
+    /// Shiftを離した合図を見落とすと旗は押されたままになり、そのあとのただの
+    /// クリックや矢印が「Shiftを押した」ものとして届く——「突然選択になりました」は
+    /// この形であった。**旗を読む場所はこの鍵の並びに20ほどあり**、
+    /// `Ctrl+K`が`Ctrl+Shift+K`（行を消す）に、`Alt+↓`が`Shift+Alt+↓`（行を写す）に
+    /// 化けるのも同じ古さなので、**読むところを1つにして、そこで訊く。**
+    callback shift-held(bool) -> bool;
 
     /// Close whichever of this pane's menus is open, and say whether one was.
     ///
@@ -712,11 +754,13 @@ export component EditorPane inherits Rectangle {
     function find-shortcut(event: KeyEvent) -> EventResult {
         if (event.modifiers.control
             && (event.text == "f" || event.text == "F" || event.text == "\u{6}")) {
+            root.focus-trace("bar-ctrl-f-received");
             root.find-requested(false);
             return accept;
         }
         if (event.modifiers.control
             && (event.text == "h" || event.text == "H" || event.text == "\u{8}")) {
+            root.focus-trace("bar-ctrl-h-received");
             root.find-requested(true);
             return accept;
         }
@@ -858,7 +902,7 @@ export component EditorPane inherits Rectangle {
             // them 要件 6.3: the list beside it names every tab, and whichever
             // tab is in front pulls the strip to itself (`reveal-tab`).
             tabs-view := ScrollView {
-                width: parent.width - 182px;
+                width: parent.width - 210px;
                 height: parent.height;
                 x: 0;
                 y: 0;
@@ -1017,15 +1061,15 @@ export component EditorPane inherits Rectangle {
             // A stretchy spacer in the row above does not work: `alignment:
             // start` gives every child its preferred width and leaves the slack
             // at the end of the row, so nothing in the middle ever grows and
-            // this group ends up packed against the tabs. Six 26px buttons with
-            // 2px between them is 166px, and that is what is held.
+            // this group ends up packed against the tabs. Seven 26px buttons with
+            // 2px between them is 194px, and that is what is held.
             //
             // **New Tab and the tab list are here rather than in the strip**
             // because the strip scrolls: a button that goes with the tabs is a
             // button that is gone exactly when there are enough tabs to need
             // it.
             Rectangle {
-                width: 166px;
+                width: 194px;
                 height: 26px;
                 x: parent.width - self.width - 8px;
                 y: 4px;
@@ -1056,7 +1100,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.horizontal;
-                        tip: "Horizontal";
+                        tip: "Horizontal" + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
                         checked: !root.vertical;
                         // 追加要件 2026-09-06: **a shell has one direction.**
                         // The grid is rows of cells across; there is nothing
@@ -1071,7 +1115,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.vertical;
-                        tip: "Vertical";
+                        tip: "Vertical" + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
                         checked: root.vertical;
                         enabled: !root.terminal;
                         clicked => {
@@ -1082,11 +1126,19 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.preview;
-                        tip: "Live Preview";
+                        tip: "Live Preview" + (root.shortcut-keys[43] == "" ? "" : " · " + root.shortcut-keys[43]);
                         checked: root.preview;
+                        enabled: !root.viewer;
                         clicked => {
                             root.preview-toggled();
                         }
+                    }
+                    IconButton {
+                        icon: "M1 2h5l2 2 2-2h5v12h-5l-2 1-2-1H1z M8 4v11";
+                        tip: (root.viewer ? "Viewerを終了" : "Viewerモード") + (root.shortcut-keys[44] == "" ? "" : " · " + root.shortcut-keys[44]);
+                        checked: root.viewer;
+                        enabled: !root.terminal;
+                        clicked => { root.viewer-toggled(); }
                     }
                     IconButton {
                         icon: Icons.more;
@@ -1173,7 +1225,7 @@ export component EditorPane inherits Rectangle {
 
                             MenuRow {
                                 title: "Save";
-                                shortcut: "Ctrl+S";
+                                shortcut: root.shortcut-keys[1];
                                 activated => {
                                     root.save-requested();
                                     pane-menu.close();
@@ -1181,7 +1233,7 @@ export component EditorPane inherits Rectangle {
                             }
                             MenuRow {
                                 title: "Save As…";
-                                shortcut: "Ctrl+Shift+S";
+                                shortcut: root.shortcut-keys[2];
                                 activated => {
                                     root.save-as-requested();
                                     pane-menu.close();
@@ -1198,7 +1250,7 @@ export component EditorPane inherits Rectangle {
                         }
                         MenuRow {
                             title: "Close Tab";
-                            shortcut: "Ctrl+W";
+                            shortcut: root.shortcut-keys[3];
                             activated => {
                                 pane-menu.close();
                                 root.close-active-tab();
@@ -1287,7 +1339,7 @@ export component EditorPane inherits Rectangle {
                         // row says which one the writer will get.
                         MenuRow {
                             title: root.terminal ? "Editor Below" : "Terminal Below";
-                            shortcut: "Ctrl+`";
+                            shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                             activated => {
                                 pane-menu.close();
                                 root.below-toggled();
@@ -1305,6 +1357,33 @@ export component EditorPane inherits Rectangle {
                             activated => {
                                 pane-menu.close();
                                 root.layout-requested();
+                            }
+                        }
+                        if !root.terminal: MenuRow {
+                            title: "Go to Line…";
+                            shortcut: root.shortcut-keys[6];
+                            activated => {
+                                root.goto-requested(true);
+                                pane-menu.close();
+                            }
+                        }
+                        if !root.terminal: MenuRow {
+                            title: "閉じたTABを開き直す";
+                            shortcut: root.shortcut-keys[7];
+                            activated => { root.reopen-closed-requested(); pane-menu.close(); }
+                        }
+                        if !root.terminal: MenuRow {
+                            title: "保存版と比較";
+                            activated => {
+                                root.compare-saved-requested();
+                                pane-menu.close();
+                            }
+                        }
+                        if !root.terminal: MenuRow {
+                            title: "別のファイルと比較…";
+                            activated => {
+                                root.compare-requested();
+                                pane-menu.close();
                             }
                         }
                         // **These three take the keyboard back themselves**,
@@ -1364,8 +1443,28 @@ export component EditorPane inherits Rectangle {
         // home in half a window: a pane is not the width of the screen, and
         // 230px of field with a fixed gap after it is not something that fits
         // twice.
+        if root.comparison-note != "": Rectangle {
+            height: 34px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 6px;
+                spacing: 6px;
+                Text {
+                    text: root.comparison-note;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                TextButton {
+                    title: "比較を終了";
+                    clicked => { root.comparison-dismissed(); }
+                }
+            }
+        }
         if root.find-open: Rectangle {
-            height: root.find-replacing ? 68px : 34px;
+            height: root.find-bar-height;
             background: Tok.chrome;
 
             Rectangle {
@@ -1427,7 +1526,7 @@ export component EditorPane inherits Rectangle {
                                 root.find-typed();
                             }
                             escaped => {
-                                root.find-dismissed();
+                                if (!root.escaped()) { root.find-dismissed(); }
                             }
                             shortcut(event) => {
                                 return root.find-keys(event, false);
@@ -1547,7 +1646,7 @@ export component EditorPane inherits Rectangle {
                                 root.replace-one();
                             }
                             escaped => {
-                                root.find-dismissed();
+                                if (!root.escaped()) { root.find-dismissed(); }
                             }
                             shortcut(event) => {
                                 return root.find-keys(event, true);
@@ -1657,7 +1756,15 @@ export component EditorPane inherits Rectangle {
             }
         }
 
+        body-clip := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            // The bar occupies layout space, but the document keeps its
+            // original origin and height. Only its covered top is clipped.
         VerticalBox {
+            y: -root.find-bar-height;
+            width: parent.width;
+            height: parent.height + root.find-bar-height;
             padding-top: root.page-margin;
             padding-bottom: root.page-margin;
             padding-left: root.side-padding;
@@ -1698,16 +1805,21 @@ export component EditorPane inherits Rectangle {
                 init => {
                     root.shown-width = self.visible-width;
                     root.shown-height = self.visible-height;
+                    root.wrap-height = self.visible-height;
                     root.resized();
                 }
                 changed viewport-x => {
                     if (root.vertical) {
                         root.scrolled(self.viewport-x / 1px);
+                    } else {
+                        root.across-scrolled(self.viewport-x / 1px);
                     }
                 }
                 changed viewport-y => {
                     if (!root.vertical) {
                         root.scrolled(self.viewport-y / 1px);
+                    } else {
+                        root.across-scrolled(self.viewport-y / 1px);
                     }
                 }
                 // One of these two is the flow axis and re-lays out the document;
@@ -1722,6 +1834,7 @@ export component EditorPane inherits Rectangle {
                 }
                 changed visible-height => {
                     root.shown-height = self.visible-height;
+                    root.wrap-height = self.visible-height;
                     if (root.vertical) {
                         root.resized();
                     } else {
@@ -1769,12 +1882,18 @@ export component EditorPane inherits Rectangle {
                     // goes nowhere.
                     property <int> generation: root.focus-generation;
                     changed generation => {
+                        root.focus-trace(root.takes-focus ? "request-generation" : "skip-generation");
                         if (root.takes-focus) {
+                            // Reissue focus even if Slint still records this field
+                            // as focused after a tab/direction change.
+                            ime-input.clear-focus();
                             ime-input.focus();
                         }
                     }
                     init => {
                         if (root.takes-focus) {
+                            root.focus-trace("request-init");
+                            ime-input.clear-focus();
                             ime-input.focus();
                         }
                     }
@@ -1813,6 +1932,15 @@ export component EditorPane inherits Rectangle {
                         // 選択が重なれば自然に濃くなる——別の色を足すと、
                         // 「選ばれている」と「見つかっている」が別のことに
                         // 見えてしまう。
+                        for difference in root.difference-rects: Rectangle {
+                            x: difference.x * 1px;
+                            y: difference.y * 1px;
+                            width: difference.width * 1px;
+                            height: difference.height * 1px;
+                            background: Tok.accent-soft.transparentize(0.65);
+                            border-color: Tok.accent.transparentize(0.4);
+                            border-width: 1px;
+                        }
                         for found in root.match-rects: Rectangle {
                             x: found.x * 1px;
                             y: found.y * 1px;
@@ -1874,12 +2002,22 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             changed has-focus => {
+                                root.focus-trace(self.has-focus ? "gained" : "lost");
                                 if self.has-focus {
                                     root.focus-taken();
                                 }
                             }
-                            x: root.ime-anchor-x * 1px;
-                            y: root.ime-anchor-y * 1px;
+                            // Slint drops keyboard focus before dispatching a key
+                            // when this item is fully clipped. Layout completion,
+                            // tab changes and manual scrolling can leave the caret
+                            // outside the viewport. Keep the invisible input inside
+                            // it, without moving the document caret or scroll.
+                            x: max(-scroll.viewport-x - page.x,
+                                min(root.ime-anchor-x * 1px,
+                                    -scroll.viewport-x - page.x + scroll.visible-width - self.width));
+                            y: max(-scroll.viewport-y - page.y + max(0px, root.find-bar-height - scroll.y),
+                                min(root.ime-anchor-y * 1px,
+                                    -scroll.viewport-y - page.y + scroll.visible-height - self.height));
                             width: max(root.ime-anchor-width * 1px, 1px);
                             height: max(root.ime-anchor-height * 1px, 1px);
                             text <=> root.ime-buffer;
@@ -1927,6 +2065,17 @@ export component EditorPane inherits Rectangle {
                                 root.preedit-changed(self.preedit-text);
                             }
                             key-pressed(event) => {
+                                if (event.modifiers.control && (event.text == "f" || event.text == "F" || event.text == "\u{6}" || event.text == "h" || event.text == "H" || event.text == "\u{8}")) {
+                                    root.focus-trace((event.text == "f" || event.text == "F" || event.text == "\u{6}") ? "body-ctrl-f-received" : "body-ctrl-h-received");
+                                    if (self.preedit-text != "") { root.focus-trace("find-key-preedit-active"); }
+                                    if (root.terminal) { root.focus-trace("find-key-terminal"); }
+                                }
+                                if (event.modifiers.control && (event.text == "w" || event.text == "W" || event.text == "\u{17}")) {
+                                    root.focus-trace("ctrl-w-received");
+                                    if (root.terminal) { root.focus-trace("ctrl-w-terminal"); }
+                                    if (self.preedit-text != "") { root.focus-trace("ctrl-w-preedit-active"); }
+                                    if (self.text != "") { root.focus-trace("ctrl-w-input-pending"); }
+                                }
                                 // **A shell takes every key.** Nothing below
                                 // applies to it: those rows are the editor's
                                 // shortcuts, and the same chords mean other
@@ -1979,8 +2128,35 @@ export component EditorPane inherits Rectangle {
                                         key-number(event.text),
                                         event.modifiers.control,
                                         event.modifiers.alt,
-                                        event.modifiers.shift);
+                                        root.shift-held(event.modifiers.shift));
                                     return accept;
+                                }
+                                if self.preedit-text == "" && root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
+                                // The way out of a menu (要件 6.7).
+                                // **Handled here rather than inside the
+                                // menus**: a `FocusScope` in a popup takes the
+                                // keyboard, and a popup that is dismissed by a
+                                // click outside never runs any of our code to
+                                // give it back (6.14). The keyboard stays where
+                                // it is, and the key travels instead.
+                                //
+                                // 書き手の報告 2026-09-12:「選択になって戻れなく
+                                // なる」。**下の`if`の前で受ける**——欄に字が
+                                // 残っているあいだ下の行はどれも動かないので、
+                                // 戻る道まで一緒に塞がっていた。残っている字は
+                                // ここで落とす：本文へはもう入っており、次の
+                                // `edited`でもう一度渡されるだけのものである。
+                                // **変換の途中は渡さない**：そのEscapeは変換を
+                                // 取り消すWindowsのものである。
+                                if (event.text == Key.Escape && self.preedit-text == "") {
+                                    if (self.text != "") {
+                                        self.text = "";
+                                    }
+                                    if (root.escaped() || root.dismiss-menus()
+                                        || root.selection-escaped()) {
+                                        return accept;
+                                    }
+                                    return reject;
                                 }
                                 if self.preedit-text == "" && self.text == "" {
                                     // 追加要件 Terminal: the strip along the
@@ -2002,6 +2178,15 @@ export component EditorPane inherits Rectangle {
                                     // field, so a line break is inserted exactly
                                     // once whatever a multi-line TextInput would do
                                     // with the key itself.
+                                    if event.modifiers.control && event.modifiers.shift && !event.modifiers.alt
+                                        && (event.text == "t" || event.text == "T" || event.text == "\u{14}") {
+                                        root.reopen-closed-requested(); return accept;
+                                    }
+                                    if event.modifiers.control && !event.modifiers.alt
+                                        && (event.text == "o" || event.text == "O" || event.text == "\u{f}") {
+                                        root.open-file-requested();
+                                        return accept;
+                                    }
                                     if event.modifiers.control
                                         && (event.text == "s" || event.text == "S" || event.text == "\u{13}") {
                                         // **Shiftは別の用事**（書き手の報告
@@ -2013,7 +2198,7 @@ export component EditorPane inherits Rectangle {
                                         // いた——**メニューが`Ctrl+Shift+S`と
                                         // 出しているのに受ける行が無い**のは、
                                         // 2026-09-09の`Ctrl+W`と同じ穴である。
-                                        if (event.modifiers.shift) {
+                                        if (root.shift-held(event.modifiers.shift)) {
                                             root.save-as-requested();
                                         } else {
                                             root.save-requested();
@@ -2032,6 +2217,7 @@ export component EditorPane inherits Rectangle {
                                     // 奪ってはいけない。
                                     } else if event.modifiers.control
                                         && (event.text == "w" || event.text == "W" || event.text == "\u{17}") {
+                                        root.focus-trace("ctrl-w-dispatch");
                                         root.close-active-tab();
                                         accept
                                     } else if event.modifiers.control
@@ -2052,7 +2238,7 @@ export component EditorPane inherits Rectangle {
                                     // 見る**——`Ctrl+K`だけならEmacsの「行末まで
                                     // 消す」と読める鍵で、そちらは要件 11.4 の
                                     // ものである。
-                                    } else if event.modifiers.control && event.modifiers.shift
+                                    } else if event.modifiers.control && root.shift-held(event.modifiers.shift)
                                         && (event.text == "k" || event.text == "K" || event.text == "\u{b}") {
                                         root.line-edit(4);
                                         accept
@@ -2063,11 +2249,11 @@ export component EditorPane inherits Rectangle {
                                     // 打った字が本文へ入ることはないので、
                                     // どれで届いても同じ意味に取る（`Ctrl+=`が
                                     // `+`でも来るのと同じ）。
-                                    } else if event.modifiers.control && event.modifiers.shift
+                                    } else if event.modifiers.control && root.shift-held(event.modifiers.shift)
                                         && (event.text == "8" || event.text == "*" || event.text == "(") {
                                         root.list-edit(0, -1);
                                         accept
-                                    } else if event.modifiers.control && event.modifiers.shift
+                                    } else if event.modifiers.control && root.shift-held(event.modifiers.shift)
                                         && (event.text == "7" || event.text == "&" || event.text == "'") {
                                         root.list-edit(1, -1);
                                         accept
@@ -2075,7 +2261,7 @@ export component EditorPane inherits Rectangle {
                                     // 開いていなくてよい——最後に探した語は
                                     // `find-needle`に残っている。
                                     } else if event.text == Key.F3 {
-                                        root.find-again(!event.modifiers.shift);
+                                        root.find-again(!root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.modifiers.control
                                         && (event.text == "z" || event.text == "Z" || event.text == "\u{1a}") {
@@ -2146,11 +2332,11 @@ export component EditorPane inherits Rectangle {
                                     // the arrows' ±1/±2 are the flow's.
                                     } else if event.modifiers.alt && !event.modifiers.control
                                         && (event.text == "f" || event.text == "F") {
-                                        root.move-caret(3, event.modifiers.shift);
+                                        root.move-caret(3, root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.modifiers.alt && !event.modifiers.control
                                         && (event.text == "b" || event.text == "B") {
-                                        root.move-caret(-3, event.modifiers.shift);
+                                        root.move-caret(-3, root.shift-held(event.modifiers.shift));
                                         accept
                                     // 要件 11.4 と 要件 7.1: **Shift is what
                                     // makes it a rectangle.** The two are one
@@ -2158,7 +2344,7 @@ export component EditorPane inherits Rectangle {
                                     // selection and choosing its shape are the
                                     // same act.
                                     } else if event.modifiers.control && event.text == " " {
-                                        root.mark-toggled(event.modifiers.shift);
+                                        root.mark-toggled(root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.modifiers.alt && !event.modifiers.control
                                         && (event.text == "w" || event.text == "W") {
@@ -2169,17 +2355,17 @@ export component EditorPane inherits Rectangle {
                                         root.kill-requested(2);
                                         accept
                                     } else if event.modifiers.alt && !event.modifiers.control
-                                        && !event.modifiers.shift
+                                        && !root.shift-held(event.modifiers.shift)
                                         && (event.text == "y" || event.text == "Y") {
                                         root.kill-requested(3);
                                         accept
                                     } else if event.modifiers.alt && !event.modifiers.control
-                                        && event.modifiers.shift
+                                        && root.shift-held(event.modifiers.shift)
                                         && (event.text == "y" || event.text == "Y") {
                                         root.kill-requested(4);
                                         accept
                                     } else if event.modifiers.control && event.text == Key.Tab {
-                                        root.tab-stepped(event.modifiers.shift);
+                                        root.tab-stepped(root.shift-held(event.modifiers.shift));
                                         accept
                                     // 要件 11.3, and **before the arrow rows**
                                     // for the same reason. Held together with
@@ -2213,28 +2399,14 @@ export component EditorPane inherits Rectangle {
                                         && event.text == Key.RightArrow {
                                         root.navigate-requested(true);
                                         accept
-                                    } else if event.text == Key.Escape {
-                                        // The way out of a menu (要件 6.7).
-                                        // **Handled here rather than inside the
-                                        // menus**: a `FocusScope` in a popup
-                                        // takes the keyboard, and a popup that
-                                        // is dismissed by a click outside never
-                                        // runs any of our code to give it back
-                                        // (6.14). The keyboard stays where it
-                                        // is, and the key travels instead.
-                                        if (root.dismiss-menus() || root.escaped()) {
-                                            accept
-                                        } else {
-                                            reject
-                                        }
                                     } else if event.text == Key.Return {
-                                        root.enter-pressed(event.modifiers.shift);
+                                        root.enter-pressed(root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.Backspace {
                                         root.backspace-pressed();
                                         accept
                                     } else if event.text == Key.Tab {
-                                        root.tab-pressed(event.modifiers.shift);
+                                        root.tab-pressed(root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.Delete {
                                         root.delete-pressed();
@@ -2246,28 +2418,28 @@ export component EditorPane inherits Rectangle {
                                         && (event.text == Key.UpArrow || event.text == Key.DownArrow) {
                                         // 0=前へ 1=後へ 2=前へ写す 3=後へ写す
                                         root.line-edit(
-                                            (event.modifiers.shift ? 2 : 0)
+                                            (root.shift-held(event.modifiers.shift) ? 2 : 0)
                                             + (event.text == Key.DownArrow ? 1 : 0));
                                         accept
                                     } else if event.text == Key.UpArrow {
                                         // A step along the line in vertical text,
                                         // a step between lines in horizontal text.
-                                        root.move-caret(root.vertical ? -1 : -2, event.modifiers.shift);
+                                        root.move-caret(root.vertical ? -1 : -2, root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.DownArrow {
-                                        root.move-caret(root.vertical ? 1 : 2, event.modifiers.shift);
+                                        root.move-caret(root.vertical ? 1 : 2, root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.LeftArrow {
-                                        root.move-caret(root.vertical ? -2 : -1, event.modifiers.shift);
+                                        root.move-caret(root.vertical ? -2 : -1, root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.RightArrow {
-                                        root.move-caret(root.vertical ? 2 : 1, event.modifiers.shift);
+                                        root.move-caret(root.vertical ? 2 : 1, root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.Home {
-                                        root.home-end(false, event.modifiers.control, event.modifiers.shift);
+                                        root.home-end(false, event.modifiers.control, root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.End {
-                                        root.home-end(true, event.modifiers.control, event.modifiers.shift);
+                                        root.home-end(true, event.modifiers.control, root.shift-held(event.modifiers.shift));
                                         accept
                                     } else {
                                         reject
@@ -2325,6 +2497,13 @@ export component EditorPane inherits Rectangle {
                                 accept
                             }
                             pointer-event(event) => {
+                                if (event.button == PointerEventButton.back
+                                    || event.button == PointerEventButton.forward) {
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.navigate-requested(event.button == PointerEventButton.forward);
+                                    }
+                                    return;
+                                }
                                 // 追加要件 2026-09-06: **the right button opens
                                 // the pane's own menu where the pointer is.**
                                 // The rows are the ⋮ menu's plus the ones a
@@ -2342,6 +2521,10 @@ export component EditorPane inherits Rectangle {
                                     return;
                                 }
                                 if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                    if event.modifiers.control && root.link-open(self.mouse-x / 1px, self.mouse-y / 1px) {
+                                        root.dragging = false;
+                                        return;
+                                    }
                                     root.dragging = true;
                                     root.selection-start(
                                         self.mouse-x / 1px,
@@ -2411,6 +2594,25 @@ export component EditorPane inherits Rectangle {
                                         // 捨て、捨てられた木から`root`へ登ろうと
                                         // した生成コードは黙って何もしない。
                                         if !root.terminal: MenuRow {
+                                            title: "Undo";
+                                            shortcut: root.shortcut-keys[8];
+                                            enabled: root.can-undo;
+                                            activated => {
+                                                root.undo-requested(false);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if !root.terminal: MenuRow {
+                                            title: "Redo";
+                                            shortcut: root.shortcut-keys[9];
+                                            enabled: root.can-redo;
+                                            activated => {
+                                                root.undo-requested(true);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if !root.terminal: MenuSep { }
+                                        if !root.terminal: MenuRow {
                                             title: "Cut";
                                             shortcut: "Ctrl+X";
                                             activated => {
@@ -2442,6 +2644,13 @@ export component EditorPane inherits Rectangle {
                                                 // shell included.
                                                 ime-input.focus();
                                                 ime-input.paste();
+                                            }
+                                        }
+                                        if !root.terminal: MenuRow {
+                                            title: "本文だけをコピー";
+                                            activated => {
+                                                root.copy-body-requested();
+                                                context-menu.close();
                                             }
                                         }
                                         // E10（2026-09-11）: 選んだ行を後から
@@ -2603,7 +2812,7 @@ export component EditorPane inherits Rectangle {
 
                                             MenuRow {
                                                 title: "Start Selection";
-                                                shortcut: "Ctrl+Space";
+                                                shortcut: root.shortcut-keys[25];
                                                 activated => {
                                                     root.mark-toggled(false);
                                                     context-menu.close();
@@ -2611,7 +2820,7 @@ export component EditorPane inherits Rectangle {
                                             }
                                             MenuRow {
                                                 title: "Start Rectangle Selection";
-                                                shortcut: "Ctrl+Shift+Space";
+                                                shortcut: root.shortcut-keys[26];
                                                 activated => {
                                                     root.mark-toggled(true);
                                                     context-menu.close();
@@ -2621,7 +2830,7 @@ export component EditorPane inherits Rectangle {
                                         MenuSep { }
                                         MenuRow {
                                             title: root.terminal ? "Editor Below" : "Terminal Below";
-                                            shortcut: "Ctrl+`";
+                                            shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                                             activated => {
                                                 context-menu.close();
                                                 root.below-toggled();
@@ -2629,6 +2838,7 @@ export component EditorPane inherits Rectangle {
                                         }
                                         MenuRow {
                                             title: "Quick Draft…";
+                                            shortcut: root.shortcut-keys[10];
                                             activated => {
                                                 context-menu.close();
                                                 root.quick-draft-requested();
@@ -2637,7 +2847,7 @@ export component EditorPane inherits Rectangle {
                                         MenuSep { }
                                         MenuRow {
                                             title: "Back";
-                                            shortcut: "Alt+←";
+                                            shortcut: root.shortcut-keys[19];
                                             activated => {
                                                 context-menu.close();
                                                 root.navigate-requested(false);
@@ -2645,66 +2855,10 @@ export component EditorPane inherits Rectangle {
                                         }
                                         MenuRow {
                                             title: "Forward";
-                                            shortcut: "Alt+→";
+                                            shortcut: root.shortcut-keys[20];
                                             activated => {
                                                 context-menu.close();
                                                 root.navigate-requested(true);
-                                            }
-                                        }
-                                        MenuSep { }
-                                        MenuRow {
-                                            title: "Split Right";
-                                            activated => {
-                                                context-menu.close();
-                                                root.split-requested(true);
-                                            }
-                                        }
-                                        MenuRow {
-                                            title: "Split Down";
-                                            activated => {
-                                                context-menu.close();
-                                                root.split-requested(false);
-                                            }
-                                        }
-                                        MenuRow {
-                                            title: "Close Other Panes";
-                                            activated => {
-                                                context-menu.close();
-                                                root.close-others-requested();
-                                            }
-                                        }
-                                        // 追加要件 2026-09-08: **倍率は文書のもの。**
-                                        // シェルの升目は`TerminalLook::default()`が
-                                        // 決めていて、要件 9 の倍率は通っていない
-                                        // ——3行とも押せて何も変わらなかった。
-                                        if !root.terminal: VerticalLayout {
-                                            spacing: 1px;
-
-                                            MenuSep { }
-
-                                            MenuRow {
-                                                title: "Zoom In";
-                                                shortcut: "Ctrl+=";
-                                                activated => {
-                                                    root.zoom-stepped(1);
-                                                    context-menu.close();
-                                                }
-                                            }
-                                            MenuRow {
-                                                title: "Zoom Out";
-                                                shortcut: "Ctrl+-";
-                                                activated => {
-                                                    root.zoom-stepped(-1);
-                                                    context-menu.close();
-                                                }
-                                            }
-                                            MenuRow {
-                                                title: "Reset Zoom";
-                                                shortcut: "Ctrl+0";
-                                                activated => {
-                                                    root.zoom-reset-requested();
-                                                    context-menu.close();
-                                                }
                                             }
                                         }
                                     }
@@ -3355,6 +3509,7 @@ export component EditorPane inherits Rectangle {
             }
 
         }
+        }
     }
 
     // 追加要件 2026-09-06: **the right button on a tab.** Every row acts on the
@@ -3376,7 +3531,7 @@ export component EditorPane inherits Rectangle {
 
                 MenuRow {
                     title: "Close";
-                    shortcut: "Ctrl+W";
+                    shortcut: root.shortcut-keys[3];
                     activated => {
                         tab-menu.close();
                         root.close-active-tab();
@@ -3478,6 +3633,13 @@ export component EditorPane inherits Rectangle {
                         }
                     }
                     MenuRow {
+                        title: "同じ文書を別TABで開く";
+                        activated => {
+                            root.duplicate-tab-requested(root.tab-menu-target);
+                            tab-menu.close();
+                        }
+                    }
+                    MenuRow {
                         title: "Copy Path";
                         activated => {
                             root.copy-path-requested(root.tab-menu-target);
@@ -3493,7 +3655,7 @@ export component EditorPane inherits Rectangle {
 
                     MenuRow {
                         title: "Save";
-                        shortcut: "Ctrl+S";
+                        shortcut: root.shortcut-keys[1];
                         activated => {
                             root.save-requested();
                             tab-menu.close();
@@ -3501,7 +3663,7 @@ export component EditorPane inherits Rectangle {
                     }
                     MenuRow {
                         title: "Save As…";
-                        shortcut: "Ctrl+Shift+S";
+                        shortcut: root.shortcut-keys[2];
                         activated => {
                             root.save-as-requested();
                             tab-menu.close();
@@ -3556,7 +3718,7 @@ export component EditorPane inherits Rectangle {
 
                 MenuRow {
                     title: "Open File…";
-                    shortcut: "Ctrl+O";
+                    shortcut: root.shortcut-keys[0];
                     activated => {
                         strip-menu.close();
                         root.open-file-requested();
@@ -3565,7 +3727,7 @@ export component EditorPane inherits Rectangle {
                 MenuSep { }
                 MenuRow {
                     title: "Close";
-                    shortcut: "Ctrl+W";
+                    shortcut: root.shortcut-keys[3];
                     activated => {
                         strip-menu.close();
                         root.close-active-tab();

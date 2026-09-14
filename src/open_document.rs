@@ -39,6 +39,7 @@ use crate::document::{DocumentCounts, Reading};
 /// is the same reason a block decides its size from its own measurements
 /// rather than from a running total (技術検証 3.4).
 pub struct SharedText {
+    saved_text: RefCell<String>,
     pub text: RefCell<String>,
     pub edited: Cell<bool>,
     /// When the text last changed, and when the run of changes now waiting for
@@ -54,6 +55,7 @@ pub struct SharedText {
 impl SharedText {
     pub fn new(text: String, window: Weak<AppWindow>) -> Self {
         Self {
+            saved_text: RefCell::new(text.clone()),
             text: RefCell::new(text),
             edited: Cell::new(false),
             changed_at: Cell::new(Instant::now()),
@@ -132,8 +134,19 @@ impl SharedText {
 
     /// The text now agrees with its file: it was just opened, or just saved.
     pub fn mark_saved(&self) {
+        *self.saved_text.borrow_mut() = self.text.borrow().clone();
         self.pending_since.set(None);
         self.set_edited(false);
+    }
+
+    /// Undo/Redo compares exact text with the last successful save, not a hash.
+    /// Ordinary keystrokes do not scan or clone the saved document.
+    pub fn reconcile_saved(&self) {
+        let edited = *self.text.borrow() != *self.saved_text.borrow();
+        if !edited {
+            self.pending_since.set(None);
+        }
+        self.set_edited(edited);
     }
 
     /// Only the moves are reported. A keystroke in an already-edited document
@@ -167,6 +180,10 @@ impl SharedText {
 /// goes when the last one lets go, with no table to keep in step and no id that
 /// can name something that is no longer there.
 pub struct OpenDocument {
+    pub comparison_peer: RefCell<std::rc::Weak<OpenDocument>>,
+    comparison_cache: RefCell<Option<(Instant, Instant, Rc<crate::comparison::Difference>)>>,
+    /// Label of an immutable, transient external-version snapshot.
+    pub external_snapshot: Option<(String, crate::file_io::TextForm)>,
     pub file: RefCell<DocumentFile>,
     pub text: SharedText,
     /// **外で変わったまま、まだ片付いていない**（要件 8.3、書き手のレビュー S2）。
@@ -178,6 +195,7 @@ pub struct OpenDocument {
     ///
     /// 下りるのは**読み直したときと、書いたとき**だけ。
     pub outside: Cell<bool>,
+    pub missing: Cell<bool>,
     /// What has been done to this text and can be taken back (要件 7.1). It
     /// belongs to the document because 要件 7.6 says it does: one file, one
     /// history, however many panes are showing it.
@@ -196,12 +214,73 @@ pub struct OpenDocument {
 impl OpenDocument {
     pub fn new(file: DocumentFile, text: String, window: Weak<AppWindow>) -> Rc<Self> {
         Rc::new(Self {
+            comparison_peer: RefCell::new(std::rc::Weak::new()),
+            comparison_cache: RefCell::new(None),
+            external_snapshot: None,
             file: RefCell::new(file),
             text: SharedText::new(text, window),
             outside: Cell::new(false),
+            missing: Cell::new(false),
             history: RefCell::new(History::default()),
             counts: RefCell::new(CountsSlot::default()),
         })
+    }
+
+    #[cfg(test)]
+    pub fn snapshot(
+        title: String,
+        form: crate::file_io::TextForm,
+        text: String,
+        window: Weak<AppWindow>,
+    ) -> Rc<Self> {
+        let mut document = Self::new(DocumentFile::untitled(0), text, window);
+        Rc::get_mut(&mut document).unwrap().external_snapshot = Some((title, form));
+        document
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.external_snapshot.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn compare_with(self: &Rc<Self>, other: &Rc<Self>) {
+        self.stop_comparison();
+        *self.comparison_peer.borrow_mut() = Rc::downgrade(other);
+        *other.comparison_peer.borrow_mut() = Rc::downgrade(self);
+        *other.comparison_cache.borrow_mut() = None;
+    }
+
+    pub fn stop_comparison(self: &Rc<Self>) {
+        let peer = self.comparison_peer.borrow().upgrade();
+        if let Some(other) = peer {
+            let paired = other
+                .comparison_peer
+                .borrow()
+                .upgrade()
+                .is_some_and(|held| Rc::ptr_eq(&held, self));
+            if paired {
+                *other.comparison_peer.borrow_mut() = std::rc::Weak::new();
+                *other.comparison_cache.borrow_mut() = None;
+            }
+        }
+        *self.comparison_peer.borrow_mut() = std::rc::Weak::new();
+        *self.comparison_cache.borrow_mut() = None;
+    }
+
+    pub fn differences(&self) -> Option<Rc<crate::comparison::Difference>> {
+        let peer = self.comparison_peer.borrow().upgrade()?;
+        let keys = (self.text.changed_at(), peer.text.changed_at());
+        if let Some((a, b, result)) = self.comparison_cache.borrow().as_ref()
+            && (*a, *b) == keys
+        {
+            return Some(result.clone());
+        }
+        let result = Rc::new(crate::comparison::compare(
+            &self.text.borrow(),
+            &peer.text.borrow(),
+        ));
+        *self.comparison_cache.borrow_mut() = Some((keys.0, keys.1, result.clone()));
+        Some(result)
     }
 
     /// Remember a change that has just gone into the text.
@@ -273,6 +352,7 @@ pub const UNDO_DEPTH: usize = 500;
 /// done last, in whichever pane it was done.
 #[derive(Default)]
 pub struct History {
+    pub separate_next: bool,
     pub done: Vec<Edit>,
     pub undone: Vec<Edit>,
 }
@@ -286,7 +366,9 @@ impl History {
     /// writer has gone somewhere else.
     pub fn record(&mut self, edit: Edit) {
         self.undone.clear();
+        let separate = std::mem::take(&mut self.separate_next);
         if let Some(last) = self.done.last_mut()
+            && !separate
             && edit.made_at.duration_since(last.made_at) <= UNDO_JOIN_IDLE
         {
             // Typing that carries on where the last left off.
@@ -436,4 +518,132 @@ pub fn replace_source_range(
 ) -> usize {
     source.replace_range(start..end, replacement);
     start + replacement.len()
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn saved_text_matches_after_undo_and_changes_again_after_redo() {
+        for (original, replacement) in [("", "入力"), ("保存した本文", "全置換した本文")]
+        {
+            let text = SharedText::new(original.into(), Weak::default());
+            let mut history = History::default();
+            history.record(Edit {
+                at: 0,
+                removed: original.into(),
+                inserted: replacement.into(),
+                made_at: Instant::now(),
+            });
+            *text.borrow_mut() = replacement.into();
+            assert!(text.edited());
+            history.undo_into(&mut text.borrow_mut()).unwrap();
+            text.reconcile_saved();
+            assert!(!text.edited());
+            history.redo_into(&mut text.borrow_mut()).unwrap();
+            text.reconcile_saved();
+            assert!(text.edited());
+        }
+    }
+
+    #[test]
+    fn saving_splits_continuous_typing_and_keeps_undo_before_save() {
+        let text = SharedText::new(String::new(), Weak::default());
+        let mut history = History::default();
+        history.record(Edit {
+            at: 0,
+            removed: "".into(),
+            inserted: "a".into(),
+            made_at: Instant::now(),
+        });
+        *text.borrow_mut() = "a".into();
+        text.mark_saved();
+        history.separate_next = true;
+        history.record(Edit {
+            at: 1,
+            removed: "".into(),
+            inserted: "b".into(),
+            made_at: Instant::now(),
+        });
+        *text.borrow_mut() = "ab".into();
+        history.undo_into(&mut text.borrow_mut()).unwrap();
+        text.reconcile_saved();
+        assert_eq!(&*text.borrow(), "a");
+        assert!(!text.edited());
+        history.undo_into(&mut text.borrow_mut()).unwrap();
+        text.reconcile_saved();
+        assert!(text.edited());
+        history.redo_into(&mut text.borrow_mut()).unwrap();
+        text.reconcile_saved();
+        assert!(!text.edited());
+    }
+
+    #[test]
+    fn comparison_updates_after_manual_merge_and_undo_without_acknowledging_conflict() {
+        let source = OpenDocument::new(DocumentFile::untitled(1), "猫".into(), Weak::default());
+        let external = OpenDocument::snapshot(
+            "原稿".into(),
+            crate::file_io::TextForm::default(),
+            "犬".into(),
+            Weak::default(),
+        );
+        source.outside.set(true);
+        source.compare_with(&external);
+        let first = source.differences().unwrap();
+        assert_eq!(first.ranges, vec![0..3]);
+        assert!(
+            Rc::ptr_eq(&first, &source.differences().unwrap()),
+            "unchanged text reuses the result"
+        );
+        source.record(0, "猫".into(), "犬".into());
+        *source.text.borrow_mut() = external.text.borrow().clone();
+        assert!(source.differences().unwrap().ranges.is_empty());
+        assert!(external.differences().unwrap().ranges.is_empty());
+        source
+            .history
+            .borrow_mut()
+            .undo_into(&mut source.text.borrow_mut())
+            .unwrap();
+        assert_eq!(source.differences().unwrap().ranges, vec![0..3]);
+        assert_eq!(&*external.text.borrow(), "犬");
+        assert!(source.outside.get());
+        assert!(!external.text.edited());
+        source.stop_comparison();
+        assert!(source.differences().is_none());
+        assert!(external.differences().is_none());
+        assert!(source.outside.get());
+    }
+
+    #[test]
+    fn comparing_again_retires_the_previous_pair_without_keeping_documents_alive() {
+        let source = OpenDocument::untitled(1, Weak::default());
+        let first = OpenDocument::untitled(2, Weak::default());
+        let next = OpenDocument::untitled(3, Weak::default());
+        source.compare_with(&first);
+        source.compare_with(&next);
+        assert!(first.differences().is_none());
+        assert!(next.differences().is_some());
+        first.stop_comparison();
+        assert!(source.differences().is_some());
+        drop(next);
+        assert!(source.differences().is_none());
+    }
+
+    #[test]
+    fn external_snapshot_is_detached_from_the_original_file_and_work_copy() {
+        let document = OpenDocument::snapshot(
+            "原稿.md".into(),
+            crate::file_io::TextForm::default(),
+            "外部の本文".into(),
+            Weak::default(),
+        );
+        assert!(document.read_only());
+        assert!(document.file.borrow().path().is_none());
+        assert!(!document.text.edited());
+        assert!(document.text.pending_since().is_none());
+        assert_eq!(document.text.borrow().as_str(), "外部の本文");
+        assert!(document.history.borrow().done.is_empty());
+        assert!(!OpenDocument::untitled(1, Weak::default()).read_only());
+    }
 }

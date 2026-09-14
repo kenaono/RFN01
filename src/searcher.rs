@@ -38,6 +38,7 @@ use crate::find::{self, Hit};
 /// here: they are 要件 7.7's answer about what a person can read, which is the
 /// editor's business and not this thread's.
 pub struct SearchJob {
+    pub exclusions: String,
     pub root: PathBuf,
     pub needle: String,
     /// Which search this is, counting up. **The editor's staleness check**: a
@@ -103,7 +104,21 @@ impl Superseded for NeverSuperseded {
 /// half-done list is worse than none because it looks like an answer.
 pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcome> {
     let started = Instant::now();
-    let paths = file_tree::files_under(&job.root, &file_tree::read_folder, job.files);
+    let patterns = exclusion_patterns(&job.exclusions);
+    let paths = file_tree::files_under(
+        &job.root,
+        &|folder| {
+            file_tree::read_folder(folder)
+                .into_iter()
+                .filter(|node| {
+                    !patterns.iter().any(|(pattern, directory)| {
+                        (!directory || node.folder) && pattern.is_match(&node.name)
+                    })
+                })
+                .collect()
+        },
+        job.files,
+    );
     let mut files: Vec<FileHits> = Vec::new();
     let mut total = 0usize;
     for path in paths {
@@ -130,6 +145,22 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         total,
         ms: started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+fn exclusion_patterns(value: &str) -> Vec<(regex::Regex, bool)> {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let directory = s.ends_with('/') || s.ends_with('\\');
+            let name = s.trim_end_matches(['/', '\\']);
+            let pattern = regex::escape(name).replace("\\*", ".*").replace("\\?", ".");
+            regex::Regex::new(&format!("(?i)^{pattern}$"))
+                .ok()
+                .map(|r| (r, directory))
+        })
+        .collect()
 }
 
 /// A thread that searches work folders, and the two queues to it.
@@ -260,6 +291,7 @@ mod tests {
 
     fn job(root: &Path, needle: &str) -> SearchJob {
         SearchJob {
+            exclusions: String::new(),
             root: root.to_path_buf(),
             needle: needle.to_owned(),
             generation: 1,
@@ -282,6 +314,28 @@ mod tests {
             sleep(Duration::from_millis(10));
         }
         collected
+    }
+
+    #[test]
+    fn exclusions_prune_folders_before_the_file_limit() {
+        let folder = scratch_folder("exclusions");
+        fs::create_dir_all(folder.join("backup")).unwrap();
+        write(&folder.join("backup"), "hidden.md", "needle");
+        write(&folder, "A.md", "needle");
+        write(&folder, "z.md", "needle");
+        let mut request = job(&folder, "needle");
+        request.files = 1;
+        request.exclusions = "backup/;a.*".into();
+        let found = search(&request, &mut NeverSuperseded).unwrap();
+        assert_eq!(found.files.len(), 1);
+        assert_eq!(found.files[0].path, folder.join("z.md"));
+        request.files = 10;
+        request.exclusions.clear();
+        assert_eq!(
+            search(&request, &mut NeverSuperseded).unwrap().files.len(),
+            3
+        );
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

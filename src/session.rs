@@ -70,6 +70,7 @@ pub fn open_session(
             }
             let caret = tab.caret;
             strips[id.index() as usize].tabs.push(PaneTab {
+                identity: Rc::new(()),
                 // 要件 7.9（2026-09-08）: セッションが覚えていたモードの番号。
                 // **無い番号は「なし」**になる（`word_mode_with`）——モードを
                 // 消したあとの文書は、間違った色ではなく色無しで戻る。
@@ -115,6 +116,7 @@ pub fn open_session(
         }
         let strip = &mut strips[focused.index() as usize];
         strip.tabs.push(PaneTab {
+            identity: Rc::new(()),
             // セッションが名を挙げていない作業コピーなので、モードも無い。
             word_mode: 0,
             document: document.clone(),
@@ -230,6 +232,7 @@ pub fn open_without_session(
         tabs: documents
             .iter()
             .map(|(document, state)| PaneTab {
+                identity: Rc::new(()),
                 word_mode: 0,
                 document: document.clone(),
                 view: TabView {
@@ -259,7 +262,20 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         .map(|id| {
             let strip = tabs.of(*id);
             app_data::SessionPane {
-                active: strip.active,
+                active: strip
+                    .tabs
+                    .iter()
+                    .take(strip.active)
+                    .filter(|tab| tab.terminal.is_none() && !tab.document.read_only())
+                    .count()
+                    .min(
+                        strip
+                            .tabs
+                            .iter()
+                            .filter(|tab| tab.terminal.is_none() && !tab.document.read_only())
+                            .count()
+                            .saturating_sub(1),
+                    ),
                 zoom: id.zoom(window),
                 // **A shell is not written down** (追加要件 Terminal). The
                 // process ends with the editor, so a remembered terminal tab
@@ -269,6 +285,7 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
                     .tabs
                     .iter()
                     .filter(|tab| tab.terminal.is_none())
+                    .filter(|tab| !tab.document.read_only())
                     .map(session_tab)
                     .collect(),
             }
@@ -283,6 +300,8 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         panes,
         folder: folder.root.clone(),
         search_folder: folder.searching.clone(),
+        search_exclusions: window.get_search_exclusions().to_string(),
+        shortcut_bindings: window.get_shortcut_bindings().to_string(),
         expanded: folder.expanded.iter().cloned().collect(),
         tree_shown: window.get_tree_open(),
         // 追加要件 2026-09-06: and how wide the writer left it.

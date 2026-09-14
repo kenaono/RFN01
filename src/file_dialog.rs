@@ -70,6 +70,10 @@ const ALL_FILES: u32 = 3;
 /// `None` for a cancel, and for the rare failure to show the dialog at all.
 /// The two mean the same thing here: no file was chosen, so nothing changes.
 pub fn open_document(owner: Owner) -> Option<PathBuf> {
+    open_document_named(owner, "開く")
+}
+
+pub fn open_document_named(owner: Owner, title: &str) -> Option<PathBuf> {
     let filters = filters();
     // SAFETY: COM is initialised on this thread — it is the window's, and the
     // apartment is the one 技術検証 7.3 settled on. Every string the shell
@@ -79,7 +83,7 @@ pub fn open_document(owner: Owner) -> Option<PathBuf> {
         let dialog: IFileDialog = created.ok()?;
         let _ = dialog.SetFileTypes(&filters);
         let _ = dialog.SetFileTypeIndex(ALL_FILES);
-        let _ = dialog.SetTitle(w!("開く"));
+        let _ = dialog.SetTitle(&HSTRING::from(title));
         if let Ok(options) = dialog.GetOptions() {
             let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM);
         }

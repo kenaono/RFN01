@@ -77,6 +77,31 @@ pub fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
     let _ = app_data::discard_in(&directory, copy);
 }
 
+/// S1: closing a memo must not leave an invisible backup to restore later.
+pub fn discard_memo_copy(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) -> bool {
+    let Some(directory) = app_data::work_directory() else {
+        return true;
+    };
+    let copy = work_identity(&document.file.borrow());
+    let path = directory.join(app_data::work_file_name(&copy));
+    let removed = if live.writer.remove(path.clone()) {
+        let results = live.writer.settle(WORK_COPY_SETTLE);
+        let removed = results.iter().any(|result| {
+            result.path == path && result.removed && !result.superseded && result.error.is_none()
+        });
+        report_write_results(window, live, results);
+        removed
+    } else {
+        app_data::discard_in(&directory, &copy).is_ok()
+    };
+    if !removed {
+        document.text.mark_pending();
+        window
+            .set_render_status("作業コピーを削除できなかったため、メモを閉じずに残しました".into());
+    }
+    removed
+}
+
 /// Take away every work copy there is (追加要件 2026-09-08).
 ///
 /// **自動退避を切った瞬間に走る。**切ったのに前の退避が残っていれば、次の
@@ -226,6 +251,9 @@ pub fn write_work_copy_now(window: &AppWindow, live: &Live) {
 /// 書かれた文字は「まだ退避していない変更」のままで、書き手が入れ直せば
 /// その続きから退避が始まる。
 pub fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) {
+    if document.read_only() {
+        return;
+    }
     if !window.get_autosave() {
         return;
     }
@@ -402,7 +430,23 @@ pub fn check_external_change(window: &AppWindow, live: &Live) {
     let mut noticed = false;
     for document in crate::open_documents(live) {
         let file = &document.file;
-        if file.borrow().external_change() != ExternalChange::Modified {
+        let change = file.borrow().external_change();
+        if change == ExternalChange::Missing {
+            if !document.missing.replace(true) {
+                document.outside.set(true);
+                noticed = true;
+                if Rc::ptr_eq(&document, &active) {
+                    window
+                        .set_render_status("ファイルが見つからないため、外部版とは比較できません。本文は保持しています".into());
+                }
+            }
+            continue;
+        }
+        if document.missing.replace(false) {
+            noticed = true;
+            document.outside.set(change == ExternalChange::Modified);
+        }
+        if change != ExternalChange::Modified {
             continue;
         }
         let Some(stamp) = file.borrow().current_stamp() else {
@@ -453,6 +497,9 @@ pub fn reload_from_file(window: &AppWindow, live: &Live) {
 /// **前にある文書とは限らない**——後ろのタブで起きた外部変更も、失うものが無ければ
 /// そこで読み直す（要件 8.3）。
 pub fn reload_document(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) {
+    if document.read_only() {
+        return;
+    }
     let reloaded = document.file.borrow_mut().reload(MAX_DOCUMENT_CHARACTERS);
     match reloaded {
         Some(Ok(text)) => {
@@ -462,6 +509,7 @@ pub fn reload_document(window: &AppWindow, live: &Live, document: &Rc<OpenDocume
             document.text.mark_saved();
             // **片付いたので、印は下りる**（書き手のレビュー 2026-09-11、S2）。
             document.outside.set(false);
+            document.missing.set(false);
             discard_work_copy(live, &work_identity(&document.file.borrow()));
             publish_tabs(window, live);
             window.set_render_status("外部の変更を読み込みました".into());
@@ -487,6 +535,9 @@ pub fn reload_document(window: &AppWindow, live: &Live, document: &Rc<OpenDocume
 /// **読めなければ何もしない。**文書は読めていたときのままで、ファイルにも触って
 /// いない——開き直しは、失敗しても何も失わない操作である。
 pub fn reopen_as(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>, encoding: Encoding) {
+    if document.read_only() {
+        return;
+    }
     // **いま何で読んでいるか**を、読み直す前に控える。同じものを選んだのなら
     // 字は1つも変わらない——書き手の報告 2026-09-10：「特に壊れて見えません」は
     // **UTF-16 BEの見本をUTF-16 BEで開き直した**回で、答えとしては正しいのに
@@ -635,6 +686,16 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
 /// loop, and Slint goes on delivering events from inside it.
 pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     let document = live.active(window);
+    if !ask_for_name && document.file.borrow().external_change() == ExternalChange::Missing {
+        crate::ask_missing_file(window, live, &document);
+        return;
+    }
+    if document.read_only() {
+        window.set_render_status(
+            "外部版は読み取り専用です。必要な内容を元のタブへコピーしてください".into(),
+        );
+        return;
+    }
     // **求めが届いたことを、まず残す**（書き手の報告 2026-09-10：「縦書きだと
     // 警告が出ていません」）。**鍵が届かなかった回は、ログのどこにも出ない**
     // ——書けたか断られたかの行しか無ければ、「効かなかった」と「届いていない」を
@@ -704,7 +765,8 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     // 要件 8.2: the ordinary Ctrl+S is silent, and the one thing it stops for
     // is a file that has changed underneath since it was opened. 要件 8.3 gives
     // that four answers, so the writing waits for one.
-    let outside_change = file.borrow().external_change() == ExternalChange::Modified;
+    let outside_change =
+        file.borrow().external_change() == ExternalChange::Modified || document.outside.get();
     if Some(&target) == existing.as_ref() && outside_change {
         let title = file.borrow().title();
         ask_question(
@@ -722,6 +784,7 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
                 "作業中の内容で上書き",
                 "外部の変更を読み込む",
                 "別名で保存",
+                "外部版と比べる",
                 "キャンセル",
             ],
             1,
@@ -808,6 +871,9 @@ pub fn write_document_in(
     target: PathBuf,
     form: file_io::TextForm,
 ) -> bool {
+    if document.read_only() {
+        return false;
+    }
     let cache = &live.cache;
     let file = &document.file;
     let text = document.text.borrow().clone();
@@ -820,10 +886,12 @@ pub fn write_document_in(
     let outcome = file.borrow_mut().save_to_as(target, &text, form);
     match outcome {
         Ok(()) => {
+            document.history.borrow_mut().separate_next = true;
             document.text.mark_saved();
             // **書けば片付く**（書き手のレビュー 2026-09-11、S2）。いま書いたものが
             // そのファイルの中身で、外の版はもう無い。
             document.outside.set(false);
+            document.missing.set(false);
             discard_work_copy(live, &previous);
             discard_work_copy(live, &work_identity(&file.borrow()));
             // The name in the strip changes with 名前を付けて保存, and the
@@ -844,8 +912,12 @@ pub fn write_document_in(
             cache.borrow_mut().log_diag(
                 "file",
                 &format!(
-                    "save ok bytes={bytes} as={} path={shown}",
-                    form.encoding.as_str()
+                    // **改行の形も書く**（2026-09-12）。文字コードだけでは、
+                    // 保存が原稿の改行をどう書いたかが記録に残らない——帯と
+                    // 同じ言葉（`UTF-8・CRLF`）で残す。
+                    "save ok bytes={bytes} as={}・{} path={shown}",
+                    form.encoding.as_str(),
+                    crate::newline_name(form.newline)
                 ),
             );
             true
@@ -920,7 +992,9 @@ pub fn save_all(window: &AppWindow, live: &Live) {
             unnamed.push(document);
             continue;
         };
-        if document.file.borrow().external_change() == ExternalChange::Modified {
+        if document.file.borrow().external_change() != ExternalChange::None
+            || document.outside.get()
+        {
             conflicted += 1;
             continue;
         }

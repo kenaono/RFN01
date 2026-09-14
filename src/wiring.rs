@@ -15,9 +15,78 @@
 //! `render_cache`）。閉包の中で何度もクローンされる名前なので、ここで短い名へ
 //! 付け替えると、内側と外側で同じ名前が別のものを指す形になる。
 
+use crate::{LeftTab, PaneTab, double_click_time, duplicate_tab};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+type ExplorerClick = Option<(usize, PaneId, Instant, bool)>;
+
+fn reuse_explorer_destination(new_tab: bool, was_open: bool, provisional: bool) -> bool {
+    new_tab || (!was_open && provisional)
+}
+
+#[test]
+fn an_already_open_provisional_tab_also_gets_another_view() {
+    assert!(!reuse_explorer_destination(false, true, true));
+    assert!(!reuse_explorer_destination(false, true, false));
+    assert!(reuse_explorer_destination(false, false, true));
+    assert!(reuse_explorer_destination(true, true, false));
+}
+
+fn take_explorer_double(click: &mut ExplorerClick, row: usize, pane: PaneId) -> Option<bool> {
+    let same = click.as_ref().is_some_and(|(previous, owner, at, _)| {
+        *previous == row && *owner == pane && at.elapsed() <= double_click_time()
+    });
+    if same {
+        click.take().map(|(_, _, _, reuse)| reuse)
+    } else {
+        *click = None;
+        None
+    }
+}
+
+#[test]
+fn explorer_double_survives_row_recreation_and_is_consumed_once() {
+    let pane = PaneId::from_index(0);
+    for reuse in [false, true] {
+        let mut click = None;
+        remember_explorer_destination(&mut click, 2, pane, reuse);
+        // Only the controller survives when the first click replaces the rows.
+        assert_eq!(take_explorer_double(&mut click, 2, pane), Some(reuse));
+        assert_eq!(take_explorer_double(&mut click, 2, pane), None);
+        remember_explorer_destination(&mut click, 2, pane, reuse);
+        assert_eq!(take_explorer_double(&mut click, 3, pane), None);
+        remember_explorer_destination(&mut click, 2, pane, reuse);
+        click.as_mut().unwrap().2 = Instant::now() - double_click_time() - Duration::from_millis(1);
+        assert_eq!(take_explorer_double(&mut click, 2, pane), None);
+    }
+}
+
+fn remember_explorer_destination(click: &mut ExplorerClick, row: usize, pane: PaneId, reuse: bool) {
+    let same = click.as_ref().is_some_and(|(previous, owner, at, _)| {
+        *previous == row && *owner == pane && at.elapsed() <= double_click_time()
+    });
+    if !same {
+        *click = Some((row, pane, Instant::now(), reuse));
+    }
+}
+
+#[test]
+fn explorer_second_click_preserves_the_first_destination() {
+    let pane = PaneId::from_index(0);
+    for reuse_first in [false, true] {
+        let mut click = None;
+        remember_explorer_destination(&mut click, 3, pane, reuse_first);
+        remember_explorer_destination(&mut click, 3, pane, !reuse_first);
+        assert_eq!(click.unwrap().3, reuse_first);
+        remember_explorer_destination(&mut click, 4, pane, !reuse_first);
+        assert_eq!(click.unwrap().3, !reuse_first);
+        click.as_mut().unwrap().2 = Instant::now() - double_click_time() - Duration::from_millis(1);
+        remember_explorer_destination(&mut click, 4, pane, reuse_first);
+        assert_eq!(click.unwrap().3, reuse_first);
+    }
+}
 
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, VecModel};
 
@@ -26,7 +95,7 @@ use crate::document;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
 use crate::word_marks;
 use crate::{
-    AppWindow, Live, NO_TARGET, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
+    AppWindow, Live, NO_TARGET, PAPER_SLOT, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, add_word_to_group, bullet_marks_of, choose_find_option, clear_find,
     close_word_naming, collect_search, colour_row, count_in_pane, drop_tree_row, edit_word_file,
     export_word_group, file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
@@ -36,7 +105,7 @@ use crate::{
     publish_word_modes, quick_draft, read_word_source, remove_word_from_group, rename_word_group,
     rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings, restore_editor_focus,
     save_settings, schedule_relayout, search_in_folder, search_work_folder, selected_runs,
-    set_colour, set_word_mode_of, shell, show_bullet_marks, shown_sheet, slint_colour,
+    set_picked_colour, set_word_mode_of, shell, show_bullet_marks, shown_sheet, slint_colour,
     step_setting, tell_goto, toggle_goto, tree_command, walk_find_history, word_modes_now,
 };
 
@@ -295,6 +364,18 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
     window.on_outside_asked(move || {
         if let Some(window) = weak.upgrade() {
             crate::ask_outside_change(&window, &held);
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_comparison_dismissed(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            held.states
+                .document(crate::PaneId::from_index(pane))
+                .stop_comparison();
+            crate::relayout_panes(&window, &held.states, &held.cache);
+            crate::restore_editor_focus(&window);
         }
     });
 
@@ -696,6 +777,7 @@ pub fn wire_typography(
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
     let colours = palette.clone();
+    let background_settings = numbers.clone();
     window.on_color_picked(move |slot| {
         let slot = slot.max(0) as usize;
         let weak = weak.clone();
@@ -703,12 +785,20 @@ pub fn wire_typography(
         let cache = cache.clone();
         let timer = timer.clone();
         let colours = colours.clone();
+        let background_settings = background_settings.clone();
         Timer::single_shot(Duration::ZERO, move || {
             let Some(window) = weak.upgrade() else {
                 return;
             };
             let sheet = shown_sheet(&window);
-            let row = colour_row(sheet, slot);
+            let initial_slot = if (8..15).contains(&slot)
+                && Setting::Decoration(slot - 8, 3).read(&window, sheet) == 0
+            {
+                PAPER_SLOT
+            } else {
+                slot
+            };
+            let row = colour_row(sheet, initial_slot);
             let now = window.get_palette().row_data(row).unwrap_or_default();
             let owner = ime::window_handle(&window);
             let standing = [now.red(), now.green(), now.blue()];
@@ -720,7 +810,7 @@ pub fn wire_typography(
                 picked[1] as f32 / 255.0,
                 picked[2] as f32 / 255.0,
             ];
-            set_colour(&colours, sheet, slot, rgb);
+            set_picked_colour(&background_settings, &colours, sheet, slot, rgb);
             schedule_relayout(&window, &states, &cache, &timer);
         });
     });
@@ -798,6 +888,19 @@ pub fn wire_open_and_draft(
     live: &Live,
     draft: &Rc<RefCell<quick_draft::QuickDraftWindow>>,
 ) {
+    crate::diff_view::wire(window, live);
+    crate::shortcuts::wire(window, live);
+    let weak = window.as_weak();
+    let reopened_live = live.clone();
+    window.on_reopen_closed_requested(move || {
+        let weak = weak.clone();
+        let live = reopened_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::reopen_closed_tab(&window, &live);
+            }
+        });
+    });
     let weak = window.as_weak();
     let file_live = live.clone();
     window.on_open_file_requested(move || {
@@ -907,6 +1010,35 @@ pub fn wire_saving(window: &AppWindow, live: &Live) {
 /// フォルダ全文検索（要件 7.7）はスレッドへ出ていて、返事は世代番号つきで
 /// 戻ってくる。**古い問いへの答えは捨てる**：追い越しは画面に出ない。
 pub fn wire_left_panel(window: &AppWindow, live: &Live) {
+    let weak = window.as_weak();
+    let excluded_live = live.clone();
+    window.on_search_exclusions_changed(move || {
+        if let Some(window) = weak.upgrade() {
+            excluded_live.searched.set(excluded_live.searched.get() + 1);
+            excluded_live.results.borrow_mut().clear();
+            publish_left(&window, &excluded_live);
+            window.set_folder_status("条件を変更しました。検索してください".into());
+            crate::write_session(&window, &excluded_live);
+        }
+    });
+    let weak = window.as_weak();
+    let new_live = live.clone();
+    window.on_tree_new_finished(move |accept| {
+        let weak = weak.clone();
+        let live = new_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::finish_tree_entry(&window, &live, accept);
+            }
+        });
+    });
+    let weak = window.as_weak();
+    let explorer_live = live.clone();
+    window.on_explorer_command(move |command| {
+        if let Some(window) = weak.upgrade() {
+            crate::explorer_command(&window, &explorer_live, command);
+        }
+    });
     // 要件 5.1, 5.2: the work folder and its tree.
     let weak = window.as_weak();
     let folder_live = live.clone();
@@ -942,23 +1074,85 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
 
     let weak = window.as_weak();
     let tree_live = live.clone();
+    // Preserve the destination chosen by the first click until double-click.
+    let explorer_click = Rc::new(RefCell::new(None::<(usize, PaneId, Instant, bool)>));
+    let first_click = explorer_click.clone();
     window.on_left_row_activated(move |index| {
         let index = index.max(0) as usize;
         let weak = weak.clone();
         let live = tree_live.clone();
+        let first_click = first_click.clone();
         // Opening a file replaces the model this row is drawn from. 6.18 again:
         // not from inside the click that is on it.
         Timer::single_shot(Duration::ZERO, move || {
             if let Some(window) = weak.upgrade() {
+                let id = focused_pane(&window);
+                let explorer = LeftTab::from_index(window.get_left_tab()) == LeftTab::Explorer;
+                let file = explorer
+                    && live
+                        .tree_paths
+                        .borrow()
+                        .get(index)
+                        .is_some_and(|path| path.is_file());
+                let doubled = if file {
+                    take_explorer_double(&mut first_click.borrow_mut(), index, id)
+                } else {
+                    *first_click.borrow_mut() = None;
+                    None
+                };
+                if let Some(reuse) = doubled {
+                    live.cache.borrow_mut().log_diag(
+                        "explorer",
+                        &format!("double pane={} row={index} reuse={reuse}", id.log_name()),
+                    );
+                    if reuse {
+                        if let Some(tab) = live.tabs.borrow().of(id).current() {
+                            tab.provisional.set(false);
+                        }
+                        publish_tabs(&window, &live);
+                    } else {
+                        let active = live.tabs.borrow().of(id).active;
+                        duplicate_tab(&window, &live, id, active);
+                    }
+                    return;
+                }
+                let new_tab = live
+                    .tabs
+                    .borrow()
+                    .of(id)
+                    .current()
+                    .is_some_and(|tab| tab.empty);
+                let was_open = live.tree_paths.borrow().get(index).is_some_and(|path| {
+                    live.tabs
+                        .borrow()
+                        .of(id)
+                        .tabs
+                        .iter()
+                        .any(|tab| tab.document.file.borrow().path() == Some(path.as_path()))
+                });
                 activate_left_row(&window, &live, index);
+                if file {
+                    let provisional = live
+                        .tabs
+                        .borrow()
+                        .of(id)
+                        .current()
+                        .is_some_and(PaneTab::is_provisional);
+                    remember_explorer_destination(
+                        &mut first_click.borrow_mut(),
+                        index,
+                        id,
+                        reuse_explorer_destination(new_tab, was_open, provisional),
+                    );
+                }
             }
         });
     });
 
     let weak = window.as_weak();
     let kept_live = live.clone();
-    // 書き手の報告 2026-09-07: **二度目のクリックは決定。**開くのは一度目が
-    // 済ませているので、ここに残るのは「このタブは置いておく」の一言だけ。
+    // Explorer doubles create another view unless the first click already
+    // filled a New Tab or made a provisional view. Other lists still pin.
     window.on_left_row_kept(move |_index| {
         let weak = weak.clone();
         let live = kept_live.clone();
@@ -967,6 +1161,10 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
         Timer::single_shot(Duration::ZERO, move || {
             if let Some(window) = weak.upgrade() {
                 let id = focused_pane(&window);
+                if LeftTab::from_index(window.get_left_tab()) == LeftTab::Explorer {
+                    // Explorer is counted by the persistent click handler above.
+                    return;
+                }
                 let tabs = live.tabs.borrow();
                 if let Some(tab) = tabs.of(id).current() {
                     tab.provisional.set(false);

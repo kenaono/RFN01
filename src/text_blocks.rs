@@ -105,6 +105,9 @@ pub struct Typography {
     ///
     /// An empty name means "whatever DirectWrite would have chosen", which is
     /// what a name nobody has set looks like.
+    /// E11: bold, italic, strike, background, heading rule bits, Body/H1..H6.
+    pub decorations: [u8; 7],
+    pub backgrounds: [[f32; 3]; 7],
     pub body_font: String,
     pub heading_font: [String; MAX_HEADING_LEVEL],
     pub code_font: String,
@@ -124,6 +127,7 @@ pub struct Typography {
     /// to be laid out again. Keeping it here is what makes that happen: two
     /// specs that differ by this are not the same page and never were.
     pub line_numbers: bool,
+    pub whitespace: bool,
     /// ルビと傍点の大きさ、親文字に対する比率（要件 7.8・要件 9）。
     ///
     /// **幾何には効かない。**ルビは幅0の箱の脇に描かれるので、この値が動いても
@@ -182,12 +186,12 @@ pub const DEFAULT_BULLET: char = '•';
 /// purple in it, because it is the one a reader looks at for an hour.
 pub const DEFAULT_INK: [f32; 3] = [36.0 / 255.0, 33.0 / 255.0, 30.0 / 255.0];
 /// `paper`, the horizontal sheet's.
-pub const DEFAULT_PAPER: [f32; 3] = [252.0 / 255.0, 249.0 / 255.0, 239.0 / 255.0];
+pub const DEFAULT_PAPER: [f32; 3] = [1.0, 254.0 / 255.0, 250.0 / 255.0];
 /// `paper-alt`, the vertical sheet's. **A shade deeper on purpose**: the two
 /// panes differ just enough to answer 「どちらの向きで書いているか」 without a
 /// word being read. It is a default now rather than a rule — each sheet has a
 /// paper of its own, and the writer may set them the same.
-pub const DEFAULT_VERTICAL_PAPER: [f32; 3] = [249.0 / 255.0, 244.0 / 255.0, 226.0 / 255.0];
+pub const DEFAULT_VERTICAL_PAPER: [f32; 3] = [253.0 / 255.0, 251.0 / 255.0, 244.0 / 255.0];
 
 impl Default for Typography {
     fn default() -> Self {
@@ -207,6 +211,8 @@ impl Typography {
             ruby_scale: 0.5,
             ruby_offset: 0.0,
             heading_scale: [1.0; MAX_HEADING_LEVEL],
+            decorations: [0; 7],
+            backgrounds: [DEFAULT_PAPER; 7],
             body_font: DEFAULT_BODY_FONT.to_owned(),
             heading_font: [const { String::new() }; MAX_HEADING_LEVEL]
                 .map(|_| DEFAULT_HEADING_FONT.to_owned()),
@@ -215,6 +221,7 @@ impl Typography {
             paper: DEFAULT_PAPER,
             heading_ink: [DEFAULT_INK; MAX_HEADING_LEVEL],
             line_numbers: false,
+            whitespace: false,
             // 要件 7.8: 書き手が何も書かなくても効く、が既定。
             upright_digits: true,
             // E10の③: いままで描いていた字。
@@ -591,6 +598,9 @@ pub struct Marks {
     /// is on both sides *and* between them; only the part a reader is meant to
     /// read comes through, and this is what says which part that was.
     pub link: bool,
+    /// E12: the destination has not been resolved. This does not assert that
+    /// the file is missing; no folder scan is performed while parsing text.
+    pub unresolved_link: bool,
     /// A comment inside a fenced code block, from its marker to the end of the
     /// line.
     ///
@@ -1262,14 +1272,14 @@ pub struct BlockLayoutPlan {
 /// `line_extent` is the pane's size along the line axis: its height in vertical
 /// writing, its width in horizontal writing.
 ///
-/// The layout box is the pane less a margin at each end, and the margin is one
-/// and a half times the font size, so three font sizes come off the extent. What
+/// The layout box is the pane less a margin at each end. Each margin reserves
+/// six marker cells and half a cell of separation, so thirteen font sizes come off. What
 /// divides into the rest is the *advance*, not the size, so widening the
 /// character spacing fits fewer characters in the same pane.
 pub fn cells_per_line(line_extent: u32, typography: &Typography) -> u32 {
     let font_size = typography.font_size.max(1.0);
     let advance = typography.cell_advance();
-    let usable = (line_extent as f32 - font_size * 3.0).max(advance);
+    let usable = (line_extent as f32 - font_size * 13.0).max(advance);
     (usable / advance).floor().max(1.0) as u32
 }
 
@@ -1281,7 +1291,7 @@ pub fn cells_per_line(line_extent: u32, typography: &Typography) -> u32 {
 /// the body size or the zoom changes, and a pixel width would not.
 pub fn line_extent_for_cells(cells: u32, typography: &Typography) -> u32 {
     let advance = typography.cell_advance();
-    let padding = typography.font_size.max(1.0) * 3.0;
+    let padding = typography.font_size.max(1.0) * 13.0;
     (cells.max(1) as f32 * advance + padding).ceil() as u32
 }
 
@@ -1460,6 +1470,7 @@ pub trait WrapPoints {
 /// somewhere else and the document goes on being edited in the meantime.
 #[derive(Clone)]
 pub struct AskedLine {
+    pub byte_start: usize,
     pub text: String,
     pub style: LineStyle,
     pub marks: Vec<Emphasis>,
@@ -1495,11 +1506,24 @@ impl AskedLine {
 #[derive(Default)]
 pub struct RecordedWraps {
     pub asked: Vec<AskedLine>,
+    source_address: Option<usize>,
+}
+
+impl RecordedWraps {
+    pub fn for_text(text: &str) -> Self {
+        Self {
+            asked: Vec::new(),
+            source_address: Some(text.as_ptr() as usize),
+        }
+    }
 }
 
 impl WrapPoints for RecordedWraps {
     fn line_starts(&mut self, line: LongLine<'_>) -> Vec<usize> {
         self.asked.push(AskedLine {
+            byte_start: self
+                .source_address
+                .map_or(0, |base| line.text.as_ptr() as usize - base),
             text: line.text.to_owned(),
             style: line.style,
             marks: line.marks.to_vec(),
@@ -2502,7 +2526,7 @@ pub fn style_runs(styled: StyledText<'_>, upright_digits: bool) -> Vec<StyleRun>
             runs.push(StyleRun {
                 utf16_start,
                 utf16_len: marker.utf16_len,
-                heading_level: 0,
+                heading_level,
                 marks: Marks::default(),
                 ornament: Some(marker.ornament),
             });
@@ -4406,7 +4430,7 @@ mod tests {
         let text = "あ".repeat(100);
         let bound = block_flow_bound(StyledText::plain(&text), 520, &plain_typography());
 
-        let usable = 520.0_f32 - 22.0 * 3.0;
+        let usable = 520.0_f32 - 22.0 * 13.0;
         let cells = (usable / 22.0).floor() as usize;
         let lines = 100_usize.div_ceil(cells);
         assert!(

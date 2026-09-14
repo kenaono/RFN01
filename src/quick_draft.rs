@@ -34,6 +34,33 @@ const SAVE_SETTLE: Duration = Duration::from_secs(2);
 /// How long "Copied" stays on screen (要件 12.3, "非侵襲的な表示").
 const NOTICE_SETTLE: Duration = Duration::from_secs(2);
 
+/// IME can swallow Shift release. Repair Slint's state before its built-in
+/// TextInput processes selection, not merely in our shortcut callback.
+fn install_shift_repair(window: &QuickDraft) {
+    use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+    window.window().on_winit_window_event(|window, event| {
+        if matches!(
+            event,
+            WindowEvent::MouseInput { .. } | WindowEvent::KeyboardInput { .. }
+        ) {
+            let (by_message, by_hand) = crate::shift_really_held();
+            repair_shift_state(window, by_message, by_hand);
+        }
+        EventResult::Propagate
+    });
+}
+
+pub(crate) fn repair_shift_state(window: &slint::Window, by_message: bool, by_hand: bool) {
+    if by_message || by_hand {
+        return;
+    }
+    // Release both sides, then let the original event run. No text editing or
+    // selection operation is synthesized.
+    for key in [slint::platform::Key::Shift, slint::platform::Key::ShiftR] {
+        window.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: key.into() });
+    }
+}
+
 /// The quick draft window, while it is open.
 ///
 /// **Held by the editor rather than by itself**, so that asking for it twice
@@ -74,6 +101,8 @@ impl QuickDraftWindow {
             owner.set_render_status("クイック下書き: 窓を作れません".into());
             return;
         };
+        wire_shortcuts(owner, &window);
+        install_shift_repair(&window);
         let draft = directory()
             .and_then(|directory| app_data::read_draft(&directory))
             .unwrap_or_default();
@@ -132,6 +161,47 @@ impl QuickDraftWindow {
         let target = live.target.borrow().clone();
         store(&live.window, &target);
     }
+}
+
+pub(crate) fn wire_shortcuts(owner: &AppWindow, window: &QuickDraft) {
+    let owner_weak = owner.as_weak();
+    let draft_weak = window.as_weak();
+    window.on_shortcut_key(move |text, control, alt, shift| {
+        let Some(owner) = owner_weak.upgrade() else {
+            return false;
+        };
+        let command = crate::shortcuts::resolve(
+            &owner.get_shortcut_bindings(),
+            1,
+            &text,
+            control,
+            alt,
+            shift,
+        );
+        if command == -1 {
+            return false;
+        }
+        if command == -2 {
+            return true;
+        }
+        let weak = draft_weak.clone();
+        Timer::single_shot(std::time::Duration::ZERO, move || {
+            let Some(draft) = weak.upgrade() else {
+                return;
+            };
+            match command {
+                38 => draft.invoke_copy_all(),
+                39 => {
+                    draft.invoke_copy_all();
+                    draft.invoke_copy_and_close();
+                }
+                40 => draft.invoke_clear_requested(),
+                41 => draft.invoke_send_requested(),
+                _ => {}
+            }
+        });
+        true
+    });
 }
 
 /// What the draft window is given of the editor, and all it is given.

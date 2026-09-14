@@ -1,0 +1,207 @@
+import { ListView, ScrollView } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { TextButton } from "controls.slint";
+
+export struct DiffRow {
+    left: string,
+    right: string,
+    left-number: string,
+    right-number: string,
+    kind: int,
+    decision: int,
+    hunk-start: bool,
+}
+
+component SideCheck inherits Rectangle {
+    in property <bool> checked;
+    in property <string> tip;
+    callback clicked();
+    width: 24px;
+    height: 26px;
+    Rectangle {
+        x: 3px;
+        y: 4px;
+        width: 18px;
+        height: 18px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: root.checked || touch.has-hover ? Tok.accent : Tok.rule-strong;
+        background: root.checked ? Tok.accent : touch.has-hover ? Tok.accent-faint : Tok.paper;
+        if root.checked: Text {
+            text: "✓";
+            color: Tok.paper;
+            font-size: 15px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    Tooltip { text: @markdown("\{root.tip}"); }
+}
+
+export component DiffView inherits Rectangle {
+    background: Tok.paper;
+    in property <[DiffRow]> rows;
+    in property <string> left-path;
+    in property <string> right-path;
+    in-out property <string> status;
+    in-out property <int> selected-row: -1;
+    in property <float> content-width: 1000;
+    in property <bool> can-previous;
+    in property <bool> can-next;
+    callback next-difference(bool);
+    callback select-difference(int);
+    callback copy-side(bool);
+    callback dismissed();
+    in property <bool> merge-enabled;
+    in property <bool> can-apply;
+    callback choose-side(bool);
+    callback apply-merge();
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.dismissed(); }
+            return accept;
+        }
+    }
+    changed selected-row => {
+        if root.selected-row >= 0 && (root.selected-row * 26px < -lines.viewport-y || (root.selected-row + 1) * 26px > -lines.viewport-y + lines.visible-height) {
+            lines.viewport-y = -min(root.selected-row * 26px, max(0px, lines.viewport-height - lines.visible-height));
+        }
+    }
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 44px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding: 7px;
+                spacing: 8px;
+                TextButton { title: "前の差分"; enabled: root.can-previous; emphasize-hover: true; clicked => { root.next-difference(false); } }
+                TextButton { title: "次の差分"; enabled: root.can-next; emphasize-hover: true; clicked => { root.next-difference(true); } }
+                TextButton { title: "比較を終了"; clicked => { root.dismissed(); } }
+                Text { text: root.status; color: Tok.ink; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+            }
+        }
+        if root.merge-enabled: Rectangle {
+            height: 40px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 8px;
+                TextButton { title: "左を残す"; enabled: root.selected-row >= 0; emphasize-hover: true; clicked => { root.choose-side(false); } }
+                TextButton { title: "右を採用"; enabled: root.selected-row >= 0; emphasize-hover: true; clicked => { root.choose-side(true); } }
+                TextButton { title: "選んだ差分を本文（左）に反映"; enabled: root.can-apply; emphasize-hover: true; clicked => { root.apply-merge(); } }
+                Text { text: "反映するまで本文（左）は変わりません"; color: Tok.ink-muted; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+            }
+        }
+        Rectangle {
+            height: 60px;
+            background: Tok.chrome;
+                Rectangle {
+                    x: 8px;
+                    y: 8px;
+                    width: root.width / 2 - 16px;
+                    height: 44px;
+                    VerticalLayout {
+                        Text { text: "左：" + root.left-path; color: Tok.ink; font-size: 12px; overflow: elide; }
+                        TextButton { title: "左の全文をコピー"; clicked => { root.copy-side(false); } }
+                    }
+                }
+                Rectangle {
+                    x: root.width / 2 + 8px;
+                    y: 8px;
+                    width: root.width / 2 - 16px;
+                    height: 44px;
+                    VerticalLayout {
+                        Text { text: "右：" + root.right-path; color: Tok.ink; font-size: 12px; overflow: elide; }
+                        TextButton { title: "右の全文をコピー"; clicked => { root.copy-side(true); } }
+                    }
+                }
+        }
+        lines := ListView {
+            viewport-width: self.visible-width;
+            for row[index] in root.rows: Rectangle {
+                height: 26px;
+                width: lines.visible-width;
+                HorizontalLayout {
+                    spacing: 1px;
+                    Rectangle {
+                        width: (parent.width - 1px) / 2;
+                        background: row.kind == 1 ? Tok.diff-removed : row.kind == 3 ? Tok.diff-changed : row.kind == 2 ? Tok.chrome : Tok.paper;
+                        clip: true;
+                        Text { x: root.merge-enabled ? 30px : 6px; width: 48px; height: parent.height; text: row.left-number; color: Tok.ink-muted; font-size: 12px; vertical-alignment: center; }
+                        
+                        Rectangle {
+                            x: root.merge-enabled ? 84px : 62px;
+                            width: max(0px, parent.width - (root.merge-enabled ? 84px : 62px));
+                            height: parent.height;
+                            clip: true;
+                            Text { x: horizontal.viewport-x; width: root.content-width * 0.5px; height: parent.height; text: row.left; color: Tok.ink; font-family: "Yu Gothic UI"; font-size: 14px; vertical-alignment: center; }
+                        }
+                    }
+                    Rectangle {
+                        width: (parent.width - 1px) / 2;
+                        background: row.kind == 2 ? Tok.diff-added : row.kind == 3 ? Tok.diff-changed : row.kind == 1 ? Tok.chrome : Tok.paper;
+                        clip: true;
+                        Text { x: root.merge-enabled ? 30px : 6px; width: 48px; height: parent.height; text: row.right-number; color: Tok.ink-muted; font-size: 12px; vertical-alignment: center; }
+                        Rectangle {
+                            x: root.merge-enabled ? 84px : 62px;
+                            width: max(0px, parent.width - (root.merge-enabled ? 84px : 62px));
+                            height: parent.height;
+                            clip: true;
+                            Text { x: horizontal.viewport-x; width: root.content-width * 0.5px; height: parent.height; text: row.right; color: Tok.ink; font-family: "Yu Gothic UI"; font-size: 14px; vertical-alignment: center; }
+                        }
+                    }
+                }
+                TouchArea {
+                    enabled: row.kind != 0;
+                    clicked => { root.select-difference(index); }
+                }
+                // Draw above both cell backgrounds so the current row stays visible.
+                if index == root.selected-row: Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: transparent;
+                    border-width: 2px;
+                    border-color: Tok.accent;
+                    Rectangle {
+                        width: 4px;
+                        height: parent.height;
+                        background: Tok.accent;
+                    }
+                }
+                if root.merge-enabled && row.hunk-start: SideCheck {
+                    x: 5px;
+                    checked: row.decision != 2;
+                    tip: "この差分は左を残す";
+                    clicked => { root.select-difference(index); root.choose-side(false); }
+                }
+                if root.merge-enabled && row.hunk-start: SideCheck {
+                    x: (parent.width + 1px) / 2 + 5px;
+                    checked: row.decision == 2;
+                    tip: "この差分は右を採用";
+                    clicked => { root.select-difference(index); root.choose-side(true); }
+                }
+            }
+        }
+        horizontal := ScrollView {
+            height: 24px;
+            viewport-height: self.visible-height;
+            viewport-width: self.visible-width + max(0px, root.content-width * 0.5px - lines.visible-width / 2);
+        }
+        Rectangle {
+            height: 30px;
+            background: Tok.chrome;
+            Text {
+                x: 10px;
+                text: "比較開始時の本文   赤：左のみ   緑：右のみ   黄：変更   枠：現在の差分   チェック：採用する側   ［改行］：実改行あり";
+                color: Tok.ink-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                height: parent.height;
+            }
+        }
+    }
+}

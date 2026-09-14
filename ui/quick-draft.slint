@@ -63,6 +63,7 @@ export component QuickDraft inherits Window {
     property <length> menu-top: -6px - root.menu-height;
 
     callback edited();
+    callback shortcut-key(string, bool, bool, bool) -> bool;
     callback copied();
     callback copy-and-close();
     callback clear-requested();
@@ -158,12 +159,7 @@ export component QuickDraft inherits Window {
                         }
                     }
                     key-pressed(event) => {
-                        // 要件 12.3: the whole draft, without selecting it by
-                        // hand. `Ctrl+C` is the selection and is Slint's own.
-                        if (event.text == "C" && event.modifiers.control && event.modifiers.shift) {
-                            root.copy-all();
-                            return accept;
-                        }
+                        if self.preedit-text == "" && root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
                         return reject;
                     }
                 }

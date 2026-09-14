@@ -999,7 +999,21 @@ pub fn enter_continuation(
     if at < head {
         return Continuation::Insert("\n".to_owned());
     }
-    let kept = &line[quote..quote + indent];
+    // 書き手の決定 2026-09-12:「改行すると、半角スペースが行頭にはいっている
+    // ようです」——**本文の行では、空白だけの字下げを写さない。**
+    //
+    // 行頭の空白はいちど出来ると、ここが次の行へ写し、その行がまた次へ写す。
+    // **書き手が字下げとして打った覚えの無い1つ**（原因は別に追っている）が、
+    // それで文書じゅうへ広がり、しかも**行頭に空白のある行は見出しにならない**
+    // （`heading_level`）ので「#を打っても見出しにならない」まで連れてくる。
+    //
+    // **箇条書き・引用・項目の続きの段落はこれまでどおり継ぐ**——そこでの
+    // 字下げは書き手が打ったものではなく、項目の形そのものだからである。
+    let kept = if marker > 0 || quote > 0 || style.list_indent > 0 {
+        &line[quote..quote + indent]
+    } else {
+        ""
+    };
     // **中身の無い項目は、そこで終わる**（E3：「空の項目でEnterを押すと継続を
     // 終える」）。印を持たない行はここへ来ない——字下げだけの行でEnterが何も
     // しないと、効かない鍵に見える。
@@ -1925,6 +1939,59 @@ pub fn visible_markdown_text(source: &str) -> String {
     visible_markdown_text_as(source, Reading::all())
 }
 
+/// E13: export recognised Markdown as plain body text, keeping source selection coordinates.
+pub fn plain_body_text(source: &str, ranges: &[(usize, usize)]) -> String {
+    let mut preview = PreviewDocument::default();
+    preview.refresh(source, None, Reading::all());
+    let whole = [(0, source.len())];
+    let ranges = if ranges.is_empty() {
+        &whole[..]
+    } else {
+        ranges
+    };
+    ranges
+        .iter()
+        .map(|&(start, end)| {
+            let mut text = String::new();
+            for (index, line) in preview.lines.iter().enumerate() {
+                if matches!(
+                    line.style.kind,
+                    LineKind::Fence | LineKind::Rule | LineKind::TableRule
+                ) {
+                    continue;
+                }
+                let mut utf16 = 0;
+                let trimmed = line.visible.trim();
+                let first = line.visible.len() - line.visible.trim_start().len();
+                let last = first + trimmed.len();
+                for (byte, ch) in line.visible.char_indices() {
+                    let position = preview.source_starts[index] + line.source_byte[utf16] as usize;
+                    let hidden = line.marker.is_some_and(|m| utf16 < m.utf16_len as usize)
+                        || line.marks.iter().any(|mark| {
+                            matches!(mark.ornament, Some(Ornament::Ruby { .. }))
+                                && (mark.utf16_start as usize
+                                    ..(mark.utf16_start + mark.utf16_len) as usize)
+                                    .contains(&utf16)
+                        });
+                    utf16 += ch.len_utf16();
+                    if position < start || position >= end || hidden {
+                        continue;
+                    }
+                    if line.style.kind == LineKind::TableRow && ch == '|' {
+                        if byte != first && byte + 1 != last {
+                            text.push('\t');
+                        }
+                    } else {
+                        text.push(ch);
+                    }
+                }
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 同じことを、**記法を読むかどうかを言われて**する（要件 E9）。
 #[cfg(test)]
 pub fn visible_markdown_text_as(source: &str, reading: Reading) -> String {
@@ -2239,8 +2306,12 @@ fn push_marked(
             rest = after;
             continue;
         }
-        if let Some((shown, after)) = link_here(rest, previous) {
+        if let Some((shown, target, after)) = link_here(rest, previous) {
             let start = *at;
+            // E12 first step: wiki names have no defined namespace here.
+            // Keep their spelling and distinguish unresolved destinations.
+            let unresolved_link =
+                rest.starts_with("[[") && !std::path::Path::new(target).is_absolute();
             // Emphasis inside the shown text is still emphasis: `[**太字**](x)`
             // is a bold link, and this is the same recursion that nests one
             // marker inside another.
@@ -2250,6 +2321,7 @@ fn push_marked(
                 utf16_len: *at - start,
                 marks: Marks {
                     link: true,
+                    unresolved_link,
                     ..Marks::default()
                 },
                 ornament: None,
@@ -2477,22 +2549,96 @@ fn footnote_here(rest: &str) -> Option<(&str, &str)> {
 /// **An image is not a link.** `![説明](画像.png)` keeps its markup, because
 /// 要件 7.3.3 asks for the image to be shown as a name — and a link that read
 /// as ordinary text would hide the one thing that says it is a picture.
-fn link_here<'a>(rest: &'a str, previous: Option<char>) -> Option<(&'a str, &'a str)> {
+fn link_here<'a>(rest: &'a str, previous: Option<char>) -> Option<(&'a str, &'a str, &'a str)> {
     if previous == Some('!') {
         return None;
     }
     if let Some(inner_and_rest) = rest.strip_prefix("[[") {
         let (inner, after) = inner_and_rest.split_once("]]")?;
         // `[[note|shown]]` shows the second half; `[[note]]` shows the note.
-        let shown = inner.split_once('|').map_or(inner, |(_, shown)| shown);
-        return (!shown.is_empty()).then_some((shown, after));
+        let (target, shown) = inner.split_once('|').unwrap_or((inner, inner));
+        return (!shown.is_empty()).then_some((shown, target, after));
     }
     let inner_and_rest = rest.strip_prefix('[')?;
     let (shown, after_close) = inner_and_rest.split_once("](")?;
     // The shown text may hold brackets of its own, but not a `](` — the first
     // one closes the link, which is what Markdown itself does.
-    let (_, after) = after_close.split_once(')')?;
-    (!shown.is_empty()).then_some((shown, after))
+    let (target, after) = after_close.split_once(')')?;
+    (!shown.is_empty()).then_some((shown, target, after))
+}
+
+/// A link at a source byte. Parsing shares the preview grammar and never reads disk.
+pub fn link_target_at(source: &str, byte: usize) -> Option<(&str, bool)> {
+    let (start, end) = line_span(source, byte);
+    let line_number = source[..start].bytes().filter(|&b| b == b'\n').count();
+    if line_styles_as(source, BulletMarks::default())
+        .get(line_number)?
+        .kind
+        .is_code()
+    {
+        return None;
+    }
+    let mut rest = &source[start..end];
+    let mut at = start;
+    let mut previous = None;
+    while !rest.is_empty() {
+        if let Some((_, _, after)) = rest.strip_prefix('!').and_then(|s| link_here(s, None)) {
+            at += rest.len() - after.len();
+            rest = after;
+            previous = Some(']');
+            continue;
+        }
+        if let Some((marks, _, after)) = opens_here(rest, previous).filter(|(m, _, _)| m.code) {
+            let _ = marks;
+            at += rest.len() - after.len();
+            rest = after;
+            previous = Some('`');
+            continue;
+        }
+        if let Some((_, target, after)) = link_here(rest, previous) {
+            let next = at + rest.len() - after.len();
+            if (at..next).contains(&byte) {
+                return Some((target, rest.starts_with("[[")));
+            }
+            at = next;
+            rest = after;
+            previous = Some(']');
+            continue;
+        }
+        let ch = rest.chars().next()?;
+        let mut len = ch.len_utf8();
+        if ch == '\\' {
+            len += rest[len..].chars().next().map_or(0, char::len_utf8);
+        }
+        rest = &rest[len..];
+        at += len;
+        previous = Some(ch);
+    }
+    None
+}
+
+/// Resolve an explicit local path. Wiki names never trigger a folder search.
+pub fn link_path(
+    target: &str,
+    wiki: bool,
+    source_file: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let target = target
+        .trim()
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(target.trim());
+    if target.is_empty() || target.contains(['\n', '\r', '#']) || target.contains("://") {
+        return None;
+    }
+    let path = std::path::Path::new(target);
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else if wiki || target.contains(':') || target.starts_with(['/', '\\']) {
+        None
+    } else {
+        Some(source_file?.parent()?.join(path))
+    }
 }
 
 /// The marker `rest` begins with, what it encloses and what follows it.
@@ -2951,6 +3097,14 @@ pub fn hidden_indent(source: &str, styles: &[LineStyle], caret: usize) -> Option
 /// **区切り線とフェンスは覆わない。**あれは行そのものが記号で、溝に立てるものが
 /// 無い——原文で出ている行を、二度描くことになる。
 fn active_markup(line: &str, style: LineStyle) -> Option<LineMarker> {
+    if style.heading_level > 0 {
+        let content = quote_content(line);
+        let body = strip_heading_marker(content);
+        return Some(LineMarker {
+            utf16_len: (line.len() - body.len()) as u32,
+            ornament: Ornament::Markup,
+        });
+    }
     // `> `はASCIIなので、バイトの数がそのままUTF-16の数である。
     let quote = (line.len() - quote_content(line).len()) as u32;
     match line_marker(line, style) {
@@ -3729,12 +3883,13 @@ mod tests {
         );
     }
 
-    /// E3の③: 印の無い行は、**字下げだけ**を継ぐ。
+    /// E3の③、書き手の決定 2026-09-12: **本文の行の字下げは継がない。**
+    /// 行頭の空白は写せば写すほど広がり、広がった先の行は見出しにならない。
     #[test]
-    fn an_indented_line_keeps_its_indent() {
+    fn an_indented_body_line_does_not_carry_its_indent() {
         assert_eq!(
             continued("    続きの段落", "    続きの段落".len()),
-            Continuation::Insert("\n    ".to_owned())
+            Continuation::Insert("\n".to_owned())
         );
         assert_eq!(
             continued("本文", "本文".len()),
@@ -3824,11 +3979,9 @@ mod tests {
             }
         );
         // **印を持たない行は、ここへ来ない**——字下げだけの行でEnterが何もしないと、
-        // 効かない鍵に見える。
-        assert_eq!(
-            continued("    ", 4),
-            Continuation::Insert("\n    ".to_owned())
-        );
+        // 効かない鍵に見える。**継ぐものは無い**（書き手の決定 2026-09-12）ので、
+        // ただの改行になる。
+        assert_eq!(continued("    ", 4), Continuation::Insert("\n".to_owned()));
     }
 
     /// E3の③: **頭の中で押されたEnterは、ただの改行。**行を押し下げたいだけの
@@ -4396,9 +4549,23 @@ mod tests {
     fn an_indented_line_outside_a_list_stays_a_plain_line() {
         let source = "本文\n   ";
 
+        // **字下げも継がない**（書き手の決定 2026-09-12）：リストの外の字下げは
+        // 項目の形ではなく、ただ行頭に空白があるだけの本文である。
         assert_eq!(
             enter_continuation(source, &line_styles(source), source.len(), false),
-            Continuation::Insert("\n   ".to_owned())
+            Continuation::Insert("\n".to_owned())
+        );
+    }
+
+    /// 書き手の決定 2026-09-12: **項目の続きの段落は、これまでどおり継ぐ。**
+    /// そこでの字下げは書き手が打ったものではなく、項目の形そのものである。
+    #[test]
+    fn a_paragraph_under_an_item_still_carries_its_indent() {
+        let source = "- 項目\n  続きの段落";
+
+        assert_eq!(
+            enter_continuation(source, &line_styles(source), source.len(), true),
+            Continuation::Insert("\n  ".to_owned())
         );
     }
 
@@ -5491,6 +5658,119 @@ mod tests {
 
         assert!(marks.iter().any(|span| span.marks.link && !span.marks.bold));
         assert!(marks.iter().any(|span| span.marks.bold && !span.marks.link));
+    }
+
+    #[test]
+    fn unresolved_wiki_links_are_distinct_from_links_footnotes_and_code() {
+        let source = "[[不明|**表示名😀**]] [通常](章.md) [^注] `[[コード]]` ![[画像]]";
+        let preview = PreviewDocument::from_source(source);
+        let marks = &preview.marks()[0];
+        let unresolved: Vec<_> = marks
+            .iter()
+            .filter(|span| span.marks.unresolved_link)
+            .collect();
+        assert_eq!(unresolved.len(), 1);
+        assert!(unresolved[0].marks.link);
+        assert_eq!(unresolved[0].utf16_start, 0);
+        assert_eq!(unresolved[0].utf16_len, 5);
+        assert!(
+            marks
+                .iter()
+                .any(|span| span.marks.link && !span.marks.unresolved_link)
+        );
+        assert_eq!(
+            visible_markdown_text(source),
+            "表示名😀 通常 [注] [[コード]] ![[画像]]"
+        );
+        assert!(
+            !PreviewDocument::from_source("[[未完").marks()[0]
+                .iter()
+                .any(|span| span.marks.unresolved_link)
+        );
+    }
+
+    #[test]
+    fn link_clicks_share_the_preview_grammar() {
+        let source = "前😀 [**表示名**](章/原稿.md) [[不明|別名]] `[[コード]]` ![[画像]]";
+        assert_eq!(
+            link_target_at(source, source.find("表示名").unwrap()),
+            Some(("章/原稿.md", false))
+        );
+        assert_eq!(
+            link_target_at(source, source.find("別名").unwrap()),
+            Some(("不明", true))
+        );
+        assert_eq!(link_target_at(source, source.find("コード").unwrap()), None);
+        assert_eq!(link_target_at(source, source.find("画像").unwrap()), None);
+        assert_eq!(link_target_at("```\n[[コード]]\n```", 7), None);
+        assert_eq!(link_target_at("[[未完", 3), None);
+        assert_eq!(link_target_at("\\[説明](章.md)", 3), None);
+    }
+
+    #[test]
+    fn local_link_paths_do_not_guess_wiki_names_or_unsaved_bases() {
+        use std::path::{Path, PathBuf};
+        let source = Path::new(r"D:\原稿\本文.md");
+        assert_eq!(
+            link_path("章/次.md", false, Some(source)),
+            Some(source.parent().unwrap().join("章/次.md"))
+        );
+        assert_eq!(
+            link_path(r"D:\原稿\次.md", true, None),
+            Some(PathBuf::from(r"D:\原稿\次.md"))
+        );
+        assert_eq!(link_path("次", true, Some(source)), None);
+        assert_eq!(link_path("次.md", false, None), None);
+        assert_eq!(link_path("https://example.com", false, Some(source)), None);
+        assert_eq!(link_path("#見出し", false, Some(source)), None);
+        let preview = PreviewDocument::from_source(r"[[D:\原稿\次.md|次]]");
+        assert!(
+            preview.marks()[0]
+                .iter()
+                .any(|m| m.marks.link && !m.marks.unresolved_link)
+        );
+    }
+
+    #[test]
+    fn body_copy_removes_decoration_but_preserves_code_and_unknown_markup() {
+        let source = "# 見出し\n**太字**と｜漢字《かんじ》と[表示](章.md)\n- 項目\n```text\n**コード**\n```\n![画像](画像.png)\n";
+        assert_eq!(
+            plain_body_text(source, &[]),
+            "見出し\n太字と漢字と表示\n項目\n**コード**\n![画像](画像.png)\n"
+        );
+    }
+
+    #[test]
+    fn body_copy_selection_uses_the_whole_documents_markup_context() {
+        let source = "前 **太字😀** と [[ノート|別名]] 後";
+        let start = source.find("太字").unwrap();
+        let end = source.find("** と").unwrap();
+        assert_eq!(plain_body_text(source, &[(start, end)]), "太字😀");
+        let alias = source.find("別名").unwrap();
+        assert_eq!(
+            plain_body_text(source, &[(alias, alias + "別名".len())]),
+            "別名"
+        );
+        assert_eq!(
+            plain_body_text(source, &[(start, end), (alias, alias + "別名".len())]),
+            "太字😀\n別名"
+        );
+    }
+
+    #[test]
+    fn body_copy_tables_use_tabs_and_omit_the_rule() {
+        assert_eq!(
+            plain_body_text("| A | B |\n|---|---|\n| 一 | 二 |\n", &[]),
+            " A \t B \n 一 \t 二 \n"
+        );
+    }
+
+    #[test]
+    fn body_copy_manual_fixture_matches_expected_text() {
+        assert_eq!(
+            plain_body_text(include_str!("../testdata/23_本文だけコピー.md"), &[]),
+            include_str!("../testdata/23_本文だけコピー_期待結果.txt")
+        );
     }
 
     /// 要件 7.3.2: a callout says what kind it is, and **the label is kept as a

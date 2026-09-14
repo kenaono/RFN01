@@ -253,16 +253,6 @@ impl LineFit {
             Self::Free => FREE_LINE_BOX,
         }
     }
-
-    /// The width to charge the split with (`cells_per_line`). A free line is
-    /// charged at the box it is given, which is to say **one line per logical
-    /// line** — which is what not wrapping means.
-    fn charged_extent(self) -> u32 {
-        match self {
-            Self::Extent(extent) => extent,
-            Self::Free => FREE_LINE_BOX as u32,
-        }
-    }
 }
 /// How many block layouts stay resident. A viewport spans one or two blocks, so
 /// a handful covers scrolling back and forth without holding the document.
@@ -379,7 +369,7 @@ struct Graphics {
     ruby_formats: HashMap<(u32, WritingMode, String), IDWriteTextFormat>,
     /// 縦中横の書式（要件 7.8）。**書字方向を持たない**ので本文とは別の地図に
     /// いる——正立させるというのは、面の向きを聞かないということである。
-    upright_formats: HashMap<(u32, String, WritingMode), IDWriteTextFormat>,
+    upright_formats: HashMap<(u32, String, WritingMode, u8), IDWriteTextFormat>,
     /// The terminal's formats (追加要件 Terminal), keyed by size, family and
     /// weight. **Kept apart from the document's**: a terminal's format has no
     /// writing mode to speak of and no line spacing — a cell grid decides its
@@ -539,7 +529,13 @@ impl Graphics {
         // 取っているのに、中の数字だけが本文の大きさで立っていた。
         let size = (typography.font_size * typography.size_scale(heading_level)).max(1.0);
         let family = typography.body_family().to_owned();
-        let key = (size.to_bits(), family, WritingMode::Horizontal);
+        let decoration = typography.decorations[usize::from(heading_level).min(6)];
+        let key = (
+            size.to_bits(),
+            family,
+            WritingMode::Horizontal,
+            decoration & 3,
+        );
         if let Some(format) = self.upright_formats.get(&key) {
             return Ok(format.clone());
         }
@@ -549,8 +545,16 @@ impl Graphics {
             self.dwrite.CreateTextFormat(
                 &family,
                 None,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
+                if decoration & 1 != 0 {
+                    DWRITE_FONT_WEIGHT_BOLD
+                } else {
+                    DWRITE_FONT_WEIGHT_NORMAL
+                },
+                if decoration & 2 != 0 {
+                    DWRITE_FONT_STYLE_ITALIC
+                } else {
+                    DWRITE_FONT_STYLE_NORMAL
+                },
                 DWRITE_FONT_STRETCH_NORMAL,
                 size,
                 w!("ja-JP"),
@@ -617,6 +621,32 @@ impl Graphics {
         }
         self.number_formats.insert(key, format.clone());
         Ok(format)
+    }
+
+    fn heading_marker(
+        &mut self,
+        typography: &Typography,
+        mode: WritingMode,
+        level: u8,
+    ) -> Result<(IDWriteTextFormat, f32)> {
+        let mut marker = typography.clone();
+        marker.font_size *= typography.size_scale(level);
+        marker.body_font = typography.family_for(level).to_owned();
+        let format = self.text_format(&marker, mode)?;
+        let text = "#"
+            .repeat(level as usize)
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let layout = unsafe {
+            self.dwrite
+                .CreateTextLayout(&text, &format, 10000.0, 10000.0)?
+        };
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe {
+            layout.GetMetrics(&mut metrics)?;
+        }
+        let (_, advance) = mode.to_axes(metrics.widthIncludingTrailingWhitespace, metrics.height);
+        Ok((format, advance + marker.font_size * 0.25))
     }
 
     fn text_format(
@@ -972,11 +1002,11 @@ fn apply_marker_boxes(
     // A whole-line box keeps its width (`keeps_room`). It stands over a line
     // that is nothing but marks — `---`, or a fence — where the room is what
     // the line leaves behind, not an indent for anything after it.
-    let box_of = |along: f32| -> IDWriteInlineObject {
+    let box_of = |along: f32, size: f32| -> IDWriteInlineObject {
         MarkerBox {
             along,
-            across: typography.font_size,
-            baseline: typography.font_size * 0.8,
+            across: size,
+            baseline: size * 0.8,
         }
         .into()
     };
@@ -985,7 +1015,7 @@ fn apply_marker_boxes(
     // 扱う**（実測 2026-09-09：縦中横の`202`が3マスではなく1マスに収まった。
     // 3桁ぶんの深さ59pxのはずが26pxだった）。幅0の箱にはその症状が出ないし、
     // 出たとしても送りが0なので何も動かない。
-    let width_less = box_of(0.0);
+    let width_less = box_of(0.0, typography.font_size);
     for run in runs {
         let Some(ornament) = run.ornament else {
             continue;
@@ -996,8 +1026,11 @@ fn apply_marker_boxes(
         // of the column before it — and the box over the delimiter row is as
         // wide as the whole table (技術検証 7.7).
         let advance = ornament.box_advance(typography.indent_step(), typography.font_size);
-        let object = if advance > 0.0 {
-            box_of(advance)
+        let object = if advance > 0.0 || run.heading_level > 0 {
+            box_of(
+                advance,
+                typography.font_size * typography.size_scale(run.heading_level),
+            )
         } else {
             width_less.clone()
         };
@@ -1689,6 +1722,7 @@ fn draw_marker_ink(
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
     format: &IDWriteTextFormat,
+    heading_markers: &[(IDWriteTextFormat, f32)],
     upright_formats: &[(u8, IDWriteTextFormat)],
     layout: &IDWriteTextLayout,
     runs: &[StyleRun],
@@ -1740,8 +1774,44 @@ fn draw_marker_ink(
         if count == 0 {
             continue;
         }
-        let region = regions[0];
+        let mut region = regions[0];
         let ink = marker_ink(ornament, text, run, bullets);
+        let hashes = ink.chars().filter(|ch| *ch == '#').count();
+        let heading = if ornament == Ornament::Markup && hashes > 0 {
+            heading_markers.get(hashes.min(6) - 1)
+        } else {
+            None
+        };
+        let format = heading.map_or(format, |(format, _)| format);
+        let indent = if ornament == Ornament::Markup && hashes > 0 {
+            heading.map_or(indent, |(_, advance)| *advance)
+        } else {
+            indent
+        };
+        if ornament == Ornament::Markup && hashes > 0 {
+            let mut x = 0.0;
+            let mut y = 0.0;
+            let mut body = DWRITE_HIT_TEST_METRICS::default();
+            unsafe {
+                layout.HitTestTextPosition(
+                    run.utf16_start + run.utf16_len,
+                    false,
+                    &mut x,
+                    &mut y,
+                    &mut body,
+                )?;
+            }
+            match mode {
+                WritingMode::Horizontal => {
+                    region.top = body.top + origin.Y;
+                    region.height = body.height;
+                }
+                WritingMode::Vertical => {
+                    region.left = body.left + origin.X;
+                    region.width = body.width;
+                }
+            }
+        }
         let utf16 = ink.encode_utf16().collect::<Vec<u16>>();
         // **The box takes no room now**, so what comes back is a sliver at the
         // head of the item's text rather than a space to draw in. The glyph
@@ -1842,6 +1912,19 @@ fn draw_upright_digits(
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+            // Inline upright digits are drawn separately from their parent layout.
+            let mut strike = Default::default();
+            layout.GetStrikethrough(run.utf16_start, &mut strike, None)?;
+            if strike.as_bool() {
+                let middle = (rect.top + rect.bottom) * 0.5;
+                let stroke = D2D_RECT_F {
+                    left: rect.left,
+                    right: rect.right,
+                    top: middle,
+                    bottom: middle + 1.0,
+                };
+                target.FillRectangle(&stroke, brush);
+            }
         }
     }
     Ok(())
@@ -2260,6 +2343,92 @@ fn cell_layout_for(
 ///
 /// **Free of the engine**, like everything else a tile is drawn with: the page,
 /// the grid and the block's own text are all a table needs.
+/// Display-only marks; the original layout remains the source of all positions.
+fn draw_whitespace(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    layout: &IDWriteTextLayout,
+    text: &str,
+    origin: windows_numerics::Vector2,
+    mode: WritingMode,
+    size: f32,
+) -> Result<()> {
+    let mut offset = 0;
+    for ch in text.chars() {
+        let at = offset;
+        offset += ch.len_utf16() as u32;
+        if !matches!(ch, ' ' | '\u{3000}' | '\t' | '\n') {
+            continue;
+        }
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut hit = DWRITE_HIT_TEST_METRICS::default();
+        unsafe {
+            layout.HitTestTextPosition(at, false, &mut x, &mut y, &mut hit)?;
+        }
+        // Inline objects hide Markdown syntax; don't mark their source spaces.
+        if !hit.isText.as_bool() {
+            continue;
+        }
+        let vertical = mode == WritingMode::Vertical;
+        let advance = if vertical { hit.height } else { hit.width };
+        let across = if vertical { hit.width } else { hit.height };
+        let along = if ch == '\n' { size * 0.6 } else { advance };
+        if along <= 0.0 || across <= 0.0 {
+            continue;
+        }
+        let point = |a: f32, b: f32| windows_numerics::Vector2 {
+            X: origin.X + hit.left + if vertical { across * b } else { along * a },
+            Y: origin.Y + hit.top + if vertical { along * a } else { across * b },
+        };
+        let stroke = (size * 0.045).max(1.0);
+        let line = |a, b, c, d| unsafe {
+            target.DrawLine(point(a, b), point(c, d), brush, stroke, None);
+        };
+        unsafe {
+            brush.SetOpacity(0.55);
+        }
+        match ch {
+            ' ' => {
+                let p = point(0.5, 0.5);
+                unsafe {
+                    target.FillRectangle(
+                        &D2D_RECT_F {
+                            left: p.X - stroke,
+                            top: p.Y - stroke,
+                            right: p.X + stroke,
+                            bottom: p.Y + stroke,
+                        },
+                        brush,
+                    );
+                }
+            }
+            '\u{3000}' => {
+                line(0.2, 0.3, 0.8, 0.3);
+                line(0.8, 0.3, 0.8, 0.7);
+                line(0.8, 0.7, 0.2, 0.7);
+                line(0.2, 0.7, 0.2, 0.3);
+            }
+            '\t' => {
+                line(0.15, 0.5, 0.85, 0.5);
+                line(0.7, 0.35, 0.85, 0.5);
+                line(0.7, 0.65, 0.85, 0.5);
+            }
+            '\n' => {
+                line(0.8, 0.25, 0.8, 0.6);
+                line(0.8, 0.6, 0.2, 0.6);
+                line(0.4, 0.45, 0.2, 0.6);
+                line(0.4, 0.75, 0.2, 0.6);
+            }
+            _ => {}
+        }
+        unsafe {
+            brush.SetOpacity(1.0);
+        }
+    }
+    Ok(())
+}
+
 fn draw_grid(
     graphics: &mut Graphics,
     target: &ID2D1RenderTarget,
@@ -2324,8 +2493,84 @@ fn draw_grid(
         unsafe {
             target.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
+        if typography.whitespace {
+            let start = byte_at_utf16(block_text, cell.utf16_start);
+            let end = byte_at_utf16(block_text, cell.utf16_start + cell.utf16_len);
+            draw_whitespace(
+                target,
+                brush,
+                &layout,
+                &block_text[start..end],
+                origin,
+                mode,
+                typography.font_size,
+            )?;
+        }
     }
     Ok(())
+}
+
+/// E11: backgrounds and heading separators occupy the line box, not glyph underlines.
+fn draw_text_decorations(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    block: &BlockPlacement,
+    runs: &[StyleRun],
+    typography: &Typography,
+    page: &OrnamentPage,
+) {
+    if typography.decorations.iter().all(|flags| flags & 24 == 0) {
+        return;
+    }
+    let near = page.margin + page.inset;
+    let far = (page.line_extent - page.margin).max(near);
+    unsafe {
+        if typography.decorations[0] & 8 != 0 {
+            brush.SetColor(&colour(typography.backgrounds[0]));
+            target.FillRectangle(
+                &page.rect(
+                    (
+                        block.content_flow_start,
+                        block.content_flow_start + block.flow_size,
+                    ),
+                    (near, far),
+                ),
+                brush,
+            );
+        }
+        for run in runs.iter().filter(|run| {
+            run.heading_level > 0 && run.ornament.is_none() && run.marks == Default::default()
+        }) {
+            let slot = usize::from(run.heading_level).min(6);
+            let flags = typography.decorations[slot];
+            let line = LineRun {
+                utf16_start: run.utf16_start,
+                utf16_len: run.utf16_len,
+                ornament: LineOrnament::Rule,
+                own_ends: (true, true),
+            };
+            let Some(flow) = mark_extent(block, &line) else {
+                continue;
+            };
+            let ground = if flags & 8 != 0 {
+                typography.backgrounds[slot]
+            } else {
+                typography.paper
+            };
+            brush.SetColor(&colour(ground));
+            target.FillRectangle(&page.rect(flow, (near, far)), brush);
+            if flags & 16 != 0 {
+                brush.SetColor(&colour(typography.heading_ink[slot - 1]));
+                let stroke = rule_stroke(typography.font_size);
+                let edge = match page.mode {
+                    WritingMode::Horizontal => (flow.1 - stroke, flow.1),
+                    WritingMode::Vertical => (flow.0, flow.0 + stroke),
+                };
+                target.FillRectangle(&page.rect(edge, (near, far)), brush);
+            }
+        }
+        brush.SetColor(&colour(typography.ink));
+    }
 }
 
 fn draw_line_ornaments(
@@ -2430,7 +2675,7 @@ fn apply_typography(
 ) -> Result<()> {
     let spacing = typography.character_spacing;
     let has_spacing = spacing.abs() > f32::EPSILON;
-    if !has_spacing && runs.is_empty() {
+    if !has_spacing && runs.is_empty() && typography.decorations[0] & 7 == 0 {
         return Ok(());
     }
     let layout1 = if has_spacing {
@@ -2441,6 +2686,28 @@ fn apply_typography(
     // SAFETY: Every range below lies inside the layout's own text, and the
     // layout outlives the calls.
     unsafe {
+        let body = typography.decorations[0];
+        let all = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: utf16_len,
+        };
+        layout.SetFontWeight(
+            if body & 1 != 0 {
+                DWRITE_FONT_WEIGHT_BOLD
+            } else {
+                DWRITE_FONT_WEIGHT_NORMAL
+            },
+            all,
+        )?;
+        layout.SetFontStyle(
+            if body & 2 != 0 {
+                DWRITE_FONT_STYLE_ITALIC
+            } else {
+                DWRITE_FONT_STYLE_NORMAL
+            },
+            all,
+        )?;
+        layout.SetStrikethrough(body & 4 != 0, all)?;
         if let Some(layout1) = &layout1 {
             set_character_spacing(layout1, typography.font_size, spacing, 0, utf16_len)?;
         }
@@ -2469,19 +2736,36 @@ fn apply_typography(
             // the italic one inside it are two ranges, and the later call only
             // changes the attribute it names; the two do not have to be worked
             // out into one flat list of non-overlapping pieces.
-            if run.marks.bold {
+            let decoration = typography.decorations[usize::from(run.heading_level).min(6)];
+            if run.heading_level > 0 && run.marks == Default::default() {
+                layout.SetFontWeight(
+                    if decoration & 1 != 0 {
+                        DWRITE_FONT_WEIGHT_BOLD
+                    } else {
+                        DWRITE_FONT_WEIGHT_NORMAL
+                    },
+                    range,
+                )?;
+                layout.SetFontStyle(
+                    if decoration & 2 != 0 {
+                        DWRITE_FONT_STYLE_ITALIC
+                    } else {
+                        DWRITE_FONT_STYLE_NORMAL
+                    },
+                    range,
+                )?;
+                layout.SetStrikethrough(decoration & 4 != 0, range)?;
+            }
+            if run.marks.bold || decoration & 1 != 0 {
                 layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, range)?;
             }
-            if run.marks.italic {
+            if run.marks.italic || decoration & 2 != 0 {
                 layout.SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range)?;
             }
-            if run.marks.strike {
+            if run.marks.strike || decoration & 4 != 0 {
                 layout.SetStrikethrough(true, range)?;
             }
-            // 要件 7.3.2: a link is underlined and nothing else. **Not a colour
-            // of its own** — 要件 9 gives the writer the ink, the paper and the
-            // headings, and a colour nobody can set is a colour that will not
-            // suit somebody's paper. An underline is legible on any of them.
+            // Links retain their underline, including unresolved links (E12).
             if run.marks.link {
                 layout.SetUnderline(true, range)?;
             }
@@ -2931,6 +3215,21 @@ fn draw_tile(
                 };
                 layout.SetDrawingEffect(heading_brush, range)?;
             }
+            // E12: unresolved destinations are red. This is a display state,
+            // not a filesystem lookup; explicit word-check colours still win.
+            if task.runs.iter().any(|run| run.marks.unresolved_link) {
+                let unresolved_brush =
+                    target.CreateSolidColorBrush(&colour([0.8, 0.12, 0.18]), None)?;
+                for run in task.runs.iter().filter(|run| run.marks.unresolved_link) {
+                    layout.SetDrawingEffect(
+                        &unresolved_brush,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: run.utf16_start,
+                            length: run.utf16_len,
+                        },
+                    )?;
+                }
+            }
             // 要件 7.9: **単語帳の色は最後に置く**ので、見出しやコメントの色より
             // 強い。書き手が自分でそこへ置いたしるしのほうが、記法から出た色より
             // 言いたいことがはっきりしている。
@@ -2982,6 +3281,7 @@ fn draw_tile(
             line_origin: cross_origin,
             font_size: typography.font_size,
         };
+        draw_text_decorations(&target, &brush, &task.block, &task.runs, typography, &page);
         draw_line_ornaments(&target, &brush, &task.block, &task.lines, &page);
         // SAFETY: The layout outlives the draw call, and the underline is set
         // and cleared on the same layout.
@@ -3006,15 +3306,30 @@ fn draw_tile(
                 )?;
             }
         }
+        if typography.whitespace {
+            draw_whitespace(
+                &target,
+                &comment_brush,
+                &layout,
+                &task.text,
+                origin,
+                mode,
+                typography.font_size,
+            )?;
+        }
         // 要件 7.3.2: what stands in each of this block's boxes. After the text,
         // so the ink sits on top of nothing it has to fight.
         if task.runs.iter().any(run_draws_ink) {
             let format = graphics.text_format(typography, mode)?;
+            let heading_markers = (1..=6)
+                .map(|level| graphics.heading_marker(typography, mode, level))
+                .collect::<Result<Vec<_>>>()?;
             let upright = graphics.upright_formats_for(typography, &task.runs)?;
             draw_marker_ink(
                 &target,
                 &brush,
                 &format,
+                &heading_markers,
                 &upright,
                 &layout,
                 &task.runs,
@@ -3326,6 +3641,7 @@ fn with_graphics<T>(body: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> 
     })
 }
 
+#[derive(Clone)]
 struct MeasuredBlock {
     text: String,
     keep_trailing_empty_line: bool,
@@ -3444,7 +3760,13 @@ pub struct TextEngine {
     wraps: Vec<ParagraphWraps>,
     /// How many list items wrap at this geometry. See [`Self::list_items`].
     wrapping_items: usize,
+    /// E17: estimates never enter the layout/measurement cache.
+    deferred_blocks: HashSet<usize>,
+    background: Option<incremental::BackgroundLayout>,
+    work_cancel: Option<incremental::Cancellation>,
 }
+
+mod incremental;
 
 /// Everything about the spec that changes a layout, hashed.
 ///
@@ -3458,6 +3780,12 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // 要件 9: **a family changes every measurement**, so unlike the colours it
     // belongs here rather than only in the tile's signature. Two specs that
     // differ by a font are not the same layout and never were.
+    typography.decorations.hash(hasher);
+    for background in typography.backgrounds {
+        for channel in background {
+            channel.to_bits().hash(hasher);
+        }
+    }
     typography.body_font.hash(hasher);
     typography.heading_font.hash(hasher);
     typography.code_font.hash(hasher);
@@ -3465,6 +3793,7 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // them is not the page without them — in the tiles as well as in the
     // measurements. **The trap the colours fell into** is two lines above.
     typography.line_numbers.hash(hasher);
+    typography.whitespace.hash(hasher);
     // 要件 7.8（2026-09-09）: ルビの大きさと位置。**色と同じ側にいる**
     // ——ルビは幅0の箱の脇に描かれるので、この2つが動いても幾何は1画素も
     // 動かず、**古くなるのはタイルだけ**である。混ぜていないと、絵置き場の
@@ -3592,8 +3921,19 @@ fn measure_key(
 
 /// Rounded, because it is the document's starting edge and every block sits a
 /// whole number of pixels from it. See `place_blocks`.
+#[cfg(test)]
 fn margin_for(font_size: f32) -> f32 {
-    (font_size * 1.5).max(16.0).round()
+    heading_margin(&Typography::new(font_size), WritingMode::Vertical).expect("heading margin")
+}
+
+fn heading_margin(typography: &Typography, mode: WritingMode) -> Result<f32> {
+    with_graphics(|graphics| {
+        let mut margin = 16.0_f32;
+        for level in 1..=6 {
+            margin = margin.max(graphics.heading_marker(typography, mode, level)?.1);
+        }
+        Ok(margin.ceil())
+    })
 }
 
 /// How much room the line numbers ask for beside the page (要件 9、2026-09-07
@@ -3765,7 +4105,8 @@ impl TextEngine {
         self.words = words;
     }
 
-    /// True when the engine already describes exactly this text and geometry.
+    /// True when the input text and geometry match. `layout_pending` separately
+    /// says whether any offscreen placements are still estimates.
     pub fn matches(&self, styled: StyledText<'_>, fit: LineFit, typography: &Typography) -> bool {
         self.fit == fit
             && self.typography == *typography
@@ -3784,6 +4125,17 @@ impl TextEngine {
         fit: LineFit,
         typography: &Typography,
     ) -> Result<UpdateCost> {
+        self.cancel_background();
+        self.update_inner(styled, fit, typography, None)
+    }
+
+    fn update_inner(
+        &mut self,
+        styled: StyledText<'_>,
+        fit: LineFit,
+        typography: &Typography,
+        foreground_limit: Option<usize>,
+    ) -> Result<UpdateCost> {
         let fit = match fit {
             LineFit::Extent(extent) => LineFit::Extent(extent.max(1)),
             LineFit::Free => LineFit::Free,
@@ -3792,9 +4144,11 @@ impl TextEngine {
             font_size: typography.font_size.max(1.0),
             ..typography.clone()
         };
-        if self.matches(styled, fit, &typography) {
+        if self.matches(styled, fit, &typography) && self.deferred_blocks.is_empty() {
             return Ok(UpdateCost::default());
         }
+        self.check_cancelled()?;
+        self.deferred_blocks.clear();
         if self.fit != fit || self.typography != typography {
             // Both feed into every measurement, so nothing cached survives. The
             // wrap positions go too: they are keyed by the geometry, so the old
@@ -3812,11 +4166,19 @@ impl TextEngine {
         // places that turn a line coordinate into a screen one reading a single
         // number, exactly as it did before.
         let numbers = number_column(&typography, mode, text);
-        let margin = margin_for(typography.font_size) + numbers.map_or(0.0, |column| column.gutter);
+        let heading_margin = if self.typography == typography && self.margin > 0.0 {
+            self.margin - self.numbers.map_or(0.0, |column| column.gutter)
+        } else {
+            heading_margin(&typography, mode)?
+        };
+        let margin = heading_margin + numbers.map_or(0.0, |column| column.gutter);
         let line_box = fit.line_box(margin, 0.0);
+        // The splitting helpers accept an extent with their nominal padding.
+        // Translate the actual measured text area to that convention.
+        let charged_extent = (line_box + typography.font_size * 13.0).ceil() as u32;
         // The split is charged in line space, so it needs the geometry: the same
         // pane at a different line extent wraps differently and cuts elsewhere.
-        let cells = cells_per_line(fit.charged_extent(), &typography);
+        let cells = cells_per_line(charged_extent, &typography);
         // The same spec, in a form a task can carry. One spec covers the whole
         // update and holds a family name for the body, one for code and one per
         // heading level, so it is shared rather than cloned per task.
@@ -3831,20 +4193,28 @@ impl TextEngine {
         //
         // Ordinary documents ask nothing, and then this pass is the split: its
         // blocks are already the right ones, and the second one never runs.
-        let mut asking = RecordedWraps::default();
+        let mut asking = RecordedWraps::for_text(text);
         let spans = split_blocks(styled, cells, &typography, &mut asking);
         let page = WrapPage {
             typography: spec.clone(),
             mode,
-            line_extent: fit.charged_extent(),
+            line_extent: charged_extent,
             line_box,
         };
-        let answered = self.wrap_answers(&asking.asked, &page, styled, cells, &typography)?;
+        let answered = self.wrap_answers(
+            &asking.asked,
+            &page,
+            styled,
+            cells,
+            &typography,
+            foreground_limit,
+        )?;
         let (spans, fresh_wraps, wrap_cost) = match answered {
             Some(done) => done,
             None => (spans, Vec::new(), UpdateCost::default()),
         };
         self.wraps = fresh_wraps;
+        let deferred = incremental::deferred_ranges(styled.text, &self.wraps);
         // **One slot per block, filled in whatever order the answers arrive.**
         // A block measured on another thread comes back when it comes back, so
         // the order of the document is kept here rather than in the measuring.
@@ -3885,6 +4255,15 @@ impl TextEngine {
         // measuring is what lets the measuring go somewhere else.
         {
             for (index, span) in spans.iter().enumerate() {
+                self.check_cancelled()?;
+                if deferred
+                    .iter()
+                    .any(|range| span.byte_start < range.end && span.byte_end > range.start)
+                {
+                    self.deferred_blocks.insert(index);
+                    measures[index] = Some(incremental::estimate(span, cells, &typography));
+                    continue;
+                }
                 let block_text = &text[span.byte_start..span.byte_end];
                 let block_styled = block_styling(styled, span, &block_lines[index]);
 
@@ -3943,7 +4322,7 @@ impl TextEngine {
                     table_tasks.push(index);
                     continue;
                 }
-                let extent = block_extent(span, fit.charged_extent(), &typography);
+                let extent = block_extent(span, charged_extent, &typography);
                 let max_flow_size = block_flow_bound(block_styled, extent, &typography);
                 tasks.push(MeasureTask {
                     index,
@@ -3965,6 +4344,7 @@ impl TextEngine {
         if !table_tasks.is_empty() {
             with_graphics(|graphics| {
                 for index in &table_tasks {
+                    self.check_cancelled()?;
                     let index = *index;
                     let span = &spans[index];
                     let block_styled = block_styling(styled, span, &block_lines[index]);
@@ -4003,7 +4383,9 @@ impl TextEngine {
         // layout belongs to the thread that made it. What that costs is the few
         // blocks on screen, whose layouts `layout_for` builds again when the
         // tiles are drawn; measuring them all again is what it saves.
-        let divide = tasks.len() >= PARALLEL_MEASURE_MIN;
+        let divide = tasks.len() >= PARALLEL_MEASURE_MIN
+            && self.work_cancel.is_none()
+            && foreground_limit.is_none();
         let handed = divide.then(|| {
             let queued = tasks.iter().cloned().map(PoolTask::Measure).collect();
             on_layout_threads(queued)
@@ -4038,6 +4420,7 @@ impl TextEngine {
         if !left.is_empty() {
             with_graphics(|graphics| {
                 for task in left {
+                    self.check_cancelled()?;
                     let (measure, layout) = measure_task(graphics, task)?;
                     if let Some(slot) = pending.get(&task.index) {
                         fresh_measures.push((
@@ -4131,6 +4514,7 @@ impl TextEngine {
         styled: StyledText<'_>,
         cells: u32,
         typography: &Typography,
+        foreground_limit: Option<usize>,
     ) -> Result<Option<(Vec<BlockSpan>, Vec<ParagraphWraps>, UpdateCost)>> {
         if asked.is_empty() {
             return Ok(None);
@@ -4140,6 +4524,7 @@ impl TextEngine {
             ..UpdateCost::default()
         };
         let mut answers: Vec<Vec<usize>> = vec![Vec::new(); asked.len()];
+        let mut complete = vec![true; asked.len()];
         let mut kept: Vec<Vec<usize>> = vec![Vec::new(); asked.len()];
         let mut tasks: Vec<WrapTask> = Vec::new();
         for (at, line) in asked.iter().enumerate() {
@@ -4169,7 +4554,9 @@ impl TextEngine {
         // **Two paragraphs are already worth dividing.** Unlike a block, a long
         // paragraph is never small: the cheapest one here is the one that only
         // just grew past a block.
-        let divide = tasks.len() >= PARALLEL_WRAP_MIN;
+        let divide = tasks.len() >= PARALLEL_WRAP_MIN
+            && self.work_cancel.is_none()
+            && foreground_limit.is_none();
         let handed = divide.then(|| {
             let queued = tasks.iter().cloned().map(PoolTask::Wrap).collect();
             on_layout_threads(queued)
@@ -4193,10 +4580,27 @@ impl TextEngine {
             with_graphics(|graphics| {
                 let format = graphics.text_format(typography, page.mode)?;
                 for task in left {
+                    self.check_cancelled()?;
                     let line = task.line.borrowed();
-                    let found = wrap_offsets(graphics, &format, page, line, task.from);
+                    let base = asked[task.at].byte_start;
+                    let stop =
+                        foreground_limit.map(|limit| limit.saturating_sub(base).max(task.from));
+                    let found = incremental::wrap_prefix(
+                        graphics,
+                        &format,
+                        page,
+                        line,
+                        task.from,
+                        stop,
+                        self.work_cancel.as_ref(),
+                    )?;
+                    cost.wrapped = cost
+                        .wrapped
+                        .saturating_sub(line.text[task.from..].encode_utf16().count() as u32)
+                        + found.2;
                     answers[task.at] = std::mem::take(&mut kept[task.at]);
-                    answers[task.at].extend(found.unwrap_or_default());
+                    answers[task.at].extend(found.0);
+                    complete[task.at] = found.1;
                 }
                 Ok(())
             })?;
@@ -4208,13 +4612,16 @@ impl TextEngine {
         let current = asked
             .iter()
             .zip(&answers)
-            .map(|(line, starts)| ParagraphWraps {
+            .enumerate()
+            .map(|(at, (line, starts))| ParagraphWraps {
+                byte_start: line.byte_start,
                 text: line.text.clone(),
                 style: line.style,
                 indent_steps: line.indent_steps,
                 marks: line.marks.clone(),
                 marker: line.marker,
                 starts: starts.clone(),
+                complete: complete[at],
             })
             .collect();
         let mut prepared = PreparedWraps::new(answers);
@@ -4442,6 +4849,9 @@ impl TextEngine {
         graphics: &mut Graphics,
         block_index: usize,
     ) -> Result<IDWriteTextLayout> {
+        if self.deferred_blocks.contains(&block_index) {
+            return Err(Error::new(E_FAIL, "layout is not yet available"));
+        }
         let (byte_start, byte_end, max_flow_size, line_box) = {
             let block = &self.plan.blocks[block_index];
             (
@@ -4495,18 +4905,22 @@ impl TextEngine {
         viewport_across: f32,
         visible_across: f32,
     ) -> Vec<TileSpan> {
-        self.plan.visible_tiles(
-            viewport_flow,
-            visible_flow,
-            self.tile_flow_size(),
-            prefetch,
-            CrossSlices {
-                extent: self.line_extent(),
-                tile_size: self.tile_cross_size(),
-                viewport: viewport_across,
-                visible: visible_across,
-            },
-        )
+        self.plan
+            .visible_tiles(
+                viewport_flow,
+                visible_flow,
+                self.tile_flow_size(),
+                prefetch,
+                CrossSlices {
+                    extent: self.line_extent(),
+                    tile_size: self.tile_cross_size(),
+                    viewport: viewport_across,
+                    visible: visible_across,
+                },
+            )
+            .into_iter()
+            .filter(|tile| !self.deferred_blocks.contains(&tile.block_index))
+            .collect()
     }
 
     /// The parcels the requested tiles are drawn from.
@@ -4651,6 +5065,9 @@ impl TextEngine {
         tile.cross_start.hash(&mut hasher);
         tile.cross_size.hash(&mut hasher);
         self.line_extent().hash(&mut hasher);
+        // Heading settings can change the common margin even in body-only
+        // blocks. Their cached pixels must move and rewrap with the new margin.
+        self.margin.to_bits().hash(&mut hasher);
         hash_typography(&self.typography, &mut hasher);
         hash_colours(&self.typography, &mut hasher);
         // 要件 7.9（2026-09-08追加）: 単語セット。**色と同じ側にいる**——語を
@@ -4828,16 +5245,21 @@ impl TextEngine {
         // カーソルが字下げの中にいるあいだは、描いてある字の頭に立つ。
         let inside = byte_at_utf16(text, local).saturating_sub(start + lead);
         let inside = utf16_units(&ink[..inside.min(ink.len())]);
-        let format = graphics.text_format(&self.typography, self.mode)?;
+        let hashes = ink.chars().filter(|ch| *ch == '#').count();
+        let (format, indent) = if hashes > 0 {
+            graphics.heading_marker(&self.typography, self.mode, hashes.min(6) as u8)?
+        } else {
+            (
+                graphics.text_format(&self.typography, self.mode)?,
+                self.typography.indent_step(),
+            )
+        };
         // 短い字なので、その場で組んで訊く。**同じ書式で組む**ので、溝に描いた字と
         // 同じ幅が返る（描くのは`draw_marker_ink`の`DrawText`で、書式はこれである）。
         let layout = unsafe {
-            graphics.dwrite.CreateTextLayout(
-                &markup,
-                &format,
-                self.typography.indent_step().max(1.0),
-                self.typography.font_size.max(1.0),
-            )?
+            graphics
+                .dwrite
+                .CreateTextLayout(&markup, &format, indent.max(1.0), indent.max(1.0))?
         };
         let mut point_x = 0.0;
         let mut point_y = 0.0;
@@ -4848,7 +5270,7 @@ impl TextEngine {
         }
         let (flow, line) = self.mode.to_axes(point_x, point_y);
         // 溝は本文の1段手前から始まる（`draw_marker_ink`が墨を置くのと同じ場所）。
-        Ok((flow, line - self.typography.indent_step()))
+        Ok((flow, line - indent))
     }
 
     /// Selection rectangles for the part of the range that the viewport shows.
@@ -4885,6 +5307,9 @@ impl TextEngine {
 
         with_graphics(|graphics| {
             for block_index in first..last {
+                if self.deferred_blocks.contains(&block_index) {
+                    continue;
+                }
                 // 要件 7.3.2: **a table is selected cell by cell.** Each has
                 // its own layout, so each answers for its own part of the
                 // range; the bars between them hold no ink and no rectangle.
@@ -5294,7 +5719,9 @@ fn hit_test_in_block(
 /// document never builds this layout at all.
 /// One long paragraph's wrapping, kept so the next update need not find it
 /// again from nothing.
+#[derive(Clone)]
 struct ParagraphWraps {
+    byte_start: usize,
     text: String,
     /// How the line was set when these positions were found — **all of what
     /// moves a break**, which is what [`LongLine`] is a list of. Positions
@@ -5311,6 +5738,7 @@ struct ParagraphWraps {
     marker: Option<LineMarker>,
     /// Byte offsets where each line after the first begins.
     starts: Vec<usize>,
+    complete: bool,
 }
 
 impl ParagraphWraps {
@@ -5399,9 +5827,9 @@ struct WrapReuse {
 
 /// Look one long line up among the paragraphs of the last update.
 fn wrap_reuse(previous: &[ParagraphWraps], line: LongLine<'_>) -> WrapReuse {
-    let same = previous
-        .iter()
-        .find(|kept| kept.matches(line) && kept.marks == line.marks && kept.text == line.text);
+    let same = previous.iter().find(|kept| {
+        kept.complete && kept.matches(line) && kept.marks == line.marks && kept.text == line.text
+    });
     if let Some(same) = same {
         return WrapReuse {
             kept: same.starts.clone(),
@@ -5706,6 +6134,20 @@ fn measure_block(
                 &mut metrics,
             )?;
         }
+        // A zero-width source marker reports its inline object's baseline,
+        // which can differ from the heading glyphs on the same line.
+        let after_box = metrics.textPosition + metrics.length;
+        if !metrics.isText.as_bool() && after_box < utf16_start + line.length - line.newlineLength {
+            unsafe {
+                layout.HitTestTextPosition(
+                    after_box,
+                    false,
+                    &mut point_x,
+                    &mut point_y,
+                    &mut metrics,
+                )?;
+            }
+        }
         lines.push(LineInfo {
             utf16_start,
             utf16_len: line.length,
@@ -5785,7 +6227,8 @@ mod tests {
     use crate::text_blocks::{LineKind, Marks, visible_flow_range};
 
     /// The pane extent along the line axis every test lays text out in.
-    const LINE_EXTENT: u32 = 520;
+    // Keep room for the sample paragraphs as well as the six-marker margins.
+    const LINE_EXTENT: u32 = 840;
 
     /// Every tile a render produced, kept whole.
     ///
@@ -5865,7 +6308,15 @@ mod tests {
         // A rotated Latin run and plain ideographs, so the columns are not all
         // the same width. That variety is what defeated a single pitch.
         let text = "縦書きの列送りを確かめる段落です。日本語ABC123を含みます。\n\n".repeat(6);
-        let engine = engine_for(&text, 22.0);
+        let mut engine = TextEngine::new(WritingMode::Vertical);
+        // Preserve this mixed-script fixture's original 454px text area.
+        engine
+            .update(
+                StyledText::plain(&text),
+                LineFit::Extent(454 + (2.0 * margin_for(22.0)) as u32),
+                &Typography::new(22.0),
+            )
+            .unwrap();
         let block = &engine.plan.blocks[0];
         assert!(block.lines.len() > 3, "need several lines");
 
@@ -6065,36 +6516,112 @@ mod tests {
     /// 戻っていた——「入力中に右に大きくズレて戻る」。記号を箱で覆って溝に描く
     /// ようにしたので（`Ornament::Markup`）、位置は動かない。
     #[test]
-    fn a_line_does_not_move_when_the_caret_is_on_it() {
-        let mode = WritingMode::Horizontal;
-        for line in [
-            "- 項目",
-            "10. 項目",
-            "- [x] 項目",
-            "> 項目",
-            "  - 項目",
-            "項目",
-        ] {
-            let source = format!("ふつうの本文\n{line}\n");
-            let head = "ふつうの本文\n".len();
-            let mut seen = Vec::new();
-            for active in [Some(head), None] {
-                let preview =
-                    crate::document::PreviewDocument::from_source_with_active_line(&source, active);
-                let styles = crate::document::line_styles(&source);
-                let styled = StyledText::marked(&preview.text, &styles, preview.marks())
-                    .with_markers(preview.markers())
-                    .with_source_line(preview.active_line());
-                let text = preview.text.clone();
-                let mut engine = engine_set(mode, styled, &plain());
-                seen.push(line_axis_at(&mut engine, mode, &text, "項目"));
-            }
-            assert!(
-                (seen[0] - seen[1]).abs() < 0.5,
-                "{line}: 触っていると{}、離れると{}",
-                seen[0],
-                seen[1]
+    fn changing_heading_margin_invalidates_body_tiles() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let mut spec = plain();
+            let mut engine = engine_set(mode, StyledText::plain("変更していない本文"), &spec);
+            let tiles = engine.visible_tiles(0.0, 2000.0, 0, 0.0, LINE_EXTENT as f32);
+            let tile = tiles[0];
+            let before = engine.tile_signature(tile, None);
+            spec.heading_scale[5] = 3.0;
+            engine
+                .update(
+                    StyledText::plain("変更していない本文"),
+                    LineFit::Extent(LINE_EXTENT),
+                    &spec,
+                )
+                .unwrap();
+            assert_ne!(
+                before,
+                engine.tile_signature(tile, None),
+                "body tile must move with the common margin: {mode:?}"
             );
+        }
+    }
+
+    #[test]
+    fn heading_margin_tracks_settings_but_not_the_edited_heading() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let mut spec = plain();
+            let mut engine = engine_set(mode, StyledText::plain("本文"), &spec);
+            let original = engine.margin;
+            spec.heading_scale[5] = 3.0;
+            engine
+                .update(
+                    StyledText::plain("本文"),
+                    LineFit::Extent(LINE_EXTENT),
+                    &spec,
+                )
+                .unwrap();
+            let enlarged = engine.margin;
+            assert!(
+                enlarged > original,
+                "H6 at 300% must enlarge the margin: {mode:?}"
+            );
+            with_graphics(|graphics| {
+                for level in 1..=6 {
+                    assert!(graphics.heading_marker(&spec, mode, level)?.1 <= enlarged);
+                }
+                Ok(())
+            })
+            .unwrap();
+            for source in ["# 見出し", "###### 見出し", "本文に戻る"] {
+                engine
+                    .update(
+                        StyledText::plain(source),
+                        LineFit::Extent(LINE_EXTENT),
+                        &spec,
+                    )
+                    .unwrap();
+                assert_eq!(engine.margin, enlarged);
+            }
+            spec.heading_scale[5] = 1.0;
+            engine
+                .update(
+                    StyledText::plain("本文"),
+                    LineFit::Extent(LINE_EXTENT),
+                    &spec,
+                )
+                .unwrap();
+            assert_eq!(engine.margin, original);
+        }
+    }
+
+    #[test]
+    fn a_line_does_not_move_when_the_caret_is_on_it() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            for line in [
+                "# 項目",
+                "###### 項目",
+                "- 項目",
+                "10. 項目",
+                "- [x] 項目",
+                "> 項目",
+                "  - 項目",
+                "項目",
+            ] {
+                let source = format!("ふつうの本文\n{line}\n");
+                let head = "ふつうの本文\n".len();
+                let mut seen = Vec::new();
+                for active in [Some(head), None] {
+                    let preview = crate::document::PreviewDocument::from_source_with_active_line(
+                        &source, active,
+                    );
+                    let styles = crate::document::line_styles(&source);
+                    let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                        .with_markers(preview.markers())
+                        .with_source_line(preview.active_line());
+                    let text = preview.text.clone();
+                    let mut engine = engine_set(mode, styled, &plain());
+                    seen.push(line_axis_at(&mut engine, mode, &text, "項目"));
+                }
+                assert!(
+                    (seen[0] - seen[1]).abs() < 0.5,
+                    "{line}: 触っていると{}、離れると{}",
+                    seen[0],
+                    seen[1]
+                );
+            }
         }
     }
 
@@ -6529,6 +7056,40 @@ mod tests {
                 ink_in_margin(mode, true) > 20,
                 "番号が3つ、余白の中に立っているはず: {mode:?}"
             );
+        }
+    }
+
+    #[test]
+    fn whitespace_marks_change_pixels_without_changing_layout() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            for source in ["😀 a", "あ　い", "あ\tい", "あ\nい", "あ\r\nい", "\n\n"] {
+                let render = |shown| {
+                    let spec = Typography {
+                        whitespace: shown,
+                        ..Typography::new(22.0)
+                    };
+                    let mut engine = engine_set(mode, StyledText::plain(source), &spec);
+                    let flow = engine.total_flow_size();
+                    let tiles = engine.visible_tiles(0.0, flow as f32, 0, 0.0, LINE_EXTENT as f32);
+                    let mut drawn = DrawnTiles::default();
+                    engine.render_tiles(&tiles, None, &mut drawn).unwrap();
+                    (
+                        flow,
+                        drawn
+                            .tiles
+                            .into_iter()
+                            .flat_map(|(_, _, _, pixels)| pixels)
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                let hidden = render(false);
+                let shown = render(true);
+                assert_eq!(hidden.0, shown.0, "{mode:?} {source:?}");
+                assert_ne!(
+                    hidden.1, shown.1,
+                    "{mode:?} {source:?} needs a visible mark"
+                );
+            }
         }
     }
 
@@ -8106,6 +8667,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn typography_decorations_invalidate_cached_layouts_and_tiles() {
+        let signature = |spec: &Typography| {
+            let mut hasher = DefaultHasher::new();
+            hash_typography(spec, &mut hasher);
+            hasher.finish()
+        };
+        let baseline = Typography::new(22.0);
+        for slot in 0..7 {
+            for bit in 0..5 {
+                let mut changed = baseline.clone();
+                changed.decorations[slot] = 1 << bit;
+                assert_ne!(signature(&baseline), signature(&changed));
+            }
+            let mut changed = baseline.clone();
+            changed.backgrounds[slot] = [0.1, 0.2, 0.3];
+            assert_ne!(signature(&baseline), signature(&changed));
+        }
+    }
+
     /// **A marker that closes changes what came before it**, so a paragraph's
     /// wrapping may be carried over only as far as its marks are unchanged
     /// (要件 7.3.2). Typing plain text moves no earlier mark, which is the case
@@ -8977,6 +9558,79 @@ mod tests {
         let cost = update_plain(&mut engine, &edited);
 
         assert!(cost.wrapped > 0, "the changed paragraph must be re-wrapped");
+    }
+
+    #[test]
+    #[ignore = "manual E17 timing; run alone with --nocapture"]
+    fn incremental_layout_timing() {
+        for count in [200, 10_000, 50_000] {
+            let text = "日本語ABCと句読点、を含む長い段落である。"
+                .chars()
+                .cycle()
+                .take(count)
+                .collect::<String>();
+            for fraction in [0, 50, 95] {
+                for interactive in [false, true] {
+                    let mut engine = engine_for(&text, 22.0);
+                    let at = text.char_indices().nth(count * fraction / 100).unwrap().0;
+                    let mut samples = Vec::new();
+                    let mut completed = Vec::new();
+                    for iteration in 0..21 {
+                        let mut edited = text.clone();
+                        edited.insert_str(
+                            at,
+                            if iteration % 2 == 0 {
+                                "追記"
+                            } else {
+                                "追加文"
+                            },
+                        );
+                        let started = std::time::Instant::now();
+                        let cost = if interactive {
+                            engine
+                                .update_interactive(
+                                    StyledText::plain(&edited),
+                                    LineFit::Extent(LINE_EXTENT),
+                                    &plain(),
+                                    edited[..at].encode_utf16().count() as u32 + 3,
+                                )
+                                .unwrap()
+                        } else {
+                            update_plain(&mut engine, &edited)
+                        };
+                        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                        while engine.layout_pending() {
+                            assert!(started.elapsed() < Duration::from_secs(10));
+                            if engine.layout_ready() {
+                                engine
+                                    .update_interactive(
+                                        StyledText::plain(&edited),
+                                        LineFit::Extent(LINE_EXTENT),
+                                        &plain(),
+                                        0,
+                                    )
+                                    .unwrap();
+                            } else {
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                        }
+                        completed.push(started.elapsed().as_secs_f64() * 1000.0);
+                        if iteration == 20 {
+                            eprintln!(
+                                "E17 chars={count} at={fraction}% wrapped={} measured={}",
+                                cost.wrapped, cost.utf16
+                            );
+                        }
+                    }
+                    samples.sort_by(f64::total_cmp);
+                    completed.sort_by(f64::total_cmp);
+                    eprintln!(
+                        "E17 interactive={interactive} chars={count} at={fraction}% median={:.2}ms p95={:.2}ms complete_p95={:.2}ms",
+                        samples[10], samples[19], completed[19]
+                    );
+                }
+            }
+        }
     }
 
     /// The asymmetry, at the engine: an edit near the end of a long paragraph

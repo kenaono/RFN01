@@ -21,9 +21,9 @@
 export global Tok {
     // Surfaces, in the order they stack. `chrome` is the ground the window
     // paints everywhere the document is not.
-    out property <color> chrome: #f1f0f7; // oklch(.958 .010 295)
-    out property <color> chrome-raised: #e8e5f0; // oklch(.928 .015 295)
-    out property <color> chrome-sunken: #dad7e7; // oklch(.885 .022 295)
+    out property <color> chrome: #faf9fc;
+    out property <color> chrome-raised: #f5f3f9;
+    out property <color> chrome-sunken: #eeebf5;
 
     // Lines. `rule` separates regions; `rule-strong` is for edges the pointer
     // can grab and for marks inside the document (the quote bar, the rule).
@@ -48,8 +48,8 @@ export global Tok {
     // without reading a word. `doc-ink` matches BACKGROUND/FOREGROUND in
     // directwrite_render.rs — the tiles are drawn there, not here, so the two
     // have to be changed together.
-    out property <color> paper: #fcf9ef; // oklch(.982 .014 92)
-    out property <color> paper-alt: #f9f4e2; // oklch(.966 .024 92)
+    out property <color> paper: #fffefa;
+    out property <color> paper-alt: #fdfbf4;
     out property <color> doc-ink: #24211e; // oklch(.250 .008 70)
 
     // The only colour outside the two families, and it is spent on one thing:
@@ -57,6 +57,10 @@ export global Tok {
     // number stays in `ink-muted`.
     out property <color> alert: #a74639; // oklch(.520 .130 30)
     out property <color> alert-soft: #fbd4cd; // oklch(.900 .045 30)
+    // Read-only diff: deletion, addition, and replacement.
+    out property <color> diff-removed: #fbe3e2;
+    out property <color> diff-added: #dff2df;
+    out property <color> diff-changed: #fff0c9;
 
     // The veil behind a question. `ink-strong` at 52%, so the paper underneath
     // reads as paper rather than as grey.

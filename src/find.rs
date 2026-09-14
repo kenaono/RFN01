@@ -504,12 +504,9 @@ pub struct Hit {
     pub line: usize,
     /// Where the match starts in the source, so the caret can be put on it.
     pub at: usize,
-    /// The line the match is on, short enough to sit in a narrow pane.
+    /// Full logical line; the UI elides it and shows the full text on hover.
     pub preview: String,
 }
-
-/// How much of a line a result shows.
-const PREVIEW_CHARACTERS: usize = 60;
 
 /// Every match in one document, with the line each sits on (要件 7.7).
 ///
@@ -533,7 +530,7 @@ pub fn hits_in(source: &str, needle: &str, limit: usize) -> Vec<Hit> {
             hits.push(Hit {
                 line: number + 1,
                 at: line_start + at,
-                preview: shortened(line),
+                preview: line.trim_end_matches('\r').to_owned(),
             });
             if hits.len() >= limit {
                 return hits;
@@ -545,19 +542,6 @@ pub fn hits_in(source: &str, needle: &str, limit: usize) -> Vec<Hit> {
         line_start += line.len() + 1;
     }
     hits
-}
-
-/// A line with its indentation dropped and its tail cut off.
-///
-/// **Cut by characters, not by bytes**, or a Japanese line would be cut through
-/// the middle of one.
-fn shortened(line: &str) -> String {
-    let line = line.trim();
-    let mut out: String = line.chars().take(PREVIEW_CHARACTERS).collect();
-    if line.chars().nth(PREVIEW_CHARACTERS).is_some() {
-        out.push('…');
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1120,19 +1104,11 @@ mod tests {
         assert_eq!(hits[2].line, 3);
     }
 
-    /// A result line is trimmed and cut to a length a narrow pane can show.
     #[test]
-    fn a_long_line_is_cut_where_a_character_ends() {
-        let long = "あ".repeat(PREVIEW_CHARACTERS + 10);
-        let source = format!("    {long}");
-
+    fn a_long_result_preserves_the_full_line_for_hover() {
+        let source = format!("    {}終端", "あ".repeat(200));
         let hits = hits_in(&source, "あ", 50);
-
-        let preview = &hits[0].preview;
-        assert_eq!(preview.chars().count(), PREVIEW_CHARACTERS + 1);
-        assert!(preview.ends_with('…'));
-        // Trimmed, so the indentation does not eat the width.
-        assert!(preview.starts_with('あ'));
+        assert_eq!(hits[0].preview, source);
     }
 
     /// 履歴は新しいものが上で、同じ語は1つ（E1の④）。

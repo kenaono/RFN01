@@ -7,6 +7,8 @@ import { ColorCell, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, Men
 // 窓の外から見えない。
 export { Ime }
 import { QuickDraft } from "quick-draft.slint";
+import { DiffView, DiffRow } from "diff-window.slint";
+export { DiffRow } from "diff-window.slint";
 
 /// 要件 7.9: 設定画面が出す語群の1行。
 ///
@@ -16,6 +18,7 @@ import { QuickDraft } from "quick-draft.slint";
 ///
 /// **語か、覚え書きか。**`#`で始まる行は覚え書きで、木には積まれず、語数にも
 /// 数えられない——一覧の中では見出しとして立つ。
+export struct ShortcutItem { id: int, name: string, key: string }
 export struct WordRow {
     text: string,
     note: bool,
@@ -191,6 +194,8 @@ export component AppWindow inherits Window {
     callback search-folder-requested();
     callback search-folder-reset();
     callback folder-search-requested();
+    in-out property <string> search-exclusions;
+    callback search-exclusions-changed();
     // 要件 2: the search runs on a thread of its own, so the answer arrives
     // after the callback that asked for it has long returned. **Rung by that
     // thread, through the event loop** — nothing here decides when.
@@ -199,7 +204,13 @@ export component AppWindow inherits Window {
     /// 1 新規フォルダー, 2 名前変更, 3 複製, 4 削除, 5 エクスプローラー
     /// (要件 5.2). One callback carrying a number, the way a pane is named by
     /// its index; `TreeCommand::from_index` is the one place it is read.
+    in-out property <int> tree-new-index: -1;
+    in-out property <string> tree-new-name;
+    in-out property <string> tree-new-error;
+    callback tree-new-finished(bool);
     callback tree-command(int);
+    callback explorer-command(int);
+    in-out property <int> tree-reveal-generation;
     /// Choose a row without acting on it (要件 5.2). What a right click does
     /// that a left click must not: the commands act on what is chosen, and
     /// opening the file or folding the folder is not what was asked for.
@@ -218,6 +229,17 @@ export component AppWindow inherits Window {
     /// them would rebuild the very row whose grab is running (6.18/6.24), so
     /// the move happens after the hand lets go, from Rust, through a `Timer`.
     property <bool> tree-carrying: false;
+    property <bool> tree-pointer-down: false;
+    function show-tree-menu(x: length, y: length) {
+        root.tree-menu-x = x;
+        root.tree-menu-y = y;
+        tree-context-menu.show();
+    }
+    function close-tree-menu() { tree-context-menu.close(); }
+    property <length> tree-menu-x;
+    property <length> tree-menu-y;
+    property <bool> tree-menu-open: tree-context-menu.is-open;
+    out property <bool> tree-refresh-blocked: root.tree-carrying || root.tree-pointer-down || root.tree-menu-open || root.tree-new-index >= 0;
     property <int> tree-carried-from: -1;
     /// Where the hand is, **in the coordinates the rows are laid out in**: `x`
     /// across a row, `y` down the list from its first row. Not the window's,
@@ -276,6 +298,24 @@ export component AppWindow inherits Window {
     /// 帯が出たときに鍵盤をそこへ置くか（E1）。**F3から出したときだけ偽**
     /// ——本文で押した鍵で書き手が欄へ連れて行かれるのは、探し直しではない。
     in-out property <bool> find-focus: true;
+    /// Open/focus the pane's search or replace bar, or close the focused bar.
+    public function toggle-find(pane-id: int, replacing: bool) {
+        root.pane-focus-trace(pane-id, replacing ? "replace-toggle-request" : "find-toggle-request");
+        root.focused-pane = pane-id;
+        if (root.find-open && root.find-pane == pane-id
+            && root.find-replacing == replacing && root.find-focus) {
+            root.find-open = false;
+            root.focus-generation += 1;
+        } else {
+            root.find-focus = true;
+            root.find-pane = pane-id;
+            root.find-replacing = replacing;
+            root.find-open = true;
+            root.find-generation += 1;
+        }
+        root.find-typed();
+        root.pane-focus-trace(pane-id, "find-toggle-finished");
+    }
     /// True searches on from the caret, false back towards the start.
     callback find-requested(bool);
     /// 検索の語が打ち変えられた。**数え直すだけ**で、本文のカーソルは動かない
@@ -346,7 +386,9 @@ export component AppWindow inherits Window {
     /// これは**片付くまで消えない**——保存のときに初めて気づくのでは、そこで
     /// どちらかを捨てることになる。
     in property <bool> count-outside;
+    in property <bool> count-missing;
     callback outside-asked();
+    callback comparison-dismissed(int);
     /// この文字コードで読み直す（要件 E2 の②）。
     callback reopen-encoding(int);
 
@@ -384,7 +426,10 @@ export component AppWindow inherits Window {
     /// **窓が持つ**（パネルの中ではなく）。`PopupWindow`の中身は開くたびに
     /// 作り直されるので、そこに置いた値は毎回0へ戻る——書き手が Layout を
     /// 見ていて閉じ、また開けば、見たいのは Layout である。
-    property <int> settings-tab: 0;
+    in-out property <int> settings-tab: 0;
+    in-out property <bool> settings-open: false;
+    in-out property <length> settings-offset-x: 0px;
+    in-out property <length> settings-offset-y: 0px;
     /// What the picker lists, and what it is picking for. The list is read from
     /// the system the first time it is opened.
     in property <[string]> font-names;
@@ -432,6 +477,7 @@ export component AppWindow inherits Window {
     // and nothing else tells the panes apart, so a repeater only has to pass
     // its `index` here instead of a literal (ペイン分割設計 5).
     callback pane-selection-start(int, float, float, bool);
+    callback pane-link-open(int, float, float) -> bool;
     /// E3の②: 行そのものを動かす・写す・消す。
     callback pane-line-edit(int, int);
     /// E10: 選んだ行を箇条書きにする、やめる。0=印、1=番号、2=数え直す。
@@ -443,6 +489,7 @@ export component AppWindow inherits Window {
     callback pane-selection-end(int, float, float);
     callback pane-select-all(int);
     callback pane-scroll-changed(int, float);
+    callback pane-across-scroll-changed(int, float);
     /// 要件 8.5: the pane was told to move the view, and this is where it
     /// actually went. **Two numbers because they can differ**: a `Flickable`
     /// holds its viewport inside what the content allows, so a scroll asked for
@@ -477,6 +524,7 @@ export component AppWindow inherits Window {
     /// 追加要件 2026-09-06: the right button's rows that the window answers.
     callback pane-close-clean(int);
     callback pane-copy-path(int, int);
+    callback pane-duplicate-tab(int, int);
     /// A shell wrote something. **Rung from its reading thread**, so it says
     /// only that: which pane, and what changed, are decided on this side.
     callback terminal-woken();
@@ -578,7 +626,7 @@ export component AppWindow inherits Window {
     /// **紙とは別に持つ。**要件 9 のシートは原稿の紙の設定で、端末を黒地で使うことと
     /// 何の関係も無い。書字方向も持たないので、設定でもシートの外に立つ。
     /// 16色（SGR）はここに無い——背景の明るさからRustが決める。
-    in-out property <color> terminal-paper: #fcf9ef;
+    in-out property <color> terminal-paper: #fffefa;
     in-out property <color> terminal-ink: #24211e;
     in-out property <string> terminal-font: "Consolas";
     in-out property <int> terminal-size: 15;
@@ -624,6 +672,7 @@ export component AppWindow inherits Window {
     callback pane-move(int, int, bool);
     callback pane-home-end(int, bool, bool, bool);
     callback pane-preview-toggled(int);
+    callback pane-viewer-toggled(int);
     /// Turn a pane's tab the other way (要件 7.2). Costs that pane's engine
     /// being built again, so it is a button and never a side effect.
     callback pane-direction-toggled(int);
@@ -631,16 +680,24 @@ export component AppWindow inherits Window {
     callback pane-undo(int, bool);
     /// Copy the pane's selection, or cut it. True takes it out (要件 11.2).
     callback pane-copy(int, bool);
+    callback pane-copy-body(int);
     /// Step through a pane's tabs (要件 11.3). True goes backwards.
     callback pane-tab-stepped(int, bool);
     /// Give the keyboard to the pane in a direction (要件 11.3): 0 left,
     /// 1 right, 2 up, 3 down. Rust decides which pane that is, from the
     /// rectangles the panes were placed in, and sets `focused-pane` itself.
     callback pane-focus-moved(int, int);
+    callback pane-focus-trace(int, string);
     /// Ask the Kill Ring for something, in a pane (要件 11.4・11.6).
     callback pane-kill(int, int);
     /// Start selecting in a pane, or stop (要件 11.4 の`Ctrl+Space`).
     callback pane-mark-toggled(int, bool);
+    /// Escapeで、選んでいる途中から戻る（書き手の報告 2026-09-12）。
+    /// **戻るものが無ければ`false`**——鍵はそのまま先へ行く。
+    callback pane-escaped(int) -> bool;
+    /// 届いたShiftを、Windowsの答えと突き合わせて返す（書き手の報告 2026-09-12）。
+    /// **窓の旗は変換をまたぐと古くなる。**
+    callback shift-held(bool) -> bool;
     /// Divide the focused pane, right or down (要件 6.4). True is right.
     callback divide-requested(bool);
     /// Bring the arrangement back to the focused pane, gathering the tabs of
@@ -690,6 +747,39 @@ export component AppWindow inherits Window {
     callback color-picked(int);
     callback typography-reset();
     callback open-file-requested();
+    callback compare-files-requested();
+    callback compare-saved-requested();
+    callback reopen-closed-requested();
+    in-out property <int> shortcut-category: 0;
+    in-out property <string> shortcut-bindings;
+    in-out property <string> shortcut-query;
+    in-out property <string> shortcut-edit;
+    in-out property <string> shortcut-status;
+    in-out property <int> shortcut-selected: 0;
+    in-out property <[ShortcutItem]> shortcut-rows;
+    in-out property <[string]> shortcut-keys: ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+T", "Ctrl+Z", "Ctrl+Y"];
+    callback shortcut-filter();
+    callback shortcut-save(bool);
+    callback shortcut-capture(string, bool, bool, bool);
+    callback shortcut-key(string, bool, bool, bool) -> bool;
+
+    in-out property <bool> diff-active: false;
+    in property <[DiffRow]> diff-rows;
+    in property <string> diff-left-path;
+    in property <string> diff-right-path;
+    in-out property <string> diff-status;
+    in-out property <int> diff-selected-row: -1;
+    in property <float> diff-content-width: 1000;
+    in property <bool> diff-can-previous;
+    in property <bool> diff-can-next;
+    callback diff-next-difference(bool);
+    callback diff-select-difference(int);
+    callback diff-copy-side(bool);
+    callback diff-dismissed();
+    in property <bool> diff-merge-enabled;
+    in property <bool> diff-can-apply;
+    callback diff-choose-side(bool);
+    callback diff-apply-merge();
     /// 要件 12: open the quick draft window.
     ///
     /// **A request, not the window.** The one thing 要件 12.2 asks of the way
@@ -751,20 +841,20 @@ export component AppWindow inherits Window {
     /// The tree's row menus are not here: each one belongs to the row it hangs
     /// from, inside a repeater, and there is nothing to name from out here.
     /// They close by being clicked away from.
+    public function show-settings() {
+        root.settings-open = true;
+    }
+
     function dismiss-menus() -> bool {
+        if (root.settings-open) {
+            root.settings-open = false;
+            return true;
+        }
         if (app-menu.is-open) {
             app-menu.close();
             return true;
         }
-        // **`settings-panel.is-open` is not read**, and closing it blind is
-        // the price. Reading it makes the compiler generate a setter for
-        // `is-open`, and the code it writes for a `show()` that reaches up
-        // through two components does not compile (技術検証 6.22). This one is
-        // opened from inside the app menu and from inside a pane; the others
-        // are opened from the component that declares them. Closing a popup
-        // that is not open does nothing, so what is lost is only the answer:
-        // Escape closes this panel without being able to say that it did.
-        settings-panel.close();
+        // Settings is a movable in-window panel; settings-open is its visibility.
         // The folder history is closed blind for the same reason, and it is
         // the same case: it is opened from a row inside the app menu, which is
         // two components up from here (要件 5.1). Reading its `is-open` is what
@@ -897,7 +987,7 @@ export component AppWindow inherits Window {
 
                             MenuRow {
                                 title: "Open File…";
-                                shortcut: "Ctrl+O"; activated => {
+                                shortcut: root.shortcut-keys[0]; activated => {
                                     app-menu.close();
                                     root.open-file-requested();
                                     root.focus-generation += 1;
@@ -970,31 +1060,12 @@ export component AppWindow inherits Window {
                             // **`if`の中の行は頼んでから閉じる**（6.24）。
                             if !root.panes[root.focused-pane].terminal: MenuRow {
                                 title: "Find in File…";
-                                shortcut: "Ctrl+F"; activated => {
+                                shortcut: root.shortcut-keys[4]; activated => {
                                     root.find-pane = root.focused-pane;
                                     root.find-replacing = false;
                                     root.find-open = true;
                                     root.find-generation += 1;
                                     root.focus-generation += 1;
-                                    app-menu.close();
-                                }
-                            }
-                            // E4: 指定の行へ。**探す相手がいないときは出さない**
-                            // のは上の行と同じ理由で、シェルの立っているペインに
-                            // 行番号は無い。
-                            //
-                            // **頼んでから閉じる**（技術検証 6.24）。条件付きの行は
-                            // `repeater`なので、先に閉じるとハンドラが走っている当の
-                            // 要素ごと消え、次の行へ来ない——書き手の報告 2026-09-10：
-                            // 「6だけうまくいきませんでした」。上の`Find in File…`が
-                            // 頼んでから閉じているのは、同じ穴を踏んだからである。
-                            if !root.panes[root.focused-pane].terminal: MenuRow {
-                                title: "Go to Line…";
-                                shortcut: "Ctrl+G";
-                                activated => {
-                                    // メニューから来た求めは「そちらへ移りたい」で
-                                    // あって、閉じてほしいという意味ではない。
-                                    root.goto-requested(true);
                                     app-menu.close();
                                 }
                             }
@@ -1091,7 +1162,7 @@ export component AppWindow inherits Window {
                     icon: Icons.settings;
                     tip: "Settings";
                     clicked => {
-                        settings-panel.show();
+                                    root.show-settings();
                         root.focus-generation += 1;
                     }
                 }
@@ -1169,6 +1240,21 @@ export component AppWindow inherits Window {
                             // The three never appear together: with no work
                             // folder there is nothing to create in, and opening
                             // one is the only thing left to do.
+                            if root.work-folder != "": IconButton {
+                                icon: "M8 1v3M8 12v3M1 8h3M12 8h3M3.5 3.5h9v9h-9z";
+                                tip: "現在の文書をツリー内に表示";
+                                clicked => { root.explorer-command(0); }
+                            }
+                            if root.work-folder != "": IconButton {
+                                icon: "M3 2h10v9M1 5h9v9H1zM3 9.5h5";
+                                tip: "すべて折り畳む";
+                                clicked => { root.explorer-command(1); }
+                            }
+                            if root.work-folder != "": IconButton {
+                                icon: "M13 5a5.5 5.5 0 1 0 0 6M13 1v4H9";
+                                tip: "更新";
+                                clicked => { root.explorer-command(2); }
+                            }
                             if root.work-folder == "": IconButton {
                                 icon: Icons.folder;
                                 tip: "Open Folder";
@@ -1347,6 +1433,13 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            Text { text: "除外する名前（; 区切り、* と ? が使えます）"; color: Tok.ink-muted; font-size: 11px; wrap: word-wrap; }
+                            Field {
+                                placeholder: "例：*.bak; backup/";
+                                text <=> root.search-exclusions;
+                                edited => { root.search-exclusions-changed(); }
+                                accepted => { root.folder-search-requested(); }
+                            }
                             HorizontalLayout {
                                 spacing: 6px;
 
@@ -1369,7 +1462,19 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    if root.left-tab == 0 && root.tree-new-index >= 0 && root.tree-new-error != "": Text {
+                        text: root.tree-new-error;
+                        color: Tok.ink;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
                     tree-view := ScrollView {
+                        property <int> reveal-generation: root.tree-reveal-generation;
+                        changed reveal-generation => {
+                            if root.left-tab == 0 {
+                                self.viewport-y = -min(max(0, root.tree-selected) * 24px, max(0px, self.viewport-height - self.visible-height));
+                            }
+                        }
                         // 要件 5.2: the point being carried, but only while it
                         // is over the rows the writer can see. **A row scrolled
                         // out of sight still has a place in the list**, and the
@@ -1442,7 +1547,7 @@ export component AppWindow inherits Window {
                                 // the way a carried tab does (要件 6.5): it
                                 // stays where it is, because the tree is not
                                 // drawn again until the hand lets go.
-                                opacity: (root.tree-carrying
+                                property <float> label-opacity: (root.tree-carrying
                                     && index == root.tree-carried-from) ? 0.45 : 1.0;
                                 border-width: self.receiving ? 2px : 0px;
                                 border-color: Tok.accent;
@@ -1462,6 +1567,7 @@ export component AppWindow inherits Window {
                                 // tab's: a hand resting on a row is not
                                 // perfectly still.
                                 property <bool> pressing: false;
+                                changed pressing => { root.tree-pointer-down = self.pressing; }
                                 property <length> press-x;
                                 property <length> press-y;
                                 property <bool> carrying-self: false;
@@ -1472,6 +1578,7 @@ export component AppWindow inherits Window {
                                 property <int> moves: 0;
 
                                 entry := TouchArea {
+                                    enabled: root.tree-new-index < 0 || root.left-tab != 0;
                                     // The hand is closed while a row is in it.
                                     mouse-cursor: tree-row.carrying-self
                                         ? MouseCursor.grabbing
@@ -1501,7 +1608,7 @@ export component AppWindow inherits Window {
                                             && event.kind == PointerEventKind.down) {
                                             root.tree-selected = index;
                                             root.left-row-picked(index);
-                                            row-menu.show();
+                                            root.show-tree-menu(tree-row.absolute-position.x + 8px, tree-row.absolute-position.y + 24px);
                                         }
                                         if (event.button != PointerEventButton.left) {
                                             return;
@@ -1590,11 +1697,13 @@ export component AppWindow inherits Window {
                                 }
 
                                 Text {
+                                    visible: root.left-tab != 0 || index != root.tree-new-index;
                                     // Depth is drawn rather than nested, because
                                     // the rows arrive flat (see `LeftRow`).
                                     x: 8px + row.depth * 14px;
                                     text: (row.folder ? (row.open ? "▾ " : "▸ ") : "　")
                                         + row.name;
+                                    opacity: tree-row.label-opacity;
                                     color: Tok.ink-strong;
                                     font-size: 12px;
                                     vertical-alignment: center;
@@ -1607,11 +1716,25 @@ export component AppWindow inherits Window {
                                         - (root.left-tab == 0 ? 28px : 8px);
                                 }
 
+                                if root.left-tab == 1: Tooltip {
+                                    text: @markdown("\{row.name}");
+                                }
+
+                                if root.left-tab == 0 && index == root.tree-new-index: Field {
+                                    x: 22px + row.depth * 14px;
+                                    width: max(20px, parent.width - self.x - 4px);
+                                    height: 24px;
+                                    text <=> root.tree-new-name;
+                                    init => { self.take-focus-selecting-all(); }
+                                    accepted => { root.tree-new-finished(true); }
+                                    escaped => { root.tree-new-finished(false); }
+                                    edited => { root.tree-new-error = ""; }
+                                }
                                 // The same menu as the right button, for a
                                 // pointer that is already on the row. Only the
                                 // tree has one: a search hit and a heading are
                                 // not files to be renamed.
-                                if (root.left-tab == 0
+                                if (root.left-tab == 0 && root.tree-new-index < 0
                                     && (index == root.tree-selected || entry.has-hover)): IconButton {
                                     x: parent.width - self.width - 3px;
                                     y: (parent.height - self.height) / 2;
@@ -1620,7 +1743,7 @@ export component AppWindow inherits Window {
                                     clicked => {
                                         root.tree-selected = index;
                                         root.left-row-picked(index);
-                                        row-menu.show();
+                                        root.show-tree-menu(tree-row.absolute-position.x + 8px, tree-row.absolute-position.y + 24px);
                                     }
                                 }
 
@@ -1635,78 +1758,7 @@ export component AppWindow inherits Window {
                                 // does not take the element running the handler
                                 // with it — and half of these commands draw the
                                 // tree again, which does take the row away.
-                                row-menu := PopupWindow {
-                                    x: 8px;
-                                    y: 24px;
-                                    width: 230px;
-                                    close-policy: close-on-click-outside;
 
-                                    MenuFrame {
-                                        width: 230px;
-
-                                        VerticalLayout {
-                                            padding: 6px;
-                                            spacing: 1px;
-
-                                            MenuRow {
-                                                title: "New File…";
-                                                activated => {
-                                                    row-menu.close();
-                                                    root.tree-command(0);
-                                                }
-                                            }
-                                            MenuRow {
-                                                title: "New Folder…";
-                                                activated => {
-                                                    row-menu.close();
-                                                    root.tree-command(1);
-                                                }
-                                            }
-                                            MenuSep { }
-                                            MenuRow {
-                                                title: "Rename…";
-                                                activated => {
-                                                    row-menu.close();
-                                                    root.tree-command(2);
-                                                }
-                                            }
-                                            MenuRow {
-                                                title: "Duplicate";
-                                                activated => {
-                                                    row-menu.close();
-                                                    root.tree-command(3);
-                                                    root.focus-generation += 1;
-                                                }
-                                            }
-                                            MenuRow {
-                                                title: "Reveal in Explorer";
-                                                activated => {
-                                                    row-menu.close();
-                                                    root.tree-command(5);
-                                                    root.focus-generation += 1;
-                                                }
-                                            }
-                                            MenuSep { }
-                                            // 要件 7.7（2026-09-07追加）: 見えて
-                                            // いるフォルダを指して絞る。
-                                            MenuRow {
-                                                title: "Search in This Folder";
-                                                activated => {
-                                                    row-menu.close();
-                                                    root.tree-command(6);
-                                                }
-                                            }
-                                            MenuSep { }
-                                            MenuRow {
-                                                title: "Delete…";
-                                                activated => {
-                                                    row-menu.close();
-                                                    root.tree-command(4);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
@@ -1739,7 +1791,7 @@ export component AppWindow inherits Window {
                 tree-grab := TouchArea {
                     mouse-cursor: ew-resize;
                     moved => {
-                        root.tree-width = max(160, min(640,
+                        root.tree-width = max(160, min(1200,
                             root.tree-width + (self.mouse-x - self.pressed-x) / 1px));
                     }
                 }
@@ -1819,7 +1871,7 @@ export component AppWindow inherits Window {
                         // 要件 9: this pane's sheet — the paper and the margin
                         // are that direction's, like everything else on it.
                         page-background: pane.vertical
-                            ? root.palette[15]
+                            ? root.palette[22]
                             : root.palette[7];
                         // **The pane picks the sheet, not the panel**: this is
                         // the margin of the direction this pane is writing in.
@@ -1846,9 +1898,15 @@ export component AppWindow inherits Window {
                         tabs: pane.tabs;
                         active-tab: pane.active-tab;
                         preview: pane.preview;
+                        viewer: pane.viewer;
+                        can-undo: pane.can-undo;
+                        can-redo: pane.can-redo;
 
                         tiles: pane.tiles;
                         selection-rects: pane.selection-rects;
+                        difference-rects: pane.difference-rects;
+                        comparison-note: pane.comparison-note;
+                        comparison-dismissed => { root.comparison-dismissed(pane.id); }
                         match-rects: pane.match-rects;
                         scope-rects: pane.scope-rects;
                         content-width: pane.content-width;
@@ -1876,6 +1934,7 @@ export component AppWindow inherits Window {
                         }
                         shown-width <=> pane.shown-width;
                         shown-height <=> pane.shown-height;
+                        wrap-height <=> pane.wrap-height;
                         focus-generation: root.focus-generation;
                         // **Only the pane the writer is in.** The old rule let
                     // every pane take the keyboard whenever there was no split,
@@ -1887,9 +1946,11 @@ export component AppWindow inherits Window {
 
                         resized => { root.pane-resized(pane.id); }
                         scrolled(offset) => { root.pane-scroll-changed(pane.id, offset); }
+                        across-scrolled(offset) => { root.pane-across-scroll-changed(pane.id, offset); }
                         selection-start(x, y, extend) => {
                             root.pane-selection-start(pane.id, x, y, extend);
                         }
+                        link-open(x, y) => { root.pane-link-open(pane.id, x, y) }
                         line-edit(what) => {
                             root.pane-line-edit(pane.id, what);
                         }
@@ -1950,6 +2011,7 @@ export component AppWindow inherits Window {
                         quick-draft-requested => { root.quick-draft-requested(); }
                         close-clean-tabs => { root.pane-close-clean(pane.id); }
                         copy-path-requested(index) => { root.pane-copy-path(pane.id, index); }
+                        duplicate-tab-requested(index) => { root.pane-duplicate-tab(pane.id, index); }
                         open-file-requested => { root.open-file-requested(); }
                         // The strip's own menu opens the default shell: the
                         // writer asked for a terminal, not for a distribution.
@@ -1971,32 +2033,7 @@ export component AppWindow inherits Window {
                         // the two shapes. Anything else — the other key, or the
                         // other pane — moves the bar rather than shutting it,
                         // because that is what was asked for.
-                        find-requested(replacing) => {
-                            root.focused-pane = pane.id;
-                            // **同じ鍵は閉じる。ただし鍵盤がまだ欄に無いなら、
-                            // 先に連れて行く**（E1、書き手の求め 2026-09-09）
-                            // ——F3で静かに出た帯にCtrl+Fを押した書き手は、
-                            // 閉じたいのではなく打ちたい。
-                            if (root.find-open
-                                && root.find-pane == pane.id
-                                && root.find-replacing == replacing
-                                && root.find-focus) {
-                                root.find-open = false;
-                                root.focus-generation += 1;
-                                root.find-typed();
-                            } else {
-                                root.find-focus = true;
-                                root.find-pane = pane.id;
-                                root.find-replacing = replacing;
-                                root.find-open = true;
-                                root.find-generation += 1;
-                                // **開いた瞬間に件数が出ている**（E1）。前に
-                                // 探した語がそのまま欄に残っているので、
-                                // 「いま何件あるか」は開けば分かってよい。
-                                // 語が無ければこれが帯を空にする。
-                                root.find-typed();
-                            }
-                        }
+                        find-requested(replacing) => { root.toggle-find(pane.id, replacing); }
                         find-step(forwards) => {
                             root.find-requested(forwards);
                         }
@@ -2011,6 +2048,17 @@ export component AppWindow inherits Window {
                         }
                         // E4: 出すのはRust——**開いた瞬間に「1〜128行」と言う**
                         // には、その文書に何行あるかを知っていなければならない。
+                        shortcut-keys: root.shortcut-keys;
+                        shortcut-key(text, control, alt, shift) => { root.focused-pane = pane.id; return root.shortcut-key(text, control, alt, shift); }
+                        reopen-closed-requested => { root.focused-pane = pane.id; root.reopen-closed-requested(); }
+                        compare-saved-requested => {
+                            root.focused-pane = pane.id;
+                            root.compare-saved-requested();
+                        }
+                        compare-requested => {
+                            root.focused-pane = pane.id;
+                            root.compare-files-requested();
+                        }
                         goto-requested(taking) => {
                             root.focused-pane = pane.id;
                             root.goto-requested(taking);
@@ -2137,6 +2185,11 @@ export component AppWindow inherits Window {
                             root.pane-preview-toggled(pane.id);
                             root.focus-generation += 1;
                         }
+                        viewer-toggled => {
+                            root.focused-pane = pane.id;
+                            root.pane-viewer-toggled(pane.id);
+                            root.focus-generation += 1;
+                        }
                         direction-toggled => {
                             // The strip and its buttons belong to this pane, so
                             // using them is being in it.
@@ -2188,7 +2241,7 @@ export component AppWindow inherits Window {
                         layout-requested => {
                             // **この面の組み方を開く**ので、開く先はそのタブ。
                             root.settings-tab = 4;
-                            settings-panel.show();
+                            root.show-settings();
                         }
                         // **No `focus-generation` here**: the wheel sends
                         // this from wherever the pointer is, and taking the
@@ -2204,6 +2257,7 @@ export component AppWindow inherits Window {
                         }
                         undo-requested(forwards) => { root.pane-undo(pane.id, forwards); }
                         copy-requested(cut) => { root.pane-copy(pane.id, cut); }
+                        copy-body-requested => { root.pane-copy-body(pane.id); }
                         tab-stepped(backwards) => { root.pane-tab-stepped(pane.id, backwards); }
                         focus-moved(towards) => { root.pane-focus-moved(pane.id, towards); }
                         kill-requested(what) => { root.pane-kill(pane.id, what); }
@@ -2222,6 +2276,12 @@ export component AppWindow inherits Window {
                         mark-toggled(rectangular) => {
                             root.pane-mark-toggled(pane.id, rectangular);
                         }
+                        selection-escaped() => {
+                            return root.pane-escaped(pane.id);
+                        }
+                        shift-held(said) => {
+                            return root.shift-held(said);
+                        }
                         escaped() => {
                             return root.dismiss-menus();
                         }
@@ -2229,6 +2289,7 @@ export component AppWindow inherits Window {
                             root.ime-vertical-requested(pane.vertical);
                             root.focused-pane = pane.id;
                         }
+                        focus-trace(event) => { root.pane-focus-trace(pane.id, event); }
                     }
                 }
 
@@ -2353,7 +2414,7 @@ export component AppWindow inherits Window {
                     outside-text := Text {
                         x: 6px;
                         y: (parent.height - self.height) / 2;
-                        text: "⚠ 外で変更";
+                        text: root.count-missing ? "⚠ ファイルが見つかりません" : "⚠ 外で変更";
                         color: Tok.alert;
                         font-size: 12px;
                     }
@@ -2695,6 +2756,43 @@ export component AppWindow inherits Window {
                 Rectangle {
                     width: arrangement.width + 21px;
                     horizontal-stretch: 0;
+                    background: arrangement-touch.has-hover ? Tok.chrome-raised : transparent;
+                    border-radius: 4px;
+
+                    arrangement-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { arrangement-menu.show(); }
+                    }
+
+                    arrangement-menu := PopupWindow {
+                        x: parent.width - 180px;
+                        y: -82px;
+                        width: 180px;
+                        close-policy: close-on-click-outside;
+                        MenuFrame {
+                            width: 180px;
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 1px;
+                                MenuRow {
+                                    title: "右に分割";
+                                    activated => {
+                                        root.divide-requested(true);
+                                        arrangement-menu.close();
+                                        root.focus-generation += 1;
+                                    }
+                                }
+                                MenuRow {
+                                    title: "下に分割";
+                                    activated => {
+                                        root.divide-requested(false);
+                                        arrangement-menu.close();
+                                        root.focus-generation += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     Icon {
                         x: 0;
@@ -2706,12 +2804,7 @@ export component AppWindow inherits Window {
                     arrangement := Text {
                         x: 21px;
                         y: (parent.height - self.height) / 2;
-                        // 要件 6.3: how many panes the editing area is
-                        // divided into. A name for each of two panes could not
-                        // survive the third.
-                        text: root.panes.length > 1
-                            ? "Panes: " + root.panes.length
-                            : "One pane";
+                        text: "Active Pane: " + (root.focused-pane + 1);
                         color: Tok.ink-muted;
                         font-size: 12px;
                     }
@@ -2766,22 +2859,28 @@ export component AppWindow inherits Window {
         }
     }
 
-    settings-panel := PopupWindow {
-        // Wider than a menu: 要件 9's six heading sizes are three to a row, and
-        // three of them do not fit in a menu's 250px.
-        x: (root.width - 380px) / 2;
-        y: 40px;
-        width: 380px;
-        close-policy: close-on-click-outside;
-
-        MenuFrame {
-            width: 380px;
+    settings-panel := Rectangle {
+        visible: root.settings-open;
+        width: root.width;
+        height: root.height;
+        TouchArea {
+            clicked => { root.settings-open = false; }
+        }
+        settings-frame := MenuFrame {
+            x: clamp((root.width - self.width) / 2 + root.settings-offset-x, 0px, max(0px, root.width - self.width));
+            y: clamp(40px + root.settings-offset-y, 0px, max(0px, root.height - self.height));
+            width: root.settings-tab == 6 ? min(620px, root.width - 24px) : 440px;
+            height: self.preferred-height;
+            // Absorb clicks in the frame so only its outside closes Settings.
+            TouchArea { }
 
             VerticalLayout {
                 padding: 14px;
                 spacing: 8px;
 
-                HorizontalLayout {
+                Rectangle {
+                    height: 22px;
+                    HorizontalLayout {
                     spacing: 10px;
 
                     Text {
@@ -2797,10 +2896,20 @@ export component AppWindow inherits Window {
                         // 要件 9: the settings are the app's, not a pane's, and
                         // they are the formatted view's — the source is drawn
                         // plain whatever is set here.
-                        text: "Live preview · all panes";
+                        text: "ドラッグで移動";
                         color: Tok.ink-faint;
                         font-size: 10px;
                         vertical-alignment: center;
+                    }
+                    }
+                    TouchArea {
+                        mouse-cursor: move;
+                        moved => {
+                            if self.pressed {
+                                root.settings-offset-x = clamp(root.settings-offset-x + self.mouse-x - self.pressed-x, -(root.width - 380px) / 2, max(0px, (root.width - 380px) / 2));
+                                root.settings-offset-y = clamp(root.settings-offset-y + self.mouse-y - self.pressed-y, -40px, max(-40px, root.height - 80px));
+                            }
+                        }
                     }
                 }
 
@@ -2863,11 +2972,94 @@ export component AppWindow inherits Window {
                             root.settings-tab = 5;
                         }
                     }
+                    PanelTab {
+                        title: "Keys";
+                        current: root.settings-tab == 6;
+                        clicked => { root.settings-tab = 6; root.shortcut-filter(); }
+                    }
                 }
 
                 Rectangle {
                     height: 1px;
                     background: Tok.rule;
+                }
+
+                if root.settings-tab == 6: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "ショートカット"; color: Tok.ink; font-size: 16px; }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        for category[index] in ["本文の操作", "基本編集", "Terminal", "入力欄", "Pane・TAB", "Emacs", "Quick Draft"]: PanelTab {
+                            title: category;
+                            current: root.shortcut-category == index;
+                            clicked => { root.shortcut-category = index; root.shortcut-query = ""; root.shortcut-selected = -1; root.shortcut-edit = ""; root.shortcut-status = "操作を選んでください"; root.shortcut-filter(); }
+                        }
+                    }
+                    Text {
+                        text: root.shortcut-category == 0 ? "変更可能 · 本文にフォーカスがあり、IME変換中でないときに有効です。"
+                            : root.shortcut-category == 4 ? "変更可能 · 本文からのPane・TAB操作です。Terminal内のキーは固定です。"
+                            : root.shortcut-category == 5 ? "変更可能 · 本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。"
+                            : root.shortcut-category == 6 ? "変更可能 · 本文から開く操作と、Quick Draft内の操作を区別します。"
+                            : root.shortcut-category == 1 ? "固定 · 本文の編集時に使います。Viewerでは編集できません。"
+                            : root.shortcut-category == 2 ? "固定 · Terminalにフォーカスがあるときに有効です。"
+                            : "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。";
+                        color: Tok.ink-muted; font-size: 12px; wrap: word-wrap;
+                    }
+                    if root.shortcut-category == 0 || root.shortcut-category >= 4: VerticalLayout {
+                        spacing: 8px;
+                Field { placeholder: "操作名・キーで検索"; text <=> root.shortcut-query; init => { self.take-focus(); } edited => { root.shortcut-filter(); } escaped => { root.settings-open = false; root.focus-generation += 1; } }
+                ScrollView {
+                    height: 210px;
+                    VerticalLayout {
+                        alignment: start;
+                        for item in root.shortcut-rows: TextButton {
+                            title: item.name + "　" + (item.key == "" ? "未割り当て" : item.key);
+                            clicked => { root.shortcut-selected = item.id; root.shortcut-edit = item.key; root.shortcut-status = item.name; shortcut-capture.focus(); }
+                        }
+                    }
+                }
+                Text { text: "操作を選び、下の欄で割り当てるキーを同時に押してください。"; color: Tok.ink; font-size: 12px; }
+                shortcut-capture := FocusScope {
+                    height: 34px;
+                    key-pressed(event) => {
+                        if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt { return reject; }
+                        if event.text == Key.Escape {
+                            root.settings-open = false;
+                            root.focus-generation += 1;
+                        } else {
+                            root.shortcut-capture(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                        }
+                        accept
+                    }
+                    Rectangle {
+                        background: Tok.paper;
+                        border-width: 1px;
+                        border-color: shortcut-capture.has-focus ? #8064b3 : Tok.rule-strong;
+                        border-radius: 4px;
+                        Text {
+                            x: 10px; width: parent.width - 20px;
+                            text: root.shortcut-edit == "" ? "ここをクリックしてキーを押す" : root.shortcut-edit;
+                            color: Tok.ink;
+                            vertical-alignment: center;
+                        }
+                        TouchArea { clicked => { shortcut-capture.focus(); } }
+                    }
+                }
+                Text { text: root.shortcut-status; color: Tok.ink; font-size: 12px; wrap: word-wrap; }
+                Text { text: "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"; color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
+                HorizontalLayout {
+                    TextButton { title: "適用して保存"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(false); } }
+                    TextButton { title: "割り当て解除"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-edit = ""; root.shortcut-save(false); } }
+                    TextButton { title: "この操作を既定に戻す"; enabled: root.shortcut-selected >= 0; clicked => { root.shortcut-save(true); } }
+                    TextButton { title: "閉じる"; clicked => { root.settings-open = false; root.focus-generation += 1; } }
+                }
+                    }
+                    if root.shortcut-category > 0 && root.shortcut-category < 4: Text {
+                        text: root.shortcut-category == 1 ? "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A"
+                            : root.shortcut-category == 2 ? "選択した文字をコピー　Ctrl+Shift+C\n貼り付け　Ctrl+V\n下段を表示・閉じる　Ctrl+`\n下段から本文へ戻る　Ctrl+Alt+↑\nその他のキーは実行中のシェル・プログラムへ渡します。"
+                            : "コピー　Ctrl+C\n切り取り　Ctrl+X\n貼り付け　Ctrl+V\n全選択　Ctrl+A\nEnter・Escの動作は、入力欄ごとの用途に従います。";
+                        color: Tok.ink; font-size: 13px; wrap: word-wrap;
+                    }
                 }
 
                 if root.settings-tab == 0: VerticalLayout {
@@ -2888,7 +3080,7 @@ export component AppWindow inherits Window {
                         spacing: 2px;
 
                         Text {
-                            text: "Auto-save";
+                            text: "自動退避";
                             color: Tok.ink;
                             font-size: 12px;
                             vertical-alignment: center;
@@ -2902,6 +3094,22 @@ export component AppWindow inherits Window {
                                 root.autosave-toggled(!root.autosave);
                             }
                         }
+                    }
+
+                    // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
+                    Text {
+                        text: root.autosave
+                            ? "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
+                            : "退避しません。Offにすると作業コピーも削除します。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "元ファイルへの反映は Ctrl+S。";
+                        color: Tok.ink-faint;
+                        font-size: 11px;
+                        overflow: elide;
                     }
 
                     // 書き手の報告 2026-09-11: **見出しが中身を言っていなかった。**
@@ -3021,21 +3229,6 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
 
-                    // **折り返さない。**`wrap: word-wrap`のTextは、`min-width`が
-                    // 0になる代わりに`preferred-width`が「一行に伸ばしたときの
-                    // 幅」のまま残る（`builtins.slint`, Text）。popupは開くとき
-                    // に`preferred`で、その後の更新では`min`で大きさを決め直す
-                    // ので、両者が食い違うぶんだけ**開いた直後に寸法が変わる**。
-                    // `overflow: elide`なら`min-width`は同じく0で、高さは一行
-                    // ぶんに定まる——幅と高さが互いを見ない形にしておく。
-                    Text {
-                        text: root.autosave
-                            ? "入力が止まって2秒、続いていても5秒ごとに退避します。"
-                            : "退避しません。切り替えたときに作業コピーも消えます。";
-                        color: Tok.ink-faint;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
                 }
 
                 // 追加要件 2026-09-08（要件 6.8）: **端末は紙とは別の設定を持つ。**
@@ -3722,7 +3915,7 @@ export component AppWindow inherits Window {
                             // 書き手はもうこの画面を見ていない。
                             clicked => {
                                 root.word-file-edited();
-                                settings-panel.close();
+                                root.settings-open = false;
                             }
                         }
                         Text {
@@ -3738,7 +3931,7 @@ export component AppWindow inherits Window {
 
                 // どの面にいても、値はいまのシートのもの——だから帯のすぐ
                 // 下に在る（要件 9）。
-                if root.settings-tab > 2: VerticalLayout {
+                if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
                     spacing: 8px;
 
                     // 要件 9: which sheet is being set. **Everything below belongs
@@ -3774,8 +3967,18 @@ export component AppWindow inherits Window {
                     TextRow {
                         label: "Body";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride] + " px";
-                        shown: root.palette[root.sheet * 8 + 0];
+                        shown: root.palette[root.sheet * 15 + 0];
                         family: root.sheet-fonts[root.sheet * 8 + 0];
+                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 19] != 0;
+                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 20] != 0;
+                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 21] != 0;
+                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 22] != 0;
+                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 23] != 0;
+                        heading: false;
+                        background-colour: root.palette[root.sheet * 15 + 8];
+                        paper-colour: root.palette[root.sheet * 15 + 7];
+                        decoration-toggled(kind, on) => { root.sheet-step(19 + kind, on ? -1 : 1); }
+                        background-picked => { root.color-picked(8); }
                         stepped(by) => {
                             root.sheet-step(0, by);
                         }
@@ -3791,8 +3994,18 @@ export component AppWindow inherits Window {
                     TextRow {
                         label: "H1";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 4] + "%";
-                        shown: root.palette[root.sheet * 8 + 1];
+                        shown: root.palette[root.sheet * 15 + 1];
                         family: root.sheet-fonts[root.sheet * 8 + 1];
+                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 24] != 0;
+                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 25] != 0;
+                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 26] != 0;
+                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 27] != 0;
+                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 28] != 0;
+                        heading: true;
+                        background-colour: root.palette[root.sheet * 15 + 9];
+                        paper-colour: root.palette[root.sheet * 15 + 7];
+                        decoration-toggled(kind, on) => { root.sheet-step(24 + kind, on ? -1 : 1); }
+                        background-picked => { root.color-picked(9); }
                         stepped(by) => {
                             root.sheet-step(4, by);
                         }
@@ -3808,8 +4021,18 @@ export component AppWindow inherits Window {
                     TextRow {
                         label: "H2";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 5] + "%";
-                        shown: root.palette[root.sheet * 8 + 2];
+                        shown: root.palette[root.sheet * 15 + 2];
                         family: root.sheet-fonts[root.sheet * 8 + 2];
+                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 29] != 0;
+                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 30] != 0;
+                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 31] != 0;
+                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 32] != 0;
+                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 33] != 0;
+                        heading: true;
+                        background-colour: root.palette[root.sheet * 15 + 10];
+                        paper-colour: root.palette[root.sheet * 15 + 7];
+                        decoration-toggled(kind, on) => { root.sheet-step(29 + kind, on ? -1 : 1); }
+                        background-picked => { root.color-picked(10); }
                         stepped(by) => {
                             root.sheet-step(5, by);
                         }
@@ -3825,8 +4048,18 @@ export component AppWindow inherits Window {
                     TextRow {
                         label: "H3";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 6] + "%";
-                        shown: root.palette[root.sheet * 8 + 3];
+                        shown: root.palette[root.sheet * 15 + 3];
                         family: root.sheet-fonts[root.sheet * 8 + 3];
+                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 34] != 0;
+                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 35] != 0;
+                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 36] != 0;
+                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 37] != 0;
+                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 38] != 0;
+                        heading: true;
+                        background-colour: root.palette[root.sheet * 15 + 11];
+                        paper-colour: root.palette[root.sheet * 15 + 7];
+                        decoration-toggled(kind, on) => { root.sheet-step(34 + kind, on ? -1 : 1); }
+                        background-picked => { root.color-picked(11); }
                         stepped(by) => {
                             root.sheet-step(6, by);
                         }
@@ -3842,8 +4075,18 @@ export component AppWindow inherits Window {
                     TextRow {
                         label: "H4";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 7] + "%";
-                        shown: root.palette[root.sheet * 8 + 4];
+                        shown: root.palette[root.sheet * 15 + 4];
                         family: root.sheet-fonts[root.sheet * 8 + 4];
+                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 39] != 0;
+                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 40] != 0;
+                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 41] != 0;
+                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 42] != 0;
+                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 43] != 0;
+                        heading: true;
+                        background-colour: root.palette[root.sheet * 15 + 12];
+                        paper-colour: root.palette[root.sheet * 15 + 7];
+                        decoration-toggled(kind, on) => { root.sheet-step(39 + kind, on ? -1 : 1); }
+                        background-picked => { root.color-picked(12); }
                         stepped(by) => {
                             root.sheet-step(7, by);
                         }
@@ -3859,8 +4102,18 @@ export component AppWindow inherits Window {
                     TextRow {
                         label: "H5";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 8] + "%";
-                        shown: root.palette[root.sheet * 8 + 5];
+                        shown: root.palette[root.sheet * 15 + 5];
                         family: root.sheet-fonts[root.sheet * 8 + 5];
+                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 44] != 0;
+                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 45] != 0;
+                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 46] != 0;
+                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 47] != 0;
+                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 48] != 0;
+                        heading: true;
+                        background-colour: root.palette[root.sheet * 15 + 13];
+                        paper-colour: root.palette[root.sheet * 15 + 7];
+                        decoration-toggled(kind, on) => { root.sheet-step(44 + kind, on ? -1 : 1); }
+                        background-picked => { root.color-picked(13); }
                         stepped(by) => {
                             root.sheet-step(8, by);
                         }
@@ -3876,8 +4129,18 @@ export component AppWindow inherits Window {
                     TextRow {
                         label: "H6";
                         value: root.sheet-numbers[root.sheet * root.sheet-stride + 9] + "%";
-                        shown: root.palette[root.sheet * 8 + 6];
+                        shown: root.palette[root.sheet * 15 + 6];
                         family: root.sheet-fonts[root.sheet * 8 + 6];
+                        bold: root.sheet-numbers[root.sheet * root.sheet-stride + 49] != 0;
+                        italic: root.sheet-numbers[root.sheet * root.sheet-stride + 50] != 0;
+                        strike: root.sheet-numbers[root.sheet * root.sheet-stride + 51] != 0;
+                        background-on: root.sheet-numbers[root.sheet * root.sheet-stride + 52] != 0;
+                        rule-on: root.sheet-numbers[root.sheet * root.sheet-stride + 53] != 0;
+                        heading: true;
+                        background-colour: root.palette[root.sheet * 15 + 14];
+                        paper-colour: root.palette[root.sheet * 15 + 7];
+                        decoration-toggled(kind, on) => { root.sheet-step(49 + kind, on ? -1 : 1); }
+                        background-picked => { root.color-picked(14); }
                         stepped(by) => {
                             root.sheet-step(9, by);
                         }
@@ -4016,6 +4279,23 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    HorizontalLayout {
+                        Text {
+                            text: "空白・改行を表示";
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        TextButton {
+                            title: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? "Shown" : "Hidden";
+                            role: root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? Role.primary : Role.normal;
+                            clicked => {
+                                root.sheet-chose(54, root.sheet-numbers[root.sheet * root.sheet-stride + 54] == 1 ? 0 : 1);
+                            }
+                        }
+                    }
+
                     // 要件 7.8（2026-09-09）: ルビと傍点。**大きさも位置も
                     // 親文字に対する比率**で、面ごとに持つ——縦書きと横書きでは
                     // ルビの置き場所そのものが違うので、読める大きさも同じとは
@@ -4128,7 +4408,7 @@ export component AppWindow inherits Window {
                     // どちらも「紙」「コード」としか言っていなかった。
                     ColorCell {
                         label: "Paper Color";
-                        shown: root.palette[root.sheet * 8 + 7];
+                        shown: root.palette[root.sheet * 15 + 7];
                         picked => {
                             root.color-picked(7);
                         }
@@ -4146,7 +4426,7 @@ export component AppWindow inherits Window {
 
                 // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
                 // なので、書式の面にだけ置く。General の2つはこれで戻らない。
-                if root.settings-tab > 2: VerticalLayout {
+                if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
                     spacing: 8px;
 
                     Rectangle {
@@ -4302,4 +4582,104 @@ export component AppWindow inherits Window {
             }
         }
     }
+    // Keep all original panes and their view state underneath the comparison.
+    if root.diff-active: Rectangle {
+        background: Tok.paper;
+        TouchArea { }
+        DiffView {
+            width: parent.width;
+            height: parent.height;
+            rows: root.diff-rows;
+            left-path: root.diff-left-path;
+            right-path: root.diff-right-path;
+            status <=> root.diff-status;
+            selected-row <=> root.diff-selected-row;
+            content-width: root.diff-content-width;
+            can-previous: root.diff-can-previous;
+            can-next: root.diff-can-next;
+            next-difference(forward) => { root.diff-next-difference(forward); }
+            select-difference(row) => { root.diff-select-difference(row); }
+            copy-side(right) => { root.diff-copy-side(right); }
+            dismissed => { root.diff-dismissed(); }
+            merge-enabled: root.diff-merge-enabled;
+            can-apply: root.diff-can-apply;
+            choose-side(right) => { root.diff-choose-side(right); }
+            apply-merge => { root.diff-apply-merge(); }
+        }
+    }
+
+    tree-context-menu := PopupWindow {
+        x: root.tree-menu-x;
+        y: root.tree-menu-y;
+        width: 230px;
+        close-policy: close-on-click-outside;
+
+        MenuFrame {
+            width: 230px;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+
+                MenuRow {
+                    title: "New File…";
+                    activated => {
+                        root.close-tree-menu();
+                        root.tree-command(0);
+                    }
+                }
+                MenuRow {
+                    title: "New Folder…";
+                    activated => {
+                        root.close-tree-menu();
+                        root.tree-command(1);
+                    }
+                }
+                MenuSep { }
+                MenuRow {
+                    title: "Rename…";
+                    activated => {
+                        root.close-tree-menu();
+                        root.tree-command(2);
+                    }
+                }
+                MenuRow {
+                    title: "Duplicate";
+                    activated => {
+                        root.close-tree-menu();
+                        root.tree-command(3);
+                        root.focus-generation += 1;
+                    }
+                }
+                MenuRow {
+                    title: "Reveal in Explorer";
+                    activated => {
+                        root.close-tree-menu();
+                        root.tree-command(5);
+                        root.focus-generation += 1;
+                    }
+                }
+                MenuSep { }
+                // 要件 7.7（2026-09-07追加）: 見えて
+                // いるフォルダを指して絞る。
+                MenuRow {
+                    title: "Search in This Folder";
+                    activated => {
+                        root.close-tree-menu();
+                        root.tree-command(6);
+                    }
+                }
+                MenuSep { }
+                MenuRow {
+                    title: "Delete…";
+                    activated => {
+                        root.close-tree-menu();
+                        root.tree-command(4);
+                    }
+                }
+            }
+        }
+    }
+
+
 }

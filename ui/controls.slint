@@ -834,8 +834,11 @@ export component ToggleChip inherits Rectangle {
 
 export component TextButton inherits Rectangle {
     in property <string> title;
+    in property <bool> show-swatch: false;
+    in property <color> swatch;
     in property <Role> role: Role.normal;
     in property <bool> enabled: true;
+    in property <bool> emphasize-hover: false;
     /// 長押しで別のことをする釦（書き手の求め 2026-09-08）。
     ///
     /// **タブの名前を変えるのと同じ作法**（追加要件 2026-09-06）——半秒押したままに
@@ -861,24 +864,34 @@ export component TextButton inherits Rectangle {
     // is a binding loop the compiler catches (min-width → layout → width →
     // label.width → min-width). The preferred width is the text's own, which
     // nothing here decides.
-    min-width: root.wide ? 44px : label.preferred-width + 22px;
-    max-width: root.wide ? 100000px : label.preferred-width + 22px;
+    min-width: root.wide ? 44px : label.preferred-width + 22px + (root.show-swatch ? 26px : 0px);
+    max-width: root.wide ? 100000px : label.preferred-width + 22px + (root.show-swatch ? 26px : 0px);
     border-radius: 5px;
     border-width: 1px;
-    border-color: root.role == Role.primary
+    border-color: root.emphasize-hover && root.enabled && touch.has-hover ? Tok.accent : root.role == Role.primary
         ? Tok.accent
         : (root.role == Role.danger
             ? Tok.alert
             : (root.role == Role.quiet ? transparent : Tok.rule-strong));
     background: root.role == Role.primary
         ? (touch.has-hover ? Tok.accent-strong : Tok.accent)
-        : (touch.has-hover ? Tok.accent-faint : (root.role == Role.quiet ? transparent : Tok.paper));
+        : (touch.has-hover && root.enabled ? (root.emphasize-hover ? Tok.accent-soft : Tok.accent-faint) : (root.role == Role.quiet ? transparent : Tok.paper));
     opacity: root.enabled ? 1.0 : 0.45;
 
-    label := Text {
-        x: 11px;
+    if root.show-swatch: Rectangle {
+        x: 7px;
         y: (parent.height - self.height) / 2;
-        width: parent.width - 22px;
+        width: 20px;
+        height: 18px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: Tok.rule-strong;
+        background: root.swatch;
+    }
+    label := Text {
+        x: root.show-swatch ? 37px : 11px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 22px - (root.show-swatch ? 26px : 0px);
         horizontal-alignment: root.wide ? left : center;
         text: root.title;
         overflow: elide;
@@ -1064,13 +1077,101 @@ export component StepRow inherits Rectangle {
     }
 }
 
-// Everything about one kind of text: how large, what colour, which family
-// (要件 9).
-//
-// **One row per thing being set.** The size, the colour and the family were
-// three sections once, and finding H3 meant counting rows in all three; what is
-// being set is H3, and those are three sides of it.
+// One line of a menu. Shortcuts are handled by the window and Rust.
+export component MenuRow inherits Rectangle {
+    in property <bool> enabled: true;
+    opacity: root.enabled ? 1.0 : 0.4;
+    in property <string> title;
+    in property <string> shortcut;
+    /// The row that stands for what is already the case — the tab in front, in
+    /// the list of tabs. **Shown, not hidden**: a list you are picking from has
+    /// to say where you are in it.
+    in property <bool> checked: false;
+    /// Answer when the pointer is *released* over the row rather than when it
+    /// is clicked on it.
+    ///
+    /// **For a menu opened by holding a button down.** The press that opened it
+    /// happened somewhere else, so there is no click here to wait for — the
+    /// writer slides onto a row and lets go. A row that did both would answer
+    /// twice for an ordinary click, so it is one or the other.
+    in property <bool> on-release: false;
+    /// **ポインタがこの行の上にいるか**（書き手の求め 2026-09-11）。
+    ///
+    /// 右に開くメニューは、押されてではなく**乗せられて**開く——それを決めるのは
+    /// 行の側にしか無い。
+    out property <bool> hovered: touch.has-hover;
+    callback activated();
+
+    height: 28px;
+    border-radius: 5px;
+    background: root.checked
+        ? Tok.accent-soft
+        : (touch.has-hover && root.enabled ? Tok.accent-faint : transparent);
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 12px;
+
+        Text {
+            text: root.title;
+            color: root.checked ? Tok.ink-strong : Tok.ink;
+            font-size: 13px;
+            // A title is a file name here, and a frame is a fixed width: without
+            // this a long one is drawn straight through the side of the menu.
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.shortcut;
+            color: Tok.ink-faint;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            if (root.enabled && !root.on-release) {
+                root.activated();
+            }
+        }
+        pointer-event(event) => {
+            if (root.enabled && root.on-release && event.kind == PointerEventKind.up) {
+                root.activated();
+            }
+        }
+    }
+}
+
+// The frame a menu is drawn in. The caller fills it with rows.
+export component MenuFrame inherits Rectangle {
+    background: Tok.paper;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Tok.rule-strong;
+    drop-shadow-color: #1713213d;
+    drop-shadow-blur: 24px;
+    drop-shadow-offset-y: 8px;
+
+    @children
+}
+
+// Everything about one kind of text: size, colour, font and decorations (要件 9).
 export component TextRow inherits Rectangle {
+    in property <bool> bold;
+    in property <bool> italic;
+    in property <bool> strike;
+    in property <bool> background-on;
+    in property <bool> rule-on;
+    in property <bool> heading;
+    in property <color> background-colour;
+    in property <color> paper-colour;
+    callback decoration-toggled(int, bool);
+    callback background-picked();
     in property <string> label;
     in property <string> value;
     in property <color> shown;
@@ -1079,9 +1180,56 @@ export component TextRow inherits Rectangle {
     callback picked();
     callback chose-font();
 
-    height: 28px;
+    height: 56px;
 
     HorizontalLayout {
+        y: 29px;
+        height: 27px;
+        spacing: 3px;
+        TextButton { title: "太字"; role: root.bold ? Role.primary : Role.normal; clicked => { root.decoration-toggled(0, root.bold); } }
+        TextButton { title: "斜体"; role: root.italic ? Role.primary : Role.normal; clicked => { root.decoration-toggled(1, root.italic); } }
+        TextButton { title: "取消線"; role: root.strike ? Role.primary : Role.normal; clicked => { root.decoration-toggled(2, root.strike); } }
+        TextButton {
+            title: root.background-on ? "指定色" : "Paper";
+            show-swatch: true;
+            swatch: root.background-on ? root.background-colour : root.paper-colour;
+            clicked => { background-menu.show(); }
+        }
+        if root.heading: TextButton { title: "罫線"; role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
+    }
+
+    background-menu := PopupWindow {
+        y: root.height;
+        width: 192px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 192px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                MenuRow {
+                    title: "Paperに合わせる";
+                    checked: !root.background-on;
+                    activated => {
+                        root.decoration-toggled(3, true);
+                        background-menu.close();
+                    }
+                }
+                MenuRow {
+                    title: "色を指定する…";
+                    checked: root.background-on;
+                    activated => {
+                        root.background-picked();
+                        background-menu.close();
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        y: 0px;
+        height: 28px;
         spacing: 4px;
 
         Text {
@@ -1241,84 +1389,7 @@ export component PickRow inherits Rectangle {
     }
 }
 
-// One line of a menu.
-//
-// The shortcut is written rather than bound, because the keys are handled by
-// the window's `FocusScope` and by Rust, not here: a menu that claimed a
-// shortcut it did not own would be the second opinion that goes stale.
-export component MenuRow inherits Rectangle {
-    in property <string> title;
-    in property <string> shortcut;
-    /// The row that stands for what is already the case — the tab in front, in
-    /// the list of tabs. **Shown, not hidden**: a list you are picking from has
-    /// to say where you are in it.
-    in property <bool> checked: false;
-    /// Answer when the pointer is *released* over the row rather than when it
-    /// is clicked on it.
-    ///
-    /// **For a menu opened by holding a button down.** The press that opened it
-    /// happened somewhere else, so there is no click here to wait for — the
-    /// writer slides onto a row and lets go. A row that did both would answer
-    /// twice for an ordinary click, so it is one or the other.
-    in property <bool> on-release: false;
-    /// **ポインタがこの行の上にいるか**（書き手の求め 2026-09-11）。
-    ///
-    /// 右に開くメニューは、押されてではなく**乗せられて**開く——それを決めるのは
-    /// 行の側にしか無い。
-    out property <bool> hovered: touch.has-hover;
-    callback activated();
-
-    height: 28px;
-    border-radius: 5px;
-    background: root.checked
-        ? Tok.accent-soft
-        : (touch.has-hover ? Tok.accent-faint : transparent);
-
-    HorizontalLayout {
-        padding-left: 9px;
-        padding-right: 9px;
-        spacing: 12px;
-
-        Text {
-            text: root.title;
-            color: root.checked ? Tok.ink-strong : Tok.ink;
-            font-size: 13px;
-            // A title is a file name here, and a frame is a fixed width: without
-            // this a long one is drawn straight through the side of the menu.
-            overflow: elide;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-
-        Text {
-            text: root.shortcut;
-            color: Tok.ink-faint;
-            font-size: 11px;
-            vertical-alignment: center;
-            horizontal-stretch: 0;
-        }
-    }
-
-    touch := TouchArea {
-        clicked => {
-            if (!root.on-release) {
-                root.activated();
-            }
-        }
-        pointer-event(event) => {
-            if (root.on-release && event.kind == PointerEventKind.up) {
-                root.activated();
-            }
-        }
-    }
-}
-
-// 追加要件 2026-09-07: one of the words a New Tab offers.
-//
-// **A link, not a button.** There is nothing else on that page, so a row of
-// framed buttons would be the only thing on it and would read as a dialog
-// asking to be dismissed. What is wanted is the feel of a page with three
-// things written on it, any of which can be pressed.
+// 追加要件 2026-09-07: one of the links a New Tab offers.
 export component LinkRow inherits Rectangle {
     in property <string> title;
     /// The shortcut that does the same thing, when there is one.
@@ -1371,19 +1442,6 @@ export component MenuSep inherits Rectangle {
         height: 1px;
         background: Tok.rule;
     }
-}
-
-// The frame a menu is drawn in. The caller fills it with rows.
-export component MenuFrame inherits Rectangle {
-    background: Tok.paper;
-    border-radius: 10px;
-    border-width: 1px;
-    border-color: Tok.rule-strong;
-    drop-shadow-color: #1713213d;
-    drop-shadow-blur: 24px;
-    drop-shadow-offset-y: 8px;
-
-    @children
 }
 
 /// A bar the writer drags a number along (追加要件 2026-09-06: 右下の倍率).

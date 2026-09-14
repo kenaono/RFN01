@@ -448,6 +448,28 @@ mod tests {
     }
 
     #[test]
+    fn comparing_a_clone_does_not_acknowledge_or_overwrite_external_changes() {
+        let directory = scratch_directory("comparison");
+        let path = directory.join("note.md");
+        fs::write(&path, "original").unwrap();
+        let (document, _) = DocumentFile::open(&path, LIMIT).unwrap();
+        let agreed = document.agreed_stamp();
+        fs::write(&path, "external version").unwrap();
+        let mut comparison = document.clone();
+        assert_eq!(
+            comparison.reload(LIMIT).unwrap().unwrap(),
+            "external version"
+        );
+        assert_eq!(document.agreed_stamp(), agreed);
+        assert_eq!(document.external_change(), ExternalChange::Modified);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external version");
+        fs::remove_file(&path).unwrap();
+        assert!(comparison.reload(LIMIT).unwrap().is_err());
+        assert_eq!(document.agreed_stamp(), agreed);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn a_deleted_file_is_reported_as_missing() {
         let directory = scratch_directory("deleted");
         let path = directory.join("note.md");

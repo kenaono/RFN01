@@ -163,6 +163,8 @@ pub struct Session {
     /// rather than a copy of it — the two would drift apart the moment another
     /// folder is opened.
     pub search_folder: Option<PathBuf>,
+    pub search_exclusions: String,
+    pub shortcut_bindings: String,
     pub expanded: Vec<PathBuf>,
     pub tree_shown: bool,
     /// How wide the left pane is, in pixels (追加要件 2026-09-06). **Zero when
@@ -220,6 +222,14 @@ pub fn encode_session(session: &Session) -> String {
     if let Some(folder) = &session.search_folder {
         out.push_str(&format!("search: {}\n", folder.display()));
     }
+    out.push_str(&format!(
+        "search-exclusions: {}\n",
+        session.search_exclusions.replace(['\n', '\r'], "")
+    ));
+    out.push_str(&format!(
+        "shortcut-bindings: {}\n",
+        session.shortcut_bindings.replace(['\n', '\r'], "")
+    ));
     for open in &session.expanded {
         out.push_str(&format!("expanded: {}\n", open.display()));
     }
@@ -320,6 +330,8 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "tree-width" => session.tree_width = value.parse().unwrap_or(0),
             "folder" => session.folder = Some(PathBuf::from(value)),
             "search" => session.search_folder = Some(PathBuf::from(value)),
+            "shortcut-bindings" => session.shortcut_bindings = value.to_owned(),
+            "search-exclusions" => session.search_exclusions = value.to_owned(),
             "expanded" => session.expanded.push(PathBuf::from(value)),
             "recent" => session.recent.push(PathBuf::from(value)),
             "visited" => session.folders.push(PathBuf::from(value)),
@@ -943,6 +955,10 @@ pub fn read_history(directory: &Path) -> Vec<String> {
 
 /// The editor's own area, or `None` when Windows does not say where it is.
 pub fn app_directory() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_DIRECTORY.with(|held| held.borrow().clone()) {
+        return Some(path);
+    }
     let local = std::env::var_os("LOCALAPPDATA")?;
     Some(PathBuf::from(local).join(APP_FOLDER))
 }
@@ -950,6 +966,12 @@ pub fn app_directory() -> Option<PathBuf> {
 /// Where work copies go.
 pub fn work_directory() -> Option<PathBuf> {
     Some(app_directory()?.join(WORK_FOLDER))
+}
+
+// Integration tests must never write the user's session or work copies.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_DIRECTORY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// FNV-1a over the path's text.
@@ -1112,6 +1134,8 @@ mod tests {
             focused: 1,
             folder: Some(PathBuf::from("D:\\書きかけ")),
             search_folder: Some(PathBuf::from("D:\\書きかけ\\章")),
+            search_exclusions: "*.bak;backup/".into(),
+            shortcut_bindings: "0=Ctrl+Alt+O".into(),
             expanded: vec![PathBuf::from("D:\\書きかけ\\章")],
             tree_shown: true,
             tree_width: 260,

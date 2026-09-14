@@ -2,7 +2,11 @@ mod app_data;
 mod buffer;
 mod clipboard;
 mod code_page;
+mod comparison;
+#[cfg(test)]
+mod comparison_ui_tests;
 mod diag;
+mod diff_view;
 mod directwrite_probe;
 mod directwrite_render;
 mod document;
@@ -11,7 +15,13 @@ mod file_io;
 mod file_tree;
 mod find;
 mod ime;
+#[cfg(test)]
+mod incremental_ui_tests;
 mod kill_ring;
+#[cfg(test)]
+mod link_ui_tests;
+#[cfg(test)]
+mod memo_ui_tests;
 mod open_document;
 mod pane_layout;
 mod pty;
@@ -20,13 +30,19 @@ mod saving;
 mod searcher;
 mod session;
 mod shell;
+mod shortcuts;
 mod terminal;
 mod terminal_session;
 mod text_blocks;
+mod tree_watch;
+#[cfg(test)]
+mod typography_ui_tests;
 #[cfg(test)]
 mod vertical_layout;
 mod wiring;
 mod word_marks;
+#[cfg(test)]
+mod word_ui_tests;
 mod writer;
 
 use std::{
@@ -456,6 +472,7 @@ const PERF_LOG_LINE_LIMIT: usize = 20_000;
 /// caret ([`PaneId::revealed_line`]).
 #[derive(Clone, Debug, Default)]
 struct EditorState {
+    viewer: bool,
     caret_source_byte: Option<usize>,
     selection_anchor_source_byte: Option<usize>,
     active_line_start: Option<usize>,
@@ -528,6 +545,61 @@ impl EditorState {
 
 /// 2回目とみなす、押した場所のずれ（画素、E3）。**手は完全には止まらない。**
 const DOUBLE_CLICK_SLACK: f32 = 4.0;
+
+/// Shiftが本当に押されていたか、Windowsに訊く（書き手の報告 2026-09-12）。
+///
+/// **窓が持っている修飾の旗は、変換をまたぐと古くなることがある。**IMEが
+/// 受け取った打鍵はSlintの手前で消えるので、**Shiftを離した合図を見落とすと
+/// 旗は押されたままになる**——そのあとのクリックが「Shiftを押したクリック」と
+/// して届き、押した場所までがいきなり選ばれる。書き手の「突然選択になりました」は
+/// この形で記録に残った（`pointer.p0 phase=Extend`が、押していないのに続けて出た）。
+///
+/// **`GetKeyState`は、いま処理している合図の時点の答え**である——「たったいまの指」を
+/// 返す`GetAsyncKeyState`ではないので、打鍵が溜まっていても、その打鍵のときの
+/// Shiftを答える。Shiftを押したまま矢印で選んでいる途中に、溜まったぶんだけ
+/// 選択が伸びなくなる、ということが起きない。
+fn shift_really_held() -> (bool, bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_SHIFT};
+
+    // SAFETY: どちらも仮想キーの番号を1つ渡すだけの呼び出しで、返るのは状態の
+    // 語である。最上位のビットが立っていれば押されている＝符号付きで見れば負。
+    let by_message = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    let by_hand = unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } < 0;
+    (by_message, by_hand)
+}
+
+/// 届いたShiftを、Windowsの答えと突き合わせる（書き手の報告 2026-09-12）。
+///
+/// **食い違った回だけ記録に残す。**旗が古くなること自体は画面に出ないので、
+/// 出なくなったのか、そもそも起きていないのかは、ここでしか言えない。
+fn shift_as_windows_sees_it(cache: &Rc<RefCell<RenderCache>>, said: bool, what: &str) -> bool {
+    if !said {
+        return false;
+    }
+    let (by_message, by_hand) = shift_really_held();
+    if by_message || by_hand {
+        // **どちらか一方でも「押されている」と言うなら、押されている。**古い旗を
+        // 疑って選択を取り上げるより、**押している指を取りこぼさない**ほうが大事で
+        // ある——Shiftを押したまま矢印で選んでいる書き手にとって、伸びないことは
+        // 壊れていることと同じである。食い違った回だけ記録に残す：どちらの問いが
+        // 当てにならないかは、これでしか分からない。
+        if by_message != by_hand {
+            cache.borrow_mut().log_diag(
+                "edit",
+                &format!(
+                    "shift-kept where={what} key={} async={}",
+                    u8::from(by_message),
+                    u8::from(by_hand)
+                ),
+            );
+        }
+        return true;
+    }
+    cache
+        .borrow_mut()
+        .log_diag("edit", &format!("stale-shift where={what} key=0 async=0"));
+    false
+}
 
 /// Windowsで決められたダブルクリックの間隔（E3）。
 fn double_click_time() -> Duration {
@@ -849,6 +921,13 @@ impl PaneGraphics {
 /// day be built on a worker thread and handed back (ペイン分割設計 7).
 #[derive(Default)]
 struct PaneView {
+    /// Direction changes reveal the caret instead of preserving a provisional viewport.
+    reveal_after_direction: bool,
+    /// Caret centre measured from the reading start: top horizontally, right vertically.
+    direction_fraction: Option<f32>,
+    direction_caret_source: Option<usize>,
+    direction_viewport: f32,
+    direction_scroll: f32,
     /// **This pane's own, not the other's.** The preview reveals the Markdown
     /// of the line the caret is on, and the panes keep separate carets (3.7),
     /// so they look at different lines and the texts differ by that one line.
@@ -871,6 +950,7 @@ struct PaneView {
     /// for an ordinary one, one per layout line for a rectangle, none for no
     /// selection at all.
     selection_utf16: Vec<(u32, u32)>,
+    difference_utf16: Vec<(u32, u32)>,
     /// The same runs in the document's bytes.
     ///
     /// **Written where the engine is**, because cutting a rectangle into runs
@@ -1458,6 +1538,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // folders they had open. A folder that has since gone is simply not there.
     let work_folder = match &session {
         Some(session) => WorkFolder {
+            creating: None,
             root: session.folder.clone().filter(|folder| folder.is_dir()),
             expanded: session.expanded.iter().cloned().collect(),
             // Nothing is selected at startup: a selection is where the writer
@@ -1474,6 +1555,20 @@ fn main() -> Result<(), slint::PlatformError> {
         None => WorkFolder::default(),
     };
     window.set_tree_open(session.as_ref().is_none_or(|session| session.tree_shown));
+    window.set_shortcut_bindings(
+        session
+            .as_ref()
+            .map(|s| s.shortcut_bindings.clone())
+            .unwrap_or_default()
+            .into(),
+    );
+    window.set_search_exclusions(
+        session
+            .as_ref()
+            .map(|s| s.search_exclusions.clone())
+            .unwrap_or_default()
+            .into(),
+    );
     // 追加要件 2026-09-06: the width the writer dragged the left pane to. A
     // session that says nothing says 0, which is not a width anybody chose —
     // the window keeps its own default then (the same rule the zoom uses).
@@ -1593,6 +1688,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let kill_ring: Rc<RefCell<Kills>> = Rc::default();
     let draft = Rc::new(RefCell::new(quick_draft::QuickDraftWindow::default()));
     let live = Live {
+        closed_tabs: Rc::default(),
         states: pane_states.clone(),
         folder: Rc::new(RefCell::new(work_folder)),
         tree_paths: Rc::new(RefCell::new(Vec::new())),
@@ -1753,14 +1849,50 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // E17: completion is collected without waiting for any layout thread.
+    // Resolve the pane's current document each time; a job does not own a TAB.
+    let layout_timer = Timer::default();
+    let weak = window.as_weak();
+    let layout_live = live.clone();
+    layout_timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        collect_layout_results(&window, &layout_live.states, &layout_live.cache);
+    });
+
     // 要件 8.3: another program writing the open file has to be noticed rather
     // than found out about by overwriting it.
     let watch_timer = Timer::default();
     let weak = window.as_weak();
     let watch_live = live.clone();
+    let mut tree_watcher = tree_watch::Watcher::new().ok();
     watch_timer.start(TimerMode::Repeated, EXTERNAL_CHECK_TICK, move || {
         if let Some(window) = weak.upgrade() {
             check_external_change(&window, &watch_live);
+            if window.get_tree_open()
+                && window.get_left_tab() == 0
+                && !window.get_tree_refresh_blocked()
+                && !window.get_question_open()
+                && !window.get_diff_active()
+            {
+                let request =
+                    watch_live
+                        .folder
+                        .borrow()
+                        .root
+                        .clone()
+                        .map(|root| tree_watch::Request {
+                            root,
+                            expanded: watch_live.folder.borrow().expanded.clone(),
+                            displayed_paths: watch_live.tree_paths.borrow().clone(),
+                        });
+                if let (Some(watcher), Some(request)) = (tree_watcher.as_mut(), request)
+                    && let Some(rows) = watcher.poll(&request)
+                {
+                    publish_tree_rows(&window, &watch_live, rows);
+                }
+            }
         }
     });
 
@@ -2102,6 +2234,30 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let weak = window.as_weak();
+    let focus_cache = render_cache.clone();
+    window.on_pane_focus_trace(move |pane, event| {
+        if let Some(window) = weak.upgrade()
+            && let Ok(mut cache) = focus_cache.try_borrow_mut()
+        {
+            cache.log_diag(
+                "focus",
+                &format!(
+                    "event={event} pane={pane} active={} generation={} panes={} question={} find_open={} find_pane={} replacing={} find_focus={} find_generation={}",
+                    window.get_focused_pane(),
+                    window.get_focus_generation(),
+                    PaneId::count(&window),
+                    window.get_question_open(),
+                    window.get_find_open(),
+                    window.get_find_pane(),
+                    window.get_find_replacing(),
+                    window.get_find_focus(),
+                    window.get_find_generation()
+                ),
+            );
+        }
+    });
+
     // From here to the mode switch, **every callback a pane raises carries its
     // number** and nothing else tells the two apart. `PaneId::from_index` turns
     // it back into the one type that knows the difference, so becoming a
@@ -2112,6 +2268,14 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_scroll_changed(move |pane, offset| {
         if let Some(window) = weak.upgrade() {
             refresh_after_scroll(&window, &cache, PaneId::from_index(pane), offset);
+        }
+    });
+
+    let weak = window.as_weak();
+    let cache = render_cache.clone();
+    window.on_pane_across_scroll_changed(move |pane, offset| {
+        if let Some(window) = weak.upgrade() {
+            refresh_after_across_scroll(&window, &cache, PaneId::from_index(pane), offset);
         }
     });
 
@@ -2184,7 +2348,9 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
-            let phase = if extend {
+            // **押した場所までを選ぶのは、Shiftを押しているときだけ。**届いた旗を
+            // そのまま信じると、古い旗のせいでただのクリックが選択になる。
+            let phase = if shift_as_windows_sees_it(&cache, extend, "click") {
                 SelectionPhase::Extend
             } else {
                 SelectionPhase::Begin
@@ -2192,6 +2358,13 @@ fn main() -> Result<(), slint::PlatformError> {
             let state = states.of(id);
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
         }
+    });
+
+    let weak = window.as_weak();
+    let link_live = live.clone();
+    window.on_pane_link_open(move |pane, x, y| {
+        weak.upgrade()
+            .is_some_and(|window| open_link_at(&window, &link_live, PaneId::from_index(pane), x, y))
     });
 
     // E3の②: 行そのものを動かす・写す・消す。**番号は窓と1対1**で、増えたときに
@@ -2392,6 +2565,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             let state = states.of(id);
+            let extend_selection = shift_as_windows_sees_it(&cache, extend_selection, "arrow");
             move_pane_caret(
                 &window,
                 id,
@@ -2414,6 +2588,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             let state = states.of(id);
+            let extend = shift_as_windows_sees_it(&cache, extend, "home-end");
             move_pane_to_line_edge(
                 &window,
                 id,
@@ -2555,11 +2730,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    let undo_live = live.clone();
     window.on_pane_undo(move |pane, forwards| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             undo_in_pane(&window, id, &document, &states, &cache, forwards);
+            if !document.text.edited() {
+                discard_work_copy(&undo_live, &work_identity(&document.file.borrow()));
+            }
         }
     });
 
@@ -2573,6 +2752,33 @@ fn main() -> Result<(), slint::PlatformError> {
             id.set_shows_preview(&window, !id.shows_preview(&window));
             let source = document.text.borrow().clone();
             refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
+        }
+    });
+
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    window.on_pane_viewer_toggled(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let document = states.document(id);
+            if document.read_only() {
+                return;
+            }
+            let viewer = !states.of(id).borrow().viewer;
+            states.of(id).borrow_mut().viewer = viewer;
+            let source = document.text.borrow().clone();
+            states.of(id).borrow_mut().preedit.clear();
+            id.set_ime_buffer(&window, "");
+            refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
+            window.set_render_status(
+                if viewer {
+                    "Viewerモードに切り替えました"
+                } else {
+                    "編集モードに戻りました"
+                }
+                .into(),
+            );
         }
     });
 
@@ -2592,13 +2798,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if cache.borrow_mut().pane(id).terminal.is_some() {
                 return;
             }
-            let document = states.document(id);
-            set_pane_direction(&window, &cache, id, !id.vertical(&window));
-            // The anchor the up and down keys hold on to is a coordinate in the
-            // layout that has just stopped existing.
-            states.of(id).borrow_mut().preferred_line = None;
-            let source = document.text.borrow().clone();
-            refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
+            toggle_pane_direction(&window, &states, &cache, id);
         }
     });
 
@@ -2635,6 +2835,39 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = window.as_weak();
+    let body_live = live.clone();
+    window.on_pane_copy_body(move |pane| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let id = PaneId::from_index(pane);
+        if id.shows_terminal(&window) {
+            return;
+        }
+        let document = body_live.states.document(id);
+        let source = document.text.borrow();
+        let ranges = selected_runs(&body_live.cache, id);
+        let text = if is_markdown_path(
+            document
+                .file
+                .borrow()
+                .path()
+                .unwrap_or(Path::new("untitled.md")),
+        ) {
+            document::plain_body_text(&source, &ranges)
+        } else if ranges.is_empty() {
+            source.clone()
+        } else {
+            selected_text(&source, &ranges)
+        };
+        window.set_render_status(if clipboard::put_text(ime::window_handle(&window), &text) {
+            "本文だけをコピーしました".into()
+        } else {
+            "クリップボードへ渡せませんでした".into()
+        });
+    });
+
+    let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
     window.on_pane_mark_toggled(move |pane, rectangular| {
@@ -2643,6 +2876,28 @@ fn main() -> Result<(), slint::PlatformError> {
             let document = states.document(id);
             toggle_mark(&window, id, &document, &states, &cache, rectangular);
         }
+    });
+
+    // 書き手の報告 2026-09-12:「突然選択になりました」。**旗を読むところは
+    // 鍵の並びに20ほどあり、訊く先はここ1つ。**古い旗は選択だけを壊すのでは
+    // ない——`Ctrl+K`が`Ctrl+Shift+K`（行を消す）に、`Alt+↓`が`Shift+Alt+↓`
+    // （行を写す）に化けるのも同じ古さである。
+    let cache = render_cache.clone();
+    window.on_shift_held(move |said| shift_as_windows_sees_it(&cache, said, "key"));
+
+    // 書き手の報告 2026-09-12:「選択になって戻れなくなる」。**Escapeは、
+    // 選んでいる途中ならいつでも戻れる鍵である**（要件 11.4）。ペインの
+    // メニューと探す帯を先に畳んだあと、ここへ来る。
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
+    window.on_pane_escaped(move |pane| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let id = PaneId::from_index(pane);
+        let document = states.document(id);
+        escape_in_pane(&window, id, &document, &states, &cache)
     });
 
     let weak = window.as_weak();
@@ -2868,6 +3123,23 @@ fn main() -> Result<(), slint::PlatformError> {
                 index.max(0) as usize,
             );
         }
+    });
+
+    let weak = window.as_weak();
+    let duplicate_live = live.clone();
+    window.on_pane_duplicate_tab(move |pane, index| {
+        let weak = weak.clone();
+        let live = duplicate_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                duplicate_tab(
+                    &window,
+                    &live,
+                    PaneId::from_index(pane),
+                    index.max(0) as usize,
+                );
+            }
+        });
     });
 
     // 要件 11.3 の手つきで上下に移る（追加要件 Terminal）。
@@ -3192,6 +3464,11 @@ fn replace_document(
     document: &Rc<OpenDocument>,
     text: String,
 ) {
+    let id = PaneId::from_index(window.get_focused_pane());
+    if document.read_only() || id.screen(window).viewer {
+        window.set_render_status("Viewerでは編集できません".into());
+        return;
+    }
     *document.text.borrow_mut() = text;
     // Nothing recorded against the old text names anything in this one.
     // `History::undo_into` checks as well, but that check is the last line of
@@ -3282,6 +3559,7 @@ impl TabView {
 
 #[derive(Clone)]
 struct PaneTab {
+    identity: Rc<()>,
     /// 要件 7.9（2026-09-08）: この文書の**単語チェックモード**の番号。
     ///
     /// **名前ではなく番号**（同日改訂）。名前で指していたときは、**モードの名前を
@@ -3371,6 +3649,18 @@ struct TabBelow {
 }
 
 impl PaneTab {
+    fn another_view(&self) -> Option<Self> {
+        if self.terminal.is_some() || self.empty {
+            return None;
+        }
+        self.provisional.set(false);
+        let mut tab = self.clone();
+        tab.identity = Rc::new(());
+        tab.provisional.set(false);
+        tab.below = TabBelow::default();
+        Some(tab)
+    }
+
     fn document(&self) -> Rc<OpenDocument> {
         self.document.clone()
     }
@@ -3378,6 +3668,7 @@ impl PaneTab {
     /// A tab showing a document this pane has not looked at yet.
     fn showing(window: &AppWindow, id: PaneId, document: Rc<OpenDocument>) -> Self {
         Self {
+            identity: Rc::new(()),
             // 要件 7.9: **開いた面のモードを継ぐ。**同じ作品の次の章を開いて
             // 選び直させるのは、書く手を止めることである（要件 3）。
             word_mode: id.screen(window).word_mode as u32,
@@ -3423,13 +3714,9 @@ struct PaneTabs {
     /// The documents this pane has stood in front of, oldest first
     /// (書き手の報告 2026-09-07).
     ///
-    /// **Documents, not tab numbers.** A number means a different tab the
-    /// moment one is closed or carried, and the walk this list is for closes
-    /// tabs as it goes: the file a writer wants to go back to is often the one
-    /// whose tab was just written over. Holding the `Rc` keeps it readable —
-    /// it is the same document, so going back to it shares the text with
-    /// anything else showing it (要件 7.6).
-    history: Vec<Rc<OpenDocument>>,
+    /// Stable TAB identities distinguish separate views of the same document.
+    /// The document is retained so replaced provisional tabs can be reopened.
+    history: Vec<NavigationPlace>,
     /// Where in that list the pane is standing. Everything after it is what
     /// 進む would reach; a move anywhere else cuts it off.
     at: usize,
@@ -3440,6 +3727,21 @@ struct PaneTabs {
 /// **A walk, not a life.** Each place holds its document open, so the number is
 /// also how many closed files the window can be keeping in memory.
 const NAVIGATION_PLACES: usize = 16;
+
+#[derive(Clone)]
+struct NavigationPlace {
+    identity: Rc<()>,
+    document: Rc<OpenDocument>,
+}
+
+impl From<&PaneTab> for NavigationPlace {
+    fn from(tab: &PaneTab) -> Self {
+        Self {
+            identity: tab.identity.clone(),
+            document: tab.document.clone(),
+        }
+    }
+}
 
 impl PaneTabs {
     /// The tab this pane is showing, if it has one.
@@ -3580,6 +3882,7 @@ impl Tabs {
 /// editing callbacks keep their own handles; nothing here changes them.
 #[derive(Clone)]
 struct Live {
+    closed_tabs: Rc<RefCell<Vec<PaneTab>>>,
     states: PaneStates,
     /// The work folder and which of its folders are open (要件 5.1, 5.2).
     /// **One folder per window** — 要件 5.1 says so, and the tree is what the
@@ -3777,7 +4080,8 @@ fn open_documents(live: &Live) -> Vec<Rc<OpenDocument>> {
     let mut open: Vec<Rc<OpenDocument>> = Vec::new();
     for strip in &tabs.panes {
         for tab in &strip.tabs {
-            if !open.iter().any(|held| Rc::ptr_eq(held, &tab.document)) {
+            if !tab.document.read_only() && !open.iter().any(|held| Rc::ptr_eq(held, &tab.document))
+            {
                 open.push(tab.document.clone());
             }
         }
@@ -3792,6 +4096,10 @@ fn open_documents(live: &Live) -> Vec<Rc<OpenDocument>> {
 /// あって、違うのは**書き手が気づいたときに自分から開ける**ことだけである。
 fn ask_outside_change(window: &AppWindow, live: &Live) {
     let document = live.active(window);
+    if document.file.borrow().external_change() == buffer::ExternalChange::Missing {
+        ask_missing_file(window, live, &document);
+        return;
+    }
     if !document.outside.get() {
         return;
     }
@@ -3813,15 +4121,53 @@ fn ask_outside_change(window: &AppWindow, live: &Live) {
             "作業中の内容で上書き",
             "外部の変更を読み込む",
             "別名で保存",
+            "外部版と比べる",
             "キャンセル",
         ],
         1,
     );
 }
 
-/// そのパスを開いている文書（要件 7.6、書き手のレビュー 2026-09-11）。
-///
-/// **同じファイルは1つの文書**であるはずなので、これが2つ見つかることはない。
+fn ask_missing_file(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) {
+    let Some(path) = document.file.borrow().path().map(Path::to_path_buf) else {
+        return;
+    };
+    document.missing.set(true);
+    document.outside.set(true);
+    publish_active_encoding(window, live);
+    ask_question(window, live, Question::MissingFile(path),
+        "ファイルが元の場所に見つからないため、外部版とは比較できません。\n編集中の本文とUndoは保持しています。必要な本文は別名で保存してください。".into(),
+        &["別名で保存…", "キャンセル"], -1);
+}
+
+/// Compare the current draft with the external file without acknowledging it.
+fn open_external_snapshot(window: &AppWindow, live: &Live, path: &Path) {
+    let Some(source) = document_at(live, path) else {
+        return;
+    };
+    // Reload a clone so comparison never acknowledges the external change.
+    let mut file = source.file.borrow().clone();
+    let text = match file.reload(MAX_DOCUMENT_CHARACTERS) {
+        Some(Ok(text)) => text,
+        Some(Err(error)) => {
+            window.set_render_status(format!("外部版を比較できません: {error}").into());
+            return;
+        }
+        None => return,
+    };
+    diff_view::show_merge(
+        window,
+        live,
+        focused_pane(window),
+        source.clone(),
+        format!("{}（編集中の本文）", path.display()),
+        source.text.borrow().clone(),
+        format!("{}（外部版・取得時点）", path.display()),
+        text,
+    );
+}
+
+/// The editable document holding this path; comparison snapshots have no path.
 fn document_at(live: &Live, path: &Path) -> Option<Rc<OpenDocument>> {
     open_documents(live)
         .into_iter()
@@ -3852,8 +4198,8 @@ fn merge_documents(
             // **閲覧履歴も持ち替える**（要件 11.2）。捨てた文書へ戻る道が残って
             // いると、戻った先にはもう誰も持っていない本文がある。
             for seen in &mut strip.history {
-                if Rc::ptr_eq(seen, gone) {
-                    *seen = kept.clone();
+                if Rc::ptr_eq(&seen.document, gone) {
+                    seen.document = kept.clone();
                 }
             }
         }
@@ -3874,6 +4220,46 @@ fn merge_documents(
 /// document being measured again — the price of a deliberate switch, never of a
 /// keystroke. The IME is told as well when it is the pane being typed in: its
 /// candidate list is laid out from the composition font's direction (7.2).
+fn toggle_pane_direction(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+) {
+    let fraction = {
+        let mut borrowed = cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        pane.view
+            .direction_fraction
+            .filter(|_| pane.view.reveal_after_direction)
+            .or_else(|| {
+                let at = pane.view.caret_utf16?;
+                if !pane.graphics.engine.position_ready(at) {
+                    return None;
+                }
+                let caret = pane.graphics.engine.caret_geometry(at).ok()?;
+                Some(caret_view_fraction(
+                    id.vertical(window),
+                    &caret,
+                    id.scroll(window),
+                    id.viewport_flow(window),
+                ))
+            })
+            .unwrap_or(0.5)
+    };
+    set_pane_direction(window, cache, id, !id.vertical(window));
+    // A provisional viewport in the new direction is not a user scroll.
+    // Keep revealing the unchanged source caret until this layout completes.
+    cache.borrow_mut().pane(id).view.reveal_after_direction = true;
+    cache.borrow_mut().pane(id).view.direction_fraction = Some(fraction);
+    cache.borrow_mut().pane(id).view.direction_caret_source =
+        states.of(id).borrow().caret_source_byte;
+    states.of(id).borrow_mut().preferred_line = None;
+    let document = states.document(id);
+    let source = document.text.borrow().clone();
+    refresh_pane_from_state(window, cache, &document, id, &states.of(id), &source);
+}
+
 fn set_pane_direction(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
@@ -3937,6 +4323,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
             Some(index) => index,
             None => {
                 strip.tabs.push(PaneTab {
+                    identity: Rc::new(()),
                     word_mode: id.screen(window).word_mode as u32,
                     document,
                     view: TabView {
@@ -4717,6 +5104,10 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     }
     let replacement = screen.find_replacement.to_string();
     let document = live.states.document(id);
+    if document.read_only() || id.screen(window).viewer {
+        window.set_render_status("Viewerでは編集できません".into());
+        return;
+    }
     let source = document.text.borrow().clone();
     refresh_find_scope(window, live, id);
     let search = match find_search(window, id) {
@@ -4827,6 +5218,7 @@ fn editor_area(window: &AppWindow) -> Rect {
 /// The work folder, and which of its folders the writer has opened.
 #[derive(Default)]
 struct WorkFolder {
+    creating: Option<(PathBuf, bool)>,
     root: Option<PathBuf>,
     /// **Paths, not indices.** A row's position changes whenever anything above
     /// it opens or closes; the folder it stands for does not.
@@ -5206,6 +5598,8 @@ fn open_work_folder(window: &AppWindow, live: &Live, chosen: &Path) {
     {
         let mut folder = live.folder.borrow_mut();
         folder.root = Some(chosen.to_path_buf());
+        folder.creating = None;
+        window.set_tree_new_index(-1);
         folder.expanded.clear();
         // 要件 7.7: **絞り込みは、絞り込んだフォルダと一緒に去る。**別の作業
         // フォルダを開いたのに検索だけ前のフォルダを歩いていたら、書き手は
@@ -5281,6 +5675,7 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
     let generation = live.searched.get() + 1;
     live.searched.set(generation);
     let job = SearchJob {
+        exclusions: window.get_search_exclusions().to_string(),
         root,
         needle,
         generation,
@@ -5380,12 +5775,55 @@ fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
 
 /// Put the work folder's tree in front of the writer (要件 5.2).
 ///
-/// Read afresh each time rather than watched: a tree is redrawn when the writer
-/// opens a folder, opens the work folder or opens a file, and each of those is
-/// something they did. Watching the disk is a separate thing, and 要件 8.3 only
-/// asks for it on the file being edited.
+/// User actions read immediately; periodic background reads use publish_tree_rows.
+fn reveal_in_tree(window: &AppWindow, live: &Live, path: &Path) {
+    let Some(root) = live.folder.borrow().root.clone() else {
+        return;
+    };
+    if !path.starts_with(&root) {
+        window.set_render_status("現在の文書は作業フォルダの外にあります".into());
+        return;
+    }
+    if !path.is_file() {
+        window.set_render_status("現在の文書のファイルが見つかりません".into());
+        return;
+    }
+    {
+        let mut folder = live.folder.borrow_mut();
+        for parent in path.ancestors().skip(1).take_while(|p| *p != root) {
+            folder.expanded.insert(parent.to_owned());
+        }
+        folder.selected = Some(path.to_owned());
+    }
+    publish_tree(window, live);
+    window.set_tree_reveal_generation(window.get_tree_reveal_generation().wrapping_add(1));
+}
+
+fn explorer_command(window: &AppWindow, live: &Live, command: i32) {
+    if live.folder.borrow().creating.is_some() {
+        return;
+    }
+    match command {
+        0 => {
+            let path = live.active(window).file.borrow().path().map(Path::to_owned);
+            if let Some(path) = path {
+                reveal_in_tree(window, live, &path);
+            } else {
+                window.set_render_status("現在の文書には保存先がありません".into());
+            }
+        }
+        1 => {
+            live.folder.borrow_mut().expanded.clear();
+            publish_tree(window, live);
+            window.set_tree_reveal_generation(window.get_tree_reveal_generation().wrapping_add(1));
+        }
+        2 => publish_tree(window, live),
+        _ => {}
+    }
+}
+
 fn publish_tree(window: &AppWindow, live: &Live) {
-    let mut folder = live.folder.borrow_mut();
+    let folder = live.folder.borrow();
     let Some(root) = folder.root.clone() else {
         window.set_work_folder(SharedString::new());
         window.set_left_rows(ModelRc::new(VecModel::from(Vec::<LeftRow>::new())));
@@ -5393,6 +5831,35 @@ fn publish_tree(window: &AppWindow, live: &Live) {
         return;
     };
     let rows = file_tree::rows(&root, &folder.expanded, &file_tree::read_folder);
+    drop(folder);
+    publish_tree_rows(window, live, rows);
+}
+
+fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::Row>) {
+    let mut folder = live.folder.borrow_mut();
+    let Some(root) = folder.root.clone() else {
+        return;
+    };
+    if let Some((parent, is_folder)) = &folder.creating {
+        let (at, depth) = rows
+            .iter()
+            .position(|row| &row.path == parent)
+            .map(|at| (at + 1, rows[at].depth + 1))
+            .unwrap_or((0, 0));
+        rows.insert(
+            at,
+            file_tree::Row {
+                name: window.get_tree_new_name().to_string(),
+                path: parent.join(window.get_tree_new_name().as_str()),
+                folder: *is_folder,
+                depth,
+                open: false,
+            },
+        );
+        window.set_tree_new_index(at as i32);
+    } else {
+        window.set_tree_new_index(-1);
+    }
     // The selection is held by path, so **where it sits is worked out afresh
     // every time the rows are** — and a path that is no longer among them is
     // let go, because a command on a row nobody can see is a command on
@@ -5422,7 +5889,9 @@ fn publish_tree(window: &AppWindow, live: &Live) {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.display().to_string());
     window.set_work_folder(name.into());
-    window.set_left_rows(ModelRc::new(VecModel::from(drawn)));
+    if !window.get_left_rows().iter().eq(drawn.iter().cloned()) {
+        window.set_left_rows(ModelRc::new(VecModel::from(drawn)));
+    }
     // Held beside the rows so a click can name one: the model the window has is
     // only what it draws, and a path is not part of that.
     *live.tree_paths.borrow_mut() = rows.into_iter().map(|row| row.path).collect();
@@ -5473,6 +5942,58 @@ fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, openi
     open_path_in_pane(window, live, focused_pane(window), path, opening);
 }
 
+fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> bool {
+    if live.cache.borrow_mut().pane(id).terminal.is_some() {
+        return false;
+    }
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let revealed = PaneId::revealed_line(id.vertical(window), &live.states.of(id), &source);
+    let hit = hit_test_pane(
+        window,
+        &mut live.cache.borrow_mut(),
+        &document,
+        id,
+        &source,
+        revealed,
+        x,
+        y,
+    );
+    let Some(hit) = hit.filter(|hit| !hit.in_numbers && hit.is_inside) else {
+        return false;
+    };
+    let Some((target, wiki)) = document::link_target_at(&source, hit.letter) else {
+        return false;
+    };
+    let path = document::link_path(target, wiki, document.file.borrow().path());
+    let Some(path) = path else {
+        window.set_render_status("リンク先を解決できません。通常リンクにはファイルのパス、内部リンクにはフルパスを指定してください。".into());
+        return true;
+    };
+    match std::fs::canonicalize(&path) {
+        Ok(path) if path.is_file() => {
+            // Reuse the spelling already held by a tab, including its unsaved text.
+            let held = live
+                .tabs
+                .borrow()
+                .panes
+                .iter()
+                .flat_map(|pane| &pane.tabs)
+                .find_map(|tab| {
+                    let file = tab.document.file.borrow();
+                    let held = file.path()?;
+                    (held.canonicalize().ok().as_ref() == Some(&path)).then(|| held.to_path_buf())
+                });
+            let path = held.unwrap_or(path);
+            open_path_in_pane(window, live, id, &path, Opening::Kept);
+        }
+        _ => window.set_render_status(
+            format!("リンク先のファイルを開けません: {}", path.display()).into(),
+        ),
+    }
+    true
+}
+
 /// The same, into a pane the caller names.
 ///
 /// Startup is why this is separate: [`focused_pane`] asks whether a pane is on
@@ -5480,28 +6001,50 @@ fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, openi
 /// answers for the pane that is *not* about to be in front. A file named on the
 /// command line went to the hidden pane and looked like it had not opened at
 /// all.
+fn opening_targets(
+    strip: &PaneTabs,
+    held: Option<usize>,
+    opening: Opening,
+) -> (Option<usize>, Option<usize>, bool) {
+    // An explicitly selected New Tab is the destination, even if the file
+    // already has another view in this pane.
+    if strip.tabs.get(strip.active).is_some_and(|tab| tab.empty) {
+        return (None, Some(strip.active), true);
+    }
+    let yielding = strip
+        .tabs
+        .iter()
+        .position(|tab| tab.empty)
+        .or_else(|| strip.tabs.iter().position(|tab| tab.yields_to(opening)));
+    (held, yielding, false)
+}
+
 fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, opening: Opening) {
     // **知らせは、いま前にある文書のものである**（書き手の報告 2026-09-10）。
     // 別のものを開くならその知らせはもう古い——ここで消しておけば、この先で
     // 出す言葉（「改行コードが混在していました」など）だけが残る。
     forget_render_status(window);
-    let (held, yielding) = {
+    let (held, yielding, explicit_new_tab) = {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
+        // Keep the selected view when the file already has multiple TABs.
+        // This also makes the second click of an Explorer double-click stay put.
         let held = strip
             .tabs
-            .iter()
-            .position(|tab| tab.document.file.borrow().path() == Some(path));
+            .get(strip.active)
+            .filter(|tab| tab.document.file.borrow().path() == Some(path))
+            .map(|_| strip.active)
+            .or_else(|| {
+                strip
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.document.file.borrow().path() == Some(path))
+            });
         // **場所を譲るタブは1枚だけ**（書き手の報告 2026-09-07、追加要件
         // 2026-09-07）。位置は毎回数え直す——タブは並び替えられるし閉じられるので、
         // 覚えた番号は次の瞬間には別のタブを指している（6.4で3度やった間違い）。
         // **空のタブが先**：まだ何でもないものが開いているなら、そこが開き先である。
-        let yielding = strip
-            .tabs
-            .iter()
-            .position(|tab| tab.empty)
-            .or_else(|| strip.tabs.iter().position(|tab| tab.yields_to(opening)));
-        (held, yielding)
+        opening_targets(strip, held, opening)
     };
     if let Some(index) = held {
         // 要件 7.7: bringing a file forward is opening it, tab or no tab.
@@ -5566,7 +6109,7 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
             preview: markdown && id.shows_preview(window),
             ..TabView::default()
         },
-        provisional: Cell::new(opening == Opening::Peeked),
+        provisional: Cell::new(opening == Opening::Peeked && !explicit_new_tab),
         ..PaneTab::showing(window, id, document)
     };
     match yielding {
@@ -5698,6 +6241,9 @@ fn entry_name(path: &Path) -> String {
 /// of the event loop later, like every other question (`answer_question`). The
 /// ones that do not are done here.
 fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
+    if live.folder.borrow().creating.is_some() {
+        return;
+    }
     let Some(root) = live.folder.borrow().root.clone() else {
         return;
     };
@@ -5706,30 +6252,13 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
     // path, and a folder is a folder however the row was drawn.
     let is_folder = selected.as_deref().map(Path::is_dir).unwrap_or(false);
     match command {
-        TreeCommand::NewFile => {
-            let chosen = selected.as_deref();
-            let into = file_tree::destination_folder(chosen, is_folder, &root);
-            let taken = file_tree::names_in(&into);
-            let suggested = file_tree::unique_name(&taken, "無題.md");
-            ask_for_name(
+        TreeCommand::NewFile | TreeCommand::NewFolder => {
+            let into = file_tree::destination_folder(selected.as_deref(), is_folder, &root);
+            begin_tree_entry(
                 window,
                 live,
-                Question::NewFile(into),
-                "新しいファイルの名前を入れてください。".to_string(),
-                &suggested,
-            );
-        }
-        TreeCommand::NewFolder => {
-            let chosen = selected.as_deref();
-            let into = file_tree::destination_folder(chosen, is_folder, &root);
-            let taken = file_tree::names_in(&into);
-            let suggested = file_tree::unique_name(&taken, "新しいフォルダー");
-            ask_for_name(
-                window,
-                live,
-                Question::NewFolder(into),
-                "新しいフォルダーの名前を入れてください。".to_string(),
-                &suggested,
+                into,
+                matches!(command, TreeCommand::NewFolder),
             );
         }
         TreeCommand::Rename => {
@@ -5768,18 +6297,7 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             let Some(path) = selected else {
                 return;
             };
-            let going = entry_name(&path);
-            ask_question(
-                window,
-                live,
-                Question::DeleteEntry(path),
-                format!(
-                    "「{going}」をごみ箱へ移動します。\n\n\
-                     Windowsのごみ箱から戻せます。"
-                ),
-                &["ごみ箱へ移動", "キャンセル"],
-                0,
-            );
+            ask_delete_entry(window, live, &path);
         }
         TreeCommand::Reveal => {
             let Some(path) = selected else {
@@ -5807,40 +6325,68 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
 }
 
 /// Make the file or folder the writer has just named (要件 5.2).
-fn make_entry(window: &AppWindow, live: &Live, parent: &Path, folder: bool) {
-    let typed = window.get_question_name().to_string();
+fn begin_tree_entry(window: &AppWindow, live: &Live, parent: PathBuf, folder: bool) {
+    let suggested = file_tree::unique_name(
+        &file_tree::names_in(&parent),
+        if folder {
+            "新しいフォルダー"
+        } else {
+            "無題.md"
+        },
+    );
+    window.set_tree_new_name(suggested.into());
+    window.set_tree_new_error("".into());
+    {
+        let mut state = live.folder.borrow_mut();
+        state.expanded.insert(parent.clone());
+        state.creating = Some((parent, folder));
+    }
+    publish_tree(window, live);
+    window.set_tree_selected(window.get_tree_new_index());
+    window.set_tree_reveal_generation(window.get_tree_reveal_generation().wrapping_add(1));
+}
+
+fn finish_tree_entry(window: &AppWindow, live: &Live, accept: bool) {
+    let Some((parent, folder)) = live.folder.borrow().creating.clone() else {
+        return;
+    };
+    if !accept {
+        live.folder.borrow_mut().creating = None;
+        window.set_tree_new_index(-1);
+        publish_tree(window, live);
+        restore_editor_focus(window);
+        return;
+    }
+    let typed = window.get_tree_new_name().to_string();
     let name = match file_tree::check_name(&typed) {
         Ok(name) => name,
-        Err(problem) => {
-            window.set_render_status(problem.message().into());
+        Err(error) => {
+            window.set_tree_new_error(error.message().into());
             return;
         }
     };
     let path = parent.join(name);
-    let made = if folder {
+    let result = if folder {
         file_tree::create_folder(&path)
     } else {
         file_tree::create_file(&path)
     };
-    if let Err(error) = made {
-        let told = format!("作れません: {error}");
-        window.set_render_status(told.into());
+    if let Err(error) = result {
+        window.set_tree_new_error(format!("作れません: {error}").into());
         return;
     }
     {
-        let mut open = live.folder.borrow_mut();
-        open.selected = Some(path.clone());
-        // The folder it went into is opened, or what was just made would not
-        // be on screen at all.
-        open.expanded.insert(parent.to_path_buf());
+        let mut state = live.folder.borrow_mut();
+        state.creating = None;
+        state.selected = Some(path.clone());
     }
-    // A new file is opened in the pane the writer is in: making one is how a
-    // note starts, and the step to it is not one they meant to take.
+    window.set_tree_new_index(-1);
+    publish_tree(window, live);
     if !folder {
         open_path_in_focused_pane(window, live, &path, Opening::Kept);
     }
-    publish_left(window, live);
     write_session(window, live);
+    restore_editor_focus(window);
 }
 
 /// Give the selected file or folder the name the writer has typed (要件 5.2).
@@ -6005,14 +6551,127 @@ fn documents_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 
 /// Move the selected file or folder to the recycle bin (要件 5.2).
 ///
-/// **The tabs are left where they are.** A document whose file has gone is one
-/// 要件 8.3's watcher already knows how to report, and closing it would be the
-/// editor throwing away the work that the recycle bin was chosen to keep.
+fn deleting_documents(live: &Live, path: &Path) -> Vec<Rc<OpenDocument>> {
+    open_documents(live)
+        .into_iter()
+        .filter(|document| {
+            document
+                .file
+                .borrow()
+                .path()
+                .is_some_and(|p| p.starts_with(path))
+        })
+        .collect()
+}
+
+fn ask_delete_entry(window: &AppWindow, live: &Live, path: &Path) {
+    let dirty: Vec<_> = deleting_documents(live, path)
+        .into_iter()
+        .filter(|d| d.text.edited())
+        .map(|d| {
+            let text = d.text.borrow().clone();
+            (d.file.borrow().path().unwrap().to_owned(), text)
+        })
+        .collect();
+    if dirty.is_empty() {
+        ask_question(
+            window,
+            live,
+            Question::DeleteEntry(path.to_owned()),
+            format!(
+                "「{}」をごみ箱へ移動し、開いているTABを閉じます。\nWindowsのごみ箱から戻せます。",
+                entry_name(path)
+            ),
+            &["ごみ箱へ移動", "キャンセル"],
+            0,
+        );
+    } else {
+        let names = dirty
+            .iter()
+            .map(|(p, _)| entry_name(p))
+            .collect::<Vec<_>>()
+            .join("、");
+        ask_question(
+            window,
+            live,
+            Question::DeleteEdited(path.to_owned(), dirty),
+            format!(
+                "「{}」を削除します。\n未保存の変更があります：{names}\n保存してからごみ箱へ移動しますか？ 開いているTABも閉じます。",
+                entry_name(path)
+            ),
+            &["保存してごみ箱へ移動", "保存せずごみ箱へ移動", "キャンセル"],
+            1,
+        );
+    }
+}
+
+fn save_before_delete(window: &AppWindow, live: &Live, documents: &[Rc<OpenDocument>]) -> bool {
+    let dirty: Vec<_> = documents.iter().filter(|d| d.text.edited()).collect();
+    if dirty.iter().any(|d| {
+        d.outside.get() || d.file.borrow().external_change() != buffer::ExternalChange::None
+    }) {
+        window.set_render_status(
+            "外部変更があります。保存時の確認を済ませてから削除をやり直してください".into(),
+        );
+        return false;
+    }
+    for document in dirty {
+        let target = document.file.borrow().path().unwrap().to_owned();
+        if !saving::write_document_to(window, live, document, target) {
+            return false;
+        }
+    }
+    true
+}
+
 fn delete_entry(window: &AppWindow, live: &Live, path: &Path) {
-    let owner = ime::window_handle(window);
-    if !shell::recycle(owner, path) {
-        window.set_render_status("ごみ箱へ移動できませんでした".into());
+    delete_entry_with(window, live, path, |path| {
+        shell::recycle(ime::window_handle(window), path)
+    });
+}
+
+fn delete_entry_with(
+    window: &AppWindow,
+    live: &Live,
+    path: &Path,
+    recycle: impl FnOnce(&Path) -> bool,
+) {
+    let documents = deleting_documents(live, path);
+    if !recycle(path) {
+        window.set_render_status("ごみ箱へ移動できませんでした。TABは保持しています".into());
         return;
+    }
+    live.closed_tabs.borrow_mut().retain(|tab| {
+        !tab.document
+            .file
+            .borrow()
+            .path()
+            .is_some_and(|p| p.starts_with(path))
+    });
+    for document in &documents {
+        document.text.mark_saved();
+        discard_work_copy(live, &work_identity(&document.file.borrow()));
+        forget_memo_navigation(&mut live.tabs.borrow_mut(), document);
+    }
+    loop {
+        let next = {
+            let tabs = live.tabs.borrow();
+            tabs.panes
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(pane, strip)| {
+                    strip
+                        .tabs
+                        .iter()
+                        .rposition(|tab| documents.iter().any(|d| Rc::ptr_eq(d, &tab.document)))
+                        .map(|index| (PaneId(pane as u32), index))
+                })
+        };
+        let Some((pane, index)) = next else {
+            break;
+        };
+        finish_close_discarded(window, live, pane, index);
     }
     {
         let mut open = live.folder.borrow_mut();
@@ -6043,7 +6702,7 @@ const MAX_PANES: usize = 64;
 /// no name. The ceiling is there because the writing is the point — a left pane
 /// that can take the window is one the writer has to put back.
 const TREE_WIDTH_MIN: f32 = 160.0;
-const TREE_WIDTH_MAX: f32 = 640.0;
+const TREE_WIDTH_MAX: f32 = 1200.0;
 
 /// Make the window's pane model hold exactly `count` rows (要件 6.3).
 ///
@@ -6331,12 +6990,12 @@ fn note_navigation(live: &Live, id: PaneId, tab: &PaneTab) {
     let standing = strip
         .history
         .get(strip.at)
-        .is_some_and(|held| Rc::ptr_eq(held, &tab.document));
+        .is_some_and(|held| Rc::ptr_eq(&held.identity, &tab.identity));
     if standing {
         return;
     }
     strip.history.truncate(strip.at + 1);
-    strip.history.push(tab.document.clone());
+    strip.history.push(NavigationPlace::from(tab));
     while strip.history.len() > NAVIGATION_PLACES {
         strip.history.remove(0);
     }
@@ -6358,7 +7017,7 @@ fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
         stepped_place(strip.history.len(), strip.at, forward)
             .map(|next| (next, strip.history[next].clone()))
     };
-    let Some((next, document)) = step else {
+    let Some((next, place)) = step else {
         return told_no_way(window, forward);
     };
     let (held, peeked) = {
@@ -6368,7 +7027,7 @@ fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
             strip
                 .tabs
                 .iter()
-                .position(|tab| Rc::ptr_eq(&tab.document, &document)),
+                .position(|tab| Rc::ptr_eq(&tab.identity, &place.identity)),
             strip
                 .tabs
                 .iter()
@@ -6394,8 +7053,9 @@ fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
         }
         None => {
             let tab = PaneTab {
+                identity: place.identity,
                 provisional: Cell::new(true),
-                ..PaneTab::showing(window, id, document)
+                ..PaneTab::showing(window, id, place.document)
             };
             match peeked {
                 Some(index) => replace_tab(window, live, id, index, tab),
@@ -6435,7 +7095,12 @@ fn tab_title(tab: &PaneTab) -> String {
     match &tab.terminal {
         Some(session) => session.borrow().name().to_owned(),
         None if tab.empty => NEW_TAB_NAME.to_owned(),
-        None => tab.document.file.borrow().title(),
+        None => tab
+            .document
+            .external_snapshot
+            .as_ref()
+            .map(|(title, _)| format!("{title}［外部版・読み取り専用］"))
+            .unwrap_or_else(|| tab.document.file.borrow().title()),
     }
 }
 
@@ -6605,6 +7270,23 @@ fn add_tab(window: &AppWindow, live: &Live, id: PaneId, tab: PaneTab) {
     publish_tabs(window, live);
 }
 
+fn duplicate_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
+    // Capture the active TAB before cloning its independent view state.
+    sync_active_tab(window, live);
+    let tab = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .get(index)
+        .and_then(PaneTab::another_view);
+    if let Some(tab) = tab {
+        add_tab(window, live, id, tab);
+        window.set_focused_pane(id.index());
+        restore_editor_focus(window);
+    }
+}
+
 /// A tab that has not been asked what it is yet (追加要件 2026-09-07).
 ///
 /// **The `＋` makes the tab and the tab asks the question.** It used to be the
@@ -6742,10 +7424,21 @@ enum Question {
     /// The pane is carried as well as the position: the answer comes back a
     /// turn of the event loop later, and the writer may have clicked into
     /// another pane by then.
-    CloseTab { pane: PaneId, index: usize },
+    CloseTab {
+        pane: PaneId,
+        index: usize,
+    },
+    /// S1: an untitled memo has no hidden "keep and close" choice.
+    CloseMemo {
+        pane: PaneId,
+        index: usize,
+    },
     /// The one answer to that question that throws work away, asked again on
     /// its own. **Never a button beside the one that keeps it.**
-    DiscardOnClose { pane: PaneId, index: usize },
+    DiscardOnClose {
+        pane: PaneId,
+        index: usize,
+    },
     /// Saving over a file another program has changed since it was opened
     /// (要件 8.3).
     ///
@@ -6769,13 +7462,13 @@ enum Question {
         form: file_io::TextForm,
     },
     /// A new file in the folder named, waiting for its name (要件 5.2).
-    NewFile(PathBuf),
+    MissingFile(PathBuf),
     /// A new folder in the folder named, waiting for its name (要件 5.2).
-    NewFolder(PathBuf),
     /// The file or folder named, waiting for the name to give it (要件 5.2).
     RenameEntry(PathBuf),
     /// The file or folder named, waiting to be told to go (要件 5.2).
     DeleteEntry(PathBuf),
+    DeleteEdited(PathBuf, Vec<(PathBuf, String)>),
     /// Something carried onto a name that is already taken (要件 5.2): what is
     /// being moved, and where it would land. **The order is the same as
     /// `move_entry`'s**, from and to.
@@ -6920,14 +7613,17 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         choice
     };
     match (question, choice) {
-        (Question::CloseTab { pane, index }, 0) => {
+        (Question::CloseTab { pane, index } | Question::CloseMemo { pane, index }, 0) => {
+            window.set_focused_pane(pane.index());
+            switch_to_tab(window, live, pane, index);
+            let document = live.active(window);
             save_document(window, live, false);
             // A save that was cancelled, failed, or stopped to ask a question
             // of its own leaves the work where it was, and closing on the back
             // of a save that did not happen is not what was asked for. The rest
             // of the run goes with it: the writer is answering something else
             // now, and the next tab's question would land on top of it.
-            if live.active(window).text.edited() {
+            if document.text.edited() || document.file.borrow().path().is_none() {
                 cancel_close_run(live);
                 return;
             }
@@ -6938,7 +7634,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             finish_close(window, live, pane, index);
             advance_close_run(window, live);
         }
-        (Question::CloseTab { pane, index }, 2) => {
+        (Question::CloseTab { pane, index }, 2) | (Question::CloseMemo { pane, index }, 1) => {
             let title = live.active(window).file.borrow().title();
             ask_question(
                 window,
@@ -6962,11 +7658,21 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                 cancel_close_run(live);
                 return;
             };
-            discard_work_copy(live, &work_identity(&document.file.borrow()));
+            if document.file.borrow().path().is_none() {
+                if !saving::discard_memo_copy(window, live, &document) {
+                    cancel_close_run(live);
+                    return;
+                }
+            } else {
+                discard_work_copy(live, &work_identity(&document.file.borrow()));
+            }
             // Nothing is waiting to be written any more, so neither the tick
             // nor the close can put the copy back.
             document.text.mark_saved();
-            finish_close(window, live, pane, index);
+            if document.file.borrow().path().is_none() {
+                forget_memo_navigation(&mut live.tabs.borrow_mut(), &document);
+            }
+            finish_close_discarded(window, live, pane, index);
             advance_close_run(window, live);
         }
         (Question::CloseWindow, 0) => {
@@ -7045,16 +7751,57 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         }
         // **別の名前で**——同じ問いをもう一度、宛先から選び直す。
         (Question::SaveOverOpen { .. }, 1) => save_document(window, live, true),
-        (Question::SaveConflict { .. }, 1) => reload_from_file(window, live),
-        (Question::SaveConflict { .. }, 2) => save_document(window, live, true),
-        (Question::NewFile(parent), 0) => make_entry(window, live, &parent, false),
-        (Question::NewFolder(parent), 0) => make_entry(window, live, &parent, true),
+        (Question::SaveConflict { path, .. }, 1) => {
+            if asked_document(window, live, &path).is_some() {
+                reload_from_file(window, live);
+            }
+        }
+        (Question::SaveConflict { path, .. }, 2) => {
+            if asked_document(window, live, &path).is_some() {
+                save_document(window, live, true);
+            }
+        }
+        (Question::SaveConflict { path, .. }, 3) => open_external_snapshot(window, live, &path),
+        (Question::MissingFile(path), 0) => {
+            if asked_document(window, live, &path).is_some() {
+                save_document(window, live, true);
+            }
+        }
         (Question::RenameEntry(path), 0) => rename_entry(window, live, &path),
-        (Question::DeleteEntry(path), 0) => delete_entry(window, live, &path),
+        (Question::DeleteEntry(path), 0) => {
+            if deleting_documents(live, &path)
+                .iter()
+                .any(|d| d.text.edited())
+            {
+                ask_delete_entry(window, live, &path);
+            } else {
+                delete_entry(window, live, &path);
+            }
+        }
+        (Question::DeleteEdited(path, approved), choice @ (0 | 1)) => {
+            let current = deleting_documents(live, &path);
+            if current.iter().filter(|d| d.text.edited()).any(|d| {
+                !approved.iter().any(|(held, text)| {
+                    d.file.borrow().path() == Some(held.as_path()) && *d.text.borrow() == *text
+                })
+            }) {
+                ask_delete_entry(window, live, &path);
+                return;
+            }
+            if choice == 0 && !save_before_delete(window, live, &current) {
+                return;
+            }
+            delete_entry(window, live, &path);
+        }
         (Question::ReplaceOnMove(from, to), 0) => replace_on_move(window, live, &from, &to),
         // キャンセル, and every other way out of a question about closing. The
         // run stops here rather than going on to ask about the next tab.
-        (Question::CloseTab { .. } | Question::DiscardOnClose { .. }, _) => {
+        (
+            Question::CloseTab { .. }
+            | Question::CloseMemo { .. }
+            | Question::DiscardOnClose { .. },
+            _,
+        ) => {
             cancel_close_run(live);
         }
         _ => {}
@@ -7145,6 +7892,32 @@ fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool 
     // leaves the document — and its unsaved text — exactly where it was
     // (要件 7.6).
     let last_view = views_of(live, &document) <= 1;
+    let memo = document.file.borrow().path().is_none() && !document.read_only();
+    if memo && last_view {
+        if document.text.borrow().is_empty() {
+            if !saving::discard_memo_copy(window, live, &document) {
+                cancel_close_run(live);
+                return true;
+            }
+            document.text.mark_saved();
+            forget_memo_navigation(&mut live.tabs.borrow_mut(), &document);
+            finish_close(window, live, id, index);
+            return false;
+        }
+        window.set_focused_pane(id.index());
+        ask_question(
+            window,
+            live,
+            Question::CloseMemo { pane: id, index },
+            format!(
+                "「{}」を閉じます。\n\n残す場合は名前を付けて保存してください。キャンセルするとタブに戻ります。",
+                document.file.borrow().title()
+            ),
+            &["名前を付けて保存", "破棄", "キャンセル"],
+            1,
+        );
+        return true;
+    }
     if !document.text.edited() || !last_view {
         finish_close(window, live, id, index);
         return false;
@@ -7191,6 +7964,25 @@ fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool 
         1,
     );
     true
+}
+
+/// Remove explicitly discarded memos from Back/Forward as well as the tab strip.
+fn forget_memo_navigation(tabs: &mut Tabs, document: &Rc<OpenDocument>) {
+    document.stop_comparison();
+    for strip in &mut tabs.panes {
+        let before = strip
+            .history
+            .iter()
+            .take(strip.at + 1)
+            .filter(|held| !Rc::ptr_eq(&held.document, document))
+            .count();
+        strip
+            .history
+            .retain(|held| !Rc::ptr_eq(&held.document, document));
+        strip.at = before
+            .saturating_sub(1)
+            .min(strip.history.len().saturating_sub(1));
+    }
 }
 
 /// Close every tab in the window, or every one but the tab in front of the pane
@@ -7333,7 +8125,39 @@ fn cancel_close_run(live: &Live) {
 
 /// Take the tab out of the list. Everything that had to be decided about its
 /// work has been decided by the time this runs.
+fn reopen_closed_tab(window: &AppWindow, live: &Live) {
+    loop {
+        let Some(mut tab) = live.closed_tabs.borrow_mut().pop() else {
+            window.set_render_status("開き直せるTABはありません".into());
+            return;
+        };
+        let path = tab.document.file.borrow().path().map(Path::to_owned);
+        if path.as_ref().is_some_and(|p| !p.is_file()) {
+            continue;
+        }
+        if let Some(document) = path.as_deref().and_then(|p| document_at(live, p)) {
+            tab.document = document;
+        }
+        tab.identity = Rc::new(());
+        tab.provisional.set(false);
+        let pane = focused_pane(window);
+        add_tab(window, live, pane, tab);
+        restore_editor_focus(window);
+        return;
+    }
+}
+fn finish_close_discarded(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
+    if let Some(tab) = live.tabs.borrow().of(id).tabs.get(index) {
+        live.closed_tabs
+            .borrow_mut()
+            .retain(|held| !Rc::ptr_eq(&held.document, &tab.document));
+    }
+    finish_close_inner(window, live, id, index, false);
+}
 fn finish_close(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
+    finish_close_inner(window, live, id, index, true);
+}
+fn finish_close_inner(window: &AppWindow, live: &Live, id: PaneId, index: usize, remember: bool) {
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
     let emptied = {
@@ -7343,7 +8167,20 @@ fn finish_close(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
             return;
         }
         let before = strip.tabs.len();
-        strip.tabs.remove(index);
+        let mut closing = strip.tabs.remove(index);
+        if remember
+            && closing.terminal.is_none()
+            && !closing.empty
+            && (closing.document.file.borrow().path().is_some()
+                || !closing.document.text.borrow().is_empty())
+        {
+            let mut closed = live.closed_tabs.borrow_mut();
+            closing.below = TabBelow::default();
+            closed.push(closing);
+            if closed.len() > 20 {
+                closed.remove(0);
+            }
+        }
         strip.active = active_after_close(before, strip.active, index);
         strip.tabs.is_empty()
     };
@@ -7371,9 +8208,18 @@ fn finish_close(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
 
 /// Take a pane off screen, giving its area to the rest (要件 6.4).
 ///
-/// **The pane is not gone** — it keeps its tabs, its carets and its scroll, and
-/// dividing again brings all of it back. What it loses is a place to be drawn.
+/// Remove its model row and move keyboard focus to a surviving pane.
 fn remove_pane(window: &AppWindow, live: &Live, id: PaneId) {
+    live.cache.borrow_mut().log_diag(
+        "focus",
+        &format!(
+            "event=remove-begin pane={} active={} generation={} panes={}",
+            id.index(),
+            window.get_focused_pane(),
+            window.get_focus_generation(),
+            PaneId::count(window)
+        ),
+    );
     if PaneId::count(window) <= 1 {
         return;
     }
@@ -7419,9 +8265,19 @@ fn remove_pane(window: &AppWindow, live: &Live, id: PaneId) {
     window.set_focused_pane(landed.index());
     live.cache.borrow_mut().log_diag(
         "layout",
-        &format!("pane gone={} left={}", id.log_name(), PaneId::count(window)),
+        &format!(
+            "pane gone={} left={} focus_before={} focus_after={} generation={}",
+            id.log_name(),
+            PaneId::count(window),
+            focused.index(),
+            landed.index(),
+            window.get_focus_generation()
+        ),
     );
     after_layout_change(window, live);
+    // R4: the caller's UI focus request can run before this callback removes
+    // the pane. Request again only after the surviving target and rows agree.
+    restore_editor_focus(window);
 }
 
 /// Take one row out of the window's pane model, closing the numbering behind it.
@@ -7757,6 +8613,7 @@ fn typography_for(
     // 要件 9（2026-09-07追加）: the numbers widen the page's own margin, so this
     // travels with the spec that decides that margin.
     spec.line_numbers = number(Setting::LineNumbers) != 0;
+    spec.whitespace = number(Setting::Whitespace) != 0;
     // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。**寸法に効く**ので、
     // 切り替えれば組み直しが起きる。
     spec.upright_digits = number(Setting::UprightDigits) != 0;
@@ -7793,6 +8650,12 @@ fn typography_for(
         *ink = colour(level + 1);
     }
     spec.paper = colour(PAPER_SLOT);
+    for slot in 0..7 {
+        spec.decorations[slot] = (0..5).fold(0, |bits, kind| {
+            bits | ((number(Setting::Decoration(slot, kind)) != 0) as u8) << kind
+        });
+        spec.backgrounds[slot] = colour(8 + slot);
+    }
     let fonts = window.get_sheet_fonts();
     let family = |slot: usize| {
         fonts
@@ -7825,6 +8688,7 @@ fn typography_for(
 fn plain_source(spec: &mut Typography, zoom_percent: i32) {
     spec.font_size = font_size_for(BASE_FONT_SIZE, zoom_percent);
     spec.heading_scale = [1.0; MAX_HEADING_LEVEL];
+    spec.decorations = [0; 7];
     spec.ink = DEFAULT_INK;
     spec.heading_ink = [DEFAULT_INK; MAX_HEADING_LEVEL];
     spec.body_font = DEFAULT_BODY_FONT.to_owned();
@@ -7846,7 +8710,7 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// to 12 the two places that had written the absolute row instead were missed —
 /// the vertical pane then took its page margin from the line height. One
 /// definition, sent over.
-const SHEET_NUMBERS: usize = 13 + MAX_HEADING_LEVEL;
+const SHEET_NUMBERS: usize = 20 + 7 * 5;
 /// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
 /// two values are `2`, the pane's own width, and `0`, not wrapping at all —
 /// **which is written down and not yet built**: tiles are cut along the flow
@@ -7857,7 +8721,7 @@ const WRAP_CHARACTERS: i32 = 1;
 /// And set to "do not wrap at all" (要件 9). The third value is `2`, the pane's
 /// own width.
 const WRAP_NEVER: i32 = 0;
-const SHEET_COLOURS: usize = 2 + MAX_HEADING_LEVEL;
+const SHEET_COLOURS: usize = 15;
 const SHEET_FONTS: usize = 2 + MAX_HEADING_LEVEL;
 /// Where the paper sits among a sheet's colours: after the body ink and the six
 /// heading inks.
@@ -7920,10 +8784,24 @@ fn hex_colour(colour: Color) -> String {
 
 /// Put a colour in front of both the panes and the window (要件 9).
 fn set_colour(palette: &VecModel<Color>, sheet: usize, slot: usize, rgb: [f32; 3]) {
-    if slot > PAPER_SLOT {
+    if slot >= SHEET_COLOURS {
         return;
     }
     palette.set_row_data(colour_row(sheet, slot), slint_colour(rgb));
+}
+
+/// Choosing a background colour also enables it; loading stored colours does not.
+fn set_picked_colour(
+    numbers: &VecModel<i32>,
+    palette: &VecModel<Color>,
+    sheet: usize,
+    slot: usize,
+    rgb: [f32; 3],
+) {
+    set_colour(palette, sheet, slot, rgb);
+    if (8..15).contains(&slot) {
+        Setting::Decoration(slot - 8, 3).write(numbers, sheet, 1);
+    }
 }
 
 /// One of 要件 9's numbers, within one sheet.
@@ -7957,6 +8835,7 @@ enum Setting {
     /// line, which is the left edge of a horizontal page and the top of a
     /// vertical one. Upright either way.
     LineNumbers,
+    Whitespace,
     /// ルビと傍点の大きさ、親文字に対する百分率（要件 7.8・要件 9）。
     ///
     /// **シートごとに持つ**——要件 7.8 がそう言っている。縦書きと横書きでは
@@ -7984,6 +8863,7 @@ enum Setting {
     /// 番号は[`BULLET_MARKS`]の並び。
     /// **原稿の記号1つにつき1行**（`document::BULLET_MARKS`の並び）。
     BulletMark(usize),
+    Decoration(usize, usize),
 }
 
 /// 画面に出る箇条書きの印として選べる字（[`Setting::BulletMark`]）。
@@ -8006,16 +8886,22 @@ impl Setting {
             10 => Some(Self::WrapMode),
             11 => Some(Self::WrapChars),
             12 => Some(Self::LineNumbers),
+            54 => Some(Self::Whitespace),
             13 => Some(Self::RubySize),
             14 => Some(Self::RubyOffset),
             15 => Some(Self::UprightDigits),
             16..=18 => Some(Self::BulletMark(index as usize - 16)),
+            19..=53 => Some(Self::Decoration(
+                (index as usize - 19) / 5,
+                (index as usize - 19) % 5,
+            )),
             _ => None,
         }
     }
 
     fn row_in_sheet(self) -> usize {
         match self {
+            Self::Decoration(slot, kind) => 19 + slot * 5 + kind,
             Self::BodySize => 0,
             Self::LineAdvance => 1,
             Self::CharAdvance => 2,
@@ -8024,6 +8910,7 @@ impl Setting {
             Self::WrapMode => 4 + MAX_HEADING_LEVEL,
             Self::WrapChars => 5 + MAX_HEADING_LEVEL,
             Self::LineNumbers => 6 + MAX_HEADING_LEVEL,
+            Self::Whitespace => 54,
             Self::RubySize => 7 + MAX_HEADING_LEVEL,
             Self::RubyOffset => 8 + MAX_HEADING_LEVEL,
             Self::UprightDigits => 9 + MAX_HEADING_LEVEL,
@@ -8034,9 +8921,11 @@ impl Setting {
     /// How far one press moves it.
     fn step(self) -> i32 {
         match self {
+            Self::Decoration(_, _) => 1,
             Self::BodySize => 1,
             Self::WrapMode => 1,
             Self::LineNumbers => 1,
+            Self::Whitespace => 1,
             Self::UprightDigits => 1,
             Self::BulletMark(_) => 1,
             Self::WrapChars => 2,
@@ -8054,12 +8943,14 @@ impl Setting {
     /// from becoming unreadable by one held-down button.
     fn range(self) -> (i32, i32) {
         match self {
+            Self::Decoration(_, _) => (0, 1),
             Self::BodySize => (8, 96),
             Self::LineAdvance => (70, 400),
             Self::CharAdvance => (-20, 100),
             Self::PageMargin => (0, 160),
             Self::WrapMode => (0, 2),
             Self::LineNumbers => (0, 1),
+            Self::Whitespace => (0, 1),
             Self::UprightDigits => (0, 1),
             Self::BulletMark(_) => (0, BULLET_GLYPHS.len() as i32 - 1),
             Self::WrapChars => (10, 200),
@@ -8072,6 +8963,7 @@ impl Setting {
 
     fn default_value(self) -> i32 {
         match self {
+            Self::Decoration(_, _) => 0,
             Self::BodySize => BASE_FONT_SIZE,
             Self::LineAdvance => 100,
             Self::CharAdvance => 0,
@@ -8085,6 +8977,7 @@ impl Setting {
             // Off: a page of prose is not a program, and the writer asks for
             // the numbers when they want them.
             Self::LineNumbers => 0,
+            Self::Whitespace => 0,
             // 入。要件 7.8 は「書き手が何も書かなくても効く」と言っている
             // ——切りたい書き手が切る側であって、既定が何もしない側ではない。
             Self::UprightDigits => 1,
@@ -8121,12 +9014,64 @@ impl Setting {
     /// The name this is written under in the settings file (要件 9).
     fn name(self) -> &'static str {
         match self {
+            Self::Decoration(slot, kind) => [
+                [
+                    "body-bold",
+                    "body-italic",
+                    "body-strike",
+                    "body-background",
+                    "body-rule",
+                ],
+                [
+                    "h1-bold",
+                    "h1-italic",
+                    "h1-strike",
+                    "h1-background",
+                    "h1-rule",
+                ],
+                [
+                    "h2-bold",
+                    "h2-italic",
+                    "h2-strike",
+                    "h2-background",
+                    "h2-rule",
+                ],
+                [
+                    "h3-bold",
+                    "h3-italic",
+                    "h3-strike",
+                    "h3-background",
+                    "h3-rule",
+                ],
+                [
+                    "h4-bold",
+                    "h4-italic",
+                    "h4-strike",
+                    "h4-background",
+                    "h4-rule",
+                ],
+                [
+                    "h5-bold",
+                    "h5-italic",
+                    "h5-strike",
+                    "h5-background",
+                    "h5-rule",
+                ],
+                [
+                    "h6-bold",
+                    "h6-italic",
+                    "h6-strike",
+                    "h6-background",
+                    "h6-rule",
+                ],
+            ][slot][kind],
             Self::BodySize => "body-size",
             Self::LineAdvance => "line-advance",
             Self::CharAdvance => "char-advance",
             Self::PageMargin => "page-margin",
             Self::WrapMode => "wrap-mode",
             Self::LineNumbers => "line-numbers",
+            Self::Whitespace => "whitespace",
             Self::UprightDigits => "upright-digits",
             Self::BulletMark(0) => "bullet-mark-hyphen",
             Self::BulletMark(1) => "bullet-mark-star",
@@ -8175,6 +9120,13 @@ fn colour_name(slot: usize) -> &'static str {
         4 => "ink-h4",
         5 => "ink-h5",
         6 => "ink-h6",
+        8 => "background-body",
+        9 => "background-h1",
+        10 => "background-h2",
+        11 => "background-h3",
+        12 => "background-h4",
+        13 => "background-h5",
+        14 => "background-h6",
         _ => "paper",
     }
 }
@@ -8206,7 +9158,7 @@ fn font_slot(name: &str) -> Option<usize> {
 /// The two papers differ by a shade so that the two panes answer 「どちらの向き
 /// で書いているか」 without a word being read; everything else starts the same.
 fn default_colour(sheet: usize, slot: usize) -> [f32; 3] {
-    if slot != PAPER_SLOT {
+    if slot != PAPER_SLOT && slot < 8 {
         return DEFAULT_INK;
     }
     if sheet == 0 {
@@ -9433,11 +10385,79 @@ fn schedule_active_line_reveal(
     });
 }
 
-/// Lay a pane out again from what its own state holds.
-///
-/// **This is how a pane is redrawn after something it did not do**: an edit in
-/// the other pane, a mode change, a resize, a toolbar command. Nothing here
-/// moves a caret — the pane comes back showing what it was already showing.
+/// Apply ready layout results without interrupting a queued input refresh.
+fn collect_layout_results(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+) {
+    for id in PaneId::all(window) {
+        if !id.is_shown(window) {
+            continue;
+        }
+        let ready = {
+            let mut borrowed = cache.borrow_mut();
+            if borrowed.pace_of(id).waiting {
+                continue;
+            }
+            let pane = borrowed.pane(id);
+            pane.terminal.is_none()
+                && (pane.graphics.engine.layout_ready()
+                    || (pane.view.reveal_after_direction && !pane.graphics.engine.layout_pending()))
+        };
+        if !ready {
+            continue;
+        }
+        let anchor = {
+            let mut borrowed = cache.borrow_mut();
+            let pane = borrowed.pane(id);
+            if pane.view.reveal_after_direction
+                || pane.view.direction_fraction.is_some()
+                || pane
+                    .view
+                    .caret_utf16
+                    .is_some_and(|at| !pane.graphics.engine.position_ready(at))
+            {
+                None
+            } else {
+                pane.graphics
+                    .engine
+                    .viewport_anchor(id.scroll(window), id.shown_flow(window))
+            }
+        };
+        let document = states.document(id);
+        let source = document.text.borrow().clone();
+        refresh_pane_from_state(window, cache, &document, id, &states.of(id), &source);
+        if let Some((at, screen_flow)) = anchor {
+            let geometry = cache
+                .borrow_mut()
+                .pane(id)
+                .graphics
+                .engine
+                .caret_geometry(at)
+                .ok();
+            if let Some(geometry) = geometry {
+                let flow = if id.vertical(window) {
+                    geometry.x
+                } else {
+                    geometry.y
+                };
+                let total = cache
+                    .borrow_mut()
+                    .pane(id)
+                    .graphics
+                    .engine
+                    .total_flow_size() as f32;
+                let offset =
+                    (screen_flow - flow).clamp(-(total - id.shown_flow(window)).max(0.0), 0.0);
+                id.set_scroll(window, offset);
+                refresh_after_scroll(window, cache, id, offset);
+            }
+        }
+    }
+}
+
+/// Redraw a pane from its current document and editing state.
 fn refresh_pane_from_state(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
@@ -9446,6 +10466,10 @@ fn refresh_pane_from_state(
     state: &Rc<RefCell<EditorState>>,
     source: &str,
 ) {
+    id.update_screen(window, |screen| screen.viewer = state.borrow().viewer);
+    if state.borrow().viewer {
+        id.set_shows_preview(window, true);
+    }
     let (caret_source_byte, selection, preedit) = {
         let state = state.borrow();
         (
@@ -9739,7 +10763,15 @@ impl PaneId {
             _ => {
                 let across = self.shown_across_flow(window);
                 LineFit::Extent(if vertical {
-                    usable_preview_height(across)
+                    // Search/replace reduces the visible viewport, but should
+                    // not rewrap every column. Keep scrolling on the real size.
+                    let screen = self.screen(window);
+                    let height = if screen.wrap_height > 0.0 {
+                        bounded_extent(screen.wrap_height, screen.height)
+                    } else {
+                        across
+                    };
+                    usable_preview_height(height)
                 } else {
                     usable_horizontal_width(across)
                 })
@@ -10165,6 +11197,19 @@ impl PaneId {
         source: &str,
         caret: Option<usize>,
     ) {
+        // A visible comparison follows edits without moving its caret.
+        for other in self.others(window) {
+            let held = states.document(other);
+            let follows = held
+                .comparison_peer
+                .borrow()
+                .upgrade()
+                .is_some_and(|peer| std::ptr::eq(peer.as_ref(), document));
+            if follows {
+                let text = held.text.borrow();
+                refresh_pane_from_state(window, cache, &held, other, &states.of(other), &text);
+            }
+        }
         // **The followers first, and the pane that was typed in last.**
         // A refresh writes the status line, and the line left standing has to
         // be the one about the pane the writer is in. The rule used to be
@@ -10396,12 +11441,62 @@ impl RenderCache {
         Ok((tile_count, keyed.len(), rendered, reused, spare_held))
     }
 
+    fn refresh_pane_differences(
+        &mut self,
+        window: &AppWindow,
+        id: PaneId,
+    ) -> windows::core::Result<()> {
+        let runs = self.pane(id).view.difference_utf16.clone();
+        let engine = &mut self.pane(id).graphics.engine;
+        let visible = id.flow_range(window, engine.total_flow_size() as f32);
+        let mut rects = Vec::new();
+        for (at, length) in runs {
+            let found = if length > 0 {
+                engine.selection_rects(Some((at, length)), visible)?
+            } else {
+                Vec::new()
+            };
+            if found.is_empty() {
+                let caret = engine.caret_geometry(at)?;
+                let flow = if id.vertical(window) {
+                    caret.x
+                } else {
+                    caret.y
+                };
+                if flow >= visible.0 && flow <= visible.1 {
+                    rects.push(SelectionRect {
+                        left: caret.x,
+                        top: caret.y,
+                        right: caret.x
+                            + if id.vertical(window) {
+                                caret.width.max(3.0)
+                            } else {
+                                3.0
+                            },
+                        bottom: caret.y
+                            + if id.vertical(window) {
+                                3.0
+                            } else {
+                                caret.height.max(3.0)
+                            },
+                    });
+                }
+            } else {
+                rects.extend(found);
+            }
+        }
+        let model = ModelRc::new(VecModel::from(preview_rects(&rects)));
+        id.update_screen(window, |screen| screen.difference_rects = model);
+        Ok(())
+    }
+
     /// Re-cut the selection rectangles for what the pane now shows.
     fn refresh_pane_selection(
         &mut self,
         window: &AppWindow,
         id: PaneId,
     ) -> windows::core::Result<()> {
+        self.refresh_pane_differences(window, id)?;
         let selection = self.pane(id).view.selection_utf16.clone();
         if selection.is_empty() {
             return Ok(());
@@ -10674,6 +11769,45 @@ fn lay_out_pane(
     // which one it got.
     let slot = &mut pane.view.preview_slot;
     let shown = pane_text(window, id, slot, source, active_line_start);
+    let differences = document.differences();
+    let note = differences
+        .as_ref()
+        .map(|diff| {
+            let target = if document.read_only() {
+                "編集中の本文と比較"
+            } else {
+                "外部版（取得時）と比較"
+            };
+            let grouped = if diff.grouped {
+                "・広い変更をまとめて表示"
+            } else {
+                ""
+            };
+            format!("{target}：差分{}箇所{grouped}", diff.ranges.len())
+        })
+        .unwrap_or_default();
+    id.update_screen(window, |screen| {
+        if screen.comparison_note.as_str() != note {
+            screen.comparison_note = note.into();
+        }
+    });
+    let difference_utf16 = if preedit.is_empty() {
+        differences
+            .as_ref()
+            .map(|diff| {
+                diff.ranges
+                    .iter()
+                    .map(|range| {
+                        let start = shown.utf16_at_source_byte(range.start) as u32;
+                        let end = shown.utf16_at_source_byte(range.end) as u32;
+                        (start, end.saturating_sub(start))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let caret = caret_source_byte.map(|byte| shown.utf16_at_source_byte(byte) as u32);
     // 要件 8.5: the place this pane is holding its view on, if it still is.
     // **The caret having moved is the writer saying where to look**, and that
@@ -10742,15 +11876,36 @@ fn lay_out_pane(
     let layout_started = Instant::now();
     let engine = &mut pane.graphics.engine;
     let previous_flow = engine.total_flow_size();
-    // **While a preedit stands, nothing is marked.** The composition is put
-    // into the line at the caret, and everything the markers pointed at after
-    // that sits somewhere else until it is committed. Half a second of plain
-    // text is better than emphasis on the wrong characters.
-    let marks = if preedit.is_empty() {
-        shown.marks()
-    } else {
-        // Nothing, for as long as the composition sits in the line.
-        &[]
+    // **下書きが乗っている行の印だけを外す**（書き手の報告 2026-09-12：
+    // 「横書きで作業すると、IMEをON/OFFするたびに全体が上下に揺れます。
+    // 1行くらい揺れる」）。
+    //
+    // 印は太字と斜体で、**字の幅が変わる＝折り返しが変わる**。ここは変換が
+    // 立っているあいだ**文書じゅうの印を外して**いたので、変換のたびに印のある
+    // ブロックが全部組み直され、**文書の高さが1〜2行ぶん変わって、下にある本文が
+    // 丸ごと動いていた**（記録：`measured=48`と`content=17481↔17552`が交互に出る）。
+    //
+    // ずれるのは**下書きが挿さった行の、挿さった場所より後ろ**だけである。
+    // 外すのもその1行でよく、**印の無い行に下書きを入れるのなら1行も外さない**
+    // ——ほとんどの打鍵はこちらで、組み直しは起きない。
+    let masked;
+    let marks = match caret.filter(|_| !preedit.is_empty()) {
+        None => shown.marks(),
+        Some(caret) => {
+            let at = shown.shown_byte_at_utf16(caret as usize);
+            // 印は論理行ごとに並んでいる（`StyledText::spans`）ので、数えるのは
+            // 挿さった場所より前の改行である。**数えるのは下書きを入れる前の
+            // 本文**——入れたあとの`render_text`でも同じ数になるが、下書きに
+            // 改行は無いという当てにしなくてよい。
+            let line = shown.text()[..at].matches('\n').count();
+            match shown.marks().get(line) {
+                Some(spans) if !spans.is_empty() => {
+                    masked = marks_without_line(shown.marks(), line);
+                    masked.as_slice()
+                }
+                _ => shown.marks(),
+            }
+        }
     };
     // **The boxes are not held back the way the marks are.** A composition sits
     // at the caret, the caret's line is the active one, and the active line has
@@ -10766,7 +11921,11 @@ fn lay_out_pane(
     // **組み直しの判定には入らない**——幾何を1画素も動かさないので、変わっても
     // タイルだけが古くなる（技術検証 9.3.1）。
     engine.set_words(word_mode_with(id.screen(window).word_mode as u32));
-    let measured = match engine.update(styled, line_fit, typography) {
+    let through = engine
+        .viewport_end_utf16(id.scroll(window), id.shown_flow(window))
+        .max(render_caret.unwrap_or(0))
+        .max(anchor_utf16.unwrap_or(0));
+    let measured = match engine.update_interactive(styled, line_fit, typography, through) {
         Ok(measured) => measured,
         Err(error) => {
             let label = id.label(window);
@@ -10797,6 +11956,7 @@ fn lay_out_pane(
 
     pane.view.caret_utf16 = render_caret;
     pane.view.selection_utf16 = runs.clone();
+    pane.view.difference_utf16 = difference_utf16;
     pane.view.selection_source = selection_source.clone();
     pane.view.preedit_range = preedit_range;
 
@@ -11845,6 +13005,12 @@ fn refresh_pane(
     selection: PaneSelection,
     preedit: &str,
 ) {
+    id.update_screen(window, |screen| {
+        let history = document.history.borrow();
+        let editable = !document.read_only() && !screen.viewer;
+        screen.can_undo = editable && !history.done.is_empty();
+        screen.can_redo = editable && !history.undone.is_empty();
+    });
     // **A pane showing a shell is not laying anything out** (追加要件
     // Terminal). None of what follows applies: there is no document to measure,
     // no wrapping to search and no caret of the editor's to place. The check is
@@ -11967,7 +13133,10 @@ fn refresh_pane(
     let caret_result = {
         let engine = &mut cache.pane(id).graphics.engine;
         match render_caret {
-            Some(position) => engine.caret_geometry(position).map(Some),
+            Some(position) if engine.position_ready(position) => {
+                engine.caret_geometry(position).map(Some)
+            }
+            Some(_) => Ok(None),
             None => Ok(None),
         }
     };
@@ -12034,6 +13203,9 @@ fn refresh_pane(
         rects
     };
     id.set_matches(window, &match_rects);
+    if let Err(error) = cache.refresh_pane_differences(window, id) {
+        window.set_render_status(format!("差分の表示に失敗しました: {error}").into());
+    }
     let scope_rects = {
         let engine = &mut cache.pane(id).graphics.engine;
         match scope {
@@ -12045,6 +13217,22 @@ fn refresh_pane(
     };
     id.set_scope(window, &scope_rects);
     let rects = selection_rects.len();
+    if cache.pane(id).view.direction_caret_source != caret_source_byte {
+        cache.pane(id).view.direction_fraction = None;
+    }
+    if let (Some(fraction), Some(caret)) = (cache.pane(id).view.direction_fraction, caret.as_ref())
+    {
+        id.set_scroll(
+            window,
+            direction_caret_scroll(
+                id.vertical(window),
+                caret,
+                fraction,
+                id.viewport_flow(window),
+                content_flow as f32,
+            ),
+        );
+    }
     apply_pane_geometry(
         window,
         &mut cache.diag,
@@ -12054,7 +13242,12 @@ fn refresh_pane(
         &selection_rects,
         anchored.is_some(),
     );
+    if !cache.pane(id).graphics.engine.layout_pending() {
+        cache.pane(id).view.reveal_after_direction = false;
+    }
     let geometry_ms = elapsed_ms(geometry_started);
+    cache.pane(id).view.direction_viewport = id.viewport_flow(window);
+    cache.pane(id).view.direction_scroll = id.scroll(window);
 
     // Prefetch here too. Moving the caret scrolls the pane to keep it visible,
     // and without a tile in hand on the leading edge every such scroll stalls on
@@ -12146,6 +13339,7 @@ fn refresh_pane(
     // Taken before the line is built: the log borrows the cache for the whole
     // of it.
     let held = cache.pace_of(id).take_held();
+    let pending_layout = cache.pane(id).graphics.engine.layout_pending();
     cache.log_perf(&format!(
         "{kind} total={total_ms:.2} preview={preview_ms:.2} layout={layout_ms:.2} \
          geom={geometry_ms:.2} tiles={tiles_ms:.2} stats={stats_ms:.2} push={push_ms:.2} \
@@ -12159,7 +13353,7 @@ fn refresh_pane(
          content={content_flow} extent={line_extent} shown={shown_flow:.0} \
          viewport={viewport_flow:.0} scroll={scroll:.0} caret={caret_at} \
          ime={ime_at:.0}/{ime_room:.0} \
-         held={held} \
+         held={held} pending_layout={pending_layout} \
          tiles_shown={tile_count} tiles_new={rendered}/{tiles_reused} spare={spare_held} \
          rects={rects} font={font_size:.1} \
          space={space:.2} lead={lead:.2} head={head:.2} preedit={preedit_chars}",
@@ -12188,7 +13382,16 @@ fn refresh_pane(
             "content={content_flow} extent={line_extent} shown={shown_flow:.0} \
              viewport={viewport_flow:.0} scroll={scroll:.0} hold={hold} blocks={blocks} \
              measured={measured} tiles={tile_count}/{tile_want} new={rendered} caret={caret_at} \
-             preview={preview} mode={mode} split={split} zoom={zoom_percent}",
+             sel={sel} preview={preview} mode={mode} split={split} zoom={zoom_percent}",
+            // 書き手の報告 2026-09-12:「選択になって戻れなくなる」。**選択は
+            // 1打鍵ごとの行に出ていなかった**ので、記録を読んでも、いつ始まった
+            // のかが分からなかった。ここに出ていれば、どの打鍵の回から選ばれて
+            // いるかは記録のほうが答える。
+            sel = match selection_source.first() {
+                Some((start, end)) if selection_source.len() == 1 => format!("{start}..{end}"),
+                Some((start, _)) => format!("{start}../{}", selection_source.len()),
+                None => "-".to_owned(),
+            },
             // 要件 8.5: where the view is being held, if it is. **Written down
             // because a view in the wrong place says nothing about why** — a
             // hold that resolved somewhere odd and a hold that never stood look
@@ -12282,6 +13485,33 @@ fn apply_pane_geometry(
 /// No tile is regenerated unless the viewport reached one it does not hold, and
 /// the selection is re-cut because its rectangles are clipped to what is on
 /// screen. This is a hit test over the visible blocks only.
+fn refresh_after_across_scroll(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    offset: f32,
+) {
+    // Record the actual ScrollView offset before choosing cross-axis tiles;
+    // the two-way model binding may not have reported it yet.
+    let vertical = id.vertical(window);
+    id.update_screen(window, |screen| {
+        if vertical {
+            screen.scroll_y = offset;
+        } else {
+            screen.scroll_x = offset;
+        }
+    });
+    if cache.borrow_mut().pane(id).terminal.is_some() {
+        return;
+    }
+    let result = cache
+        .borrow_mut()
+        .refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
+    if let Err(error) = result {
+        window.set_render_status(format!("表示範囲の描画に失敗しました: {error}").into());
+    }
+}
+
 fn refresh_after_scroll(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
@@ -12306,12 +13536,48 @@ fn refresh_after_scroll(
     // handler, and nothing orders those two against each other — reading the
     // row first cuts tiles for where the pane was a moment ago, which leaves
     // the newly uncovered strip with no tile until something else redraws it.
+    {
+        let mut borrowed = cache.borrow_mut();
+        let view = &mut borrowed.pane(id).view;
+        if !view.reveal_after_direction
+            && (view.direction_viewport - id.viewport_flow(window)).abs() < 0.5
+            && (offset - view.direction_scroll).abs() >= 0.5
+        {
+            view.direction_fraction = None;
+        }
+    }
     id.record_scroll(window, offset);
     let mut cache = cache.borrow_mut();
     // **The writer has scrolled, so this is where they want to look now**
     // (要件 8.5). The other way a hold ends is the caret moving, which the
     // layout pass notices for itself (`ViewAnchor`).
     cache.pane(id).view.top_anchor = None;
+    let previous = cache.pane(id).graphics.engine.total_flow_size();
+    if let Err(error) = cache
+        .pane(id)
+        .graphics
+        .engine
+        .prepare_viewport(offset, id.shown_flow(window))
+    {
+        window.set_render_status(format!("表示範囲の整形に失敗しました: {error}").into());
+    }
+    let engine = &cache.pane(id).graphics.engine;
+    let total = engine.total_flow_size();
+    let extent = engine.line_extent();
+    if previous != total {
+        if id.vertical(window) {
+            id.set_scroll(
+                window,
+                scroll_after_content_resize(
+                    offset,
+                    id.shown_flow(window),
+                    previous as f32,
+                    total as f32,
+                ),
+            );
+        }
+        id.set_content_size(window, total, extent);
+    }
     let drawn = cache.refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
     let placed = match &drawn {
         Ok((count, want, new, _, _)) => {
@@ -12638,7 +13904,11 @@ fn publish_encoding(window: &AppWindow, document: &OpenDocument) {
     // 要件 E2: **この文書が何で書かれているか。**文字コードと改行を1つの言葉に
     // する——`UTF-8 BOM・CRLF`。**混ざった改行はそう言う**（読んだときに1つへ
     // 揃えてあるので、黙っていると保存で揃ったことが画面のどこにも出ない）。
-    let form = document.file.borrow().form();
+    let form = document
+        .external_snapshot
+        .as_ref()
+        .map(|(_, form)| *form)
+        .unwrap_or_else(|| document.file.borrow().form());
     let mark = if form.byte_order_mark && form.encoding == file_io::Encoding::Utf8 {
         " BOM"
     } else {
@@ -12657,6 +13927,7 @@ fn publish_encoding(window: &AppWindow, document: &OpenDocument) {
     window.set_count_encoding(told.into());
     // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **片付くまで消えない印。**
     window.set_count_outside(document.outside.get());
+    window.set_count_missing(document.missing.get());
     // E2の②: **一覧の何番目に印を付けるか**と、**開き直せるか**。
     // 開き直しはファイルを読み直すことなので、まだファイルの無い文書には
     // その道が無い——一覧はそう言う（要件 7.7）。
@@ -12841,6 +14112,35 @@ fn ime_candidate_anchor(caret: &directwrite_render::CaretGeometry, vertical: boo
 /// All of it is one-dimensional arithmetic over the flow axis, so the vertical
 /// pane passes its x and the horizontal pane its y. The offset is Slint's, which
 /// is negative as content scrolls past the start.
+fn caret_view_fraction(vertical: bool, caret: &CaretGeometry, scroll: f32, viewport: f32) -> f32 {
+    if viewport <= 0.0 {
+        return 0.5;
+    }
+    let centre = if vertical {
+        caret.x + caret.width / 2.0
+    } else {
+        caret.y + caret.height / 2.0
+    };
+    let fraction = (centre + scroll) / viewport;
+    (if vertical { 1.0 - fraction } else { fraction }).clamp(0.0, 1.0)
+}
+
+fn direction_caret_scroll(
+    vertical: bool,
+    caret: &CaretGeometry,
+    fraction: f32,
+    viewport: f32,
+    content: f32,
+) -> f32 {
+    let centre = if vertical {
+        caret.x + caret.width / 2.0
+    } else {
+        caret.y + caret.height / 2.0
+    };
+    let fraction = if vertical { 1.0 - fraction } else { fraction };
+    (viewport * fraction - centre).clamp(-(content - viewport).max(0.0), 0.0)
+}
+
 fn caret_visible_scroll(
     viewport: f32,
     visible: f32,
@@ -12991,7 +14291,15 @@ fn hit_test_pane(
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
     let label = id.label(window);
-    if let Err(error) = engine.update(styled, id.line_fit(window, &typography), &typography) {
+    let through = engine
+        .viewport_end_utf16(id.scroll(window), id.shown_flow(window))
+        .max(view.caret_utf16.unwrap_or(0));
+    if let Err(error) = engine.update_interactive(
+        styled,
+        id.line_fit(window, &typography),
+        &typography,
+        through,
+    ) {
         window.set_render_status(format!("{label}整形: NG / {error}").into());
         return None;
     }
@@ -12999,11 +14307,15 @@ fn hit_test_pane(
     // いるのは組版側で、返ってくるバイトは欄の中でも本文の位置（その行の頭）で
     // ある——どちらの問いも同じ点に対する答えなので、一度に訊く。
     let in_numbers = engine.in_number_column(x, y);
+    if !engine.point_ready(x, y) {
+        return None;
+    }
     match engine.hit_test(x, y) {
         Ok(hit) => Some(PaneHit {
             byte: shown.source_byte_at_utf16(hit.utf16_position as usize),
             letter: shown.source_byte_at_utf16(hit.utf16_letter as usize),
             in_numbers,
+            is_inside: hit.is_inside,
         }),
         Err(error) => {
             window.set_render_status(format!("{label}ヒットテスト: NG / {error}").into());
@@ -13015,6 +14327,7 @@ fn hit_test_pane(
 /// 点が当たった場所——本文のバイトと、そこが行番号の欄かどうか（要件 7.1、E3）。
 #[derive(Clone, Copy, Debug)]
 struct PaneHit {
+    is_inside: bool,
     /// いちばん近い本文の位置。**欄の中の点でも本文の位置が返る**（その行の頭）。
     ///
     /// カーソルを置く場所なので、**字と字の境目**である——点が字の後ろ半分に
@@ -13065,7 +14378,15 @@ fn lay_out_for_caret<'a>(
         .with_source_line(shown.source_line());
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
-    if let Err(error) = engine.update(styled, id.line_fit(window, &typography), &typography) {
+    let through = engine
+        .viewport_end_utf16(id.scroll(window), id.shown_flow(window))
+        .max(view.caret_utf16.unwrap_or(0));
+    if let Err(error) = engine.update_interactive(
+        styled,
+        id.line_fit(window, &typography),
+        &typography,
+        through,
+    ) {
         let label = id.label(window);
         window.set_render_status(format!("{label}整形: NG / {error}").into());
         return None;
@@ -13371,6 +14692,18 @@ fn drag_caret_only(
     }
 }
 
+/// 1行ぶんの印だけを外した写し（書き手の報告 2026-09-12）。
+///
+/// **写すのは、その行に印があるときだけ。**印の無い行に下書きが乗るのなら
+/// 渡すものは元のままでよく、写しも組み直しも起きない。
+fn marks_without_line(marks: &[Vec<Emphasis>], line: usize) -> Vec<Vec<Emphasis>> {
+    let mut owned = marks.to_vec();
+    if let Some(spans) = owned.get_mut(line) {
+        spans.clear();
+    }
+    owned
+}
+
 /// The text a pane draws, with any IME pre-edit spliced in at the caret.
 ///
 /// The pre-edit never reaches the document: it exists only in what is drawn.
@@ -13421,7 +14754,12 @@ fn pane_text<'a>(
     source: &'a str,
     active_line_start: Option<usize>,
 ) -> PaneText<'a> {
-    if id.shows_preview(window) {
+    if id.shows_preview(window) || id.screen(window).viewer {
+        let active_line_start = if id.screen(window).viewer {
+            None
+        } else {
+            active_line_start
+        };
         PaneText::Preview(preview_slot.get(source, active_line_start, reading_of(window)))
     } else {
         PaneText::Source(source)
@@ -13480,6 +14818,9 @@ fn paste_targets(
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
         for (index, tab) in strip.tabs.iter().enumerate() {
+            if tab.document.read_only() {
+                continue;
+            }
             let file = tab.document.file.borrow();
             let title = file.title();
             let number = place + 1;
@@ -13578,8 +14919,32 @@ fn insert_pane_text(
     text: &str,
     indent_line_start: bool,
 ) {
+    // **受け取った時点で欄を空にする。**欄（`ime-input`）に字が残っているあいだ、
+    // ペインの鍵はどれも動かない（`editor-pane.slint`の`key-pressed`は
+    // `self.text == ""`のときだけ下の行へ進む）——つまり**ここで空にし忘れると、
+    // 矢印もEscapeも効かなくなり、次に何か打って初めて戻る**。空にし忘れる道は
+    // 下の2つの早い返り（読み取り専用・打てる字が残らなかったとき）で、
+    // どちらも「入れないことにした」のであって「まだ受け取っていない」のでは
+    // ない（書き手の報告 2026-09-12：「打鍵中に、選択が始まり戻れなくなり、
+    // 何か入力すると戻る」）。
+    id.set_ime_buffer(window, "");
+    if document.read_only() || id.screen(window).viewer {
+        window.set_render_status("Viewerでは編集できません".into());
+        return;
+    }
     let input = normalize_typed_input(text);
     if input.is_empty() {
+        // **落とした字も記録に残す。**画面には何も起きないので、起きなかったのか
+        // 落としたのかは、ここでしか言えない。
+        cache.borrow_mut().log_diag(
+            "edit",
+            &format!(
+                "dropped pane={} len={} chars={}",
+                id.log_name(),
+                text.len(),
+                text.chars().count()
+            ),
+        );
         return;
     }
     // 要件 7.1: **typing over a rectangle takes the rectangle out first**, and
@@ -13600,7 +14965,6 @@ fn insert_pane_text(
         remove_selection(window, id, document, states, cache, &ranges);
     }
     let state = states.of(id);
-    id.set_ime_buffer(window, "");
     let started = Instant::now();
     let mut source = document.text.borrow().clone();
     let cloned_ms = elapsed_ms(started);
@@ -13787,6 +15151,10 @@ fn apply_span_edit(
     told: &str,
 ) {
     let document = live.states.document(id);
+    if document.read_only() || id.screen(window).viewer {
+        window.set_render_status("Viewerでは編集できません".into());
+        return;
+    }
     let state = live.states.of(id);
     let mut next = source.to_owned();
     next.replace_range(region.clone(), text);
@@ -14039,6 +15407,10 @@ fn undo_in_pane(
     cache: &Rc<RefCell<RenderCache>>,
     forwards: bool,
 ) {
+    if document.read_only() || id.screen(window).viewer {
+        window.set_render_status("Viewerでは編集できません".into());
+        return;
+    }
     let state = states.of(id);
     let mut source = document.text.borrow().clone();
     let moved = {
@@ -14064,6 +15436,7 @@ fn undo_in_pane(
         state.preferred_line = None;
     }
     *document.text.borrow_mut() = source.clone();
+    document.text.reconcile_saved();
     id.draw_edit(
         window,
         states,
@@ -14130,11 +15503,77 @@ fn toggle_mark(
     // (書き手の報告 2026-09-07).
     let told = match (marking, rectangular) {
         (false, _) => "選択終了",
-        (true, false) => "選択開始：矢印かクリックで選ぶ範囲を決めます",
-        (true, true) => "矩形選択開始：矢印かクリックで選ぶ範囲を決めます",
+        // **やめ方も一緒に言う**（書き手の報告 2026-09-12）。始まったことだけ
+        // 言って終わり方を言わないと、押した覚えのない書き手には出口が無い。
+        (true, false) => "選択開始：矢印かクリックで範囲を決めます（Escapeでやめます）",
+        (true, true) => "矩形選択開始：矢印かクリックで範囲を決めます（Escapeでやめます）",
     };
     window.set_render_status(told.into());
     refresh_pane_from_state(window, cache, document, id, &state, &source);
+}
+
+/// 選んでいる途中を畳んで、畳むものがあったかを返す（書き手の報告 2026-09-12）。
+///
+/// **選び始める道はいくつもあり、降りる道は1つでよい。**`Ctrl+Space`の印
+/// （要件 11.4）は同じ鍵をもう一度押せば下りるが、**押した覚えのない書き手に
+/// その鍵は無い**——「打鍵中に、選択が始まり戻れなくなり」は、始めたつもりが
+/// 無いからこそ終わらせ方も分からない、という形である。だから見るのは
+/// 「どうやって始まったか」ではなく「いま選んでいる途中か」だけにする。
+///
+/// **カーソルは動かさない。**畳むのは選択のほうで、書き手が字を打つ場所は
+/// 打つ前と同じところにある。
+fn release_selection(state: &mut EditorState) -> bool {
+    let selecting = state.mark
+        || state.line_drag.is_some()
+        || state.word_drag.is_some()
+        || !state.preedit.is_empty()
+        || selection_source_range(state).is_some();
+    if !selecting {
+        return false;
+    }
+    state.mark = false;
+    state.rectangular = false;
+    state.line_drag = None;
+    state.word_drag = None;
+    // 選択はカーソルのところへ畳む。**本文は動かさない**——打った字が選択を
+    // 置き換えるのは`insert_pane_text`のほうで、ここは何も消さない。
+    state.selection_anchor_source_byte = state.caret_source_byte;
+    state.preedit.clear();
+    true
+}
+
+/// Escapeで、選んでいる途中から戻る（書き手の報告 2026-09-12）。
+///
+/// **戻るものが無ければ`false`**を返し、鍵はそのまま先へ行く——ペインのメニュー
+/// と探す帯は先にこの鍵を使っており（`dismiss-menus`）、ここはそのあとである。
+fn escape_in_pane(
+    window: &AppWindow,
+    id: PaneId,
+    document: &Rc<OpenDocument>,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+) -> bool {
+    let state = states.of(id);
+    let source = document.text.borrow().clone();
+    let released = {
+        let mut state = state.borrow_mut();
+        release_selection(&mut state)
+    };
+    if !released {
+        return false;
+    }
+    // 変換の途中は上（Slint）で先に返しているので、ここへ来た下書きは
+    // 画面にだけ残っていたものである。
+    id.set_ime_buffer(window, "");
+    let caret = id.caret_byte(&state, &source);
+    cache
+        .borrow_mut()
+        .log_diag("edit", &format!("escape pane={} at={caret}", id.log_name()));
+    // **止めたことを画面が言う。**印を下ろしたときと同じ知らせにする：
+    // 起きたことは同じ「選ぶのをやめた」である。
+    window.set_render_status("選択終了".into());
+    refresh_pane_from_state(window, cache, document, id, &state, &source);
+    true
 }
 
 /// The Kill Ring, and where its last yank landed (要件 11.4・11.6).
@@ -14540,6 +15979,10 @@ fn splice_source(
     text: &str,
     caret: usize,
 ) {
+    if document.read_only() || id.screen(window).viewer {
+        window.set_render_status("Viewerでは編集できません".into());
+        return;
+    }
     if start >= end {
         return;
     }
@@ -14698,12 +16141,18 @@ fn move_pane_caret(
         cache.borrow_mut().log_diag(
             "edit",
             &format!(
-                "step pane={} dir={direction} rect={rectangular} {}:{}->{}:{}",
+                "step pane={} dir={direction} rect={rectangular} \
+                 shift={shift} mark={mark} {}:{}->{}:{}",
                 id.log_name(),
                 from.0,
                 from.1,
                 to.0,
-                to.1
+                to.1,
+                // 書き手の報告 2026-09-12: **伸ばしたのか、動いただけなのか。**
+                // 選択が伸びる道は2つ（Shiftと印）あり、どちらだったかは
+                // あとから本文を見ても分からない。
+                shift = u8::from(extend_selection),
+                mark = u8::from(state.borrow().mark)
             ),
         );
     }
@@ -14802,6 +16251,10 @@ fn set_pane_preedit(
     cache: &Rc<RefCell<RenderCache>>,
     text: &str,
 ) {
+    if document.read_only() || id.screen(window).viewer {
+        window.set_render_status("Viewerでは編集できません".into());
+        return;
+    }
     let source = document.text.borrow().clone();
     let caret = id.caret_byte(state, &source);
     let line = source_line_start(&source, caret);
@@ -15139,6 +16592,84 @@ mod tests {
         assert!(state.double_click(101.0, 41.0), "手のぶれの内側なら2回目");
         assert!(!state.double_click(101.0, 41.0), "3回目は次の1回目");
         assert!(state.double_click(101.0, 41.0), "その次が2回目");
+    }
+
+    /// 書き手の報告 2026-09-12:「IMEをON/OFFするたびに全体が上下に揺れます」。
+    /// **外すのは下書きが乗った1行だけ**——太字と斜体は字の幅を変えるので、
+    /// 文書じゅうの印を外すと折り返しごと変わって本文が動く。
+    #[test]
+    fn a_preedit_only_takes_the_marks_off_its_own_line() {
+        let bold = Emphasis {
+            utf16_start: 3,
+            utf16_len: 4,
+            marks: text_blocks::Marks {
+                bold: true,
+                ..Default::default()
+            },
+            ornament: None,
+        };
+        let marks = vec![vec![bold.clone()], Vec::new(), vec![bold.clone()]];
+
+        let masked = marks_without_line(&marks, 0);
+
+        assert!(masked[0].is_empty(), "下書きの行の印は外れる");
+        assert_eq!(masked[2].len(), 1, "ほかの行の印はそのまま");
+        assert_eq!(masked.len(), marks.len(), "行は減らさない");
+    }
+
+    /// 書き手の報告 2026-09-12:「選択になって戻れなくなる」。**始め方が
+    /// どれであっても、降りる道は1つ**（要件 11.4）。
+    #[test]
+    fn escape_puts_the_mark_down_and_leaves_the_caret_where_it_is() {
+        let mut state = EditorState {
+            caret_source_byte: Some(40),
+            selection_anchor_source_byte: Some(12),
+            mark: true,
+            rectangular: true,
+            ..EditorState::default()
+        };
+
+        assert!(release_selection(&mut state), "選んでいる途中だった");
+        assert!(!state.mark, "印は下りる");
+        assert!(!state.rectangular, "形も一緒に下りる");
+        assert_eq!(state.caret_source_byte, Some(40), "カーソルは動かさない");
+        assert_eq!(
+            selection_source_range(&state),
+            None,
+            "選択はカーソルのところへ畳む"
+        );
+    }
+
+    /// **選んでいる途中でなければ、Escapeは何も畳まない**——`false`を返して
+    /// 鍵はそのまま先へ行く。
+    #[test]
+    fn escape_over_a_plain_caret_releases_nothing() {
+        let mut state = EditorState {
+            caret_source_byte: Some(40),
+            selection_anchor_source_byte: Some(40),
+            ..EditorState::default()
+        };
+
+        assert!(!release_selection(&mut state));
+    }
+
+    /// 引きずっている途中の印（E3）も、同じ鍵で下りる。**押した合図と離した
+    /// 合図の間で窓の外へ出たときに残るのがこれ**である。
+    #[test]
+    fn escape_also_lets_go_of_a_drag_that_was_still_standing() {
+        let mut state = EditorState {
+            caret_source_byte: Some(8),
+            selection_anchor_source_byte: Some(8),
+            line_drag: Some(0),
+            word_drag: Some((4, 8)),
+            preedit: "へんかん".to_owned(),
+            ..EditorState::default()
+        };
+
+        assert!(release_selection(&mut state));
+        assert_eq!(state.line_drag, None);
+        assert_eq!(state.word_drag, None);
+        assert!(state.preedit.is_empty(), "画面にだけ残る下書きも消える");
     }
 
     /// E3: **離れたところを2回押したのは、同じものを2回押したのではない。**
@@ -16024,6 +17555,27 @@ mod tests {
     }
 
     #[test]
+    fn typography_decoration_settings_have_unique_persistent_names_and_safe_defaults() {
+        let mut names = std::collections::HashSet::new();
+        for setting in Setting::all() {
+            assert!(names.insert(setting.name()));
+            assert_eq!(Setting::from_name(setting.name()), Some(setting));
+            assert_eq!(
+                Setting::from_index(setting.row_in_sheet() as i32),
+                Some(setting)
+            );
+        }
+        for slot in 0..7 {
+            for kind in 0..5 {
+                let setting = Setting::Decoration(slot, kind);
+                assert_eq!(setting.default_value(), 0);
+                assert_eq!(setting.range(), (0, 1));
+            }
+            assert_eq!(colour_slot(colour_name(slot + 8)), Some(slot + 8));
+        }
+    }
+
+    #[test]
     fn a_count_is_marked_off_in_threes() {
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
@@ -16048,6 +17600,77 @@ mod tests {
         assert_eq!(active_after_close(3, 2, 0), 1);
         // Closing after the active one leaves it where it is.
         assert_eq!(active_after_close(3, 0, 2), 0);
+    }
+
+    #[test]
+    fn selected_new_tab_wins_over_an_existing_file_tab() {
+        let document = OpenDocument::untitled(1, slint::Weak::default());
+        let tab = PaneTab {
+            identity: Rc::new(()),
+            document,
+            word_mode: 0,
+            terminal: None,
+            below: TabBelow::default(),
+            view: TabView::default(),
+            empty: false,
+            provisional: Cell::new(false),
+        };
+        let mut empty = tab.clone();
+        empty.empty = true;
+        let mut strip = PaneTabs {
+            tabs: vec![empty.clone(), tab, empty],
+            active: 2,
+            ..Default::default()
+        };
+        for opening in [Opening::Kept, Opening::Peeked] {
+            assert_eq!(
+                opening_targets(&strip, Some(1), opening),
+                (None, Some(2), true)
+            );
+            assert_eq!(
+                opening_targets(&strip, None, opening),
+                (None, Some(2), true)
+            );
+        }
+        strip.active = 1;
+        for opening in [Opening::Kept, Opening::Peeked] {
+            assert_eq!(opening_targets(&strip, Some(1), opening).0, Some(1));
+        }
+    }
+
+    #[test]
+    fn another_tab_shares_unsaved_text_but_has_its_own_view() {
+        let document = OpenDocument::untitled(1, slint::Weak::default());
+        *document.text.borrow_mut() = "未保存の原稿".into();
+        let original = PaneTab {
+            identity: Rc::new(()),
+            document,
+            word_mode: 0,
+            terminal: None,
+            below: TabBelow::default(),
+            view: TabView::default(),
+            empty: false,
+            provisional: Cell::new(true),
+        };
+        let mut viewer = original.another_view().unwrap();
+        viewer.view.state.viewer = true;
+        viewer.view.state.caret_source_byte = Some(3);
+        viewer.view.scroll = -100.0;
+        assert!(!original.view.state.viewer);
+        assert_eq!(original.view.state.caret_source_byte, None);
+        assert_eq!(original.view.scroll, 0.0);
+        assert!(Rc::ptr_eq(&original.document, &viewer.document));
+        assert!(!original.is_provisional());
+        assert!(!viewer.is_provisional());
+        original.document.text.borrow_mut().push_str("追記");
+        assert_eq!(&*viewer.document.text.borrow(), "未保存の原稿追記");
+        let strip = PaneTabs {
+            tabs: vec![original, viewer],
+            active: 1,
+            ..Default::default()
+        };
+        assert_eq!(strip.tabs.len(), 2);
+        assert!(strip.current().unwrap().view.state.viewer);
     }
 
     #[test]
