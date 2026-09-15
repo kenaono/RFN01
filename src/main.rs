@@ -23,6 +23,8 @@ mod ime;
 mod incremental_ui_tests;
 mod kill_ring;
 #[cfg(test)]
+mod layout_snapshot_ui_tests;
+#[cfg(test)]
 mod link_ui_tests;
 #[cfg(test)]
 mod memo_ui_tests;

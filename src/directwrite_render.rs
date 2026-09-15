@@ -1193,8 +1193,7 @@ fn apply_marker_boxes(
         // 編集中の行：いつもの組み方で測った行箱に絵の厚みを足し、字はいつもの行箱の中に置く。
         // **記法は行の頭の側、絵はその先**（書き手の報告 2026-09-16：「横書きは画像の上にソースが出る。
         // 縦書きは右に出るべき」）。基線はそのままなので、横書きは下、縦書きは左に空く。
-        // ブロックの頭は行頭の字の箱で測る（`measure_block`：縦書きは字の左端）ので、縦書きは空けたぶん
-        // 測った頭が内側へずれ、空きがブロックの外へ出て隣に重なる——`picture_lead`が測りから差し引く。
+        // ブロックの頭は行の箱で測る（`measure_block`）ので、どちらへ空けても測りはずれない。
         // 折り返した行はどれも同じだけ広がる。
         let lines = line_metrics(layout)?;
         if let Some(line) = lines.first() {
@@ -3128,23 +3127,6 @@ fn build_block_layout(
     Ok(layout)
 }
 
-/// 編集中の画像の行で、縦書きの字が行箱の左端から余分に離れるぶん（追加要件 2026-09-16）。
-///
-/// `apply_marker_boxes`が行箱を絵の厚みだけ左へ広げるので、字の箱で測るブロックの頭（`measure_block`）
-/// はそのぶん右にずれる。横書きは下へ広げ、測る上端は動かないので0。
-fn picture_lead(runs: &[StyleRun], mode: WritingMode, line_box: f32) -> f32 {
-    if !matches!(mode, WritingMode::Vertical) {
-        return 0.0;
-    }
-    runs.iter()
-        .filter_map(|run| {
-            run.ornament
-                .and_then(|ornament| picture_box(ornament, mode, line_box))
-        })
-        .find(|picture| picture.source_shown)
-        .map_or(0.0, |picture| picture.across)
-}
-
 /// Measure one block, and hand back the layout it was measured with.
 ///
 /// **The measurement and the layout are the same object's two answers.** The
@@ -3170,7 +3152,6 @@ fn measure_task(
         task.max_flow_size,
         task.keep_trailing_empty_line,
         task.mode,
-        picture_lead(&task.runs, task.mode, task.block_box),
     )?;
     Ok((measure, layout))
 }
@@ -6468,7 +6449,6 @@ fn measure_block(
     max_flow_size: f32,
     keep_trailing_empty_line: bool,
     mode: WritingMode,
-    lead: f32,
 ) -> Result<BlockMeasure> {
     let mut line_metrics = line_metrics(layout)?;
 
@@ -6488,38 +6468,40 @@ fn measure_block(
     let mut utf16_start = 0_u32;
 
     for line in &line_metrics {
-        let mut point_x = 0.0;
-        let mut point_y = 0.0;
-        let mut metrics = DWRITE_HIT_TEST_METRICS::default();
-        // SAFETY: Every line start is a valid position inside this layout.
+        // **行の箱で測る**（2026-09-16）。字の箱（`HitTestTextPosition`）は行の中で字がどこに立つかに
+        // 引きずられる：行送りを片側へ広げた行（編集中の画像の行）では、字の箱の端は行の端から離れ、
+        // ブロックがそのぶんずれて隣に重なった。範囲の箱（`HitTestTextRange`）は行の送りそのものを
+        // 返すので、字がどこに立っても、行頭が見えない箱（見出しの印など）でも同じ端になる。
+        let mut boxes = [DWRITE_HIT_TEST_METRICS::default(); 4];
+        let mut count = 0;
+        // SAFETY: Every line start is a valid position inside this layout, and
+        // one unit's range fits the buffer.
         unsafe {
-            layout.HitTestTextPosition(
-                utf16_start,
-                false,
-                &mut point_x,
-                &mut point_y,
-                &mut metrics,
-            )?;
+            layout.HitTestTextRange(utf16_start, 1, 0.0, 0.0, Some(&mut boxes), &mut count)?;
         }
-        // A zero-width source marker reports its inline object's baseline,
-        // which can differ from the heading glyphs on the same line.
-        let after_box = metrics.textPosition + metrics.length;
-        if !metrics.isText.as_bool() && after_box < utf16_start + line.length - line.newlineLength {
+        let flow_start = if count > 0 {
+            mode.flow_of(&boxes[0])
+        } else {
+            // 範囲の無い行（文書の末尾の空行）は位置で訊く。
+            let (mut point_x, mut point_y) = (0.0, 0.0);
+            let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+            // SAFETY: as above.
             unsafe {
                 layout.HitTestTextPosition(
-                    after_box,
+                    utf16_start,
                     false,
                     &mut point_x,
                     &mut point_y,
                     &mut metrics,
                 )?;
             }
-        }
+            mode.flow_of(&metrics)
+        };
         lines.push(LineInfo {
             utf16_start,
             utf16_len: line.length,
             newline_len: line.newlineLength,
-            flow_start: mode.flow_of(&metrics) - lead,
+            flow_start,
             // The line's own advance along the flow axis. Not `metrics.width`,
             // which is the ink of the one character sitting there. DirectWrite
             // reports this advance as `height` in either writing direction.
@@ -8559,6 +8541,94 @@ mod tests {
         (text, levels)
     }
 
+    /// **分割しても、どの行も一括で組んだときの場所に立つ**（2026-09-16）。ブロックの頭を字の箱で
+    /// 測っていたころは、行の中で字の立つ位置が変わる行（大きな見出し、行送りを片側へ広げた行）で
+    /// ブロックがずれた。行の箱で測れば、残るのはブロックの幅を整数pxに丸めるぶんだけである。
+    #[test]
+    fn split_blocks_put_every_line_where_one_layout_does() {
+        let mut text = String::new();
+        let mut levels = Vec::new();
+        for index in 0..40 {
+            if index % 3 == 0 {
+                text.push_str(&format!("# 第{index}章\n"));
+                levels.push(LineStyle::heading(1));
+            }
+            text.push_str(
+                "検証用の段落です。半角ABC123とRust 1.85を含みます。句読点、括弧（かっこ）。\n\n",
+            );
+            levels.push(LineStyle::default());
+            levels.push(LineStyle::default());
+        }
+        let styled = StyledText::new(&text, &levels);
+        let typography = plain().with_heading_ramp(2.0);
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            let mut engine = engine_set(mode, styled, &typography);
+            let margin = margin_for(typography.font_size);
+            let line_box = (LINE_EXTENT as f32 - margin * 2.0).max(1.0);
+            let bound = block_flow_bound(styled, LINE_EXTENT, &typography);
+            let (max_width, max_height) = mode.to_screen(bound, line_box);
+            let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+            let runs = style_runs(styled, mode.stands_digits_upright(&typography));
+            // 字の箱の、流れの向きの位置。描いた字がどこに出るかはこれで決まる。
+            let glyph = |layout: &IDWriteTextLayout, at: u32| -> Result<f32> {
+                let (mut x, mut y) = (0.0, 0.0);
+                let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+                // SAFETY: the position is inside the layout's text.
+                unsafe { layout.HitTestTextPosition(at, false, &mut x, &mut y, &mut metrics)? };
+                Ok(mode.flow_of(&metrics))
+            };
+            let whole = with_graphics(|graphics| {
+                let format = graphics.text_format(&typography, mode)?;
+                // SAFETY: The UTF-16 buffer outlives CreateTextLayout.
+                let layout = unsafe {
+                    graphics
+                        .dwrite
+                        .CreateTextLayout(&utf16, &format, max_width, max_height)?
+                };
+                apply_typography(&layout, &typography, &runs, utf16.len() as u32)?;
+                apply_marker_boxes(&layout, &typography, &runs, mode, line_box)?;
+                let mut places = std::collections::HashMap::new();
+                let mut at = 0;
+                for line in line_metrics(&layout)? {
+                    places.insert(at, glyph(&layout, at)?);
+                    at += line.length;
+                }
+                Ok(places)
+            })
+            .unwrap();
+            let blocks = engine.plan.blocks.clone();
+            let split = with_graphics(|graphics| {
+                let mut places = Vec::new();
+                for (index, block) in blocks.iter().enumerate() {
+                    let layout = engine.layout_for(graphics, index)?;
+                    for line in block.lines.iter() {
+                        let at = block.span.utf16_start + line.utf16_start;
+                        places.push((at, block.draw_origin() + glyph(&layout, line.utf16_start)?));
+                    }
+                }
+                Ok(places)
+            })
+            .unwrap();
+            // 折り返しの位置は文書の幅の見積もりで変わりうるので、両方にある行の頭だけを比べる。
+            let shift = split[0].1 - whole[&split[0].0];
+            let compared = split
+                .iter()
+                .filter_map(|(at, place)| {
+                    whole
+                        .get(at)
+                        .map(|expected| (place - expected - shift).abs())
+                })
+                .collect::<Vec<_>>();
+            let worst = compared.iter().copied().fold(0.0, f32::max);
+            assert!(
+                compared.len() > 60 && worst < 1.0,
+                "{mode:?}: {} lines compared over {} blocks, worst {worst:.3}px",
+                compared.len(),
+                blocks.len()
+            );
+        }
+    }
+
     fn assert_split_matches_one_layout(mode: WritingMode, repeats: usize, typography: &Typography) {
         let (text, levels) = sample_document(repeats);
         let label = format!("{repeats} paragraphs");
@@ -8617,13 +8687,7 @@ mod tests {
             apply_marker_boxes(&layout, typography, &runs, mode, line_box)?;
             // The whole document is its own last block, so it keeps the
             // trailing empty line the split blocks give up.
-            measure_block(
-                &layout,
-                bound,
-                true,
-                mode,
-                picture_lead(&runs, mode, line_box),
-            )
+            measure_block(&layout, bound, true, mode)
         })
         .expect("whole document measurement");
 
