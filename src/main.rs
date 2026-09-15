@@ -16259,7 +16259,12 @@ fn update_pane_selection(
         // Only the vertical pane keeps the revealed line: the horizontal one
         // derives it from its caret on every lookup, so writing it there would
         // be storing an answer that is recomputed anyway.
-        if id.vertical(window) && phase != SelectionPhase::Update {
+        //
+        // **縦書きは離したときに開く**（書き手の報告 2026-09-16：「縦書きだと、2行目を選択する
+        // ことが難しかった」）。縦書きは文書の終わり側から積むので、押した行が開いて広がると
+        // その行が右へずれる——画像の行なら絵の幅ぶん——、離した点は隣の行に落ち、カーソルが
+        // 行を出てまた閉じていた。押したあいだは押したときの組みのまま答える。
+        if id.vertical(window) && phase == SelectionPhase::End {
             state.active_line_start = Some(next_active_line_start);
         }
         state.preedit.clear();
@@ -16282,13 +16287,19 @@ fn update_pane_selection(
         );
         return;
     }
+    // 縦書きで押したあいだは、開いている行を替えない（上の`active_line_start`と同じ理由）。
+    let revealed = if id.vertical(window) && phase != SelectionPhase::End {
+        active_line_start
+    } else {
+        Some(next_active_line_start)
+    };
     refresh_pane(
         window,
         cache,
         document,
         id,
         &source,
-        Some(next_active_line_start),
+        revealed,
         Some(hit),
         selection,
         "",

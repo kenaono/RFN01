@@ -201,3 +201,108 @@ fn an_image_line_is_shown_as_the_picture() {
     drop(borrowed);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// 縦書きで画像の行を押して離すと、カーソルはその行に残り、行が開く（書き手の報告 2026-09-16：
+/// 「縦書きだと、2行目を選択することが難しかった」）。押した瞬間に開くと、行が絵の幅ぶん右へずれ、
+/// 離した点が隣の空行に落ちていた。
+#[test]
+fn a_click_on_a_vertical_picture_keeps_the_caret_on_its_line() {
+    let directory = std::env::temp_dir().join(format!(
+        "editor-image-click-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("a.bmp"), solid_bmp(640, 400, [255, 0, 0])).unwrap();
+    let text = "![テスト|300](a.bmp)\n\n![[a.bmp|200]]\n";
+    let path = directory.join("原稿.md");
+    std::fs::write(&path, text).unwrap();
+
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1000, 700));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let (file, source) = DocumentFile::open(&path, usize::MAX).unwrap();
+    let document = Rc::new(OpenDocument::new(file, source.clone(), window.as_weak()));
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 950.0;
+        screen.height = 600.0;
+        screen.shown_width = 950.0;
+        screen.shown_height = 560.0;
+        screen.preview = true;
+        screen.tabs = ModelRc::new(VecModel::from(vec![TabInfo {
+            title: "原稿.md".into(),
+            ..Default::default()
+        }]));
+    });
+    set_pane_direction(&window, &cache, id, true);
+    let state = states.of(id);
+    {
+        let mut state = state.borrow_mut();
+        state.caret_source_byte = Some(0);
+        state.active_line_start = Some(0);
+    }
+    refresh_pane_from_state(&window, &cache, &document, id, &state, &source);
+
+    // 2枚目の絵の真ん中（開く前の組みで、その行に当たる列の中央）。
+    let start = source.find("![[").unwrap();
+    let end = start + "![[a.bmp|200]]".len();
+    let on_line = (0..100)
+        .map(|step| step as f32 * 9.0)
+        .filter(|&x| {
+            let mut borrowed = cache.borrow_mut();
+            let hit = hit_test_pane(
+                &window,
+                &mut borrowed,
+                &document,
+                id,
+                &source,
+                Some(0),
+                x,
+                200.0,
+            );
+            hit.is_some_and(|hit| (start..=end).contains(&hit.byte))
+        })
+        .collect::<Vec<_>>();
+    assert!(on_line.len() > 10, "picture column: {on_line:?}");
+    let x = on_line[on_line.len() / 2];
+
+    for phase in [SelectionPhase::Begin, SelectionPhase::End] {
+        update_pane_selection(&window, &document, &state, &cache, id, x, 200.0, phase);
+    }
+    let (caret, active) = {
+        let state = state.borrow();
+        (state.caret_source_byte, state.active_line_start)
+    };
+    assert!(
+        caret.is_some_and(|caret| (start..=end).contains(&caret)),
+        "caret {caret:?}, line {start}..{end}"
+    );
+    assert_eq!(active, Some(start));
+    // 離したら開く：記法が見える。
+    let mut borrowed = cache.borrow_mut();
+    let shown = &borrowed.pane(id).view.preview_slot.preview.text;
+    assert!(shown.contains("![[a.bmp|200]]"), "{shown}");
+    drop(borrowed);
+    let _ = std::fs::remove_dir_all(&directory);
+}
