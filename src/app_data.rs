@@ -26,6 +26,7 @@ use crate::file_io;
 use crate::word_marks;
 
 /// The editor's folder inside the user's local application data.
+#[cfg_attr(test, allow(dead_code))]
 const APP_FOLDER: &str = "RFN Edit";
 
 /// Work copies get a folder of their own, so that settings and session state
@@ -1012,12 +1013,18 @@ pub fn read_history(directory: &Path) -> Vec<String> {
 
 /// The editor's own area, or `None` when Windows does not say where it is.
 pub fn app_directory() -> Option<PathBuf> {
+    // **試験は書き手の置き場所に決して触らない。**試験用の場所を決めていない試験には、置き場所が無い
+    // （書き手の報告 2026-09-15：起動のたびにフォルダが戻る——`TEST_DIRECTORY`を置き忘れた試験が、
+    // 試験を回すたびに本物のセッションを空の窓で上書きしていた）。
     #[cfg(test)]
-    if let Some(path) = TEST_DIRECTORY.with(|held| held.borrow().clone()) {
-        return Some(path);
+    {
+        TEST_DIRECTORY.with(|held| held.borrow().clone())
     }
-    let local = std::env::var_os("LOCALAPPDATA")?;
-    Some(PathBuf::from(local).join(APP_FOLDER))
+    #[cfg(not(test))]
+    {
+        let local = std::env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(local).join(APP_FOLDER))
+    }
 }
 
 /// Where work copies go.
@@ -1168,6 +1175,15 @@ pub fn discard_in(directory: &Path, copy: &WorkCopy) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// 書き手の報告 2026-09-15: **試験は、試験用の場所を決めなければどこにも書かない。**置き忘れた試験が、
+    /// 試験を回すたびに本物のセッションを上書きして、起動のたびにフォルダが戻っていた。
+    #[test]
+    fn a_test_without_its_own_directory_writes_nowhere() {
+        TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+        assert_eq!(app_directory(), None);
+        assert_eq!(work_directory(), None);
+    }
     use super::*;
 
     fn scratch_directory(name: &str) -> PathBuf {
