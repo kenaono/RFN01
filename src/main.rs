@@ -1643,6 +1643,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(tab) = tab_list.borrow().of(id).current().cloned() else {
             continue;
         };
+        // 追加要件 2026-09-15: 戻ってきたTAB・Paneの紙の色も、最初に描く前に行へ置く。
+        let pane_paper = tab_list.borrow().of(id).paper;
+        id.update_screen(&window, |screen| {
+            show_paper(screen, &tab.paper, &pane_paper)
+        });
         pane_states.show(id, &tab.document);
         let mut state = tab.view.state.clone();
         {
@@ -3670,6 +3675,50 @@ struct PaneTab {
     /// mutable one there is the borrow every path into it would have to be
     /// checked against.
     provisional: Cell<bool>,
+    /// 追加要件 2026-09-15（書き手）: **このTABの紙の色**（横書き、縦書き）。TABが残って
+    /// いる限り付いていて、別のペインへ運んでも一緒に行く。Paneの色より勝つ。
+    paper: Paper,
+}
+
+/// TAB・Paneに付けた紙の色（横書き、縦書き）。`None`は付けていない＝下の段に任せる。
+type Paper = [Option<Color>; 2];
+
+/// ランダムな紙の色（追加要件 2026-09-15）。**文字色の反対側の明るさ**から選ぶ：
+/// 暗い字なら淡い色、明るい字なら暗い色。色相だけが自由に動く。
+fn random_paper(ink: [f32; 3], seed: u64) -> [f32; 3] {
+    let part = |shift: u32| ((seed >> shift) % 1000) as f32 / 999.0;
+    let hue = part(0) * 360.0;
+    let luminance = 0.2126 * ink[0] + 0.7152 * ink[1] + 0.0722 * ink[2];
+    let (saturation, value) = if luminance < 0.5 {
+        (0.10 + 0.22 * part(20), 0.93 + 0.07 * part(40))
+    } else {
+        (0.25 + 0.30 * part(20), 0.14 + 0.12 * part(40))
+    };
+    channels(Color::from_hsva(hue, saturation, value, 1.0))
+}
+
+/// 乱数の種。**標準ライブラリだけで**——ハッシュの鍵は起動ごと・呼ぶごとに違う。
+fn random_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos()),
+    );
+    hasher.finish()
+}
+
+/// 前に出ているTABと、そのPaneの色から、画面の行に置く紙を決める（TAB > Pane）。
+///
+/// **両方の向きをそのまま置く。**縦書きを横書きに合わせる（`paper-shared`）かは読む側が
+/// 見るので、切り替えてもここを置き直さなくてよい。
+fn show_paper(screen: &mut PaneScreen, tab: &Paper, pane: &Paper) {
+    let [horizontal, vertical] = std::array::from_fn(|at| tab[at].or(pane[at]));
+    screen.paper_h_own = horizontal.is_some();
+    screen.paper_h = horizontal.unwrap_or_default();
+    screen.paper_v_own = vertical.is_some();
+    screen.paper_v = vertical.unwrap_or_default();
 }
 
 /// Whether a file being opened gets a tab that stays (書き手の報告 2026-09-07).
@@ -3736,6 +3785,7 @@ impl PaneTab {
             empty: false,
             settings: false,
             provisional: Cell::new(false),
+            paper: [None; 2],
         }
     }
 
@@ -3778,6 +3828,8 @@ struct PaneTabs {
     /// Where in that list the pane is standing. Everything after it is what
     /// 進む would reach; a move anywhere else cuts it off.
     at: usize,
+    /// 追加要件 2026-09-15: このPaneの紙の色。Paneが残っている限り付いている。
+    paper: Paper,
 }
 
 /// How many places one pane remembers going (書き手の報告 2026-09-07).
@@ -4083,7 +4135,13 @@ impl Live {
         let asking = tab.empty;
         let showing_settings = tab.settings;
         let mode_id = tab.word_mode;
+        // 呼ぶ側が帯を借りたままのことがあるので、借りられなければPaneの色は publish_tabs に任せる。
+        let pane_paper = self
+            .tabs
+            .try_borrow()
+            .map_or([None; 2], |tabs| tabs.of(id).paper);
         id.update_screen(window, |screen| {
+            show_paper(screen, &tab.paper, &pane_paper);
             screen.terminal = showing_shell;
             screen.empty = asking;
             screen.settings = showing_settings;
@@ -4396,6 +4454,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                     empty: false,
                     settings: false,
                     provisional: Cell::new(false),
+                    paper: [None; 2],
                 });
                 strip.tabs.len() - 1
             }
@@ -6996,9 +7055,10 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                 }
             })
             .collect::<Vec<_>>();
-        (infos, strip.active as i32)
+        let tab_paper = strip.current().map_or([None; 2], |tab| tab.paper);
+        (infos, strip.active as i32, (tab_paper, strip.paper))
     });
-    for (id, (infos, active)) in PaneId::all(window).into_iter().zip(strips) {
+    for (id, (infos, active, paper)) in PaneId::all(window).into_iter().zip(strips) {
         // **どの行がシェルかを、窓へ渡したそのままの形で残す**（書き手の報告
         // 2026-09-07: 切り替えの行が出てこない）。出ない理由が「旗が立って
         // いない」のか「旗は立っているのに窓が読んでいない」のかは、ここが
@@ -7019,6 +7079,7 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
         id.update_screen(window, |screen| {
             screen.tabs = ModelRc::new(VecModel::from(infos));
             screen.active_tab = active;
+            show_paper(screen, &paper.0, &paper.1);
         });
     }
     // The name and the unsaved marker in the status bar are the focused pane's
@@ -8764,12 +8825,19 @@ fn font_size_for(base_px: i32, zoom_percent: i32) -> f32 {
 /// has magnified it (要件 9), which way the tab in front of it runs, and
 /// whether that tab is showing the formatted text or its source (要件 7.2).
 fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
-    typography_for(
-        window,
-        id.zoom(window),
-        id.vertical(window),
-        id.shows_preview(window),
-    )
+    let vertical = id.vertical(window);
+    let mut spec = typography_for(window, id.zoom(window), vertical, id.shows_preview(window));
+    // 追加要件 2026-09-15: TAB・Paneに色が付いていれば、紙はそちら（行に置いてある）。
+    let screen = id.screen(window);
+    let (own, paper) = if vertical && !window.get_paper_shared() {
+        (screen.paper_v_own, screen.paper_v)
+    } else {
+        (screen.paper_h_own, screen.paper_h)
+    };
+    if own {
+        spec.paper = channels(paper);
+    }
+    spec
 }
 
 fn typography_for(
@@ -8823,7 +8891,16 @@ fn typography_for(
     for (level, ink) in spec.heading_ink.iter_mut().enumerate() {
         *ink = colour(level + 1);
     }
-    spec.paper = colour(PAPER_SLOT);
+    // 追加要件 2026-09-15: 縦書きを横書きに合わせているなら、横書きの紙。
+    spec.paper = if vertical && window.get_paper_shared() {
+        channels(
+            palette
+                .row_data(colour_row(0, PAPER_SLOT))
+                .unwrap_or_default(),
+        )
+    } else {
+        colour(PAPER_SLOT)
+    };
     for slot in 0..7 {
         spec.decorations[slot] = (0..5).fold(0, |bits, kind| {
             bits | ((number(Setting::Decoration(slot, kind)) != 0) as u8) << kind
@@ -9518,6 +9595,8 @@ const COUNT_RUBY_SETTING: &str = "count.ruby";
 /// 11字の本文なのかを決める。**シートに置けば、同じ文書が2つのペインで別の本文に
 /// なる**（字数も食い違う）。
 const RUBY_MARKS_SETTING: &str = "ruby.marks";
+/// 追加要件 2026-09-15（書き手）: 縦書きの紙を横書きに合わせるか。**`1`だけがOn**。
+const PAPER_SHARED_SETTING: &str = "paper.shared";
 /// どの記号を箇条書きの印として読むか（書き手の決定 2026-09-11）。
 const LIST_MARKS_SETTING: &str = "list.marks";
 
@@ -10303,6 +10382,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_count_ruby()).to_string(),
     ));
     values.push((
+        PAPER_SHARED_SETTING.to_owned(),
+        i32::from(window.get_paper_shared()).to_string(),
+    ));
+    values.push((
         RUBY_MARKS_SETTING.to_owned(),
         i32::from(window.get_ruby_marks()).to_string(),
     ));
@@ -10417,6 +10500,10 @@ fn apply_settings(
         }
         // 要件 7.8: **`1`だけがOn。**初期値は数えないほうなので、読めない値は
         // そちらへ倒す。
+        if written == PAPER_SHARED_SETTING {
+            window.set_paper_shared(value.trim() == "1");
+            continue;
+        }
         if written == COUNT_RUBY_SETTING {
             window.set_count_ruby(value.trim() == "1");
             continue;
@@ -18047,6 +18134,7 @@ mod tests {
             empty: false,
             settings: false,
             provisional: Cell::new(false),
+            paper: [None; 2],
         };
         let mut empty = tab.clone();
         empty.empty = true;
@@ -18085,6 +18173,7 @@ mod tests {
             empty: false,
             settings: false,
             provisional: Cell::new(true),
+            paper: [None; 2],
         };
         let mut viewer = original.another_view().unwrap();
         viewer.view.state.viewer = true;

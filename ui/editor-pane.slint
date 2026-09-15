@@ -1,6 +1,6 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
-import { Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Tab, TextButton, ToggleChip } from "controls.slint";
+import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Tab, TextButton, ToggleChip } from "controls.slint";
 
 // One editing pane.
 //
@@ -161,6 +161,13 @@ export struct PaneScreen {
     // (追加要件 2026-09-07). The document behind the page is real and empty;
     // what stands over it is three words.
     empty: bool,
+    /// 追加要件 2026-09-15（書き手）: **TAB毎・Pane毎の紙の色。**横書き・縦書きで別々に
+    /// 持ち、`-own`が立っていなければ全体の設定の紙。前に出ているTABの色がPaneの色より
+    /// 勝つ——Rustがその順で決めてここへ置く。
+    paper-h: color,
+    paper-h-own: bool,
+    paper-v: color,
+    paper-v-own: bool,
     /// 追加要件 2026-09-14（書き手）: **設定はTABで開く。**前に出ているタブが
     /// 設定の面なら、本文の場所には窓が差し込む設定の中身が立つ。下の文書は
     /// 端末と同じく空の代役で、字は入らない。
@@ -296,6 +303,23 @@ export component EditorPane inherits Rectangle {
     in property <bool> swap-down;
 
     in property <color> page-background;
+    /// 追加要件 2026-09-15: 紙の色をTAB（0）・Pane（1）に付ける。色は「いま見えている
+    /// 向き」のもの。既定の色へ戻す・その他の色・ランダムも同じ番号で言う。
+    /// メニューの行に添える向き（縦横で別々のときだけ）。色は見えている向きに付くので、それを言う。
+    in property <string> paper-direction;
+    callback paper-chosen(int, color);
+    callback paper-default(int);
+    callback paper-more(int);
+    callback paper-random(int);
+    property <int> paper-target: 0;
+    property <length> paper-x;
+    property <length> paper-y;
+    function open-paper-palette(target: int, at-x: length, at-y: length) {
+        root.paper-target = target;
+        root.paper-x = at-x;
+        root.paper-y = at-y;
+        paper-palette.show();
+    }
     // What to say above the paper when something went wrong. Empty the rest of
     // the time, and then nothing is there at all.
     in property <string> status;
@@ -1368,6 +1392,21 @@ export component EditorPane inherits Rectangle {
                             activated => {
                                 pane-menu.close();
                                 root.layout-requested();
+                            }
+                        }
+                        // 追加要件 2026-09-15: このPaneの紙の色（TABの色が付いていればそちらが勝つ）。
+                        if root.writing: MenuRow {
+                            title: "Pane Background" + root.paper-direction + "…";
+                            activated => {
+                                root.open-paper-palette(1, root.width - 256px, 32px);
+                                pane-menu.close();
+                            }
+                        }
+                        if root.writing: MenuRow {
+                            title: "Random Pane Background" + root.paper-direction;
+                            activated => {
+                                root.paper-random(1);
+                                pane-menu.close();
                             }
                         }
                         if root.writing: MenuRow {
@@ -3560,6 +3599,36 @@ export component EditorPane inherits Rectangle {
         }
     }
 
+    // 追加要件 2026-09-15: TAB・Paneの紙の色を選ぶパレット。メニューの行から開くので、
+    // メニューと同じ場所に出す。
+    paper-palette := PopupWindow {
+        x: min(root.paper-x, root.width - 240px);
+        y: root.paper-y;
+        width: 236px;
+        close-policy: close-on-click-outside;
+
+        MenuFrame {
+            width: 236px;
+
+            ColourPalette {
+                automatic: "既定の色";
+                current: root.page-background;
+                chosen(colour) => {
+                    root.paper-chosen(root.paper-target, colour);
+                    paper-palette.close();
+                }
+                automatic-chosen => {
+                    root.paper-default(root.paper-target);
+                    paper-palette.close();
+                }
+                more => {
+                    root.paper-more(root.paper-target);
+                    paper-palette.close();
+                }
+            }
+        }
+    }
+
     // 追加要件 2026-09-06: **the right button on a tab.** Every row acts on the
     // tab in front, and the press that opened this made that tab the one in
     // front — so the menu says nothing about which tab it is about, because
@@ -3597,6 +3666,27 @@ export component EditorPane inherits Rectangle {
                     activated => {
                         tab-menu.close();
                         root.close-clean-tabs();
+                    }
+                }
+                // 追加要件 2026-09-15: このTABの紙の色。TABが残っている限り付いている。
+                if root.writing: VerticalLayout {
+                    spacing: 1px;
+
+                    MenuSep { }
+
+                    MenuRow {
+                        title: "Tab Background" + root.paper-direction + "…";
+                        activated => {
+                            root.open-paper-palette(0, root.tab-menu-x, root.tab-menu-y);
+                            tab-menu.close();
+                        }
+                    }
+                    MenuRow {
+                        title: "Random Tab Background" + root.paper-direction;
+                        activated => {
+                            root.paper-random(0);
+                            tab-menu.close();
+                        }
                     }
                 }
                 // 追加要件 2026-09-07: **端末のタブにはもう一群ある。**長押しでも

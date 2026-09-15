@@ -660,6 +660,10 @@ export component AppWindow inherits Window {
     // 人には逆が要るので、これは「正解が二つある」たぐいで、選ばせる。
     in-out property <bool> count-ruby: false;
     callback count-ruby-toggled(bool);
+    /// 追加要件 2026-09-15（書き手）: 縦書きの紙を横書きに合わせる。On なら全体の紙も、
+    /// TAB・Paneに付けた紙も、縦書きと横書きで共通（横書きの色を使う）。
+    in-out property <bool> paper-shared: false;
+    callback paper-shared-toggled(bool);
     // 要件 E9: ルビと傍点の記法を読むか。**既定はOn**——要件7.8がその記法で
     // 組めと言っているので、切りたい書き手が切る側である。**切ったら記号を
     // そのまま字として出す**（原稿のバイト列は元から変えていない）。
@@ -752,6 +756,9 @@ export component AppWindow inherits Window {
     /// (kind, slot) で言う——kind 0 は紙のシート（slot は色の番号、シートは
     /// `sheet`）、1 は端末（0 地、1 字）、2 は語群（slot は語群の番号）。
     callback colour-set(int, int, color);
+    /// 追加要件 2026-09-15: kind 3 はTABの紙、4 はPaneの紙（slot はペインの番号）。
+    /// ランダムはその2つだけ。
+    callback colour-random(int, int);
     /// 追加要件 2026-09-15: 文字色のセット（10個）。1つは Body・H1〜H6 の文字色を
     /// 横書き・縦書きの順に14色、`#rrggbb` をカンマで並べた字。空ならまだ無い。
     in property <[string]> ink-sets: ["", "", "", "", "", "", "", "", "", ""];
@@ -1903,9 +1910,27 @@ export component AppWindow inherits Window {
                         background: pane.vertical ? Tok.paper-alt : Tok.paper;
                         // 要件 9: this pane's sheet — the paper and the margin
                         // are that direction's, like everything else on it.
-                        page-background: pane.vertical
-                            ? root.palette[22]
-                            : root.palette[7];
+                        // 追加要件 2026-09-15: TAB・Paneの色が付いていればそちら。
+                        page-background: pane.vertical && !root.paper-shared
+                            ? (pane.paper-v-own ? pane.paper-v : root.palette[22])
+                            : (pane.paper-h-own ? pane.paper-h : root.palette[7]);
+                        paper-direction: root.paper-shared ? "" : (pane.vertical ? " (Vertical)" : " (Horizontal)");
+                        paper-chosen(which, colour) => {
+                            root.focused-pane = pane.id;
+                            root.colour-set(3 + which, pane.id, colour);
+                        }
+                        paper-default(which) => {
+                            root.focused-pane = pane.id;
+                            root.colour-default(3 + which, pane.id);
+                        }
+                        paper-more(which) => {
+                            root.focused-pane = pane.id;
+                            root.colour-more(3 + which, pane.id);
+                        }
+                        paper-random(which) => {
+                            root.focused-pane = pane.id;
+                            root.colour-random(3 + which, pane.id);
+                        }
                         // **The pane picks the sheet, not the panel**: this is
                         // the margin of the direction this pane is writing in.
                         page-margin: root.sheet-numbers[
@@ -4175,9 +4200,32 @@ export component AppWindow inherits Window {
                                                     letter-spacing: 0.9px;
                                                 }
 
+                                                    // 追加要件 2026-09-15（書き手）: 縦書きの紙を横書きに合わせる。
+                                                    // On の間は縦書きの色の欄を出さない（選んでも効かない欄を置かない）。
+                                                    if sheet-index == 1: HorizontalLayout {
+                                                        spacing: 6px;
+                                                        height: 28px;
+
+                                                        Text {
+                                                            text: "横書きに合わせる";
+                                                            color: Tok.ink;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                            horizontal-stretch: 1;
+                                                        }
+
+                                                        TextButton {
+                                                            title: root.paper-shared ? "On" : "Off";
+                                                            role: root.paper-shared ? Role.primary : Role.normal;
+                                                            clicked => {
+                                                                root.paper-shared-toggled(!root.paper-shared);
+                                                            }
+                                                        }
+                                                    }
+
                                                     // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない。
                                                     // （コードの書体は 2026-09-15 に Text へ移した。）
-                                                    ColorCell {
+                                                    if sheet-index == 0 || !root.paper-shared: ColorCell {
                                                         label: "Paper Color";
                                                         shown: root.palette[sheet-index * 15 + 7];
                                                         chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 7, colour); }

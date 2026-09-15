@@ -71,6 +71,8 @@ pub fn open_session(
             let caret = tab.caret;
             strips[id.index() as usize].tabs.push(PaneTab {
                 identity: Rc::new(()),
+                // 追加要件 2026-09-15: セッションが覚えていたTABの紙の色。
+                paper: from_stored(&tab.paper),
                 // 要件 7.9（2026-09-08）: セッションが覚えていたモードの番号。
                 // **無い番号は「なし」**になる（`word_mode_with`）——モードを
                 // 消したあとの文書は、間違った色ではなく色無しで戻る。
@@ -106,6 +108,7 @@ pub fn open_session(
         }
         let strip = &mut strips[id.index() as usize];
         strip.active = stored.active.min(strip.tabs.len().saturating_sub(1));
+        strip.paper = from_stored(&stored.paper);
     }
 
     // A work copy the session does not name is still somebody's unsaved work.
@@ -130,6 +133,7 @@ pub fn open_session(
             empty: false,
             settings: false,
             provisional: Cell::new(false),
+            paper: [None; 2],
         });
     }
     for id in PaneId::all(window) {
@@ -246,6 +250,7 @@ pub fn open_without_session(
                 empty: false,
                 settings: false,
                 provisional: Cell::new(false),
+                paper: [None; 2],
             })
             .collect(),
         active: 0,
@@ -280,6 +285,7 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
                             .saturating_sub(1),
                     ),
                 zoom: id.zoom(window),
+                paper: to_stored(&strip.paper),
                 // **A shell is not written down** (追加要件 Terminal). The
                 // process ends with the editor, so a remembered terminal tab
                 // would come back as its stand-in document — an empty 無題
@@ -400,7 +406,17 @@ pub fn session_tab(tab: &PaneTab) -> app_data::SessionTab {
         // 追加要件 2026-09-07: a tab that had not been asked yet comes back
         // asking.
         empty: tab.empty,
+        paper: to_stored(&tab.paper),
     }
+}
+
+/// 追加要件 2026-09-15: 紙の色を、セッションが書く形へ。
+fn to_stored(paper: &crate::Paper) -> app_data::Paper {
+    paper.map(|held| held.map(|colour| [colour.red(), colour.green(), colour.blue()]))
+}
+
+fn from_stored(paper: &app_data::Paper) -> crate::Paper {
+    paper.map(|held| held.map(|[r, g, b]| slint::Color::from_rgb_u8(r, g, b)))
 }
 
 /// Put the session away.

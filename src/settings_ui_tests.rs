@@ -460,3 +460,165 @@ fn typed_sizes_read_full_width_and_points() {
         "unreadable changes nothing"
     );
 }
+
+/// 追加要件 2026-09-15（書き手）: TAB毎・Pane毎の紙の色。
+///
+/// **TAB > Pane > 全体**で、横書き・縦書きは別。付けた色は組版の紙（`pane_typography`）と
+/// 画面の行の両方に出て、TABを切り替えればそのTABの色に、既定へ戻せば下の段の色になる。
+/// セッションにも残る。ランダムは暗い字に対して淡い色を選ぶ。
+#[test]
+fn a_tab_and_a_pane_carry_their_own_paper() {
+    let directory = std::env::temp_dir().join(format!(
+        "editor-paper-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = Some(directory.clone()));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1000, 740));
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    window.set_autosave(false);
+    let document = OpenDocument::untitled(1, window.as_weak());
+    *document.text.borrow_mut() = "本文".into();
+    let live = Live {
+        closed_tabs: Rc::default(),
+        states: PaneStates::new(&document),
+        folder: Rc::default(),
+        tree_paths: Rc::default(),
+        results: Rc::default(),
+        recent: Rc::default(),
+        recent_folders: Rc::default(),
+        find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        replace_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        layout: Rc::new(RefCell::new(Layout::single(0))),
+        pending: Rc::default(),
+        close_run: Rc::default(),
+        cache: Rc::new(RefCell::new(RenderCache::default())),
+        tabs: Rc::new(RefCell::new(Tabs {
+            panes: vec![{
+                let tab = PaneTab::showing(&window, id, document.clone());
+                PaneTabs {
+                    history: vec![NavigationPlace::from(&tab)],
+                    tabs: vec![tab],
+                    ..Default::default()
+                }
+            }],
+        })),
+        writer: Rc::new(FileWriter::start()),
+        searcher: Rc::new(Searcher::start(|| {})),
+        searched: Rc::default(),
+    };
+    wiring::wire_colours(
+        &window,
+        &live,
+        &live.states,
+        &live.cache,
+        Rc::new(Timer::default()),
+        numbers,
+        palette.clone(),
+    );
+    let paper = || pane_typography(&window, id).paper;
+    let global = channels(palette.row_data(colour_row(0, PAPER_SLOT)).unwrap());
+    let red = Color::from_rgb_u8(255, 0, 0);
+    let blue = Color::from_rgb_u8(0, 0, 255);
+    assert_eq!(paper(), global);
+
+    window.invoke_colour_set(3, 0, red);
+    assert_eq!(paper(), channels(red), "the tab's paper");
+    assert!(id.screen(&window).paper_h_own && !id.screen(&window).paper_v_own);
+    window.invoke_colour_set(4, 0, blue);
+    assert_eq!(paper(), channels(red), "the tab wins over the pane");
+    let session = session::capture_session(&window, &live);
+    assert_eq!(session.panes[0].paper, [Some([0, 0, 255]), None]);
+    assert_eq!(session.panes[0].tabs[0].paper, [Some([255, 0, 0]), None]);
+
+    // Another tab in the same pane shows the pane's paper; coming back shows the tab's.
+    new_tab(&window, &live, id);
+    assert_eq!(paper(), channels(blue), "a new tab has only the pane's");
+    switch_to_tab(&window, &live, id, 0);
+    assert_eq!(paper(), channels(red));
+
+    // Back to the default: the tab falls to the pane, the pane to the settings.
+    window.invoke_colour_default(3, 0);
+    assert_eq!(paper(), channels(blue));
+    window.invoke_colour_default(4, 0);
+    assert_eq!(paper(), global);
+
+    // The other direction is untouched, and has its own.
+    id.update_screen(&window, |screen| screen.vertical = true);
+    window.invoke_colour_set(3, 0, red);
+    assert!(id.screen(&window).paper_v_own && !id.screen(&window).paper_h_own);
+    id.update_screen(&window, |screen| screen.vertical = false);
+    assert_eq!(paper(), global);
+
+    // 横書きに合わせる（書き手の求め 2026-09-15）: 縦書きでも横書きの色を使い、
+    // 縦書きから選んだ色も横書きの側に付く。切れば縦書きの色に戻る。
+    window.invoke_colour_set(4, 0, blue);
+    id.update_screen(&window, |screen| screen.vertical = true);
+    assert_eq!(
+        paper(),
+        channels(red),
+        "separate: the tab's vertical colour"
+    );
+    window.set_paper_shared(true);
+    assert_eq!(
+        paper(),
+        channels(blue),
+        "shared: the pane's horizontal colour"
+    );
+    let green = Color::from_rgb_u8(0, 255, 0);
+    window.invoke_colour_set(3, 0, green);
+    id.update_screen(&window, |screen| screen.vertical = false);
+    assert_eq!(
+        paper(),
+        channels(green),
+        "chosen while vertical, kept as horizontal"
+    );
+    window.invoke_colour_default(3, 0);
+    window.invoke_colour_default(4, 0);
+    id.update_screen(&window, |screen| screen.vertical = true);
+    let vertical_global = pane_typography(&window, id).paper;
+    assert_eq!(
+        vertical_global, global,
+        "the vertical sheet takes the horizontal paper"
+    );
+    window.set_paper_shared(false);
+    window.invoke_colour_default(3, 0);
+    id.update_screen(&window, |screen| screen.vertical = false);
+
+    // Random paper is light under dark ink, and changes each time.
+    let first = random_paper(DEFAULT_INK, 1);
+    assert!(first.iter().all(|channel| *channel > 0.7), "{first:?}");
+    let dark = random_paper([0.95, 0.95, 0.95], 12345);
+    assert!(dark.iter().all(|channel| *channel < 0.3), "{dark:?}");
+    window.invoke_colour_random(3, 0);
+    let once = paper();
+    window.invoke_colour_random(3, 0);
+    assert_ne!(once, paper());
+    assert_ne!(once, global);
+}

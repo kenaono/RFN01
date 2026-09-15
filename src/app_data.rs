@@ -121,6 +121,37 @@ pub struct SessionTab {
     /// reads back exactly as it did — and a tab that had become something is
     /// restored as that thing rather than as the question it started as.
     pub empty: bool,
+    /// 追加要件 2026-09-15: このTABの紙の色（横書き、縦書き）。無ければ付いていない。
+    pub paper: Paper,
+}
+
+/// TAB・Paneに付けた紙の色（横書き、縦書き）。`None`は「付けていない」。
+pub type Paper = [Option<[u8; 3]>; 2];
+
+/// `#rrggbb -` の形（無い向きは`-`）。**付いていないときは書かない。**
+fn encode_paper(paper: &Paper) -> Option<String> {
+    if paper.iter().all(Option::is_none) {
+        return None;
+    }
+    let one = |held: &Option<[u8; 3]>| match held {
+        Some([r, g, b]) => format!("#{r:02x}{g:02x}{b:02x}"),
+        None => "-".to_owned(),
+    };
+    Some(format!("{} {}", one(&paper[0]), one(&paper[1])))
+}
+
+/// 読めない向きは「付いていない」にする。
+fn decode_paper(value: &str) -> Paper {
+    let one = |field: Option<&str>| {
+        let digits = field?.strip_prefix('#')?;
+        if digits.len() != 6 {
+            return None;
+        }
+        let channel = |at: usize| u8::from_str_radix(digits.get(at..at + 2)?, 16).ok();
+        Some([channel(0)?, channel(2)?, channel(4)?])
+    };
+    let mut fields = value.split(' ');
+    [one(fields.next()), one(fields.next())]
 }
 
 /// One pane's strip, as the session remembers it.
@@ -135,6 +166,8 @@ pub struct SessionPane {
     /// a session that did not say, which is every session written before the
     /// zoom belonged to a pane; the window puts its own default there.
     pub zoom: i32,
+    /// 追加要件 2026-09-15: このPaneの紙の色。
+    pub paper: Paper,
 }
 
 /// What was on screen when the editor was last closed (要件 8.5).
@@ -250,6 +283,10 @@ pub fn encode_session(session: &Session) -> String {
     }
     for pane in &session.panes {
         out.push_str(&format!("pane: {} {}\n", pane.active, pane.zoom));
+        // **TABの行より前に書く**——TABの行より後ろの鍵は、そのTABのものとして読まれる。
+        if let Some(paper) = encode_paper(&pane.paper) {
+            out.push_str(&format!("pane-paper: {paper}\n"));
+        }
         for tab in &pane.tabs {
             out.push_str(&format!(
                 "tab: {} {} {} {}\n",
@@ -272,6 +309,9 @@ pub fn encode_session(session: &Session) -> String {
             }
             if tab.empty {
                 out.push_str("empty: 1\n");
+            }
+            if let Some(paper) = encode_paper(&tab.paper) {
+                out.push_str(&format!("paper: {paper}\n"));
             }
             // 要件 7.9（2026-09-08）: 単語チェックモード。**「なし」なら書かない**
             // ので、この版より前のセッションは空のまま読まれる。
@@ -347,7 +387,15 @@ pub fn decode_session(raw: &str) -> Option<Session> {
                         .next()
                         .and_then(|zoom| zoom.parse().ok())
                         .unwrap_or(window_zoom),
+                    paper: Paper::default(),
                 });
+            }
+            "pane-paper" => {
+                session.panes.last_mut()?.paper = decode_paper(value);
+            }
+            "paper" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                tab.paper = decode_paper(value);
             }
             "tab" => {
                 let pane = session.panes.last_mut()?;
@@ -1150,6 +1198,7 @@ mod tests {
                 SessionPane {
                     active: 1,
                     zoom: 125,
+                    paper: [Some([0x20, 0x22, 0x28]), None],
                     tabs: vec![
                         SessionTab {
                             untitled: 2,
@@ -1163,6 +1212,7 @@ mod tests {
                         SessionTab {
                             origin: Some(PathBuf::from("D:\\書きかけ\\第一章.md")),
                             preview: true,
+                            paper: [None, Some([0xff, 0xf2, 0xcc])],
                             ..SessionTab::default()
                         },
                     ],
@@ -1171,6 +1221,7 @@ mod tests {
                     active: 0,
                     zoom: 80,
                     tabs: vec![SessionTab::default()],
+                    ..SessionPane::default()
                 },
             ],
         }
