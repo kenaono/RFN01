@@ -16,6 +16,8 @@ mod file_tree;
 mod find;
 mod git_version;
 mod i18n;
+#[cfg(test)]
+mod image_ui_tests;
 mod ime;
 #[cfg(test)]
 mod incremental_ui_tests;
@@ -26,6 +28,7 @@ mod link_ui_tests;
 mod memo_ui_tests;
 mod open_document;
 mod pane_layout;
+mod pictures;
 mod pty;
 mod quick_draft;
 #[cfg(test)]
@@ -771,9 +774,22 @@ struct PreviewSlot {
     /// 「設定しただけでは反映されず……縦書き横書きを切り替えると反映されます」
     /// ＝向きを変えたときだけ枠が作り直されていた）。
     reading: document::Reading,
+    /// 追加要件 2026-09-15: 画像の大きさをどの倍率と置き場所で入れたか。変われば入れ直す。
+    sized: Option<(i32, Option<PathBuf>)>,
 }
 
 impl PreviewSlot {
+    /// 追加要件 2026-09-15: 画像の行の箱に大きさを入れ、描く絵を集める。**組み直したとき、
+    /// 倍率が変わったとき、文書の置き場所が変わったとき**だけ。読めない絵の行は記法のまま出る。
+    fn size_images(&mut self, zoom_percent: i32, folder: Option<&Path>) {
+        self.preview.size_images(|image| {
+            let picture = pictures::load(&pictures::resolve(folder, image.target)?)?;
+            let size = pictures::size(&picture, image.width, zoom_percent);
+            Some((picture, size))
+        });
+        self.sized = Some((zoom_percent, folder.map(Path::to_path_buf)));
+    }
+
     /// 要件 E9: `ruby`は**この文書を組むときの読み方**。取り違えのないよう
     /// 旗も持ち回るが、**古くなったかどうかを決めるのは`PreviewDocument`のほう**
     /// ——切り替えたときに行を捨てるのはあちらの仕事で、ここはただ渡す。
@@ -782,6 +798,8 @@ impl PreviewSlot {
         source: &str,
         active_line_start: Option<usize>,
         reading: document::Reading,
+        zoom_percent: i32,
+        folder: Option<&Path>,
     ) -> &PreviewDocument {
         let stale = !self.started
             || self.active_line_start != active_line_start
@@ -799,6 +817,14 @@ impl PreviewSlot {
             self.active_line_start = active_line_start;
             self.reading = reading;
             self.started = true;
+        }
+        if stale
+            || self
+                .sized
+                .as_ref()
+                .is_none_or(|(zoom, place)| *zoom != zoom_percent || place.as_deref() != folder)
+        {
+            self.size_images(zoom_percent, folder);
         }
         &self.preview
     }
@@ -13367,7 +13393,7 @@ fn lay_out_pane(
     // (3.12). Everything below is written against `PaneText` and does not ask
     // which one it got.
     let slot = &mut pane.view.preview_slot;
-    let shown = pane_text(window, id, slot, source, active_line_start);
+    let shown = pane_text(window, document, id, slot, source, active_line_start);
     let differences = document.differences();
     let note = differences
         .as_ref()
@@ -13527,6 +13553,8 @@ fn lay_out_pane(
     // **組み直しの判定には入らない**——幾何を1画素も動かさないので、変わっても
     // タイルだけが古くなる（技術検証 9.3.1）。
     engine.set_words(word_mode_with(id.screen(window).word_mode as u32));
+    // 追加要件 2026-09-15: 画像の行に描く絵。これも幾何の外（大きさは箱が持つ）。
+    engine.set_pictures(shown.pictures());
     let through = engine
         .viewport_end_utf16(id.scroll(window), id.shown_flow(window))
         .max(render_caret.unwrap_or(0))
@@ -15318,6 +15346,14 @@ enum PaneText<'a> {
 }
 
 impl<'a> PaneText<'a> {
+    /// 追加要件 2026-09-15: 画像の行に描く絵。ソースのままの面には無い。
+    fn pictures(&self) -> text_blocks::Pictures {
+        match self {
+            Self::Source(_) => text_blocks::Pictures::default(),
+            Self::Preview(preview) => preview.pictures().clone(),
+        }
+    }
+
     /// What the engine lays out.
     fn text(&self) -> &'a str {
         match self {
@@ -15946,7 +15982,7 @@ fn hit_test_pane(
     // `lay_out_for_caret` gives (ペイン分割設計 7.3).
     let Pane { graphics, view, .. } = cache.pane(id);
     let slot = &mut view.preview_slot;
-    let shown = pane_text(window, id, slot, source, active_line_start);
+    let shown = pane_text(window, document, id, slot, source, active_line_start);
     // The same layout the drawing path builds, boxes included: a hit test
     // against a layout without them would answer for text that is not where it
     // is on screen.
@@ -16041,7 +16077,7 @@ fn lay_out_for_caret<'a>(
     // the pane's data and the other from its graphics (ペイン分割設計 7.3).
     let Pane { graphics, view, .. } = cache.pane(id);
     let slot = &mut view.preview_slot;
-    let shown = pane_text(window, id, slot, source, active_line_start);
+    let shown = pane_text(window, document, id, slot, source, active_line_start);
     // The same layout the drawing path builds, boxes included, for the reason
     // `hit_test_pane` gives.
     let marked = StyledText::marked(shown.text(), styles, shown.marks());
@@ -16295,7 +16331,14 @@ fn drag_caret_only(
             selection_utf16,
             ..
         } = &mut cache.pane(id).view;
-        let shown = pane_text(window, id, preview_slot, source, active_line_start);
+        let shown = pane_text(
+            window,
+            document,
+            id,
+            preview_slot,
+            source,
+            active_line_start,
+        );
         let caret = shown.utf16_at_source_byte(hit) as u32;
         let ranges = selection
             .iter()
@@ -16424,6 +16467,7 @@ fn text_with_preedit<'a>(
 /// re-measure per event.
 fn pane_text<'a>(
     window: &AppWindow,
+    document: &OpenDocument,
     id: PaneId,
     preview_slot: &'a mut PreviewSlot,
     source: &'a str,
@@ -16435,7 +16479,16 @@ fn pane_text<'a>(
         } else {
             active_line_start
         };
-        PaneText::Preview(preview_slot.get(source, active_line_start, reading_of(window)))
+        // 追加要件 2026-09-15: 画像は文書の置き場所から読み、表示倍率ぶんの大きさで出す。
+        let file = document.file.borrow();
+        let folder = file.path().and_then(Path::parent);
+        PaneText::Preview(preview_slot.get(
+            source,
+            active_line_start,
+            reading_of(window),
+            id.zoom(window),
+            folder,
+        ))
     } else {
         PaneText::Source(source)
     }
@@ -16693,7 +16746,19 @@ fn insert_pane_text(
         let revealed = PaneId::revealed_line(id.vertical(window), &state, &source).unwrap_or(line);
         let mut borrowed = cache.borrow_mut();
         let slot = &mut borrowed.pane(id).view.preview_slot;
-        let preview = slot.get(&source, Some(revealed), reading_of(window));
+        let folder = document
+            .file
+            .borrow()
+            .path()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let preview = slot.get(
+            &source,
+            Some(revealed),
+            reading_of(window),
+            id.zoom(window),
+            folder.as_deref(),
+        );
         let shown = preview.utf16_at_source_byte(caret);
         let at = vertical_insertion_source_byte(&source, preview, shown, indent_line_start);
         drop(borrowed);
@@ -17606,7 +17671,7 @@ fn delete_adjacent_grapheme(
     let (start, end) = {
         let mut borrowed = cache.borrow_mut();
         let slot = &mut borrowed.pane(id).view.preview_slot;
-        let shown = pane_text(window, id, slot, &source, revealed);
+        let shown = pane_text(window, document, id, slot, &source, revealed);
         if backward {
             (shown.previous_grapheme(caret), caret)
         } else {
@@ -18321,7 +18386,8 @@ mod tests {
         let source = "｜漢字《かんじ》を書く\n";
         let mut slot = PreviewSlot::default();
         assert_eq!(
-            slot.get(source, None, document::Reading::all()).text,
+            slot.get(source, None, document::Reading::all(), 100, None)
+                .text,
             "漢字《かんじ》を書く\n"
         );
         // **本文も活性行も変えていない。**変わったのは読み方だけである。
@@ -18332,13 +18398,16 @@ mod tests {
                 document::Reading {
                     ruby: false,
                     ..document::Reading::all()
-                }
+                },
+                100,
+                None,
             )
             .text,
             source
         );
         assert_eq!(
-            slot.get(source, None, document::Reading::all()).text,
+            slot.get(source, None, document::Reading::all(), 100, None)
+                .text,
             "漢字《かんじ》を書く\n"
         );
     }

@@ -119,7 +119,7 @@ fn stamp_of(path: &Path) -> Option<(SystemTime, u64)> {
 }
 
 /// 画像ファイルを読む（WIC：JPEG・PNG・BMP・GIF・TIFF・JPEG XRなど、Windowsが読めるもの）。
-fn decode(path: &Path) -> windows::core::Result<(u32, u32, Vec<u8>)> {
+pub(crate) fn decode(path: &Path) -> windows::core::Result<(u32, u32, Vec<u8>)> {
     // SAFETY: COMは窓のスレッドで初期化済み（ファイルダイアログと同じ道）。
     // 渡す矩形とバッファは、読んだ画像の大きさから作っている。
     unsafe {

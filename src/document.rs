@@ -3,8 +3,8 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text_blocks::{
-    CommentSyntax, Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, is_table_row,
-    table_alignments,
+    CommentSyntax, Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, Picture, Pictures,
+    is_table_row, table_alignments,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +105,11 @@ impl PreviewLine {
             marker = active_markup(source_line, style);
             // 書き手の求め 2026-09-15: **記号は隠さず、ただし太字として見える。**
             marks = active_marks(source_line, style, reading, &context);
+            // 追加要件 2026-09-15: **編集中の画像の行は、絵を残して記法をその下に見せる。**箱は行頭の`!`
+            // だけにかぶせ、行の長さいっぱいの送りにする（`size_images`）——後ろの記法は次の行へ折り返す。
+            if style.kind == LineKind::Image {
+                marks = image_box(source_line, 1).into_iter().collect();
+            }
         } else {
             push_visible_line_in(
                 source_line,
@@ -214,6 +219,8 @@ pub struct PreviewDocument {
     /// **その行が何の字でできているか**を変える——`｜漢字《かんじ》`は
     /// 記法として6字、字として11字である。
     reading: Reading,
+    /// 追加要件 2026-09-15: 画像の行に描く絵（鍵 → 画素）。`size_images`が入れる。
+    pictures: Pictures,
 }
 
 impl PreviewDocument {
@@ -387,6 +394,57 @@ impl PreviewDocument {
         self.utf16_starts.push(utf16);
         self.source_starts.push(source_byte);
         self.preview_starts.push(preview_byte);
+    }
+
+    /// 画像の箱に大きさを入れる（追加要件 2026-09-15）。`size(image)`が読んだ絵と描く大きさ（幅, 高さ）を返す。
+    ///
+    /// **返さない（読めない）絵は箱を外す**——字は消していないので、記法がそのまま見える。編集中の行は
+    /// `source_shown`（記法を見せたまま、その前に絵）。行を組み直すたびに0に戻るので、呼ぶ側は
+    /// 組み直しのあと毎回呼ぶ。
+    pub fn size_images(
+        &mut self,
+        mut size: impl FnMut(ImageRef<'_>) -> Option<(std::sync::Arc<Picture>, (u32, u32))>,
+    ) {
+        let mut pictures = std::collections::HashMap::new();
+        for (index, line) in self.lines.iter().enumerate() {
+            if !line
+                .marks
+                .iter()
+                .any(|mark| matches!(mark.ornament, Some(Ornament::Image { .. })))
+            {
+                continue;
+            }
+            self.marks[index] = line
+                .marks
+                .iter()
+                .filter_map(|mark| match mark.ornament {
+                    Some(Ornament::Image { key, .. }) => image_of_line(&line.source)
+                        .and_then(&mut size)
+                        .map(|(picture, (width, height))| {
+                            pictures.insert(key, picture);
+                            Emphasis {
+                                ornament: Some(Ornament::Image {
+                                    key,
+                                    width,
+                                    height,
+                                    source_shown: line.active,
+                                }),
+                                ..*mark
+                            }
+                        }),
+                    _ => Some(*mark),
+                })
+                .collect();
+        }
+        // 同じ絵のままなら差し替えない（空のままの文書で`Arc`を作り続けない）。
+        if *self.pictures != pictures {
+            self.pictures = std::sync::Arc::new(pictures);
+        }
+    }
+
+    /// 画像の行に描く絵（追加要件 2026-09-15）。
+    pub fn pictures(&self) -> &Pictures {
+        &self.pictures
     }
 
     /// What is marked inside each line (要件 7.3.2).
@@ -2206,6 +2264,15 @@ fn push_visible_line(
         return;
     }
 
+    // 追加要件 2026-09-15: **画像だけの行は、字を消さずに箱をかぶせる。**字は残っているので、
+    // 絵が読めなかったときは箱を外すだけで記法がそのまま見える。
+    if style.kind == LineKind::Image {
+        let start = visible.len();
+        visible.push_str(line);
+        let length = visible[start..].encode_utf16().count() as u32;
+        marks.extend(image_box(line, length));
+        return;
+    }
     let content = strip_heading_marker(content);
     // **A line long enough to be pathological is left literal.** Looking for
     // the closer of a marker that has none costs a scan to the end of the line,
@@ -2680,6 +2747,90 @@ fn paragraph_contexts(
         }
     }
     contexts
+}
+
+/// 画像だけの行が指す絵（追加要件 2026-09-15、書き手）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageRef<'a> {
+    /// 書いてあるとおりの行き先（`<…>`は外す）。解決は呼ぶ側（文書の置き場所を知っている）。
+    pub target: &'a str,
+    /// Obsidianの`|300`（`300x200`の幅）。無ければ元の大きさ。
+    pub width: Option<u32>,
+}
+
+/// 行が画像だけか、そうなら指す絵（追加要件 2026-09-15）。
+///
+/// `![説明](画像.png)`・`![説明|300](画像.png)`・`![説明](<画像 a.png> "題")`・`![[画像.png]]`・
+/// `![[画像.png|300]]`。**行き先は画像の拡張子で終わるものだけ**——`![[ノート]]`は別の文書の埋め込みで、
+/// 絵ではない。`http://`などの外の場所は読まない（取りに行かない）。
+pub fn image_of_line(line: &str) -> Option<ImageRef<'_>> {
+    let body = line.trim();
+    let size = |option: &str| {
+        option
+            .trim()
+            .split('x')
+            .next()
+            .and_then(|width| width.parse::<u32>().ok())
+            .filter(|width| *width > 0)
+    };
+    let (target, width) = if let Some(inner) = body
+        .strip_prefix("![[")
+        .and_then(|rest| rest.strip_suffix("]]"))
+    {
+        match inner.split_once('|') {
+            Some((target, option)) => (target.trim(), size(option)),
+            None => (inner.trim(), None),
+        }
+    } else {
+        let rest = body.strip_prefix("![")?;
+        let (alt, after) = rest.split_once("](")?;
+        let inner = after.strip_suffix(')')?;
+        let target = match inner.split_once(" \"") {
+            Some((target, _)) => target,
+            None => inner,
+        }
+        .trim();
+        let target = target
+            .strip_prefix('<')
+            .and_then(|target| target.strip_suffix('>'))
+            .unwrap_or(target);
+        (
+            target,
+            alt.rsplit_once('|').and_then(|(_, option)| size(option)),
+        )
+    };
+    let lower = target.to_ascii_lowercase();
+    let picture = [
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".ico", ".jxr", ".heic",
+    ]
+    .iter()
+    .any(|extension| lower.ends_with(extension));
+    (picture && !target.is_empty() && !target.contains("://")).then_some(ImageRef { target, width })
+}
+
+/// 絵を指す鍵：行き先と幅から決まる（同じ書き方なら同じ鍵）。
+pub fn image_key(image: ImageRef<'_>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    image.target.hash(&mut hasher);
+    image.width.hash(&mut hasher);
+    hasher.finish() | 1
+}
+
+/// 画像の行に立てる箱（大きさはまだ0、`PreviewDocument::size_images`が入れる）。
+fn image_box(line: &str, utf16_len: u32) -> Option<Emphasis> {
+    let image = image_of_line(line)?;
+    Some(Emphasis {
+        utf16_start: 0,
+        utf16_len,
+        marks: Marks::default(),
+        ornament: Some(Ornament::Image {
+            key: image_key(image),
+            width: 0,
+            height: 0,
+            source_shown: false,
+        }),
+    })
 }
 
 /// 持ち越した記号を足して1行を読む。**足した記号が対にならなかった**（空白の並びなどで閉じられ
@@ -3783,7 +3934,21 @@ fn line_style(
             if let Some(style) = table_line(line, next, levels, table) {
                 return style;
             }
-            outside_fence(line, levels, marks)
+            let style = outside_fence(line, levels, marks);
+            // 追加要件 2026-09-15: 画像だけの行。本文の行（引用・箇条書き・字下げの中ではない）に限る。
+            if style.kind == LineKind::Body
+                && style.quote_depth == 0
+                && style.list_indent == 0
+                && !line.starts_with([' ', '\t'])
+                && image_of_line(line).is_some()
+            {
+                LineStyle {
+                    kind: LineKind::Image,
+                    ..style
+                }
+            } else {
+                style
+            }
         }
     };
     // Anything a fence decides ends whatever table was open: a table's rows are
@@ -6350,6 +6515,38 @@ mod tests {
             "![説明](画像.png)"
         );
         assert_eq!(visible_markdown_text("![[画像.png]]"), "![[画像.png]]");
+    }
+
+    /// 追加要件 2026-09-15: **画像だけの行**が絵の行になる。行き先は画像の拡張子で終わるものだけで、
+    /// 幅の指定（`|300`）はObsidianの2つの書き方のどちらからも読む。文中の画像・外のURL・引用や
+    /// 箇条書きの中は、記法のまま。
+    #[test]
+    fn only_a_line_that_is_one_image_becomes_a_picture() {
+        let image = |line| image_of_line(line).map(|image| (image.target, image.width));
+        assert_eq!(image("![説明](img/a.png)"), Some(("img/a.png", None)));
+        assert_eq!(image("  ![説明|300](a.JPG)  "), Some(("a.JPG", Some(300))));
+        assert_eq!(
+            image("![説明](<写真 1.png> \"題\")"),
+            Some(("写真 1.png", None))
+        );
+        assert_eq!(image("![[a.png]]"), Some(("a.png", None)));
+        assert_eq!(image("![[a.png|300x200]]"), Some(("a.png", Some(300))));
+        assert_eq!(image("![[ノート]]"), None);
+        assert_eq!(image("![説明](https://example.com/a.png)"), None);
+        assert_eq!(image("文の中の![説明](a.png)"), None);
+
+        let preview =
+            PreviewDocument::from_source("![説明](a.png)\n> ![説明](a.png)\n- ![説明](a.png)\n");
+        let pictures = preview
+            .marks()
+            .iter()
+            .map(|marks| {
+                marks
+                    .iter()
+                    .any(|mark| mark.ornament.is_some_and(Ornament::is_image))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pictures[..3], [true, false, false]);
     }
 
     /// The shown text is marked as a link, and emphasis inside it still counts:

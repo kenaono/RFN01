@@ -448,6 +448,9 @@ pub enum LineKind {
     TableRow,
     /// The row of dashes under the header, which is what names the columns.
     TableRule,
+    /// 画像だけの行（`![説明](画像.png)`・`![[画像.png|300]]`、追加要件 2026-09-15 書き手）。
+    /// **1行が1枚の絵**で、整形表示では字の代わりに絵の大きさの箱が立つ。
+    Image,
 }
 
 impl LineKind {
@@ -628,6 +631,23 @@ pub struct Marks {
     pub dots: bool,
 }
 
+/// 画像の行に描く絵（追加要件 2026-09-15）。画素は前掛けのBGRA（Direct2Dへそのまま渡す）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Picture({}x{})", self.width, self.height)
+    }
+}
+
+/// 鍵（`document::image_key`）から絵へ。
+pub type Pictures = Arc<std::collections::HashMap<u64, Arc<Picture>>>;
+
 /// What is drawn in place of the marker a box stands over (要件 7.3.2).
 ///
 /// **The block is the space and this is the ink.** The box over a marker hides
@@ -699,6 +719,20 @@ pub enum Ornament {
     /// 1〜2桁で1つの箱、3桁以上は**1桁につき1つ**——要件 7.8 の「3桁以上は
     /// 縦に並べる」がそれで、桁ごとに正立した箱が列に並ぶ。
     Upright,
+    /// 画像（追加要件 2026-09-15、書き手：ライブプレビューの本文中に、画像だけの行をブロックとして出す）。
+    ///
+    /// `key`は絵を指す（`document::image_key`）。`width`×`height`は描く大きさ（画面の画素、倍率込み、
+    /// **回さない**）で、行の長さに入らなければ組むときに縮める（`apply_marker_boxes`）。0なのは、まだ絵が
+    /// 決まっていない（`PreviewDocument::size_images`の前）。
+    ///
+    /// `source_shown`は**編集中の行**：記法を1字も隠さず（箱を立てない）、行送りを絵のぶん広げて、
+    /// 空けたところ（横書きは記法の下、縦書きは記法の右）に絵を描く。
+    Image {
+        key: u64,
+        width: u32,
+        height: u32,
+        source_shown: bool,
+    },
 }
 
 impl Ornament {
@@ -735,6 +769,11 @@ impl Ornament {
             Self::Upright => font_size,
             _ => 0.0,
         }
+    }
+
+    /// 画像の箱か（追加要件 2026-09-15）。
+    pub fn is_image(self) -> bool {
+        matches!(self, Self::Image { .. })
     }
 
     /// Whether the ink goes inside the box rather than in the gutter the
@@ -1629,7 +1668,7 @@ pub fn split_blocks(
     let mut block_utf16_start = 0_u32;
     let mut block_cells = 0_u32;
     let mut block_indent = 0_u8;
-    let mut block_table = false;
+    let mut block_table = 0_u8;
 
     while byte_cursor < text.len() {
         let line_end = match text[byte_cursor..].find('\n') {
@@ -1680,7 +1719,16 @@ pub fn split_blocks(
         // (技術検証 7.7) — so a block holding a table and a paragraph would
         // have to be laid out two ways at once. It was already true that a
         // table could not be cut in two; this says it cannot share either.
-        let table = style.kind.is_table();
+        // 追加要件 2026-09-15: **画像だけの行も自分だけのブロックを持つ**。絵の行は行の高さが絵の
+        // 大きさで決まる（`apply_marker_boxes`）ので、本文と同じブロックに入れると本文の行まで
+        // その決め方で組むことになる。
+        let table = if style.kind.is_table() {
+            1
+        } else if style.kind == LineKind::Image {
+            2
+        } else {
+            0
+        };
         if block_indent != indent || block_table != table {
             if block_byte_start < byte_cursor {
                 blocks.push(BlockSpan {

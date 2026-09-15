@@ -365,7 +365,7 @@ fn typography_settings_roundtrip_and_render() {
     refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
     assert!(id.screen(&window).viewer);
     let mut preview_slot = PreviewSlot::default();
-    let completed = pane_text(&window, id, &mut preview_slot, source, Some(0))
+    let completed = pane_text(&window, &document, id, &mut preview_slot, source, Some(0))
         .text()
         .to_owned();
     assert!(
@@ -374,7 +374,7 @@ fn typography_settings_roundtrip_and_render() {
     );
     assert_eq!(
         completed,
-        pane_text(&window, id, &mut preview_slot, source, None).text()
+        pane_text(&window, &document, id, &mut preview_slot, source, None).text()
     );
     window.window().request_redraw();
     let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];

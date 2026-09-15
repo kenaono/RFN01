@@ -37,8 +37,10 @@ use windows::{
         Graphics::{
             Direct2D::{
                 Common::{
-                    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+                    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+                    D2D1_PIXEL_FORMAT,
                 },
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
                 D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
                 D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
                 D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
@@ -52,16 +54,17 @@ use windows::{
                 DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS,
                 DWRITE_INLINE_OBJECT_METRICS, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING,
-                DWRITE_LINE_SPACING_METHOD_PROPORTIONAL, DWRITE_LINE_SPACING_METHOD_UNIFORM,
-                DWRITE_MEASURING_MODE_NATURAL, DWRITE_OVERHANG_METRICS,
-                DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_FAR,
-                DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_READING_DIRECTION_TOP_TO_BOTTOM,
-                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-                DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
-                DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory,
-                IDWriteFontCollection, IDWriteInlineObject, IDWriteInlineObject_Impl,
-                IDWriteLocalizedStrings, IDWriteTextFormat, IDWriteTextFormat3, IDWriteTextLayout,
-                IDWriteTextLayout1, IDWriteTextRenderer,
+                DWRITE_LINE_SPACING_METHOD_DEFAULT, DWRITE_LINE_SPACING_METHOD_PROPORTIONAL,
+                DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MEASURING_MODE_NATURAL,
+                DWRITE_OVERHANG_METRICS, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
+                DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_ALIGNMENT_CENTER,
+                DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS,
+                DWRITE_TEXT_RANGE, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
+                IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
+                IDWriteInlineObject_Impl, IDWriteLocalizedStrings, IDWriteTextFormat,
+                IDWriteTextFormat3, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTextLayout3,
+                IDWriteTextRenderer,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Imaging::{
@@ -81,10 +84,10 @@ use crate::terminal::{Attrs as CellAttrs, Color as CellColor, Line as CellLine, 
 use crate::text_blocks::{
     Align, AskedLine, BlockLayoutPlan, BlockMeasure, BlockPlacement, BlockSpan, CrossSlices,
     DEFAULT_CODE_FONT, DEFAULT_INK, Emphasis, FlowOrder, GridCell, LineInfo, LineKind, LineMarker,
-    LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL, Marks, Ornament, PreparedWraps,
-    RecordedWraps, StyleRun, StyledText, TableGrid, TileSpan, Typography, block_flow_bound,
-    cells_per_line, line_runs, place_blocks, split_blocks, style_runs, table_alignments,
-    table_cells, tables, wrapping_list_lines,
+    LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL, Marks, Ornament, Pictures,
+    PreparedWraps, RecordedWraps, StyleRun, StyledText, TableGrid, TileSpan, Typography,
+    block_flow_bound, cells_per_line, line_runs, place_blocks, split_blocks, style_runs,
+    table_alignments, table_cells, tables, wrapping_list_lines,
 };
 
 /// Which way the text runs.
@@ -288,7 +291,7 @@ pub struct HitTest {
     pub is_inside: bool,
 }
 
-struct ComApartment;
+pub(crate) struct ComApartment;
 
 impl Drop for ComApartment {
     fn drop(&mut self) {
@@ -298,7 +301,7 @@ impl Drop for ComApartment {
     }
 }
 
-fn ensure_com_apartment() -> Result<Option<ComApartment>> {
+pub(crate) fn ensure_com_apartment() -> Result<Option<ComApartment>> {
     // Single-threaded, because the window's thread has to be. **This runs
     // before the window exists** — the startup probe lays text out first — and
     // winit calls `OleInitialize` when it creates the window, which fails
@@ -972,6 +975,151 @@ impl IDWriteInlineObject_Impl for MarkerBox_Impl {
     }
 }
 
+/// 絵の大きさ（追加要件 2026-09-15）。`along`・`across`は絵が行に沿う長さ・横切る長さ（縮めたあと）。
+/// 絵でない、または大きさの決まっていない箱は`None`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PictureBox {
+    along: f32,
+    across: f32,
+    /// 編集中の行（`Ornament::Image::source_shown`）。
+    source_shown: bool,
+}
+
+fn picture_box(ornament: Ornament, mode: WritingMode, line_box: f32) -> Option<PictureBox> {
+    let Ornament::Image {
+        width,
+        height,
+        source_shown,
+        ..
+    } = ornament
+    else {
+        return None;
+    };
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (along, across) = match mode {
+        WritingMode::Horizontal => (width as f32, height as f32),
+        WritingMode::Vertical => (height as f32, width as f32),
+    };
+    let scale = (line_box / along).min(1.0);
+    Some(PictureBox {
+        along: along * scale,
+        across: across * scale,
+        source_shown,
+    })
+}
+
+/// 画像の行の箱へ絵を描く（追加要件 2026-09-15）。**回さない**——縦書きでも絵は立ったまま、
+/// 箱の行に沿う向きの頭から、縮めた大きさで置く。
+///
+/// 行に交わる向きは**箱の基線に合わせる**（`apply_marker_boxes`が決めた位置）：横書きは絵の下端が
+/// 基線、縦書きは絵の真ん中が行の中心。絵が字より低い行は字の高さで組まれるので、行の上端から
+/// 描くと字の地に隠れる。
+fn draw_pictures(
+    target: &ID2D1RenderTarget,
+    layout: &IDWriteTextLayout,
+    runs: &[StyleRun],
+    origin: windows_numerics::Vector2,
+    mode: WritingMode,
+    line_box: f32,
+    pictures: &Pictures,
+) -> Result<()> {
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
+    let lines = line_metrics(layout)?;
+    for run in runs {
+        let Some(ornament) = run.ornament else {
+            continue;
+        };
+        let (Ornament::Image { key, .. }, Some(fitted)) =
+            (ornament, picture_box(ornament, mode, line_box))
+        else {
+            continue;
+        };
+        let Some(picture) = pictures.get(&key) else {
+            continue;
+        };
+        let mut count = 0;
+        // SAFETY: the range is inside the block's own text, and the buffer is larger than one box needs.
+        unsafe {
+            layout.HitTestTextRange(
+                run.utf16_start,
+                run.utf16_len.min(1),
+                origin.X,
+                origin.Y,
+                Some(&mut regions),
+                &mut count,
+            )?;
+        }
+        if count == 0 {
+            continue;
+        }
+        let region = regions[0];
+        let (width, height) = match mode {
+            WritingMode::Horizontal => (fitted.along, fitted.across),
+            WritingMode::Vertical => (fitted.across, fitted.along),
+        };
+        let (left, top) = match mode {
+            // 編集中の行：広げた行箱の空けた側（横書きは下端、縦書きは右端）。
+            WritingMode::Horizontal if fitted.source_shown => {
+                (region.left, region.top + region.height - height)
+            }
+            WritingMode::Vertical if fitted.source_shown => {
+                (region.left + region.width - width, region.top)
+            }
+            WritingMode::Horizontal => {
+                // 箱の行の基線。行を頭から数え、この箱の字の位置を含む行を探す。
+                let mut start = 0;
+                let baseline = lines
+                    .iter()
+                    .find(|line| {
+                        start += line.length;
+                        run.utf16_start < start
+                    })
+                    .map_or(height, |line| line.baseline);
+                (region.left, region.top + baseline - height)
+            }
+            WritingMode::Vertical => (region.left + (region.width - width) * 0.5, region.top),
+        };
+        let rect = D2D_RECT_F {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        };
+        let mut dpi_x = 96.0;
+        let mut dpi_y = 96.0;
+        // SAFETY: the pixels outlive CreateBitmap (which copies them), and the bitmap is drawn before it is dropped.
+        unsafe {
+            target.GetDpi(&mut dpi_x, &mut dpi_y);
+            let bitmap = target.CreateBitmap(
+                D2D_SIZE_U {
+                    width: picture.width,
+                    height: picture.height,
+                },
+                Some(picture.bgra.as_ptr() as *const c_void),
+                picture.width * 4,
+                &D2D1_BITMAP_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    dpiX: dpi_x,
+                    dpiY: dpi_y,
+                },
+            )?;
+            target.DrawBitmap(
+                &bitmap,
+                Some(&rect),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Put a box over every range a marker stands at the head of (要件 7.3.2).
 ///
 /// **Both places that build a layout call this**, right after
@@ -988,6 +1136,8 @@ fn apply_marker_boxes(
     layout: &IDWriteTextLayout,
     typography: &Typography,
     runs: &[StyleRun],
+    mode: WritingMode,
+    line_box: f32,
 ) -> Result<()> {
     if runs.iter().all(|run| run.ornament.is_none()) {
         return Ok(());
@@ -1016,10 +1166,84 @@ fn apply_marker_boxes(
     // 3桁ぶんの深さ59pxのはずが26pxだった）。幅0の箱にはその症状が出ないし、
     // 出たとしても送りが0なので何も動かない。
     let width_less = box_of(0.0, typography.font_size);
+    // 追加要件 2026-09-15: **絵の行は、行の高さを絵に合わせる。**本文の行は字の大きさから決めた一様な
+    // 行送り（`apply_line_height`）で組むが、それでは箱の高さが行に効かず、絵が次の行に重なる。
+    // 絵の行はブロックが分かれている（`split_blocks`）ので、ここで中身に合わせる送りへ替えても本文には効かない。
+    let pictures = runs
+        .iter()
+        .filter_map(|run| {
+            run.ornament
+                .and_then(|ornament| picture_box(ornament, mode, line_box))
+        })
+        .collect::<Vec<_>>();
+    if let Some(shown) = pictures.iter().find(|picture| picture.source_shown) {
+        // 編集中の行：いつもの組み方で測った行箱に絵の厚みを足し、字はいつもの行箱の中に置く。
+        // **足す側は、ブロックの頭を測る側の反対**——ブロックの頭は行頭の字の箱で測る（`measure_layout`の
+        // `HitTestTextPosition`：横書きは字の上端、縦書きは字の左端）ので、そちらへ空けると空けたところが
+        // ブロックの外へ出て、次のブロックに重なる（実測 2026-09-16）。だから横書きは下（基線はそのまま）、
+        // 縦書きは右（基線を送る）。折り返した行はどれも同じだけ広がる。
+        let lines = line_metrics(layout)?;
+        if let Some(line) = lines.first() {
+            let spacing = DWRITE_LINE_SPACING {
+                method: DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                height: line.height + shown.across,
+                baseline: match mode {
+                    WritingMode::Horizontal => line.baseline,
+                    WritingMode::Vertical => line.baseline + shown.across,
+                },
+                leadingBefore: 0.0,
+                fontLineGapUsage: DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
+            };
+            // SAFETY: The layout is alive for this call, and the struct is read before it returns.
+            unsafe {
+                layout
+                    .cast::<IDWriteTextLayout3>()?
+                    .SetLineSpacing(&spacing)?
+            };
+        }
+    } else if !pictures.is_empty() {
+        let spacing = DWRITE_LINE_SPACING {
+            method: DWRITE_LINE_SPACING_METHOD_DEFAULT,
+            height: 0.0,
+            baseline: 0.0,
+            leadingBefore: 0.0,
+            fontLineGapUsage: DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
+        };
+        // SAFETY: The layout is alive for this call, and the struct is read before it returns.
+        unsafe {
+            layout
+                .cast::<IDWriteTextLayout3>()?
+                .SetLineSpacing(&spacing)?
+        };
+    }
     for run in runs {
         let Some(ornament) = run.ornament else {
             continue;
         };
+        // 追加要件 2026-09-15: 絵の箱は絵の大きさ（行の長さに入らなければ縦横比を保って縮める）。
+        // **底を並びの線に置く**（横書き）——字の足元に絵の下端が来る。縦書きは字の中心の線に絵の真ん中。
+        // 編集中の行は箱を立てない（記法を隠さない、上で行送りを広げた）。
+        if let Some(fitted) = picture_box(ornament, mode, line_box) {
+            if fitted.source_shown {
+                continue;
+            }
+            let object: IDWriteInlineObject = MarkerBox {
+                along: fitted.along,
+                across: fitted.across,
+                baseline: match mode {
+                    WritingMode::Horizontal => fitted.across,
+                    WritingMode::Vertical => fitted.across * 0.5,
+                },
+            }
+            .into();
+            let range = DWRITE_TEXT_RANGE {
+                startPosition: run.utf16_start,
+                length: run.utf16_len,
+            };
+            // SAFETY: as below.
+            unsafe { layout.SetInlineObject(&object, range)? };
+            continue;
+        }
         // 要件 7.3.2: **a table's boxes are the ones built per run.** Every
         // marker begins its text at the same step and can share one object; no
         // two cells of a table can, because what the box holds is what is left
@@ -1687,6 +1911,8 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun, bullets: [ch
         // 同じ道で、違うのは置き場所だけ——あちらは溝、これは箱の中。
         Ornament::Upright => covered(block_text, run).to_owned(),
         Ornament::Ruby { .. } => ruby_reading(block_text, run).to_owned(),
+        // 追加要件 2026-09-15: 絵は字ではない。描くのは`draw_pictures`。
+        Ornament::Image { .. } => String::new(),
     }
 }
 
@@ -1759,7 +1985,8 @@ fn draw_marker_ink(
         };
         // 要件 7.8: ルビは行の脇に出るので、行頭の溝へ置くこの道は通らない。
         // 置き場所を決める軸が違うだけで、当たった矩形へ墨を置くのは同じ。
-        if ornament.rides_beside_the_line() {
+        // 追加要件 2026-09-15: 絵も墨ではないので、ここは通らない（`draw_pictures`）。
+        if ornament.rides_beside_the_line() || ornament.is_image() {
             continue;
         }
         if ornament.stands_in_its_box() {
@@ -2886,7 +3113,7 @@ fn build_block_layout(
             .CreateTextLayout(&utf16, &format, max_width, max_height)?
     };
     apply_typography(&layout, typography, runs, utf16.len() as u32)?;
-    apply_marker_boxes(&layout, typography, runs)?;
+    apply_marker_boxes(&layout, typography, runs, mode, line_box)?;
     Ok(layout)
 }
 
@@ -3020,6 +3247,8 @@ struct TileTask {
     /// 要件 7.9: 色を付ける語。**`Typography`ではなくここ**——組み直しの判定に
     /// 入れてはならない（`TextEngine::set_words`）。
     words: Arc<crate::word_marks::WordMarks>,
+    /// 追加要件 2026-09-15: 画像の行に描く絵。
+    pictures: Pictures,
     mode: WritingMode,
     margin: f32,
     /// The line numbers' column, when there is one (要件 9).
@@ -3358,6 +3587,22 @@ fn draw_tile(
                 mode,
                 typography.indent_step(),
                 typography.bullets,
+            )?;
+        }
+        // 追加要件 2026-09-15: 画像の行の絵。箱が立っているところへ、回さずに描く。
+        if task
+            .runs
+            .iter()
+            .any(|run| run.ornament.is_some_and(Ornament::is_image))
+        {
+            draw_pictures(
+                &target,
+                &layout,
+                &task.runs,
+                origin,
+                mode,
+                task.line_box,
+                &task.pictures,
             )?;
         }
         // 要件 7.8: ルビと傍点は行の脇の帯に出る。**本文の上に描く**ので、
@@ -3733,6 +3978,9 @@ pub struct TextEngine {
     /// 変えるだけで`matches`が偽になり、**文書全体が測り直された**。語も色も
     /// 幾何を1画素も動かさないのだから、測り直す理由が無い。
     words: Arc<crate::word_marks::WordMarks>,
+    /// 追加要件 2026-09-15: 画像の行に描く絵（鍵 → 画素）。**`words`と同じく組み直しの判定の外**——
+    /// 大きさは箱（`Ornament::Image`）が持っていて、ここは描く画素だけ。
+    pictures: Pictures,
     /// Heading level per logical line of `text`. Blocks cut only at logical line
     /// boundaries, so `block_lines` slices this without ever cutting an entry.
     line_styles: Vec<LineStyle>,
@@ -4125,6 +4373,11 @@ impl TextEngine {
     /// だからここは`matches`に入らず、[`TextEngine::tile_signature`]にだけ入る。
     pub fn set_words(&mut self, words: Arc<crate::word_marks::WordMarks>) {
         self.words = words;
+    }
+
+    /// 追加要件 2026-09-15: 画像の行に描く絵を渡す。
+    pub fn set_pictures(&mut self, pictures: Pictures) {
+        self.pictures = pictures;
     }
 
     /// True when the input text and geometry match. `layout_pending` separately
@@ -5006,6 +5259,7 @@ impl TextEngine {
                     lines,
                     typography: spec.clone(),
                     words: self.words.clone(),
+                    pictures: self.pictures.clone(),
                     mode: self.mode,
                     margin: self.margin,
                     numbers: self.numbers,
@@ -5126,6 +5380,15 @@ impl TextEngine {
                 self.mode.stands_digits_upright(&self.typography),
             );
             hash_style_runs(&runs, &self.typography, &mut hasher);
+            // 追加要件 2026-09-15: 絵の画素。同じ書き方の絵でも、ファイルが替われば別の絵である。
+            for run in &runs {
+                if let Some(Ornament::Image { key, .. }) = run.ornament {
+                    self.pictures
+                        .get(&key)
+                        .map(|picture| Arc::as_ptr(picture) as usize)
+                        .hash(&mut hasher);
+                }
+            }
             // 要件 7.3.2: and the marks that belong to whole lines. **Nothing
             // in the block's own text says a line is one** — three hyphens
             // inside a fence are three hyphens — and neither mark moves a
@@ -6003,7 +6266,7 @@ fn wrap_offsets_in(
     };
     let runs = style_runs(styled, page.mode.stands_digits_upright(typography));
     apply_typography(&layout, typography, &runs, utf16.len() as u32)?;
-    apply_marker_boxes(&layout, typography, &runs)?;
+    apply_marker_boxes(&layout, typography, &runs, page.mode, line_box)?;
     Ok(wrap_byte_offsets(text, &line_metrics(&layout)?))
 }
 
@@ -8269,7 +8532,7 @@ mod tests {
             // 同じに組む」がこの比較の前提で、室を取る箱（`---`やフェンス、
             // 縦中横の1マス）はブロック側では張られていた——縦中横が入るまで、
             // 標本の文に室を取る箱が1つも無かったので気づけていなかった。
-            apply_marker_boxes(&layout, typography, &runs)?;
+            apply_marker_boxes(&layout, typography, &runs, mode, line_box)?;
             // The whole document is its own last block, so it keeps the
             // trailing empty line the split blocks give up.
             measure_block(&layout, bound, true, mode)
