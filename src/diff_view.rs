@@ -353,12 +353,51 @@ fn show_saved(app: &AppWindow, document: &crate::OpenDocument) {
     }
 }
 
+/// 前回のCommitの版と比べる（追加要件「Gitの版管理」）。保存版との比較と同じく比較専用。
+fn show_head(app: &AppWindow, document: &crate::OpenDocument) {
+    let file = document.file.borrow();
+    let Some(path) = file.path().map(Path::to_owned) else {
+        app.set_render_status("まだ保存先がありません。保存してから比較してください".into());
+        return;
+    };
+    let (commit, bytes) = match crate::git_version::head_version(&path) {
+        Ok(version) => version,
+        Err(error) => {
+            app.set_render_status(format!("前回のCommitと比較できません: {error}").into());
+            return;
+        }
+    };
+    // 文書の読み方で読み、読めなければ判別に任せる（保存版の読み直しと同じ決まり）。
+    let encoding = file.form().encoding;
+    let right = crate::file_io::decode_as(&bytes, MAX_DOCUMENT_CHARACTERS, encoding)
+        .or_else(|_| crate::file_io::decode(&bytes, MAX_DOCUMENT_CHARACTERS));
+    match right {
+        Ok((right, _)) => show(
+            app,
+            format!("本文（左）：{}", path.display()),
+            document.text.borrow().clone(),
+            format!("前回のCommit（{commit}）：{}", path.display()),
+            right,
+        ),
+        Err(error) => {
+            app.set_render_status(format!("前回のCommitと比較できません: {error}").into())
+        }
+    }
+}
+
 pub fn wire(app: &AppWindow, live: &crate::Live) {
     let weak = app.as_weak();
     let saved_live = live.clone();
     app.on_compare_saved_requested(move || {
         if let Some(app) = weak.upgrade() {
             show_saved(&app, &saved_live.active(&app));
+        }
+    });
+    let weak = app.as_weak();
+    let head_live = live.clone();
+    app.on_compare_head_requested(move || {
+        if let Some(app) = weak.upgrade() {
+            show_head(&app, &head_live.active(&app));
         }
     });
     let weak = app.as_weak();

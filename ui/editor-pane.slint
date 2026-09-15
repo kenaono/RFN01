@@ -634,6 +634,7 @@ export component EditorPane inherits Rectangle {
     callback goto-requested(bool);
     callback compare-requested();
     callback compare-saved-requested();
+    callback compare-head-requested();
     callback reopen-closed-requested();
     in property <[string]> shortcut-keys: ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+T", "Ctrl+Z", "Ctrl+Y"];
     callback shortcut-key(string, bool, bool, bool) -> bool;
@@ -1386,6 +1387,13 @@ export component EditorPane inherits Rectangle {
                             title: "保存版と比較";
                             activated => {
                                 root.compare-saved-requested();
+                                pane-menu.close();
+                            }
+                        }
+                        if root.writing: MenuRow {
+                            title: "前回のCommitと比較";
+                            activated => {
+                                root.compare-head-requested();
                                 pane-menu.close();
                             }
                         }

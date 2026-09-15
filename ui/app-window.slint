@@ -779,6 +779,7 @@ export component AppWindow inherits Window {
     callback open-file-requested();
     callback compare-files-requested();
     callback compare-saved-requested();
+    callback compare-head-requested();
     callback reopen-closed-requested();
     /// 畳んでいる分類（ビット）と、押して探しているキー（書き手の求め 2026-09-15）。
     in-out property <int> shortcut-folded: 0;
@@ -2079,6 +2080,10 @@ export component AppWindow inherits Window {
                         compare-saved-requested => {
                             root.focused-pane = pane.id;
                             root.compare-saved-requested();
+                        }
+                        compare-head-requested => {
+                            root.focused-pane = pane.id;
+                            root.compare-head-requested();
                         }
                         compare-requested => {
                             root.focused-pane = pane.id;
@@ -4364,14 +4369,32 @@ export component AppWindow inherits Window {
                 // 報告 2026-09-10）。数の並びより先に読めるよう、色を持たせてある
                 // ——ここに出るのは「保存できません」のような、書き手が次の一手を
                 // 決めなければならない知らせである。
-                if root.render-status != "": Text {
-                    text: root.render-status;
-                    color: Tok.alert;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    horizontal-stretch: 0;
-                    overflow: elide;
-                    max-width: 520px;
+                //
+                // **空いている幅いっぱいまで出し、切れたときだけ全文をマウス
+                // オーバーで出す**（書き手の求め 2026-09-15：Gitの断りが切れて
+                // 読めなかった）。伸びるのは箱で、自分の全文より広くはならない
+                // ——余りは右の空きが取り、右の並びは動かない。
+                if root.render-status != "": status-box := Rectangle {
+                    horizontal-stretch: 1;
+                    min-width: 40px;
+                    preferred-width: status-text.preferred-width;
+                    max-width: status-text.preferred-width;
+
+                    status-text := Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.render-status;
+                        color: Tok.alert;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    // **比べる相手は名前で呼ぶ。**`parent.width`と書くと出ない
+                    // （技術検証 6.39：条件は生成される要素へ移される）。
+                    if status-text.preferred-width > status-box.width: Tooltip {
+                        text: @markdown("\{root.render-status}");
+                    }
                 }
 
                 // 要件 7.3: a paragraph long enough to cost a keystroke. The

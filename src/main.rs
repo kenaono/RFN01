@@ -14,6 +14,7 @@ mod file_dialog;
 mod file_io;
 mod file_tree;
 mod find;
+mod git_version;
 mod ime;
 #[cfg(test)]
 mod incremental_ui_tests;
