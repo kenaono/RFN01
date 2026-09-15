@@ -1,4 +1,6 @@
 //! Comparison and explicitly staged merge, preserving the editor's tabs and views.
+use crate::i18n::pick;
+use crate::say;
 use crate::{AppWindow, DiffRow, MAX_DOCUMENT_CHARACTERS, buffer::DocumentFile};
 use slint::Model;
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -68,11 +70,11 @@ fn aligned(left: &str, right: &str) -> Aligned {
 
 fn display_line(line: &str) -> String {
     let (body, end) = if let Some(body) = line.strip_suffix("\r\n") {
-        (body, " ［CRLF］")
+        (body, pick(" ［CRLF］", " [CRLF]"))
     } else if let Some(body) = line.strip_suffix('\n') {
-        (body, " ［改行］")
+        (body, pick(" ［改行］", " [LF]"))
     } else {
-        (line, " ［改行なし］")
+        (line, pick(" ［改行なし］", " [no line break]"))
     };
     format!("{}{end}", body.replace('\t', "→   "))
 }
@@ -93,16 +95,14 @@ fn populate(window: &AppWindow, left: String, right: String) {
     let aligned = aligned(&left, &right);
     let count = aligned.starts.len();
     let summary = if count == 0 {
-        "差分はありません".to_owned()
+        say!("差分はありません", "No differences")
     } else {
-        format!(
-            "差分 {count} 箇所{}",
-            if aligned.grouped {
-                "・広い変更をまとめて表示"
-            } else {
-                ""
-            }
-        )
+        let grouped = if aligned.grouped {
+            pick("・広い変更をまとめて表示", " (wide changes shown together)")
+        } else {
+            ""
+        };
+        say!("差分 {count} 箇所{grouped}", "{count} differences{grouped}")
     };
     let width = aligned
         .rows
@@ -129,7 +129,14 @@ fn populate(window: &AppWindow, left: String, right: String) {
             window.set_diff_selected_row(starts[index] as i32);
             window.set_diff_can_previous(index > 0);
             window.set_diff_can_next(index + 1 < starts.len());
-            window.set_diff_status(format!("{click_summary}（{}/{count}）", index + 1).into());
+            let at = index + 1;
+            window.set_diff_status(
+                say!(
+                    "{click_summary}（{at}/{count}）",
+                    "{click_summary} ({at}/{count})"
+                )
+                .into(),
+            );
         }
     });
     window.set_diff_rows(ModelRc::new(VecModel::from(aligned.rows)));
@@ -145,15 +152,27 @@ fn populate(window: &AppWindow, left: String, right: String) {
                 let index = aligned.starts.iter().position(|at| *at == row).unwrap() + 1;
                 window.set_diff_can_previous(index > 1);
                 window.set_diff_can_next(index < count);
-                window.set_diff_status(format!("{summary}（{index}/{count}）").into());
+                window.set_diff_status(
+                    say!(
+                        "{summary}（{index}/{count}）",
+                        "{summary} ({index}/{count})"
+                    )
+                    .into(),
+                );
             } else {
                 window.set_diff_status(
                     if count == 0 {
-                        "差分はありません"
+                        pick("差分はありません", "No differences")
                     } else if forward {
-                        "これより先の差分はありません"
+                        pick(
+                            "これより先の差分はありません",
+                            "No more differences after this",
+                        )
                     } else {
-                        "これより前の差分はありません"
+                        pick(
+                            "これより前の差分はありません",
+                            "No more differences before this",
+                        )
                     }
                     .into(),
                 );
@@ -166,9 +185,9 @@ fn populate(window: &AppWindow, left: String, right: String) {
             let copied = crate::clipboard::put_text(None, if right_side { &right } else { &left });
             window.set_diff_status(
                 if copied {
-                    "本文をコピーしました"
+                    pick("本文をコピーしました", "Copied the text")
                 } else {
-                    "コピーできませんでした"
+                    pick("コピーできませんでした", "Could not copy")
                 }
                 .into(),
             );
@@ -179,7 +198,10 @@ fn populate(window: &AppWindow, left: String, right: String) {
 fn read(path: &Path) -> Result<String, String> {
     DocumentFile::open(path, MAX_DOCUMENT_CHARACTERS)
         .map(|(_, text)| text)
-        .map_err(|error| format!("{}を開けません: {error}", path.display()))
+        .map_err(|error| {
+            let path = path.display();
+            say!("{path}を開けません: {error}", "Cannot open {path}: {error}")
+        })
 }
 
 fn dismiss(app: &AppWindow) {
@@ -273,7 +295,11 @@ pub fn show_merge(
         let count = selected.borrow().iter().filter(|chosen| **chosen).count();
         app.set_diff_can_apply(count > 0);
         app.set_diff_status(
-            format!("右を採用：{count} 箇所（まだ本文（左）には反映していません）").into(),
+            say!(
+                "右を採用：{count} 箇所（まだ本文（左）には反映していません）",
+                "Taking the right: {count} (not yet applied to the text on the left)"
+            )
+            .into(),
         );
     });
     let weak = app.as_weak();
@@ -283,11 +309,17 @@ pub fn show_merge(
             return;
         };
         if !Rc::ptr_eq(&live.states.document(pane), &document) || *document.text.borrow() != left {
-            app.set_diff_status("比較開始後に本文が変わりました。比較を開き直してください".into());
+            app.set_diff_status(
+                say!(
+                    "比較開始後に本文が変わりました。比較を開き直してください",
+                    "The text changed after the comparison started. Open the comparison again"
+                )
+                .into(),
+            );
             return;
         }
         if document.read_only() || live.states.of(pane).borrow().viewer {
-            app.set_diff_status("Viewerでは取り込めません".into());
+            app.set_diff_status(say!("Viewerでは取り込めません", "Cannot apply in Viewer").into());
             return;
         }
         let merged = merged_text(&left, &right, &choices.borrow());
@@ -295,7 +327,13 @@ pub fn show_merge(
             return;
         }
         if merged.chars().count() > MAX_DOCUMENT_CHARACTERS {
-            app.set_diff_status("文字数の上限を超えるため反映できません".into());
+            app.set_diff_status(
+                say!(
+                    "文字数の上限を超えるため反映できません",
+                    "Cannot apply: the text would exceed the character limit"
+                )
+                .into(),
+            );
             return;
         }
         let caret = live
@@ -314,7 +352,10 @@ pub fn show_merge(
             0..left.len(),
             &merged,
             (caret, caret),
-            "選択した差分を本文（左）に反映しました。Undoで戻せます",
+            pick(
+                "選択した差分を本文（左）に反映しました。Undoで戻せます",
+                "Applied the chosen differences to the text on the left. Undo reverts it",
+            ),
         );
         document.history.borrow_mut().separate_next = true;
         app.set_diff_active(false);
@@ -335,20 +376,34 @@ fn show_saved(app: &AppWindow, document: &crate::OpenDocument) {
     // Reading a clone preserves the document's agreed stamp and encoding settings.
     let mut file = document.file.borrow().clone();
     let Some(path) = file.path().map(Path::to_owned) else {
-        app.set_render_status("まだ保存先がありません。保存してから比較してください".into());
+        app.set_render_status(
+            say!(
+                "まだ保存先がありません。保存してから比較してください",
+                "This document has not been saved yet. Save it, then compare"
+            )
+            .into(),
+        );
         return;
     };
     match file.reload(MAX_DOCUMENT_CHARACTERS) {
         Some(Ok(right)) => show(
             app,
-            format!("本文（左）：{}", path.display()),
+            say!("本文（左）：{}", "Text (left): {}", path.display()),
             document.text.borrow().clone(),
-            format!("保存版（取得時点）：{}", path.display()),
+            say!(
+                "保存版（取得時点）：{}",
+                "Saved (when read): {}",
+                path.display()
+            ),
             right,
         ),
-        Some(Err(error)) => {
-            app.set_render_status(format!("保存版を比較できません: {error}").into())
-        }
+        Some(Err(error)) => app.set_render_status(
+            say!(
+                "保存版を比較できません: {error}",
+                "Cannot compare with saved: {error}"
+            )
+            .into(),
+        ),
         None => {}
     }
 }
@@ -357,13 +412,25 @@ fn show_saved(app: &AppWindow, document: &crate::OpenDocument) {
 fn show_head(app: &AppWindow, document: &crate::OpenDocument) {
     let file = document.file.borrow();
     let Some(path) = file.path().map(Path::to_owned) else {
-        app.set_render_status("まだ保存先がありません。保存してから比較してください".into());
+        app.set_render_status(
+            say!(
+                "まだ保存先がありません。保存してから比較してください",
+                "This document has not been saved yet. Save it, then compare"
+            )
+            .into(),
+        );
         return;
     };
     let (commit, bytes) = match crate::git_version::head_version(&path) {
         Ok(version) => version,
         Err(error) => {
-            app.set_render_status(format!("前回のCommitと比較できません: {error}").into());
+            app.set_render_status(
+                say!(
+                    "前回のCommitと比較できません: {error}",
+                    "Cannot compare with the last commit: {error}"
+                )
+                .into(),
+            );
             return;
         }
     };
@@ -374,14 +441,22 @@ fn show_head(app: &AppWindow, document: &crate::OpenDocument) {
     match right {
         Ok((right, _)) => show(
             app,
-            format!("本文（左）：{}", path.display()),
+            say!("本文（左）：{}", "Text (left): {}", path.display()),
             document.text.borrow().clone(),
-            format!("前回のCommit（{commit}）：{}", path.display()),
+            say!(
+                "前回のCommit（{commit}）：{}",
+                "Last commit ({commit}): {}",
+                path.display()
+            ),
             right,
         ),
-        Err(error) => {
-            app.set_render_status(format!("前回のCommitと比較できません: {error}").into())
-        }
+        Err(error) => app.set_render_status(
+            say!(
+                "前回のCommitと比較できません: {error}",
+                "Cannot compare with the last commit: {error}"
+            )
+            .into(),
+        ),
     }
 }
 
@@ -414,7 +489,7 @@ pub fn wire(app: &AppWindow, live: &crate::Live) {
             .borrow()
             .path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "未保存の文書".into());
+            .unwrap_or_else(|| say!("未保存の文書", "Unsaved document"));
         let weak = weak.clone();
         let live = live.clone();
         slint::Timer::single_shot(std::time::Duration::ZERO, move || {
@@ -422,9 +497,10 @@ pub fn wire(app: &AppWindow, live: &crate::Live) {
                 return;
             };
             let owner = crate::ime::window_handle(&app);
-            let Some(path) =
-                crate::file_dialog::open_document_named(owner, "比較対象のファイルを選択")
-            else {
+            let Some(path) = crate::file_dialog::open_document_named(
+                owner,
+                pick("比較対象のファイルを選択", "Choose a File to Compare"),
+            ) else {
                 return;
             };
             match read(&path) {
@@ -434,9 +510,9 @@ pub fn wire(app: &AppWindow, live: &crate::Live) {
                         &live,
                         pane,
                         document,
-                        format!("{label}（編集中の本文）"),
+                        say!("{label}（編集中の本文）", "{label} (text being edited)"),
                         left,
-                        format!("{}（保存内容）", path.display()),
+                        say!("{}（保存内容）", "{} (saved content)", path.display()),
                         right,
                     );
                 }

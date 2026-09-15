@@ -23,15 +23,26 @@ pub enum GitError {
 impl std::fmt::Display for GitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GitError::Missing => {
-                f.write_str("Gitが見つかりません（インストールされていないか、PATHにありません）")
-            }
-            GitError::NoCommit => f.write_str("Gitの管理下にないか、まだCommitがありません"),
-            GitError::Untrusted => f.write_str(
+            GitError::Missing => f.write_str(crate::i18n::pick(
+                "Gitが見つかりません（インストールされていないか、PATHにありません）",
+                "Git was not found (it is not installed, or not on PATH)",
+            )),
+            GitError::NoCommit => f.write_str(crate::i18n::pick(
+                "Gitの管理下にないか、まだCommitがありません",
+                "Not under Git, or there are no commits yet",
+            )),
+            GitError::Untrusted => f.write_str(crate::i18n::pick(
                 "フォルダの持ち主が違うため、Gitが読むのを断りました（safe.directoryへの追加が必要です）",
-            ),
-            GitError::NotCommitted => f.write_str("前回のCommitにこのファイルがありません"),
-            GitError::Failed(error) => write!(f, "Gitを実行できません: {error}"),
+                "Git refused to read a folder owned by someone else (add it to safe.directory)",
+            )),
+            GitError::NotCommitted => f.write_str(crate::i18n::pick(
+                "前回のCommitにこのファイルがありません",
+                "This file is not in the last commit",
+            )),
+            GitError::Failed(error) => f.write_str(&crate::say!(
+                "Gitを実行できません: {error}",
+                "Cannot run Git: {error}"
+            )),
         }
     }
 }

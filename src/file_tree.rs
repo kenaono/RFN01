@@ -156,10 +156,17 @@ impl NameProblem {
     /// What to tell the writer.
     pub fn message(self) -> String {
         match self {
-            Self::Empty => "名前を入れてください".to_string(),
-            Self::Character(bad) => format!("名前に {bad} は使えません"),
-            Self::TrailingDot => "終わりのピリオドは使えません".to_string(),
-            Self::Reserved => "Windowsが使う名前です".to_string(),
+            Self::Empty => crate::say!("名前を入れてください", "Enter a name"),
+            Self::Character(bad) => {
+                crate::say!("名前に {bad} は使えません", "A name cannot contain {bad}")
+            }
+            Self::TrailingDot => {
+                crate::say!(
+                    "終わりのピリオドは使えません",
+                    "A name cannot end with a period"
+                )
+            }
+            Self::Reserved => crate::say!("Windowsが使う名前です", "Windows reserves this name"),
         }
     }
 }
@@ -354,7 +361,10 @@ pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
     if same != wanted && to.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "同じ名前のものがあります",
+            crate::i18n::pick(
+                "同じ名前のものがあります",
+                "Something with that name already exists",
+            ),
         ));
     }
     fs::rename(from, to)
@@ -367,7 +377,10 @@ pub fn duplicate(path: &Path) -> io::Result<PathBuf> {
     let Some(parent) = path.parent() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "複製できる場所がありません",
+            crate::i18n::pick(
+                "複製できる場所がありません",
+                "There is nowhere to put a copy",
+            ),
         ));
     };
     let name = path.file_name().unwrap_or_default();

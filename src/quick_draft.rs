@@ -98,7 +98,13 @@ impl QuickDraftWindow {
             return;
         }
         let Ok(window) = QuickDraft::new() else {
-            owner.set_render_status("クイック下書き: 窓を作れません".into());
+            owner.set_render_status(
+                crate::say!(
+                    "クイック下書き: 窓を作れません",
+                    "Quick Draft: cannot create the window"
+                )
+                .into(),
+            );
             return;
         };
         wire_shortcuts(owner, &window);
@@ -137,7 +143,13 @@ impl QuickDraftWindow {
         wire(held, &window, editor);
 
         if window.show().is_err() {
-            owner.set_render_status("クイック下書き: 窓を出せません".into());
+            owner.set_render_status(
+                crate::say!(
+                    "クイック下書き: 窓を出せません",
+                    "Quick Draft: cannot show the window"
+                )
+                .into(),
+            );
             held.borrow_mut().open = None;
             return;
         }

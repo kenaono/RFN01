@@ -72,6 +72,7 @@ use directwrite_render::{
     CaretGeometry, LineFit, SelectionRect, TextEngine, TileSink, WritingMode, cells,
 };
 use document::{PreviewDocument, caret_place};
+use i18n::pick;
 use kill_ring::{KillAction, KillRing};
 use open_document::{Change, OpenDocument, replace_source_range};
 use pane_layout::{Layout, Rect, Split, Towards, neighbour};
@@ -441,7 +442,12 @@ const READ_ONLY_CHECK_TICK: Duration = Duration::from_millis(500);
 /// 最下行に「いる」とみなす余り（px）。ホイールの止まり方で1px足りないことがある。
 const READ_ONLY_END_SLACK: f32 = 2.0;
 /// ReadOnlyのあいだは縦書き・プレビューへ切り替えない（追加要件 2026-09-15）。
-const READ_ONLY_STAYS: &str = "ReadOnlyモードでは縦書き・プレビューに切り替えられません";
+fn read_only_stays() -> &'static str {
+    pick(
+        "ReadOnlyモードでは縦書き・プレビューに切り替えられません",
+        "ReadOnly mode cannot switch to vertical or preview",
+    )
+}
 /// How much one press of a typography control moves it, in percent. Character
 /// spacing is a fraction of the size rather than a multiple, so it steps finer.
 /// How large a heading is set at each level, as a percentage of body size
@@ -2830,7 +2836,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let id = PaneId::from_index(pane);
             // 追加要件 2026-09-15（書き手）: ReadOnlyはソース表示のまま。
             if id.reads_only(&window) {
-                window.set_render_status(READ_ONLY_STAYS.into());
+                window.set_render_status(read_only_stays().into());
                 return;
             }
             let document = states.document(id);
@@ -2867,7 +2873,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             // 追加要件 2026-09-15（書き手）: ReadOnlyは横書きだけ。
             if id.reads_only(&window) {
-                window.set_render_status(READ_ONLY_STAYS.into());
+                window.set_render_status(read_only_stays().into());
                 return;
             }
             toggle_pane_direction(&window, &states, &cache, id);
@@ -2933,9 +2939,9 @@ fn main() -> Result<(), slint::PlatformError> {
             selected_text(&source, &ranges)
         };
         window.set_render_status(if clipboard::put_text(ime::window_handle(&window), &text) {
-            "本文だけをコピーしました".into()
+            pick("本文だけをコピーしました", "Copied the text only").into()
         } else {
-            "クリップボードへ渡せませんでした".into()
+            clipboard_failed().into()
         });
     });
 
@@ -3081,8 +3087,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 &window,
                 &reset_live,
                 Question::ResetAll,
-                "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻り、文書ごとに選んだモードは「なし」になります。単語帳とモード、文字色のセットは残ります。".to_owned(),
-                &["既定に戻す", "キャンセル"],
+                say!(
+                    "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻り、文書ごとに選んだモードは「なし」になります。単語帳とモード、文字色のセットは残ります。",
+                    "Restore all settings to their defaults?\n\nGeneral, Terminal, Text, Layout, Page and Keys return to their defaults, and each document's mode becomes \"None\". Word sets, modes and color sets are kept."
+                ),
+                &[pick("既定に戻す", "Restore Defaults"), cancel()],
                 0,
             );
         }
@@ -3494,11 +3503,17 @@ fn main() -> Result<(), slint::PlatformError> {
             &window,
             live,
             Question::CloseWindow,
-            format!(
+            say!(
                 "保存していない文書が{unsaved}件あります。\n\n\
-                 自動退避を切ってあるので、閉じると元に戻せません。"
+                 自動退避を切ってあるので、閉じると元に戻せません。",
+                "{unsaved} documents are not saved.\n\n\
+                 Automatic backup is off, so closing cannot be undone."
             ),
-            &["すべて保存して閉じる", "破棄して閉じる", "キャンセル"],
+            &[
+                pick("すべて保存して閉じる", "Save All and Close"),
+                pick("破棄して閉じる", "Discard and Close"),
+                cancel(),
+            ],
             1,
         );
         CloseRequestResponse::KeepWindowShown
@@ -4387,8 +4402,55 @@ fn show_wallpaper(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
     }
 }
 
+/// 検索の語と、その語についての一言（国際化②）。
+fn quoted_needle(needle: &str, trouble: &str) -> String {
+    say!("「{needle}」{trouble}", "\"{needle}\" {trouble}")
+}
+
+fn cannot_rename(error: &dyn std::fmt::Display) -> String {
+    say!("名前を変えられません: {error}", "Cannot rename: {error}")
+}
+
+fn viewer_cannot_edit() -> &'static str {
+    pick("Viewerでは編集できません", "Cannot edit in Viewer")
+}
+
+fn no_work_folder() -> &'static str {
+    pick("作業フォルダがありません", "No work folder")
+}
+
+fn type_a_line() -> String {
+    say!("行番号を打ってください", "Type a line number")
+}
+
+fn lines_up_to(lines: usize) -> String {
+    say!("{lines}行までです", "There are {lines} lines")
+}
+
+fn line_range(lines: usize) -> String {
+    say!("1〜{lines}行", "Lines 1–{lines}")
+}
+
+/// 問いのやめる側（国際化②）。
+fn cancel() -> &'static str {
+    pick("キャンセル", "Cancel")
+}
+
+fn clipboard_failed() -> &'static str {
+    pick(
+        "クリップボードへ渡せませんでした",
+        "Could not put it on the clipboard",
+    )
+}
+
 fn report_wallpaper_error(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, error: &str) {
-    window.set_render_status(format!("背景の画像を読めませんでした: {error}").into());
+    window.set_render_status(
+        say!(
+            "背景の画像を読めませんでした: {error}",
+            "Could not read the background image: {error}"
+        )
+        .into(),
+    );
     cache.borrow_mut().log_diag(
         "wallpaper",
         &format!("failed kind={} error={error}", window.get_wall_kind()),
@@ -4503,8 +4565,15 @@ fn ask_outside_change(window: &AppWindow, live: &Live) {
             window,
             live,
             Question::OutsideChanged(path),
-            format!("「{title}」は別のアプリで変更されています。"),
-            &["外部の変更を読み込む", "ReadOnlyモードで読む", "キャンセル"],
+            say!(
+                "「{title}」は別のアプリで変更されています。",
+                "\"{title}\" was changed by another app."
+            ),
+            &[
+                pick("外部の変更を読み込む", "Load the Outside Change"),
+                pick("ReadOnlyモードで読む", "Read in ReadOnly Mode"),
+                cancel(),
+            ],
             -1,
         );
         return;
@@ -4513,16 +4582,11 @@ fn ask_outside_change(window: &AppWindow, live: &Live) {
         window,
         live,
         Question::SaveConflict { path, form },
-        format!(
-            "「{title}」は別のアプリで変更されています。\n\n             読み込むと、保存していない変更は失われます。"
+        say!(
+            "「{title}」は別のアプリで変更されています。\n\n読み込むと、保存していない変更は失われます。",
+            "\"{title}\" was changed by another app.\n\nLoading it loses your unsaved changes."
         ),
-        &[
-            "作業中の内容で上書き",
-            "外部の変更を読み込む",
-            "別名で保存",
-            "外部版と比べる",
-            "キャンセル",
-        ],
+        &saving::conflict_choices(),
         1,
     );
 }
@@ -4534,9 +4598,17 @@ fn ask_missing_file(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>
     document.missing.set(true);
     document.outside.set(true);
     publish_active_encoding(window, live);
-    ask_question(window, live, Question::MissingFile(path),
-        "ファイルが元の場所に見つからないため、外部版とは比較できません。\n編集中の本文とUndoは保持しています。必要な本文は別名で保存してください。".into(),
-        &["別名で保存…", "キャンセル"], -1);
+    ask_question(
+        window,
+        live,
+        Question::MissingFile(path),
+        say!(
+            "ファイルが元の場所に見つからないため、外部版とは比較できません。\n編集中の本文とUndoは保持しています。必要な本文は別名で保存してください。",
+            "The file is no longer where it was, so it cannot be compared.\nThe text and Undo are kept. Use Save As to keep the text."
+        ),
+        &[pick("別名で保存…", "Save As…"), cancel()],
+        -1,
+    );
 }
 
 /// Compare the current draft with the external file without acknowledging it.
@@ -4549,7 +4621,13 @@ fn open_external_snapshot(window: &AppWindow, live: &Live, path: &Path) {
     let text = match file.reload(MAX_DOCUMENT_CHARACTERS) {
         Some(Ok(text)) => text,
         Some(Err(error)) => {
-            window.set_render_status(format!("外部版を比較できません: {error}").into());
+            window.set_render_status(
+                say!(
+                    "外部版を比較できません: {error}",
+                    "Cannot compare with the outside version: {error}"
+                )
+                .into(),
+            );
             return;
         }
         None => return,
@@ -4559,9 +4637,17 @@ fn open_external_snapshot(window: &AppWindow, live: &Live, path: &Path) {
         live,
         focused_pane(window),
         source.clone(),
-        format!("{}（編集中の本文）", path.display()),
+        say!(
+            "{}（編集中の本文）",
+            "{} (text being edited)",
+            path.display()
+        ),
         source.text.borrow().clone(),
-        format!("{}（外部版・取得時点）", path.display()),
+        say!(
+            "{}（外部版・取得時点）",
+            "{} (outside version, when read)",
+            path.display()
+        ),
         text,
     );
 }
@@ -4669,9 +4755,12 @@ fn toggle_viewer(
     );
     window.set_render_status(
         match (viewer, reading) {
-            (true, true) => "ReadOnlyモードに切り替えました（最下行を追います）",
-            (true, false) => "Viewerモードに切り替えました",
-            (false, _) => "編集モードに戻りました",
+            (true, true) => pick(
+                "ReadOnlyモードに切り替えました（最下行を追います）",
+                "Switched to ReadOnly mode (following the last line)",
+            ),
+            (true, false) => pick("Viewerモードに切り替えました", "Switched to Viewer mode"),
+            (false, _) => pick("編集モードに戻りました", "Back to editing"),
         }
         .into(),
     );
@@ -4729,9 +4818,15 @@ fn follow_scroll(
     if was != at_end {
         window.set_render_status(
             if at_end {
-                "最下行に戻ったので、自動スクロールを再開しました"
+                pick(
+                    "最下行に戻ったので、自動スクロールを再開しました",
+                    "Back at the last line: automatic scrolling resumed",
+                )
             } else {
-                "自動スクロールを止めました（最下行まで戻すと再開します）"
+                pick(
+                    "自動スクロールを止めました（最下行まで戻すと再開します）",
+                    "Automatic scrolling stopped (scroll to the last line to resume)",
+                )
             }
             .into(),
         );
@@ -5036,10 +5131,10 @@ fn tell_goto(window: &AppWindow, live: &Live) {
         .logical_lines;
     let typed = window.get_goto_line().to_string();
     let told = match document::read_place(&typed) {
-        _ if typed.trim().is_empty() => format!("1〜{lines}行"),
-        None => "行番号を打ってください".to_owned(),
-        Some((line, _)) if line > lines => format!("{lines}行までです"),
-        Some(_) => format!("1〜{lines}行"),
+        _ if typed.trim().is_empty() => line_range(lines),
+        None => type_a_line(),
+        Some((line, _)) if line > lines => lines_up_to(lines),
+        Some(_) => line_range(lines),
     };
     window.set_goto_status(told.into());
 }
@@ -5094,7 +5189,7 @@ fn go_to_line(window: &AppWindow, live: &Live) {
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let Some((line, column)) = document::read_place(&typed) else {
-        window.set_goto_status("行番号を打ってください".into());
+        window.set_goto_status(type_a_line().into());
         return;
     };
     let lines = document
@@ -5104,7 +5199,7 @@ fn go_to_line(window: &AppWindow, live: &Live) {
         .stats()
         .logical_lines;
     let Some(at) = document::place_of(&source, line, column) else {
-        window.set_goto_status(format!("{lines}行までです").into());
+        window.set_goto_status(lines_up_to(lines).into());
         live.cache.borrow_mut().log_diag(
             "goto",
             &format!("pane={} line={line} of={lines} outside", id.log_name()),
@@ -5271,7 +5366,7 @@ fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
     let search = match find_search(window, id) {
         Ok(search) => search,
         Err(trouble) => {
-            window.set_count_find(format!("「{needle}」{trouble}").into());
+            window.set_count_find(quoted_needle(&needle, &trouble).into());
             say_in_bar(window, id, trouble);
             return;
         }
@@ -5378,7 +5473,11 @@ fn choose_find_option(window: &AppWindow, live: &Live, which: i32) {
             let on = screen.find_scope_end > screen.find_scope_start;
             let scope = if on { None } else { selected };
             if !on && scope.is_none() {
-                say_in_bar(window, id, "範囲が選ばれていません".to_owned());
+                say_in_bar(
+                    window,
+                    id,
+                    say!("範囲が選ばれていません", "No range is selected"),
+                );
                 return;
             }
             let (start, end) = scope.unwrap_or((0, 0));
@@ -5438,7 +5537,7 @@ fn tell_find(window: &AppWindow, id: PaneId, source: &str, selected: Option<(usi
         Err(trouble) => {
             // **書きかけの正規表現は「0件」ではない。**打っている途中の`(`に
             // 0件と答えるのは、探し方の話を数の話に見せかけることである。
-            window.set_count_find(format!("「{needle}」{trouble}").into());
+            window.set_count_find(quoted_needle(&needle, &trouble).into());
             id.update_screen(window, |screen| {
                 screen.find_status = trouble.into();
             });
@@ -5457,14 +5556,20 @@ fn tell_find(window: &AppWindow, id: PaneId, source: &str, selected: Option<(usi
     // 「`[]`の挙動が不安」）。`3 / 12`が文書ぜんぶの数なのか選んだ範囲の数なのか、
     // 数だけでは見分けられない——見えない状態は、無い状態と同じに見える。
     let scope = if find_rules(window, id).within.is_some() {
-        "・範囲内"
+        pick("・範囲内", " (in range)")
     } else {
         ""
     };
     let line = if total == 0 {
-        format!("「{needle}」は見つかりません{scope}")
+        say!(
+            "「{needle}」は見つかりません{scope}",
+            "\"{needle}\" not found{scope}"
+        )
     } else {
-        format!("「{needle}」{counted}{scope}")
+        say!(
+            "「{needle}」{counted}{scope}",
+            "\"{needle}\" {counted}{scope}"
+        )
     };
     window.set_count_find(line.into());
     id.update_screen(window, |screen| {
@@ -5489,9 +5594,9 @@ fn say_in_bar(window: &AppWindow, id: PaneId, told: String) {
 /// 出すのは、探し方の話を数の話に見せかけることである。
 fn found_status(total: usize, which: Option<usize>) -> String {
     match (total, which) {
-        (0, _) => "見つかりません".to_owned(),
+        (0, _) => say!("見つかりません", "Not found"),
         (total, Some(which)) => format!("{which} / {total}"),
-        (total, None) => format!("{total}件"),
+        (total, None) => say!("{total}件", "{total} found"),
     }
 }
 
@@ -5631,7 +5736,7 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     let replacement = screen.find_replacement.to_string();
     let document = live.states.document(id);
     if document.read_only() || id.screen(window).viewer {
-        window.set_render_status("Viewerでは編集できません".into());
+        window.set_render_status(viewer_cannot_edit().into());
         return;
     }
     let source = document.text.borrow().clone();
@@ -5645,7 +5750,11 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     };
     let (next, replaced) = search.replace_all(&source, &replacement);
     if replaced == 0 {
-        say_in_bar(window, id, format!("「{needle}」は見つかりません"));
+        say_in_bar(
+            window,
+            id,
+            say!("「{needle}」は見つかりません", "\"{needle}\" not found"),
+        );
         return;
     }
     // 2026-09-08: **置換も上限の内側にいる。**打鍵も貼り付けも
@@ -5654,8 +5763,9 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     // 開き直せないファイル**になる（読み込み側は同じ上限で断る）。
     // **確定の前に測る**ので、断るときは何も起きていない。
     if next.chars().count() > MAX_DOCUMENT_CHARACTERS {
-        let told = format!(
-            "文書の上限{MAX_DOCUMENT_CHARACTERS}文字を超えるため、{replaced}件の置換を取り消しました"
+        let told = say!(
+            "文書の上限{MAX_DOCUMENT_CHARACTERS}文字を超えるため、{replaced}件の置換を取り消しました",
+            "Undid {replaced} replacements: the document would exceed {MAX_DOCUMENT_CHARACTERS} characters"
         );
         say_in_bar(window, id, told);
         return;
@@ -5695,7 +5805,11 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
         Some(caret),
         change,
     );
-    say_in_bar(window, id, format!("{replaced}件置換しました"));
+    say_in_bar(
+        window,
+        id,
+        say!("{replaced}件置換しました", "Replaced {replaced}"),
+    );
 }
 
 /// Bring another pane along after an edit (要件 7.6).
@@ -5839,7 +5953,7 @@ fn show_searched_folder(window: &AppWindow, live: &Live) {
     let scoped = folder.searching.is_some();
     let told = match folder.searched_root() {
         Some(root) => entry_name(&root),
-        None => "作業フォルダがありません".to_owned(),
+        None => no_work_folder().to_owned(),
     };
     let path = folder
         .searched_root()
@@ -6185,7 +6299,7 @@ const HITS_PER_FILE: usize = 50;
 fn search_work_folder(window: &AppWindow, live: &Live) {
     let needle = window.get_folder_needle().to_string();
     let Some(root) = live.folder.borrow().searched_root() else {
-        window.set_folder_status("作業フォルダがありません".into());
+        window.set_folder_status(no_work_folder().into());
         return;
     };
     if needle.is_empty() {
@@ -6212,7 +6326,7 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
     };
     let handed_over = match live.searcher.dispatch(job) {
         Ok(()) => {
-            window.set_folder_status("検索しています…".into());
+            window.set_folder_status(pick("検索しています…", "Searching…").into());
             true
         }
         Err(job) => {
@@ -6288,9 +6402,12 @@ fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
     let total = outcome.total;
     let answered = outcome.files.len();
     let told = if total == 0 {
-        format!("「{}」は見つかりません", outcome.needle)
+        say!("「{}」は見つかりません", "\"{}\" not found", outcome.needle)
     } else {
-        format!("{total}件 / {answered}ファイル")
+        say!(
+            "{total}件 / {answered}ファイル",
+            "{total} found / {answered} files"
+        )
     };
     window.set_folder_status(told.into());
     let (generation, ms) = (outcome.generation, outcome.ms);
@@ -6307,11 +6424,23 @@ fn reveal_in_tree(window: &AppWindow, live: &Live, path: &Path) {
         return;
     };
     if !path.starts_with(&root) {
-        window.set_render_status("現在の文書は作業フォルダの外にあります".into());
+        window.set_render_status(
+            pick(
+                "現在の文書は作業フォルダの外にあります",
+                "The current document is outside the work folder",
+            )
+            .into(),
+        );
         return;
     }
     if !path.is_file() {
-        window.set_render_status("現在の文書のファイルが見つかりません".into());
+        window.set_render_status(
+            pick(
+                "現在の文書のファイルが見つかりません",
+                "The current document's file is missing",
+            )
+            .into(),
+        );
         return;
     }
     {
@@ -6335,7 +6464,13 @@ fn explorer_command(window: &AppWindow, live: &Live, command: i32) {
             if let Some(path) = path {
                 reveal_in_tree(window, live, &path);
             } else {
-                window.set_render_status("現在の文書には保存先がありません".into());
+                window.set_render_status(
+                    pick(
+                        "現在の文書には保存先がありません",
+                        "The current document has not been saved",
+                    )
+                    .into(),
+                );
             }
         }
         1 => {
@@ -6493,7 +6628,13 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
     };
     let path = document::link_path(target, wiki, document.file.borrow().path());
     let Some(path) = path else {
-        window.set_render_status("リンク先を解決できません。通常リンクにはファイルのパス、内部リンクにはフルパスを指定してください。".into());
+        window.set_render_status(
+            pick(
+                "リンク先を解決できません。通常リンクにはファイルのパス、内部リンクにはフルパスを指定してください。",
+                "Cannot resolve the link. Use a file path for a link, and a full path for an internal link.",
+            )
+            .into(),
+        );
         return true;
     };
     match std::fs::canonicalize(&path) {
@@ -6514,7 +6655,12 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
             open_path_in_pane(window, live, id, &path, Opening::Kept);
         }
         _ => window.set_render_status(
-            format!("リンク先のファイルを開けません: {}", path.display()).into(),
+            say!(
+                "リンク先のファイルを開けません: {}",
+                "Cannot open the linked file: {}",
+                path.display()
+            )
+            .into(),
         ),
     }
     true
@@ -6608,12 +6754,15 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
                 // 画面からしか知りようがない。開けたこと自体は画面が言って
                 // いる——タブがそこに増えている。
                 if mixed {
-                    window.set_render_status("改行コードが混在していました".into());
+                    window.set_render_status(
+                        pick("改行コードが混在していました", "The line breaks were mixed").into(),
+                    );
                 }
                 OpenDocument::new(file, text, window.as_weak())
             }
             Err(error) => {
-                window.set_render_status(format!("開けません: {error}").into());
+                window
+                    .set_render_status(say!("開けません: {error}", "Cannot open: {error}").into());
                 live.cache
                     .borrow_mut()
                     .log_diag("file", &format!("open failed path={shown} error={error}"));
@@ -6797,7 +6946,7 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
                 window,
                 live,
                 Question::RenameEntry(path),
-                "新しい名前を入れてください。".to_string(),
+                say!("新しい名前を入れてください。", "Enter a new name."),
                 &now_called,
             );
         }
@@ -6815,7 +6964,7 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
                     write_session(window, live);
                 }
                 Err(error) => {
-                    let told = format!("複製できません: {error}");
+                    let told = say!("複製できません: {error}", "Cannot duplicate: {error}");
                     window.set_render_status(told.into());
                 }
             }
@@ -6856,9 +7005,9 @@ fn begin_tree_entry(window: &AppWindow, live: &Live, parent: PathBuf, folder: bo
     let suggested = file_tree::unique_name(
         &file_tree::names_in(&parent),
         if folder {
-            "新しいフォルダー"
+            pick("新しいフォルダー", "New folder")
         } else {
-            "無題.md"
+            pick("無題.md", "Untitled.md")
         },
     );
     window.set_tree_new_name(suggested.into());
@@ -6899,7 +7048,7 @@ fn finish_tree_entry(window: &AppWindow, live: &Live, accept: bool) {
         file_tree::create_file(&path)
     };
     if let Err(error) = result {
-        window.set_tree_new_error(format!("作れません: {error}").into());
+        window.set_tree_new_error(say!("作れません: {error}", "Cannot create: {error}").into());
         return;
     }
     {
@@ -6931,7 +7080,7 @@ fn rename_entry(window: &AppWindow, live: &Live, from: &Path) {
     };
     let to = parent.join(name);
     if let Err(error) = move_entry(window, live, from, &to) {
-        let told = format!("名前を変えられません: {error}");
+        let told = cannot_rename(&error);
         window.set_render_status(told.into());
         return;
     }
@@ -6980,11 +7129,13 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
             window,
             live,
             Question::ReplaceOnMove(source, to),
-            format!(
+            say!(
                 "「{going}」はすでにあります。\n\n\
-                 いまある「{going}」はごみ箱へ移ります。Windowsのごみ箱から戻せます。"
+                 いまある「{going}」はごみ箱へ移ります。Windowsのごみ箱から戻せます。",
+                "\"{going}\" already exists.\n\n\
+                 The existing \"{going}\" goes to the Recycle Bin, where you can restore it."
             ),
-            &["上書きする", "キャンセル"],
+            &[pick("上書きする", "Replace"), cancel()],
             0,
         );
         return;
@@ -7000,7 +7151,13 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
 fn replace_on_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     let owner = ime::window_handle(window);
     if !shell::recycle(owner, to) {
-        window.set_render_status("ごみ箱へ移動できませんでした".into());
+        window.set_render_status(
+            pick(
+                "ごみ箱へ移動できませんでした",
+                "Could not move it to the Recycle Bin",
+            )
+            .into(),
+        );
         return;
     }
     finish_move(window, live, from, to);
@@ -7009,7 +7166,7 @@ fn replace_on_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 /// Carry out a move that has nothing left to ask (要件 5.2).
 fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     if let Err(error) = move_entry(window, live, from, to) {
-        let told = format!("移動できません: {error}");
+        let told = say!("移動できません: {error}", "Cannot move: {error}");
         window.set_render_status(told.into());
         return;
     }
@@ -7105,11 +7262,12 @@ fn ask_delete_entry(window: &AppWindow, live: &Live, path: &Path) {
             window,
             live,
             Question::DeleteEntry(path.to_owned()),
-            format!(
+            say!(
                 "「{}」をごみ箱へ移動し、開いているTABを閉じます。\nWindowsのごみ箱から戻せます。",
+                "Moves \"{}\" to the Recycle Bin and closes its open tabs.\nYou can restore it from the Recycle Bin.",
                 entry_name(path)
             ),
-            &["ごみ箱へ移動", "キャンセル"],
+            &[pick("ごみ箱へ移動", "Move to Recycle Bin"), cancel()],
             0,
         );
     } else {
@@ -7117,16 +7275,21 @@ fn ask_delete_entry(window: &AppWindow, live: &Live, path: &Path) {
             .iter()
             .map(|(p, _)| entry_name(p))
             .collect::<Vec<_>>()
-            .join("、");
+            .join(pick("、", ", "));
         ask_question(
             window,
             live,
             Question::DeleteEdited(path.to_owned(), dirty),
-            format!(
+            say!(
                 "「{}」を削除します。\n未保存の変更があります：{names}\n保存してからごみ箱へ移動しますか？ 開いているTABも閉じます。",
+                "Deleting \"{}\".\nThese have unsaved changes: {names}\nSave them before moving to the Recycle Bin? Open tabs are closed too.",
                 entry_name(path)
             ),
-            &["保存してごみ箱へ移動", "保存せずごみ箱へ移動", "キャンセル"],
+            &[
+                pick("保存してごみ箱へ移動", "Save and Move to Recycle Bin"),
+                pick("保存せずごみ箱へ移動", "Move to Recycle Bin without Saving"),
+                cancel(),
+            ],
             1,
         );
     }
@@ -7138,7 +7301,11 @@ fn save_before_delete(window: &AppWindow, live: &Live, documents: &[Rc<OpenDocum
         d.outside.get() || d.file.borrow().external_change() != buffer::ExternalChange::None
     }) {
         window.set_render_status(
-            "外部変更があります。保存時の確認を済ませてから削除をやり直してください".into(),
+            pick(
+                "外部変更があります。保存時の確認を済ませてから削除をやり直してください",
+                "Some files changed outside. Settle that when saving, then delete again",
+            )
+            .into(),
         );
         return false;
     }
@@ -7165,7 +7332,13 @@ fn delete_entry_with(
 ) {
     let documents = deleting_documents(live, path);
     if !recycle(path) {
-        window.set_render_status("ごみ箱へ移動できませんでした。TABは保持しています".into());
+        window.set_render_status(
+            pick(
+                "ごみ箱へ移動できませんでした。TABは保持しています",
+                "Could not move it to the Recycle Bin. The tab is kept",
+            )
+            .into(),
+        );
         return;
     }
     live.closed_tabs.borrow_mut().retain(|tab| {
@@ -7632,9 +7805,9 @@ fn stepped_place(places: usize, at: usize, forward: bool) -> Option<usize> {
 /// There is nothing that way (書き手の報告 2026-09-07).
 fn told_no_way(window: &AppWindow, forward: bool) {
     let told = if forward {
-        "これより先はありません"
+        pick("これより先はありません", "Nothing further forward")
     } else {
-        "これより前はありません"
+        pick("これより前はありません", "Nothing further back")
     };
     window.set_render_status(told.into());
 }
@@ -7648,23 +7821,32 @@ fn told_no_way(window: &AppWindow, forward: bool) {
 fn tab_title(tab: &PaneTab) -> String {
     match &tab.terminal {
         Some(session) => session.borrow().name().to_owned(),
-        None if tab.empty => NEW_TAB_NAME.to_owned(),
-        None if tab.settings => SETTINGS_TAB_NAME.to_owned(),
+        None if tab.empty => new_tab_name().to_owned(),
+        None if tab.settings => settings_tab_name().to_owned(),
         None => tab
             .document
             .external_snapshot
             .as_ref()
-            .map(|(title, _)| format!("{title}［外部版・読み取り専用］"))
+            .map(|(title, _)| {
+                say!(
+                    "{title}［外部版・読み取り専用］",
+                    "{title} [outside version, read-only]"
+                )
+            })
             .unwrap_or_else(|| tab.document.file.borrow().title()),
     }
 }
 
 /// 追加要件 2026-09-07: what a tab is called before it is anything.
-const NEW_TAB_NAME: &str = "New Tab";
+fn new_tab_name() -> &'static str {
+    pick("新しいTAB", "New Tab")
+}
 
 /// 追加要件 2026-09-14: what the settings are called in a strip — the same word
 /// as the button at the foot of the rail that opens them.
-const SETTINGS_TAB_NAME: &str = "Settings";
+fn settings_tab_name() -> &'static str {
+    pick("設定", "Settings")
+}
 
 /// Show another tab in one pane (要件 6.3).
 fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
@@ -8191,10 +8373,15 @@ fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
         window,
         live,
         Question::LastWorkCopyFailed,
-        format!(
-            "最後の自動退避を{lost}件書けませんでした。\n\nこのまま閉じると、退避していない変更は戻せません。"
+        say!(
+            "最後の自動退避を{lost}件書けませんでした。\n\nこのまま閉じると、退避していない変更は戻せません。",
+            "The last automatic backup failed for {lost}.\n\nClosing now loses the changes that were not backed up."
         ),
-        &["もう一度試す", "文書を保存する…", "閉じない"],
+        &[
+            pick("もう一度試す", "Try Again"),
+            pick("文書を保存する…", "Save Documents…"),
+            pick("閉じない", "Don't Close"),
+        ],
         -1,
     );
     true
@@ -8226,7 +8413,13 @@ fn reset_all_settings(window: &AppWindow, live: &Live) {
     window.invoke_terminal_reset();
     window.invoke_shortcut_reset_all();
     window.invoke_typography_reset(-1);
-    window.set_render_status("すべての設定を既定に戻しました".into());
+    window.set_render_status(
+        pick(
+            "すべての設定を既定に戻しました",
+            "Restored all settings to their defaults",
+        )
+        .into(),
+    );
 }
 
 /// Put a question in front of the writer.
@@ -8279,7 +8472,14 @@ fn ask_for_name(
     suggested_name: &str,
 ) {
     window.set_question_name(suggested_name.into());
-    ask_question(window, live, question, text, &["決定", "キャンセル"], -1);
+    ask_question(
+        window,
+        live,
+        question,
+        text,
+        &[pick("決定", "OK"), cancel()],
+        -1,
+    );
     window.set_question_asks_name(true);
     let asked = window.get_question_generation();
     window.set_question_generation(asked + 1);
@@ -8345,11 +8545,13 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                 window,
                 live,
                 Question::DiscardOnClose { pane, index },
-                format!(
+                say!(
                     "「{title}」の保存していない変更を破棄します。\n\n\
-                     作業コピーも削除するので、元に戻せません。"
+                     作業コピーも削除するので、元に戻せません。",
+                    "Discarding the unsaved changes to \"{title}\".\n\n\
+                     The work copy is deleted too, so this cannot be undone."
                 ),
-                &["破棄する", "キャンセル"],
+                &[pick("破棄する", "Discard"), cancel()],
                 0,
             );
         }
@@ -8386,7 +8588,13 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             // 取り消した文書がまだ編集中のまま残っている——そのまま閉じるのは
             // 書き手が断ったことをやることになる。
             if open_documents(live).iter().any(|held| held.text.edited()) {
-                window.set_render_status("保存していない文書が残っています".into());
+                window.set_render_status(
+                    pick(
+                        "保存していない文書が残っています",
+                        "Some documents are still unsaved",
+                    )
+                    .into(),
+                );
                 return;
             }
             window.hide().ok();
@@ -8410,7 +8618,13 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             // 何も失わせない。**残っていれば閉じない**：「名前を付けて保存」を
             // 取り消した文書がまだ編集中で、そこには失うものがある。
             if open_documents(live).iter().any(|held| held.text.edited()) {
-                window.set_render_status("保存していない文書が残っています".into());
+                window.set_render_status(
+                    pick(
+                        "保存していない文書が残っています",
+                        "Some documents are still unsaved",
+                    )
+                    .into(),
+                );
                 return;
             }
             window.hide().ok();
@@ -8564,7 +8778,13 @@ fn reopen_as_asked(window: &AppWindow, live: &Live, encoding: file_io::Encoding)
     // **ファイルが無ければ開き直せない。**新しい文書はまだどこにも無く、
     // 読み直す相手がいない——③（指定文字コードで保存する）がその道である。
     let Some(path) = path else {
-        window.set_render_status("まだ保存していない文書は開き直せません".into());
+        window.set_render_status(
+            pick(
+                "まだ保存していない文書は開き直せません",
+                "A document that has not been saved cannot be reopened",
+            )
+            .into(),
+        );
         return;
     };
     let name = encoding.as_str();
@@ -8577,10 +8797,15 @@ fn reopen_as_asked(window: &AppWindow, live: &Live, encoding: file_io::Encoding)
         window,
         live,
         Question::ReopenAs { path, encoding },
-        format!(
-            "「{title}」を{name}で開き直します。\n\n保存していない変更は、ファイルを読み直したときに失われます。"
+        say!(
+            "「{title}」を{name}で開き直します。\n\n保存していない変更は、ファイルを読み直したときに失われます。",
+            "Reopening \"{title}\" as {name}.\n\nUnsaved changes are lost when the file is read again."
         ),
-        &["保存して開き直す", "破棄して開き直す", "キャンセル"],
+        &[
+            pick("保存して開き直す", "Save and Reopen"),
+            pick("破棄して開き直す", "Discard and Reopen"),
+            cancel(),
+        ],
         1,
     );
 }
@@ -8624,11 +8849,16 @@ fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool 
             window,
             live,
             Question::CloseMemo { pane: id, index },
-            format!(
+            say!(
                 "「{}」を閉じます。\n\n残す場合は名前を付けて保存してください。キャンセルするとタブに戻ります。",
+                "Closing \"{}\".\n\nUse Save As to keep it. Cancel returns to the tab.",
                 document.file.borrow().title()
             ),
-            &["名前を付けて保存", "破棄", "キャンセル"],
+            &[
+                pick("名前を付けて保存", "Save As"),
+                pick("破棄", "Discard"),
+                cancel(),
+            ],
             1,
         );
         return true;
@@ -8653,15 +8883,17 @@ fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool 
             window,
             live,
             Question::CloseTab { pane: id, index },
-            format!(
+            say!(
                 "「{title}」には保存していない変更があります。\n\n\
-                 作業コピーを残して閉じると、次に起動したときに戻ってきます。"
+                 作業コピーを残して閉じると、次に起動したときに戻ってきます。",
+                "\"{title}\" has unsaved changes.\n\n\
+                 Keeping the work copy brings them back the next time you start."
             ),
             &[
-                "保存して閉じる",
-                "作業コピーを残して閉じる",
-                "破棄して閉じる",
-                "キャンセル",
+                pick("保存して閉じる", "Save and Close"),
+                pick("作業コピーを残して閉じる", "Keep Work Copy and Close"),
+                pick("破棄して閉じる", "Discard and Close"),
+                cancel(),
             ],
             2,
         );
@@ -8671,11 +8903,17 @@ fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool 
         window,
         live,
         Question::CloseTab { pane: id, index },
-        format!(
+        say!(
             "「{title}」には保存していない変更があります。\n\n\
-             自動退避を切ってあるので、閉じると元に戻せません。"
+             自動退避を切ってあるので、閉じると元に戻せません。",
+            "\"{title}\" has unsaved changes.\n\n\
+             Automatic backup is off, so closing cannot be undone."
         ),
-        &["保存して閉じる", "破棄して閉じる", "キャンセル"],
+        &[
+            pick("保存して閉じる", "Save and Close"),
+            pick("破棄して閉じる", "Discard and Close"),
+            cancel(),
+        ],
         1,
     );
     true
@@ -8761,7 +8999,9 @@ fn close_clean_tabs(window: &AppWindow, live: &Live, id: PaneId) {
             .collect::<VecDeque<_>>()
     };
     if left.is_empty() {
-        window.set_render_status("閉じられるタブはありません".into());
+        window.set_render_status(
+            pick("閉じられるタブはありません", "There are no tabs to close").into(),
+        );
         return;
     }
     *live.close_run.borrow_mut() = Some(CloseRun { left });
@@ -8780,11 +9020,17 @@ fn copy_tab_path(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
     // **A tab that stands for nothing on disk has no path to give.** 無題1 reads
     // like a name on screen and is filed under nothing.
     let Some(path) = path else {
-        window.set_render_status("このタブにはまだ保存先がありません".into());
+        window.set_render_status(
+            pick(
+                "このタブにはまだ保存先がありません",
+                "This tab has not been saved yet",
+            )
+            .into(),
+        );
         return;
     };
     if !clipboard::put_text(ime::window_handle(window), &path.display().to_string()) {
-        window.set_render_status("クリップボードへ渡せませんでした".into());
+        window.set_render_status(clipboard_failed().into());
     }
 }
 
@@ -8843,7 +9089,13 @@ fn cancel_close_run(live: &Live) {
 fn reopen_closed_tab(window: &AppWindow, live: &Live) {
     loop {
         let Some(mut tab) = live.closed_tabs.borrow_mut().pop() else {
-            window.set_render_status("開き直せるTABはありません".into());
+            window.set_render_status(
+                pick(
+                    "開き直せるTABはありません",
+                    "There are no closed tabs to reopen",
+                )
+                .into(),
+            );
             return;
         };
         let path = tab.document.file.borrow().path().map(Path::to_owned);
@@ -9035,11 +9287,17 @@ fn divide_pane(window: &AppWindow, live: &Live, here: PaneId, split: Split) {
     // word rather than silently, because a menu row that does nothing looks
     // exactly like one that is broken.
     if (across - pane_layout::DIVIDER) / 2.0 < pane_layout::MIN_PANE {
-        window.set_render_status("分割: これ以上は狭くなりすぎます".into());
+        window.set_render_status(
+            pick(
+                "分割: これ以上は狭くなりすぎます",
+                "Split: the panes would be too narrow",
+            )
+            .into(),
+        );
         return;
     }
     if PaneId::count(window) >= MAX_PANES {
-        window.set_render_status("分割: ペインが多すぎます".into());
+        window.set_render_status(pick("分割: ペインが多すぎます", "Split: too many panes").into());
         return;
     }
     let new = PaneId(PaneId::count(window) as u32);
@@ -9194,7 +9452,13 @@ fn rename_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, typed: 
         // Nothing is filed under 無題1, so there is nothing to rename. **Said
         // rather than ignored**: the press was held on purpose, and a gesture
         // that does nothing without a word looks broken.
-        window.set_render_status("名前の変更: 先に保存してください".into());
+        window.set_render_status(
+            pick(
+                "名前の変更: 先に保存してください",
+                "Rename: save the document first",
+            )
+            .into(),
+        );
         return;
     };
     if typed == entry_name(&path) {
@@ -9212,7 +9476,7 @@ fn rename_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, typed: 
     };
     let to = parent.join(name);
     if let Err(error) = move_entry(window, live, &path, &to) {
-        window.set_render_status(format!("名前を変えられません: {error}").into());
+        window.set_render_status(cannot_rename(&error).into());
         return;
     }
     publish_left(window, live);
@@ -10250,7 +10514,10 @@ fn open_word_modes(window: &AppWindow, live: &Live) {
         Some((stored, damaged)) => {
             if damaged > 0 {
                 // **黙って半分になった辞書は、いちばん気づきにくい失い方**である。
-                let told = format!("単語帳の{damaged}行を読めませんでした");
+                let told = say!(
+                    "単語帳の{damaged}行を読めませんでした",
+                    "Could not read {damaged} lines of the word sets"
+                );
                 window.set_render_status(told.into());
                 live.cache
                     .borrow_mut()
@@ -10267,7 +10534,13 @@ fn open_word_modes(window: &AppWindow, live: &Live) {
             // 読めないからといって捨ててよいものではない——この実行は色分けの
             // 無いまま進み、書き手がファイルを見に行ける。
             if app_data::words_path(&directory).exists() {
-                window.set_render_status("単語帳を読めませんでした（上書きしません）".into());
+                window.set_render_status(
+                    pick(
+                        "単語帳を読めませんでした（上書きしません）",
+                        "Could not read the word sets (not overwriting them)",
+                    )
+                    .into(),
+                );
                 live.cache.borrow_mut().log_diag("spec", "words unreadable");
                 WORD_STORING.with(|storing| storing.set(false));
             }
@@ -10366,7 +10639,7 @@ fn publish_word_modes(window: &AppWindow) {
     // 消す必要は無い（コードエディタの`Plain Text`にあたる）。
     let mut names: Vec<WordModeRow> = vec![WordModeRow {
         id: 0,
-        name: word_marks::NO_MODE.into(),
+        name: word_marks::no_mode().into(),
     }];
     names.extend(modes.iter().map(|marks| WordModeRow {
         id: marks.mode.id as i32,
@@ -10429,11 +10702,11 @@ fn publish_word_modes(window: &AppWindow) {
                     .iter()
                     .map(named)
                     .collect::<Vec<String>>()
-                    .join(" と ")
+                    .join(pick(" と ", " and "))
                     .into(),
                 word_marks::Trouble::Repeated => {
                     let name = trouble.groups.first().map_or(String::new(), |at| named(at));
-                    format!("{name} の中で二度").into()
+                    say!("{name} の中で二度", "twice in {name}").into()
                 }
             },
         })
@@ -10498,7 +10771,7 @@ fn publish_word_mode_of(window: &AppWindow, live: &Live) {
     window.set_word_mode(id as i32);
     // **番号ではなく名前を見せる。**指しているのは番号でも、書き手が読むのは名前。
     window.set_word_mode_name(if name.is_empty() {
-        word_marks::NO_MODE.into()
+        word_marks::no_mode().into()
     } else {
         name.into()
     });
@@ -10510,9 +10783,9 @@ fn publish_word_mode_of(window: &AppWindow, live: &Live) {
     // 書き手は自分の原稿のほうを疑うことになる。
     let conflicts = marks.conflicts();
     window.set_word_mode_trouble(if !WORD_STORING.with(std::cell::Cell::get) {
-        "辞書を読めていません".into()
+        pick("辞書を読めていません", "The word sets are not read").into()
     } else if conflicts > 0 {
-        format!("色が付かない語 {conflicts}").into()
+        say!("色が付かない語 {conflicts}", "Uncolored words {conflicts}").into()
     } else {
         SharedString::new()
     });
@@ -10573,14 +10846,22 @@ fn close_word_naming(window: &AppWindow) {
 fn new_word_mode(window: &AppWindow, live: &Live, name: &str) -> Result<(), String> {
     let mut modes = word_modes_now();
     if modes.len() >= word_marks::MAX_WORD_MODES {
-        return Err(format!("モードは{}個までです", word_marks::MAX_WORD_MODES));
+        return Err(say!(
+            "モードは{}個までです",
+            "Up to {} modes",
+            word_marks::MAX_WORD_MODES
+        ));
     }
     let name = name.trim();
-    if name.is_empty() || name == word_marks::NO_MODE {
-        return Err("その名前は使えません".to_owned());
+    if name.is_empty() || [word_marks::NO_MODE_NAMES.0, word_marks::NO_MODE_NAMES.1].contains(&name)
+    {
+        return Err(say!("その名前は使えません", "That name cannot be used"));
     }
     if modes.iter().any(|mode| mode.name == name) {
-        return Err(format!("「{name}」はもうあります"));
+        return Err(say!(
+            "「{name}」はもうあります",
+            "\"{name}\" already exists"
+        ));
     }
     modes.push(word_marks::WordMode {
         id: next_word_id(),
@@ -10599,17 +10880,24 @@ fn new_word_mode(window: &AppWindow, live: &Live, name: &str) -> Result<(), Stri
 fn new_word_group(window: &AppWindow, live: &Live, at: usize, name: &str) -> Result<(), String> {
     let mut modes = word_modes_now();
     let Some(mode) = modes.get_mut(at) else {
-        return Err("先にモードを開いてください".to_owned());
+        return Err(say!("先にモードを開いてください", "Open a mode first"));
     };
     if mode.groups.len() >= word_marks::MAX_WORD_GROUPS {
-        return Err(format!("語群は{}つまでです", word_marks::MAX_WORD_GROUPS));
+        return Err(say!(
+            "語群は{}つまでです",
+            "Up to {} groups",
+            word_marks::MAX_WORD_GROUPS
+        ));
     }
     let name = name.trim();
     if name.is_empty() {
-        return Err("その名前は使えません".to_owned());
+        return Err(say!("その名前は使えません", "That name cannot be used"));
     }
     if mode.groups.iter().any(|group| group.name == name) {
-        return Err(format!("「{name}」はもうあります"));
+        return Err(say!(
+            "「{name}」はもうあります",
+            "\"{name}\" already exists"
+        ));
     }
     let colour = next_word_colour(&mode.groups);
     mode.groups.push(word_marks::WordGroup {
@@ -10630,18 +10918,25 @@ fn new_word_group(window: &AppWindow, live: &Live, at: usize, name: &str) -> Res
 fn rename_word_mode(window: &AppWindow, live: &Live, at: usize, name: &str) -> Result<(), String> {
     let mut modes = word_modes_now();
     let name = name.trim();
-    if name.is_empty() || name == word_marks::NO_MODE {
-        return Err("その名前は使えません".to_owned());
+    if name.is_empty() || [word_marks::NO_MODE_NAMES.0, word_marks::NO_MODE_NAMES.1].contains(&name)
+    {
+        return Err(say!("その名前は使えません", "That name cannot be used"));
     }
     if modes
         .iter()
         .enumerate()
         .any(|(index, mode)| index != at && mode.name == name)
     {
-        return Err(format!("「{name}」はもうあります"));
+        return Err(say!(
+            "「{name}」はもうあります",
+            "\"{name}\" already exists"
+        ));
     }
     let Some(mode) = modes.get_mut(at) else {
-        return Err("そのモードはもうありません".to_owned());
+        return Err(say!(
+            "そのモードはもうありません",
+            "That mode no longer exists"
+        ));
     };
     if mode.name == name {
         return Ok(());
@@ -10663,11 +10958,11 @@ fn rename_word_group(
 ) -> Result<(), String> {
     let mut modes = word_modes_now();
     let Some(held) = modes.get_mut(mode) else {
-        return Err("先にモードを開いてください".to_owned());
+        return Err(say!("先にモードを開いてください", "Open a mode first"));
     };
     let name = name.trim();
     if name.is_empty() {
-        return Err("その名前は使えません".to_owned());
+        return Err(say!("その名前は使えません", "That name cannot be used"));
     }
     if held
         .groups
@@ -10675,10 +10970,16 @@ fn rename_word_group(
         .enumerate()
         .any(|(index, group)| index != at && group.name == name)
     {
-        return Err(format!("「{name}」はもうあります"));
+        return Err(say!(
+            "「{name}」はもうあります",
+            "\"{name}\" already exists"
+        ));
     }
     let Some(group) = held.groups.get_mut(at) else {
-        return Err("その語群はもうありません".to_owned());
+        return Err(say!(
+            "その語群はもうありません",
+            "That group no longer exists"
+        ));
     };
     if group.name == name {
         return Ok(());
@@ -10697,7 +10998,13 @@ fn rename_word_group(
 /// 行列に残ったぶんが後から着いても害は無い。
 fn edit_word_file(window: &AppWindow, live: &Live) {
     let Some(directory) = app_data::app_directory() else {
-        window.set_render_status("単語帳の置き場所が分かりません".into());
+        window.set_render_status(
+            pick(
+                "単語帳の置き場所が分かりません",
+                "Cannot find where the word sets are kept",
+            )
+            .into(),
+        );
         return;
     };
     let held = app_data::StoredWords {
@@ -10712,15 +11019,33 @@ fn edit_word_file(window: &AppWindow, live: &Live) {
         && let Err(error) =
             file_io::write_atomically(&path, app_data::encode_words(&held).as_bytes())
     {
-        window.set_render_status(format!("単語帳を書けません: {error}").into());
+        window.set_render_status(
+            say!(
+                "単語帳を書けません: {error}",
+                "Cannot write the word sets: {error}"
+            )
+            .into(),
+        );
         return;
     }
     if !path.exists() {
-        window.set_render_status("単語帳のファイルがありません".into());
+        window.set_render_status(
+            pick(
+                "単語帳のファイルがありません",
+                "The word set file is missing",
+            )
+            .into(),
+        );
         return;
     }
     open_path_in_focused_pane(window, live, &path, Opening::Kept);
-    window.set_render_status("単語帳を開きました（保存すると取り込みます）".into());
+    window.set_render_status(
+        pick(
+            "単語帳を開きました（保存すると取り込みます）",
+            "Opened the word sets (saving takes them in)",
+        )
+        .into(),
+    );
 }
 
 /// 単語帳のファイルが保存されたので、そこから読み直す（同要件 5.4）。
@@ -10743,9 +11068,12 @@ fn adopt_word_file(window: &AppWindow, live: &Live) {
             let modes: Vec<word_marks::WordMode> =
                 stored.modes.iter().map(mode_from_stored).collect();
             let told = if damaged > 0 {
-                format!("単語帳を取り込みました（{damaged}行は読めませんでした）")
+                say!(
+                    "単語帳を取り込みました（{damaged}行は読めませんでした）",
+                    "Took in the word sets ({damaged} lines could not be read)"
+                )
             } else {
-                "単語帳を取り込みました".to_owned()
+                say!("単語帳を取り込みました", "Took in the word sets")
             };
             // **書き戻さない。**いま読んだものがファイルの中身なので、書けば
             // 開いているタブに外部変更として立つだけである（要件 8.2）。
@@ -10755,7 +11083,13 @@ fn adopt_word_file(window: &AppWindow, live: &Live) {
         }
         None => {
             WORD_STORING.with(|storing| storing.set(false));
-            window.set_render_status("単語帳を読めませんでした（取り込みません）".into());
+            window.set_render_status(
+                pick(
+                    "単語帳を読めませんでした（取り込みません）",
+                    "Could not read the word sets (not taking them in)",
+                )
+                .into(),
+            );
             live.cache
                 .borrow_mut()
                 .log_diag("spec", "words unreadable after edit");
@@ -10778,14 +11112,26 @@ pub fn is_word_file(path: &Path) -> bool {
 fn add_word_to_group(window: &AppWindow, live: &Live, mode: u32, at: usize, word: &str) {
     let word = word.trim();
     if word.is_empty() || word.contains('\n') {
-        window.set_render_status("1行に収まる語だけを足せます".into());
+        window.set_render_status(
+            pick(
+                "1行に収まる語だけを足せます",
+                "Only a word on one line can be added",
+            )
+            .into(),
+        );
         return;
     }
     // **`#`で始まる語は足せない**（2026-09-08）。その形は覚え書きのもので、
     // 足せてしまうと一覧の中で見出しに化ける——見出しの行を選んで足そうとした
     // ときに起きる。
     if word_marks::is_note(word) {
-        window.set_render_status("`#`で始まる語は足せません（覚え書きの印です）".into());
+        window.set_render_status(
+            pick(
+                "`#`で始まる語は足せません（覚え書きの印です）",
+                "A word starting with `#` cannot be added (it marks a note)",
+            )
+            .into(),
+        );
         return;
     }
     let mut modes = word_modes_now();
@@ -10802,14 +11148,24 @@ fn add_word_to_group(window: &AppWindow, live: &Live, mode: u32, at: usize, word
         .iter()
         .any(|held| held.eq_ignore_ascii_case(word))
     {
-        let told = format!("「{word}」は{}にもう入っています", group.name);
+        let told = say!(
+            "「{word}」は{}にもう入っています",
+            "\"{word}\" is already in {}",
+            group.name
+        );
         window.set_render_status(told.into());
         return;
     }
     group.words.push(word.to_owned());
     let name = group.name.clone();
     hold_word_modes(window, live, modes, true);
-    window.set_render_status(format!("「{word}」を{name}へ足しました").into());
+    window.set_render_status(
+        say!(
+            "「{word}」を{name}へ足しました",
+            "Added \"{word}\" to {name}"
+        )
+        .into(),
+    );
 }
 
 /// 語群から語を1つ落とす（要件 7.9）。
@@ -10851,10 +11207,15 @@ fn export_word_group(window: &AppWindow, mode: usize, at: usize) {
     }
     match file_io::write_atomically(&target, out.as_bytes()) {
         Ok(_) => {
-            let told = format!("{}語を書き出しました", group.word_count());
+            let told = say!(
+                "{}語を書き出しました",
+                "Exported {} words",
+                group.word_count()
+            );
             window.set_render_status(told.into());
         }
-        Err(error) => window.set_render_status(format!("書き出せません: {error}").into()),
+        Err(error) => window
+            .set_render_status(say!("書き出せません: {error}", "Cannot export: {error}").into()),
     }
 }
 
@@ -11771,9 +12132,9 @@ impl PaneId {
     /// What this pane is called in a message.
     fn label(self, window: &AppWindow) -> &'static str {
         if self.vertical(window) {
-            "縦書き"
+            pick("縦書き", "Vertical")
         } else {
-            "横書き"
+            pick("横書き", "Horizontal")
         }
     }
 
@@ -12836,16 +13197,23 @@ fn lay_out_pane(
         .as_ref()
         .map(|diff| {
             let target = if document.read_only() {
-                "編集中の本文と比較"
+                pick("編集中の本文と比較", "Compared with the text being edited")
             } else {
-                "外部版（取得時）と比較"
+                pick(
+                    "外部版（取得時）と比較",
+                    "Compared with the outside version (when read)",
+                )
             };
             let grouped = if diff.grouped {
-                "・広い変更をまとめて表示"
+                pick("・広い変更をまとめて表示", " (wide changes shown together)")
             } else {
                 ""
             };
-            format!("{target}：差分{}箇所{grouped}", diff.ranges.len())
+            say!(
+                "{target}：差分{}箇所{grouped}",
+                "{target}: {} differences{grouped}",
+                diff.ranges.len()
+            )
         })
         .unwrap_or_default();
     id.update_screen(window, |screen| {
@@ -12991,7 +13359,9 @@ fn lay_out_pane(
         Ok(measured) => measured,
         Err(error) => {
             let label = id.label(window);
-            window.set_render_status(format!("{label}整形: NG / {error}").into());
+            window.set_render_status(
+                say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into(),
+            );
             return None;
         }
     };
@@ -13514,7 +13884,11 @@ fn start_shell(
             live.cache
                 .borrow_mut()
                 .log_diag("terminal", &format!("open {} {error}", shell.command));
-            let told = format!("{}を開けませんでした: {error}", shell.name);
+            let told = say!(
+                "{}を開けませんでした: {error}",
+                "Could not open {}: {error}",
+                shell.name
+            );
             window.set_render_status(told.into());
             None
         }
@@ -13837,7 +14211,7 @@ fn copy_terminal_selection(window: &AppWindow, live: &Live, id: PaneId, spot: Te
         return;
     }
     if !clipboard::put_text(ime::window_handle(window), &text) {
-        window.set_render_status("クリップボードへ渡せませんでした".into());
+        window.set_render_status(clipboard_failed().into());
     }
 }
 
@@ -14206,7 +14580,13 @@ fn refresh_pane(
         Ok(caret) => caret,
         Err(error) => {
             let label = id.label(window);
-            window.set_render_status(format!("{label}座標計算: NG / {error}").into());
+            window.set_render_status(
+                say!(
+                    "{label}座標計算: NG / {error}",
+                    "{label} geometry: NG / {error}"
+                )
+                .into(),
+            );
             update_status(
                 window,
                 id,
@@ -14236,7 +14616,13 @@ fn refresh_pane(
         Ok(rects) => rects,
         Err(error) => {
             let label = id.label(window);
-            window.set_render_status(format!("{label}選択座標: NG / {error}").into());
+            window.set_render_status(
+                say!(
+                    "{label}選択座標: NG / {error}",
+                    "{label} selection geometry: NG / {error}"
+                )
+                .into(),
+            );
             update_status(
                 window,
                 id,
@@ -14266,7 +14652,13 @@ fn refresh_pane(
     };
     id.set_matches(window, &match_rects);
     if let Err(error) = cache.refresh_pane_differences(window, id) {
-        window.set_render_status(format!("差分の表示に失敗しました: {error}").into());
+        window.set_render_status(
+            say!(
+                "差分の表示に失敗しました: {error}",
+                "Could not show the differences: {error}"
+            )
+            .into(),
+        );
     }
     let scope_rects = {
         let engine = &mut cache.pane(id).graphics.engine;
@@ -14336,7 +14728,13 @@ fn refresh_pane(
         Ok(counts) => counts,
         Err(error) => {
             let label = id.label(window);
-            window.set_render_status(format!("{label}遅延タイル: NG / {error}").into());
+            window.set_render_status(
+                say!(
+                    "{label}遅延タイル: NG / {error}",
+                    "{label} deferred tiles: NG / {error}"
+                )
+                .into(),
+            );
             return;
         }
     };
@@ -14570,7 +14968,13 @@ fn refresh_after_across_scroll(
         .borrow_mut()
         .refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
     if let Err(error) = result {
-        window.set_render_status(format!("表示範囲の描画に失敗しました: {error}").into());
+        window.set_render_status(
+            say!(
+                "表示範囲の描画に失敗しました: {error}",
+                "Could not draw the visible range: {error}"
+            )
+            .into(),
+        );
     }
 }
 
@@ -14621,7 +15025,13 @@ fn refresh_after_scroll(
         .engine
         .prepare_viewport(offset, id.shown_flow(window))
     {
-        window.set_render_status(format!("表示範囲の整形に失敗しました: {error}").into());
+        window.set_render_status(
+            say!(
+                "表示範囲の整形に失敗しました: {error}",
+                "Could not lay out the visible range: {error}"
+            )
+            .into(),
+        );
     }
     let engine = &cache.pane(id).graphics.engine;
     let total = engine.total_flow_size();
@@ -14650,13 +15060,22 @@ fn refresh_after_scroll(
             format!("tiles={count}/{want} new={new} ms={ms:.1}")
         }
         Err(error) => {
-            let line = format!("{label}遅延タイル: NG / {error}");
+            let line = say!(
+                "{label}遅延タイル: NG / {error}",
+                "{label} deferred tiles: NG / {error}"
+            );
             window.set_render_status(line.into());
             "tiles=-".to_owned()
         }
     };
     if let Err(error) = cache.refresh_pane_selection(window, id) {
-        window.set_render_status(format!("{label}選択座標: NG / {error}").into());
+        window.set_render_status(
+            say!(
+                "{label}選択座標: NG / {error}",
+                "{label} selection geometry: NG / {error}"
+            )
+            .into(),
+        );
     }
     // **Only when something was drawn.** A wheel raises one of these every few
     // pixels, and a line per notch buries the run that mattered.
@@ -14918,8 +15337,9 @@ fn update_status(
         })
         .sum();
     let long_paragraph = if stats.longest_line_characters > PARAGRAPH_WARNING_CHARACTERS {
-        format!(
+        say!(
             "最長段落 {}文字（長すぎます）",
+            "Longest paragraph {} chars (too long)",
             stats.longest_line_characters
         )
     } else {
@@ -14929,11 +15349,11 @@ fn update_status(
     let caret = match source_caret {
         Some(byte) => {
             let (line, column) = caret_place(source, byte);
-            format!("Ln {line}, Col {column}")
+            say!("{line}行、{column}列", "Ln {line}, Col {column}")
         }
         None => String::new(),
     };
-    let lines = format!("{} lines", thousands(stats.logical_lines));
+    let lines = say!("{}行", "{} lines", thousands(stats.logical_lines));
     // 要件 7.8・要件 10: **ルビは既定では数えない。**投稿サイトへ出すための
     // 字数はルビを含まないので、そちらを初期値にしてある。両方を数えてある
     // （`DocumentStats::ruby_characters`）ので、設定を切り替えても数え直しは
@@ -14943,9 +15363,9 @@ fn update_status(
     } else {
         stats.body_characters.saturating_sub(stats.ruby_characters)
     };
-    let body = format!("{} chars", thousands(counted));
-    let source = format!("{} source", thousands(stats.source_characters));
-    let selected = format!("{} selected", thousands(selected_characters));
+    let body = say!("{}字", "{} chars", thousands(counted));
+    let source = say!("原文 {}字", "{} source", thousands(stats.source_characters));
+    let selected = say!("選択 {}字", "{} selected", thousands(selected_characters));
     window.set_count_lines(lines.into());
     window.set_count_body(body.into());
     window.set_count_source(source.into());
@@ -14977,7 +15397,7 @@ fn publish_encoding(window: &AppWindow, document: &OpenDocument) {
         ""
     };
     let mixed = if form.mixed_newlines {
-        "（混在）"
+        pick("（混在）", " (mixed)")
     } else {
         ""
     };
@@ -15362,7 +15782,9 @@ fn hit_test_pane(
         &typography,
         through,
     ) {
-        window.set_render_status(format!("{label}整形: NG / {error}").into());
+        window.set_render_status(
+            say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into(),
+        );
         return None;
     }
     // E3: **番号を押したかどうかは、ここでしか分からない。**欄の広さを知って
@@ -15380,7 +15802,13 @@ fn hit_test_pane(
             is_inside: hit.is_inside,
         }),
         Err(error) => {
-            window.set_render_status(format!("{label}ヒットテスト: NG / {error}").into());
+            window.set_render_status(
+                say!(
+                    "{label}ヒットテスト: NG / {error}",
+                    "{label} hit test: NG / {error}"
+                )
+                .into(),
+            );
             None
         }
     }
@@ -15450,7 +15878,9 @@ fn lay_out_for_caret<'a>(
         through,
     ) {
         let label = id.label(window);
-        window.set_render_status(format!("{label}整形: NG / {error}").into());
+        window.set_render_status(
+            say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into(),
+        );
         return None;
     }
     Some(MeasuredPane { shown, engine })
@@ -15748,7 +16178,10 @@ fn drag_caret_only(
             );
         }
         (Err(error), _) | (_, Err(error)) => {
-            let line = format!("{label}選択座標: NG / {error}");
+            let line = say!(
+                "{label}選択座標: NG / {error}",
+                "{label} selection geometry: NG / {error}"
+            );
             window.set_render_status(line.into());
         }
     }
@@ -15907,7 +16340,7 @@ fn paste_targets(
         .get(target.max(0) as usize)
         .filter(|_| target >= 0)
         .cloned()
-        .unwrap_or_else(|| NO_TARGET.to_owned());
+        .unwrap_or_else(|| no_target().to_owned());
     quick_draft::TabList {
         rows,
         target,
@@ -15916,7 +16349,9 @@ fn paste_targets(
 }
 
 /// What the send button says when it has nowhere to send to.
-const NO_TARGET: &str = "Paste to tab…";
+fn no_target() -> &'static str {
+    pick("TABへ貼り付け…", "Paste to tab…")
+}
 
 /// How a tab is named in the draft's own file, so that the next run finds it
 /// again (要件 12.4).
@@ -15991,7 +16426,7 @@ fn insert_pane_text(
     // 何か入力すると戻る」）。
     id.set_ime_buffer(window, "");
     if document.read_only() || id.screen(window).viewer {
-        window.set_render_status("Viewerでは編集できません".into());
+        window.set_render_status(viewer_cannot_edit().into());
         return;
     }
     let input = normalize_typed_input(text);
@@ -16214,7 +16649,7 @@ fn apply_span_edit(
 ) {
     let document = live.states.document(id);
     if document.read_only() || id.screen(window).viewer {
-        window.set_render_status("Viewerでは編集できません".into());
+        window.set_render_status(viewer_cannot_edit().into());
         return;
     }
     let state = live.states.of(id);
@@ -16470,7 +16905,7 @@ fn undo_in_pane(
     forwards: bool,
 ) {
     if document.read_only() || id.screen(window).viewer {
-        window.set_render_status("Viewerでは編集できません".into());
+        window.set_render_status(viewer_cannot_edit().into());
         return;
     }
     let state = states.of(id);
@@ -16564,11 +16999,17 @@ fn toggle_mark(
     // cannot tell reads the next arrow key as the feature not working
     // (書き手の報告 2026-09-07).
     let told = match (marking, rectangular) {
-        (false, _) => "選択終了",
+        (false, _) => pick("選択終了", "Selection ended"),
         // **やめ方も一緒に言う**（書き手の報告 2026-09-12）。始まったことだけ
         // 言って終わり方を言わないと、押した覚えのない書き手には出口が無い。
-        (true, false) => "選択開始：矢印かクリックで範囲を決めます（Escapeでやめます）",
-        (true, true) => "矩形選択開始：矢印かクリックで範囲を決めます（Escapeでやめます）",
+        (true, false) => pick(
+            "選択開始：矢印かクリックで範囲を決めます（Escapeでやめます）",
+            "Selection started: arrows or a click set the range (Escape stops)",
+        ),
+        (true, true) => pick(
+            "矩形選択開始：矢印かクリックで範囲を決めます（Escapeでやめます）",
+            "Rectangular selection started: arrows or a click set the range (Escape stops)",
+        ),
     };
     window.set_render_status(told.into());
     refresh_pane_from_state(window, cache, document, id, &state, &source);
@@ -16633,7 +17074,7 @@ fn escape_in_pane(
         .log_diag("edit", &format!("escape pane={} at={caret}", id.log_name()));
     // **止めたことを画面が言う。**印を下ろしたときと同じ知らせにする：
     // 起きたことは同じ「選ぶのをやめた」である。
-    window.set_render_status("選択終了".into());
+    window.set_render_status(pick("選択終了", "Selection ended").into());
     refresh_pane_from_state(window, cache, document, id, &state, &source);
     true
 }
@@ -16900,7 +17341,7 @@ fn copy_selection(
         return;
     }
     if !clipboard::put_text(ime::window_handle(window), &selected_text(&source, &ranges)) {
-        window.set_render_status("クリップボードへ渡せませんでした".into());
+        window.set_render_status(clipboard_failed().into());
         return;
     }
     if cut {
@@ -17042,7 +17483,7 @@ fn splice_source(
     caret: usize,
 ) {
     if document.read_only() || id.screen(window).viewer {
-        window.set_render_status("Viewerでは編集できません".into());
+        window.set_render_status(viewer_cannot_edit().into());
         return;
     }
     if start >= end {
@@ -17157,7 +17598,13 @@ fn move_pane_caret(
         Ok(moved) => moved,
         Err(error) => {
             let label = id.label(window);
-            window.set_render_status(format!("{label}キャレット移動: NG / {error}").into());
+            window.set_render_status(
+                say!(
+                    "{label}キャレット移動: NG / {error}",
+                    "{label} caret move: NG / {error}"
+                )
+                .into(),
+            );
             return;
         }
     };
@@ -17314,7 +17761,7 @@ fn set_pane_preedit(
     text: &str,
 ) {
     if document.read_only() || id.screen(window).viewer {
-        window.set_render_status("Viewerでは編集できません".into());
+        window.set_render_status(viewer_cannot_edit().into());
         return;
     }
     let source = document.text.borrow().clone();
@@ -17443,8 +17890,9 @@ fn normalize_typed_input(input: &str) -> String {
 /// Said rather than done quietly: refusing without a word looks like a dropped
 /// keystroke, and the writer has no way to tell the two apart.
 fn over_limit_message(input: &str) -> String {
-    format!(
+    say!(
         "文書の上限{}文字を超えるため、{}文字の入力を取り消しました",
+        "Undid {1} characters of input: the document limit is {0} characters",
         MAX_DOCUMENT_CHARACTERS,
         input.chars().count()
     )

@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::pick;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
@@ -36,21 +37,36 @@ pub type Owner = Option<HWND>;
 /// longer than the dialog that reads them.
 ///
 /// **`すべてのファイル`が最後で、初めから選ばれているのはそれ**（[`ALL_FILES`]）。
-fn filters() -> [COMDLG_FILTERSPEC; 3] {
+///
+/// **絞り込みの名前は言語で変わる**（国際化②）ので、字列は呼ぶ側が[`filter_names`]で持ち、
+/// ダイアログを出し終えるまで生かしておく。
+fn filters(names: &[HSTRING; 3]) -> [COMDLG_FILTERSPEC; 3] {
     [
         COMDLG_FILTERSPEC {
-            pszName: w!("Markdown (*.md)"),
+            pszName: PCWSTR(names[0].as_ptr()),
             pszSpec: w!("*.md;*.markdown"),
         },
         COMDLG_FILTERSPEC {
-            pszName: w!("テキスト (*.txt)"),
+            pszName: PCWSTR(names[1].as_ptr()),
             pszSpec: w!("*.txt"),
         },
         COMDLG_FILTERSPEC {
-            pszName: w!("すべてのファイル"),
+            pszName: PCWSTR(names[2].as_ptr()),
             pszSpec: w!("*.*"),
         },
     ]
+}
+
+fn filter_names() -> [HSTRING; 3] {
+    [
+        HSTRING::from("Markdown (*.md)"),
+        HSTRING::from(pick("テキスト (*.txt)", "Text (*.txt)")),
+        HSTRING::from(all_files()),
+    ]
+}
+
+fn all_files() -> &'static str {
+    pick("すべてのファイル", "All Files")
 }
 
 /// [`filters`]の何番目が初めから選ばれているか（**1から数える**、Windowsの決めごと）。
@@ -70,11 +86,12 @@ const ALL_FILES: u32 = 3;
 /// `None` for a cancel, and for the rare failure to show the dialog at all.
 /// The two mean the same thing here: no file was chosen, so nothing changes.
 pub fn open_document(owner: Owner) -> Option<PathBuf> {
-    open_document_named(owner, "開く")
+    open_document_named(owner, pick("開く", "Open"))
 }
 
 pub fn open_document_named(owner: Owner, title: &str) -> Option<PathBuf> {
-    let filters = filters();
+    let names = filter_names();
+    let filters = filters(&names);
     // SAFETY: COM is initialised on this thread — it is the window's, and the
     // apartment is the one 技術検証 7.3 settled on. Every string the shell
     // hands back is freed in `chosen_path`.
@@ -99,7 +116,8 @@ pub fn open_document_named(owner: Owner, title: &str) -> Option<PathBuf> {
 /// テキストで、開く先も違う（設定に覚えるだけで、タブは開かない）——**同じ絵の
 /// ダイアログが2つの用事に出るなら、題でそれを言う**。
 pub fn open_word_set(owner: Owner) -> Option<PathBuf> {
-    let filters = filters();
+    let names = filter_names();
+    let filters = filters(&names);
     // SAFETY: `open_document`と同じ——COMは窓のスレッドで初期化済みで、
     // シェルが返した文字列は`chosen_path`が解放する。
     unsafe {
@@ -107,7 +125,10 @@ pub fn open_word_set(owner: Owner) -> Option<PathBuf> {
         let dialog: IFileDialog = created.ok()?;
         let _ = dialog.SetFileTypes(&filters);
         let _ = dialog.SetFileTypeIndex(ALL_FILES);
-        let _ = dialog.SetTitle(w!("語群へ取り込むファイルを選ぶ（1行に1語）"));
+        let _ = dialog.SetTitle(&HSTRING::from(pick(
+            "語群へ取り込むファイルを選ぶ（1行に1語）",
+            "Choose a File to Take into the Group (One Word per Line)",
+        )));
         if let Ok(options) = dialog.GetOptions() {
             let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM);
         }
@@ -120,13 +141,20 @@ pub fn open_word_set(owner: Owner) -> Option<PathBuf> {
 /// 背景の壁紙にする画像を選ぶ（追加要件 2026-09-15）。**Windowsが読める画像なら何でも**
 /// （WICで読む）ので、絞り込みは目安で、すべてのファイルも選べる。
 pub fn open_image(owner: Owner) -> Option<PathBuf> {
+    let names = [
+        HSTRING::from(pick(
+            "画像 (*.jpg;*.png;*.bmp;*.gif;*.webp;*.tif)",
+            "Images (*.jpg;*.png;*.bmp;*.gif;*.webp;*.tif)",
+        )),
+        HSTRING::from(all_files()),
+    ];
     let filters = [
         COMDLG_FILTERSPEC {
-            pszName: w!("画像 (*.jpg;*.png;*.bmp;*.gif;*.webp;*.tif)"),
+            pszName: PCWSTR(names[0].as_ptr()),
             pszSpec: w!("*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.jxr;*.heic"),
         },
         COMDLG_FILTERSPEC {
-            pszName: w!("すべてのファイル"),
+            pszName: PCWSTR(names[1].as_ptr()),
             pszSpec: w!("*.*"),
         },
     ];
@@ -137,7 +165,10 @@ pub fn open_image(owner: Owner) -> Option<PathBuf> {
         let dialog: IFileDialog = created.ok()?;
         let _ = dialog.SetFileTypes(&filters);
         let _ = dialog.SetFileTypeIndex(1);
-        let _ = dialog.SetTitle(w!("背景の画像を選ぶ"));
+        let _ = dialog.SetTitle(&HSTRING::from(pick(
+            "背景の画像を選ぶ",
+            "Choose a Background Image",
+        )));
         if let Ok(options) = dialog.GetOptions() {
             let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM);
         }
@@ -154,7 +185,7 @@ pub fn open_image(owner: Owner) -> Option<PathBuf> {
 /// "browse for folder" here: the old one of those is the tree with no address
 /// bar and no typing, and nobody wants it.
 pub fn open_folder(owner: Owner) -> Option<PathBuf> {
-    open_folder_from(owner, None, w!("作業フォルダを開く"))
+    open_folder_from(owner, None, pick("作業フォルダを開く", "Open Work Folder"))
 }
 
 /// The same dialog, opened inside a folder the caller names (要件 7.7).
@@ -164,19 +195,15 @@ pub fn open_folder(owner: Owner) -> Option<PathBuf> {
 /// tree; a dialog that starts over at the desktop each time makes the second
 /// step as long as the first.
 pub fn open_folder_at(owner: Owner, start: Option<&Path>) -> Option<PathBuf> {
-    open_folder_from(owner, start, w!("検索するフォルダ"))
+    open_folder_from(owner, start, pick("検索するフォルダ", "Folder to Search"))
 }
 
-fn open_folder_from(
-    owner: Owner,
-    start: Option<&Path>,
-    title: windows::core::PCWSTR,
-) -> Option<PathBuf> {
+fn open_folder_from(owner: Owner, start: Option<&Path>, title: &str) -> Option<PathBuf> {
     // SAFETY: as in `open_document`.
     unsafe {
         let created = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER);
         let dialog: IFileDialog = created.ok()?;
-        let _ = dialog.SetTitle(title);
+        let _ = dialog.SetTitle(&HSTRING::from(title));
         if let Ok(options) = dialog.GetOptions() {
             let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PICKFOLDERS);
         }
@@ -263,7 +290,8 @@ pub fn save_document_as(
     suggested_name: &str,
     fields: SaveFields,
 ) -> Option<SaveChoice> {
-    let filters = filters();
+    let names = filter_names();
+    let filters = filters(&names);
     let suggested = HSTRING::from(suggested_name);
     // SAFETY: as above.
     unsafe {
@@ -271,7 +299,7 @@ pub fn save_document_as(
         let dialog: IFileDialog = created.ok()?;
         let _ = dialog.SetFileTypes(&filters);
         let _ = dialog.SetFileTypeIndex(ALL_FILES);
-        let _ = dialog.SetTitle(w!("名前を付けて保存"));
+        let _ = dialog.SetTitle(&HSTRING::from(pick("名前を付けて保存", "Save As")));
         // **付け足す拡張子は、その文書のもの。**`.txt`の原稿を保存するのに
         // `.md`が足されるのは、種類の欄が`Markdown`と出ていたのと同じ食い違い
         // である——名前に拡張子があるならそれ、無いときだけこの編集器の既定
@@ -293,7 +321,7 @@ pub fn save_document_as(
                 customize,
                 ENCODING_GROUP,
                 ENCODING_COMBO,
-                w!("文字コード"),
+                pick("文字コード", "Encoding"),
                 fields.encodings,
                 fields.encoding,
             );
@@ -301,7 +329,7 @@ pub fn save_document_as(
                 customize,
                 NEWLINE_GROUP,
                 NEWLINE_COMBO,
-                w!("改行コード"),
+                pick("改行コード", "Line Breaks"),
                 fields.newlines,
                 fields.newline,
             );
@@ -339,7 +367,7 @@ unsafe fn add_field(
     customize: &IFileDialogCustomize,
     group: u32,
     combo: u32,
-    title: PCWSTR,
+    title: &str,
     labels: &[&str],
     chosen: u32,
 ) {
@@ -348,7 +376,7 @@ unsafe fn add_field(
     }
     // SAFETY: 呼ぶ側の決めごとのとおり。
     unsafe {
-        let _ = customize.StartVisualGroup(group, title);
+        let _ = customize.StartVisualGroup(group, &HSTRING::from(title));
         let _ = customize.AddComboBox(combo);
         for (index, label) in labels.iter().enumerate() {
             let text = HSTRING::from(*label);

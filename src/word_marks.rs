@@ -87,7 +87,13 @@ pub const SHOWN_TROUBLES: usize = 50;
 ///
 /// コードエディタの`Plain Text`にあたる。**必ず選べる**ので、色分けを止めるのに
 /// モードを消す必要が無い。
-pub const NO_MODE: &str = "なし";
+///
+/// **言語で名前が変わる**（国際化②）。どちらの名前も、書き手が付けるモードの名前には使えない。
+pub const NO_MODE_NAMES: (&str, &str) = ("なし", "None");
+
+pub fn no_mode() -> &'static str {
+    crate::i18n::pick(NO_MODE_NAMES.0, NO_MODE_NAMES.1)
+}
 
 /// ひとつの語群——名前と、色と、語（要件 7.9）。
 ///

@@ -21,7 +21,18 @@ pub const ENGLISH: i32 = 2;
 static SHOWING_JAPANESE: AtomicBool = AtomicBool::new(true);
 
 pub fn japanese() -> bool {
+    #[cfg(test)]
+    if let Some(japanese) = TEST_LANGUAGE.with(std::cell::Cell::get) {
+        return japanese;
+    }
     SHOWING_JAPANESE.load(Ordering::Relaxed)
+}
+
+// 試験は並んで走り、ほかの試験は日本語の文言を期待している。**言語を変える試験は自分の
+// スレッドだけで変える。**
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_LANGUAGE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// 日本語と英語の対から、いまの言語のほうを選ぶ。
@@ -31,6 +42,22 @@ pub fn pick<'a>(japanese_text: &'a str, english_text: &'a str) -> &'a str {
     } else {
         english_text
     }
+}
+
+/// 日本語と英語の対から、いまの言語のほうを`format!`で組む（国際化②）。
+///
+/// **書式の文字列は定数でなければならない**ので、[`pick`]で選んでから`format!`へは
+/// 渡せない——選ぶのを式の外に出したのがこれ。`{title}`のような名前での取り込みは
+/// どちらの文にも効き、`{}`へ渡す値は後ろに並べる（走るのは片方だけ）。
+#[macro_export]
+macro_rules! say {
+    ($japanese:literal, $english:literal $(, $argument:expr)* $(,)?) => {
+        if $crate::i18n::japanese() {
+            format!($japanese $(, $argument)*)
+        } else {
+            format!($english $(, $argument)*)
+        }
+    };
 }
 
 /// Windows の表示言語が日本語か。
@@ -120,5 +147,151 @@ mod tests {
         missing.sort();
         assert!(used.len() > 200, "found {} texts", used.len());
         assert!(missing.is_empty(), "no Japanese for: {missing:?}");
+    }
+
+    /// 国際化②: **Rustから画面へ出す日本語の文は、英語と対になっているか。**
+    ///
+    /// 日本語の字（かな・漢字）を含む文字列は、すぐ後ろに`, "英語"`が続いていなければならない
+    /// ——[`pick`](super::pick)・[`say!`]・Keysの操作名の組がその形である。対の無い文は英語の画面に
+    /// 日本語のまま出るだけで、ビルドも試験も通ってしまうので、ここで数える。
+    /// 画面に出ないもの（記法・診断ログ・試験の本文）だけを名指しで外す。
+    #[test]
+    fn every_rust_message_has_an_english_pair() {
+        let sources = [
+            ("app_data.rs", include_str!("app_data.rs")),
+            ("buffer.rs", include_str!("buffer.rs")),
+            ("clipboard.rs", include_str!("clipboard.rs")),
+            ("code_page.rs", include_str!("code_page.rs")),
+            ("comparison.rs", include_str!("comparison.rs")),
+            ("diag.rs", include_str!("diag.rs")),
+            ("diff_view.rs", include_str!("diff_view.rs")),
+            ("directwrite_probe.rs", include_str!("directwrite_probe.rs")),
+            (
+                "directwrite_render.rs",
+                include_str!("directwrite_render.rs"),
+            ),
+            (
+                "directwrite_render/incremental.rs",
+                include_str!("directwrite_render/incremental.rs"),
+            ),
+            ("document.rs", include_str!("document.rs")),
+            ("file_dialog.rs", include_str!("file_dialog.rs")),
+            ("file_io.rs", include_str!("file_io.rs")),
+            ("file_tree.rs", include_str!("file_tree.rs")),
+            ("find.rs", include_str!("find.rs")),
+            ("git_version.rs", include_str!("git_version.rs")),
+            ("ime.rs", include_str!("ime.rs")),
+            ("kill_ring.rs", include_str!("kill_ring.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("open_document.rs", include_str!("open_document.rs")),
+            ("pane_layout.rs", include_str!("pane_layout.rs")),
+            ("pty.rs", include_str!("pty.rs")),
+            ("quick_draft.rs", include_str!("quick_draft.rs")),
+            ("saving.rs", include_str!("saving.rs")),
+            ("searcher.rs", include_str!("searcher.rs")),
+            ("session.rs", include_str!("session.rs")),
+            ("shell.rs", include_str!("shell.rs")),
+            ("shortcuts.rs", include_str!("shortcuts.rs")),
+            ("terminal.rs", include_str!("terminal.rs")),
+            ("terminal_session.rs", include_str!("terminal_session.rs")),
+            ("text_blocks.rs", include_str!("text_blocks.rs")),
+            ("tree_watch.rs", include_str!("tree_watch.rs")),
+            ("vertical_layout.rs", include_str!("vertical_layout.rs")),
+            ("wallpaper.rs", include_str!("wallpaper.rs")),
+            ("wiring.rs", include_str!("wiring.rs")),
+            ("word_marks.rs", include_str!("word_marks.rs")),
+            ("writer.rs", include_str!("writer.rs")),
+        ];
+        // 画面に出ない日本語。
+        let exempt = [
+            "」に傍点］",   // 青空文庫の注記（記法）
+            "(なし)",       // 診断ログの見出し
+            "- 箇条書き",   // 起動時の測定
+            "日本語ABC123", // 起動時の測定
+            "DirectWrite縦書き: OK / layout {:.0}×{:.0}px / caret Δy {:.1}px", // 診断ログ
+            "DirectWrite縦書き: NG / {error}", // 診断ログ
+            "the editing area always holds one pane (要件 6.3)", // panicの文
+        ];
+        let japanese = |text: &str| {
+            text.chars().any(|c| {
+                matches!(c, '\u{3041}'..='\u{3096}' | '\u{30a1}'..='\u{30fa}' | '\u{4e00}'..='\u{9fff}')
+            })
+        };
+        let mut unpaired = Vec::new();
+        for (name, source) in sources {
+            // 試験の塊（`#[cfg(test)]`の次の`mod … {`）から先は見ない。
+            let end = source
+                .match_indices("#[cfg(test)]")
+                .map(|(at, _)| at)
+                .find(|at| {
+                    let next = source[*at..].lines().nth(1).unwrap_or("").trim_end();
+                    next.starts_with("mod ") && next.ends_with('{')
+                })
+                .unwrap_or(source.len());
+            let code = &source[..end];
+            let bytes = code.as_bytes();
+            let mut at = 0;
+            while at < bytes.len() {
+                let rest = &code[at..];
+                if rest.starts_with("//") {
+                    at += rest.find('\n').unwrap_or(rest.len());
+                } else if rest.starts_with("r#\"") {
+                    at += rest[3..].find("\"#").map_or(rest.len(), |close| close + 5);
+                } else if rest.starts_with("'\"'") {
+                    at += 3;
+                } else if rest.starts_with("'\\\"'") {
+                    at += 4;
+                } else if rest.starts_with('"') {
+                    let mut close = 1;
+                    while close < rest.len() && rest.as_bytes()[close] != b'"' {
+                        close += if rest.as_bytes()[close] == b'\\' {
+                            2
+                        } else {
+                            1
+                        };
+                    }
+                    let text = &rest[1..close.min(rest.len())];
+                    let after = rest[(close + 1).min(rest.len())..].trim_start();
+                    let paired = after
+                        .strip_prefix(',')
+                        .map(str::trim_start)
+                        .and_then(|next| next.strip_prefix('"'))
+                        .is_some_and(|next| !japanese(next.split('"').next().unwrap_or("")));
+                    if japanese(text) && !paired && !exempt.contains(&text) {
+                        let line = code[..at].lines().count();
+                        unpaired.push(format!("{name}:{line}: {text}"));
+                    }
+                    at += close + 1;
+                } else {
+                    at += rest.chars().next().map_or(1, char::len_utf8);
+                }
+            }
+        }
+        assert!(
+            unpaired.is_empty(),
+            "no English for:\n{}",
+            unpaired.join("\n")
+        );
+    }
+
+    /// 国際化②: 英語を選べば、Rustの文も英語で出る（このスレッドだけ切り替える）。
+    #[test]
+    fn rust_messages_follow_the_language() {
+        super::TEST_LANGUAGE.with(|held| held.set(Some(false)));
+        assert_eq!(super::pick("保存しました", "Saved"), "Saved");
+        assert_eq!(crate::found_status(0, None), "Not found");
+        assert_eq!(crate::found_status(12, None), "12 found");
+        assert_eq!(
+            crate::file_tree::NameProblem::Empty.message(),
+            "Enter a name"
+        );
+        assert_eq!(crate::saving::conflict_choices()[4], "Cancel");
+        assert_eq!(crate::word_marks::no_mode(), "None");
+        let over = crate::over_limit_message("abc");
+        assert!(over.starts_with("Undid 3 characters"), "{over}");
+        super::TEST_LANGUAGE.with(|held| held.set(Some(true)));
+        assert_eq!(crate::found_status(0, None), "見つかりません");
+        assert_eq!(crate::saving::conflict_choices()[4], "キャンセル");
+        super::TEST_LANGUAGE.with(|held| held.set(None));
     }
 }

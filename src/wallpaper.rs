@@ -387,7 +387,10 @@ pub fn publish(window: &AppWindow) -> Result<(), String> {
         FILE => {
             let path = PathBuf::from(window.get_wall_path().as_str());
             if path.as_os_str().is_empty() {
-                result = Err("画像ファイルが選ばれていません".to_owned());
+                result = Err(crate::say!(
+                    "画像ファイルが選ばれていません",
+                    "No image file is chosen"
+                ));
             } else {
                 match load(&path) {
                     Ok((image, size)) => {

@@ -767,6 +767,9 @@ export component AppWindow inherits Window {
     callback paper-random-chosen(int);
     /// 追加要件 2026-09-15（書き手）: 表示の言語。0 システムに合わせる、1 日本語、2 English。
     in-out property <int> language: 0;
+    /// 選べる言語。**言語の名前はその言語で書く**——読めない言語で出ている画面から戻れるように。
+    /// 並びは設定の番号（0 System、1 日本語、2 English）。
+    property <[string]> language-names: [@tr("System"), "日本語", "English"];
     callback language-chosen(int);
     /// 追加要件 2026-09-15（書き手）: 背景の壁紙（全体の設定）。0 なし、1 Windowsの壁紙
     /// （画面に固定して敷くので、窓越しにデスクトップが見えているように感じる）、2 画像ファイル。
@@ -2689,11 +2692,44 @@ export component AppWindow inherits Window {
                                                     horizontal-stretch: 1;
                                                 }
 
-                                                for choice[index] in [@tr("System"), "日本語", "English"]: TextButton {
-                                                    title: choice;
-                                                    role: root.language == index ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.language-chosen(index);
+                                                // **プルダウン**（書き手の求め 2026-09-15：言語が増えても行を足すだけで済む）。
+                                                // 押した釦と同じ箱に置き、その下に出す（技術検証 6.30）。
+                                                Rectangle {
+                                                    width: 160px;
+
+                                                    TextButton {
+                                                        width: parent.width;
+                                                        wide: true;
+                                                        title: root.language-names[root.language];
+                                                        clicked => {
+                                                            language-menu.show();
+                                                        }
+                                                    }
+
+                                                    language-menu := PopupWindow {
+                                                        x: 0px;
+                                                        y: 32px;
+                                                        width: 160px;
+                                                        close-policy: close-on-click-outside;
+
+                                                        MenuFrame {
+                                                            width: 160px;
+
+                                                            VerticalLayout {
+                                                                padding: 6px;
+                                                                spacing: 1px;
+
+                                                                // 頼んでから閉じる（技術検証 6.24）。
+                                                                for name[index] in root.language-names: MenuRow {
+                                                                    title: name;
+                                                                    checked: index == root.language;
+                                                                    activated => {
+                                                                        root.language-chosen(index);
+                                                                        language-menu.close();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }

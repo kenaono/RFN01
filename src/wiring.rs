@@ -95,7 +95,7 @@ use crate::document;
 use crate::saving::{open_document, reveal_active_document, save_all, save_document};
 use crate::word_marks;
 use crate::{
-    AppWindow, Live, NO_TARGET, PAPER_SLOT, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
+    AppWindow, Live, PAPER_SLOT, PaneId, PaneStates, RenderCache, Setting, TreeCommand,
     activate_left_row, add_word_to_group, bullet_marks_of, choose_find_option, clear_find,
     close_word_naming, collect_search, colour_row, count_in_pane, drop_tree_row, edit_word_file,
     export_word_group, file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
@@ -234,7 +234,8 @@ pub fn wire_colours(
     });
 
     // 追加要件 2026-09-15（書き手）: 表示の言語。画面の`@tr`はSlintが切り替え、Rustから
-    // 渡している一覧（Keys）は作り直す。
+    // 渡している文（Keysの一覧、TABの名前、モードの「なし」、左の欄、ステータスバー）は置き直す。
+    // 前の言語で出ていた知らせは畳む。
     let weak = window.as_weak();
     let held = doors.clone();
     window.on_language_chosen(move |choice| {
@@ -242,6 +243,12 @@ pub fn wire_colours(
             window.set_language(choice.clamp(0, 2));
             crate::i18n::apply(window.get_language());
             crate::shortcuts::publish(&window);
+            crate::forget_render_status(&window);
+            crate::publish_tabs(&window, &held.live);
+            crate::publish_word_modes(&window);
+            crate::publish_word_mode_of(&window, &held.live);
+            crate::publish_left(&window, &held.live);
+            schedule_relayout(&window, &held.states, &held.cache, &held.timer);
             save_settings(&window, &held.cache);
         }
     });
@@ -952,7 +959,9 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
                 return;
             };
             let Some(words) = read_word_source(&source) else {
-                window.set_render_status("取り込めませんでした".into());
+                window.set_render_status(
+                    crate::say!("取り込めませんでした", "Could not take it in").into(),
+                );
                 return;
             };
             let mode = window.get_word_mode_opened_at().max(0) as usize;
@@ -981,7 +990,9 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
                 group.words.push(line);
             }
             hold_word_modes(&window, &held, modes, true);
-            window.set_render_status(format!("{taken}語を取り込みました").into());
+            window.set_render_status(
+                crate::say!("{taken}語を取り込みました", "Took in {taken} words").into(),
+            );
         });
     });
 
@@ -1355,7 +1366,7 @@ pub fn wire_open_and_draft(
                         return quick_draft::TabList {
                             rows: Vec::new(),
                             target: -1,
-                            target_name: NO_TARGET.to_owned(),
+                            target_name: crate::no_target().to_owned(),
                         };
                     };
                     paste_targets(&window, &live, aimed, &mut resolved.borrow_mut())
@@ -1435,7 +1446,13 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
             excluded_live.searched.set(excluded_live.searched.get() + 1);
             excluded_live.results.borrow_mut().clear();
             publish_left(&window, &excluded_live);
-            window.set_folder_status("条件を変更しました。検索してください".into());
+            window.set_folder_status(
+                crate::say!(
+                    "条件を変更しました。検索してください",
+                    "The conditions changed. Search again"
+                )
+                .into(),
+            );
             crate::write_session(&window, &excluded_live);
         }
     });

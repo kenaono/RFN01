@@ -148,7 +148,7 @@ impl DocumentFile {
     /// What to call this document on screen.
     pub fn title(&self) -> String {
         match &self.origin {
-            Origin::Untitled(number) => format!("無題{number}"),
+            Origin::Untitled(number) => crate::say!("無題{number}", "Untitled-{number}"),
             Origin::Saved(saved) => file_title(&saved.path),
         }
     }

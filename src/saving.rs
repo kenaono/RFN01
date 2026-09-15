@@ -29,7 +29,9 @@ use slint::ComponentHandle;
 
 use crate::buffer::{DocumentFile, ExternalChange};
 use crate::file_io::{self, Encoding, LoadError};
+use crate::i18n::pick;
 use crate::open_document::OpenDocument;
+use crate::say;
 use crate::{
     AUTOSAVE_SETTING, AppWindow, EditorState, Live, MAX_DOCUMENT_CHARACTERS, Opening, PaneId,
     Question, WORK_COPY_IDLE, WORK_COPY_LONGEST, WORK_COPY_SETTLE, app_data, ask_question,
@@ -96,8 +98,13 @@ pub fn discard_memo_copy(window: &AppWindow, live: &Live, document: &Rc<OpenDocu
     };
     if !removed {
         document.text.mark_pending();
-        window
-            .set_render_status("作業コピーを削除できなかったため、メモを閉じずに残しました".into());
+        window.set_render_status(
+            say!(
+                "作業コピーを削除できなかったため、メモを閉じずに残しました",
+                "Could not delete the work copy, so the memo was kept open"
+            )
+            .into(),
+        );
     }
     removed
 }
@@ -405,9 +412,15 @@ pub fn report_write_results(
         // 書き手が知っていなければならない。1件目だけ——同じ理由で失敗した
         // 数件が順に上書きし合っても、読めるのは最後の1つである。
         let told = if result.removed {
-            "作業コピーを片づけられませんでした"
+            pick(
+                "作業コピーを片づけられませんでした",
+                "Could not clear the work copy",
+            )
         } else {
-            "作業コピーを退避できませんでした。まもなく再試行します"
+            pick(
+                "作業コピーを退避できませんでした。まもなく再試行します",
+                "Could not back up to the work copy. Trying again shortly",
+            )
         };
         window.set_render_status(told.into());
     }
@@ -452,7 +465,10 @@ fn check_documents(window: &AppWindow, live: &Live, documents: Vec<Rc<OpenDocume
                 noticed = true;
                 if Rc::ptr_eq(&document, &active) {
                     window
-                        .set_render_status("ファイルが見つからないため、外部版とは比較できません。本文は保持しています".into());
+                        .set_render_status(say!(
+                            "ファイルが見つからないため、外部版とは比較できません。本文は保持しています",
+                            "The file is missing, so it cannot be compared. The text is kept"
+                        ).into());
                 }
             }
             continue;
@@ -490,7 +506,11 @@ fn check_documents(window: &AppWindow, live: &Live, documents: Vec<Rc<OpenDocume
         noticed = true;
         if Rc::ptr_eq(&document, &active) {
             window.set_render_status(
-                "別のアプリがこのファイルを変更しました。「⚠ 外で変更」から読み直せます".into(),
+                say!(
+                    "別のアプリがこのファイルを変更しました。「⚠ 外で変更」から読み直せます",
+                    "Another app changed this file. Reload it from \"⚠ Changed outside\""
+                )
+                .into(),
             );
         }
         live.cache.borrow_mut().log_diag(
@@ -538,13 +558,17 @@ pub fn reload_document(window: &AppWindow, live: &Live, document: &Rc<OpenDocume
             document.missing.set(false);
             discard_work_copy(live, &work_identity(&document.file.borrow()));
             publish_tabs(window, live);
-            window.set_render_status("外部の変更を読み込みました".into());
+            window.set_render_status(
+                say!("外部の変更を読み込みました", "Loaded the outside change").into(),
+            );
             live.cache
                 .borrow_mut()
                 .log_diag("external", &format!("reloaded bytes={bytes}"));
         }
         Some(Err(error)) => {
-            window.set_render_status(format!("読み直せません: {error}").into());
+            window.set_render_status(
+                say!("読み直せません: {error}", "Cannot reload: {error}").into(),
+            );
             live.cache
                 .borrow_mut()
                 .log_diag("external", &format!("reload failed error={error}"));
@@ -591,12 +615,18 @@ pub fn reopen_as(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>, e
             // 付いていたのだから、書き手が知りたいのは「字が変わらなかったのは
             // 効かなかったからではない」ことである。
             let done = if held == encoding {
-                format!("{name}のまま読み直しました（字は変わりません）")
+                say!(
+                    "{name}のまま読み直しました（字は変わりません）",
+                    "Reloaded as {name} (the text is unchanged)"
+                )
             } else {
-                format!("{name}で開き直しました")
+                say!("{name}で開き直しました", "Reopened as {name}")
             };
             let told = if mixed {
-                format!("{done}（改行コードは混在していました）")
+                say!(
+                    "{done}（改行コードは混在していました）",
+                    "{done} (the line breaks were mixed)"
+                )
             } else {
                 done
             };
@@ -616,9 +646,12 @@ pub fn reopen_as(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>, e
             // 言い直す——書き手が選んだのは1つの文字コードである。
             let told = match error {
                 LoadError::Unreadable => {
-                    format!("{name}としては読めません。文書はそのままです")
+                    say!(
+                        "{name}としては読めません。文書はそのままです",
+                        "Cannot read it as {name}. The document is unchanged"
+                    )
                 }
-                other => format!("開き直せません: {other}"),
+                other => say!("開き直せません: {other}", "Cannot reopen: {other}"),
             };
             window.set_render_status(told.into());
             live.cache
@@ -718,7 +751,11 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     }
     if document.read_only() {
         window.set_render_status(
-            "外部版は読み取り専用です。必要な内容を元のタブへコピーしてください".into(),
+            say!(
+                "外部版は読み取り専用です。必要な内容を元のタブへコピーしてください",
+                "The outside version is read-only. Copy what you need into the original tab"
+            )
+            .into(),
         );
         return;
     }
@@ -727,7 +764,11 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     // 断面として残したいなら、別名で保存する（そのときReadOnlyは解ける）。
     if !ask_for_name && focused_pane(window).reads_only(window) {
         window.set_render_status(
-            "ReadOnlyモードでは上書き保存しません。残すときは別名で保存してください".into(),
+            say!(
+                "ReadOnlyモードでは上書き保存しません。残すときは別名で保存してください",
+                "ReadOnly mode does not overwrite. Use Save As to keep a copy"
+            )
+            .into(),
         );
         return;
     }
@@ -786,10 +827,15 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
                     path: target.clone(),
                     form,
                 },
-                format!(
-                    "「{title}」は別のタブで編集中です。\n\n                     そちらの保存していない変更は失われます。"
+                say!(
+                    "「{title}」は別のタブで編集中です。\n\nそちらの保存していない変更は失われます。",
+                    "\"{title}\" is being edited in another tab.\n\nIts unsaved changes will be lost."
                 ),
-                &["保存する", "別の名前で", "やめる"],
+                &[
+                    pick("保存する", "Save"),
+                    pick("別の名前で", "Save As"),
+                    pick("やめる", "Cancel"),
+                ],
                 2,
             );
             return;
@@ -811,17 +857,13 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
                 path: target.clone(),
                 form,
             },
-            format!(
+            say!(
                 "「{title}」は別のアプリで変更されています。\n\n\
-                 読み込むと、保存していない変更は失われます。"
+                 読み込むと、保存していない変更は失われます。",
+                "\"{title}\" was changed by another app.\n\n\
+                 Loading it loses your unsaved changes."
             ),
-            &[
-                "作業中の内容で上書き",
-                "外部の変更を読み込む",
-                "別名で保存",
-                "外部版と比べる",
-                "キャンセル",
-            ],
+            &conflict_choices(),
             1,
         );
         return;
@@ -837,8 +879,9 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
         // **帯と同じ言葉で言う**（`CP932・CRLF`）——欄が2つになったので、
         // 文字コードだけを言うと、改行を選び直した書き手には何も答えていない
         // ことになる（要件 E2 の⑤）。
-        let told = format!(
+        let told = say!(
             "{}{mark}・{}で保存しました",
+            "Saved as {}{mark}・{}",
             form.encoding.as_str(),
             crate::newline_name(form.newline)
         );
@@ -937,9 +980,15 @@ pub fn write_document_in(
             // 打鍵で組み直すまで待たない——保存は本文を1字も動かさないので、
             // その組み直しは来ない。
             crate::publish_active_encoding(window, live);
-            window.set_render_status("保存しました".into());
+            window.set_render_status(say!("保存しました", "Saved").into());
             if moved && crate::release_read_only(window, live, document) {
-                window.set_render_status("別名で保存しました。ReadOnlyモードを解除しました".into());
+                window.set_render_status(
+                    say!(
+                        "別名で保存しました。ReadOnlyモードを解除しました",
+                        "Saved under a new name. ReadOnly mode is off"
+                    )
+                    .into(),
+                );
             }
             // 単語チェックモード要件 5.4（2026-09-08）: **保存されたのが辞書
             // そのものなら、そこから読み直す。**書き手が直したのは表であって、
@@ -979,8 +1028,9 @@ pub fn write_document_in(
             // **見つけた字は診断ログに残す**（`first=`）。「なぜ保存できないのか」を
             // 後から辿る手掛かりは要る——画面に出すかどうかとは別の話である。
             window.set_render_status(
-                format!(
+                say!(
                     "{}では表せない文字があるため保存できません。UTF-8で保存してください",
+                    "Cannot save: some characters cannot be written in {}. Save as UTF-8",
                     form.encoding.as_str()
                 )
                 .into(),
@@ -995,7 +1045,8 @@ pub fn write_document_in(
             false
         }
         Err(error) => {
-            window.set_render_status(format!("保存できません: {error}").into());
+            window
+                .set_render_status(say!("保存できません: {error}", "Cannot save: {error}").into());
             cache
                 .borrow_mut()
                 .log_diag("file", &format!("save failed path={shown} error={error}"));
@@ -1071,15 +1122,24 @@ pub fn save_all(window: &AppWindow, live: &Live) {
     }
     // Written last, over whatever the individual saves said: the count is the
     // answer to 全て保存, and one of the writes saying 保存しました is not.
-    let mut told = format!("{saved}件を保存しました");
+    let mut told = say!("{saved}件を保存しました", "Saved {saved}");
     if failed > 0 {
-        told.push_str(&format!("／{failed}件は保存できません"));
+        told.push_str(&say!(
+            "／{failed}件は保存できません",
+            " / {failed} could not be saved"
+        ));
     }
     if left > 0 {
-        told.push_str(&format!("／無題{left}件は保存していません"));
+        told.push_str(&say!(
+            "／無題{left}件は保存していません",
+            " / {left} untitled not saved"
+        ));
     }
     if conflicted > 0 {
-        told.push_str(&format!("／外部変更{conflicted}件は個別に保存してください"));
+        told.push_str(&say!(
+            "／外部変更{conflicted}件は個別に保存してください",
+            " / {conflicted} changed outside: save them one by one"
+        ));
     }
     window.set_render_status(told.clone().into());
     live.cache.borrow_mut().log_diag("file", &told);
@@ -1094,7 +1154,13 @@ pub fn reveal_active_document(window: &AppWindow, live: &Live) {
     let document = live.active(window);
     let path = document.file.borrow().path().map(Path::to_path_buf);
     let Some(path) = path else {
-        window.set_render_status("まだ保存していない文書です".into());
+        window.set_render_status(
+            say!(
+                "まだ保存していない文書です",
+                "This document has not been saved yet"
+            )
+            .into(),
+        );
         return;
     };
     let shown = path.display().to_string();
@@ -1119,4 +1185,15 @@ pub fn open_document(window: &AppWindow, live: &Live) {
     };
     // **`Kept`**：書き手が名前で指した1件で、一覧を歩いているのではない。
     open_path_in_focused_pane(window, live, &path, Opening::Kept);
+}
+
+/// 外で変わったファイルへ保存しようとしたときの選択肢（要件 8.2）。`main.rs`の問いと同じ並び。
+pub fn conflict_choices() -> [&'static str; 5] {
+    [
+        pick("作業中の内容で上書き", "Overwrite with My Changes"),
+        pick("外部の変更を読み込む", "Load the Outside Change"),
+        pick("別名で保存", "Save As"),
+        pick("外部版と比べる", "Compare with Outside Version"),
+        pick("キャンセル", "Cancel"),
+    ]
 }

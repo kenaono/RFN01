@@ -162,14 +162,14 @@ pub enum LoadError {
 impl fmt::Display for LoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LoadError::Unreadable => write!(
-                formatter,
-                "UTF-8・UTF-16・CP932のどれとしても読めないファイルです"
-            ),
-            LoadError::TooLarge { characters, limit } => write!(
-                formatter,
-                "{characters}文字のファイルは、上限{limit}文字を超えるため開けません"
-            ),
+            LoadError::Unreadable => formatter.write_str(&crate::say!(
+                "UTF-8・UTF-16・CP932のどれとしても読めないファイルです",
+                "The file cannot be read as UTF-8, UTF-16 or CP932"
+            )),
+            LoadError::TooLarge { characters, limit } => formatter.write_str(&crate::say!(
+                "{characters}文字のファイルは、上限{limit}文字を超えるため開けません",
+                "Cannot open a file of {characters} characters: the limit is {limit}"
+            )),
             LoadError::Io(error) => write!(formatter, "{error}"),
         }
     }
@@ -202,9 +202,10 @@ pub enum SaveError {
 impl fmt::Display for SaveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SaveError::Unmappable(character) => {
-                write!(formatter, "表せない字があります（{character}）")
-            }
+            SaveError::Unmappable(character) => formatter.write_str(&crate::say!(
+                "表せない字があります（{character}）",
+                "Some characters cannot be written ({character})"
+            )),
             SaveError::Io(error) => write!(formatter, "{error}"),
         }
     }

@@ -140,7 +140,12 @@ impl Search {
                 // **書き手に見せるのは1行。**どこがどう悪いかは正規表現の
                 // 作法の話で、帯に置くには長い——大事なのは「いま探せていない」
                 // ことが画面に出ていることである。
-                Err(_) => return Err("正規表現が正しくありません".to_owned()),
+                Err(_) => {
+                    return Err(crate::say!(
+                        "正規表現が正しくありません",
+                        "The regular expression is not valid"
+                    ));
+                }
             }
         } else {
             None

@@ -486,11 +486,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         let mut keys = bindings(&app.get_shortcut_bindings());
         if let Some(other) = conflict(&keys, i, &key) {
             let name = shown(NAMES[other]);
-            let told = if crate::i18n::japanese() {
-                format!("{name}に割り当て済みです")
-            } else {
-                format!("Already assigned to {name}")
-            };
+            let told = crate::say!("{name}に割り当て済みです", "Already assigned to {name}");
             app.set_shortcut_status(told.into());
             return;
         }
@@ -507,11 +503,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         publish(&app);
         crate::write_session(&app, &saved_live);
         let name = shown(NAMES[i]);
-        let told = if crate::i18n::japanese() {
-            format!("{name}の設定を保存しました")
-        } else {
-            format!("Saved the key for {name}")
-        };
+        let told = crate::say!("{name}の設定を保存しました", "Saved the key for {name}");
         app.set_shortcut_status(told.into());
     });
     // 書き手の求め 2026-09-15: Keys の面の Reset。割り当てを全部既定へ。

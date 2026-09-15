@@ -112,7 +112,7 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     assert_eq!(strip(), (vec![false, true], 1));
     assert!(id.screen(&window).settings);
     let shown = id.screen(&window).tabs.row_data(1).unwrap();
-    assert_eq!(shown.title, SETTINGS_TAB_NAME);
+    assert_eq!(shown.title, settings_tab_name());
     assert!(!shown.edited && !shown.renamable);
 
     // Asked again from another tab, the one already open comes to the front.
