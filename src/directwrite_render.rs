@@ -8015,6 +8015,67 @@ mod tests {
         assert!(engine.plan.blocks.iter().all(|block| block.grid.is_none()));
     }
 
+    /// 追加要件 2026-09-15（書き手）: **禁則はWindows（DirectWrite）の組版に任せる**——独自の行分割は持たない
+    /// （書き手の判断：「Windows標準が一般的であれば、独自に持つ必要はない」）。
+    ///
+    /// その代わり、**要件定義に書いた禁則が本当に効いていることを、ここで確かめる**。Windowsの更新で
+    /// 規則が変われば、この試験が落ちて文書との食い違いが分かる。縦書きも横書きも同じ。
+    #[test]
+    fn line_breaking_keeps_the_kinsoku_rules() {
+        let line_starts = |engine: &TextEngine| {
+            engine
+                .plan
+                .blocks
+                .iter()
+                .flat_map(|block| {
+                    block
+                        .lines
+                        .iter()
+                        .map(|line| block.span.utf16_start + line.utf16_start)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<u32>>()
+        };
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let base = "あ".repeat(200);
+            let engine = engine_set(mode, StyledText::plain(&base), &plain());
+            let per = line_starts(&engine)[1];
+            // 折り返しがちょうど`per`字目に来る文に、`head`を置く。`per`で行が始まれば、そこで分かれた。
+            let splits_at = |lead: usize, piece: &str| {
+                let text = format!("{}{piece}{}", "あ".repeat(lead), "あ".repeat(20));
+                let engine = engine_set(mode, StyledText::plain(&text), &plain());
+                line_starts(&engine).contains(&per)
+            };
+            for head in LINE_START_REFUSED.chars() {
+                assert!(
+                    !splits_at(per as usize, &head.to_string()),
+                    "{mode:?}: {head} began a line"
+                );
+            }
+            for tail in LINE_END_REFUSED.chars() {
+                assert!(
+                    !splits_at(per as usize - 1, &tail.to_string()),
+                    "{mode:?}: {tail} ended a line"
+                );
+            }
+            for pair in KEPT_TOGETHER {
+                assert!(
+                    !splits_at(per as usize - 1, pair),
+                    "{mode:?}: {pair} was split"
+                );
+            }
+            // 比べる相手：禁則の無い字は、そこで分かれる。
+            assert!(splits_at(per as usize, "い"), "{mode:?}: the probe itself");
+        }
+    }
+
+    /// 要件定義 7.5 の禁則（行頭に来ない字）。
+    const LINE_START_REFUSED: &str = "、。，．・：；？！ー…‥ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰ々〻ゝゞヽヾ）」』】〕〉》］｝〟’”〜‐゠〵";
+    /// 同じく、行末に来ない字。
+    const LINE_END_REFUSED: &str = "（「『【〔〈《［｛〝‘“";
+    /// 同じく、2字のあいだで分けない並び。
+    const KEPT_TOGETHER: [&str; 6] = ["……", "――", "‥‥", "！？", "!?", "12"];
+
     /// **The question the whole approach turns on.**
     ///
     /// A paragraph with no break in it is cut at the positions DirectWrite says
