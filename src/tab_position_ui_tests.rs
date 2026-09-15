@@ -132,3 +132,72 @@ fn a_new_vertical_tab_opens_at_the_start() {
     add_tab(&window, &live, id, PaneTab::showing(&window, id, long));
     at_start("reopened");
 }
+
+/// 書き手の報告 2026-09-15: **Pane1で保存した「Saved」が、Active PaneをPane2へ切り替えても残る。**
+///
+/// 知らせは窓に1つで、どのPaneの話かを持っていなかった。**TAB・Pane・窓全体に分け**（書き手の判断）、
+/// 頭に誰の話かを付け、TAB・Paneの話は別のPaneで操作が始まれば畳む。同じPaneで描き直すだけなら残し、
+/// 窓全体の話はPaneを移っても残す。
+#[test]
+fn a_message_goes_when_another_pane_takes_over() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1000, 740));
+    publish_panes(&window, 2);
+    let document = OpenDocument::new(DocumentFile::untitled(1), "本文\n".into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    cache.borrow_mut().add_pane(WritingMode::Horizontal);
+    let (first, second) = (PaneId::from_index(0), PaneId::from_index(1));
+    for id in [first, second] {
+        id.update_screen(&window, |screen| {
+            screen.width = 480.0;
+            screen.height = 600.0;
+            screen.shown_width = 480.0;
+            screen.shown_height = 600.0;
+        });
+    }
+    let refresh = |id: PaneId| {
+        window.set_focused_pane(id.index());
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), "本文\n");
+    };
+
+    refresh(first);
+    window.tell_tab("保存しました".into());
+    refresh(first);
+    assert_eq!(
+        window.get_render_status(),
+        "保存しました",
+        "the same pane keeps it"
+    );
+    refresh(second);
+    assert_eq!(window.get_render_status(), "", "another pane takes over");
+    window.tell_pane("分割: ペインが多すぎます".into());
+    refresh(second);
+    assert_eq!(
+        window.get_render_status_shown(),
+        "Pane 2: 分割: ペインが多すぎます",
+        "a pane's message names the pane"
+    );
+    refresh(first);
+    assert_eq!(window.get_render_status(), "");
+    window.tell("すべての設定を既定に戻しました".into());
+    refresh(second);
+    assert_eq!(
+        window.get_render_status_shown(),
+        "すべての設定を既定に戻しました",
+        "the window's message stays, with no name"
+    );
+}

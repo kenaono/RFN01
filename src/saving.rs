@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
 
+use crate::StatusBar;
 use crate::buffer::{DocumentFile, ExternalChange};
 use crate::file_io::{self, Encoding, LoadError};
 use crate::i18n::pick;
@@ -98,7 +99,7 @@ pub fn discard_memo_copy(window: &AppWindow, live: &Live, document: &Rc<OpenDocu
     };
     if !removed {
         document.text.mark_pending();
-        window.set_render_status(
+        window.tell_tab(
             say!(
                 "作業コピーを削除できなかったため、メモを閉じずに残しました",
                 "Could not delete the work copy, so the memo was kept open"
@@ -422,7 +423,7 @@ pub fn report_write_results(
                 "Could not back up to the work copy. Trying again shortly",
             )
         };
-        window.set_render_status(told.into());
+        window.tell(told.into());
     }
     lost
 }
@@ -465,7 +466,7 @@ fn check_documents(window: &AppWindow, live: &Live, documents: Vec<Rc<OpenDocume
                 noticed = true;
                 if Rc::ptr_eq(&document, &active) {
                     window
-                        .set_render_status(say!(
+                        .tell_tab(say!(
                             "ファイルが見つからないため、外部版とは比較できません。本文は保持しています",
                             "The file is missing, so it cannot be compared. The text is kept"
                         ).into());
@@ -505,7 +506,7 @@ fn check_documents(window: &AppWindow, live: &Live, documents: Vec<Rc<OpenDocume
         }
         noticed = true;
         if Rc::ptr_eq(&document, &active) {
-            window.set_render_status(
+            window.tell_tab(
                 say!(
                     "別のアプリがこのファイルを変更しました。「⚠ 外で変更」から読み直せます",
                     "Another app changed this file. Reload it from \"⚠ Changed outside\""
@@ -558,17 +559,13 @@ pub fn reload_document(window: &AppWindow, live: &Live, document: &Rc<OpenDocume
             document.missing.set(false);
             discard_work_copy(live, &work_identity(&document.file.borrow()));
             publish_tabs(window, live);
-            window.set_render_status(
-                say!("外部の変更を読み込みました", "Loaded the outside change").into(),
-            );
+            window.tell_tab(say!("外部の変更を読み込みました", "Loaded the outside change").into());
             live.cache
                 .borrow_mut()
                 .log_diag("external", &format!("reloaded bytes={bytes}"));
         }
         Some(Err(error)) => {
-            window.set_render_status(
-                say!("読み直せません: {error}", "Cannot reload: {error}").into(),
-            );
+            window.tell_tab(say!("読み直せません: {error}", "Cannot reload: {error}").into());
             live.cache
                 .borrow_mut()
                 .log_diag("external", &format!("reload failed error={error}"));
@@ -630,7 +627,7 @@ pub fn reopen_as(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>, e
             } else {
                 done
             };
-            window.set_render_status(told.into());
+            window.tell_tab(told.into());
             live.cache.borrow_mut().log_diag(
                 "encoding",
                 &format!(
@@ -653,7 +650,7 @@ pub fn reopen_as(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>, e
                 }
                 other => say!("開き直せません: {other}", "Cannot reopen: {other}"),
             };
-            window.set_render_status(told.into());
+            window.tell_tab(told.into());
             live.cache
                 .borrow_mut()
                 .log_diag("encoding", &format!("refused as={name}"));
@@ -750,7 +747,7 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
         return;
     }
     if document.read_only() {
-        window.set_render_status(
+        window.tell_tab(
             say!(
                 "外部版は読み取り専用です。必要な内容を元のタブへコピーしてください",
                 "The outside version is read-only. Copy what you need into the original tab"
@@ -763,7 +760,7 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     // 少し前に読んだ断面を書き戻すことになる——その間に足された行が消える。
     // 断面として残したいなら、別名で保存する（そのときReadOnlyは解ける）。
     if !ask_for_name && focused_pane(window).reads_only(window) {
-        window.set_render_status(
+        window.tell_tab(
             say!(
                 "ReadOnlyモードでは上書き保存しません。残すときは別名で保存してください",
                 "ReadOnly mode does not overwrite. Use Save As to keep a copy"
@@ -885,7 +882,7 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
             form.encoding.as_str(),
             crate::newline_name(form.newline)
         );
-        window.set_render_status(told.into());
+        window.tell_tab(told.into());
         live.cache.borrow_mut().log_diag(
             "encoding",
             &format!(
@@ -980,9 +977,9 @@ pub fn write_document_in(
             // 打鍵で組み直すまで待たない——保存は本文を1字も動かさないので、
             // その組み直しは来ない。
             crate::publish_active_encoding(window, live);
-            window.set_render_status(say!("保存しました", "Saved").into());
+            window.tell_tab(say!("保存しました", "Saved").into());
             if moved && crate::release_read_only(window, live, document) {
-                window.set_render_status(
+                window.tell_tab(
                     say!(
                         "別名で保存しました。ReadOnlyモードを解除しました",
                         "Saved under a new name. ReadOnly mode is off"
@@ -1027,7 +1024,7 @@ pub fn write_document_in(
             //
             // **見つけた字は診断ログに残す**（`first=`）。「なぜ保存できないのか」を
             // 後から辿る手掛かりは要る——画面に出すかどうかとは別の話である。
-            window.set_render_status(
+            window.tell_tab(
                 say!(
                     "{}では表せない文字があるため保存できません。UTF-8で保存してください",
                     "Cannot save: some characters cannot be written in {}. Save as UTF-8",
@@ -1045,8 +1042,7 @@ pub fn write_document_in(
             false
         }
         Err(error) => {
-            window
-                .set_render_status(say!("保存できません: {error}", "Cannot save: {error}").into());
+            window.tell_tab(say!("保存できません: {error}", "Cannot save: {error}").into());
             cache
                 .borrow_mut()
                 .log_diag("file", &format!("save failed path={shown} error={error}"));
@@ -1141,7 +1137,7 @@ pub fn save_all(window: &AppWindow, live: &Live) {
             " / {conflicted} changed outside: save them one by one"
         ));
     }
-    window.set_render_status(told.clone().into());
+    window.tell(told.clone().into());
     live.cache.borrow_mut().log_diag("file", &told);
 }
 
@@ -1154,7 +1150,7 @@ pub fn reveal_active_document(window: &AppWindow, live: &Live) {
     let document = live.active(window);
     let path = document.file.borrow().path().map(Path::to_path_buf);
     let Some(path) = path else {
-        window.set_render_status(
+        window.tell_tab(
             say!(
                 "まだ保存していない文書です",
                 "This document has not been saved yet"

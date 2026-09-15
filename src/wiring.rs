@@ -15,6 +15,7 @@
 //! `render_cache`）。閉包の中で何度もクローンされる名前なので、ここで短い名へ
 //! 付け替えると、内側と外側で同じ名前が別のものを指す形になる。
 
+use crate::StatusBar;
 use crate::{LeftTab, PaneTab, double_click_time, duplicate_tab};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -959,9 +960,7 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
                 return;
             };
             let Some(words) = read_word_source(&source) else {
-                window.set_render_status(
-                    crate::say!("取り込めませんでした", "Could not take it in").into(),
-                );
+                window.tell(crate::say!("取り込めませんでした", "Could not take it in").into());
                 return;
             };
             let mode = window.get_word_mode_opened_at().max(0) as usize;
@@ -990,9 +989,7 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
                 group.words.push(line);
             }
             hold_word_modes(&window, &held, modes, true);
-            window.set_render_status(
-                crate::say!("{taken}語を取り込みました", "Took in {taken} words").into(),
-            );
+            window.tell(crate::say!("{taken}語を取り込みました", "Took in {taken} words").into());
         });
     });
 

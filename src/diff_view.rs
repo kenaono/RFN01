@@ -1,4 +1,5 @@
 //! Comparison and explicitly staged merge, preserving the editor's tabs and views.
+use crate::StatusBar;
 use crate::i18n::pick;
 use crate::say;
 use crate::{AppWindow, DiffRow, MAX_DOCUMENT_CHARACTERS, buffer::DocumentFile};
@@ -376,7 +377,7 @@ fn show_saved(app: &AppWindow, document: &crate::OpenDocument) {
     // Reading a clone preserves the document's agreed stamp and encoding settings.
     let mut file = document.file.borrow().clone();
     let Some(path) = file.path().map(Path::to_owned) else {
-        app.set_render_status(
+        app.tell_tab(
             say!(
                 "まだ保存先がありません。保存してから比較してください",
                 "This document has not been saved yet. Save it, then compare"
@@ -397,7 +398,7 @@ fn show_saved(app: &AppWindow, document: &crate::OpenDocument) {
             ),
             right,
         ),
-        Some(Err(error)) => app.set_render_status(
+        Some(Err(error)) => app.tell_tab(
             say!(
                 "保存版を比較できません: {error}",
                 "Cannot compare with saved: {error}"
@@ -412,7 +413,7 @@ fn show_saved(app: &AppWindow, document: &crate::OpenDocument) {
 fn show_head(app: &AppWindow, document: &crate::OpenDocument) {
     let file = document.file.borrow();
     let Some(path) = file.path().map(Path::to_owned) else {
-        app.set_render_status(
+        app.tell_tab(
             say!(
                 "まだ保存先がありません。保存してから比較してください",
                 "This document has not been saved yet. Save it, then compare"
@@ -424,7 +425,7 @@ fn show_head(app: &AppWindow, document: &crate::OpenDocument) {
     let (commit, bytes) = match crate::git_version::head_version(&path) {
         Ok(version) => version,
         Err(error) => {
-            app.set_render_status(
+            app.tell_tab(
                 say!(
                     "前回のCommitと比較できません: {error}",
                     "Cannot compare with the last commit: {error}"
@@ -450,7 +451,7 @@ fn show_head(app: &AppWindow, document: &crate::OpenDocument) {
             ),
             right,
         ),
-        Err(error) => app.set_render_status(
+        Err(error) => app.tell_tab(
             say!(
                 "前回のCommitと比較できません: {error}",
                 "Cannot compare with the last commit: {error}"
@@ -516,7 +517,7 @@ pub fn wire(app: &AppWindow, live: &crate::Live) {
                         right,
                     );
                 }
-                Err(error) => app.set_render_status(error.into()),
+                Err(error) => app.tell(error.into()),
             }
         });
     });

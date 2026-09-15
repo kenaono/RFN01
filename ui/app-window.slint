@@ -414,6 +414,16 @@ export component AppWindow inherits Window {
     // いたので、**横書きで書いている書き手には一言も届いていなかった**——保存が
     // 断られたことさえ画面のどこにも無かった。窓に1つの場所へ移してある。
     in property <string> render-status;
+    /// 知らせがどのPaneの操作で出たか（書き手の報告 2026-09-15）。**別のPaneで操作が始まれば畳む**
+    /// ——Pane1で保存した「Saved」が、Pane2へ移っても残っていた。
+    in-out property <int> render-status-pane: -1;
+    /// 誰の話か。0 窓全体、1 Pane、2 そのPaneの前のTAB。**頭に付ける名前はここで組む**
+    /// ——開いた直後の知らせは、TABが前に出る前に出ていることがある。
+    in-out property <int> render-status-scope: 0;
+    out property <string> render-status-shown: root.render-status-scope == 2
+        ? @tr("{}: {}", root.panes[root.render-status-pane].tabs[root.panes[root.render-status-pane].active-tab].title, root.render-status)
+        : root.render-status-scope == 1 ? @tr("Pane {}: {}", root.render-status-pane + 1, root.render-status)
+        : root.render-status;
     // The three quantities the typography validation is about. Character
     // spacing is extra advance as a percentage of the character's own size, so
     // 0 is DirectWrite's own; the other two are multipliers, so 100 is.
@@ -4844,7 +4854,7 @@ export component AppWindow inherits Window {
                     status-text := Text {
                         width: parent.width;
                         height: parent.height;
-                        text: root.render-status;
+                        text: root.render-status-shown;
                         color: Tok.alert;
                         font-size: 12px;
                         vertical-alignment: center;
@@ -4854,7 +4864,7 @@ export component AppWindow inherits Window {
                     // **比べる相手は名前で呼ぶ。**`parent.width`と書くと出ない
                     // （技術検証 6.39：条件は生成される要素へ移される）。
                     if status-text.preferred-width > status-box.width: Tooltip {
-                        text: @markdown("\{root.render-status}");
+                        text: @markdown("\{root.render-status-shown}");
                     }
                 }
 

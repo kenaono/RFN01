@@ -20,6 +20,7 @@ use slint::{
     Timer, TimerMode, VecModel, WindowPosition, WindowSize,
 };
 
+use crate::StatusBar;
 use crate::app_data::{self, Draft, WindowPlace};
 use crate::{AppWindow, QuickDraft};
 
@@ -98,7 +99,7 @@ impl QuickDraftWindow {
             return;
         }
         let Ok(window) = QuickDraft::new() else {
-            owner.set_render_status(
+            owner.tell(
                 crate::say!(
                     "クイック下書き: 窓を作れません",
                     "Quick Draft: cannot create the window"
@@ -143,7 +144,7 @@ impl QuickDraftWindow {
         wire(held, &window, editor);
 
         if window.show().is_err() {
-            owner.set_render_status(
+            owner.tell(
                 crate::say!(
                     "クイック下書き: 窓を出せません",
                     "Quick Draft: cannot show the window"

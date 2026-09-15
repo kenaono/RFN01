@@ -477,6 +477,9 @@ msgstr "Paneの背景"
 msgid "Pane menu"
 msgstr "Paneのメニュー"
 
+msgid "Pane {}: {}"
+msgstr "Pane {}：{}"
+
 msgid "Paper"
 msgstr "紙"
 
@@ -842,6 +845,9 @@ msgstr "{}語 (二重{})"
 
 msgid "{} words / {} duplicates"
 msgstr "{}語 / 重複{}"
+
+msgid "{}: {}"
+msgstr "{}：{}"
 
 msgid "{}are read as bullet marks."
 msgstr "{}を箇条書きの印として読みます。"
