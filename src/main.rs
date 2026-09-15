@@ -2691,6 +2691,15 @@ fn main() -> Result<(), slint::PlatformError> {
     // 色しか覚えていないので、語はここで初めて手に入る。
     open_word_modes(&window, &live);
 
+    wiring::wire_colours(
+        &window,
+        &live,
+        &pane_states,
+        &render_cache,
+        spec_timer.clone(),
+        numbers.clone(),
+        palette.clone(),
+    );
     wiring::wire_typography(
         &window,
         &pane_states,
@@ -9462,6 +9471,8 @@ const SHELL_SETTING: &str = "terminal.shell";
 /// **紙とは別に持つ。**要件9のシートは原稿の紙の設定で、端末を黒地で使う人が多いことと
 /// 何の関係も無い。書字方向も持たないので、シートの外にいる。
 const TERMINAL_PAPER_SETTING: &str = "terminal.paper";
+/// C5: 最近使用した色。`#rrggbb` をカンマで並べる。
+const RECENT_COLOURS_SETTING: &str = "colour.recent";
 const TERMINAL_INK_SETTING: &str = "terminal.ink";
 const TERMINAL_FONT_SETTING: &str = "terminal.font";
 const TERMINAL_SIZE_SETTING: &str = "terminal.size";
@@ -10231,6 +10242,16 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         bullet_marks_of(window).as_said(),
     ));
     values.push((
+        RECENT_COLOURS_SETTING.to_owned(),
+        window
+            .global::<Colours>()
+            .get_recent()
+            .iter()
+            .map(hex_colour)
+            .collect::<Vec<_>>()
+            .join(","),
+    ));
+    values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
         hex_colour(window.get_terminal_paper()),
     ));
@@ -10340,6 +10361,18 @@ fn apply_settings(
         }
         // 追加要件 2026-09-08: 端末の見た目（要件 6.8）。読めない値は既定のまま
         // ——手で書いた設定ファイルが、端末を読めない色にできてはならない。
+        if written == RECENT_COLOURS_SETTING {
+            let recent: Vec<Color> = value
+                .split(',')
+                .filter_map(parse_hex_colour)
+                .map(slint_colour)
+                .take(wiring::RECENT_COLOURS)
+                .collect();
+            window
+                .global::<Colours>()
+                .set_recent(ModelRc::new(VecModel::from(recent)));
+            continue;
+        }
         if written == TERMINAL_PAPER_SETTING {
             if let Some(rgb) = parse_hex_colour(value) {
                 window.set_terminal_paper(slint_colour(rgb));

@@ -1215,6 +1215,7 @@ export component NumberField inherits Rectangle {
     /// いま効いている値。
     in property <string> shown;
     in property <string> unit;
+    in property <length> field-width: 50px;
     callback committed(string);
 
     property <bool> focused: field.has-focus;
@@ -1240,7 +1241,7 @@ export component NumberField inherits Rectangle {
         spacing: 3px;
 
         field := Field {
-            width: 50px;
+            width: root.field-width;
             height: 24px;
             y: 2px;
             text: root.shown;
@@ -1262,6 +1263,381 @@ export component NumberField inherits Rectangle {
     }
 }
 
+// 色を選ぶ（C5、書き手の求め 2026-09-15：「Windows標準は小さくわかりにくいので、
+// MS-Officeの形式がいい」）。
+//
+// **Officeと同じ並び**：テーマの色（10色と、その明るい3段・暗い2段）、標準の色、
+// 最近使用した色、その他の色。テーマは Office の既定テーマで、明暗の段は Office と
+// 同じ HSL の輝度の掛け方で出してある。**押せば決まって閉じる**——一度で済む
+// 選び方で、見比べたいときは「その他の色」が新旧を並べて出す。
+export global Colours {
+    out property <[color]> theme: [
+        #ffffff, #000000, #e7e6e6, #44546a, #4472c4, #ed7d31, #a5a5a5, #ffc000, #5b9bd5, #70ad47,
+        #f2f2f2, #808080, #d0cece, #d6dce5, #dae3f3, #fbe5d6, #ededed, #fff2cc, #deebf7, #e2f0d9,
+        #d9d9d9, #595959, #afabab, #adb9ca, #b4c7e7, #f8cbad, #dbdbdb, #ffe699, #bdd7ee, #c5e0b4,
+        #bfbfbf, #404040, #767171, #8497b0, #8faadc, #f4b183, #c9c9c9, #ffd966, #9dc3e6, #a9d18e,
+        #a6a6a6, #262626, #3b3838, #333f50, #2f5597, #c55a11, #7c7c7c, #bf9000, #2e75b6, #548235,
+        #808080, #0d0d0d, #181717, #222a35, #203864, #843c0b, #525252, #806000, #1f4e79, #385723
+    ];
+    out property <[color]> standard: [#c00000, #ff0000, #ffc000, #ffff00, #92d050, #00b050, #00b0f0, #0070c0, #002060, #7030a0];
+    /// 新しい順、最大10色。Rust が覚えて設定ファイルへ書く。
+    in-out property <[color]> recent: [];
+}
+
+component PaletteSwatch inherits Rectangle {
+    in property <color> colour;
+    in property <bool> current;
+    callback chosen();
+
+    width: 18px;
+    height: 18px;
+    background: root.colour;
+    border-width: touch.has-hover || root.current ? 2px : 1px;
+    border-color: touch.has-hover ? Tok.accent : (root.current ? Tok.accent-strong : #0000002a);
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.chosen();
+        }
+    }
+}
+
+component PaletteCaption inherits Text {
+    color: Tok.ink-muted;
+    font-size: 11px;
+}
+
+component PaletteRow inherits Rectangle {
+    in property <string> title;
+    in property <color> sample: transparent;
+    in property <bool> show-sample: false;
+    callback activated();
+
+    height: 26px;
+    border-radius: 4px;
+    background: touch.has-hover ? Tok.accent-faint : transparent;
+
+    HorizontalLayout {
+        padding-left: 4px;
+        spacing: 8px;
+
+        if root.show-sample: Rectangle {
+            width: 18px;
+            height: 18px;
+            y: 4px;
+            background: root.sample;
+            border-width: 1px;
+            border-color: #0000002a;
+        }
+
+        Text {
+            text: root.title;
+            color: Tok.ink;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.activated();
+        }
+    }
+}
+
+export component ColourPalette inherits Rectangle {
+    /// 一番上の行（「既定の色」「Paperに合わせる」）。空なら出さない。
+    in property <string> automatic;
+    in property <color> automatic-colour: transparent;
+    in property <color> current;
+    callback chosen(color);
+    callback automatic-chosen();
+    callback more();
+
+    width: 236px;
+
+    VerticalLayout {
+        padding: 9px;
+        spacing: 6px;
+
+        if root.automatic != "": PaletteRow {
+            title: root.automatic;
+            sample: root.automatic-colour;
+            show-sample: root.automatic-colour.alpha > 0;
+            activated => {
+                root.automatic-chosen();
+            }
+        }
+
+        PaletteCaption { text: "テーマの色"; }
+
+        VerticalLayout {
+            spacing: 4px;
+
+            HorizontalLayout {
+                spacing: 4px;
+                for column in 10: PaletteSwatch {
+                    colour: Colours.theme[column];
+                    current: self.colour == root.current;
+                    chosen => {
+                        root.chosen(Colours.theme[column]);
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 0px;
+                for row in 5: HorizontalLayout {
+                    spacing: 4px;
+                    for column in 10: PaletteSwatch {
+                        colour: Colours.theme[(row + 1) * 10 + column];
+                        current: self.colour == root.current;
+                        chosen => {
+                            root.chosen(Colours.theme[(row + 1) * 10 + column]);
+                        }
+                    }
+                }
+            }
+        }
+
+        PaletteCaption { text: "標準の色"; }
+
+        HorizontalLayout {
+            spacing: 4px;
+            for colour in Colours.standard: PaletteSwatch {
+                colour: colour;
+                current: colour == root.current;
+                chosen => {
+                    root.chosen(colour);
+                }
+            }
+        }
+
+        if Colours.recent.length > 0: PaletteCaption { text: "最近使用した色"; }
+
+        if Colours.recent.length > 0: HorizontalLayout {
+            alignment: start;
+            spacing: 4px;
+            for colour in Colours.recent: PaletteSwatch {
+                colour: colour;
+                current: colour == root.current;
+                chosen => {
+                    root.chosen(colour);
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Tok.rule;
+        }
+
+        PaletteRow {
+            title: "その他の色…";
+            activated => {
+                root.more();
+            }
+        }
+    }
+}
+
+// 「その他の色…」（C5）。**新しい色と今の色を並べ、OKで初めて決まる**——
+// 色面と色相の帯で選ぶか、16進数・RGBを打つ。
+export component ColourMixer inherits Rectangle {
+    in property <color> current;
+    in-out property <float> hue;
+    in-out property <float> saturation;
+    in-out property <float> value;
+    out property <color> mixed: Colors.hsv(root.hue, root.saturation, root.value);
+    /// 色を #rrggbb で言う（Rust が書く。Slint には16進の書式が無い）。
+    pure callback hex-of(color) -> string;
+    callback hex-typed(string);
+    callback channel-typed(int, string);
+    callback accepted(color);
+    callback cancelled();
+
+    background: Tok.scrim;
+    TouchArea { }
+
+    keys := FocusScope {
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.cancelled();
+                return accept;
+            }
+            if event.text == Key.Return {
+                root.accepted(root.mixed);
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 460px;
+                    background: Tok.paper;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: Tok.rule-strong;
+                    drop-shadow-color: #1713214d;
+                    drop-shadow-blur: 40px;
+                    drop-shadow-offset-y: 16px;
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 14px;
+
+                        Text {
+                            text: "その他の色";
+                            color: Tok.ink-strong;
+                            font-size: 15px;
+                            font-weight: 600;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            field := Rectangle {
+                                width: 220px;
+                                height: 180px;
+                                background: @linear-gradient(90deg, #ffffff 0%, Colors.hsv(root.hue, 1, 1) 100%);
+                                Rectangle {
+                                    background: @linear-gradient(180deg, #00000000 0%, #000000 100%);
+                                }
+                                Rectangle {
+                                    x: root.saturation * parent.width - 6px;
+                                    y: (1 - root.value) * parent.height - 6px;
+                                    width: 12px;
+                                    height: 12px;
+                                    border-radius: 6px;
+                                    border-width: 2px;
+                                    border-color: root.value > 0.5 ? #000000 : #ffffff;
+                                }
+                                field-touch := TouchArea {
+                                    function pick() {
+                                        root.saturation = clamp(self.mouse-x / self.width, 0, 1);
+                                        root.value = 1 - clamp(self.mouse-y / self.height, 0, 1);
+                                    }
+                                    pointer-event(event) => {
+                                        if event.kind == PointerEventKind.down {
+                                            self.pick();
+                                        }
+                                    }
+                                    moved => {
+                                        if self.pressed {
+                                            self.pick();
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 18px;
+                                height: 180px;
+                                background: @linear-gradient(180deg, #ff0000 0%, #ffff00 16.67%, #00ff00 33.33%, #00ffff 50%, #0000ff 66.67%, #ff00ff 83.33%, #ff0000 100%);
+                                Rectangle {
+                                    x: -3px;
+                                    y: root.hue / 360 * parent.height - 2px;
+                                    width: parent.width + 6px;
+                                    height: 4px;
+                                    border-width: 1px;
+                                    border-color: #000000;
+                                    background: #ffffff80;
+                                }
+                                TouchArea {
+                                    function pick() {
+                                        root.hue = clamp(self.mouse-y / self.height, 0, 1) * 359.9;
+                                    }
+                                    pointer-event(event) => {
+                                        if event.kind == PointerEventKind.down {
+                                            self.pick();
+                                        }
+                                    }
+                                    moved => {
+                                        if self.pressed {
+                                            self.pick();
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 6px;
+                                alignment: start;
+
+                                // Office と同じ並べ方：上が新しい色、下が今の色。
+                                PaletteCaption { text: "新規"; }
+                                Rectangle {
+                                    height: 72px;
+                                    border-width: 1px;
+                                    border-color: #0000002a;
+                                    VerticalLayout {
+                                        Rectangle { background: root.mixed; }
+                                        Rectangle { background: root.current; }
+                                    }
+                                }
+                                PaletteCaption { text: "現在"; }
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    PaletteCaption { text: "#"; vertical-alignment: center; }
+                                    NumberField {
+                                        field-width: 76px;
+                                        shown: root.hex-of(root.mixed);
+                                        unit: "";
+                                        committed(text) => {
+                                            root.hex-typed(text);
+                                        }
+                                    }
+                                }
+                                for channel[index] in ["R", "G", "B"]: HorizontalLayout {
+                                    spacing: 4px;
+                                    PaletteCaption { text: channel; vertical-alignment: center; min-width: 10px; }
+                                    NumberField {
+                                        shown: index == 0 ? root.mixed.red : (index == 1 ? root.mixed.green : root.mixed.blue);
+                                        unit: "";
+                                        committed(text) => {
+                                            root.channel-typed(index, text);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+                            TextButton {
+                                title: "OK";
+                                role: Role.primary;
+                                clicked => {
+                                    root.accepted(root.mixed);
+                                }
+                            }
+                            TextButton {
+                                title: "キャンセル";
+                                role: Role.quiet;
+                                clicked => {
+                                    root.cancelled();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component TextRow inherits Rectangle {
     in property <bool> bold;
     in property <bool> italic;
@@ -1272,7 +1648,9 @@ export component TextRow inherits Rectangle {
     in property <color> background-colour;
     in property <color> paper-colour;
     callback decoration-toggled(int, bool);
-    callback background-picked();
+    /// C5（2026-09-15）: 背景色をパレットで選んだ／その他の色を頼んだ。
+    callback background-chosen(color);
+    callback background-more();
     in property <string> label;
     /// 大きさの数と単位：本文は px、見出しは本文に対する %。
     in property <string> number;
@@ -1284,7 +1662,10 @@ export component TextRow inherits Rectangle {
     callback stepped(int);
     callback typed(string);
     callback typed-points(string);
-    callback picked();
+    /// C5: 文字色をパレットで選んだ／既定へ戻した／その他の色を頼んだ。
+    callback ink-chosen(color);
+    callback ink-automatic();
+    callback ink-more();
     callback chose-font();
 
     height: 56px;
@@ -1300,35 +1681,34 @@ export component TextRow inherits Rectangle {
             title: root.background-on ? "指定色" : "Paper";
             show-swatch: true;
             swatch: root.background-on ? root.background-colour : root.paper-colour;
-            clicked => { background-menu.show(); }
+            clicked => { background-palette.show(); }
         }
         if root.heading: TextButton { title: "罫線"; role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
     }
 
-    background-menu := PopupWindow {
+    // C5（書き手の求め 2026-09-15）: 背景もパレットで。「Paperに合わせる」が
+    // 一番上の行——Office の「塗りつぶしなし」と同じ場所。
+    background-palette := PopupWindow {
         y: root.height;
-        width: 192px;
+        width: 236px;
         close-policy: close-on-click-outside;
         MenuFrame {
-            width: 192px;
-            VerticalLayout {
-                padding: 6px;
-                spacing: 1px;
-                MenuRow {
-                    title: "Paperに合わせる";
-                    checked: !root.background-on;
-                    activated => {
-                        root.decoration-toggled(3, true);
-                        background-menu.close();
-                    }
+            width: 236px;
+            ColourPalette {
+                automatic: "Paperに合わせる";
+                automatic-colour: root.paper-colour;
+                current: root.background-on ? root.background-colour : transparent;
+                chosen(colour) => {
+                    root.background-chosen(colour);
+                    background-palette.close();
                 }
-                MenuRow {
-                    title: "色を指定する…";
-                    checked: root.background-on;
-                    activated => {
-                        root.background-picked();
-                        background-menu.close();
-                    }
+                automatic-chosen => {
+                    root.decoration-toggled(3, true);
+                    background-palette.close();
+                }
+                more => {
+                    root.background-more();
+                    background-palette.close();
                 }
             }
         }
@@ -1408,7 +1788,32 @@ export component TextRow inherits Rectangle {
                 swatch := TouchArea {
                     mouse-cursor: pointer;
                     clicked => {
-                        root.picked();
+                        ink-palette.show();
+                    }
+                }
+
+                ink-palette := PopupWindow {
+                    y: parent.height + 2px;
+                    width: 236px;
+                    close-policy: close-on-click-outside;
+                    MenuFrame {
+                        width: 236px;
+                        ColourPalette {
+                            automatic: "既定の色";
+                            current: root.shown;
+                            chosen(colour) => {
+                                root.ink-chosen(colour);
+                                ink-palette.close();
+                            }
+                            automatic-chosen => {
+                                root.ink-automatic();
+                                ink-palette.close();
+                            }
+                            more => {
+                                root.ink-more();
+                                ink-palette.close();
+                            }
+                        }
                     }
                 }
             }
@@ -1433,7 +1838,10 @@ export component TextRow inherits Rectangle {
 export component ColorCell inherits Rectangle {
     in property <string> label;
     in property <color> shown;
-    callback picked();
+    /// C5: パレットで選んだ／既定へ戻した／その他の色を頼んだ。
+    callback chosen(color);
+    callback automatic();
+    callback more();
 
     height: 28px;
 
@@ -1465,7 +1873,33 @@ export component ColorCell inherits Rectangle {
                 swatch := TouchArea {
                     mouse-cursor: pointer;
                     clicked => {
-                        root.picked();
+                        palette.show();
+                    }
+                }
+
+                palette := PopupWindow {
+                    x: parent.width - 236px;
+                    y: parent.height + 2px;
+                    width: 236px;
+                    close-policy: close-on-click-outside;
+                    MenuFrame {
+                        width: 236px;
+                        ColourPalette {
+                            automatic: "既定の色";
+                            current: root.shown;
+                            chosen(colour) => {
+                                root.chosen(colour);
+                                palette.close();
+                            }
+                            automatic-chosen => {
+                                root.automatic();
+                                palette.close();
+                            }
+                            more => {
+                                root.more();
+                                palette.close();
+                            }
+                        }
                     }
                 }
             }
@@ -1649,3 +2083,4 @@ export component Slider inherits Rectangle {
             1.0 - (y - root.grip / 2) / max(1px, root.height - root.grip), 0.0, 1.0);
     }
 }
+

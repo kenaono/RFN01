@@ -1,19 +1,16 @@
-//! What Windows itself does: the recycle bin, Explorer, and the colour dialog.
+//! What Windows itself does: the recycle bin and Explorer.
 //!
-//! All three belong to the system rather than to the editor. 要件 5.2 asks that
+//! Both belong to the system rather than to the editor. 要件 5.2 asks that
 //! a deleted file stay recoverable and that the writer can reach it in
 //! Explorer, and neither is something to imitate — a "delete" that moved the
-//! file into a folder of ours would not be in the bin the writer looks in. The
-//! colour dialog is here for the same reason: 要件 9 asks for a colour to be
-//! chosen, and **the way a colour is chosen on Windows is this window**, with
-//! its wheel, its hex box and its sixteen custom slots.
+//! file into a folder of ours would not be in the bin the writer looks in. The colour
+//! dialog used to be here too; C5 (2026-09-15) replaced it with the editor's
+//! own palette, because the writer found Windows' small and hard to read.
 
-use std::cell::RefCell;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows::Win32::Foundation::{COLORREF, HWND};
-use windows::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{
     FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, ILCreateFromPathW, ILFree,
     SHFILEOPSTRUCTW, SHFileOperationW, SHOpenFolderAndSelectItems,
@@ -71,72 +68,5 @@ pub fn reveal(path: &Path) {
         }
         let _ = SHOpenFolderAndSelectItems(item as *const _, None, 0);
         ILFree(Some(item as *const _));
-    }
-}
-
-/// A colour chosen in the dialog Windows draws (要件 9).
-///
-/// `initial` and the answer are both plain sRGB channels; `COLORREF` puts blue
-/// first, which is the one thing to get wrong here.
-///
-/// **The sixteen custom slots are kept for the run.** A writer who mixes a
-/// colour for the body ink and then opens the dialog again for a heading
-/// expects to find it still there — the dialog does not keep them, the caller
-/// does.
-///
-/// This runs somebody else's message loop while it is open (技術検証 6.18), so
-/// it is asked for from the event loop rather than from inside the click that
-/// wanted it.
-pub fn choose_colour(owner: Option<HWND>, initial: [u8; 3]) -> Option<[u8; 3]> {
-    CUSTOM_COLOURS.with(|slots| {
-        let mut slots = slots.borrow_mut();
-        let mut chosen = CHOOSECOLORW {
-            lStructSize: size_of::<CHOOSECOLORW>() as u32,
-            hwndOwner: owner.unwrap_or_default(),
-            rgbResult: COLORREF(colorref(initial)),
-            lpCustColors: slots.as_mut_ptr(),
-            // Open on the full picker rather than on the twenty basic colours:
-            // the colours this sets are a page and its ink, and neither is
-            // likely to be one of the twenty.
-            Flags: CC_RGBINIT | CC_FULLOPEN,
-            ..Default::default()
-        };
-        // SAFETY: the structure and the slots both outlive the call, and the
-        // dialog copies what it needs before it returns.
-        let picked = unsafe { ChooseColorW(&mut chosen) };
-        picked.as_bool().then(|| channels(chosen.rgbResult.0))
-    })
-}
-
-thread_local! {
-    /// The dialog's custom colours, kept where the dialog can be handed them
-    /// again. White, because that is what an empty slot looks like.
-    static CUSTOM_COLOURS: RefCell<[COLORREF; 16]> = RefCell::new([COLORREF(0x00ff_ffff); 16]);
-}
-
-/// sRGB as Windows wants it: `0x00bbggrr`.
-fn colorref(rgb: [u8; 3]) -> u32 {
-    u32::from(rgb[0]) | (u32::from(rgb[1]) << 8) | (u32::from(rgb[2]) << 16)
-}
-
-/// And back.
-fn channels(colorref: u32) -> [u8; 3] {
-    [
-        (colorref & 0xff) as u8,
-        ((colorref >> 8) & 0xff) as u8,
-        ((colorref >> 16) & 0xff) as u8,
-    ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_colour_survives_the_trip_through_windows_byte_order() {
-        // Red, which is the one that moves: 0xrrggbb becomes 0x00bbggrr.
-        assert_eq!(colorref([0xff, 0x00, 0x00]), 0x0000_00ff);
-        assert_eq!(colorref([0x24, 0x21, 0x1e]), 0x001e_2124);
-        assert_eq!(channels(colorref([0x24, 0x21, 0x1e])), [0x24, 0x21, 0x1e]);
     }
 }

@@ -105,7 +105,7 @@ use crate::{
     publish_word_modes, quick_draft, read_word_source, remove_word_from_group, rename_word_group,
     rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings_group,
     restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
-    selected_runs, set_picked_colour, set_word_mode_of, shell, show_bullet_marks, shown_sheet,
+    selected_runs, set_picked_colour, set_word_mode_of, show_bullet_marks, shown_sheet,
     slint_colour, step_setting, tell_goto, toggle_goto, tree_command, walk_find_history,
     word_modes_now,
 };
@@ -140,40 +140,6 @@ pub fn wire_terminal_look(
                 .log_diag("spec", &format!("terminal theme dark={}", u8::from(dark)));
             after_terminal_look(&window, &cache);
         }
-    });
-
-    // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
-    // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
-    let weak = window.as_weak();
-    let cache = render_cache.clone();
-    window.on_terminal_colour_picked(move |which| {
-        let weak = weak.clone();
-        let cache = cache.clone();
-        Timer::single_shot(Duration::ZERO, move || {
-            let Some(window) = weak.upgrade() else {
-                return;
-            };
-            let now = if which == 0 {
-                window.get_terminal_paper()
-            } else {
-                window.get_terminal_ink()
-            };
-            let standing = [now.red(), now.green(), now.blue()];
-            let Some(picked) = shell::choose_colour(ime::window_handle(&window), standing) else {
-                return;
-            };
-            let rgb = [
-                picked[0] as f32 / 255.0,
-                picked[1] as f32 / 255.0,
-                picked[2] as f32 / 255.0,
-            ];
-            if which == 0 {
-                window.set_terminal_paper(slint_colour(rgb));
-            } else {
-                window.set_terminal_ink(slint_colour(rgb));
-            }
-            after_terminal_look(&window, &cache);
-        });
     });
 
     let weak = window.as_weak();
@@ -217,6 +183,244 @@ pub fn wire_terminal_look(
 
     let _ = live;
 }
+
+/// C5（書き手の求め 2026-09-15：「Windows標準は小さくわかりにくいので、MS-Officeの
+/// 形式がいい」）: 色を選ぶ口。パレットで選ぶ、既定へ戻す、その他の色で混ぜる。
+///
+/// **どの色かは (kind, slot) の2つで足りる**——kind 0 は紙のシート（シートは
+/// 押した欄が`sheet`へ置いてある）、1 は端末（0 地、1 字）、2 は語群。
+/// 選んだ色は「最近使用した色」の頭へ入り、設定ファイルに残る。
+pub fn wire_colours(
+    window: &AppWindow,
+    live: &Live,
+    pane_states: &PaneStates,
+    render_cache: &Rc<RefCell<RenderCache>>,
+    spec_timer: Rc<Timer>,
+    numbers: Rc<VecModel<i32>>,
+    palette: Rc<VecModel<Color>>,
+) {
+    let doors = Rc::new(ColourDoors {
+        live: live.clone(),
+        states: pane_states.clone(),
+        cache: render_cache.clone(),
+        timer: spec_timer,
+        numbers,
+        palette,
+        target: std::cell::Cell::new((0, 0, 0)),
+    });
+
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_colour_set(move |kind, slot, colour| {
+        if let Some(window) = weak.upgrade() {
+            held.apply(
+                &window,
+                kind,
+                slot,
+                shown_sheet(&window),
+                Some(channels_of(colour)),
+            );
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_colour_default(move |kind, slot| {
+        if let Some(window) = weak.upgrade() {
+            held.apply(&window, kind, slot, shown_sheet(&window), None);
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_colour_more(move |kind, slot| {
+        if let Some(window) = weak.upgrade() {
+            let sheet = shown_sheet(&window);
+            held.target.set((kind, slot, sheet));
+            let current = held.current(&window, kind, slot, sheet);
+            window.set_colour_mixer_current(current);
+            show_in_mixer(&window, current);
+            window.set_colour_mixer_open(true);
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = doors;
+    window.on_colour_mixer_accepted(move |colour| {
+        if let Some(window) = weak.upgrade() {
+            let (kind, slot, sheet) = held.target.get();
+            held.apply(&window, kind, slot, sheet, Some(channels_of(colour)));
+        }
+    });
+
+    window.on_colour_hex_of(|colour| crate::hex_colour(colour).trim_start_matches('#').into());
+
+    let weak = window.as_weak();
+    window.on_colour_hex_typed(move |text| {
+        if let Some(window) = weak.upgrade()
+            && let Some(rgb) = crate::parse_hex_colour(&text)
+        {
+            show_in_mixer(&window, slint_colour(rgb));
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_colour_channel_typed(move |channel, text| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Some(typed) = crate::typed_number(&text) else {
+            return;
+        };
+        let mixed = Color::from_hsva(
+            window.get_colour_mixer_hue(),
+            window.get_colour_mixer_saturation(),
+            window.get_colour_mixer_value(),
+            1.0,
+        );
+        let mut rgb = [mixed.red(), mixed.green(), mixed.blue()];
+        rgb[channel.clamp(0, 2) as usize] = typed.round().clamp(0.0, 255.0) as u8;
+        show_in_mixer(&window, Color::from_rgb_u8(rgb[0], rgb[1], rgb[2]));
+    });
+}
+
+/// What the colour doors need to reach every place a colour lives.
+struct ColourDoors {
+    live: Live,
+    states: PaneStates,
+    cache: Rc<RefCell<RenderCache>>,
+    timer: Rc<Timer>,
+    numbers: Rc<VecModel<i32>>,
+    palette: Rc<VecModel<Color>>,
+    /// Which colour the mixer was opened for: kind, slot, sheet.
+    target: std::cell::Cell<(i32, i32, usize)>,
+}
+
+impl ColourDoors {
+    /// Put a colour where (kind, slot) names, or its default when `rgb` is `None`.
+    fn apply(&self, window: &AppWindow, kind: i32, slot: i32, sheet: usize, rgb: Option<[f32; 3]>) {
+        let slot_at = slot.max(0) as usize;
+        match kind {
+            0 => {
+                match rgb {
+                    Some(rgb) => {
+                        set_picked_colour(&self.numbers, &self.palette, sheet, slot_at, rgb)
+                    }
+                    None if (8..15).contains(&slot_at) => {
+                        Setting::Decoration(slot_at - 8, 3).write(&self.numbers, sheet, 0)
+                    }
+                    None => crate::set_colour(
+                        &self.palette,
+                        sheet,
+                        slot_at,
+                        crate::default_colour(sheet, slot_at),
+                    ),
+                }
+                schedule_relayout(window, &self.states, &self.cache, &self.timer);
+            }
+            1 => {
+                let fallback = if slot == 0 {
+                    crate::text_blocks::DEFAULT_PAPER
+                } else {
+                    crate::text_blocks::DEFAULT_INK
+                };
+                let colour = slint_colour(rgb.unwrap_or(fallback));
+                if slot == 0 {
+                    window.set_terminal_paper(colour);
+                } else {
+                    window.set_terminal_ink(colour);
+                }
+                after_terminal_look(window, &self.cache);
+            }
+            2 => {
+                let Some(rgb) = rgb else {
+                    return;
+                };
+                let mode = window.get_word_mode_opened_at().max(0) as usize;
+                let mut modes = word_modes_now();
+                let Some(group) = modes
+                    .get_mut(mode)
+                    .and_then(|held| held.groups.get_mut(slot_at))
+                else {
+                    return;
+                };
+                // 色を持たない語群（除外語群）から選び直すこともできる。そのときは
+                // **色を選んだことが、色を付けると言ったことである。**
+                group.colour = Some(rgb);
+                hold_word_modes(window, &self.live, modes, true);
+            }
+            _ => return,
+        }
+        if let Some(rgb) = rgb {
+            remember_colour(window, slint_colour(rgb));
+            save_settings(window, &self.cache);
+        }
+    }
+
+    /// The colour (kind, slot) has now, which the mixer shows as 現在.
+    fn current(&self, window: &AppWindow, kind: i32, slot: i32, sheet: usize) -> Color {
+        let slot_at = slot.max(0) as usize;
+        match kind {
+            0 => {
+                // 背景が Paper に合わせてあるなら、今見えているのは紙の色。
+                let shown = if (8..15).contains(&slot_at)
+                    && Setting::Decoration(slot_at - 8, 3).read(window, sheet) == 0
+                {
+                    PAPER_SLOT
+                } else {
+                    slot_at
+                };
+                window
+                    .get_palette()
+                    .row_data(colour_row(sheet, shown))
+                    .unwrap_or_default()
+            }
+            1 if slot == 0 => window.get_terminal_paper(),
+            1 => window.get_terminal_ink(),
+            _ => word_modes_now()
+                .get(window.get_word_mode_opened_at().max(0) as usize)
+                .and_then(|mode| mode.groups.get(slot_at))
+                .and_then(|group| group.colour)
+                .map(slint_colour)
+                .unwrap_or(Color::from_rgb_u8(128, 128, 128)),
+        }
+    }
+}
+
+/// Channels as the settings hold them.
+fn channels_of(colour: Color) -> [f32; 3] {
+    [
+        f32::from(colour.red()) / 255.0,
+        f32::from(colour.green()) / 255.0,
+        f32::from(colour.blue()) / 255.0,
+    ]
+}
+
+/// Point the mixer's field and hue bar at a colour.
+fn show_in_mixer(window: &AppWindow, colour: Color) {
+    let hsva = colour.to_hsva();
+    // 灰色には色相が無い。いま帯が指している色相を残す——打ち直すたびに
+    // 帯が赤へ跳ねると、次に面を触ったときに色が変わる。
+    if hsva.saturation > 0.0 && hsva.value > 0.0 {
+        window.set_colour_mixer_hue(hsva.hue.rem_euclid(360.0));
+    }
+    window.set_colour_mixer_saturation(hsva.saturation);
+    window.set_colour_mixer_value(hsva.value);
+}
+
+/// Put a colour at the head of 最近使用した色 (C5): newest first, no repeats,
+/// ten at most — one row of the palette.
+pub fn remember_colour(window: &AppWindow, colour: Color) {
+    let colours = window.global::<crate::Colours>();
+    let mut recent: Vec<Color> = colours.get_recent().iter().collect();
+    recent.retain(|held| *held != colour);
+    recent.insert(0, colour);
+    recent.truncate(RECENT_COLOURS);
+    colours.set_recent(ModelRc::new(VecModel::from(recent)));
+}
+
+/// How many recent colours the palette keeps: one row, like Office.
+pub const RECENT_COLOURS: usize = 10;
 
 /// システムの書体の一覧を、初めて必要になったときだけ読む。
 ///
@@ -423,43 +627,6 @@ pub fn wire_word_modes(window: &AppWindow, live: &Live) {
             let mode = window.get_word_mode_opened_at().max(0) as usize;
             remove_word_from_group(&window, &held, mode, group.max(0) as usize, &word);
         }
-    });
-
-    // **イベントループから開く**（要件 9 の色選びと同じ）。ダイアログは自前の
-    // メッセージループを回すので、押した釦の上で開いてはならない（6.18）。
-    let weak = window.as_weak();
-    let held = live.clone();
-    window.on_word_group_colour_picked(move |at| {
-        let weak = weak.clone();
-        let held = held.clone();
-        Timer::single_shot(Duration::ZERO, move || {
-            let Some(window) = weak.upgrade() else {
-                return;
-            };
-            let mode = window.get_word_mode_opened_at().max(0) as usize;
-            let mut modes = word_modes_now();
-            let Some(group) = modes
-                .get_mut(mode)
-                .and_then(|held| held.groups.get_mut(at.max(0) as usize))
-            else {
-                return;
-            };
-            // 色を持たない語群（除外語群）から選び直すこともできる。そのときは
-            // **色を選んだことが、色を付けると言ったことである。**
-            let standing = group
-                .colour
-                .unwrap_or([0.5, 0.5, 0.5])
-                .map(|channel| (channel * 255.0).round() as u8);
-            let Some(picked) = shell::choose_colour(ime::window_handle(&window), standing) else {
-                return;
-            };
-            group.colour = Some([
-                picked[0] as f32 / 255.0,
-                picked[1] as f32 / 255.0,
-                picked[2] as f32 / 255.0,
-            ]);
-            hold_word_modes(&window, &held, modes, true);
-        });
     });
 
     // 書き手と決めた 2026-09-08: **除外語群。**色を持たない語群は木に積まれて
@@ -809,54 +976,6 @@ pub fn wire_typography(
             save_settings(&window, &cache);
             schedule_relayout(&window, &states, &cache, &timer);
         }
-    });
-
-    // 要件 9: the colour the writer picks in the window Windows draws.
-    //
-    // **From the event loop, not from the click.** The dialog runs a message
-    // loop of its own while it is open (6.18), and the swatch that asked for it
-    // is inside a popup that may be taken down while it stands.
-    let weak = window.as_weak();
-    let states = pane_states.clone();
-    let cache = render_cache.clone();
-    let timer = spec_timer.clone();
-    let colours = palette.clone();
-    let background_settings = numbers.clone();
-    window.on_color_picked(move |slot| {
-        let slot = slot.max(0) as usize;
-        let weak = weak.clone();
-        let states = states.clone();
-        let cache = cache.clone();
-        let timer = timer.clone();
-        let colours = colours.clone();
-        let background_settings = background_settings.clone();
-        Timer::single_shot(Duration::ZERO, move || {
-            let Some(window) = weak.upgrade() else {
-                return;
-            };
-            let sheet = shown_sheet(&window);
-            let initial_slot = if (8..15).contains(&slot)
-                && Setting::Decoration(slot - 8, 3).read(&window, sheet) == 0
-            {
-                PAPER_SLOT
-            } else {
-                slot
-            };
-            let row = colour_row(sheet, initial_slot);
-            let now = window.get_palette().row_data(row).unwrap_or_default();
-            let owner = ime::window_handle(&window);
-            let standing = [now.red(), now.green(), now.blue()];
-            let Some(picked) = shell::choose_colour(owner, standing) else {
-                return;
-            };
-            let rgb = [
-                picked[0] as f32 / 255.0,
-                picked[1] as f32 / 255.0,
-                picked[2] as f32 / 255.0,
-            ];
-            set_picked_colour(&background_settings, &colours, sheet, slot, rgb);
-            schedule_relayout(&window, &states, &cache, &timer);
-        });
     });
 
     // 要件 9: which families this machine has, and which one was chosen.

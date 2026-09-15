@@ -45,8 +45,8 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     ]));
     reset_settings(&numbers, &palette, &fonts);
     window.set_sheet_stride(SHEET_NUMBERS as i32);
-    window.set_sheet_numbers(ModelRc::from(numbers));
-    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
     window.set_sheet_fonts(ModelRc::from(fonts));
     surface.set_size(slint::PhysicalSize::new(1000, 740));
     publish_panes(&window, 1);
@@ -216,6 +216,99 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
             }
             std::fs::write(output.join(format!("settings-{group}.ppm")), ppm).unwrap();
         }
+        window.set_colour_mixer_current(Color::from_rgb_u8(0x44, 0x72, 0xc4));
+        window.set_colour_mixer_hue(20.0);
+        window.set_colour_mixer_saturation(0.8);
+        window.set_colour_mixer_value(0.9);
+        window.set_colour_mixer_open(true);
+        slint::platform::update_timers_and_animations();
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+        let mut ppm = b"P6\n1000 740\n255\n".to_vec();
+        for pixel in pixels {
+            ppm.extend([pixel.r, pixel.g, pixel.b]);
+        }
+        std::fs::write(output.join("colour-mixer.ppm"), ppm).unwrap();
+        window.set_colour_mixer_open(false);
+    }
+
+    // C5 (書き手の求め 2026-09-15): the palette's doors.
+    {
+        wiring::wire_colours(
+            &window,
+            &live,
+            &live.states,
+            &live.cache,
+            Rc::new(Timer::default()),
+            numbers.clone(),
+            palette.clone(),
+        );
+        let red = Color::from_rgb_u8(255, 0, 0);
+        let row = |sheet, slot| palette.row_data(colour_row(sheet, slot)).unwrap();
+        window.set_sheet(1);
+        window.invoke_colour_set(0, 1, red);
+        assert_eq!(row(1, 1), red);
+        assert_ne!(row(0, 1), red, "the other sheet stays");
+        assert_eq!(
+            window.global::<Colours>().get_recent().row_data(0),
+            Some(red)
+        );
+        // A background chosen from the palette is a background that is on.
+        window.invoke_colour_set(0, 9, Color::from_rgb_u8(0, 0, 255));
+        assert_eq!(Setting::Decoration(1, 3).read(&window, 1), 1);
+        window.invoke_colour_default(0, 9);
+        assert_eq!(Setting::Decoration(1, 3).read(&window, 1), 0);
+        window.invoke_colour_default(0, 1);
+        assert_eq!(row(1, 1), slint_colour(default_colour(1, 1)));
+
+        // その他の色: opened on the colour there now, typed into, then accepted.
+        window.invoke_colour_set(0, 2, red);
+        window.set_sheet(0);
+        window.invoke_colour_more(0, 2);
+        assert!(window.get_colour_mixer_open());
+        window.set_sheet(1);
+        window.invoke_colour_hex_typed("00ff00".into());
+        assert!((window.get_colour_mixer_hue() - 120.0).abs() < 0.5);
+        window.invoke_colour_channel_typed(0, "２５５".into());
+        assert!((window.get_colour_mixer_hue() - 60.0).abs() < 0.5);
+        assert_eq!(
+            window.invoke_colour_hex_of(Color::from_rgb_u8(255, 255, 0)),
+            "ffff00"
+        );
+        window.invoke_colour_mixer_accepted(Color::from_rgb_u8(255, 255, 0));
+        assert_eq!(
+            row(0, 2),
+            Color::from_rgb_u8(255, 255, 0),
+            "the sheet it was opened from, not the one now in `sheet`"
+        );
+
+        // Recent colours: newest first, no repeats, ten at most, and kept.
+        for shade in 0..12u8 {
+            window.invoke_colour_set(1, 1, Color::from_rgb_u8(shade, shade, shade));
+        }
+        window.invoke_colour_set(1, 1, Color::from_rgb_u8(11, 11, 11));
+        let recent: Vec<Color> = window.global::<Colours>().get_recent().iter().collect();
+        assert_eq!(recent.len(), wiring::RECENT_COLOURS);
+        assert_eq!(recent[0], Color::from_rgb_u8(11, 11, 11));
+        assert_eq!(recent[1], Color::from_rgb_u8(10, 10, 10));
+        assert_eq!(window.get_terminal_ink(), Color::from_rgb_u8(11, 11, 11));
+        let stored = settings_values(&window);
+        window
+            .global::<Colours>()
+            .set_recent(ModelRc::new(VecModel::from(Vec::<Color>::new())));
+        let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+        apply_settings(&window, &numbers, &palette, &fonts, &stored);
+        assert_eq!(
+            window
+                .global::<Colours>()
+                .get_recent()
+                .iter()
+                .collect::<Vec<_>>(),
+            recent
+        );
     }
 
     // Reset All puts every document's mode back to none (書き手の求め 2026-09-15).

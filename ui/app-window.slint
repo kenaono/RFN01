@@ -2,11 +2,12 @@ import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
-import { ColorCell, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
+import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
 // **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
 // 窓の外から見えない。
 export { Ime }
 import { QuickDraft } from "quick-draft.slint";
+export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 export { DiffRow } from "diff-window.slint";
 
@@ -622,7 +623,6 @@ export component AppWindow inherits Window {
     callback word-mode-removed(int);
     callback word-group-added(int, string);
     callback word-group-removed(int);
-    callback word-group-colour-picked(int);
     /// 除外語群にする／やめる（2026-09-08）。
     callback word-group-paint-toggled(int);
     /// 1行1語のファイルから足す／へ書き出す（**あってもよい道**）。
@@ -641,10 +641,6 @@ export component AppWindow inherits Window {
     in-out property <color> terminal-ink: #24211e;
     in-out property <string> terminal-font: "Consolas";
     in-out property <int> terminal-size: 15;
-    /// どれを変えたのか（0 背景、1 文字）。色はWindowsの色ダイアログで選ぶので、
-    /// 要件 9 の`color-picked`と同じ形——**開いてから戻ってくるまでのあいだに、
-    /// 何を選んでいたのかを覚えておく場所**が要る。
-    callback terminal-colour-picked(int);
     callback terminal-font-picked();
     /// 書体の一覧は要件 9 のものと同じ`font-menu`を使う。**どちらの欄のために
     /// 開いたか**を、開いた側がここで言う——戻る先だけが違う。
@@ -752,10 +748,22 @@ export component AppWindow inherits Window {
     callback font-picked(int);
     /// A family was chosen for that slot.
     callback font-chosen(int, string);
-    /// The swatch beside a colour was pressed (要件 9). The picker Windows
-    /// draws is opened by Rust, from the event loop rather than from this
-    /// click: it runs a message loop of its own (6.18).
-    callback color-picked(int);
+    /// C5（書き手の求め 2026-09-15）: 色を選ぶ3つの口。**どの色か**は
+    /// (kind, slot) で言う——kind 0 は紙のシート（slot は色の番号、シートは
+    /// `sheet`）、1 は端末（0 地、1 字）、2 は語群（slot は語群の番号）。
+    callback colour-set(int, int, color);
+    callback colour-default(int, int);
+    callback colour-more(int, int);
+    /// 「その他の色」。開くのも決まったあとも Rust。
+    in-out property <bool> colour-mixer-open: false;
+    in-out property <color> colour-mixer-current;
+    in-out property <float> colour-mixer-hue;
+    in-out property <float> colour-mixer-saturation;
+    in-out property <float> colour-mixer-value;
+    pure callback colour-hex-of(color) -> string;
+    callback colour-hex-typed(string);
+    callback colour-channel-typed(int, string);
+    callback colour-mixer-accepted(color);
     /// 書き手の求め 2026-09-15: どの面を初期値へ戻すか——3 Text、4 Layout、5 Page、
     /// 負の数なら書式の全部（「Reset All」から）。
     /// 書き手の求め 2026-09-15: 打って決めた数。本文は px、見出しは %（行の番号は
@@ -2881,17 +2889,17 @@ export component AppWindow inherits Window {
                                             ColorCell {
                                                 label: "Background";
                                                 shown: root.terminal-paper;
-                                                picked => {
-                                                    root.terminal-colour-picked(0);
-                                                }
+                                                chosen(colour) => { root.colour-set(1, 0, colour); }
+                                                automatic => { root.colour-default(1, 0); }
+                                                more => { root.colour-more(1, 0); }
                                             }
 
                                             ColorCell {
                                                 label: "Text Color";
                                                 shown: root.terminal-ink;
-                                                picked => {
-                                                    root.terminal-colour-picked(1);
-                                                }
+                                                chosen(colour) => { root.colour-set(1, 1, colour); }
+                                                automatic => { root.colour-default(1, 1); }
+                                                more => { root.colour-more(1, 1); }
                                             }
 
                                             PickRow {
@@ -3151,7 +3159,28 @@ export component AppWindow inherits Window {
                                                             swatch := TouchArea {
                                                                 mouse-cursor: pointer;
                                                                 clicked => {
-                                                                    root.word-group-colour-picked(index);
+                                                                    group-palette.show();
+                                                                }
+                                                            }
+
+                                                            // C5（2026-09-15）: 語群の色もパレットで。
+                                                            group-palette := PopupWindow {
+                                                                y: parent.height + 2px;
+                                                                width: 236px;
+                                                                close-policy: close-on-click-outside;
+                                                                MenuFrame {
+                                                                    width: 236px;
+                                                                    ColourPalette {
+                                                                        current: row.paints ? row.shown : transparent;
+                                                                        chosen(colour) => {
+                                                                            root.colour-set(2, index, colour);
+                                                                            group-palette.close();
+                                                                        }
+                                                                        more => {
+                                                                            root.colour-more(2, index);
+                                                                            group-palette.close();
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -3522,13 +3551,14 @@ export component AppWindow inherits Window {
                                                         background-colour: root.palette[sheet-index * 15 + 8];
                                                         paper-colour: root.palette[sheet-index * 15 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(19 + kind, on ? -1 : 1); }
-                                                        background-picked => { root.sheet = sheet-index; root.color-picked(8); }
+                                                        background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 8, colour); }
+                                                        background-more => { root.sheet = sheet-index; root.colour-more(0, 8); }
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(0, by);
                                                         }
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(0);
-                                                        }
+                                                        ink-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 0, colour); }
+                                                        ink-automatic => { root.sheet = sheet-index; root.colour-default(0, 0); }
+                                                        ink-more => { root.sheet = sheet-index; root.colour-more(0, 0); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(0);
                                                             font-menu.show();
@@ -3553,13 +3583,14 @@ export component AppWindow inherits Window {
                                                         background-colour: root.palette[sheet-index * 15 + 9];
                                                         paper-colour: root.palette[sheet-index * 15 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(24 + kind, on ? -1 : 1); }
-                                                        background-picked => { root.sheet = sheet-index; root.color-picked(9); }
+                                                        background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 9, colour); }
+                                                        background-more => { root.sheet = sheet-index; root.colour-more(0, 9); }
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(4, by);
                                                         }
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(1);
-                                                        }
+                                                        ink-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 1, colour); }
+                                                        ink-automatic => { root.sheet = sheet-index; root.colour-default(0, 1); }
+                                                        ink-more => { root.sheet = sheet-index; root.colour-more(0, 1); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(1);
                                                             font-menu.show();
@@ -3584,13 +3615,14 @@ export component AppWindow inherits Window {
                                                         background-colour: root.palette[sheet-index * 15 + 10];
                                                         paper-colour: root.palette[sheet-index * 15 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(29 + kind, on ? -1 : 1); }
-                                                        background-picked => { root.sheet = sheet-index; root.color-picked(10); }
+                                                        background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 10, colour); }
+                                                        background-more => { root.sheet = sheet-index; root.colour-more(0, 10); }
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(5, by);
                                                         }
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(2);
-                                                        }
+                                                        ink-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 2, colour); }
+                                                        ink-automatic => { root.sheet = sheet-index; root.colour-default(0, 2); }
+                                                        ink-more => { root.sheet = sheet-index; root.colour-more(0, 2); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(2);
                                                             font-menu.show();
@@ -3615,13 +3647,14 @@ export component AppWindow inherits Window {
                                                         background-colour: root.palette[sheet-index * 15 + 11];
                                                         paper-colour: root.palette[sheet-index * 15 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(34 + kind, on ? -1 : 1); }
-                                                        background-picked => { root.sheet = sheet-index; root.color-picked(11); }
+                                                        background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 11, colour); }
+                                                        background-more => { root.sheet = sheet-index; root.colour-more(0, 11); }
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(6, by);
                                                         }
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(3);
-                                                        }
+                                                        ink-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 3, colour); }
+                                                        ink-automatic => { root.sheet = sheet-index; root.colour-default(0, 3); }
+                                                        ink-more => { root.sheet = sheet-index; root.colour-more(0, 3); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(3);
                                                             font-menu.show();
@@ -3646,13 +3679,14 @@ export component AppWindow inherits Window {
                                                         background-colour: root.palette[sheet-index * 15 + 12];
                                                         paper-colour: root.palette[sheet-index * 15 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(39 + kind, on ? -1 : 1); }
-                                                        background-picked => { root.sheet = sheet-index; root.color-picked(12); }
+                                                        background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 12, colour); }
+                                                        background-more => { root.sheet = sheet-index; root.colour-more(0, 12); }
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(7, by);
                                                         }
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(4);
-                                                        }
+                                                        ink-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 4, colour); }
+                                                        ink-automatic => { root.sheet = sheet-index; root.colour-default(0, 4); }
+                                                        ink-more => { root.sheet = sheet-index; root.colour-more(0, 4); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(4);
                                                             font-menu.show();
@@ -3677,13 +3711,14 @@ export component AppWindow inherits Window {
                                                         background-colour: root.palette[sheet-index * 15 + 13];
                                                         paper-colour: root.palette[sheet-index * 15 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(44 + kind, on ? -1 : 1); }
-                                                        background-picked => { root.sheet = sheet-index; root.color-picked(13); }
+                                                        background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 13, colour); }
+                                                        background-more => { root.sheet = sheet-index; root.colour-more(0, 13); }
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(8, by);
                                                         }
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(5);
-                                                        }
+                                                        ink-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 5, colour); }
+                                                        ink-automatic => { root.sheet = sheet-index; root.colour-default(0, 5); }
+                                                        ink-more => { root.sheet = sheet-index; root.colour-more(0, 5); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(5);
                                                             font-menu.show();
@@ -3708,13 +3743,14 @@ export component AppWindow inherits Window {
                                                         background-colour: root.palette[sheet-index * 15 + 14];
                                                         paper-colour: root.palette[sheet-index * 15 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(49 + kind, on ? -1 : 1); }
-                                                        background-picked => { root.sheet = sheet-index; root.color-picked(14); }
+                                                        background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 14, colour); }
+                                                        background-more => { root.sheet = sheet-index; root.colour-more(0, 14); }
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(9, by);
                                                         }
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(6);
-                                                        }
+                                                        ink-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 6, colour); }
+                                                        ink-automatic => { root.sheet = sheet-index; root.colour-default(0, 6); }
+                                                        ink-more => { root.sheet = sheet-index; root.colour-more(0, 6); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(6);
                                                             font-menu.show();
@@ -4013,9 +4049,9 @@ export component AppWindow inherits Window {
                                                     ColorCell {
                                                         label: "Paper Color";
                                                         shown: root.palette[sheet-index * 15 + 7];
-                                                        picked => {
-                                                            root.sheet = sheet-index; root.color-picked(7);
-                                                        }
+                                                        chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 7, colour); }
+                                                        automatic => { root.sheet = sheet-index; root.colour-default(0, 7); }
+                                                        more => { root.sheet = sheet-index; root.colour-more(0, 7); }
                                                     }
 
                                             }
@@ -4749,6 +4785,26 @@ export component AppWindow inherits Window {
             }
         }
     }
+    // C5: 「その他の色」。問いと同じく窓の一番上に重ねる。
+    if root.colour-mixer-open: ColourMixer {
+        current: root.colour-mixer-current;
+        hue <=> root.colour-mixer-hue;
+        saturation <=> root.colour-mixer-saturation;
+        value <=> root.colour-mixer-value;
+        hex-of(colour) => { return root.colour-hex-of(colour); }
+        hex-typed(text) => { root.colour-hex-typed(text); }
+        channel-typed(channel, text) => { root.colour-channel-typed(channel, text); }
+        accepted(colour) => {
+            root.colour-mixer-open = false;
+            root.colour-mixer-accepted(colour);
+            root.focus-generation += 1;
+        }
+        cancelled => {
+            root.colour-mixer-open = false;
+            root.focus-generation += 1;
+        }
+    }
+
     // Keep all original panes and their view state underneath the comparison.
     if root.diff-active: Rectangle {
         background: Tok.paper;

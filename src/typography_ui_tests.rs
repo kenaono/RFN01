@@ -173,7 +173,7 @@ fn typography_settings_roundtrip_and_render() {
                 button: PointerEventButton::Left,
             });
     };
-    click(446.0, 202.0);
+    click(446.0, 188.0);
     window.window().request_redraw();
     let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];
     surface.draw_if_needed(|renderer| {
@@ -185,7 +185,7 @@ fn typography_settings_roundtrip_and_render() {
     }
     std::fs::write(output.join("background-menu.ppm"), ppm).unwrap();
     // 「Paperに合わせる」
-    click(295.0, 236.0);
+    click(307.0, 222.0);
     assert_eq!(Setting::Decoration(1, 3).read(&window, 0), 0);
     let saved_background = palette.row_data(colour_row(0, 9)).unwrap();
     set_colour(&palette, 0, PAPER_SLOT, [0.9, 1.0, 0.9]);
