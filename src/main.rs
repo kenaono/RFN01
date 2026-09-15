@@ -2745,6 +2745,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // 追加要件 2026-09-15: 表示の言語。**窓を作ったあと、画面の文言を作る前に**決める。
     i18n::apply(window.get_language());
     match_ink_set(&window);
+    // TABの色は全体の紙も見る（書き手の判断 2026-09-15）。最初に並べたときは設定を読む前だった。
+    publish_tabs(&window, &live);
     // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
     // 色しか覚えていないので、語はここで初めて手に入る。
     open_word_modes(&window, &live);
@@ -2760,6 +2762,7 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     wiring::wire_typography(
         &window,
+        &live,
         &pane_states,
         &render_cache,
         spec_timer,
@@ -3809,7 +3812,7 @@ struct PaneTab {
     /// いる限り付いていて、別のペインへ運んでも一緒に行く。Paneの色より勝つ。
     paper: Paper,
     /// 追加要件 2026-09-15（書き手）: **TAB（見出し）そのものの色。**`None`なら背景に合わせる。
-    /// 一度選べば背景を変えても追随しない（書き手の選択）。
+    /// 一度選べばTABの紙を変えても追随しない。**Paneの色を変えると外れる**（書き手の判断 2026-09-15）。
     tab_colour: Option<Color>,
 }
 
@@ -7421,6 +7424,14 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
     // **タブが動けばここも動く**ので、publishの入口で一緒に言う。
     publish_word_mode_of(window, live);
     let shared = window.get_paper_shared();
+    // 書き手の判断 2026-09-15: **全体の紙を既定から変えていれば、その向きのTABは選ばれて
+    // いなくてもその色。**既定のままなら今までの見た目（前のTABだけが紙）。
+    let palette = window.get_palette();
+    let global: [Option<Color>; 2] = std::array::from_fn(|sheet| {
+        palette
+            .row_data(colour_row(sheet, PAPER_SLOT))
+            .filter(|colour| *colour != slint_colour(default_colour(sheet, PAPER_SLOT)))
+    });
     let strips = PaneId::all(window).into_iter().map(|id| {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
@@ -7431,10 +7442,16 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                 // 追加要件 2026-09-15: TABの色＝個別の色、なければそのTABの向きの紙（TAB > Pane）。
                 // 全体の紙のままなら色を持たない（今までの見た目）。
                 let direction = usize::from(tab.view.vertical && !shared);
-                let chip = tab
-                    .tab_colour
-                    .or(tab.paper[direction])
-                    .or(strip.paper[direction]);
+                // 設定・端末のTABは紙を持たないので、紙の色は映さない（書き手の報告
+                // 2026-09-15：「SettingのTABまで色つきになりました」）。
+                let paper = (!tab.stands_in())
+                    .then(|| {
+                        tab.paper[direction]
+                            .or(strip.paper[direction])
+                            .or(global[direction])
+                    })
+                    .flatten();
+                let chip = tab.tab_colour.or(paper);
                 // **編集の始まったタブは、もう覗いているだけではない**
                 // （書き手の報告 2026-09-07）。ここが不変の借りしか持たないので
                 // 旗は`Cell`にしてある。最初の一字で`set_edited`がこの publish を
@@ -7804,6 +7821,29 @@ fn give_random_paper(window: &AppWindow, tab: &mut PaneTab) {
     }
     let colour = slint_colour(random_paper(choice == 1, random_seed()));
     tab.paper = [Some(colour); 2];
+}
+
+/// 紙の色の全体Reset（Page・Reset All）で、**TAB・Paneに付けた色も全部外す**
+/// （書き手の報告 2026-09-15）。
+///
+/// 残していたときは、Resetが「縦書きを横書きに合わせる」を切るので、縦書きのTABが
+/// **前に縦書きへ付けた色**を読み出し、既定に戻したはずの紙が戻らなかった。閉じたTABも
+/// 開き直せば戻ってくるので一緒に外す。
+fn forget_paper_colours(window: &AppWindow, live: &Live) {
+    let forget = |tab: &mut PaneTab| {
+        tab.paper = [None; 2];
+        tab.tab_colour = None;
+    };
+    for strip in &mut live.tabs.borrow_mut().panes {
+        strip.paper = [None; 2];
+        strip.tabs.iter_mut().for_each(forget);
+    }
+    live.closed_tabs.borrow_mut().iter_mut().for_each(forget);
+    live.cache
+        .borrow_mut()
+        .log_diag("paper", "reset tabs and panes");
+    publish_tabs(window, live);
+    write_session(window, live);
 }
 
 fn add_tab(window: &AppWindow, live: &Live, id: PaneId, mut tab: PaneTab) {

@@ -1941,7 +1941,6 @@ export component AppWindow inherits Window {
                         page-background: pane.vertical && !root.paper-shared
                             ? (pane.paper-v-own ? pane.paper-v : root.palette[22])
                             : (pane.paper-h-own ? pane.paper-h : root.palette[7]);
-                        paper-direction: root.paper-shared ? "" : (pane.vertical ? @tr(" (Vertical)") : @tr(" (Horizontal)"));
                         wall-kind: root.wall-kind;
                         wall-pieces: root.wall-pieces;
                         wall-image: root.wall-image;

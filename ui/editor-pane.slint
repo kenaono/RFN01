@@ -338,11 +338,9 @@ export component EditorPane inherits Rectangle {
     // 窓の中の原点の、画面上の位置（Windowsの壁紙を画面に固定するため）。
     in property <length> wall-origin-x;
     in property <length> wall-origin-y;
-    /// 追加要件 2026-09-15: 紙の色をTAB（0）・Pane（1）に付ける。色は「いま見えている
-    /// 向き」のもの。2 はTABそのものの色（向きを持たない）。既定の色へ戻す・その他の色も
+    /// 追加要件 2026-09-15: 紙の色をTAB（0）・Pane（1）に付ける。**縦書き・横書きの両方に
+    /// 同じ色**（書き手の判断 2026-09-15）。2 はTABそのものの色。既定の色へ戻す・その他の色も
     /// 同じ番号で言う。
-    /// メニューの行に添える向き（縦横で別々のときだけ）。色は見えている向きに付くので、それを言う。
-    in property <string> paper-direction;
     callback paper-chosen(int, color);
     callback paper-default(int);
     callback paper-more(int);
@@ -1440,7 +1438,7 @@ export component EditorPane inherits Rectangle {
                         }
                         // 追加要件 2026-09-15: このPaneの紙の色（TABの色が付いていればそちらが勝つ）。
                         if root.writing: MenuRow {
-                            title: @tr("Pane Background") + root.paper-direction + "…";
+                            title: @tr("Pane Background") + "…";
                             activated => {
                                 root.open-paper-palette(1, root.width - 256px, 32px);
                                 pane-menu.close();
@@ -3025,7 +3023,7 @@ export component EditorPane inherits Rectangle {
                                             // 追加要件 2026-09-15（書き手）: **本文の紙の上の右クリックで背景。**
                                             // このTABの紙の色（見えている向き）。
                                             MenuRow {
-                                                title: @tr("Background") + root.paper-direction + "…";
+                                                title: @tr("Background") + "…";
                                                 activated => {
                                                     root.paper-target = 0;
                                                     body-palette.show();

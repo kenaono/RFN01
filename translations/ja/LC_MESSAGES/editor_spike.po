@@ -6,12 +6,6 @@ msgstr ""
 "Language: ja\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-msgid " (Horizontal)"
-msgstr "（横書き）"
-
-msgid " (Vertical)"
-msgstr "（縦書き）"
-
 msgid "A document that has not been saved\ncannot be reopened"
 msgstr "まだ保存していない文書は\n開き直せません"
 

@@ -498,7 +498,7 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     window.set_sheet_stride(SHEET_NUMBERS as i32);
     window.set_sheet_numbers(ModelRc::from(numbers.clone()));
     window.set_palette(ModelRc::from(palette.clone()));
-    window.set_sheet_fonts(ModelRc::from(fonts));
+    window.set_sheet_fonts(ModelRc::from(fonts.clone()));
     surface.set_size(slint::PhysicalSize::new(1000, 740));
     publish_panes(&window, 1);
     let id = PaneId::from_index(0);
@@ -548,14 +548,14 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     let blue = Color::from_rgb_u8(0, 0, 255);
     assert_eq!(paper(), global);
 
-    window.invoke_colour_set(3, 0, red);
-    assert_eq!(paper(), channels(red), "the tab's paper");
-    assert!(id.screen(&window).paper_h_own && !id.screen(&window).paper_v_own);
     window.invoke_colour_set(4, 0, blue);
+    assert_eq!(paper(), channels(blue), "the pane's paper");
+    assert!(id.screen(&window).paper_h_own && id.screen(&window).paper_v_own);
+    window.invoke_colour_set(3, 0, red);
     assert_eq!(paper(), channels(red), "the tab wins over the pane");
     let session = session::capture_session(&window, &live);
-    assert_eq!(session.panes[0].paper, [Some([0, 0, 255]), None]);
-    assert_eq!(session.panes[0].tabs[0].paper, [Some([255, 0, 0]), None]);
+    assert_eq!(session.panes[0].paper, [Some([0, 0, 255]); 2]);
+    assert_eq!(session.panes[0].tabs[0].paper, [Some([255, 0, 0]); 2]);
 
     // Another tab in the same pane shows the pane's paper; coming back shows the tab's.
     new_tab(&window, &live, id);
@@ -563,53 +563,75 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     switch_to_tab(&window, &live, id, 0);
     assert_eq!(paper(), channels(red));
 
+    // 書き手の判断 2026-09-15: Paneの色を変えれば、そのPaneのTABは全部塗り変わる——
+    // TABに付けた紙の色も見出しの色も外れる。
+    window.invoke_colour_set(5, 0, red);
+    window.invoke_colour_set(4, 0, blue);
+    assert_eq!(paper(), channels(blue), "the pane repaints its tabs");
+    let tabs = live.tabs.borrow();
+    assert!(
+        tabs.of(id)
+            .tabs
+            .iter()
+            .all(|tab| tab.paper == [None; 2] && tab.tab_colour.is_none())
+    );
+    drop(tabs);
+    window.invoke_colour_set(3, 0, red);
+
     // Back to the default: the tab falls to the pane, the pane to the settings.
     window.invoke_colour_default(3, 0);
     assert_eq!(paper(), channels(blue));
     window.invoke_colour_default(4, 0);
     assert_eq!(paper(), global);
 
-    // The other direction is untouched, and has its own.
-    id.update_screen(&window, |screen| screen.vertical = true);
-    window.invoke_colour_set(3, 0, red);
-    assert!(id.screen(&window).paper_v_own && !id.screen(&window).paper_h_own);
-    id.update_screen(&window, |screen| screen.vertical = false);
-    assert_eq!(paper(), global);
-
-    // 横書きに合わせる（書き手の求め 2026-09-15）: 縦書きでも横書きの色を使い、
-    // 縦書きから選んだ色も横書きの側に付く。切れば縦書きの色に戻る。
+    // 書き手の判断 2026-09-15: TAB・Paneの色は縦書き・横書きにそろう。「縦書きを横書きに
+    // 合わせる」を切り替えても変わらない。
     window.invoke_colour_set(4, 0, blue);
-    id.update_screen(&window, |screen| screen.vertical = true);
-    assert_eq!(
-        paper(),
-        channels(red),
-        "separate: the tab's vertical colour"
-    );
-    window.set_paper_shared(true);
-    assert_eq!(
-        paper(),
-        channels(blue),
-        "shared: the pane's horizontal colour"
-    );
-    let green = Color::from_rgb_u8(0, 255, 0);
-    window.invoke_colour_set(3, 0, green);
-    id.update_screen(&window, |screen| screen.vertical = false);
-    assert_eq!(
-        paper(),
-        channels(green),
-        "chosen while vertical, kept as horizontal"
-    );
-    window.invoke_colour_default(3, 0);
-    window.invoke_colour_default(4, 0);
-    id.update_screen(&window, |screen| screen.vertical = true);
-    let vertical_global = pane_typography(&window, id).paper;
-    assert_eq!(
-        vertical_global, global,
-        "the vertical sheet takes the horizontal paper"
-    );
+    window.invoke_colour_set(3, 0, red);
+    for (vertical, shared) in [(true, false), (true, true), (false, true)] {
+        id.update_screen(&window, |screen| screen.vertical = vertical);
+        window.set_paper_shared(shared);
+        assert_eq!(
+            paper(),
+            channels(red),
+            "vertical={vertical} shared={shared}"
+        );
+    }
     window.set_paper_shared(false);
-    window.invoke_colour_default(3, 0);
     id.update_screen(&window, |screen| screen.vertical = false);
+    window.invoke_colour_default(3, 0);
+
+    // 書き手の判断 2026-09-15: 全体の紙を変えたら、TAB・Paneに付けた色は外す。
+    let green = Color::from_rgb_u8(0, 255, 0);
+    window.invoke_colour_set(3, 0, red);
+    window.invoke_colour_set(0, PAPER_SLOT as i32, green);
+    assert_eq!(paper(), channels(green), "the global paper wins again");
+    let tabs = live.tabs.borrow();
+    assert_eq!(tabs.of(id).paper, [None; 2]);
+    assert!(tabs.of(id).tabs.iter().all(|tab| tab.paper == [None; 2]));
+    drop(tabs);
+    window.invoke_colour_set(4, 0, blue);
+    window.invoke_colour_default(0, PAPER_SLOT as i32);
+    assert_eq!(paper(), global, "the default does the same");
+    assert!(!id.screen(&window).paper_h_own);
+
+    // 書き手の判断 2026-09-15: 全体の紙を既定から変えれば、選ばれていないTABもその色。
+    // 既定のままなら今までの見た目（色を持たない）。
+    let chips = || {
+        let tabs = id.screen(&window).tabs;
+        (0..tabs.row_count())
+            .map(|at| tabs.row_data(at).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(chips().len() > 1);
+    window.invoke_colour_set(0, PAPER_SLOT as i32, green);
+    assert!(
+        chips()
+            .iter()
+            .all(|chip| chip.colour_own && chip.colour == green)
+    );
+    window.invoke_colour_default(0, PAPER_SLOT as i32);
+    assert!(chips().iter().all(|chip| !chip.colour_own));
 
     // TABの色（書き手の求め 2026-09-15）: 既定は背景と同じ、個別に変えれば背景を変えても残る。
     let chip = || id.screen(&window).tabs.row_data(0).unwrap();
@@ -658,6 +680,49 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     window.invoke_paper_random_chosen(0);
     new_tab(&window, &live, id);
     assert_eq!(paper(), global, "off: no colour");
+
+    // 紙のReset（書き手の報告 2026-09-15）: **TAB・Paneに付けた色も外す。**残していたときは、
+    // Resetが「横書きに合わせる」を切ったとたん前に縦書きへ付けた色が出て、紙が既定に戻らなかった。
+    // 設定のTABは紙を持たないので、Paneの色を映さない。
+    wiring::wire_typography(
+        &window,
+        &live,
+        &live.states,
+        &live.cache,
+        Rc::new(Timer::default()),
+        numbers.clone(),
+        palette.clone(),
+        fonts.clone(),
+    );
+    switch_to_tab(&window, &live, id, 0);
+    window.invoke_colour_set(4, 0, blue);
+    window.invoke_colour_set(3, 0, red);
+    window.invoke_colour_set(5, 0, yellow);
+    open_settings(&window, &live);
+    let settings_chip = live.tabs.borrow().of(id).active;
+    let chip_at = |at: usize| id.screen(&window).tabs.row_data(at).unwrap();
+    assert!(
+        !chip_at(settings_chip).colour_own,
+        "the settings tab has no paper"
+    );
+    switch_to_tab(&window, &live, id, 0);
+    window.set_paper_shared(true);
+    window.invoke_typography_reset(5);
+    assert!(!window.get_paper_shared());
+    assert_eq!(paper(), global, "back to the default paper");
+    let screen = id.screen(&window);
+    assert!(!screen.paper_h_own && !screen.paper_v_own);
+    let tabs = live.tabs.borrow();
+    let strip = tabs.of(id);
+    assert_eq!(strip.paper, [None; 2]);
+    assert!(
+        strip
+            .tabs
+            .iter()
+            .all(|tab| tab.paper == [None; 2] && tab.tab_colour.is_none())
+    );
+    drop(tabs);
+    assert!((0..id.screen(&window).tabs.row_count()).all(|at| !chip_at(at).colour_own));
 
     // 書式・レイアウトの「横書きに合わせる」（書き手の求め 2026-09-15）: 面ごと。縦書きにしか
     // 無い縦中横は共通にしない。保存するのは縦書き自身の値で、切れば戻る。

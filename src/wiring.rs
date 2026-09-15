@@ -464,6 +464,10 @@ impl ColourDoors {
                         crate::default_colour(sheet, slot_at),
                     ),
                 }
+                // 書き手の判断 2026-09-15: **全体の紙を変えたら、TAB・Paneに付けた色は外す。**
+                if slot_at == PAPER_SLOT {
+                    crate::forget_paper_colours(window, &self.live);
+                }
                 schedule_relayout(window, &self.states, &self.cache, &self.timer);
             }
             1 => {
@@ -516,12 +520,12 @@ impl ColourDoors {
                 );
                 crate::publish_tabs(window, &self.live);
             }
-            // 追加要件 2026-09-15: TAB（3）・Pane（4）の紙。slot はペインの番号で、
-            // 向きはそのペインがいま見せている向き（開いた面の`sheet`ではない）。
+            // 追加要件 2026-09-15: TAB（3）・Pane（4）の紙。slot はペインの番号。
+            // **縦書き・横書きの両方に同じ色**（書き手の判断 2026-09-15：「そろえたほうがいい」）
+            // ——向きごとに持っていたときは、横書きのTABでPaneの色を変えても縦書きのTABが
+            // 塗り変わらず、「縦書きを横書きに合わせる」を切ると前の色が出てきた。
             3 | 4 => {
                 let id = crate::PaneId::from_index(slot);
-                // 縦書きを横書きに合わせているなら、どちらの向きから選んでも横書きの色。
-                let direction = usize::from(id.vertical(window) && !window.get_paper_shared());
                 {
                     let mut tabs = self.live.tabs.borrow_mut();
                     let strip = tabs.of_mut(id);
@@ -532,18 +536,22 @@ impl ColourDoors {
                             None => return,
                         }
                     } else {
+                        // 書き手の判断 2026-09-15: **Paneの色を変えれば、そのPaneのTABは全部
+                        // 塗り変わる。**TABに付けた紙の色も見出しの色も外す——残すと、
+                        // 個別に色を付けたTABだけが追随しないように見えた。
+                        for tab in &mut strip.tabs {
+                            tab.paper = [None; 2];
+                            tab.tab_colour = None;
+                        }
                         &mut strip.paper
                     };
-                    paper[direction] = rgb.map(slint_colour);
+                    *paper = [rgb.map(slint_colour); 2];
                 }
                 let what = if kind == 3 { "tab" } else { "pane" };
                 let said = rgb.map_or("-".to_owned(), |rgb| crate::hex_colour(slint_colour(rgb)));
                 self.cache.borrow_mut().log_diag(
                     "paper",
-                    &format!(
-                        "{what} pane={} vertical={direction} colour={said}",
-                        id.log_name()
-                    ),
+                    &format!("{what} pane={} colour={said}", id.log_name()),
                 );
                 // 行へ置き、組み直し、セッションに残す（TAB・Paneが残っている限り付いている）。
                 crate::publish_tabs(window, &self.live);
@@ -1094,6 +1102,7 @@ pub fn wire_find(window: &AppWindow, live: &Live) {
 /// 入れて持っていくので、ここから先で誰も使わない——`main()`でもそうだった。
 pub fn wire_typography(
     window: &AppWindow,
+    live: &Live,
     pane_states: &PaneStates,
     render_cache: &Rc<RefCell<RenderCache>>,
     spec_timer: Rc<Timer>,
@@ -1254,6 +1263,7 @@ pub fn wire_typography(
     let steps = numbers;
     let colours = palette;
     let families = sheet_fonts;
+    let live = live.clone();
     window.on_typography_reset(move |group| {
         if let Some(window) = weak.upgrade() {
             // **Both sheets**, which are both on the page now (書き手の求め
@@ -1278,6 +1288,8 @@ pub fn wire_typography(
                     window.set_wall_path("".into());
                 }
                 crate::show_wallpaper(&window, &cache);
+                // 書き手の報告 2026-09-15: TAB・Paneに付けた紙の色も戻す。残すと既定に戻らない。
+                crate::forget_paper_colours(&window, &live);
             }
             schedule_relayout(&window, &states, &cache, &timer);
         }
