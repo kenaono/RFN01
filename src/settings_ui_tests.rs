@@ -700,3 +700,63 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     assert_ne!(vertical().ink, channels(red));
     assert_ne!(Setting::BodySize.read(&window, 1), 30);
 }
+
+/// 書き手の報告 2026-09-15: **Paneメニューの「Terminal Below」が効かない。**
+///
+/// 設定のTAB化でこの行が`if !root.settings`に入り、「閉じてから頼む」の順が
+/// 残った——閉じた時点で行ごと消え、頼みが届かない（技術検証 6.24）。
+/// 本文の右クリックの同じ行も、押せば1回届くことを見る。
+#[test]
+fn terminal_below_rows_reach_the_pane() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let document = OpenDocument::new(DocumentFile::untitled(1), "本文\n".into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 1050.0;
+        screen.height = 640.0;
+        screen.shown_width = 1050.0;
+        screen.shown_height = 540.0;
+    });
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), "本文\n");
+    let calls = Rc::new(std::cell::Cell::new(0));
+    let seen = calls.clone();
+    window.on_pane_below_toggled(move |_| seen.set(seen.get() + 1));
+    let click = |x: f32, y: f32, button| {
+        let position = slint::LogicalPosition::new(x, y);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        slint::platform::update_timers_and_animations();
+    };
+    // ⋮ → Terminal Below
+    click(1077.0, 25.0, PointerEventButton::Left);
+    click(900.0, 357.0, PointerEventButton::Left);
+    assert_eq!(calls.get(), 1, "the pane menu row");
+    // 本文の右クリック → Terminal Below
+    click(160.0, 150.0, PointerEventButton::Right);
+    click(218.0, 578.0, PointerEventButton::Left);
+    assert_eq!(calls.get(), 2, "the body menu row");
+}

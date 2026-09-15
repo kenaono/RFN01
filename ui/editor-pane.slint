@@ -1382,12 +1382,16 @@ export component EditorPane inherits Rectangle {
                         // 追加要件 Terminal: **the strip along the foot.** Which
                         // of the two it is follows from the tab in front, so the
                         // row says which one the writer will get.
+                        //
+                        // **頼んでから閉じる**（技術検証 6.24、書き手の報告 2026-09-15）。
+                        // 設定のTAB化で`if`に入ったとき順が残り、閉じた時点で行ごと
+                        // 消えて、頼みが届いていなかった。
                         if !root.settings: MenuRow {
                             title: root.terminal ? "Editor Below" : "Terminal Below";
                             shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                             activated => {
-                                pane-menu.close();
                                 root.below-toggled();
+                                pane-menu.close();
                             }
                         }
                         MenuSep { }
