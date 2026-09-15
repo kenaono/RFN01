@@ -23,7 +23,9 @@ pub enum GitError {
 impl std::fmt::Display for GitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GitError::Missing => f.write_str("Gitが見つかりません"),
+            GitError::Missing => {
+                f.write_str("Gitが見つかりません（インストールされていないか、PATHにありません）")
+            }
             GitError::NoCommit => f.write_str("Gitの管理下にないか、まだCommitがありません"),
             GitError::Untrusted => f.write_str(
                 "フォルダの持ち主が違うため、Gitが読むのを断りました（safe.directoryへの追加が必要です）",
@@ -35,10 +37,15 @@ impl std::fmt::Display for GitError {
 }
 
 fn git(folder: &Path, arguments: &[&str]) -> Result<Output, GitError> {
+    run("git", folder, arguments)
+}
+
+/// 呼ぶ名前を差し替えられるのは、**Gitの無いPC**を試験で作るため。
+fn run(program: &str, folder: &Path, arguments: &[&str]) -> Result<Output, GitError> {
     use std::os::windows::process::CommandExt;
     // コンソールの窓を一瞬でも出さない。
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new("git")
+    Command::new(program)
         .arg("-C")
         .arg(folder)
         .args(arguments)
@@ -81,6 +88,18 @@ pub fn head_version(path: &Path) -> Result<(String, Vec<u8>), GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 書き手の確認 2026-09-15: Gitが入っていなくても、断りの理由が出る。
+    #[test]
+    fn a_machine_without_git_says_so() {
+        let error = run("rfnedit-no-such-git", &std::env::temp_dir(), &["--version"]);
+        assert_eq!(error.err(), Some(GitError::Missing));
+        assert!(
+            GitError::Missing
+                .to_string()
+                .contains("Gitが見つかりません")
+        );
+    }
 
     #[test]
     fn reads_the_committed_version_not_the_working_file() {
