@@ -1,5 +1,5 @@
 import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
-import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WordModeRow } from "editor-pane.slint";
+import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
 import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
@@ -62,7 +62,7 @@ export struct WordTroubleRow {
 // Re-exported so they stay part of this window's public API: Rust builds the
 // pane model and the tile and selection models inside it, and they reach it
 // through the generated types.
-export { PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo }
+export { PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece }
 
 // 要件 12: a window of its own, opened from the menu here. **Exported through
 // this file** because that is the one Slint compiles (`build.rs`).
@@ -765,6 +765,24 @@ export component AppWindow inherits Window {
     /// 書き手の求めで、TAB・Paneのメニューからは選ばない（おまけなので全体設定だけ）。
     in-out property <int> paper-random: 0;
     callback paper-random-chosen(int);
+    /// 追加要件 2026-09-15（書き手）: 背景の壁紙（全体の設定）。0 なし、1 Windowsの壁紙
+    /// （画面に固定して敷くので、窓越しにデスクトップが見えているように感じる）、2 画像ファイル。
+    in-out property <int> wall-kind: 0;
+    in-out property <string> wall-path;
+    /// 画像ファイルの置き方。0 タイル、1 縦に合わせる、2 横に合わせる。
+    in-out property <int> wall-fit: 0;
+    /// 壁紙の濃さ（%）。紙はその分だけ透ける。
+    in-out property <int> wall-strength: 30;
+    in property <[WallPiece]> wall-pieces;
+    in property <image> wall-image;
+    in property <float> wall-image-width;
+    in property <float> wall-image-height;
+    in property <length> wall-origin-x;
+    in property <length> wall-origin-y;
+    callback wall-kind-chosen(int);
+    callback wall-file-requested();
+    callback wall-fit-chosen(int);
+    callback wall-strength-moved(float);
     /// 追加要件 2026-09-15: 文字色のセット（10個）。1つは Body・H1〜H6 の文字色を
     /// 横書き・縦書きの順に14色、`#rrggbb` をカンマで並べた字。空ならまだ無い。
     in property <[string]> ink-sets: ["", "", "", "", "", "", "", "", "", ""];
@@ -1921,6 +1939,15 @@ export component AppWindow inherits Window {
                             ? (pane.paper-v-own ? pane.paper-v : root.palette[22])
                             : (pane.paper-h-own ? pane.paper-h : root.palette[7]);
                         paper-direction: root.paper-shared ? "" : (pane.vertical ? " (Vertical)" : " (Horizontal)");
+                        wall-kind: root.wall-kind;
+                        wall-pieces: root.wall-pieces;
+                        wall-image: root.wall-image;
+                        wall-image-width: root.wall-image-width;
+                        wall-image-height: root.wall-image-height;
+                        wall-fit: root.wall-fit;
+                        wall-strength: root.wall-strength;
+                        wall-origin-x: root.wall-origin-x;
+                        wall-origin-y: root.wall-origin-y;
                         paper-chosen(which, colour) => {
                             root.focused-pane = pane.id;
                             root.colour-set(3 + which, pane.id, colour);
@@ -4273,6 +4300,111 @@ export component AppWindow inherits Window {
                                                         clicked => {
                                                             root.paper-random-chosen(index);
                                                         }
+                                                    }
+                                                }
+                                            }
+                                            // 追加要件 2026-09-15（書き手）: 背景の壁紙。全体の設定だけ。
+                                            // Windowsの壁紙は画面に固定して敷く（窓越しにデスクトップが見える感じ）。
+                                            VerticalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: "BACKGROUND IMAGE";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    letter-spacing: 0.9px;
+                                                }
+                                                HorizontalLayout {
+                                                    spacing: 6px;
+                                                    height: 28px;
+
+                                                    Text {
+                                                        text: "Image";
+                                                        color: Tok.ink;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+
+                                                    for choice[index] in ["None", "Windows Wallpaper", "Image File"]: TextButton {
+                                                        title: choice;
+                                                        role: root.wall-kind == index ? Role.primary : Role.normal;
+                                                        clicked => {
+                                                            root.wall-kind-chosen(index);
+                                                        }
+                                                    }
+                                                }
+
+                                                if root.wall-kind == 2: HorizontalLayout {
+                                                    spacing: 6px;
+                                                    height: 28px;
+
+                                                    Text {
+                                                        text: root.wall-path == "" ? "No file chosen" : root.wall-path;
+                                                        color: Tok.ink-muted;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                        overflow: elide;
+                                                    }
+
+                                                    TextButton {
+                                                        title: "Choose…";
+                                                        clicked => {
+                                                            root.wall-file-requested();
+                                                        }
+                                                    }
+                                                }
+
+                                                if root.wall-kind == 2: HorizontalLayout {
+                                                    spacing: 6px;
+                                                    height: 28px;
+
+                                                    Text {
+                                                        text: "Fit";
+                                                        color: Tok.ink;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+
+                                                    for choice[index] in ["Tile", "Fit Height", "Fit Width"]: TextButton {
+                                                        title: choice;
+                                                        role: root.wall-fit == index ? Role.primary : Role.normal;
+                                                        clicked => {
+                                                            root.wall-fit-chosen(index);
+                                                        }
+                                                    }
+                                                }
+
+                                                if root.wall-kind != 0: HorizontalLayout {
+                                                    spacing: 10px;
+                                                    height: 28px;
+
+                                                    Text {
+                                                        text: "Image Strength";
+                                                        color: Tok.ink;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+
+                                                    Slider {
+                                                        width: 220px;
+                                                        y: 3px;
+                                                        minimum: 0;
+                                                        maximum: 100;
+                                                        value: root.wall-strength;
+                                                        moved(value) => {
+                                                            root.wall-strength-moved(value);
+                                                        }
+                                                    }
+
+                                                    Text {
+                                                        text: root.wall-strength + "%";
+                                                        color: Tok.ink-muted;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        min-width: 40px;
                                                     }
                                                 }
                                             }

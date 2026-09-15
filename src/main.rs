@@ -44,6 +44,7 @@ mod tree_watch;
 mod typography_ui_tests;
 #[cfg(test)]
 mod vertical_layout;
+mod wallpaper;
 mod wiring;
 mod word_marks;
 #[cfg(test)]
@@ -1909,6 +1910,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             check_external_change(&window, &watch_live);
+            // 追加要件 2026-09-15: Windowsの壁紙は替わる（Bing壁紙なら毎日）。替わっていれば置き直す。
+            if let Some(error) = wallpaper::refresh_if_changed(&window) {
+                report_wallpaper_error(&window, &watch_live.cache, &error);
+            }
             if window.get_tree_open()
                 && window.get_left_tab() == 0
                 && !window.get_tree_refresh_blocked()
@@ -2987,6 +2992,38 @@ fn main() -> Result<(), slint::PlatformError> {
     // 三つで、設定ファイルはそれを丸ごと置き換えることがある——先に並べて
     // しまうと、書き手が足したシェルがどのメニューにも出ない。
     publish_shells(&window);
+    // 追加要件 2026-09-15（書き手）: 背景の壁紙。設定を読んだあとに置く。
+    show_wallpaper(&window, &render_cache);
+    // **窓が動けば、Windowsの壁紙を敷く位置が逆へ動く**（画面に固定しているので）。
+    // 画面の拡大率が変われば、画面の座標の読み方ごと変わるので置き直す。
+    {
+        use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+        let weak = window.as_weak();
+        let cache = render_cache.clone();
+        window.window().on_winit_window_event(move |_, event| {
+            match event {
+                WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                    if let Some(window) = weak.upgrade() {
+                        wallpaper::follow_window(&window);
+                    }
+                }
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    if let Some(window) = weak.upgrade() {
+                        show_wallpaper(&window, &cache);
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Propagate
+        });
+    }
+    // 窓が画面に出てから、原点を取り直す（出る前はハンドルが無い）。
+    let weak = window.as_weak();
+    Timer::single_shot(Duration::ZERO, move || {
+        if let Some(window) = weak.upgrade() {
+            wallpaper::follow_window(&window);
+        }
+    });
 
     // 追加要件 Terminal. **Opened in the pane the writer is in**, like every
     // other new tab: which pane is the writer's business and they said it by
@@ -4308,6 +4345,25 @@ fn has_reading_view(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>
                 })
             })
         })
+}
+
+/// 設定どおりの壁紙を置き、読めなかったら言う（追加要件 2026-09-15）。
+fn show_wallpaper(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
+    match wallpaper::publish(window) {
+        Ok(()) => cache.borrow_mut().log_diag(
+            "wallpaper",
+            &format!("shown kind={}", window.get_wall_kind()),
+        ),
+        Err(error) => report_wallpaper_error(window, cache, &error),
+    }
+}
+
+fn report_wallpaper_error(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, error: &str) {
+    window.set_render_status(format!("背景の画像を読めませんでした: {error}").into());
+    cache.borrow_mut().log_diag(
+        "wallpaper",
+        &format!("failed kind={} error={error}", window.get_wall_kind()),
+    );
 }
 
 /// 外で変わった文書を、印の問いから「ReadOnlyモードで読む」（書き手の判断 2026-09-15）。
@@ -9195,6 +9251,8 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
     if own {
         spec.paper = channels(paper);
     }
+    // 追加要件 2026-09-15: 壁紙を敷いているあいだ、紙は面が1枚だけ透かして塗る。
+    spec.paper_painted = window.get_wall_kind() == wallpaper::NONE;
     spec
 }
 
@@ -9977,6 +10035,12 @@ const TEXT_SHARED_SETTING: &str = "text.shared";
 const LAYOUT_SHARED_SETTING: &str = "layout.shared";
 /// 追加要件 2026-09-15（書き手）: 新しく開いたTABのランダムな紙。0 Off、1 淡色、2 濃色。
 const PAPER_RANDOM_SETTING: &str = "paper.random";
+/// 追加要件 2026-09-15（書き手）: 背景の壁紙。種類（0 なし・1 Windows・2 画像）、画像のパス、
+/// 置き方（0 タイル・1 縦・2 横）、濃さ（%）。
+const WALL_KIND_SETTING: &str = "wallpaper.kind";
+const WALL_PATH_SETTING: &str = "wallpaper.path";
+const WALL_FIT_SETTING: &str = "wallpaper.fit";
+const WALL_STRENGTH_SETTING: &str = "wallpaper.strength";
 /// どの記号を箇条書きの印として読むか（書き手の決定 2026-09-11）。
 const LIST_MARKS_SETTING: &str = "list.marks";
 
@@ -10766,6 +10830,22 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_paper_random().to_string(),
     ));
     values.push((
+        WALL_KIND_SETTING.to_owned(),
+        window.get_wall_kind().to_string(),
+    ));
+    values.push((
+        WALL_PATH_SETTING.to_owned(),
+        window.get_wall_path().to_string(),
+    ));
+    values.push((
+        WALL_FIT_SETTING.to_owned(),
+        window.get_wall_fit().to_string(),
+    ));
+    values.push((
+        WALL_STRENGTH_SETTING.to_owned(),
+        window.get_wall_strength().to_string(),
+    ));
+    values.push((
         TEXT_SHARED_SETTING.to_owned(),
         i32::from(window.get_text_shared()).to_string(),
     ));
@@ -10894,6 +10974,23 @@ fn apply_settings(
         // そちらへ倒す。
         if written == PAPER_RANDOM_SETTING {
             window.set_paper_random(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
+            continue;
+        }
+        if written == WALL_KIND_SETTING {
+            window.set_wall_kind(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
+            continue;
+        }
+        if written == WALL_PATH_SETTING {
+            window.set_wall_path(value.trim().into());
+            continue;
+        }
+        if written == WALL_FIT_SETTING {
+            window.set_wall_fit(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
+            continue;
+        }
+        if written == WALL_STRENGTH_SETTING {
+            let strength = value.trim().parse::<i32>().unwrap_or(30);
+            window.set_wall_strength(strength.clamp(0, 100));
             continue;
         }
         if written == TEXT_SHARED_SETTING {
@@ -12456,8 +12553,13 @@ impl TileSink for TileImages<'_> {
             four.swap(0, 2);
         }
         self.uploaded += pixels.as_bytes().len();
-        self.produced
-            .push((span, Image::from_rgba8(pixels.clone()), pixels));
+        // **乗算済みのまま渡す**（追加要件 2026-09-15）。壁紙のあいだタイルの地は透明で、
+        // 字の縁は半透明になる。紙を塗っていれば全画素が不透明で、どちらでも同じ絵。
+        self.produced.push((
+            span,
+            Image::from_rgba8_premultiplied(pixels.clone()),
+            pixels,
+        ));
     }
 }
 

@@ -3105,7 +3105,13 @@ fn draw_tile(
     // whole draw, and BeginDraw/EndDraw are paired.
     unsafe {
         target.BeginDraw();
-        target.Clear(Some(&paper));
+        // 壁紙を敷いているあいだは、紙は面が塗る（`Typography::paper_painted`）。
+        let ground = if typography.paper_painted {
+            paper
+        } else {
+            D2D1_COLOR_F::default()
+        };
+        target.Clear(Some(&ground));
         // The brushes the target keeps, told what the inks are now. Cheaper
         // than building them per tile, and the settings may have moved since
         // the target was made (要件 9).
@@ -3820,6 +3826,7 @@ fn hash_colours(typography: &Typography, hasher: &mut DefaultHasher) {
     for channel in typography.ink.iter().chain(typography.paper.iter()) {
         channel.to_bits().hash(hasher);
     }
+    typography.paper_painted.hash(hasher);
     for level in &typography.heading_ink {
         for channel in level {
             channel.to_bits().hash(hasher);

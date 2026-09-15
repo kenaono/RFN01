@@ -16,6 +16,23 @@ import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, Menu
 // One rendered slice of the document. Both directions use it: the vertical pane
 // stacks tiles along x and the horizontal one along y, so the placement Rust
 // computes covers both and this side does not have to know which is which.
+// 追加要件 2026-09-15（書き手）: Windowsの壁紙の、画面1台ぶん。**座標は画面の論理画素**
+// で、面が自分の画面上の位置を引いて置く。画面の矩形で切り、地の色の上に画像を置く。
+export struct WallPiece {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    image-x: length,
+    image-y: length,
+    image-width: length,
+    image-height: length,
+    source: image,
+    has-image: bool,
+    tiled: bool,
+    colour: color,
+}
+
 export struct PreviewTile {
     x: int,
     y: int,
@@ -308,6 +325,19 @@ export component EditorPane inherits Rectangle {
     in property <bool> swap-down;
 
     in property <color> page-background;
+    // 追加要件 2026-09-15（書き手）: 背景の壁紙。0 なし、1 Windowsの壁紙、2 画像ファイル。
+    // 紙は壁紙の上に`wall-strength`%ぶん透けて塗られ、タイルは字だけを置く。
+    in property <int> wall-kind: 0;
+    in property <[WallPiece]> wall-pieces;
+    in property <image> wall-image;
+    in property <float> wall-image-width;
+    in property <float> wall-image-height;
+    // 画像ファイルの置き方。0 タイル、1 縦に合わせる、2 横に合わせる。
+    in property <int> wall-fit: 0;
+    in property <int> wall-strength: 30;
+    // 窓の中の原点の、画面上の位置（Windowsの壁紙を画面に固定するため）。
+    in property <length> wall-origin-x;
+    in property <length> wall-origin-y;
     /// 追加要件 2026-09-15: 紙の色をTAB（0）・Pane（1）に付ける。色は「いま見えている
     /// 向き」のもの。2 はTABそのものの色（向きを持たない）。既定の色へ戻す・その他の色も
     /// 同じ番号で言う。
@@ -1823,6 +1853,54 @@ export component EditorPane inherits Rectangle {
         body-clip := Rectangle {
             vertical-stretch: 1;
             clip: true;
+            // 追加要件 2026-09-15（書き手）: **本文の後ろに壁紙、その上に紙を濃さぶん透かして1枚。**
+            // スクロールしても動かない——紙は本文と一緒に流れるが、壁紙は面（Windowsの壁紙なら
+            // 画面）に固定されている。メニュー・Terminal・Settingsには敷かない。
+            if root.wall-kind != 0 && root.writing: wall := Rectangle {
+                width: parent.width;
+                height: parent.height;
+
+                if root.wall-kind == 1: Rectangle {
+                    for piece in root.wall-pieces: Rectangle {
+                        x: piece.x - root.wall-origin-x - wall.absolute-position.x;
+                        y: piece.y - root.wall-origin-y - wall.absolute-position.y;
+                        width: piece.width;
+                        height: piece.height;
+                        clip: true;
+                        background: piece.colour;
+
+                        if piece.has-image: Image {
+                            x: piece.image-x;
+                            y: piece.image-y;
+                            width: piece.image-width;
+                            height: piece.image-height;
+                            source: piece.source;
+                            image-fit: fill;
+                            horizontal-tiling: piece.tiled ? ImageTiling.repeat : ImageTiling.none;
+                            vertical-tiling: piece.tiled ? ImageTiling.repeat : ImageTiling.none;
+                        }
+                    }
+                }
+
+                if root.wall-kind == 2: Image {
+                    property <float> aspect: root.wall-image-height > 0
+                        ? root.wall-image-width / root.wall-image-height
+                        : 1;
+                    width: root.wall-fit == 1 ? parent.height * self.aspect : parent.width;
+                    height: root.wall-fit == 2 ? parent.width / self.aspect : parent.height;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: root.wall-image;
+                    image-fit: fill;
+                    horizontal-tiling: root.wall-fit == 0 ? ImageTiling.repeat : ImageTiling.none;
+                    vertical-tiling: root.wall-fit == 0 ? ImageTiling.repeat : ImageTiling.none;
+                }
+
+                Rectangle {
+                    background: root.page-background.transparentize(root.wall-strength / 100);
+                }
+            }
+
             // The bar occupies layout space, but the document keeps its
             // original origin and height. Only its covered top is clipped.
         VerticalBox {
@@ -1919,7 +1997,8 @@ export component EditorPane inherits Rectangle {
                     // of each of them is why none of them had to learn about it.
                     x: root.vertical ? 0px : max(0px, (parent.width - self.width) / 2);
                     y: root.vertical ? max(0px, (parent.height - self.height) / 2) : 0px;
-                    background: root.page-background;
+                    // 壁紙のあいだは、紙は後ろの幕が塗る。
+                    background: root.wall-kind != 0 ? transparent : root.page-background;
                     // 書き手の報告 2026-09-08:「設定を開いていると背面がちらつく」
                     // ——ちらついていたのはこの線だった。**Slintの`has-focus`は
                     // popupが開いた瞬間に落ちる**（`WindowInner::show_popup`が

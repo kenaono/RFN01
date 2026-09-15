@@ -95,6 +95,12 @@ pub struct Typography {
     /// own (要件 9).
     pub ink: [f32; 3],
     pub paper: [f32; 3],
+    /// タイルが紙の色を塗るか（追加要件 2026-09-15、背景の壁紙）。
+    ///
+    /// **壁紙を敷いているあいだは塗らない。**紙は面の側が壁紙の上に濃さ付きで
+    /// 1枚だけ塗り、タイルは字だけを透明な地に置く——タイルごとに紙を塗ると、
+    /// 壁紙が文字の帯ごとに隠れる。色と同じ側にいて、幾何には効かない。
+    pub paper_painted: bool,
     /// The families 要件 9 asks to be free.
     ///
     /// **One spec is one writing direction's** (要件 9, revised 2026-08-22), so
@@ -219,6 +225,7 @@ impl Typography {
             code_font: DEFAULT_CODE_FONT.to_owned(),
             ink: DEFAULT_INK,
             paper: DEFAULT_PAPER,
+            paper_painted: true,
             heading_ink: [DEFAULT_INK; MAX_HEADING_LEVEL],
             line_numbers: false,
             whitespace: false,

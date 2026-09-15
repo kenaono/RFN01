@@ -117,6 +117,36 @@ pub fn open_word_set(owner: Owner) -> Option<PathBuf> {
     }
 }
 
+/// 背景の壁紙にする画像を選ぶ（追加要件 2026-09-15）。**Windowsが読める画像なら何でも**
+/// （WICで読む）ので、絞り込みは目安で、すべてのファイルも選べる。
+pub fn open_image(owner: Owner) -> Option<PathBuf> {
+    let filters = [
+        COMDLG_FILTERSPEC {
+            pszName: w!("画像 (*.jpg;*.png;*.bmp;*.gif;*.webp;*.tif)"),
+            pszSpec: w!("*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.jxr;*.heic"),
+        },
+        COMDLG_FILTERSPEC {
+            pszName: w!("すべてのファイル"),
+            pszSpec: w!("*.*"),
+        },
+    ];
+    // SAFETY: `open_document`と同じ——COMは窓のスレッドで初期化済みで、
+    // シェルが返した文字列は`chosen_path`が解放する。
+    unsafe {
+        let created = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER);
+        let dialog: IFileDialog = created.ok()?;
+        let _ = dialog.SetFileTypes(&filters);
+        let _ = dialog.SetFileTypeIndex(1);
+        let _ = dialog.SetTitle(w!("背景の画像を選ぶ"));
+        if let Ok(options) = dialog.GetOptions() {
+            let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM);
+        }
+        dialog.Show(owner).ok()?;
+        let item = dialog.GetResult().ok()?;
+        chosen_path(&item)
+    }
+}
+
 /// Ask which folder to work in (要件 5.1).
 ///
 /// The same dialog as `open_document`, told to pick a folder instead of a file

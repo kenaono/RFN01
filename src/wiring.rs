@@ -233,6 +233,64 @@ pub fn wire_colours(
         }
     });
 
+    // 追加要件 2026-09-15（書き手）: 背景の壁紙。**種類が変わるとタイルの地が変わる**
+    // （紙を塗る／塗らない）ので組み直す——組み直しが設定も書く。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_wall_kind_chosen(move |kind| {
+        if let Some(window) = weak.upgrade() {
+            let kind = kind.clamp(0, 2);
+            // 画像ファイルをまだ選んでいなければ、ここで選ぶ。やめたら何も変えない。
+            if kind == crate::wallpaper::FILE && window.get_wall_path().is_empty() {
+                let owner = crate::ime::window_handle(&window);
+                let Some(path) = crate::file_dialog::open_image(owner) else {
+                    return;
+                };
+                window.set_wall_path(path.display().to_string().into());
+            }
+            window.set_wall_kind(kind);
+            crate::show_wallpaper(&window, &held.cache);
+            crate::relayout_panes(&window, &held.states, &held.cache);
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_wall_file_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            let owner = crate::ime::window_handle(&window);
+            let Some(path) = crate::file_dialog::open_image(owner) else {
+                return;
+            };
+            window.set_wall_path(path.display().to_string().into());
+            window.set_wall_kind(crate::wallpaper::FILE);
+            crate::show_wallpaper(&window, &held.cache);
+            crate::relayout_panes(&window, &held.states, &held.cache);
+        }
+    });
+
+    // 置き方と濃さは面の側（Slint）だけで効くので、組み直さない。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_wall_fit_chosen(move |fit| {
+        if let Some(window) = weak.upgrade() {
+            window.set_wall_fit(fit.clamp(0, 2));
+            save_settings(&window, &held.cache);
+        }
+    });
+
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_wall_strength_moved(move |value| {
+        if let Some(window) = weak.upgrade() {
+            let strength = (value.round() as i32).clamp(0, 100);
+            if strength != window.get_wall_strength() {
+                window.set_wall_strength(strength);
+                save_settings(&window, &held.cache);
+            }
+        }
+    });
+
     // 追加要件 2026-09-15（書き手）: 縦書きの紙を横書きに合わせる。組み直しが設定を書く。
     let weak = window.as_weak();
     let held = doors.clone();
@@ -1199,6 +1257,14 @@ pub fn wire_typography(
             if group == 5 || group < 0 {
                 window.set_paper_shared(false);
                 window.set_paper_random(0);
+                // 壁紙は外す。面のResetでは選んだ画像のパスは覚えておき、Reset All で忘れる。
+                window.set_wall_kind(crate::wallpaper::NONE);
+                window.set_wall_fit(0);
+                window.set_wall_strength(30);
+                if group < 0 {
+                    window.set_wall_path("".into());
+                }
+                crate::show_wallpaper(&window, &cache);
             }
             schedule_relayout(&window, &states, &cache, &timer);
         }

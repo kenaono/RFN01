@@ -762,3 +762,156 @@ fn terminal_below_rows_reach_the_pane() {
     click(218.0, 578.0, PointerEventButton::Left);
     assert_eq!(calls.get(), 2, "the body menu row");
 }
+
+/// 小さなBMP（24bit、上から下）。WICが読める一番簡単な画像。
+fn write_bmp(path: &std::path::Path, width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) {
+    let row = (width * 3).div_ceil(4) * 4;
+    let body = row * height;
+    let mut bytes = Vec::new();
+    bytes.extend(b"BM");
+    bytes.extend((54 + body).to_le_bytes());
+    bytes.extend([0u8; 4]);
+    bytes.extend(54u32.to_le_bytes());
+    bytes.extend(40u32.to_le_bytes());
+    bytes.extend((width as i32).to_le_bytes());
+    bytes.extend((-(height as i32)).to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(24u16.to_le_bytes());
+    bytes.extend([0u8; 24]);
+    for y in 0..height {
+        let mut line = Vec::new();
+        for x in 0..width {
+            let [r, g, b] = pixel(x, y);
+            line.extend([b, g, r]);
+        }
+        line.resize(row as usize, 0);
+        bytes.extend(line);
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// 追加要件 2026-09-15（書き手）: **背景の壁紙。**画像ファイルを敷くと、本文の紙が
+/// 濃さぶん透けて画像が見え、字は濃いまま残る。タイルは紙を塗らない。
+#[test]
+fn a_background_image_shows_through_the_paper() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let directory = std::env::temp_dir().join(format!(
+        "editor-wall-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = Some(directory.clone()));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts.clone()));
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let source = "# 見出し\n本文の字は壁紙の上でも濃いまま。\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 1050.0;
+        screen.height = 640.0;
+        screen.shown_width = 1050.0;
+        screen.shown_height = 540.0;
+        screen.preview = true;
+    });
+    let draw = || {
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1100);
+        });
+        pixels
+    };
+    let save = |name: &str, pixels: &[slint::Rgb8Pixel]| {
+        let output = PathBuf::from("target/wallpaper-qa");
+        std::fs::create_dir_all(&output).unwrap();
+        let mut ppm = b"P6\n1100 760\n255\n".to_vec();
+        for pixel in pixels {
+            ppm.extend([pixel.r, pixel.g, pixel.b]);
+        }
+        std::fs::write(output.join(name), ppm).unwrap();
+    };
+    // 本文の下の、字の無い所。
+    let at = |pixels: &[slint::Rgb8Pixel], x: usize, y: usize| pixels[y * 1100 + x];
+    let empty = (600, 520);
+
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+    let plain = draw();
+    save("plain.ppm", &plain);
+    assert!(pane_typography(&window, id).paper_painted);
+
+    // 赤と青の市松（32px）。
+    let image = directory.join("checker.bmp");
+    write_bmp(&image, 64, 64, |x, y| {
+        if (x / 32 + y / 32) % 2 == 0 {
+            [220, 30, 30]
+        } else {
+            [30, 30, 220]
+        }
+    });
+    window.set_wall_path(image.display().to_string().into());
+    window.set_wall_kind(wallpaper::FILE);
+    window.set_wall_strength(60);
+    wallpaper::publish(&window).unwrap();
+    assert_eq!(window.get_wall_image_width(), 64.0);
+    assert!(
+        !pane_typography(&window, id).paper_painted,
+        "tiles leave the paper to the pane"
+    );
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+    let walled = draw();
+    save("walled.ppm", &walled);
+    let (before, after) = (at(&plain, empty.0, empty.1), at(&walled, empty.0, empty.1));
+    assert_ne!(before, after, "the image shows through the paper");
+    assert!(
+        after.r.abs_diff(after.b) > 20,
+        "a colour of the checker, not paper: {after:?}"
+    );
+
+    // 濃さ0：紙だけに戻る（画像は見えない）。
+    window.set_wall_strength(0);
+    let hidden = draw();
+    let paper = at(&hidden, empty.0, empty.1);
+    assert!(
+        paper.r.abs_diff(before.r) <= 2 && paper.b.abs_diff(before.b) <= 2,
+        "strength 0 is the plain paper: {paper:?} vs {before:?}"
+    );
+
+    // Settings → Page に出る。
+    window.set_wall_strength(60);
+    window.set_settings_tab(5);
+    id.update_screen(&window, |screen| screen.settings = true);
+    save("page-settings.ppm", &draw());
+    let _ = (
+        PointerEventButton::Left,
+        WindowEvent::WindowActiveChanged(true),
+    );
+}
