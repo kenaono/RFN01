@@ -192,6 +192,40 @@ fn an_image_line_is_shown_as_the_picture() {
             (190..=210).contains(&across) && (95..=105).contains(&along) && count > 18_000,
             "{name} active: red {count} px, {across}x{along}"
         );
+        // 記法は行の頭の側、絵はその先（書き手の報告 2026-09-16）：横書きは記法の下、縦書きは記法の左。
+        // 次の行（本文の行）は絵に重ならない。
+        let picture = cache.borrow_mut().pane(id).view.pictures[0].1;
+        let screen = id.screen(&window);
+        let next = {
+            let mut borrowed = cache.borrow_mut();
+            let pane = borrowed.pane(id);
+            let shown = &pane.view.preview_slot.preview.text;
+            let at = shown[..shown.find("本文の行").unwrap()]
+                .encode_utf16()
+                .count();
+            pane.graphics.engine.caret_geometry(at as u32).unwrap()
+        };
+        if vertical {
+            assert!(
+                screen.caret_x >= picture.right - 1.0,
+                "{name}: caret {} picture {picture:?}",
+                screen.caret_x
+            );
+            assert!(
+                next.x + next.width <= picture.left + 1.0,
+                "{name}: next {next:?} picture {picture:?}"
+            );
+        } else {
+            assert!(
+                screen.caret_y + screen.caret_height <= picture.top + 1.0,
+                "{name}: caret {} picture {picture:?}",
+                screen.caret_y
+            );
+            assert!(
+                next.y >= picture.bottom - 1.0,
+                "{name}: next {next:?} picture {picture:?}"
+            );
+        }
     }
     // 読めない行き先の行は記法のまま（字が消えていない）。
     let mut borrowed = cache.borrow_mut();

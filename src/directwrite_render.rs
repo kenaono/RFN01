@@ -1056,13 +1056,11 @@ fn picture_places(
             WritingMode::Vertical => (fitted.across, fitted.along),
         };
         let (left, top) = match mode {
-            // 編集中の行：広げた行箱の空けた側（横書きは下端、縦書きは右端）。
+            // 編集中の行：広げた行箱の空けた側（横書きは記法の下、縦書きは記法の左）。
             WritingMode::Horizontal if fitted.source_shown => {
                 (region.left, region.top + region.height - height)
             }
-            WritingMode::Vertical if fitted.source_shown => {
-                (region.left + region.width - width, region.top)
-            }
+            WritingMode::Vertical if fitted.source_shown => (region.left, region.top),
             WritingMode::Horizontal => {
                 // 箱の行の基線。行を頭から数え、この箱の字の位置を含む行を探す。
                 let mut start = 0;
@@ -1193,19 +1191,17 @@ fn apply_marker_boxes(
         .collect::<Vec<_>>();
     if let Some(shown) = pictures.iter().find(|picture| picture.source_shown) {
         // 編集中の行：いつもの組み方で測った行箱に絵の厚みを足し、字はいつもの行箱の中に置く。
-        // **足す側は、ブロックの頭を測る側の反対**——ブロックの頭は行頭の字の箱で測る（`measure_layout`の
-        // `HitTestTextPosition`：横書きは字の上端、縦書きは字の左端）ので、そちらへ空けると空けたところが
-        // ブロックの外へ出て、次のブロックに重なる（実測 2026-09-16）。だから横書きは下（基線はそのまま）、
-        // 縦書きは右（基線を送る）。折り返した行はどれも同じだけ広がる。
+        // **記法は行の頭の側、絵はその先**（書き手の報告 2026-09-16：「横書きは画像の上にソースが出る。
+        // 縦書きは右に出るべき」）。基線はそのままなので、横書きは下、縦書きは左に空く。
+        // ブロックの頭は行頭の字の箱で測る（`measure_block`：縦書きは字の左端）ので、縦書きは空けたぶん
+        // 測った頭が内側へずれ、空きがブロックの外へ出て隣に重なる——`picture_lead`が測りから差し引く。
+        // 折り返した行はどれも同じだけ広がる。
         let lines = line_metrics(layout)?;
         if let Some(line) = lines.first() {
             let spacing = DWRITE_LINE_SPACING {
                 method: DWRITE_LINE_SPACING_METHOD_UNIFORM,
                 height: line.height + shown.across,
-                baseline: match mode {
-                    WritingMode::Horizontal => line.baseline,
-                    WritingMode::Vertical => line.baseline + shown.across,
-                },
+                baseline: line.baseline,
                 leadingBefore: 0.0,
                 fontLineGapUsage: DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
             };
@@ -3132,6 +3128,23 @@ fn build_block_layout(
     Ok(layout)
 }
 
+/// 編集中の画像の行で、縦書きの字が行箱の左端から余分に離れるぶん（追加要件 2026-09-16）。
+///
+/// `apply_marker_boxes`が行箱を絵の厚みだけ左へ広げるので、字の箱で測るブロックの頭（`measure_block`）
+/// はそのぶん右にずれる。横書きは下へ広げ、測る上端は動かないので0。
+fn picture_lead(runs: &[StyleRun], mode: WritingMode, line_box: f32) -> f32 {
+    if !matches!(mode, WritingMode::Vertical) {
+        return 0.0;
+    }
+    runs.iter()
+        .filter_map(|run| {
+            run.ornament
+                .and_then(|ornament| picture_box(ornament, mode, line_box))
+        })
+        .find(|picture| picture.source_shown)
+        .map_or(0.0, |picture| picture.across)
+}
+
 /// Measure one block, and hand back the layout it was measured with.
 ///
 /// **The measurement and the layout are the same object's two answers.** The
@@ -3157,6 +3170,7 @@ fn measure_task(
         task.max_flow_size,
         task.keep_trailing_empty_line,
         task.mode,
+        picture_lead(&task.runs, task.mode, task.block_box),
     )?;
     Ok((measure, layout))
 }
@@ -6454,6 +6468,7 @@ fn measure_block(
     max_flow_size: f32,
     keep_trailing_empty_line: bool,
     mode: WritingMode,
+    lead: f32,
 ) -> Result<BlockMeasure> {
     let mut line_metrics = line_metrics(layout)?;
 
@@ -6504,7 +6519,7 @@ fn measure_block(
             utf16_start,
             utf16_len: line.length,
             newline_len: line.newlineLength,
-            flow_start: mode.flow_of(&metrics),
+            flow_start: mode.flow_of(&metrics) - lead,
             // The line's own advance along the flow axis. Not `metrics.width`,
             // which is the ink of the one character sitting there. DirectWrite
             // reports this advance as `height` in either writing direction.
@@ -8602,7 +8617,13 @@ mod tests {
             apply_marker_boxes(&layout, typography, &runs, mode, line_box)?;
             // The whole document is its own last block, so it keeps the
             // trailing empty line the split blocks give up.
-            measure_block(&layout, bound, true, mode)
+            measure_block(
+                &layout,
+                bound,
+                true,
+                mode,
+                picture_lead(&runs, mode, line_box),
+            )
         })
         .expect("whole document measurement");
 
