@@ -52,6 +52,11 @@ export struct TabInfo {
     // place of. **Drawn in italics**, the way a book sets a word it is only
     // mentioning.
     provisional: bool,
+    /// 追加要件 2026-09-15（書き手）: TABの色（個別の色、なければそのTABに付いた紙）と、
+    /// それが暗いか。`colour-own`でなければ全体の紙のまま＝今までの見た目。
+    colour: color,
+    colour-own: bool,
+    dark: bool,
 }
 
 // One line of the draft that stands under a shell (書き手の報告 2026-09-07).
@@ -304,13 +309,13 @@ export component EditorPane inherits Rectangle {
 
     in property <color> page-background;
     /// 追加要件 2026-09-15: 紙の色をTAB（0）・Pane（1）に付ける。色は「いま見えている
-    /// 向き」のもの。既定の色へ戻す・その他の色・ランダムも同じ番号で言う。
+    /// 向き」のもの。2 はTABそのものの色（向きを持たない）。既定の色へ戻す・その他の色も
+    /// 同じ番号で言う。
     /// メニューの行に添える向き（縦横で別々のときだけ）。色は見えている向きに付くので、それを言う。
     in property <string> paper-direction;
     callback paper-chosen(int, color);
     callback paper-default(int);
     callback paper-more(int);
-    callback paper-random(int);
     property <int> paper-target: 0;
     property <length> paper-x;
     property <length> paper-y;
@@ -964,6 +969,9 @@ export component EditorPane inherits Rectangle {
                         edited: tab.edited;
                         outside: tab.outside;
                         provisional: tab.provisional;
+                        own: tab.colour-own;
+                        own-colour: tab.colour;
+                        dark: tab.dark;
                         current: index == root.active-tab;
                         // 要件 6.3: the tab being written in. **Both halves** —
                         // the pane has the keyboard and this is the tab in
@@ -1399,13 +1407,6 @@ export component EditorPane inherits Rectangle {
                             title: "Pane Background" + root.paper-direction + "…";
                             activated => {
                                 root.open-paper-palette(1, root.width - 256px, 32px);
-                                pane-menu.close();
-                            }
-                        }
-                        if root.writing: MenuRow {
-                            title: "Random Pane Background" + root.paper-direction;
-                            activated => {
-                                root.paper-random(1);
                                 pane-menu.close();
                             }
                         }
@@ -2633,6 +2634,36 @@ export component EditorPane inherits Rectangle {
                         // has no forward references, and Paste is the field's
                         // own doing (it is the one thing on this side that can
                         // read the clipboard).
+                        // 追加要件 2026-09-15: 本文の右クリックから開く、このTABの紙の色。
+                        // 右クリックのメニューと同じ場所に出す（同じ座標の中に置く）。
+                        body-palette := PopupWindow {
+                            x: root.context-x;
+                            y: root.context-y;
+                            width: 236px;
+                            close-policy: close-on-click-outside;
+
+                            MenuFrame {
+                                width: 236px;
+
+                                ColourPalette {
+                                    automatic: "既定の色";
+                                    current: root.page-background;
+                                    chosen(colour) => {
+                                        root.paper-chosen(0, colour);
+                                        body-palette.close();
+                                    }
+                                    automatic-chosen => {
+                                        root.paper-default(0);
+                                        body-palette.close();
+                                    }
+                                    more => {
+                                        root.paper-more(0);
+                                        body-palette.close();
+                                    }
+                                }
+                            }
+                        }
+
                         context-menu := PopupWindow {
                             x: root.context-x;
                             y: root.context-y;
@@ -2900,6 +2931,19 @@ export component EditorPane inherits Rectangle {
                                                 shortcut: root.shortcut-keys[26];
                                                 activated => {
                                                     root.mark-toggled(true);
+                                                    context-menu.close();
+                                                }
+                                            }
+
+                                            MenuSep { }
+
+                                            // 追加要件 2026-09-15（書き手）: **本文の紙の上の右クリックで背景。**
+                                            // このTABの紙の色（見えている向き）。
+                                            MenuRow {
+                                                title: "Background" + root.paper-direction + "…";
+                                                activated => {
+                                                    root.paper-target = 0;
+                                                    body-palette.show();
                                                     context-menu.close();
                                                 }
                                             }
@@ -3668,23 +3712,17 @@ export component EditorPane inherits Rectangle {
                         root.close-clean-tabs();
                     }
                 }
-                // 追加要件 2026-09-15: このTABの紙の色。TABが残っている限り付いている。
+                // 追加要件 2026-09-15: このTABの色。TABが残っている限り付いている。
                 if root.writing: VerticalLayout {
                     spacing: 1px;
 
                     MenuSep { }
 
+                    // 追加要件 2026-09-15（書き手）: TABの右クリックはTABの色。背景はPaperの右クリックから。
                     MenuRow {
-                        title: "Tab Background" + root.paper-direction + "…";
+                        title: "Tab Color…";
                         activated => {
-                            root.open-paper-palette(0, root.tab-menu-x, root.tab-menu-y);
-                            tab-menu.close();
-                        }
-                    }
-                    MenuRow {
-                        title: "Random Tab Background" + root.paper-direction;
-                        activated => {
-                            root.paper-random(0);
+                            root.open-paper-palette(2, root.tab-menu-x, root.tab-menu-y);
                             tab-menu.close();
                         }
                     }

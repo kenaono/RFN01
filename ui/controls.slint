@@ -373,6 +373,12 @@ export component Tab inherits Rectangle {
     /// panes do not have the same paper (要件 7.2 縦書き／横書き), so it is
     /// asked for rather than assumed.
     in property <brush> paper: Tok.paper;
+    /// 追加要件 2026-09-15（書き手）: **TABの色**。既定はそのTABの背景と同じ色で、TABごとに
+    /// 変えられる。`own`でなければ今までどおり（前のTABは紙、ほかは地のまま）。
+    in property <bool> own;
+    in property <color> own-colour;
+    /// その色が暗い——名前を明るい字で書く。
+    in property <bool> dark;
     callback chosen();
     callback closed();
     /// 要件 6.5: this tab is being carried along the strip.
@@ -567,9 +573,11 @@ export component Tab inherits Rectangle {
     max-width: 240px;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
-    background: root.current
-        ? root.paper
-        : (touch.has-hover ? Tok.chrome-sunken : transparent);
+    background: root.own
+        ? (touch.has-hover && !root.current ? root.own-colour.mix(Tok.chrome-sunken, 0.8) : root.own-colour)
+        : root.current
+            ? root.paper
+            : (touch.has-hover ? Tok.chrome-sunken : transparent);
 
     // Which tab is in front. Drawn rather than given as a border, because a
     // border is on all four sides and this is on one.
@@ -622,9 +630,11 @@ export component Tab inherits Rectangle {
             text: root.title;
             // Three steps, not two: the tab being written in, the tab in front
             // of some other pane, and the rest.
-            color: root.focused
-                ? Tok.accent-strong
-                : (root.current ? Tok.ink-strong : Tok.ink-muted);
+            color: root.dark
+                ? (root.current ? #ffffff : #e6e2da)
+                : root.focused
+                    ? Tok.accent-strong
+                    : (root.current ? Tok.ink-strong : Tok.ink-muted);
             font-italic: root.provisional;
             font-size: 13px;
             overflow: elide;

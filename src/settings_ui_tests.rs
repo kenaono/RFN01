@@ -539,7 +539,7 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
         &live.states,
         &live.cache,
         Rc::new(Timer::default()),
-        numbers,
+        numbers.clone(),
         palette.clone(),
     );
     let paper = || pane_typography(&window, id).paper;
@@ -611,14 +611,92 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     window.invoke_colour_default(3, 0);
     id.update_screen(&window, |screen| screen.vertical = false);
 
-    // Random paper is light under dark ink, and changes each time.
-    let first = random_paper(DEFAULT_INK, 1);
-    assert!(first.iter().all(|channel| *channel > 0.7), "{first:?}");
-    let dark = random_paper([0.95, 0.95, 0.95], 12345);
+    // TABの色（書き手の求め 2026-09-15）: 既定は背景と同じ、個別に変えれば背景を変えても残る。
+    let chip = || id.screen(&window).tabs.row_data(0).unwrap();
+    switch_to_tab(&window, &live, id, 0);
+    assert!(
+        !chip().colour_own,
+        "the global paper leaves the tab as it was"
+    );
+    window.invoke_colour_set(3, 0, red);
+    assert!(
+        chip().colour_own && chip().colour == red,
+        "follows the tab's paper"
+    );
+    let yellow = Color::from_rgb_u8(255, 255, 0);
+    window.invoke_colour_set(5, 0, yellow);
+    window.invoke_colour_set(3, 0, blue);
+    assert_eq!(chip().colour, yellow, "its own colour stays");
+    assert!(chip().dark == false);
+    assert_eq!(paper(), channels(blue), "the tab colour is not the paper");
+    window.invoke_colour_default(5, 0);
+    assert_eq!(chip().colour, blue, "back to following the paper");
+    assert!(chip().dark, "a dark tab writes its name light");
+    let session = session::capture_session(&window, &live);
+    assert_eq!(session.panes[0].tabs[0].tab_colour, None);
+    window.invoke_colour_default(3, 0);
+
+    // Random paper is a global setting for new tabs (書き手の求め 2026-09-15): light or dark,
+    // a new colour for each new tab, and nothing for tabs already open.
+    let light = random_paper(true, 1);
+    assert!(light.iter().all(|channel| *channel > 0.7), "{light:?}");
+    let dark = random_paper(false, 12345);
     assert!(dark.iter().all(|channel| *channel < 0.3), "{dark:?}");
-    window.invoke_colour_random(3, 0);
-    let once = paper();
-    window.invoke_colour_random(3, 0);
-    assert_ne!(once, paper());
-    assert_ne!(once, global);
+    window.invoke_paper_random_chosen(1);
+    assert_eq!(paper(), global, "the tab already open keeps its paper");
+    new_tab(&window, &live, id);
+    let first = paper();
+    assert!(first.iter().all(|channel| *channel > 0.7), "{first:?}");
+    new_tab(&window, &live, id);
+    assert_ne!(first, paper(), "each new tab its own");
+    let tabs = live.tabs.borrow();
+    let newest = tabs.of(id).current().unwrap();
+    assert!(newest.paper[0].is_some() && newest.paper[0] == newest.paper[1]);
+    drop(tabs);
+    window.invoke_paper_random_chosen(0);
+    new_tab(&window, &live, id);
+    assert_eq!(paper(), global, "off: no colour");
+
+    // 書式・レイアウトの「横書きに合わせる」（書き手の求め 2026-09-15）: 面ごと。縦書きにしか
+    // 無い縦中横は共通にしない。保存するのは縦書き自身の値で、切れば戻る。
+    let vertical = || typography_for(&window, 100, true, true);
+    window.set_sheet(0);
+    window.invoke_colour_set(0, 0, red);
+    Setting::BodySize.write(&numbers, 0, 30);
+    Setting::LineAdvance.write(&numbers, 0, 250);
+    Setting::UprightDigits.write(&numbers, 1, 1);
+    assert_ne!(vertical().ink, channels(red));
+    window.invoke_text_shared_toggled(true);
+    assert_eq!(vertical().ink, channels(red), "text: the horizontal ink");
+    assert_eq!(Setting::BodySize.read(&window, 1), 30);
+    assert_ne!(
+        Setting::LineAdvance.read(&window, 1),
+        250,
+        "layout is its own page"
+    );
+    window.invoke_layout_shared_toggled(true);
+    assert_eq!(Setting::LineAdvance.read(&window, 1), 250);
+    assert_eq!(
+        Setting::UprightDigits.read(&window, 1),
+        1,
+        "vertical-only stays"
+    );
+    let stored = settings_values(&window);
+    let own = |name: &str| {
+        stored
+            .iter()
+            .find(|(key, _)| key == name)
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_ne!(
+        own("v.body-size"),
+        "30",
+        "the vertical value is kept, not the shared one"
+    );
+    window.invoke_text_shared_toggled(false);
+    window.invoke_layout_shared_toggled(false);
+    assert_ne!(vertical().ink, channels(red));
+    assert_ne!(Setting::BodySize.read(&window, 1), 30);
 }

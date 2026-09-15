@@ -223,20 +223,13 @@ pub fn wire_colours(
         }
     });
 
-    // 追加要件 2026-09-15: 押すたびに新しい色。**その向きの本文の文字色で読める明るさ**から
-    // 選ぶ——読めない紙を引いたら、書き手はもう一度押すしかなくなる。
+    // 追加要件 2026-09-15（書き手）: 新しく開いたTABのランダムな紙（0 Off、1 淡色、2 濃色）。
     let weak = window.as_weak();
     let held = doors.clone();
-    window.on_colour_random(move |kind, slot| {
+    window.on_paper_random_chosen(move |choice| {
         if let Some(window) = weak.upgrade() {
-            let id = crate::PaneId::from_index(slot);
-            let sheet = usize::from(id.vertical(&window) && !window.get_paper_shared());
-            let ink = window
-                .get_palette()
-                .row_data(colour_row(sheet, 0))
-                .unwrap_or_default();
-            let rgb = crate::random_paper(channels_of(ink), crate::random_seed());
-            held.apply(&window, kind, slot, sheet, Some(rgb));
+            window.set_paper_random(choice.clamp(0, 2));
+            save_settings(&window, &held.cache);
         }
     });
 
@@ -246,9 +239,29 @@ pub fn wire_colours(
     window.on_paper_shared_toggled(move |wanted| {
         if let Some(window) = weak.upgrade() {
             window.set_paper_shared(wanted);
+            // TABの色は向きの紙から来るので、見出しも置き直す。
+            crate::publish_tabs(&window, &held.live);
             held.cache
                 .borrow_mut()
                 .log_diag("paper", &format!("shared={}", u8::from(wanted)));
+            schedule_relayout(&window, &held.states, &held.cache, &held.timer);
+        }
+    });
+
+    // 同じく Text・Layout の面。組み直しが設定を書く。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_text_shared_toggled(move |wanted| {
+        if let Some(window) = weak.upgrade() {
+            window.set_text_shared(wanted);
+            schedule_relayout(&window, &held.states, &held.cache, &held.timer);
+        }
+    });
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_layout_shared_toggled(move |wanted| {
+        if let Some(window) = weak.upgrade() {
+            window.set_layout_shared(wanted);
             schedule_relayout(&window, &held.states, &held.cache, &held.timer);
         }
     });
@@ -413,6 +426,25 @@ impl ColourDoors {
                 group.colour = Some(rgb);
                 hold_word_modes(window, &self.live, modes, true);
             }
+            // 追加要件 2026-09-15（書き手）: TAB（見出し）そのものの色。向きを持たない。
+            5 => {
+                let id = crate::PaneId::from_index(slot);
+                {
+                    let mut tabs = self.live.tabs.borrow_mut();
+                    let strip = tabs.of_mut(id);
+                    let active = strip.active;
+                    let Some(tab) = strip.tabs.get_mut(active) else {
+                        return;
+                    };
+                    tab.tab_colour = rgb.map(slint_colour);
+                }
+                let said = rgb.map_or("-".to_owned(), |rgb| crate::hex_colour(slint_colour(rgb)));
+                self.cache.borrow_mut().log_diag(
+                    "paper",
+                    &format!("chip pane={} colour={said}", id.log_name()),
+                );
+                crate::publish_tabs(window, &self.live);
+            }
             // 追加要件 2026-09-15: TAB（3）・Pane（4）の紙。slot はペインの番号で、
             // 向きはそのペインがいま見せている向き（開いた面の`sheet`ではない）。
             3 | 4 => {
@@ -471,6 +503,17 @@ impl ColourDoors {
                     .get_palette()
                     .row_data(colour_row(sheet, shown))
                     .unwrap_or_default()
+            }
+            5 => {
+                let id = crate::PaneId::from_index(slot);
+                let chip = self
+                    .live
+                    .tabs
+                    .borrow()
+                    .of(id)
+                    .current()
+                    .and_then(|tab| tab.tab_colour);
+                chip.unwrap_or_else(|| self.current(window, 3, slot, sheet))
             }
             3 | 4 => {
                 let id = crate::PaneId::from_index(slot);
@@ -1146,9 +1189,16 @@ pub fn wire_typography(
             // 2026-09-15) — and **only the page's own values**: the Reset on
             // Text leaves the page margin where the writer put it.
             reset_settings_group(&steps, &colours, &families, group);
-            // 追加要件 2026-09-15: 「横書きに合わせる」は Page の値。
+            // 追加要件 2026-09-15: 「横書きに合わせる」はその面の値、ランダムは Page の値。
+            if group == 3 || group < 0 {
+                window.set_text_shared(false);
+            }
+            if group == 4 || group < 0 {
+                window.set_layout_shared(false);
+            }
             if group == 5 || group < 0 {
                 window.set_paper_shared(false);
+                window.set_paper_random(0);
             }
             schedule_relayout(&window, &states, &cache, &timer);
         }

@@ -3678,23 +3678,30 @@ struct PaneTab {
     /// 追加要件 2026-09-15（書き手）: **このTABの紙の色**（横書き、縦書き）。TABが残って
     /// いる限り付いていて、別のペインへ運んでも一緒に行く。Paneの色より勝つ。
     paper: Paper,
+    /// 追加要件 2026-09-15（書き手）: **TAB（見出し）そのものの色。**`None`なら背景に合わせる。
+    /// 一度選べば背景を変えても追随しない（書き手の選択）。
+    tab_colour: Option<Color>,
 }
 
 /// TAB・Paneに付けた紙の色（横書き、縦書き）。`None`は付けていない＝下の段に任せる。
 type Paper = [Option<Color>; 2];
 
-/// ランダムな紙の色（追加要件 2026-09-15）。**文字色の反対側の明るさ**から選ぶ：
-/// 暗い字なら淡い色、明るい字なら暗い色。色相だけが自由に動く。
-fn random_paper(ink: [f32; 3], seed: u64) -> [f32; 3] {
+/// ランダムな紙の色（追加要件 2026-09-15）。淡色か濃色かは書き手が全体設定で選ぶ
+/// （淡色は暗い字、濃色は明るい字で読める明るさ）。色相だけが自由に動く。
+fn random_paper(light: bool, seed: u64) -> [f32; 3] {
     let part = |shift: u32| ((seed >> shift) % 1000) as f32 / 999.0;
     let hue = part(0) * 360.0;
-    let luminance = 0.2126 * ink[0] + 0.7152 * ink[1] + 0.0722 * ink[2];
-    let (saturation, value) = if luminance < 0.5 {
+    let (saturation, value) = if light {
         (0.10 + 0.22 * part(20), 0.93 + 0.07 * part(40))
     } else {
         (0.25 + 0.30 * part(20), 0.14 + 0.12 * part(40))
     };
     channels(Color::from_hsva(hue, saturation, value, 1.0))
+}
+
+/// 色の明るさ（0〜1）。TABの名前を明るい字にするかを決める。
+fn luminance(rgb: [f32; 3]) -> f32 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
 /// 乱数の種。**標準ライブラリだけで**——ハッシュの鍵は起動ごと・呼ぶごとに違う。
@@ -3756,6 +3763,10 @@ impl PaneTab {
         tab.identity = Rc::new(());
         tab.provisional.set(false);
         tab.below = TabBelow::default();
+        // **色は引き継がない**（書き手の報告 2026-09-15：開いているファイルを別TABで開くと
+        // 元の背景色を引きずる）。別TABは新しいTABなので、ランダムがOnならそこで付く。
+        tab.paper = [None; 2];
+        tab.tab_colour = None;
         Some(tab)
     }
 
@@ -3786,6 +3797,7 @@ impl PaneTab {
             settings: false,
             provisional: Cell::new(false),
             paper: [None; 2],
+            tab_colour: None,
         }
     }
 
@@ -4455,6 +4467,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                     settings: false,
                     provisional: Cell::new(false),
                     paper: [None; 2],
+                    tab_colour: None,
                 });
                 strip.tabs.len() - 1
             }
@@ -6260,7 +6273,8 @@ fn is_markdown_path(path: &Path) -> bool {
 /// provisional at the first character (`is_provisional`). It keeps the tab's
 /// place in the strip, which is the whole point — the strip does not grow, and
 /// the file the writer is walking towards stays under the same finger.
-fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, tab: PaneTab) {
+fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, mut tab: PaneTab) {
+    give_random_paper(window, &mut tab);
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
     {
@@ -7016,6 +7030,7 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
     // 要件 7.9・10: ステータスバーのモードは、前に出ているタブのもの。
     // **タブが動けばここも動く**ので、publishの入口で一緒に言う。
     publish_word_mode_of(window, live);
+    let shared = window.get_paper_shared();
     let strips = PaneId::all(window).into_iter().map(|id| {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
@@ -7023,6 +7038,13 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
             .tabs
             .iter()
             .map(|tab| {
+                // 追加要件 2026-09-15: TABの色＝個別の色、なければそのTABの向きの紙（TAB > Pane）。
+                // 全体の紙のままなら色を持たない（今までの見た目）。
+                let direction = usize::from(tab.view.vertical && !shared);
+                let chip = tab
+                    .tab_colour
+                    .or(tab.paper[direction])
+                    .or(strip.paper[direction]);
                 // **編集の始まったタブは、もう覗いているだけではない**
                 // （書き手の報告 2026-09-07）。ここが不変の借りしか持たないので
                 // 旗は`Cell`にしてある。最初の一字で`set_edited`がこの publish を
@@ -7052,6 +7074,9 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                     stem_length: stem_length(&tab.document.file.borrow().title()),
                     terminal: tab.terminal.is_some(),
                     provisional: tab.is_provisional(),
+                    colour: chip.unwrap_or_default(),
+                    colour_own: chip.is_some(),
+                    dark: chip.is_some_and(|colour| luminance(channels(colour)) < 0.45),
                 }
             })
             .collect::<Vec<_>>();
@@ -7379,7 +7404,20 @@ fn move_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize)
 }
 
 /// Add a tab to one pane's strip and show it there.
-fn add_tab(window: &AppWindow, live: &Live, id: PaneId, tab: PaneTab) {
+/// 追加要件 2026-09-15（書き手）: 全体設定でランダムがOnなら、**新しく開いたTAB**に色を付ける。
+/// 色を持って来たTAB（同じ文書の別TAB・運ばれたTAB）と、端末・設定のTABには付けない。
+/// 縦書き・横書きの両方に同じ色。
+fn give_random_paper(window: &AppWindow, tab: &mut PaneTab) {
+    let choice = window.get_paper_random();
+    if choice == 0 || tab.stands_in() || tab.paper.iter().any(Option::is_some) {
+        return;
+    }
+    let colour = slint_colour(random_paper(choice == 1, random_seed()));
+    tab.paper = [Some(colour); 2];
+}
+
+fn add_tab(window: &AppWindow, live: &Live, id: PaneId, mut tab: PaneTab) {
+    give_random_paper(window, &mut tab);
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
     let index = {
@@ -8880,10 +8918,12 @@ fn typography_for(
         *scale = percent(number(Setting::Heading(level)));
     }
     let palette = window.get_palette();
+    // 追加要件 2026-09-15: 文字の色と書体は Text の面、紙は Page の面の「横書きに合わせる」に従う。
     let colour = |slot: usize| {
+        let page = if slot == PAPER_SLOT { 5 } else { 3 };
         channels(
             palette
-                .row_data(colour_row(sheet, slot))
+                .row_data(colour_row(shared_sheet(window, sheet, page), slot))
                 .unwrap_or_default(),
         )
     };
@@ -8891,16 +8931,7 @@ fn typography_for(
     for (level, ink) in spec.heading_ink.iter_mut().enumerate() {
         *ink = colour(level + 1);
     }
-    // 追加要件 2026-09-15: 縦書きを横書きに合わせているなら、横書きの紙。
-    spec.paper = if vertical && window.get_paper_shared() {
-        channels(
-            palette
-                .row_data(colour_row(0, PAPER_SLOT))
-                .unwrap_or_default(),
-        )
-    } else {
-        colour(PAPER_SLOT)
-    };
+    spec.paper = colour(PAPER_SLOT);
     for slot in 0..7 {
         spec.decorations[slot] = (0..5).fold(0, |bits, kind| {
             bits | ((number(Setting::Decoration(slot, kind)) != 0) as u8) << kind
@@ -8910,7 +8941,7 @@ fn typography_for(
     let fonts = window.get_sheet_fonts();
     let family = |slot: usize| {
         fonts
-            .row_data(font_row(sheet, slot))
+            .row_data(font_row(shared_sheet(window, sheet, 3), slot))
             .map(|name| name.to_string())
             .unwrap_or_default()
     };
@@ -9312,6 +9343,19 @@ impl Setting {
 
     /// What this sheet has it set to.
     fn read(self, window: &AppWindow, sheet: usize) -> i32 {
+        // **縦書きにしか無い設定は共通にしない**（書き手の求め 2026-09-15）。縦中横は
+        // 横書きのシートに値が無いので、合わせても縦書きの値を読む。
+        let sheet = if matches!(self, Self::UprightDigits) {
+            sheet
+        } else {
+            shared_sheet(window, sheet, self.page())
+        };
+        self.read_own(window, sheet)
+    }
+
+    /// そのシートに**置いてある**値。保存と、押して動かすときはこちら——合わせている間も
+    /// 縦書きの値は消さずに持っていて、切れば戻る。
+    fn read_own(self, window: &AppWindow, sheet: usize) -> i32 {
         let row = sheet * SHEET_NUMBERS + self.row_in_sheet();
         window
             .get_sheet_numbers()
@@ -9412,11 +9456,22 @@ impl Setting {
     }
 }
 
+/// 縦書きのシートを、面ごとの「横書きに合わせる」に従って読み替える（書き手の求め
+/// 2026-09-15）。`page` は 3 Text、4 Layout、5 Page。
+fn shared_sheet(window: &AppWindow, sheet: usize, page: i32) -> usize {
+    let shared = match page {
+        3 => window.get_text_shared(),
+        4 => window.get_layout_shared(),
+        _ => window.get_paper_shared(),
+    };
+    if sheet == 1 && shared { 0 } else { sheet }
+}
+
 /// Move one setting by one press of its buttons (要件 9).
 fn step_setting(window: &AppWindow, numbers: &VecModel<i32>, setting: Setting, by: i32) {
     let sheet = shown_sheet(window);
     let (low, high) = setting.range();
-    let next = (setting.read(window, sheet) + by * setting.step()).clamp(low, high);
+    let next = (setting.read_own(window, sheet) + by * setting.step()).clamp(low, high);
     setting.write(numbers, sheet, next);
 }
 
@@ -9597,6 +9652,11 @@ const COUNT_RUBY_SETTING: &str = "count.ruby";
 const RUBY_MARKS_SETTING: &str = "ruby.marks";
 /// 追加要件 2026-09-15（書き手）: 縦書きの紙を横書きに合わせるか。**`1`だけがOn**。
 const PAPER_SHARED_SETTING: &str = "paper.shared";
+/// 同じく Text・Layout の面（書き手の求め 2026-09-15）。
+const TEXT_SHARED_SETTING: &str = "text.shared";
+const LAYOUT_SHARED_SETTING: &str = "layout.shared";
+/// 追加要件 2026-09-15（書き手）: 新しく開いたTABのランダムな紙。0 Off、1 淡色、2 濃色。
+const PAPER_RANDOM_SETTING: &str = "paper.random";
 /// どの記号を箇条書きの印として読むか（書き手の決定 2026-09-11）。
 const LIST_MARKS_SETTING: &str = "list.marks";
 
@@ -10382,6 +10442,18 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_count_ruby()).to_string(),
     ));
     values.push((
+        PAPER_RANDOM_SETTING.to_owned(),
+        window.get_paper_random().to_string(),
+    ));
+    values.push((
+        TEXT_SHARED_SETTING.to_owned(),
+        i32::from(window.get_text_shared()).to_string(),
+    ));
+    values.push((
+        LAYOUT_SHARED_SETTING.to_owned(),
+        i32::from(window.get_layout_shared()).to_string(),
+    ));
+    values.push((
         PAPER_SHARED_SETTING.to_owned(),
         i32::from(window.get_paper_shared()).to_string(),
     ));
@@ -10430,7 +10502,7 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         let mark = if sheet == 0 { "h" } else { "v" };
         for setting in Setting::all() {
             let name = format!("{mark}.{}", setting.name());
-            values.push((name, setting.read(window, sheet).to_string()));
+            values.push((name, setting.read_own(window, sheet).to_string()));
         }
         for slot in 0..SHEET_COLOURS {
             let colour = palette
@@ -10500,6 +10572,18 @@ fn apply_settings(
         }
         // 要件 7.8: **`1`だけがOn。**初期値は数えないほうなので、読めない値は
         // そちらへ倒す。
+        if written == PAPER_RANDOM_SETTING {
+            window.set_paper_random(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
+            continue;
+        }
+        if written == TEXT_SHARED_SETTING {
+            window.set_text_shared(value.trim() == "1");
+            continue;
+        }
+        if written == LAYOUT_SHARED_SETTING {
+            window.set_layout_shared(value.trim() == "1");
+            continue;
+        }
         if written == PAPER_SHARED_SETTING {
             window.set_paper_shared(value.trim() == "1");
             continue;
@@ -18135,6 +18219,7 @@ mod tests {
             settings: false,
             provisional: Cell::new(false),
             paper: [None; 2],
+            tab_colour: None,
         };
         let mut empty = tab.clone();
         empty.empty = true;
@@ -18173,9 +18258,15 @@ mod tests {
             empty: false,
             settings: false,
             provisional: Cell::new(true),
-            paper: [None; 2],
+            paper: [Some(Color::from_rgb_u8(1, 2, 3)); 2],
+            tab_colour: Some(Color::from_rgb_u8(4, 5, 6)),
         };
         let mut viewer = original.another_view().unwrap();
+        assert_eq!(
+            viewer.paper, [None; 2],
+            "another tab does not carry the colours"
+        );
+        assert_eq!(viewer.tab_colour, None);
         viewer.view.state.viewer = true;
         viewer.view.state.caret_source_byte = Some(3);
         viewer.view.scroll = -100.0;

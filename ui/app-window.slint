@@ -664,6 +664,11 @@ export component AppWindow inherits Window {
     /// TAB・Paneに付けた紙も、縦書きと横書きで共通（横書きの色を使う）。
     in-out property <bool> paper-shared: false;
     callback paper-shared-toggled(bool);
+    /// 同じく Text と Layout の面（書き手の求め 2026-09-15）。縦書きにしか無い設定（縦中横）は共通にしない。
+    in-out property <bool> text-shared: false;
+    callback text-shared-toggled(bool);
+    in-out property <bool> layout-shared: false;
+    callback layout-shared-toggled(bool);
     // 要件 E9: ルビと傍点の記法を読むか。**既定はOn**——要件7.8がその記法で
     // 組めと言っているので、切りたい書き手が切る側である。**切ったら記号を
     // そのまま字として出す**（原稿のバイト列は元から変えていない）。
@@ -756,9 +761,10 @@ export component AppWindow inherits Window {
     /// (kind, slot) で言う——kind 0 は紙のシート（slot は色の番号、シートは
     /// `sheet`）、1 は端末（0 地、1 字）、2 は語群（slot は語群の番号）。
     callback colour-set(int, int, color);
-    /// 追加要件 2026-09-15: kind 3 はTABの紙、4 はPaneの紙（slot はペインの番号）。
-    /// ランダムはその2つだけ。
-    callback colour-random(int, int);
+    /// 追加要件 2026-09-15: 新しく開いたTABにランダムな紙の色を付けるか。0 Off、1 淡色、2 濃色。
+    /// 書き手の求めで、TAB・Paneのメニューからは選ばない（おまけなので全体設定だけ）。
+    in-out property <int> paper-random: 0;
+    callback paper-random-chosen(int);
     /// 追加要件 2026-09-15: 文字色のセット（10個）。1つは Body・H1〜H6 の文字色を
     /// 横書き・縦書きの順に14色、`#rrggbb` をカンマで並べた字。空ならまだ無い。
     in property <[string]> ink-sets: ["", "", "", "", "", "", "", "", "", ""];
@@ -1927,10 +1933,7 @@ export component AppWindow inherits Window {
                             root.focused-pane = pane.id;
                             root.colour-more(3 + which, pane.id);
                         }
-                        paper-random(which) => {
-                            root.focused-pane = pane.id;
-                            root.colour-random(3 + which, pane.id);
-                        }
+
                         // **The pane picks the sheet, not the panel**: this is
                         // the margin of the direction this pane is writing in.
                         page-margin: root.sheet-numbers[
@@ -3685,6 +3688,31 @@ export component AppWindow inherits Window {
                                                     letter-spacing: 0.9px;
                                                 }
 
+                                                // 追加要件 2026-09-15（書き手）: 縦書きを横書きに合わせる（この面の値）。
+                                                // On の間は縦書きだけにある設定だけを出す。
+                                                if sheet-index == 1: HorizontalLayout {
+                                                    spacing: 6px;
+                                                    height: 28px;
+
+                                                    Text {
+                                                        text: "横書きに合わせる";
+                                                        color: Tok.ink;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+
+                                                    TextButton {
+                                                        title: root.text-shared ? "On" : "Off";
+                                                        role: root.text-shared ? Role.primary : Role.normal;
+                                                        clicked => {
+                                                            root.text-shared-toggled(!root.text-shared);
+                                                        }
+                                                    }
+                                                }
+
+                                                if sheet-index == 0 || !root.text-shared: VerticalLayout {
+                                                    spacing: 8px;
                                                     // One row per kind of text: how large, what colour, which
                                                     // family. The numbers are the rows of the models — ten numbers,
                                                     // eight colours and eight families to a sheet — and the same
@@ -3923,6 +3951,7 @@ export component AppWindow inherits Window {
                                                             font-menu.show();
                                                         }
                                                     }
+                                                }
                                             }
                                         }
 
@@ -3941,6 +3970,31 @@ export component AppWindow inherits Window {
                                                     letter-spacing: 0.9px;
                                                 }
 
+                                                // 追加要件 2026-09-15（書き手）: 縦書きを横書きに合わせる（この面の値）。
+                                                // On の間は縦書きだけにある設定だけを出す。
+                                                if sheet-index == 1: HorizontalLayout {
+                                                    spacing: 6px;
+                                                    height: 28px;
+
+                                                    Text {
+                                                        text: "横書きに合わせる";
+                                                        color: Tok.ink;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+
+                                                    TextButton {
+                                                        title: root.layout-shared ? "On" : "Off";
+                                                        role: root.layout-shared ? Role.primary : Role.normal;
+                                                        clicked => {
+                                                            root.layout-shared-toggled(!root.layout-shared);
+                                                        }
+                                                    }
+                                                }
+
+                                                if sheet-index == 0 || !root.layout-shared: VerticalLayout {
+                                                    spacing: 8px;
                                                     // 要件 9 calls the flow advance 行間 in horizontal writing and
                                                     // 列間隔 in vertical writing. **One quantity, two names**: the
                                                     // label follows the sheet, because on this sheet that is what
@@ -4101,6 +4155,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
+                                                }
                                                     // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。半角の数字を
                                                     // 1〜2桁なら1マスに正立させ、3桁以上は1桁ずつ縦に並べる。
                                                     // **縦書きのシートにだけ出す**——縦中横は縦書きの中でしか
@@ -4133,6 +4188,8 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
+                                                if sheet-index == 0 || !root.layout-shared: VerticalLayout {
+                                                    spacing: 8px;
                                                     // 書き手の決定 2026-09-11: **原稿の記号ごとに、画面へ出る字。**
                                                     // 「三種類の文字に箇条書きの意味を与え、それぞれに、表現として
                                                     // どう見せるかを設定できるように」——`- 項目`と`* 項目`を別の
@@ -4182,11 +4239,43 @@ export component AppWindow inherits Window {
                                                             vertical-alignment: center;
                                                         }
                                                     }
+                                                }
                                             }
                                         }
 
                                         if root.settings-tab == 5: VerticalLayout {
                                             spacing: 20px;
+                                            // 追加要件 2026-09-15（書き手）: 新しく開いたTABにランダムな紙の色。
+                                            // 淡色か濃色かを選ぶ。個別に色を付けたTAB・Paneには効かない。
+                                            VerticalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: "NEW TABS";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    letter-spacing: 0.9px;
+                                                }
+                                                HorizontalLayout {
+                                                    spacing: 6px;
+                                                    height: 28px;
+
+                                                    Text {
+                                                        text: "Random Background";
+                                                        color: Tok.ink;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+
+                                                    for choice[index] in ["Off", "Light", "Dark"]: TextButton {
+                                                        title: choice;
+                                                        role: root.paper-random == index ? Role.primary : Role.normal;
+                                                        clicked => {
+                                                            root.paper-random-chosen(index);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
                                             // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
                                             // 値かは見出しが言う。押した欄のシートを`root.sheet`へ置いてから

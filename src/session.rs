@@ -73,6 +73,9 @@ pub fn open_session(
                 identity: Rc::new(()),
                 // 追加要件 2026-09-15: セッションが覚えていたTABの紙の色。
                 paper: from_stored(&tab.paper),
+                tab_colour: tab
+                    .tab_colour
+                    .map(|[r, g, b]| slint::Color::from_rgb_u8(r, g, b)),
                 // 要件 7.9（2026-09-08）: セッションが覚えていたモードの番号。
                 // **無い番号は「なし」**になる（`word_mode_with`）——モードを
                 // 消したあとの文書は、間違った色ではなく色無しで戻る。
@@ -134,6 +137,7 @@ pub fn open_session(
             settings: false,
             provisional: Cell::new(false),
             paper: [None; 2],
+            tab_colour: None,
         });
     }
     for id in PaneId::all(window) {
@@ -251,6 +255,7 @@ pub fn open_without_session(
                 settings: false,
                 provisional: Cell::new(false),
                 paper: [None; 2],
+                tab_colour: None,
             })
             .collect(),
         active: 0,
@@ -407,6 +412,9 @@ pub fn session_tab(tab: &PaneTab) -> app_data::SessionTab {
         // asking.
         empty: tab.empty,
         paper: to_stored(&tab.paper),
+        tab_colour: tab
+            .tab_colour
+            .map(|colour| [colour.red(), colour.green(), colour.blue()]),
     }
 }
 

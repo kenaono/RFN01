@@ -123,6 +123,8 @@ pub struct SessionTab {
     pub empty: bool,
     /// 追加要件 2026-09-15: このTABの紙の色（横書き、縦書き）。無ければ付いていない。
     pub paper: Paper,
+    /// 追加要件 2026-09-15: TAB（見出し）そのものの色。無ければ背景に合わせる。
+    pub tab_colour: Option<[u8; 3]>,
 }
 
 /// TAB・Paneに付けた紙の色（横書き、縦書き）。`None`は「付けていない」。
@@ -313,6 +315,9 @@ pub fn encode_session(session: &Session) -> String {
             if let Some(paper) = encode_paper(&tab.paper) {
                 out.push_str(&format!("paper: {paper}\n"));
             }
+            if let Some([r, g, b]) = tab.tab_colour {
+                out.push_str(&format!("tab-colour: #{r:02x}{g:02x}{b:02x}\n"));
+            }
             // 要件 7.9（2026-09-08）: 単語チェックモード。**「なし」なら書かない**
             // ので、この版より前のセッションは空のまま読まれる。
             if tab.word_mode != 0 {
@@ -396,6 +401,10 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "paper" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.paper = decode_paper(value);
+            }
+            "tab-colour" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                tab.tab_colour = decode_paper(&format!("{value} -"))[0];
             }
             "tab" => {
                 let pane = session.panes.last_mut()?;
@@ -1213,6 +1222,7 @@ mod tests {
                             origin: Some(PathBuf::from("D:\\書きかけ\\第一章.md")),
                             preview: true,
                             paper: [None, Some([0xff, 0xf2, 0xcc])],
+                            tab_colour: Some([0x44, 0x72, 0xc4]),
                             ..SessionTab::default()
                         },
                     ],
