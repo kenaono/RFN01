@@ -306,3 +306,80 @@ fn a_click_on_a_vertical_picture_keeps_the_caret_on_its_line() {
     drop(borrowed);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// 縦書きは右から始まる：Paneより短い文書も右端に寄る（書き手の報告 2026-09-16：「短いファイルは
+/// 左に寄っています」）。1行だけの絵が、Paneの右半分に出る。
+#[test]
+fn a_short_vertical_document_starts_at_the_right() {
+    let directory = std::env::temp_dir().join(format!(
+        "editor-image-right-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("a.bmp"), solid_bmp(100, 100, [255, 0, 0])).unwrap();
+    let path = directory.join("原稿.md");
+    std::fs::write(&path, "![[a.bmp]]\n").unwrap();
+
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    let (width, height) = (1000usize, 700usize);
+    surface.set_size(slint::PhysicalSize::new(width as u32, height as u32));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let (file, source) = DocumentFile::open(&path, usize::MAX).unwrap();
+    let document = OpenDocument::new(file, source.clone(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 950.0;
+        screen.height = 600.0;
+        screen.shown_width = 950.0;
+        screen.shown_height = 560.0;
+        screen.preview = true;
+    });
+    set_pane_direction(&window, &cache, id, true);
+    // 空行にカーソルを置く：絵の行は開かない。
+    {
+        let state = states.of(id);
+        let mut state = state.borrow_mut();
+        state.caret_source_byte = Some(source.len());
+        state.active_line_start = Some(source.len());
+    }
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
+    let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+    window.window().request_redraw();
+    surface.draw_if_needed(|renderer| {
+        renderer.render(&mut pixels, width);
+    });
+    let red = pixels
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| pixel.r > 200 && pixel.g < 60 && pixel.b < 60)
+        .map(|(index, _)| index % width)
+        .collect::<Vec<_>>();
+    let left = red.iter().min().copied().unwrap_or(0);
+    assert!(
+        red.len() > 5_000 && left > width / 2,
+        "red {} px from x={left}",
+        red.len()
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}

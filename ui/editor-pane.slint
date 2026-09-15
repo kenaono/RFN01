@@ -2020,7 +2020,12 @@ export component EditorPane inherits Rectangle {
                     // inside this rectangle, so they are in the document's own
                     // coordinates whatever this one is. Moving the sheet instead
                     // of each of them is why none of them had to learn about it.
-                    x: root.vertical ? 0px : max(0px, (parent.width - self.width) / 2);
+                    //
+                    // 書き手の報告 2026-09-16: **縦書きは右から始まる。**Paneより短い文書も
+                    // 右端に寄せる（左に寄っていた）。長い文書は右端を保つスクロール
+                    // （`scroll_after_content_resize`）が同じ位置へ置くので、Paneの幅を
+                    // 越える前後で文書の頭が動かない。
+                    x: root.vertical ? max(0px, parent.width - self.width) : max(0px, (parent.width - self.width) / 2);
                     y: root.vertical ? max(0px, (parent.height - self.height) / 2) : 0px;
                     // 壁紙のあいだは、紙は後ろの幕が塗る。
                     background: root.wall-kind != 0 ? transparent : root.page-background;
