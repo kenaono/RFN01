@@ -746,6 +746,10 @@ Explorerを表示している間は、外部での追加・削除・名前変更
   メニューの行の「(Horizontal)」「(Vertical)」が、色の付く向き。**Settings → Page の VERTICAL「横書きに合わせる」をOn**にすると、
   全体の紙もTAB・Paneの紙も縦書き・横書きで共通になる。Text・Layout の面にも同じ「横書きに合わせる」があり、
   Onなら縦書きはその面の値を横書きから読む（縦中横のような縦書きだけの設定は残る）
+- **表示の言語**（2026-09-15）。Settings → General「LANGUAGE」で「System」（Windowsの表示言語が日本語なら日本語、それ以外は英語）
+  「日本語」「English」を選ぶ。メニュー・設定画面・ツールチップ・Keysの操作名がすぐ切り替わる。**ステータスバーの知らせや問いの文は
+  まだ日本語のまま**（次の段で切り替える）。訳を足すときは`ui/*.slint`に`@tr("English")`と書き、
+  `translations/ja/LC_MESSAGES/editor_spike.po`に訳を足す（足し忘れは`i18n`の試験が落ちる）
 - **背景の壁紙**（2026-09-15）。Settings → Page「BACKGROUND IMAGE」で、本文の紙の後ろに画像を敷く（全体の設定）。
   **Windows Wallpaper** はWindowsの壁紙を画面上と同じ位置に敷くので、窓越しにデスクトップが透けて見えるように感じる
   （他のウィンドウは透けない）。窓を動かすと壁紙が画面に留まり、Windowsの壁紙が替わる（Bing壁紙など）と数秒で追う。
@@ -942,6 +946,8 @@ Explorerを表示している間は、外部での追加・削除・名前変更
 | `src/terminal_session.rs` | シェル1つ・その画面・読み取りスレッド1本（要件 2）。`searcher.rs`と同じ形——所有したハンドルをスレッドへ渡し、起こし方を引数でもらう。**スレッドは升目に触らない**（触れば描画が鍵を取ることになる） |
 | `src/ime.rs` | IMEへ書字方向を伝える（変換候補を縦組みにする） |
 | `src/kill_ring.rs` | Kill Ring（要件 11.6）。文字列の並びと、そのどこを読んでいるか。**どこまでが1回のKillかは編集器の話**なのでここには無い。純Rust |
+| `src/wallpaper.rs` | 背景の壁紙（追加要件 2026-09-15）。Windowsの壁紙（`IDesktopWallpaper`）と指定の画像をWICで読み、**何をどこに敷くか**を決めて窓へ置く。敷くのは面（Slint）。`place`がWindowsの6つの配置 |
+| `src/i18n.rs` | 表示の言語（追加要件 2026-09-15）。設定（System／日本語／English）から言語を決め、画面の`@tr`の訳（`translations/ja/LC_MESSAGES/editor_spike.po`、`build.rs`で埋め込み）を選ぶ。Rustが画面へ渡す文言は`pick(日本語, 英語)`。訳し漏れは試験が数える |
 | `src/clipboard.rs` | クリップボードへ渡す（要件 11.2）。**出す向きだけ**——貼り付けはIME用の欄に落ちて打鍵と同じ道で入るので、取りにいく必要が無い |
 | `ui/tokens.slint` | 画面が使ってよい色の全部（`global Tok`）。**ここ以外に色を書かない。**UIは紫（色相295）、紙はアイボリー（色相92）で、この2つの色相を混ぜない。本文の墨`doc-ink`だけは紫を含まない |
 | `ui/controls.slint` | 画面の部品。アイコンの形（`Icons`＝SVGのパス文字列）、`IconButton`（ホバー・入・ツールチップ）、`StepRow`、メニューの行と枠 |

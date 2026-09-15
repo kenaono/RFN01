@@ -765,6 +765,9 @@ export component AppWindow inherits Window {
     /// 書き手の求めで、TAB・Paneのメニューからは選ばない（おまけなので全体設定だけ）。
     in-out property <int> paper-random: 0;
     callback paper-random-chosen(int);
+    /// 追加要件 2026-09-15（書き手）: 表示の言語。0 システムに合わせる、1 日本語、2 English。
+    in-out property <int> language: 0;
+    callback language-chosen(int);
     /// 追加要件 2026-09-15（書き手）: 背景の壁紙（全体の設定）。0 なし、1 Windowsの壁紙
     /// （画面に固定して敷くので、窓越しにデスクトップが見えているように感じる）、2 画像ファイル。
     in-out property <int> wall-kind: 0;
@@ -962,7 +965,7 @@ export component AppWindow inherits Window {
                     x: 7px;
                     y: 4px;
                     icon: Icons.menu;
-                    tip: "Menu";
+                    tip: @tr("Menu");
                     clicked => {
                         app-menu.show();
                     }
@@ -976,7 +979,7 @@ export component AppWindow inherits Window {
                     x: 7px;
                     y: 40px;
                     icon: Icons.folder;
-                    tip: "Explorer";
+                    tip: @tr("Explorer");
                     checked: root.tree-open && root.left-tab == 0;
                     clicked => {
                         root.tree-open = !(root.tree-open && root.left-tab == 0);
@@ -990,7 +993,7 @@ export component AppWindow inherits Window {
                     x: 7px;
                     y: 70px;
                     icon: Icons.search;
-                    tip: "Search";
+                    tip: @tr("Search");
                     checked: root.tree-open && root.left-tab == 1;
                     clicked => {
                         root.tree-open = !(root.tree-open && root.left-tab == 1);
@@ -1004,7 +1007,7 @@ export component AppWindow inherits Window {
                     x: 7px;
                     y: 100px;
                     icon: Icons.history;
-                    tip: "History";
+                    tip: @tr("History");
                     checked: root.tree-open && root.left-tab == 2;
                     clicked => {
                         root.tree-open = !(root.tree-open && root.left-tab == 2);
@@ -1018,7 +1021,7 @@ export component AppWindow inherits Window {
                     x: 7px;
                     y: 130px;
                     icon: Icons.outline;
-                    tip: "Outline";
+                    tip: @tr("Outline");
                     checked: root.tree-open && root.left-tab == 3;
                     clicked => {
                         root.tree-open = !(root.tree-open && root.left-tab == 3);
@@ -1051,7 +1054,7 @@ export component AppWindow inherits Window {
                             spacing: 1px;
 
                             MenuRow {
-                                title: "Open File…";
+                                title: @tr("Open File…");
                                 shortcut: root.shortcut-keys[0]; activated => {
                                     app-menu.close();
                                     root.open-file-requested();
@@ -1059,7 +1062,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             MenuRow {
-                                title: "Open Folder…";
+                                title: @tr("Open Folder…");
                                 activated => {
                                     app-menu.close();
                                     root.work-folder-requested();
@@ -1069,7 +1072,7 @@ export component AppWindow inherits Window {
                             // Nothing to go back to on a first run, and a row that
                             // opens an empty menu is a row that lies.
                             if root.recent-folders.length > 0: MenuRow {
-                                title: "Recent Folders";
+                                title: @tr("Recent Folders");
                                 // The mark a submenu carries, in the column the
                                 // shortcuts use. There is no key for this one.
                                 shortcut: "▸";
@@ -1087,7 +1090,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             MenuRow {
-                                title: "New Terminal";
+                                title: @tr("New Terminal");
                                 // The mark a submenu carries, in the column the
                                 // shortcuts use — the same one Recent Folders
                                 // has. **Shown first, closed second**, for the
@@ -1099,7 +1102,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             MenuRow {
-                                title: "Quick Draft…";
+                                title: @tr("Quick Draft…");
                                 activated => {
                                     app-menu.close();
                                     root.quick-draft-requested();
@@ -1108,7 +1111,7 @@ export component AppWindow inherits Window {
                             }
                             MenuSep { }
                             MenuRow {
-                                title: "Save All";
+                                title: @tr("Save All");
                                 activated => {
                                     app-menu.close();
                                     root.save-all-requested();
@@ -1124,7 +1127,7 @@ export component AppWindow inherits Window {
                             //
                             // **`if`の中の行は頼んでから閉じる**（6.24）。
                             if !root.panes[root.focused-pane].terminal: MenuRow {
-                                title: "Find in File…";
+                                title: @tr("Find in File…");
                                 shortcut: root.shortcut-keys[4]; activated => {
                                     root.find-pane = root.focused-pane;
                                     root.find-replacing = false;
@@ -1135,7 +1138,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             MenuRow {
-                                title: "Find in Folder…";
+                                title: @tr("Find in Folder…");
                                 activated => {
                                     app-menu.close();
                                     root.tree-open = true;
@@ -1225,7 +1228,7 @@ export component AppWindow inherits Window {
                     x: 7px;
                     y: parent.height - self.height - 7px;
                     icon: Icons.settings;
-                    tip: "Settings";
+                    tip: @tr("Settings");
                     clicked => {
                         root.settings-requested();
                     }
@@ -1288,7 +1291,7 @@ export component AppWindow inherits Window {
 
                             Text {
                                 text: root.work-folder == ""
-                                    ? "No folder open"
+                                    ? @tr("No folder open")
                                     : root.work-folder;
                                 color: Tok.ink;
                                 font-size: 12px;
@@ -1306,22 +1309,22 @@ export component AppWindow inherits Window {
                             // one is the only thing left to do.
                             if root.work-folder != "": IconButton {
                                 icon: "M8 1v3M8 12v3M1 8h3M12 8h3M3.5 3.5h9v9h-9z";
-                                tip: "現在の文書をツリー内に表示";
+                                tip: @tr("Show Current Document in Tree");
                                 clicked => { root.explorer-command(0); }
                             }
                             if root.work-folder != "": IconButton {
                                 icon: "M3 2h10v9M1 5h9v9H1zM3 9.5h5";
-                                tip: "すべて折り畳む";
+                                tip: @tr("Collapse All");
                                 clicked => { root.explorer-command(1); }
                             }
                             if root.work-folder != "": IconButton {
                                 icon: "M13 5a5.5 5.5 0 1 0 0 6M13 1v4H9";
-                                tip: "更新";
+                                tip: @tr("Refresh");
                                 clicked => { root.explorer-command(2); }
                             }
                             if root.work-folder == "": IconButton {
                                 icon: Icons.folder;
-                                tip: "Open Folder";
+                                tip: @tr("Open Folder");
                                 clicked => {
                                     root.work-folder-requested();
                                     root.focus-generation += 1;
@@ -1347,7 +1350,7 @@ export component AppWindow inherits Window {
 
                                 IconButton {
                                     icon: Icons.plus;
-                                    tip: "New";
+                                    tip: @tr("New");
                                     clicked => {
                                         tree-plus-menu.show();
                                     }
@@ -1371,14 +1374,14 @@ export component AppWindow inherits Window {
                                         // ので、後に書いたものは届かないことが
                                         // ある。
                                         MenuRow {
-                                            title: "New File…";
+                                            title: @tr("New File…");
                                             activated => {
                                                 root.tree-command(0);
                                                 tree-plus-menu.close();
                                             }
                                         }
                                         MenuRow {
-                                            title: "New Terminal";
+                                            title: @tr("New Terminal");
                                             activated => {
                                                 root.terminal-requested(root.default-shell);
                                                 root.focus-generation += 1;
@@ -1386,7 +1389,7 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         MenuRow {
-                                            title: "New Folder…";
+                                            title: @tr("New Folder…");
                                             activated => {
                                                 root.tree-command(1);
                                                 tree-plus-menu.close();
@@ -1403,7 +1406,7 @@ export component AppWindow inherits Window {
                             // wore the same icon and did opposite things.
                             if root.work-folder != "": IconButton {
                                 icon: Icons.folder;
-                                tip: "Open Folder";
+                                tip: @tr("Open Folder");
                                 clicked => {
                                     root.work-folder-requested();
                                     root.focus-generation += 1;
@@ -1425,7 +1428,7 @@ export component AppWindow inherits Window {
                             spacing: 4px;
 
                             needle-in-folder := Field {
-                                placeholder: "Search in folder";
+                                placeholder: @tr("Search in folder");
                                 text <=> root.folder-needle;
                                 // Built when the panel is, so asking for it is
                                 // enough to type into it.
@@ -1489,7 +1492,7 @@ export component AppWindow inherits Window {
 
                                 if root.search-folder-scoped: IconButton {
                                     icon: Icons.close;
-                                    tip: "Search the whole work folder";
+                                    tip: @tr("Search the whole work folder");
                                     size: 24px;
                                     clicked => {
                                         root.search-folder-reset();
@@ -1497,9 +1500,9 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "除外する名前（; 区切り、* と ? が使えます）"; color: Tok.ink-muted; font-size: 11px; wrap: word-wrap; }
+                            Text { text: @tr("Names to exclude (separate with ;, * and ? allowed)"); color: Tok.ink-muted; font-size: 11px; wrap: word-wrap; }
                             Field {
-                                placeholder: "例：*.bak; backup/";
+                                placeholder: @tr("e.g. *.bak; backup/");
                                 text <=> root.search-exclusions;
                                 edited => { root.search-exclusions-changed(); }
                                 accepted => { root.folder-search-requested(); }
@@ -1508,7 +1511,7 @@ export component AppWindow inherits Window {
                                 spacing: 6px;
 
                                 TextButton {
-                                    title: "Search";
+                                    title: @tr("Search");
                                     clicked => {
                                         root.folder-search-requested();
                                     }
@@ -1938,7 +1941,7 @@ export component AppWindow inherits Window {
                         page-background: pane.vertical && !root.paper-shared
                             ? (pane.paper-v-own ? pane.paper-v : root.palette[22])
                             : (pane.paper-h-own ? pane.paper-h : root.palette[7]);
-                        paper-direction: root.paper-shared ? "" : (pane.vertical ? " (Vertical)" : " (Horizontal)");
+                        paper-direction: root.paper-shared ? "" : (pane.vertical ? @tr(" (Vertical)") : @tr(" (Horizontal)"));
                         wall-kind: root.wall-kind;
                         wall-pieces: root.wall-pieces;
                         wall-image: root.wall-image;
@@ -2411,7 +2414,7 @@ export component AppWindow inherits Window {
                                     alignment: start;
 
                                     Text {
-                                        text: "SETTINGS";
+                                        text: @tr("SETTINGS");
                                         color: Tok.ink-faint;
                                         font-size: 11px;
                                         letter-spacing: 0.9px;
@@ -2423,7 +2426,7 @@ export component AppWindow inherits Window {
                                     // いる：General・Terminal・Words は方向を持たず、
                                     // Text・Layout・Page はシート（横書き／縦書き）
                                     // の上の値である。Keys は最後。
-                                    for category[index] in ["General", "Terminal", "Words", "Text", "Layout", "Page", "Keys"]: SideTab {
+                                    for category[index] in [@tr("General"), @tr("Terminal"), @tr("Words"), @tr("Text"), @tr("Layout"), @tr("Page"), @tr("Keys")]: SideTab {
                                         title: category;
                                         current: root.settings-tab == index;
                                         clicked => {
@@ -2457,7 +2460,7 @@ export component AppWindow inherits Window {
 
                                         if root.settings-tab == 6: VerticalLayout {
                                             spacing: 10px;
-                                            Text { text: "ショートカット"; color: Tok.ink; font-size: 16px; }
+                                            Text { text: @tr("Shortcuts"); color: Tok.ink; font-size: 16px; }
 
                                             // 書き手の求め 2026-09-15: **名前で探す欄と、キーを押して探す欄。**
                                             // 「CTRL+O」と綴るより押すほうが間違えない。1つの欄にまとめると
@@ -2466,7 +2469,7 @@ export component AppWindow inherits Window {
                                                 spacing: 8px;
                                                 Field {
                                                     horizontal-stretch: 1;
-                                                    placeholder: "操作名で探す";
+                                                    placeholder: @tr("Search by action");
                                                     text <=> root.shortcut-query;
                                                     edited => { root.shortcut-filter(); }
                                                     escaped => { root.focus-generation += 1; }
@@ -2499,7 +2502,7 @@ export component AppWindow inherits Window {
                                                             vertical-alignment: center;
                                                             overflow: elide;
                                                             text: root.shortcut-key-query != "" ? root.shortcut-key-query
-                                                                : (key-search.has-focus ? "キーを押す（Backspaceで消す）" : "キーを押して探す");
+                                                                : (key-search.has-focus ? @tr("Press a key (Backspace to clear)") : @tr("Press a key to search"));
                                                             color: root.shortcut-key-query != "" ? Tok.ink : Tok.ink-faint;
                                                             font-size: 12px;
                                                         }
@@ -2508,7 +2511,7 @@ export component AppWindow inherits Window {
                                                             y: (parent.height - self.height) / 2;
                                                             size: 20px;
                                                             icon: Icons.close;
-                                                            tip: "Clear";
+                                                            tip: @tr("Clear");
                                                             clicked => {
                                                                 root.shortcut-key-query = "";
                                                                 root.shortcut-filter();
@@ -2567,7 +2570,7 @@ export component AppWindow inherits Window {
                                                                     } else {
                                                                         root.shortcut-selected = item.id;
                                                                         root.shortcut-edit = item.key;
-                                                                        root.shortcut-status = "割り当てるキーを押して「適用して保存」";
+                                                                        root.shortcut-status = @tr("Press the key to assign, then \"Apply and Save\"");
                                                                     }
                                                                 }
                                                             }
@@ -2586,7 +2589,7 @@ export component AppWindow inherits Window {
                                                             }
                                                             Text {
                                                                 vertical-alignment: center;
-                                                                text: item.key == "" ? "未割り当て" : item.key;
+                                                                text: item.key == "" ? @tr("Unassigned") : item.key;
                                                                 color: item.key == "" ? Tok.ink-faint : Tok.ink;
                                                                 font-size: 12px;
                                                             }
@@ -2594,7 +2597,7 @@ export component AppWindow inherits Window {
                                                                 min-width: 24px;
                                                                 vertical-alignment: center;
                                                                 horizontal-alignment: right;
-                                                                text: item.fixed ? "固定" : "";
+                                                                text: item.fixed ? @tr("Fixed") : "";
                                                                 color: Tok.ink-faint;
                                                                 font-size: 11px;
                                                             }
@@ -2631,7 +2634,7 @@ export component AppWindow inherits Window {
                                                                     Text {
                                                                         x: 10px; width: parent.width - 20px;
                                                                         height: parent.height;
-                                                                        text: root.shortcut-edit == "" ? "ここをクリックしてキーを押す" : root.shortcut-edit;
+                                                                        text: root.shortcut-edit == "" ? @tr("Click here and press a key") : root.shortcut-edit;
                                                                         color: Tok.ink;
                                                                         vertical-alignment: center;
                                                                     }
@@ -2642,12 +2645,12 @@ export component AppWindow inherits Window {
                                                             HorizontalLayout {
                                                                 alignment: start;
                                                                 spacing: 4px;
-                                                                TextButton { title: "適用して保存"; role: Role.primary; clicked => { root.shortcut-save(false); } }
-                                                                TextButton { title: "割り当て解除"; clicked => { root.shortcut-edit = ""; root.shortcut-save(false); } }
-                                                                TextButton { title: "既定に戻す"; clicked => { root.shortcut-save(true); } }
-                                                                TextButton { title: "閉じる"; role: Role.quiet; clicked => { root.shortcut-selected = -1; } }
+                                                                TextButton { title: @tr("Apply and Save"); role: Role.primary; clicked => { root.shortcut-save(false); } }
+                                                                TextButton { title: @tr("Unassign"); clicked => { root.shortcut-edit = ""; root.shortcut-save(false); } }
+                                                                TextButton { title: @tr("Restore Default"); clicked => { root.shortcut-save(true); } }
+                                                                TextButton { title: @tr("Close"); role: Role.quiet; clicked => { root.shortcut-selected = -1; } }
                                                             }
-                                                            Text { text: "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"; color: Tok.ink-faint; font-size: 11px; wrap: word-wrap; }
+                                                            Text { text: @tr("Assignable keys: the default keys in the list, or Ctrl+Alt+A–Z."); color: Tok.ink-faint; font-size: 11px; wrap: word-wrap; }
                                                         }
                                                     }
                                                 }
@@ -2658,7 +2661,7 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 alignment: start;
                                                 TextButton {
-                                                    title: "Reset";
+                                                    title: @tr("Reset");
                                                     clicked => { root.shortcut-reset-all(); }
                                                 }
                                             }
@@ -2667,8 +2670,38 @@ export component AppWindow inherits Window {
                                         if root.settings-tab == 0: VerticalLayout {
                                             spacing: 8px;
 
+                                            // 追加要件 2026-09-15（書き手）: 表示の言語。言語の名前はその言語で書く
+                                            // ——読めない言語で出ている画面から戻れるように。
                                             Text {
-                                                text: "FILES";
+                                                text: @tr("LANGUAGE");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                letter-spacing: 0.9px;
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                height: 28px;
+
+                                                Text {
+                                                    text: @tr("Language");
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                for choice[index] in [@tr("System"), "日本語", "English"]: TextButton {
+                                                    title: choice;
+                                                    role: root.language == index ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.language-chosen(index);
+                                                    }
+                                                }
+                                            }
+                                            Rectangle { height: 12px; }
+
+                                            Text {
+                                                text: @tr("FILES");
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -2682,7 +2715,7 @@ export component AppWindow inherits Window {
                                                 spacing: 2px;
 
                                                 Text {
-                                                    text: "自動退避";
+                                                    text: @tr("Auto Backup");
                                                     color: Tok.ink;
                                                     font-size: 12px;
                                                     vertical-alignment: center;
@@ -2690,7 +2723,7 @@ export component AppWindow inherits Window {
                                                 }
 
                                                 TextButton {
-                                                    title: root.autosave ? "On" : "Off";
+                                                    title: root.autosave ? @tr("On") : @tr("Off");
                                                     role: root.autosave ? Role.primary : Role.normal;
                                                     clicked => {
                                                         root.autosave-toggled(!root.autosave);
@@ -2701,14 +2734,14 @@ export component AppWindow inherits Window {
                                             // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
                                             Text {
                                                 text: root.autosave
-                                                    ? "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
-                                                    : "退避しません。Offにすると作業コピーも削除します。";
+                                                    ? @tr("Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing.")
+                                                    : @tr("No backup. Turning it off also deletes the work copies.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 overflow: elide;
                                             }
                                             Text {
-                                                text: "元ファイルへの反映は Ctrl+S。";
+                                                text: @tr("Ctrl+S writes to the original file.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 overflow: elide;
@@ -2720,7 +2753,7 @@ export component AppWindow inherits Window {
                                             // 私が別のものを指して話すことになる。**記法の読み書きは
                                             // ここから下である。
                                             Text {
-                                                text: "MARKUP";
+                                                text: @tr("MARKUP");
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -2735,7 +2768,7 @@ export component AppWindow inherits Window {
                                                 spacing: 2px;
 
                                                 Text {
-                                                    text: "Count ruby";
+                                                    text: @tr("Count ruby");
                                                     color: Tok.ink;
                                                     font-size: 12px;
                                                     vertical-alignment: center;
@@ -2743,7 +2776,7 @@ export component AppWindow inherits Window {
                                                 }
 
                                                 TextButton {
-                                                    title: root.count-ruby ? "On" : "Off";
+                                                    title: root.count-ruby ? @tr("On") : @tr("Off");
                                                     role: root.count-ruby ? Role.primary : Role.normal;
                                                     clicked => {
                                                         root.count-ruby-toggled(!root.count-ruby);
@@ -2753,8 +2786,8 @@ export component AppWindow inherits Window {
 
                                             Text {
                                                 text: root.count-ruby
-                                                    ? "《よみ》も本文の字数に入れます。"
-                                                    : "《よみ》は本文の字数に入れません。";
+                                                    ? @tr("Ruby readings 《》 count toward the character count.")
+                                                    : @tr("Ruby readings 《》 do not count toward the character count.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 overflow: elide;
@@ -2768,7 +2801,7 @@ export component AppWindow inherits Window {
                                                 spacing: 2px;
 
                                                 Text {
-                                                    text: "Ruby markup";
+                                                    text: @tr("Ruby markup");
                                                     color: Tok.ink;
                                                     font-size: 12px;
                                                     vertical-alignment: center;
@@ -2776,7 +2809,7 @@ export component AppWindow inherits Window {
                                                 }
 
                                                 TextButton {
-                                                    title: root.ruby-marks ? "On" : "Off";
+                                                    title: root.ruby-marks ? @tr("On") : @tr("Off");
                                                     role: root.ruby-marks ? Role.primary : Role.normal;
                                                     clicked => {
                                                         root.ruby-marks-toggled(!root.ruby-marks);
@@ -2786,8 +2819,8 @@ export component AppWindow inherits Window {
 
                                             Text {
                                                 text: root.ruby-marks
-                                                    ? "｜漢字《かんじ》と《《傍点》》を記法として読みます。"
-                                                    : "記号をそのまま字として出します。";
+                                                    ? @tr("Reads ｜漢字《かんじ》 and 《《傍点》》 as markup.")
+                                                    : @tr("Shows the marks as plain characters.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 overflow: elide;
@@ -2802,7 +2835,7 @@ export component AppWindow inherits Window {
                                                 spacing: 2px;
 
                                                 Text {
-                                                    text: "Bullet marks";
+                                                    text: @tr("Bullet marks");
                                                     color: Tok.ink;
                                                     font-size: 12px;
                                                     vertical-alignment: center;
@@ -2821,11 +2854,11 @@ export component AppWindow inherits Window {
                                             Text {
                                                 text: !root.bullet-marks[0] && !root.bullet-marks[1]
                                                     && !root.bullet-marks[2]
-                                                    ? "箇条書きの印はありません（どの記号もただの本文です）。"
-                                                    : (root.bullet-marks[0] ? "- " : "")
+                                                    ? @tr("No bullet marks (every mark is plain text).")
+                                                    : @tr("{}are read as bullet marks.",
+                                                        (root.bullet-marks[0] ? "- " : "")
                                                         + (root.bullet-marks[1] ? "* " : "")
-                                                        + (root.bullet-marks[2] ? "+ " : "")
-                                                        + "を箇条書きの印として読みます。";
+                                                        + (root.bullet-marks[2] ? "+ " : ""));
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 overflow: elide;
@@ -2839,12 +2872,12 @@ export component AppWindow inherits Window {
                                                 alignment: start;
                                                 spacing: 10px;
                                                 TextButton {
-                                                    title: "Reset All";
+                                                    title: @tr("Reset All");
                                                     role: Role.danger;
                                                     clicked => { root.reset-all-requested(); }
                                                 }
                                                 Text {
-                                                    text: "General・Terminal・Text・Layout・Page・Keys を既定に戻し、文書のモードは「なし」にします。単語帳とモードは残ります。";
+                                                    text: @tr("Restores General, Terminal, Text, Layout, Page and Keys to their defaults and sets each document's mode to \"None\". Word sets and modes are kept.");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     vertical-alignment: center;
@@ -2863,14 +2896,14 @@ export component AppWindow inherits Window {
                                             // 2026-09-08 からはこの面が丸ごとそれで、シートを選ぶ釦は
                                             // 隣の3面にある。
                                             Text {
-                                                text: "TERMINAL";
+                                                text: @tr("TERMINAL");
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
                                             }
 
                                             PickRow {
-                                                label: "Default";
+                                                label: @tr("Default");
                                                 value: root.terminal-shells[root.default-shell];
                                                 pressed => {
                                                     default-shell-menu.show();
@@ -2919,7 +2952,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             Text {
-                                                text: "APPEARANCE";
+                                                text: @tr("APPEARANCE");
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -2933,7 +2966,7 @@ export component AppWindow inherits Window {
                                                 spacing: 2px;
 
                                                 Text {
-                                                    text: "Theme";
+                                                    text: @tr("Theme");
                                                     color: Tok.ink;
                                                     font-size: 12px;
                                                     vertical-alignment: center;
@@ -2941,13 +2974,13 @@ export component AppWindow inherits Window {
                                                 }
 
                                                 TextButton {
-                                                    title: "Paper";
+                                                    title: @tr("Paper");
                                                     clicked => {
                                                         root.terminal-theme-chosen(false);
                                                     }
                                                 }
                                                 TextButton {
-                                                    title: "Dark";
+                                                    title: @tr("Dark");
                                                     clicked => {
                                                         root.terminal-theme-chosen(true);
                                                     }
@@ -2955,7 +2988,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             ColorCell {
-                                                label: "Background";
+                                                label: @tr("Background");
                                                 shown: root.terminal-paper;
                                                 chosen(colour) => { root.colour-set(1, 0, colour); }
                                                 automatic => { root.colour-default(1, 0); }
@@ -2963,7 +2996,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             ColorCell {
-                                                label: "Text Color";
+                                                label: @tr("Text Color");
                                                 shown: root.terminal-ink;
                                                 chosen(colour) => { root.colour-set(1, 1, colour); }
                                                 automatic => { root.colour-default(1, 1); }
@@ -2971,7 +3004,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             PickRow {
-                                                label: "Font";
+                                                label: @tr("Font");
                                                 value: root.terminal-font;
                                                 pressed => {
                                                     root.terminal-font-picked();
@@ -2980,7 +3013,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             StepRow {
-                                                label: "Size";
+                                                label: @tr("Size");
                                                 value: root.terminal-size + " px";
                                                 stepped(by) => {
                                                     root.terminal-size-stepped(by);
@@ -2990,7 +3023,7 @@ export component AppWindow inherits Window {
                                             // **16色は選ばせない**（要件 6.8）。選ばせれば16回選ぶことに
                                             // なり、しかも選び終えるまで読めない。
                                             Text {
-                                                text: "SGRの16色は背景の明るさから選びます。";
+                                                text: @tr("The 16 SGR colors are chosen from the background brightness.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 overflow: elide;
@@ -3001,7 +3034,7 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 alignment: start;
                                                 TextButton {
-                                                    title: "Reset";
+                                                    title: @tr("Reset");
                                                     clicked => { root.terminal-reset(); }
                                                 }
                                             }
@@ -3018,7 +3051,7 @@ export component AppWindow inherits Window {
                                             spacing: 8px;
 
                                             Text {
-                                                text: "MODES";
+                                                text: @tr("MODES");
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -3061,7 +3094,7 @@ export component AppWindow inherits Window {
                                                 if index > 0 && mode.id == root.word-mode
                                                     && !(root.word-naming == 3
                                                         && root.word-naming-at == index - 1): Text {
-                                                    text: "この文書";
+                                                    text: @tr("This document");
                                                     color: Tok.accent;
                                                     font-size: 11px;
                                                     vertical-alignment: center;
@@ -3078,7 +3111,7 @@ export component AppWindow inherits Window {
 
                                                 // 名前を変えているあいだ、この行はその欄になる。
                                                 if root.word-naming == 3 && root.word-naming-at == index - 1: Field {
-                                                    placeholder: "モードの名前";
+                                                    placeholder: @tr("Mode name");
                                                     text <=> root.word-new-name;
                                                     init => {
                                                         self.take-focus();
@@ -3091,14 +3124,14 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
                                                 if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
-                                                    title: "決定";
+                                                    title: @tr("OK");
                                                     role: Role.primary;
                                                     clicked => {
                                                         root.word-mode-renamed(index - 1, root.word-new-name);
                                                     }
                                                 }
                                                 if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
-                                                    title: "取消";
+                                                    title: @tr("Cancel");
                                                     role: Role.quiet;
                                                     clicked => {
                                                         root.word-naming = 0;
@@ -3116,7 +3149,7 @@ export component AppWindow inherits Window {
                                                 alignment: start;
 
                                                 TextButton {
-                                                    title: "New Mode";
+                                                    title: @tr("New Mode");
                                                     role: Role.primary;
                                                     clicked => {
                                                         root.word-new-name = "";
@@ -3130,7 +3163,7 @@ export component AppWindow inherits Window {
                                                 spacing: 6px;
 
                                                 Field {
-                                                    placeholder: "モードの名前";
+                                                    placeholder: @tr("Mode name");
                                                     text <=> root.word-new-name;
                                                     // **出たときに鍵盤をここへ。**押した手はもう名前を
                                                     // 打つつもりでいる。`if`の中の要素はここからしか
@@ -3146,14 +3179,14 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
                                                 TextButton {
-                                                    title: "追加";
+                                                    title: @tr("Add");
                                                     role: Role.primary;
                                                     clicked => {
                                                         root.word-mode-added(root.word-new-name);
                                                     }
                                                 }
                                                 TextButton {
-                                                    title: "取消";
+                                                    title: @tr("Cancel");
                                                     role: Role.quiet;
                                                     clicked => {
                                                         root.word-naming = 0;
@@ -3169,8 +3202,8 @@ export component AppWindow inherits Window {
                                             }
 
                                             if root.word-mode-names.length <= 1: Text {
-                                                text: "モードを作り、その中に語群（人物・地名など）を作ります。"
-                                                    + "文書ごとにモードを選ぶのは下のステータスバーからです。";
+                                                text: @tr("Create a mode, then word groups (people, places, …) inside it.")
+                                                    + @tr("Choose the mode for each document from the status bar below.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 wrap: word-wrap;
@@ -3185,8 +3218,7 @@ export component AppWindow inherits Window {
                                             // モードの中を見ているのか画面に無かった（書き手の報告
                                             // 2026-09-08）。`+ 1`は先頭の「なし」の分。
                                             if root.word-mode-opened-at >= 0: Text {
-                                                text: "GROUPS — "
-                                                    + root.word-mode-names[root.word-mode-opened-at + 1].name;
+                                                text: @tr("GROUPS — {}", root.word-mode-names[root.word-mode-opened-at + 1].name);
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -3287,10 +3319,10 @@ export component AppWindow inherits Window {
                                                         && root.word-naming-at == index): TextButton {
                                                         role: Role.quiet;
                                                         title: row.conflicts > 0
-                                                            ? row.words + "語 / 重複" + row.conflicts
+                                                            ? @tr("{} words / {} duplicates", row.words, row.conflicts)
                                                             : (row.repeated > 0
-                                                                ? row.words + "語 (二重" + row.repeated + ")"
-                                                                : row.words + "語");
+                                                                ? @tr("{} words ({} doubled)", row.words, row.repeated)
+                                                                : @tr("{} words", row.words));
                                                         clicked => {
                                                             root.word-group-opened(
                                                                 root.word-group-opened-at == index ? -1 : index);
@@ -3300,7 +3332,7 @@ export component AppWindow inherits Window {
                                                     // 名前を変えているあいだ、この行はその欄になる
                                                     // （色見本だけは残す——どの語群かはそれで分かる）。
                                                     if root.word-naming == 4 && root.word-naming-at == index: Field {
-                                                        placeholder: "語群の名前";
+                                                        placeholder: @tr("Group name");
                                                         text <=> root.word-new-name;
                                                         init => {
                                                             self.take-focus();
@@ -3313,14 +3345,14 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                     if root.word-naming == 4 && root.word-naming-at == index: TextButton {
-                                                        title: "決定";
+                                                        title: @tr("OK");
                                                         role: Role.primary;
                                                         clicked => {
                                                             root.word-group-renamed(index, root.word-new-name);
                                                         }
                                                     }
                                                     if root.word-naming == 4 && root.word-naming-at == index: TextButton {
-                                                        title: "取消";
+                                                        title: @tr("Cancel");
                                                         role: Role.quiet;
                                                         clicked => {
                                                             root.word-naming = 0;
@@ -3332,8 +3364,8 @@ export component AppWindow inherits Window {
                                                 // 何も出ないのは「効かなかった」に見える（書き手の報告
                                                 // 2026-09-08）ので、**次にすることを書いておく**。
                                                 if root.word-group-rows.length == 0: Text {
-                                                    text: "このモードにはまだ語群がありません。"
-                                                        + "`New Group`で人物・地名などの語群を作り、色を決めます。";
+                                                    text: @tr("This mode has no word groups yet.")
+                                                        + @tr("Use \"New Group\" to create groups such as people or places and pick their colors.");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     wrap: word-wrap;
@@ -3380,9 +3412,9 @@ export component AppWindow inherits Window {
                                                             }
 
                                                             if root.word-group-words.length == 0: Text {
-                                                                text: "まだ語がありません。本文で語を選んで右ボタン、"
-                                                                    + "`単語帳へ追加`から入れられます。"
-                                                                    + "`#`で始まる行は覚え書きです。";
+                                                                text: @tr("No words yet. Select a word in the text, right-click,")
+                                                                    + @tr("and use \"Add to word set\".")
+                                                                    + @tr("Lines starting with # are notes.");
                                                                 color: Tok.ink-faint;
                                                                 font-size: 11px;
                                                                 wrap: word-wrap;
@@ -3403,13 +3435,13 @@ export component AppWindow inherits Window {
                                                     spacing: 6px;
 
                                                     TextButton {
-                                                        title: "Import…";
+                                                        title: @tr("Import…");
                                                         clicked => {
                                                             root.word-group-imported(root.word-group-opened-at);
                                                         }
                                                     }
                                                     TextButton {
-                                                        title: "Export…";
+                                                        title: @tr("Export…");
                                                         clicked => {
                                                             root.word-group-exported(root.word-group-opened-at);
                                                         }
@@ -3420,14 +3452,14 @@ export component AppWindow inherits Window {
                                                     // `リオン`が光らなくなる。
                                                     TextButton {
                                                         title: root.word-group-rows[root.word-group-opened-at].paints
-                                                            ? "色を付けない"
-                                                            : "色を付ける";
+                                                            ? @tr("No Color")
+                                                            : @tr("Use Color");
                                                         clicked => {
                                                             root.word-group-paint-toggled(root.word-group-opened-at);
                                                         }
                                                     }
                                                     TextButton {
-                                                        title: "この語群を消す";
+                                                        title: @tr("Delete This Group");
                                                         role: Role.danger;
                                                         clicked => {
                                                             root.word-group-removed(root.word-group-opened-at);
@@ -3439,7 +3471,7 @@ export component AppWindow inherits Window {
                                                     spacing: 6px;
 
                                                     Field {
-                                                        placeholder: "語群の名前";
+                                                        placeholder: @tr("Group name");
                                                         text <=> root.word-new-name;
                                                         init => {
                                                             self.take-focus();
@@ -3453,7 +3485,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                     TextButton {
-                                                        title: "追加";
+                                                        title: @tr("Add");
                                                         role: Role.primary;
                                                         clicked => {
                                                             root.word-group-added(
@@ -3461,7 +3493,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                     TextButton {
-                                                        title: "取消";
+                                                        title: @tr("Cancel");
                                                         role: Role.quiet;
                                                         clicked => {
                                                             root.word-naming = 0;
@@ -3474,7 +3506,7 @@ export component AppWindow inherits Window {
                                                     spacing: 6px;
 
                                                     if root.word-naming != 2: TextButton {
-                                                        title: "New Group";
+                                                        title: @tr("New Group");
                                                         // **一枚で終える**（`New Mode`の注記）。
                                                         clicked => {
                                                             root.word-new-name = "";
@@ -3486,8 +3518,8 @@ export component AppWindow inherits Window {
                                                     // 直すときにだけ開く。
                                                     if root.word-trouble-count > 0: TextButton {
                                                         title: root.word-troubles-shown
-                                                            ? "重複を閉じる"
-                                                            : "重複 " + root.word-trouble-count + " 件";
+                                                            ? @tr("Hide Duplicates")
+                                                            : @tr("{} duplicates", root.word-trouble-count);
                                                         clicked => {
                                                             root.word-troubles-shown = !root.word-troubles-shown;
                                                         }
@@ -3515,7 +3547,7 @@ export component AppWindow inherits Window {
                                                                 spacing: 6px;
 
                                                                 Text {
-                                                                    text: trouble.conflict ? "色なし" : "二重";
+                                                                    text: trouble.conflict ? @tr("No color") : @tr("Doubled");
                                                                     color: trouble.conflict ? Tok.alert : Tok.ink-faint;
                                                                     font-size: 11px;
                                                                     horizontal-stretch: 0;
@@ -3538,9 +3570,7 @@ export component AppWindow inherits Window {
                                                             }
 
                                                             if root.word-trouble-count > root.word-troubles.length: Text {
-                                                                text: "ほかに "
-                                                                    + (root.word-trouble-count - root.word-troubles.length)
-                                                                    + " 件";
+                                                                text: @tr("{} more", root.word-trouble-count - root.word-troubles.length);
                                                                 color: Tok.ink-faint;
                                                                 font-size: 11px;
                                                             }
@@ -3562,7 +3592,7 @@ export component AppWindow inherits Window {
                                                 spacing: 6px;
 
                                                 TextButton {
-                                                    title: "Edit…";
+                                                    title: @tr("Edit…");
                                                     // **頼んでから閉じる**（技術検証 6.24）。開く先はタブで、
                                                     // 書き手はもうこの画面を見ていない。
                                                     clicked => {
@@ -3570,7 +3600,7 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
                                                 Text {
-                                                    text: "単語帳のファイルをタブで開きます。保存すると取り込みます。";
+                                                    text: @tr("Opens the word set file in a tab. Saving it reloads the words.");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     vertical-alignment: center;
@@ -3591,7 +3621,7 @@ export component AppWindow inherits Window {
                                             VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: "COLOR SETS";
+                                                    text: @tr("COLOR SETS");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -3607,9 +3637,10 @@ export component AppWindow inherits Window {
                                                         TextButton {
                                                             width: parent.width;
                                                             wide: true;
-                                                            title: root.ink-set-chosen < 0 ? "Custom"
-                                                                : "Set " + (root.ink-set-chosen + 1)
-                                                                    + (root.ink-sets[root.ink-set-chosen] == "" ? " (empty)" : "");
+                                                            title: root.ink-set-chosen < 0 ? @tr("Custom")
+                                                                : (root.ink-sets[root.ink-set-chosen] == ""
+                                                                    ? @tr("Set {} (empty)", root.ink-set-chosen + 1)
+                                                                    : @tr("Set {}", root.ink-set-chosen + 1));
                                                             clicked => {
                                                                 ink-set-menu.show();
                                                             }
@@ -3633,7 +3664,7 @@ export component AppWindow inherits Window {
                                                                     // 選んでも下の色が替わらないと分かりにくい）。空のセットは
                                                                     // 選ぶだけで、色は変えない。頼んでから閉じる（技術検証 6.24）。
                                                                     for held[index] in root.ink-sets: MenuRow {
-                                                                        title: "Set " + (index + 1) + (held == "" ? " (empty)" : "");
+                                                                        title: held == "" ? @tr("Set {} (empty)", index + 1) : @tr("Set {}", index + 1);
                                                                         checked: index == root.ink-set-chosen;
                                                                         activated => {
                                                                             root.ink-set-chosen = index;
@@ -3656,7 +3687,7 @@ export component AppWindow inherits Window {
 
                                                         save-button := TextButton {
                                                             width: parent.width;
-                                                            title: "Save to…";
+                                                            title: @tr("Save to…");
                                                             clicked => { ink-save-menu.show(); }
                                                         }
 
@@ -3674,7 +3705,7 @@ export component AppWindow inherits Window {
                                                                     spacing: 1px;
 
                                                                     for held[index] in root.ink-sets: MenuRow {
-                                                                        title: "Set " + (index + 1) + (held == "" ? " (empty)" : "");
+                                                                        title: held == "" ? @tr("Set {} (empty)", index + 1) : @tr("Set {}", index + 1);
                                                                         checked: index == root.ink-set-chosen;
                                                                         activated => {
                                                                             root.ink-set-chosen = index;
@@ -3688,14 +3719,14 @@ export component AppWindow inherits Window {
                                                     }
                                                     // 保存したセットを失う操作なので、赤で言う。
                                                     TextButton {
-                                                        title: "Delete";
+                                                        title: @tr("Delete");
                                                         role: Role.danger;
                                                         enabled: root.ink-set-chosen >= 0 && root.ink-sets[root.ink-set-chosen] != "";
                                                         clicked => { root.ink-set-delete(root.ink-set-chosen); }
                                                     }
                                                 }
                                                 Text {
-                                                    text: "Body・H1〜H6の文字色を、横書き・縦書きまとめて保存します。一覧で選ぶと適用します。";
+                                                    text: @tr("Saves the text colors of Body and H1–H6 for both directions. Pick one from the list to apply it.");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     overflow: elide;
@@ -3709,7 +3740,7 @@ export component AppWindow inherits Window {
                                             for sheet-index in [0, 1]: VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: sheet-index == 0 ? "HORIZONTAL" : "VERTICAL";
+                                                    text: sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -3722,7 +3753,7 @@ export component AppWindow inherits Window {
                                                     height: 28px;
 
                                                     Text {
-                                                        text: "横書きに合わせる";
+                                                        text: @tr("Same as Horizontal");
                                                         color: Tok.ink;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
@@ -3730,7 +3761,7 @@ export component AppWindow inherits Window {
                                                     }
 
                                                     TextButton {
-                                                        title: root.text-shared ? "On" : "Off";
+                                                        title: root.text-shared ? @tr("On") : @tr("Off");
                                                         role: root.text-shared ? Role.primary : Role.normal;
                                                         clicked => {
                                                             root.text-shared-toggled(!root.text-shared);
@@ -3971,7 +4002,7 @@ export component AppWindow inherits Window {
                                                     // 書き手の求め 2026-09-15: **コードの書体も文字の設定。**本文・見出しの
                                                     // 書体と同じ面に置く（紙の面にあったのはおかしい）。
                                                     PickRow {
-                                                        label: "Code Font";
+                                                        label: @tr("Code Font");
                                                         value: root.sheet-fonts[sheet-index * 8 + 7];
                                                         pressed => {
                                                             root.sheet = sheet-index; root.font-picked(7);
@@ -3991,7 +4022,7 @@ export component AppWindow inherits Window {
                                             for sheet-index in [0, 1]: VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: sheet-index == 0 ? "HORIZONTAL" : "VERTICAL";
+                                                    text: sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4004,7 +4035,7 @@ export component AppWindow inherits Window {
                                                     height: 28px;
 
                                                     Text {
-                                                        text: "横書きに合わせる";
+                                                        text: @tr("Same as Horizontal");
                                                         color: Tok.ink;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
@@ -4012,7 +4043,7 @@ export component AppWindow inherits Window {
                                                     }
 
                                                     TextButton {
-                                                        title: root.layout-shared ? "On" : "Off";
+                                                        title: root.layout-shared ? @tr("On") : @tr("Off");
                                                         role: root.layout-shared ? Role.primary : Role.normal;
                                                         clicked => {
                                                             root.layout-shared-toggled(!root.layout-shared);
@@ -4027,7 +4058,7 @@ export component AppWindow inherits Window {
                                                     // label follows the sheet, because on this sheet that is what
                                                     // it is.
                                                     StepRow {
-                                                        label: sheet-index == 0 ? "Line height" : "Column gap";
+                                                        label: sheet-index == 0 ? @tr("Line height") : @tr("Column gap");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 1] + "%";
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(1, by);
@@ -4035,7 +4066,7 @@ export component AppWindow inherits Window {
                                                     }
 
                                                     StepRow {
-                                                        label: "Char advance";
+                                                        label: @tr("Char advance");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 2] + "%";
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(2, by);
@@ -4043,7 +4074,7 @@ export component AppWindow inherits Window {
                                                     }
 
                                                     StepRow {
-                                                        label: "Page margin";
+                                                        label: @tr("Page margin");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 3] + " px";
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(3, by);
@@ -4060,7 +4091,7 @@ export component AppWindow inherits Window {
                                                         spacing: 2px;
 
                                                         Text {
-                                                            text: "Wrap";
+                                                            text: @tr("Wrap");
                                                             color: Tok.ink;
                                                             font-size: 12px;
                                                             vertical-alignment: center;
@@ -4071,14 +4102,14 @@ export component AppWindow inherits Window {
                                                         // neither switch on, a row of unlit buttons reads as a
                                                         // setting nobody has made rather than as the setting it is.
                                                         if root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 0: Text {
-                                                            text: "not wrapped";
+                                                            text: @tr("not wrapped");
                                                             color: Tok.ink-faint;
                                                             font-size: 11px;
                                                             vertical-alignment: center;
                                                         }
 
                                                         TextButton {
-                                                            title: "Width";
+                                                            title: @tr("Width");
                                                             role: root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 1
                                                                 ? Role.primary
                                                                 : Role.normal;
@@ -4090,7 +4121,7 @@ export component AppWindow inherits Window {
                                                             }
                                                         }
                                                         TextButton {
-                                                            title: "Pane";
+                                                            title: @tr("Pane");
                                                             role: root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 2
                                                                 ? Role.primary
                                                                 : Role.normal;
@@ -4107,8 +4138,8 @@ export component AppWindow inherits Window {
                                                     // length means: the number stays true when the body size or the
                                                     // zoom changes, and a width in pixels would not.
                                                     if root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 1: StepRow {
-                                                        label: "Line length";
-                                                        value: root.sheet-numbers[sheet-index * root.sheet-stride + 11] + " chars";
+                                                        label: @tr("Line length");
+                                                        value: @tr("{} chars", root.sheet-numbers[sheet-index * root.sheet-stride + 11]);
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(11, by);
                                                         }
@@ -4121,7 +4152,7 @@ export component AppWindow inherits Window {
                                                         spacing: 2px;
 
                                                         Text {
-                                                            text: "Line numbers";
+                                                            text: @tr("Line numbers");
                                                             color: Tok.ink;
                                                             font-size: 12px;
                                                             vertical-alignment: center;
@@ -4130,8 +4161,8 @@ export component AppWindow inherits Window {
 
                                                         TextButton {
                                                             title: root.sheet-numbers[sheet-index * root.sheet-stride + 12] == 1
-                                                                ? "Shown"
-                                                                : "Hidden";
+                                                                ? @tr("Shown")
+                                                                : @tr("Hidden");
                                                             role: root.sheet-numbers[sheet-index * root.sheet-stride + 12] == 1
                                                                 ? Role.primary
                                                                 : Role.normal;
@@ -4146,14 +4177,14 @@ export component AppWindow inherits Window {
 
                                                     HorizontalLayout {
                                                         Text {
-                                                            text: "空白・改行を表示";
+                                                            text: @tr("Show spaces and line breaks");
                                                             color: Tok.ink;
                                                             font-size: 12px;
                                                             vertical-alignment: center;
                                                             horizontal-stretch: 1;
                                                         }
                                                         TextButton {
-                                                            title: root.sheet-numbers[sheet-index * root.sheet-stride + 54] == 1 ? "Shown" : "Hidden";
+                                                            title: root.sheet-numbers[sheet-index * root.sheet-stride + 54] == 1 ? @tr("Shown") : @tr("Hidden");
                                                             role: root.sheet-numbers[sheet-index * root.sheet-stride + 54] == 1 ? Role.primary : Role.normal;
                                                             clicked => {
                                                                 root.sheet = sheet-index; root.sheet-chose(54, root.sheet-numbers[sheet-index * root.sheet-stride + 54] == 1 ? 0 : 1);
@@ -4167,7 +4198,7 @@ export component AppWindow inherits Window {
                                                     // 限らない。位置は0が行の箱の端（行間の空きの外側）で、
                                                     // 上げるほど字に近づく。
                                                     StepRow {
-                                                        label: "Ruby size";
+                                                        label: @tr("Ruby size");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 13] + "%";
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(13, by);
@@ -4175,7 +4206,7 @@ export component AppWindow inherits Window {
                                                     }
 
                                                     StepRow {
-                                                        label: "Ruby position";
+                                                        label: @tr("Ruby position");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 14] + "%";
                                                         stepped(by) => {
                                                             root.sheet = sheet-index; root.sheet-step(14, by);
@@ -4192,7 +4223,7 @@ export component AppWindow inherits Window {
                                                         spacing: 2px;
 
                                                         Text {
-                                                            text: "Tate-chu-yoko";
+                                                            text: @tr("Tate-chu-yoko");
                                                             color: Tok.ink;
                                                             font-size: 12px;
                                                             vertical-alignment: center;
@@ -4201,8 +4232,8 @@ export component AppWindow inherits Window {
 
                                                         TextButton {
                                                             title: root.sheet-numbers[sheet-index * root.sheet-stride + 15] == 1
-                                                                ? "Upright"
-                                                                : "Sideways";
+                                                                ? @tr("Upright")
+                                                                : @tr("Sideways");
                                                             role: root.sheet-numbers[sheet-index * root.sheet-stride + 15] == 1
                                                                 ? Role.primary
                                                                 : Role.normal;
@@ -4230,7 +4261,7 @@ export component AppWindow inherits Window {
                                                         spacing: 2px;
 
                                                         Text {
-                                                            text: at == 0 ? "Bullet marks" : "";
+                                                            text: at == 0 ? @tr("Bullet marks") : "";
                                                             color: Tok.ink;
                                                             font-size: 12px;
                                                             vertical-alignment: center;
@@ -4260,7 +4291,7 @@ export component AppWindow inherits Window {
                                                         }
 
                                                         if !root.bullet-marks[at]: Text {
-                                                            text: "General で切ってあります";
+                                                            text: @tr("Turned off in General");
                                                             color: Tok.ink-faint;
                                                             font-size: 11px;
                                                             vertical-alignment: center;
@@ -4277,7 +4308,7 @@ export component AppWindow inherits Window {
                                             VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: "NEW TABS";
+                                                    text: @tr("NEW TABS");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4287,14 +4318,14 @@ export component AppWindow inherits Window {
                                                     height: 28px;
 
                                                     Text {
-                                                        text: "Random Background";
+                                                        text: @tr("Random Background");
                                                         color: Tok.ink;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
                                                         horizontal-stretch: 1;
                                                     }
 
-                                                    for choice[index] in ["Off", "Light", "Dark"]: TextButton {
+                                                    for choice[index] in [@tr("Off"), @tr("Light"), @tr("Dark")]: TextButton {
                                                         title: choice;
                                                         role: root.paper-random == index ? Role.primary : Role.normal;
                                                         clicked => {
@@ -4308,7 +4339,7 @@ export component AppWindow inherits Window {
                                             VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: "BACKGROUND IMAGE";
+                                                    text: @tr("BACKGROUND IMAGE");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4318,14 +4349,14 @@ export component AppWindow inherits Window {
                                                     height: 28px;
 
                                                     Text {
-                                                        text: "Image";
+                                                        text: @tr("Image");
                                                         color: Tok.ink;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
                                                         horizontal-stretch: 1;
                                                     }
 
-                                                    for choice[index] in ["None", "Windows Wallpaper", "Image File"]: TextButton {
+                                                    for choice[index] in [@tr("None"), @tr("Windows Wallpaper"), @tr("Image File")]: TextButton {
                                                         title: choice;
                                                         role: root.wall-kind == index ? Role.primary : Role.normal;
                                                         clicked => {
@@ -4339,7 +4370,7 @@ export component AppWindow inherits Window {
                                                     height: 28px;
 
                                                     Text {
-                                                        text: root.wall-path == "" ? "No file chosen" : root.wall-path;
+                                                        text: root.wall-path == "" ? @tr("No file chosen") : root.wall-path;
                                                         color: Tok.ink-muted;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
@@ -4348,7 +4379,7 @@ export component AppWindow inherits Window {
                                                     }
 
                                                     TextButton {
-                                                        title: "Choose…";
+                                                        title: @tr("Choose…");
                                                         clicked => {
                                                             root.wall-file-requested();
                                                         }
@@ -4360,14 +4391,14 @@ export component AppWindow inherits Window {
                                                     height: 28px;
 
                                                     Text {
-                                                        text: "Fit";
+                                                        text: @tr("Fit");
                                                         color: Tok.ink;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
                                                         horizontal-stretch: 1;
                                                     }
 
-                                                    for choice[index] in ["Tile", "Fit Height", "Fit Width"]: TextButton {
+                                                    for choice[index] in [@tr("Tile"), @tr("Fit Height"), @tr("Fit Width")]: TextButton {
                                                         title: choice;
                                                         role: root.wall-fit == index ? Role.primary : Role.normal;
                                                         clicked => {
@@ -4381,7 +4412,7 @@ export component AppWindow inherits Window {
                                                     height: 28px;
 
                                                     Text {
-                                                        text: "Image Strength";
+                                                        text: @tr("Image Strength");
                                                         color: Tok.ink;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
@@ -4415,7 +4446,7 @@ export component AppWindow inherits Window {
                                             for sheet-index in [0, 1]: VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: sheet-index == 0 ? "HORIZONTAL" : "VERTICAL";
+                                                    text: sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4428,7 +4459,7 @@ export component AppWindow inherits Window {
                                                         height: 28px;
 
                                                         Text {
-                                                            text: "横書きに合わせる";
+                                                            text: @tr("Same as Horizontal");
                                                             color: Tok.ink;
                                                             font-size: 12px;
                                                             vertical-alignment: center;
@@ -4436,7 +4467,7 @@ export component AppWindow inherits Window {
                                                         }
 
                                                         TextButton {
-                                                            title: root.paper-shared ? "On" : "Off";
+                                                            title: root.paper-shared ? @tr("On") : @tr("Off");
                                                             role: root.paper-shared ? Role.primary : Role.normal;
                                                             clicked => {
                                                                 root.paper-shared-toggled(!root.paper-shared);
@@ -4447,7 +4478,7 @@ export component AppWindow inherits Window {
                                                     // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない。
                                                     // （コードの書体は 2026-09-15 に Text へ移した。）
                                                     if sheet-index == 0 || !root.paper-shared: ColorCell {
-                                                        label: "Paper Color";
+                                                        label: @tr("Paper Color");
                                                         shown: root.palette[sheet-index * 15 + 7];
                                                         chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 7, colour); }
                                                         automatic => { root.sheet = sheet-index; root.colour-default(0, 7); }
@@ -4471,7 +4502,7 @@ export component AppWindow inherits Window {
                                                 spacing: 8px;
 
                                                 TextButton {
-                                                    title: "Reset";
+                                                    title: @tr("Reset");
                                                     clicked => {
                                                         root.typography-reset(root.settings-tab);
                                                     }
@@ -4607,7 +4638,7 @@ export component AppWindow inherits Window {
                     outside-text := Text {
                         x: 6px;
                         y: (parent.height - self.height) / 2;
-                        text: root.count-missing ? "⚠ ファイルが見つかりません" : "⚠ 外で変更";
+                        text: root.count-missing ? @tr("⚠ File not found") : @tr("⚠ Changed outside");
                         color: Tok.alert;
                         font-size: 12px;
                     }
@@ -4671,7 +4702,7 @@ export component AppWindow inherits Window {
                                 // させない（要件 E2：2つは別の操作である）。
                                 Text {
                                     height: 22px;
-                                    text: "この文字コードで開き直す";
+                                    text: @tr("Reopen with this encoding");
                                     color: Tok.ink-faint;
                                     font-size: 11px;
                                     vertical-alignment: center;
@@ -4685,7 +4716,7 @@ export component AppWindow inherits Window {
                                 // 隠している。
                                 if !root.count-encoding-reopenable: Text {
                                     height: 40px;
-                                    text: "まだ保存していない文書は\n開き直せません";
+                                    text: @tr("A document that has not been saved\ncannot be reopened");
                                     color: Tok.ink-muted;
                                     font-size: 12px;
                                     vertical-alignment: center;
@@ -4986,7 +5017,7 @@ export component AppWindow inherits Window {
                                 padding: 6px;
                                 spacing: 1px;
                                 MenuRow {
-                                    title: "右に分割";
+                                    title: @tr("Split Right");
                                     activated => {
                                         root.divide-requested(true);
                                         arrangement-menu.close();
@@ -4994,7 +5025,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 MenuRow {
-                                    title: "下に分割";
+                                    title: @tr("Split Down");
                                     activated => {
                                         root.divide-requested(false);
                                         arrangement-menu.close();
@@ -5015,7 +5046,7 @@ export component AppWindow inherits Window {
                     arrangement := Text {
                         x: 21px;
                         y: (parent.height - self.height) / 2;
-                        text: "Active Pane: " + (root.focused-pane + 1);
+                        text: @tr("Active Pane: {}", root.focused-pane + 1);
                         color: Tok.ink-muted;
                         font-size: 12px;
                     }
@@ -5263,14 +5294,14 @@ export component AppWindow inherits Window {
                 spacing: 1px;
 
                 MenuRow {
-                    title: "New File…";
+                    title: @tr("New File…");
                     activated => {
                         root.close-tree-menu();
                         root.tree-command(0);
                     }
                 }
                 MenuRow {
-                    title: "New Folder…";
+                    title: @tr("New Folder…");
                     activated => {
                         root.close-tree-menu();
                         root.tree-command(1);
@@ -5278,14 +5309,14 @@ export component AppWindow inherits Window {
                 }
                 MenuSep { }
                 MenuRow {
-                    title: "Rename…";
+                    title: @tr("Rename…");
                     activated => {
                         root.close-tree-menu();
                         root.tree-command(2);
                     }
                 }
                 MenuRow {
-                    title: "Duplicate";
+                    title: @tr("Duplicate");
                     activated => {
                         root.close-tree-menu();
                         root.tree-command(3);
@@ -5293,7 +5324,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 MenuRow {
-                    title: "Reveal in Explorer";
+                    title: @tr("Reveal in Explorer");
                     activated => {
                         root.close-tree-menu();
                         root.tree-command(5);
@@ -5304,7 +5335,7 @@ export component AppWindow inherits Window {
                 // 要件 7.7（2026-09-07追加）: 見えて
                 // いるフォルダを指して絞る。
                 MenuRow {
-                    title: "Search in This Folder";
+                    title: @tr("Search in This Folder");
                     activated => {
                         root.close-tree-menu();
                         root.tree-command(6);
@@ -5312,7 +5343,7 @@ export component AppWindow inherits Window {
                 }
                 MenuSep { }
                 MenuRow {
-                    title: "Delete…";
+                    title: @tr("Delete…");
                     activated => {
                         root.close-tree-menu();
                         root.tree-command(4);

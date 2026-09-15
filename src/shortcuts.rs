@@ -1,51 +1,64 @@
 use crate::{AppWindow, Live, ShortcutItem};
 use slint::{ComponentHandle, ModelRc, VecModel};
-const NAMES: &[&str] = &[
-    "ファイルを開く",
-    "保存",
-    "名前を付けて保存",
-    "TABを閉じる",
-    "本文を検索",
-    "本文を置換",
-    "行へ移動",
-    "閉じたTABを開き直す",
-    "Undo",
-    "Redo",
-    "Quick Draftを開く（本文）",
-    "次のTAB",
-    "前のTAB",
-    "左のPaneへ",
-    "右のPaneへ",
-    "上のPaneへ",
-    "下段または下のPaneへ",
-    "下段を表示・閉じる",
-    "新しいTAB",
-    "戻る",
-    "進む",
-    "次の1文字を削除",
-    "1単語後へ",
-    "1単語前へ",
-    "行末まで切り取り",
-    "選択を開始・解除",
-    "矩形選択を開始・解除",
-    "Kill Ringへコピー",
-    "Kill Ringへ切り取り",
-    "最新のKillを貼り付け",
-    "前のKillへ置き換え",
-    "1単語後まで選択",
-    "1単語前まで選択",
-    "行を削除",
-    "行を上へ移動",
-    "行を下へ移動",
-    "行を上へ複製",
-    "行を下へ複製",
-    "全文をコピー（Quick Draft内）",
-    "コピーして閉じる（Quick Draft内）",
-    "クリア（Quick Draft内）",
-    "TABへ貼り付け（Quick Draft内）",
-    "縦書き・横書きを切り替え",
-    "ソース・Previewを切り替え（Viewer終了）",
-    "Viewerを開始・終了",
+/// 操作名：日本語と英語（追加要件 2026-09-15、表示の国際化）。
+const NAMES: &[(&str, &str)] = &[
+    ("ファイルを開く", "Open File"),
+    ("保存", "Save"),
+    ("名前を付けて保存", "Save As"),
+    ("TABを閉じる", "Close Tab"),
+    ("本文を検索", "Find in Text"),
+    ("本文を置換", "Replace in Text"),
+    ("行へ移動", "Go to Line"),
+    ("閉じたTABを開き直す", "Reopen Closed Tab"),
+    ("元に戻す", "Undo"),
+    ("やり直し", "Redo"),
+    ("Quick Draftを開く（本文）", "Open Quick Draft (from Text)"),
+    ("次のTAB", "Next Tab"),
+    ("前のTAB", "Previous Tab"),
+    ("左のPaneへ", "To Left Pane"),
+    ("右のPaneへ", "To Right Pane"),
+    ("上のPaneへ", "To Upper Pane"),
+    ("下段または下のPaneへ", "To Strip Below or Lower Pane"),
+    ("下段を表示・閉じる", "Show or Hide Strip Below"),
+    ("新しいTAB", "New Tab"),
+    ("戻る", "Back"),
+    ("進む", "Forward"),
+    ("次の1文字を削除", "Delete Next Character"),
+    ("1単語後へ", "Forward One Word"),
+    ("1単語前へ", "Back One Word"),
+    ("行末まで切り取り", "Cut to End of Line"),
+    ("選択を開始・解除", "Start or Cancel Selection"),
+    (
+        "矩形選択を開始・解除",
+        "Start or Cancel Rectangle Selection",
+    ),
+    ("Kill Ringへコピー", "Copy to Kill Ring"),
+    ("Kill Ringへ切り取り", "Cut to Kill Ring"),
+    ("最新のKillを貼り付け", "Paste Latest Kill"),
+    ("前のKillへ置き換え", "Replace with Previous Kill"),
+    ("1単語後まで選択", "Select Forward One Word"),
+    ("1単語前まで選択", "Select Back One Word"),
+    ("行を削除", "Delete Line"),
+    ("行を上へ移動", "Move Line Up"),
+    ("行を下へ移動", "Move Line Down"),
+    ("行を上へ複製", "Duplicate Line Up"),
+    ("行を下へ複製", "Duplicate Line Down"),
+    ("全文をコピー（Quick Draft内）", "Copy All (in Quick Draft)"),
+    (
+        "コピーして閉じる（Quick Draft内）",
+        "Copy and Close (in Quick Draft)",
+    ),
+    ("クリア（Quick Draft内）", "Clear (in Quick Draft)"),
+    (
+        "TABへ貼り付け（Quick Draft内）",
+        "Paste to Tab (in Quick Draft)",
+    ),
+    ("縦書き・横書きを切り替え", "Toggle Vertical / Horizontal"),
+    (
+        "ソース・Previewを切り替え（Viewer終了）",
+        "Toggle Source / Preview (Exits Viewer)",
+    ),
+    ("Viewerを開始・終了", "Start or Exit Viewer"),
 ];
 const DEFAULTS: &[&str] = &[
     "Ctrl+O",
@@ -100,40 +113,78 @@ const CATEGORIES: &[i32] = &[
 ];
 /// Keys の面の分類（書き手の求め 2026-09-15：タブで切り替えず、全部を並べて
 /// 分類ごとに畳めるように）。番号は[`CATEGORIES`]の値。
-const CATEGORY_NAMES: [&str; 7] = [
-    "本文の操作",
-    "基本編集",
-    "Terminal",
-    "入力欄",
-    "Pane・TAB",
-    "Emacs",
-    "Quick Draft",
+const CATEGORY_NAMES: [(&str, &str); 7] = [
+    ("本文の操作", "Text Actions"),
+    ("基本編集", "Basic Editing"),
+    ("Terminal", "Terminal"),
+    ("入力欄", "Input Fields"),
+    ("Pane・TAB", "Panes & Tabs"),
+    ("Emacs", "Emacs"),
+    ("Quick Draft", "Quick Draft"),
 ];
-const CATEGORY_NOTES: [&str; 7] = [
-    "本文にフォーカスがあり、IME変換中でないときに有効です。",
-    "固定 · 本文の編集時に使います。Viewerでは編集できません。",
-    "固定 · Terminalにフォーカスがあるときに有効です。その他のキーは実行中のシェル・プログラムへ渡します。",
-    "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。Enter・Escの動作は入力欄ごとの用途に従います。",
-    "本文からのPane・TAB操作です。Terminal内のキーは固定です。",
-    "本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。",
-    "本文から開く操作と、Quick Draft内の操作を区別します。",
+const CATEGORY_NOTES: [(&str, &str); 7] = [
+    (
+        "本文にフォーカスがあり、IME変換中でないときに有効です。",
+        "Active when the text has focus and no IME conversion is in progress.",
+    ),
+    (
+        "固定 · 本文の編集時に使います。Viewerでは編集できません。",
+        "Fixed · Used while editing the text. Nothing can be edited in Viewer.",
+    ),
+    (
+        "固定 · Terminalにフォーカスがあるときに有効です。その他のキーは実行中のシェル・プログラムへ渡します。",
+        "Fixed · Active when a Terminal has focus. Other keys go to the running shell or program.",
+    ),
+    (
+        "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。Enter・Escの動作は入力欄ごとの用途に従います。",
+        "Fixed · Active when an input field such as Find has focus. Enter and Esc work as each field needs.",
+    ),
+    (
+        "本文からのPane・TAB操作です。Terminal内のキーは固定です。",
+        "Pane and tab actions from the text. Keys inside a Terminal are fixed.",
+    ),
+    (
+        "本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。",
+        "Emacs-style keys always available in the text. There is no separate mode to switch to.",
+    ),
+    (
+        "本文から開く操作と、Quick Draft内の操作を区別します。",
+        "Tells opening from the text apart from actions inside Quick Draft.",
+    ),
 ];
 /// 変えられないキー。**同じ一覧に並べる**——「このキーは何か」を探す書き手に
 /// とって、変えられるかどうかは探したあとの話である。
-const FIXED: &[(i32, &str, &str)] = &[
-    (1, "コピー", "Ctrl+C"),
-    (1, "切り取り", "Ctrl+X"),
-    (1, "貼り付け", "Ctrl+V"),
-    (1, "全選択", "Ctrl+A"),
-    (2, "選択した文字をコピー", "Ctrl+Shift+C"),
-    (2, "貼り付け", "Ctrl+V"),
-    (2, "下段を表示・閉じる", "Ctrl+`"),
-    (2, "下段から本文へ戻る", "Ctrl+Alt+Up"),
-    (3, "コピー", "Ctrl+C"),
-    (3, "切り取り", "Ctrl+X"),
-    (3, "貼り付け", "Ctrl+V"),
-    (3, "全選択", "Ctrl+A"),
+const FIXED: &[(i32, (&str, &str), &str)] = &[
+    (1, ("コピー", "Copy"), "Ctrl+C"),
+    (1, ("切り取り", "Cut"), "Ctrl+X"),
+    (1, ("貼り付け", "Paste"), "Ctrl+V"),
+    (1, ("全選択", "Select All"), "Ctrl+A"),
+    (
+        2,
+        ("選択した文字をコピー", "Copy Selected Text"),
+        "Ctrl+Shift+C",
+    ),
+    (2, ("貼り付け", "Paste"), "Ctrl+V"),
+    (
+        2,
+        ("下段を表示・閉じる", "Show or Hide Strip Below"),
+        "Ctrl+`",
+    ),
+    (
+        2,
+        ("下段から本文へ戻る", "Back to Text from Strip Below"),
+        "Ctrl+Alt+Up",
+    ),
+    (3, ("コピー", "Copy"), "Ctrl+C"),
+    (3, ("切り取り", "Cut"), "Ctrl+X"),
+    (3, ("貼り付け", "Paste"), "Ctrl+V"),
+    (3, ("全選択", "Select All"), "Ctrl+A"),
 ];
+
+/// 日本語と英語の対から、いまの言語のほうを。
+fn shown((japanese, english): (&'static str, &'static str)) -> &'static str {
+    crate::i18n::pick(japanese, english)
+}
 /// 追加要件 2026-09-14: 設定のTABが前にあるときに通す操作。**TABとペインを
 /// 移る・閉じる・開く**だけで、本文に効くもの（保存・検索・Undo・字の編集）は
 /// 通さない——設定のTABの下にあるのは代役の空文書で、保存すれば空の無題が
@@ -277,7 +328,7 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
 /// what they are. While the writer is searching — by name or by pressing a key
 /// — every group with something to show is open and the others are left out,
 /// because a fold hiding the one match is a search that found nothing.
-fn publish(app: &AppWindow) {
+pub fn publish(app: &AppWindow) {
     let keys = bindings(&app.get_shortcut_bindings());
     let query = app.get_shortcut_query().to_lowercase();
     let key_query = app.get_shortcut_key_query().to_string();
@@ -296,11 +347,11 @@ fn publish(app: &AppWindow) {
             .iter()
             .enumerate()
             .filter(|(i, _)| CATEGORIES[*i] == category)
-            .map(|(i, name)| (i as i32, *name, keys[i].as_str(), false));
+            .map(|(i, name)| (i as i32, shown(*name), keys[i].as_str(), false));
         let fixed = FIXED
             .iter()
             .filter(|(owner, _, _)| *owner == category)
-            .map(|(_, name, key)| (-1, *name, *key, true));
+            .map(|(_, name, key)| (-1, shown(*name), *key, true));
         let items: Vec<ShortcutItem> = changeable
             .chain(fixed)
             .filter(|(_, name, key, _)| matches(name, key))
@@ -322,13 +373,13 @@ fn publish(app: &AppWindow) {
         let open = searching || folded & (1 << category) == 0;
         rows.push(ShortcutItem {
             id: -1,
-            name: (*title).into(),
+            name: shown(*title).into(),
             key: Default::default(),
             header: true,
             category,
             open,
             fixed: false,
-            note: CATEGORY_NOTES[category as usize].into(),
+            note: shown(CATEGORY_NOTES[category as usize]).into(),
             count: items.len() as i32,
         });
         if open {
@@ -388,15 +439,21 @@ pub fn wire(app: &AppWindow, live: &Live) {
         }
         let key = chord(&text, control, alt, shift).unwrap_or_default();
         app.set_shortcut_edit(if key.is_empty() {
-            "使用不可".into()
+            shown(("使用不可", "Not available")).into()
         } else {
             key.clone().into()
         });
         app.set_shortcut_status(
             if !key.is_empty() && normalize(&key).is_some() {
-                "キーを受け付けました。「適用して保存」で確定します。"
+                shown((
+                    "キーを受け付けました。「適用して保存」で確定します。",
+                    "Key accepted. Click \"Apply and Save\" to confirm.",
+                ))
             } else {
-                "一覧の既定キー、またはCtrl+Alt+A〜Zを押してください"
+                shown((
+                    "一覧の既定キー、またはCtrl+Alt+A〜Zを押してください",
+                    "Press a default key from the list, or Ctrl+Alt+A–Z",
+                ))
             }
             .into(),
         );
@@ -417,12 +474,24 @@ pub fn wire(app: &AppWindow, live: &Live) {
             app.get_shortcut_edit().to_string()
         };
         let Some(key) = normalize(&typed) else {
-            app.set_shortcut_status("一覧の既定キー、またはCtrl+Alt+A〜Zを指定してください".into());
+            app.set_shortcut_status(
+                shown((
+                    "一覧の既定キー、またはCtrl+Alt+A〜Zを指定してください",
+                    "Use a default key from the list, or Ctrl+Alt+A–Z",
+                ))
+                .into(),
+            );
             return;
         };
         let mut keys = bindings(&app.get_shortcut_bindings());
         if let Some(other) = conflict(&keys, i, &key) {
-            app.set_shortcut_status(format!("{}に割り当て済みです", NAMES[other]).into());
+            let name = shown(NAMES[other]);
+            let told = if crate::i18n::japanese() {
+                format!("{name}に割り当て済みです")
+            } else {
+                format!("Already assigned to {name}")
+            };
+            app.set_shortcut_status(told.into());
             return;
         }
         keys[i] = key.clone();
@@ -437,7 +506,13 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.set_shortcut_edit(key.into());
         publish(&app);
         crate::write_session(&app, &saved_live);
-        app.set_shortcut_status(format!("{}の設定を保存しました", NAMES[i]).into());
+        let name = shown(NAMES[i]);
+        let told = if crate::i18n::japanese() {
+            format!("{name}の設定を保存しました")
+        } else {
+            format!("Saved the key for {name}")
+        };
+        app.set_shortcut_status(told.into());
     });
     // 書き手の求め 2026-09-15: Keys の面の Reset。割り当てを全部既定へ。
     let weak = app.as_weak();
@@ -451,7 +526,13 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.set_shortcut_edit("".into());
         publish(&app);
         crate::write_session(&app, &reset_live);
-        app.set_shortcut_status("すべてのキーを既定に戻しました".into());
+        app.set_shortcut_status(
+            shown((
+                "すべてのキーを既定に戻しました",
+                "Restored all keys to their defaults",
+            ))
+            .into(),
+        );
     });
     let weak = app.as_weak();
     let keyed_live = live.clone();

@@ -1106,7 +1106,7 @@ export component StepRow inherits Rectangle {
 
         IconButton {
             icon: Icons.minus;
-            tip: "Less";
+            tip: @tr("Less");
             clicked => {
                 root.stepped(-1);
             }
@@ -1124,7 +1124,7 @@ export component StepRow inherits Rectangle {
 
         IconButton {
             icon: Icons.plus;
-            tip: "More";
+            tip: @tr("More");
             clicked => {
                 root.stepped(1);
             }
@@ -1380,7 +1380,7 @@ export component ColourPalette inherits Rectangle {
             }
         }
 
-        PaletteCaption { text: "テーマの色"; }
+        PaletteCaption { text: @tr("Theme Colors"); }
 
         VerticalLayout {
             spacing: 4px;
@@ -1411,7 +1411,7 @@ export component ColourPalette inherits Rectangle {
             }
         }
 
-        PaletteCaption { text: "標準の色"; }
+        PaletteCaption { text: @tr("Standard Colors"); }
 
         HorizontalLayout {
             spacing: 4px;
@@ -1424,7 +1424,7 @@ export component ColourPalette inherits Rectangle {
             }
         }
 
-        if Colours.recent.length > 0: PaletteCaption { text: "最近使用した色"; }
+        if Colours.recent.length > 0: PaletteCaption { text: @tr("Recent Colors"); }
 
         if Colours.recent.length > 0: HorizontalLayout {
             alignment: start;
@@ -1444,7 +1444,7 @@ export component ColourPalette inherits Rectangle {
         }
 
         PaletteRow {
-            title: "その他の色…";
+            title: @tr("More Colors…");
             activated => {
                 root.more();
             }
@@ -1507,7 +1507,7 @@ export component ColourMixer inherits Rectangle {
                         spacing: 14px;
 
                         Text {
-                            text: "その他の色";
+                            text: @tr("More Colors");
                             color: Tok.ink-strong;
                             font-size: 15px;
                             font-weight: 600;
@@ -1585,7 +1585,7 @@ export component ColourMixer inherits Rectangle {
                                 alignment: start;
 
                                 // Office と同じ並べ方：上が新しい色、下が今の色。
-                                PaletteCaption { text: "新規"; }
+                                PaletteCaption { text: @tr("New"); }
                                 Rectangle {
                                     height: 72px;
                                     border-width: 1px;
@@ -1595,7 +1595,7 @@ export component ColourMixer inherits Rectangle {
                                         Rectangle { background: root.current; }
                                     }
                                 }
-                                PaletteCaption { text: "現在"; }
+                                PaletteCaption { text: @tr("Current"); }
 
                                 HorizontalLayout {
                                     spacing: 4px;
@@ -1627,14 +1627,14 @@ export component ColourMixer inherits Rectangle {
                             alignment: end;
                             spacing: 8px;
                             TextButton {
-                                title: "OK";
+                                title: @tr("OK");
                                 role: Role.primary;
                                 clicked => {
                                     root.accepted(root.mixed);
                                 }
                             }
                             TextButton {
-                                title: "キャンセル";
+                                title: @tr("Cancel");
                                 role: Role.quiet;
                                 clicked => {
                                     root.cancelled();
@@ -1684,16 +1684,16 @@ export component TextRow inherits Rectangle {
         y: 29px;
         height: 27px;
         spacing: 3px;
-        TextButton { title: "太字"; role: root.bold ? Role.primary : Role.normal; clicked => { root.decoration-toggled(0, root.bold); } }
-        TextButton { title: "斜体"; role: root.italic ? Role.primary : Role.normal; clicked => { root.decoration-toggled(1, root.italic); } }
-        TextButton { title: "取消線"; role: root.strike ? Role.primary : Role.normal; clicked => { root.decoration-toggled(2, root.strike); } }
+        TextButton { title: @tr("Bold"); role: root.bold ? Role.primary : Role.normal; clicked => { root.decoration-toggled(0, root.bold); } }
+        TextButton { title: @tr("Italic"); role: root.italic ? Role.primary : Role.normal; clicked => { root.decoration-toggled(1, root.italic); } }
+        TextButton { title: @tr("Strikethrough"); role: root.strike ? Role.primary : Role.normal; clicked => { root.decoration-toggled(2, root.strike); } }
         TextButton {
-            title: root.background-on ? "指定色" : "Paper";
+            title: root.background-on ? @tr("Color") : @tr("Paper");
             show-swatch: true;
             swatch: root.background-on ? root.background-colour : root.paper-colour;
             clicked => { background-palette.show(); }
         }
-        if root.heading: TextButton { title: "罫線"; role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
+        if root.heading: TextButton { title: @tr("Rule"); role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
     }
 
     // C5（書き手の求め 2026-09-15）: 背景もパレットで。「Paperに合わせる」が
@@ -1705,7 +1705,7 @@ export component TextRow inherits Rectangle {
         MenuFrame {
             width: 236px;
             ColourPalette {
-                automatic: "Paperに合わせる";
+                automatic: @tr("Same as Paper");
                 automatic-colour: root.paper-colour;
                 current: root.background-on ? root.background-colour : transparent;
                 chosen(colour) => {
@@ -1809,7 +1809,7 @@ export component TextRow inherits Rectangle {
                     MenuFrame {
                         width: 236px;
                         ColourPalette {
-                            automatic: "既定の色";
+                            automatic: @tr("Default Color");
                             current: root.shown;
                             chosen(colour) => {
                                 root.ink-chosen(colour);
@@ -1895,7 +1895,7 @@ export component ColorCell inherits Rectangle {
                     MenuFrame {
                         width: 236px;
                         ColourPalette {
-                            automatic: "既定の色";
+                            automatic: @tr("Default Color");
                             current: root.shown;
                             chosen(colour) => {
                                 root.chosen(colour);

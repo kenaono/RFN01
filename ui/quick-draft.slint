@@ -14,7 +14,7 @@ import { MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 // undo, cut, copy, paste and select-all that 要件 12.2 asks for. Writing a
 // second editor for this would be writing one to be worse.
 export component QuickDraft inherits Window {
-    title: "Quick Draft";
+    title: @tr("Quick Draft");
     // preferred-*, not width/height, for the reason the main window gives: a
     // Window given a width is a Window the writer cannot resize.
     preferred-width: 690px;
@@ -46,7 +46,7 @@ export component QuickDraft inherits Window {
     in property <int> tab-target: -1;
     /// What the send button says, which is the name of the tab a click sends
     /// to (要件 12.4).
-    in property <string> target-name: "Paste to tab";
+    in property <string> target-name: @tr("Paste to tab");
 
     /// One row of the tab list, and how tall the list is.
     ///
@@ -198,7 +198,7 @@ export component QuickDraft inherits Window {
                     }
 
                     pin-label := Text {
-                        text: "On top";
+                        text: @tr("On top");
                         color: root.on-top ? Tok.accent-strong : Tok.ink-muted;
                         font-size: 13px;
                         vertical-alignment: center;
@@ -231,7 +231,7 @@ export component QuickDraft inherits Window {
             // back off the popup, which would be a binding loop.
             HorizontalLayout {
                 history-button := TextButton {
-                    title: "History";
+                    title: @tr("History");
                     enabled: root.history.length > 0;
                     clicked => {
                         history-menu.show();
@@ -269,7 +269,7 @@ export component QuickDraft inherits Window {
             }
 
             TextButton {
-                title: "Clear";
+                title: @tr("Clear");
                 role: Role.danger;
                 enabled: root.text != "";
                 clicked => {
@@ -383,7 +383,7 @@ export component QuickDraft inherits Window {
             }
 
             TextButton {
-                title: "Copy & close";
+                title: @tr("Copy & close");
                 enabled: root.text != "";
                 clicked => {
                     root.copy-all();
@@ -392,7 +392,7 @@ export component QuickDraft inherits Window {
             }
 
             TextButton {
-                title: "Copy all";
+                title: @tr("Copy all");
                 role: Role.primary;
                 enabled: root.text != "";
                 clicked => {

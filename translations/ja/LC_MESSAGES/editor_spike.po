@@ -1,0 +1,860 @@
+# RFN Edit の日本語表示（追加要件 2026-09-15「表示の国際化対応」）。
+# msgid は ui/*.slint の @tr("…") の英語。訳の漏れは i18n の試験が見る。
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: ja\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid " (Horizontal)"
+msgstr "（横書き）"
+
+msgid " (Vertical)"
+msgstr "（縦書き）"
+
+msgid "A document that has not been saved\ncannot be reopened"
+msgstr "まだ保存していない文書は\n開き直せません"
+
+msgid "APPEARANCE"
+msgstr "外観"
+
+msgid "Active Pane: {}"
+msgstr "アクティブPane: {}"
+
+msgid "Add"
+msgstr "追加"
+
+msgid "Add to word set: {}"
+msgstr "単語帳へ追加：{}"
+
+msgid "All Tabs"
+msgstr "すべてのTAB"
+
+msgid "Apply Chosen Differences to the Text (Left)"
+msgstr "選んだ差分を本文（左）に反映"
+
+msgid "Apply and Save"
+msgstr "適用して保存"
+
+msgid "Assignable keys: the default keys in the list, or Ctrl+Alt+A–Z."
+msgstr "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"
+
+msgid "Auto Backup"
+msgstr "自動退避"
+
+msgid "BACKGROUND IMAGE"
+msgstr "背景の壁紙"
+
+msgid "Back"
+msgstr "戻る"
+
+msgid "Background"
+msgstr "背景"
+
+msgid "Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing."
+msgstr "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
+
+msgid "Bold"
+msgstr "太字"
+
+msgid "Bullet List"
+msgstr "箇条書き"
+
+msgid "Bullet marks"
+msgstr "箇条書きの印"
+
+msgid "COLOR SETS"
+msgstr "文字色のセット"
+
+msgid "Cancel"
+msgstr "キャンセル"
+
+msgid "Char advance"
+msgstr "字間"
+
+msgid "Choose the mode for each document from the status bar below."
+msgstr "文書ごとにモードを選ぶのは下のステータスバーからです。"
+
+msgid "Choose…"
+msgstr "選ぶ…"
+
+msgid "Clear"
+msgstr "クリア"
+
+msgid "Click here and press a key"
+msgstr "ここをクリックしてキーを押す"
+
+msgid "Close"
+msgstr "閉じる"
+
+msgid "Close All"
+msgstr "すべて閉じる"
+
+msgid "Close All Tabs"
+msgstr "すべてのTABを閉じる"
+
+msgid "Close Editor Below"
+msgstr "下のEditorを閉じる"
+
+msgid "Close Other Panes"
+msgstr "他のPaneを閉じる"
+
+msgid "Close Other Tabs"
+msgstr "他のTABを閉じる"
+
+msgid "Close Others"
+msgstr "他を閉じる"
+
+msgid "Close Saved"
+msgstr "保存済みを閉じる"
+
+msgid "Close Tab"
+msgstr "TABを閉じる"
+
+msgid "Close Terminal Below"
+msgstr "下のTerminalを閉じる"
+
+msgid "Code Font"
+msgstr "コードのフォント"
+
+msgid "Collapse All"
+msgstr "すべて折り畳む"
+
+msgid "Color"
+msgstr "指定色"
+
+msgid "Column gap"
+msgstr "行間"
+
+msgid "Compare with Another File…"
+msgstr "別のファイルと比較…"
+
+msgid "Compare with Last Commit"
+msgstr "前回のCommitと比較"
+
+msgid "Compare with Saved"
+msgstr "保存版と比較"
+
+msgid "Copy"
+msgstr "コピー"
+
+msgid "Copy & close"
+msgstr "コピーして閉じる"
+
+msgid "Copy All of Left"
+msgstr "左の全文をコピー"
+
+msgid "Copy All of Right"
+msgstr "右の全文をコピー"
+
+msgid "Copy Path"
+msgstr "パスをコピー"
+
+msgid "Copy Text Only"
+msgstr "本文だけをコピー"
+
+msgid "Copy all"
+msgstr "すべてコピー"
+
+msgid "Count ruby"
+msgstr "ルビを数える"
+
+msgid "Create a mode, then word groups (people, places, …) inside it."
+msgstr "モードを作り、その中に語群（人物・地名など）を作ります。"
+
+msgid "Ctrl+Enter sends to the terminal above"
+msgstr "Ctrl+Enter で上の端末へ送ります"
+
+msgid "Ctrl+S writes to the original file."
+msgstr "元ファイルへの反映は Ctrl+S。"
+
+msgid "Current"
+msgstr "現在"
+
+msgid "Custom"
+msgstr "カスタム"
+
+msgid "Cut"
+msgstr "切り取り"
+
+msgid "Dark"
+msgstr "濃色"
+
+msgid "Default"
+msgstr "既定"
+
+msgid "Default Color"
+msgstr "既定の色"
+
+msgid "Delete"
+msgstr "削除"
+
+msgid "Delete This Group"
+msgstr "この語群を消す"
+
+msgid "Delete…"
+msgstr "削除…"
+
+msgid "Doubled"
+msgstr "二重"
+
+msgid "Duplicate"
+msgstr "複製"
+
+msgid "Editor Above"
+msgstr "上のEditor"
+
+msgid "Editor Below"
+msgstr "下にEditor"
+
+msgid "Edit…"
+msgstr "編集…"
+
+msgid "End Comparison"
+msgstr "比較を終了"
+
+msgid "Exit ReadOnly"
+msgstr "ReadOnlyを終了"
+
+msgid "Exit Viewer"
+msgstr "Viewerを終了"
+
+msgid "Explorer"
+msgstr "エクスプローラー"
+
+msgid "Export…"
+msgstr "書き出す…"
+
+msgid "FILES"
+msgstr "ファイル"
+
+msgid "Find"
+msgstr "検索"
+
+msgid "Find in File…"
+msgstr "ファイル内を検索…"
+
+msgid "Find in Folder…"
+msgstr "フォルダー内を検索…"
+
+msgid "Fit"
+msgstr "置き方"
+
+msgid "Fit Height"
+msgstr "縦に合わせる"
+
+msgid "Fit Width"
+msgstr "横に合わせる"
+
+msgid "Fixed"
+msgstr "固定"
+
+msgid "Font"
+msgstr "フォント"
+
+msgid "Forward"
+msgstr "進む"
+
+msgid "GROUPS — {}"
+msgstr "語群 — {}"
+
+msgid "General"
+msgstr "全般"
+
+msgid "Go to Line…"
+msgstr "行へ移動…"
+
+msgid "Go to line"
+msgstr "行へ移動"
+
+msgid "Group name"
+msgstr "語群の名前"
+
+msgid "HORIZONTAL"
+msgstr "横書き"
+
+msgid "Hidden"
+msgstr "非表示"
+
+msgid "Hide Duplicates"
+msgstr "重複を閉じる"
+
+msgid "History"
+msgstr "履歴"
+
+msgid "Horizontal"
+msgstr "横書き"
+
+msgid "Image"
+msgstr "画像"
+
+msgid "Image File"
+msgstr "画像ファイル"
+
+msgid "Image Strength"
+msgstr "壁紙の濃さ"
+
+msgid "Import…"
+msgstr "読み込む…"
+
+msgid "In selection"
+msgstr "選択範囲内"
+
+msgid "Italic"
+msgstr "斜体"
+
+msgid "Keep Left"
+msgstr "左を残す"
+
+msgid "Keep left for this difference"
+msgstr "この差分は左を残す"
+
+msgid "Keys"
+msgstr "キー"
+
+msgid "LANGUAGE"
+msgstr "言語"
+
+msgid "Language"
+msgstr "表示の言語"
+
+msgid "Layout"
+msgstr "レイアウト"
+
+msgid "Layout…"
+msgstr "レイアウト…"
+
+msgid "Left: {}"
+msgstr "左：{}"
+
+msgid "Less"
+msgstr "減らす"
+
+msgid "Light"
+msgstr "淡色"
+
+msgid "Line height"
+msgstr "行の高さ"
+
+msgid "Line length"
+msgstr "1行の長さ"
+
+msgid "Line numbers"
+msgstr "行番号"
+
+msgid "Lines starting with # are notes."
+msgstr "#で始まる行は覚え書きです。"
+
+msgid "Live Preview"
+msgstr "ライブプレビュー"
+
+msgid "MARKUP"
+msgstr "記法"
+
+msgid "MODES"
+msgstr "モード"
+
+msgid "Match case"
+msgstr "大文字と小文字を区別"
+
+msgid "Menu"
+msgstr "メニュー"
+
+msgid "Mode name"
+msgstr "モードの名前"
+
+msgid "Mode: {}"
+msgstr "モード：{}"
+
+msgid "More"
+msgstr "増やす"
+
+msgid "More Colors"
+msgstr "その他の色"
+
+msgid "More Colors…"
+msgstr "その他の色…"
+
+msgid "NEW TABS"
+msgstr "新しいTAB"
+
+msgid "Names to exclude (separate with ;, * and ? allowed)"
+msgstr "除外する名前（; 区切り、* と ? が使えます）"
+
+msgid "New"
+msgstr "新規"
+
+msgid "New File"
+msgstr "新しいファイル"
+
+msgid "New File…"
+msgstr "新しいファイル…"
+
+msgid "New Folder…"
+msgstr "新しいフォルダー…"
+
+msgid "New Group"
+msgstr "新しい語群"
+
+msgid "New Mode"
+msgstr "新しいモード"
+
+msgid "New Tab"
+msgstr "新しいTAB"
+
+msgid "New Terminal"
+msgstr "新しいTerminal"
+
+msgid "Next"
+msgstr "次へ"
+
+msgid "Next Difference"
+msgstr "次の差分"
+
+msgid "No Color"
+msgstr "色を付けない"
+
+msgid "No backup. Turning it off also deletes the work copies."
+msgstr "退避しません。オフにすると作業コピーも削除します。"
+
+msgid "No bullet marks (every mark is plain text)."
+msgstr "箇条書きの印はありません（どの記号もただの本文です）。"
+
+msgid "No color"
+msgstr "色なし"
+
+msgid "No file chosen"
+msgstr "ファイルが選ばれていません"
+
+msgid "No folder open"
+msgstr "フォルダーを開いていません"
+
+msgid "No words yet. Select a word in the text, right-click,"
+msgstr "まだ語がありません。本文で語を選んで右ボタン、"
+
+msgid "None"
+msgstr "なし"
+
+msgid "Numbered List"
+msgstr "番号付きリスト"
+
+msgid "OK"
+msgstr "OK"
+
+msgid "Off"
+msgstr "オフ"
+
+msgid "On"
+msgstr "オン"
+
+msgid "On top"
+msgstr "最前面"
+
+msgid "Open File…"
+msgstr "ファイルを開く…"
+
+msgid "Open Folder"
+msgstr "フォルダーを開く"
+
+msgid "Open Folder…"
+msgstr "フォルダーを開く…"
+
+msgid "Open in Another Tab"
+msgstr "同じ文書を別TABで開く"
+
+msgid "Opens the word set file in a tab. Saving it reloads the words."
+msgstr "単語帳のファイルをタブで開きます。保存すると取り込みます。"
+
+msgid "Outline"
+msgstr "見出し"
+
+msgid "Page"
+msgstr "ページ"
+
+msgid "Page margin"
+msgstr "ページの余白"
+
+msgid "Pane"
+msgstr "Pane"
+
+msgid "Pane Background"
+msgstr "Paneの背景"
+
+msgid "Pane menu"
+msgstr "Paneのメニュー"
+
+msgid "Paper"
+msgstr "紙"
+
+msgid "Paper Color"
+msgstr "紙の色"
+
+msgid "Paste"
+msgstr "貼り付け"
+
+msgid "Paste to tab"
+msgstr "TABへ貼り付け"
+
+msgid "Press a key (Backspace to clear)"
+msgstr "キーを押す（Backspaceで消す）"
+
+msgid "Press a key to search"
+msgstr "キーを押して探す"
+
+msgid "Press the key to assign, then \"Apply and Save\""
+msgstr "割り当てるキーを押して「適用して保存」"
+
+msgid "Previous"
+msgstr "前へ"
+
+msgid "Previous Difference"
+msgstr "前の差分"
+
+msgid "Quick Draft"
+msgstr "Quick Draft"
+
+msgid "Quick Draft…"
+msgstr "Quick Draft…"
+
+msgid "Random Background"
+msgstr "ランダムな背景"
+
+msgid "ReadOnly Mode"
+msgstr "ReadOnlyモード"
+
+msgid "Reads ｜漢字《かんじ》 and 《《傍点》》 as markup."
+msgstr "｜漢字《かんじ》と《《傍点》》を記法として読みます。"
+
+msgid "Recent Colors"
+msgstr "最近使用した色"
+
+msgid "Recent Folders"
+msgstr "最近使ったフォルダー"
+
+msgid "Redo"
+msgstr "やり直し"
+
+msgid "Refresh"
+msgstr "更新"
+
+msgid "Regular expression"
+msgstr "正規表現"
+
+msgid "Rename"
+msgstr "名前の変更"
+
+msgid "Rename…"
+msgstr "名前の変更…"
+
+msgid "Renumber"
+msgstr "番号を振り直す"
+
+msgid "Reopen Closed Tab"
+msgstr "閉じたTABを開き直す"
+
+msgid "Reopen with this encoding"
+msgstr "この文字コードで開き直す"
+
+msgid "Replace"
+msgstr "置換"
+
+msgid "Replace All"
+msgstr "すべて置換"
+
+msgid "Replace with…"
+msgstr "置換後の文字列…"
+
+msgid "Reset"
+msgstr "リセット"
+
+msgid "Reset All"
+msgstr "すべてリセット"
+
+msgid "Reset Zoom"
+msgstr "倍率を戻す"
+
+msgid "Restore Default"
+msgstr "既定に戻す"
+
+msgid "Restores General, Terminal, Text, Layout, Page and Keys to their defaults and sets each document's mode to \"None\". Word sets and modes are kept."
+msgstr "全般・Terminal・文字・レイアウト・ページ・キーを既定に戻し、文書のモードは「なし」にします。単語帳とモードは残ります。"
+
+msgid "Reveal in Explorer"
+msgstr "エクスプローラーで表示"
+
+msgid "Right: {}"
+msgstr "右：{}"
+
+msgid "Ruby markup"
+msgstr "ルビ記法"
+
+msgid "Ruby position"
+msgstr "ルビの位置"
+
+msgid "Ruby readings 《》 count toward the character count."
+msgstr "《よみ》も本文の字数に入れます。"
+
+msgid "Ruby readings 《》 do not count toward the character count."
+msgstr "《よみ》は本文の字数に入れません。"
+
+msgid "Ruby size"
+msgstr "ルビの大きさ"
+
+msgid "Rule"
+msgstr "罫線"
+
+msgid "SETTINGS"
+msgstr "設定"
+
+msgid "Same as Horizontal"
+msgstr "横書きに合わせる"
+
+msgid "Same as Paper"
+msgstr "紙に合わせる"
+
+msgid "Save"
+msgstr "保存"
+
+msgid "Save All"
+msgstr "すべて保存"
+
+msgid "Save As…"
+msgstr "名前を付けて保存…"
+
+msgid "Save to…"
+msgstr "保存先…"
+
+msgid "Saves the text colors of Body and H1–H6 for both directions. Pick one from the list to apply it."
+msgstr "Body・H1〜H6の文字色を、横書き・縦書きまとめて保存します。一覧で選ぶと適用します。"
+
+msgid "Search"
+msgstr "検索"
+
+msgid "Search by action"
+msgstr "操作名で探す"
+
+msgid "Search in This Folder"
+msgstr "このフォルダー内を検索"
+
+msgid "Search in folder"
+msgstr "フォルダー内を検索"
+
+msgid "Search the whole work folder"
+msgstr "作業フォルダー全体を検索"
+
+msgid "Select All"
+msgstr "すべて選択"
+
+msgid "Send to Terminal"
+msgstr "Terminalへ送る"
+
+msgid "Set {}"
+msgstr "セット{}"
+
+msgid "Set {} (empty)"
+msgstr "セット{}（空）"
+
+msgid "Settings"
+msgstr "設定"
+
+msgid "Shortcuts"
+msgstr "ショートカット"
+
+msgid "Show Current Document in Tree"
+msgstr "現在の文書をツリー内に表示"
+
+msgid "Show spaces and line breaks"
+msgstr "空白・改行を表示"
+
+msgid "Shown"
+msgstr "表示"
+
+msgid "Shows the marks as plain characters."
+msgstr "記号をそのまま字として出します。"
+
+msgid "Sideways"
+msgstr "横に寝かせる"
+
+msgid "Size"
+msgstr "サイズ"
+
+msgid "Split Down"
+msgstr "下に分割"
+
+msgid "Split Right"
+msgstr "右に分割"
+
+msgid "Standard Colors"
+msgstr "標準の色"
+
+msgid "Start Rectangle Selection"
+msgstr "矩形選択を開始"
+
+msgid "Start Selection"
+msgstr "選択を開始"
+
+msgid "Strikethrough"
+msgstr "取消線"
+
+msgid "Swap Down"
+msgstr "下と入れ替え"
+
+msgid "Swap Left"
+msgstr "左と入れ替え"
+
+msgid "Swap Right"
+msgstr "右と入れ替え"
+
+msgid "Swap Up"
+msgstr "上と入れ替え"
+
+msgid "Switch to {}"
+msgstr "{}に切り替え"
+
+msgid "System"
+msgstr "システムに合わせる"
+
+msgid "TERMINAL"
+msgstr "Terminal"
+
+msgid "Tab Color…"
+msgstr "TABの色…"
+
+msgid "Take Right"
+msgstr "右を採用"
+
+msgid "Take right for this difference"
+msgstr "この差分は右を採用"
+
+msgid "Tate-chu-yoko"
+msgstr "縦中横"
+
+msgid "Terminal"
+msgstr "Terminal"
+
+msgid "Terminal Above"
+msgstr "上のTerminal"
+
+msgid "Terminal Below"
+msgstr "下にTerminal"
+
+msgid "Text"
+msgstr "文字"
+
+msgid "Text Color"
+msgstr "文字色"
+
+msgid "Text as of the start of comparison   Red: left only   Green: right only   Yellow: changed   Frame: current difference   Check: side to take   [LF]: real line break"
+msgstr "比較開始時の本文   赤：左のみ   緑：右のみ   黄：変更   枠：現在の差分   チェック：採用する側   ［改行］：実改行あり"
+
+msgid "The 16 SGR colors are chosen from the background brightness."
+msgstr "SGRの16色は背景の明るさから選びます。"
+
+msgid "The text (left) does not change until you apply"
+msgstr "反映するまで本文（左）は変わりません"
+
+msgid "Theme"
+msgstr "テーマ"
+
+msgid "Theme Colors"
+msgstr "テーマの色"
+
+msgid "This document"
+msgstr "この文書"
+
+msgid "This mode has no word groups yet."
+msgstr "このモードにはまだ語群がありません。"
+
+msgid "Tile"
+msgstr "並べる"
+
+msgid "Turned off in General"
+msgstr "全般で切ってあります"
+
+msgid "Unassign"
+msgstr "割り当て解除"
+
+msgid "Unassigned"
+msgstr "未割り当て"
+
+msgid "Undo"
+msgstr "元に戻す"
+
+msgid "Upright"
+msgstr "縦中横にする"
+
+msgid "Use \"New Group\" to create groups such as people or places and pick their colors."
+msgstr "「新しい語群」で人物・地名などの語群を作り、色を決めます。"
+
+msgid "Use Color"
+msgstr "色を付ける"
+
+msgid "VERTICAL"
+msgstr "縦書き"
+
+msgid "Vertical"
+msgstr "縦書き"
+
+msgid "Viewer Mode"
+msgstr "Viewerモード"
+
+msgid "Whole word"
+msgstr "単語単位"
+
+msgid "Width"
+msgstr "幅"
+
+msgid "Windows Wallpaper"
+msgstr "Windowsの壁紙"
+
+msgid "Words"
+msgstr "単語"
+
+msgid "Wrap"
+msgstr "折り返し"
+
+msgid "Zoom In"
+msgstr "拡大"
+
+msgid "Zoom Out"
+msgstr "縮小"
+
+msgid "and use \"Add to word set\"."
+msgstr "「単語帳へ追加」から入れられます。"
+
+msgid "e.g. *.bak; backup/"
+msgstr "例：*.bak; backup/"
+
+msgid "not wrapped"
+msgstr "折り返さない"
+
+msgid "or pick a file in the Explorer"
+msgstr "またはエクスプローラーでファイルを選ぶ"
+
+msgid "{} chars"
+msgstr "{}字"
+
+msgid "{} duplicates"
+msgstr "重複 {} 件"
+
+msgid "{} more"
+msgstr "ほかに {} 件"
+
+msgid "{} words"
+msgstr "{}語"
+
+msgid "{} words ({} doubled)"
+msgstr "{}語 (二重{})"
+
+msgid "{} words / {} duplicates"
+msgstr "{}語 / 重複{}"
+
+msgid "{}are read as bullet marks."
+msgstr "{}を箇条書きの印として読みます。"
+
+msgid "⚠ Changed outside"
+msgstr "⚠ 外で変更"
+
+msgid "⚠ File not found"
+msgstr "⚠ ファイルが見つかりません"
+

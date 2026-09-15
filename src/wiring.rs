@@ -233,6 +233,19 @@ pub fn wire_colours(
         }
     });
 
+    // 追加要件 2026-09-15（書き手）: 表示の言語。画面の`@tr`はSlintが切り替え、Rustから
+    // 渡している一覧（Keys）は作り直す。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_language_chosen(move |choice| {
+        if let Some(window) = weak.upgrade() {
+            window.set_language(choice.clamp(0, 2));
+            crate::i18n::apply(window.get_language());
+            crate::shortcuts::publish(&window);
+            save_settings(&window, &held.cache);
+        }
+    });
+
     // 追加要件 2026-09-15（書き手）: 背景の壁紙。**種類が変わるとタイルの地が変わる**
     // （紙を塗る／塗らない）ので組み直す——組み直しが設定も書く。
     let weak = window.as_weak();

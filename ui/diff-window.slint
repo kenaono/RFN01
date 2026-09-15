@@ -78,9 +78,9 @@ export component DiffView inherits Rectangle {
             HorizontalLayout {
                 padding: 7px;
                 spacing: 8px;
-                TextButton { title: "前の差分"; enabled: root.can-previous; emphasize-hover: true; clicked => { root.next-difference(false); } }
-                TextButton { title: "次の差分"; enabled: root.can-next; emphasize-hover: true; clicked => { root.next-difference(true); } }
-                TextButton { title: "比較を終了"; clicked => { root.dismissed(); } }
+                TextButton { title: @tr("Previous Difference"); enabled: root.can-previous; emphasize-hover: true; clicked => { root.next-difference(false); } }
+                TextButton { title: @tr("Next Difference"); enabled: root.can-next; emphasize-hover: true; clicked => { root.next-difference(true); } }
+                TextButton { title: @tr("End Comparison"); clicked => { root.dismissed(); } }
                 Text { text: root.status; color: Tok.ink; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
             }
         }
@@ -90,10 +90,10 @@ export component DiffView inherits Rectangle {
             HorizontalLayout {
                 padding: 6px;
                 spacing: 8px;
-                TextButton { title: "左を残す"; enabled: root.selected-row >= 0; emphasize-hover: true; clicked => { root.choose-side(false); } }
-                TextButton { title: "右を採用"; enabled: root.selected-row >= 0; emphasize-hover: true; clicked => { root.choose-side(true); } }
-                TextButton { title: "選んだ差分を本文（左）に反映"; enabled: root.can-apply; emphasize-hover: true; clicked => { root.apply-merge(); } }
-                Text { text: "反映するまで本文（左）は変わりません"; color: Tok.ink-muted; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                TextButton { title: @tr("Keep Left"); enabled: root.selected-row >= 0; emphasize-hover: true; clicked => { root.choose-side(false); } }
+                TextButton { title: @tr("Take Right"); enabled: root.selected-row >= 0; emphasize-hover: true; clicked => { root.choose-side(true); } }
+                TextButton { title: @tr("Apply Chosen Differences to the Text (Left)"); enabled: root.can-apply; emphasize-hover: true; clicked => { root.apply-merge(); } }
+                Text { text: @tr("The text (left) does not change until you apply"); color: Tok.ink-muted; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
             }
         }
         Rectangle {
@@ -105,8 +105,8 @@ export component DiffView inherits Rectangle {
                     width: root.width / 2 - 16px;
                     height: 44px;
                     VerticalLayout {
-                        Text { text: "左：" + root.left-path; color: Tok.ink; font-size: 12px; overflow: elide; }
-                        TextButton { title: "左の全文をコピー"; clicked => { root.copy-side(false); } }
+                        Text { text: @tr("Left: {}", root.left-path); color: Tok.ink; font-size: 12px; overflow: elide; }
+                        TextButton { title: @tr("Copy All of Left"); clicked => { root.copy-side(false); } }
                     }
                 }
                 Rectangle {
@@ -115,8 +115,8 @@ export component DiffView inherits Rectangle {
                     width: root.width / 2 - 16px;
                     height: 44px;
                     VerticalLayout {
-                        Text { text: "右：" + root.right-path; color: Tok.ink; font-size: 12px; overflow: elide; }
-                        TextButton { title: "右の全文をコピー"; clicked => { root.copy-side(true); } }
+                        Text { text: @tr("Right: {}", root.right-path); color: Tok.ink; font-size: 12px; overflow: elide; }
+                        TextButton { title: @tr("Copy All of Right"); clicked => { root.copy-side(true); } }
                     }
                 }
         }
@@ -175,13 +175,13 @@ export component DiffView inherits Rectangle {
                 if root.merge-enabled && row.hunk-start: SideCheck {
                     x: 5px;
                     checked: row.decision != 2;
-                    tip: "この差分は左を残す";
+                    tip: @tr("Keep left for this difference");
                     clicked => { root.select-difference(index); root.choose-side(false); }
                 }
                 if root.merge-enabled && row.hunk-start: SideCheck {
                     x: (parent.width + 1px) / 2 + 5px;
                     checked: row.decision == 2;
-                    tip: "この差分は右を採用";
+                    tip: @tr("Take right for this difference");
                     clicked => { root.select-difference(index); root.choose-side(true); }
                 }
             }
@@ -196,7 +196,7 @@ export component DiffView inherits Rectangle {
             background: Tok.chrome;
             Text {
                 x: 10px;
-                text: "比較開始時の本文   赤：左のみ   緑：右のみ   黄：変更   枠：現在の差分   チェック：採用する側   ［改行］：実改行あり";
+                text: @tr("Text as of the start of comparison   Red: left only   Green: right only   Yellow: changed   Frame: current difference   Check: side to take   [LF]: real line break");
                 color: Tok.ink-muted;
                 font-size: 12px;
                 vertical-alignment: center;

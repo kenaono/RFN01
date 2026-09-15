@@ -15,6 +15,7 @@ mod file_io;
 mod file_tree;
 mod find;
 mod git_version;
+mod i18n;
 mod ime;
 #[cfg(test)]
 mod incremental_ui_tests;
@@ -2739,6 +2740,8 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         apply_settings(&window, &numbers, &palette, &sheet_fonts, &values);
     }
+    // 追加要件 2026-09-15: 表示の言語。**窓を作ったあと、画面の文言を作る前に**決める。
+    i18n::apply(window.get_language());
     match_ink_set(&window);
     // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
     // 色しか覚えていないので、語はここで初めて手に入る。
@@ -10035,6 +10038,8 @@ const TEXT_SHARED_SETTING: &str = "text.shared";
 const LAYOUT_SHARED_SETTING: &str = "layout.shared";
 /// 追加要件 2026-09-15（書き手）: 新しく開いたTABのランダムな紙。0 Off、1 淡色、2 濃色。
 const PAPER_RANDOM_SETTING: &str = "paper.random";
+/// 追加要件 2026-09-15（書き手）: 表示の言語。0 システムに合わせる、1 日本語、2 English。
+const LANGUAGE_SETTING: &str = "language";
 /// 追加要件 2026-09-15（書き手）: 背景の壁紙。種類（0 なし・1 Windows・2 画像）、画像のパス、
 /// 置き方（0 タイル・1 縦・2 横）、濃さ（%）。
 const WALL_KIND_SETTING: &str = "wallpaper.kind";
@@ -10830,6 +10835,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_paper_random().to_string(),
     ));
     values.push((
+        LANGUAGE_SETTING.to_owned(),
+        window.get_language().to_string(),
+    ));
+    values.push((
         WALL_KIND_SETTING.to_owned(),
         window.get_wall_kind().to_string(),
     ));
@@ -10974,6 +10983,10 @@ fn apply_settings(
         // そちらへ倒す。
         if written == PAPER_RANDOM_SETTING {
             window.set_paper_random(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
+            continue;
+        }
+        if written == LANGUAGE_SETTING {
+            window.set_language(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
             continue;
         }
         if written == WALL_KIND_SETTING {

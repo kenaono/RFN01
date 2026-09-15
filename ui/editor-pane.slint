@@ -1159,7 +1159,7 @@ export component EditorPane inherits Rectangle {
                     // writer who wanted none of them can click a file in the tree.
                     IconButton {
                         icon: Icons.plus;
-                        tip: "New Tab";
+                        tip: @tr("New Tab");
                         clicked => {
                             root.new-tab-requested();
                         }
@@ -1167,7 +1167,7 @@ export component EditorPane inherits Rectangle {
 
                     IconButton {
                         icon: Icons.down;
-                        tip: "All Tabs";
+                        tip: @tr("All Tabs");
                         clicked => {
                             root.menu-opened();
                             tabs-menu.show();
@@ -1175,7 +1175,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.horizontal;
-                        tip: "Horizontal" + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
+                        tip: @tr("Horizontal") + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
                         checked: !root.vertical;
                         // 追加要件 2026-09-06: **a shell has one direction.**
                         // The grid is rows of cells across; there is nothing
@@ -1190,7 +1190,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.vertical;
-                        tip: "Vertical" + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
+                        tip: @tr("Vertical") + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
                         checked: root.vertical;
                         enabled: root.writing && !root.reading-only;
                         clicked => {
@@ -1201,7 +1201,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.preview;
-                        tip: "Live Preview" + (root.shortcut-keys[43] == "" ? "" : " · " + root.shortcut-keys[43]);
+                        tip: @tr("Live Preview") + (root.shortcut-keys[43] == "" ? "" : " · " + root.shortcut-keys[43]);
                         checked: root.preview;
                         enabled: !root.viewer && !root.settings;
                         clicked => {
@@ -1210,14 +1210,14 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: "M1 2h5l2 2 2-2h5v12h-5l-2 1-2-1H1z M8 4v11";
-                        tip: (root.reading-only ? "ReadOnlyを終了" : root.viewer ? "Viewerを終了" : root.preview ? "Viewerモード" : "ReadOnlyモード") + (root.shortcut-keys[44] == "" ? "" : " · " + root.shortcut-keys[44]);
+                        tip: (root.reading-only ? @tr("Exit ReadOnly") : root.viewer ? @tr("Exit Viewer") : root.preview ? @tr("Viewer Mode") : @tr("ReadOnly Mode")) + (root.shortcut-keys[44] == "" ? "" : " · " + root.shortcut-keys[44]);
                         checked: root.viewer;
                         enabled: root.writing;
                         clicked => { root.viewer-toggled(); }
                     }
                     IconButton {
                         icon: Icons.more;
-                        tip: "Pane menu";
+                        tip: @tr("Pane menu");
                         clicked => {
                             root.menu-opened();
                             pane-menu.show();
@@ -1299,7 +1299,7 @@ export component EditorPane inherits Rectangle {
                             spacing: 1px;
 
                             MenuRow {
-                                title: "Save";
+                                title: @tr("Save");
                                 shortcut: root.shortcut-keys[1];
                                 activated => {
                                     root.save-requested();
@@ -1307,7 +1307,7 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             MenuRow {
-                                title: "Save As…";
+                                title: @tr("Save As…");
                                 shortcut: root.shortcut-keys[2];
                                 activated => {
                                     root.save-as-requested();
@@ -1315,7 +1315,7 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             MenuRow {
-                                title: "Reveal in Explorer";
+                                title: @tr("Reveal in Explorer");
                                 activated => {
                                     root.reveal-requested();
                                     pane-menu.close();
@@ -1324,7 +1324,7 @@ export component EditorPane inherits Rectangle {
                             MenuSep { }
                         }
                         MenuRow {
-                            title: "Close Tab";
+                            title: @tr("Close Tab");
                             shortcut: root.shortcut-keys[3];
                             activated => {
                                 pane-menu.close();
@@ -1332,14 +1332,14 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         MenuRow {
-                            title: "Close Other Tabs";
+                            title: @tr("Close Other Tabs");
                             activated => {
                                 pane-menu.close();
                                 root.close-other-tabs();
                             }
                         }
                         MenuRow {
-                            title: "Close All Tabs";
+                            title: @tr("Close All Tabs");
                             activated => {
                                 pane-menu.close();
                                 root.close-all-tabs();
@@ -1347,14 +1347,14 @@ export component EditorPane inherits Rectangle {
                         }
                         MenuSep { }
                         MenuRow {
-                            title: "Split Right";
+                            title: @tr("Split Right");
                             activated => {
                                 pane-menu.close();
                                 root.split-requested(true);
                             }
                         }
                         MenuRow {
-                            title: "Split Down";
+                            title: @tr("Split Down");
                             activated => {
                                 pane-menu.close();
                                 root.split-requested(false);
@@ -1369,28 +1369,28 @@ export component EditorPane inherits Rectangle {
                         // 6.24), and closing the menu takes away the very row
                         // whose handler is running.
                         if root.swap-left: MenuRow {
-                            title: "Swap Left";
+                            title: @tr("Swap Left");
                             activated => {
                                 root.swap-requested(0);
                                 pane-menu.close();
                             }
                         }
                         if root.swap-right: MenuRow {
-                            title: "Swap Right";
+                            title: @tr("Swap Right");
                             activated => {
                                 root.swap-requested(1);
                                 pane-menu.close();
                             }
                         }
                         if root.swap-up: MenuRow {
-                            title: "Swap Up";
+                            title: @tr("Swap Up");
                             activated => {
                                 root.swap-requested(2);
                                 pane-menu.close();
                             }
                         }
                         if root.swap-down: MenuRow {
-                            title: "Swap Down";
+                            title: @tr("Swap Down");
                             activated => {
                                 root.swap-requested(3);
                                 pane-menu.close();
@@ -1402,7 +1402,7 @@ export component EditorPane inherits Rectangle {
                             // pane is never taken away from under the tabs it
                             // holds, which is why there is no row for closing
                             // this one: a pane goes when its last tab does.
-                            title: "Close Other Panes";
+                            title: @tr("Close Other Panes");
                             activated => {
                                 pane-menu.close();
                                 root.close-others-requested();
@@ -1417,7 +1417,7 @@ export component EditorPane inherits Rectangle {
                         // 設定のTAB化で`if`に入ったとき順が残り、閉じた時点で行ごと
                         // 消えて、頼みが届いていなかった。
                         if !root.settings: MenuRow {
-                            title: root.terminal ? "Editor Below" : "Terminal Below";
+                            title: root.terminal ? @tr("Editor Below") : @tr("Terminal Below");
                             shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                             activated => {
                                 root.below-toggled();
@@ -1432,7 +1432,7 @@ export component EditorPane inherits Rectangle {
                         // 呼ぶ**（開く先もその
                         // タブへ合わせてある）。
                         MenuRow {
-                            title: "Layout…";
+                            title: @tr("Layout…");
                             activated => {
                                 pane-menu.close();
                                 root.layout-requested();
@@ -1440,14 +1440,14 @@ export component EditorPane inherits Rectangle {
                         }
                         // 追加要件 2026-09-15: このPaneの紙の色（TABの色が付いていればそちらが勝つ）。
                         if root.writing: MenuRow {
-                            title: "Pane Background" + root.paper-direction + "…";
+                            title: @tr("Pane Background") + root.paper-direction + "…";
                             activated => {
                                 root.open-paper-palette(1, root.width - 256px, 32px);
                                 pane-menu.close();
                             }
                         }
                         if root.writing: MenuRow {
-                            title: "Go to Line…";
+                            title: @tr("Go to Line…");
                             shortcut: root.shortcut-keys[6];
                             activated => {
                                 root.goto-requested(true);
@@ -1455,26 +1455,26 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         if root.writing: MenuRow {
-                            title: "閉じたTABを開き直す";
+                            title: @tr("Reopen Closed Tab");
                             shortcut: root.shortcut-keys[7];
                             activated => { root.reopen-closed-requested(); pane-menu.close(); }
                         }
                         if root.writing: MenuRow {
-                            title: "保存版と比較";
+                            title: @tr("Compare with Saved");
                             activated => {
                                 root.compare-saved-requested();
                                 pane-menu.close();
                             }
                         }
                         if root.writing: MenuRow {
-                            title: "前回のCommitと比較";
+                            title: @tr("Compare with Last Commit");
                             activated => {
                                 root.compare-head-requested();
                                 pane-menu.close();
                             }
                         }
                         if root.writing: MenuRow {
-                            title: "別のファイルと比較…";
+                            title: @tr("Compare with Another File…");
                             activated => {
                                 root.compare-requested();
                                 pane-menu.close();
@@ -1494,7 +1494,7 @@ export component EditorPane inherits Rectangle {
                             spacing: 1px;
 
                             MenuRow {
-                                title: "Zoom In";
+                                title: @tr("Zoom In");
                                 shortcut: "Ctrl+=";
                                 activated => {
                                     root.zoom-stepped(1);
@@ -1503,7 +1503,7 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             MenuRow {
-                                title: "Zoom Out";
+                                title: @tr("Zoom Out");
                                 shortcut: "Ctrl+-";
                                 activated => {
                                     root.zoom-stepped(-1);
@@ -1512,7 +1512,7 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             MenuRow {
-                                title: "Reset Zoom";
+                                title: @tr("Reset Zoom");
                                 shortcut: "Ctrl+0";
                                 activated => {
                                     root.zoom-reset-requested();
@@ -1552,7 +1552,7 @@ export component EditorPane inherits Rectangle {
                     vertical-alignment: center;
                 }
                 TextButton {
-                    title: "比較を終了";
+                    title: @tr("End Comparison");
                     clicked => { root.comparison-dismissed(); }
                 }
             }
@@ -1593,7 +1593,7 @@ export component EditorPane inherits Rectangle {
                             horizontal-stretch: 1;
                             min-width: 70px;
                             max-width: 230px;
-                            placeholder: "Find";
+                            placeholder: @tr("Find");
                             text <=> root.find-needle;
                             // At `init` because the bar is built when it opens,
                             // and on the generation because asking for it again
@@ -1640,7 +1640,7 @@ export component EditorPane inherits Rectangle {
                         // 言っているかは、この3つで変わるからである。
                         ToggleChip {
                             title: "Aa";
-                            tip: "Match case";
+                            tip: @tr("Match case");
                             checked: root.find-match-case;
                             clicked => {
                                 root.find-option(0);
@@ -1648,7 +1648,7 @@ export component EditorPane inherits Rectangle {
                         }
                         ToggleChip {
                             title: "W";
-                            tip: "Whole word";
+                            tip: @tr("Whole word");
                             checked: root.find-whole-word;
                             clicked => {
                                 root.find-option(1);
@@ -1656,7 +1656,7 @@ export component EditorPane inherits Rectangle {
                         }
                         ToggleChip {
                             title: "[ ]";
-                            tip: "In selection";
+                            tip: @tr("In selection");
                             checked: root.find-in-scope;
                             clicked => {
                                 root.find-option(2);
@@ -1667,7 +1667,7 @@ export component EditorPane inherits Rectangle {
                         // 切り替えは1つにしてある。
                         ToggleChip {
                             title: ".*";
-                            tip: "Regular expression";
+                            tip: @tr("Regular expression");
                             checked: root.find-regex;
                             clicked => {
                                 root.find-option(3);
@@ -1677,7 +1677,7 @@ export component EditorPane inherits Rectangle {
                         IconButton {
                             horizontal-stretch: 0;
                             icon: Icons.up;
-                            tip: "Previous";
+                            tip: @tr("Previous");
                             clicked => {
                                 root.find-step(false);
                             }
@@ -1685,7 +1685,7 @@ export component EditorPane inherits Rectangle {
                         IconButton {
                             horizontal-stretch: 0;
                             icon: Icons.down;
-                            tip: "Next";
+                            tip: @tr("Next");
                             clicked => {
                                 root.find-step(true);
                             }
@@ -1693,7 +1693,7 @@ export component EditorPane inherits Rectangle {
                         IconButton {
                             horizontal-stretch: 0;
                             icon: Icons.clear;
-                            tip: "Clear";
+                            tip: @tr("Clear");
                             clicked => {
                                 root.find-cleared();
                             }
@@ -1701,7 +1701,7 @@ export component EditorPane inherits Rectangle {
                         IconButton {
                             horizontal-stretch: 0;
                             icon: Icons.close;
-                            tip: "Close";
+                            tip: @tr("Close");
                             clicked => {
                                 root.find-dismissed();
                             }
@@ -1734,7 +1734,7 @@ export component EditorPane inherits Rectangle {
                             horizontal-stretch: 1;
                             min-width: 70px;
                             max-width: 230px;
-                            placeholder: "Replace with…";
+                            placeholder: @tr("Replace with…");
                             text <=> root.find-replacement;
                             accepted => {
                                 root.replace-one();
@@ -1749,14 +1749,14 @@ export component EditorPane inherits Rectangle {
 
                         TextButton {
                             horizontal-stretch: 0;
-                            title: "Replace";
+                            title: @tr("Replace");
                             clicked => {
                                 root.replace-one();
                             }
                         }
                         TextButton {
                             horizontal-stretch: 0;
-                            title: "Replace All";
+                            title: @tr("Replace All");
                             clicked => {
                                 root.replace-every();
                             }
@@ -1805,7 +1805,7 @@ export component EditorPane inherits Rectangle {
                     horizontal-stretch: 1;
                     min-width: 70px;
                     max-width: 160px;
-                    placeholder: "Go to line";
+                    placeholder: @tr("Go to line");
                     text <=> root.goto-line;
                     property <int> asked: root.goto-generation;
                     init => {
@@ -1842,7 +1842,7 @@ export component EditorPane inherits Rectangle {
                 IconButton {
                     horizontal-stretch: 0;
                     icon: Icons.close;
-                    tip: "Close";
+                    tip: @tr("Close");
                     clicked => {
                         root.goto-dismissed();
                     }
@@ -2731,7 +2731,7 @@ export component EditorPane inherits Rectangle {
                                 width: 236px;
 
                                 ColourPalette {
-                                    automatic: "既定の色";
+                                    automatic: @tr("Default Color");
                                     current: root.page-background;
                                     chosen(colour) => {
                                         root.paper-chosen(0, colour);
@@ -2787,7 +2787,7 @@ export component EditorPane inherits Rectangle {
                                         // 捨て、捨てられた木から`root`へ登ろうと
                                         // した生成コードは黙って何もしない。
                                         if root.writing: MenuRow {
-                                            title: "Undo";
+                                            title: @tr("Undo");
                                             shortcut: root.shortcut-keys[8];
                                             enabled: root.can-undo;
                                             activated => {
@@ -2796,7 +2796,7 @@ export component EditorPane inherits Rectangle {
                                             }
                                         }
                                         if root.writing: MenuRow {
-                                            title: "Redo";
+                                            title: @tr("Redo");
                                             shortcut: root.shortcut-keys[9];
                                             enabled: root.can-redo;
                                             activated => {
@@ -2806,7 +2806,7 @@ export component EditorPane inherits Rectangle {
                                         }
                                         if root.writing: MenuSep { }
                                         if root.writing: MenuRow {
-                                            title: "Cut";
+                                            title: @tr("Cut");
                                             shortcut: "Ctrl+X";
                                             activated => {
                                                 root.copy-requested(true);
@@ -2819,7 +2819,7 @@ export component EditorPane inherits Rectangle {
                                         // Rustが前に出ているものを見て決める。
                                         // 綴じ目だけが違うので、そこは文言で言う。
                                         MenuRow {
-                                            title: "Copy";
+                                            title: @tr("Copy");
                                             shortcut: root.terminal ? "Ctrl+Shift+C" : "Ctrl+C";
                                             activated => {
                                                 context-menu.close();
@@ -2827,7 +2827,7 @@ export component EditorPane inherits Rectangle {
                                             }
                                         }
                                         MenuRow {
-                                            title: "Paste";
+                                            title: @tr("Paste");
                                             shortcut: "Ctrl+V";
                                             activated => {
                                                 context-menu.close();
@@ -2840,7 +2840,7 @@ export component EditorPane inherits Rectangle {
                                             }
                                         }
                                         if root.writing: MenuRow {
-                                            title: "本文だけをコピー";
+                                            title: @tr("Copy Text Only");
                                             activated => {
                                                 root.copy-body-requested();
                                                 context-menu.close();
@@ -2885,7 +2885,7 @@ export component EditorPane inherits Rectangle {
                                                 bullet-row := MenuRow {
                                                     width: parent.width;
                                                     height: parent.height;
-                                                    title: "Bullet List";
+                                                    title: @tr("Bullet List");
                                                     shortcut: "▸";
                                                     // **乗せれば開く。**押しても開く
                                                     // ——押した書き手を待たせない。
@@ -2944,7 +2944,7 @@ export component EditorPane inherits Rectangle {
                                                 }
                                             }
                                             MenuRow {
-                                                title: "Numbered List";
+                                                title: @tr("Numbered List");
                                                 shortcut: "Ctrl+Shift+7";
                                                 // **別の行へ移ったら畳む**（Windowsの
                                                 // メニューと同じ）。
@@ -2963,7 +2963,7 @@ export component EditorPane inherits Rectangle {
                                             // 先頭を`5.`に直してここを押せば、下が
                                             // `6. 7. …`になる——数を訊く画面は無い。
                                             MenuRow {
-                                                title: "Renumber";
+                                                title: @tr("Renumber");
                                                 changed hovered => {
                                                     if (self.hovered) {
                                                         root.bullet-rows-open = false;
@@ -2989,7 +2989,7 @@ export component EditorPane inherits Rectangle {
                                             MenuSep { }
 
                                             for name[index] in root.word-sets: MenuRow {
-                                                title: "単語帳へ追加：" + name;
+                                                title: @tr("Add to word set: {}", name);
                                                 // **頼んでから閉じる**（6.24）。
                                                 activated => {
                                                     root.word-add-requested(index);
@@ -3004,7 +3004,7 @@ export component EditorPane inherits Rectangle {
                                             MenuSep { }
 
                                             MenuRow {
-                                                title: "Start Selection";
+                                                title: @tr("Start Selection");
                                                 shortcut: root.shortcut-keys[25];
                                                 activated => {
                                                     root.mark-toggled(false);
@@ -3012,7 +3012,7 @@ export component EditorPane inherits Rectangle {
                                                 }
                                             }
                                             MenuRow {
-                                                title: "Start Rectangle Selection";
+                                                title: @tr("Start Rectangle Selection");
                                                 shortcut: root.shortcut-keys[26];
                                                 activated => {
                                                     root.mark-toggled(true);
@@ -3025,7 +3025,7 @@ export component EditorPane inherits Rectangle {
                                             // 追加要件 2026-09-15（書き手）: **本文の紙の上の右クリックで背景。**
                                             // このTABの紙の色（見えている向き）。
                                             MenuRow {
-                                                title: "Background" + root.paper-direction + "…";
+                                                title: @tr("Background") + root.paper-direction + "…";
                                                 activated => {
                                                     root.paper-target = 0;
                                                     body-palette.show();
@@ -3035,7 +3035,7 @@ export component EditorPane inherits Rectangle {
                                         }
                                         MenuSep { }
                                         MenuRow {
-                                            title: root.terminal ? "Editor Below" : "Terminal Below";
+                                            title: root.terminal ? @tr("Editor Below") : @tr("Terminal Below");
                                             shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                                             activated => {
                                                 context-menu.close();
@@ -3043,7 +3043,7 @@ export component EditorPane inherits Rectangle {
                                             }
                                         }
                                         MenuRow {
-                                            title: "Quick Draft…";
+                                            title: @tr("Quick Draft…");
                                             shortcut: root.shortcut-keys[10];
                                             activated => {
                                                 context-menu.close();
@@ -3052,7 +3052,7 @@ export component EditorPane inherits Rectangle {
                                         }
                                         MenuSep { }
                                         MenuRow {
-                                            title: "Back";
+                                            title: @tr("Back");
                                             shortcut: root.shortcut-keys[19];
                                             activated => {
                                                 context-menu.close();
@@ -3060,7 +3060,7 @@ export component EditorPane inherits Rectangle {
                                             }
                                         }
                                         MenuRow {
-                                            title: "Forward";
+                                            title: @tr("Forward");
                                             shortcut: root.shortcut-keys[20];
                                             activated => {
                                                 context-menu.close();
@@ -3125,20 +3125,20 @@ export component EditorPane inherits Rectangle {
                                 spacing: 2px;
 
                                 LinkRow {
-                                    title: "New File";
+                                    title: @tr("New File");
                                     clicked => {
                                         root.new-file-requested();
                                     }
                                 }
                                 LinkRow {
-                                    title: "New Terminal";
+                                    title: @tr("New Terminal");
                                     hint: root.terminal-shells[root.default-shell];
                                     clicked => {
                                         root.new-terminal-requested(root.default-shell);
                                     }
                                 }
                                 LinkRow {
-                                    title: "Open File…";
+                                    title: @tr("Open File…");
                                     hint: "Ctrl+O";
                                     clicked => {
                                         root.open-file-requested();
@@ -3149,7 +3149,7 @@ export component EditorPane inherits Rectangle {
                                 // ファイルを選べばこのタブが開き先になる、という
                                 // のは押せる行ではないが、知らなければ使えない。
                                 Text {
-                                    text: "or pick a file in the Explorer";
+                                    text: @tr("or pick a file in the Explorer");
                                     color: Tok.ink-faint;
                                     font-size: 12px;
                                     horizontal-alignment: center;
@@ -3402,7 +3402,7 @@ export component EditorPane inherits Rectangle {
                                 spacing: 1px;
 
                                 MenuRow {
-                                    title: "Copy";
+                                    title: @tr("Copy");
                                     shortcut: "Ctrl+Shift+C";
                                     activated => {
                                         below-menu.close();
@@ -3410,7 +3410,7 @@ export component EditorPane inherits Rectangle {
                                     }
                                 }
                                 MenuRow {
-                                    title: "Paste";
+                                    title: @tr("Paste");
                                     shortcut: "Ctrl+V";
                                     activated => {
                                         below-menu.close();
@@ -3422,7 +3422,7 @@ export component EditorPane inherits Rectangle {
                                 }
                                 MenuSep { }
                                 MenuRow {
-                                    title: "Editor Above";
+                                    title: @tr("Editor Above");
                                     shortcut: "Ctrl+Alt+↑";
                                     activated => {
                                         below-menu.close();
@@ -3430,7 +3430,7 @@ export component EditorPane inherits Rectangle {
                                     }
                                 }
                                 MenuRow {
-                                    title: "Close Terminal Below";
+                                    title: @tr("Close Terminal Below");
                                     shortcut: "Ctrl+`";
                                     activated => {
                                         below-menu.close();
@@ -3620,7 +3620,7 @@ export component EditorPane inherits Rectangle {
                             if root.below-draft == "": Text {
                                 x: 10px;
                                 y: 8px;
-                                text: "Ctrl+Enter で上の端末へ送ります";
+                                text: @tr("Ctrl+Enter sends to the terminal above");
                                 color: Tok.ink-faint;
                                 font-size: 12px;
                             }
@@ -3648,7 +3648,7 @@ export component EditorPane inherits Rectangle {
                                 spacing: 1px;
 
                                 MenuRow {
-                                    title: "Cut";
+                                    title: @tr("Cut");
                                     shortcut: "Ctrl+X";
                                     activated => {
                                         draft-menu.close();
@@ -3657,7 +3657,7 @@ export component EditorPane inherits Rectangle {
                                     }
                                 }
                                 MenuRow {
-                                    title: "Copy";
+                                    title: @tr("Copy");
                                     shortcut: "Ctrl+C";
                                     activated => {
                                         draft-menu.close();
@@ -3665,7 +3665,7 @@ export component EditorPane inherits Rectangle {
                                     }
                                 }
                                 MenuRow {
-                                    title: "Paste";
+                                    title: @tr("Paste");
                                     shortcut: "Ctrl+V";
                                     activated => {
                                         draft-menu.close();
@@ -3674,7 +3674,7 @@ export component EditorPane inherits Rectangle {
                                     }
                                 }
                                 MenuRow {
-                                    title: "Select All";
+                                    title: @tr("Select All");
                                     shortcut: "Ctrl+A";
                                     activated => {
                                         draft-menu.close();
@@ -3684,7 +3684,7 @@ export component EditorPane inherits Rectangle {
                                 }
                                 MenuSep { }
                                 MenuRow {
-                                    title: "Send to Terminal";
+                                    title: @tr("Send to Terminal");
                                     shortcut: "Ctrl+Enter";
                                     activated => {
                                         draft-menu.close();
@@ -3692,7 +3692,7 @@ export component EditorPane inherits Rectangle {
                                     }
                                 }
                                 MenuRow {
-                                    title: "Terminal Above";
+                                    title: @tr("Terminal Above");
                                     shortcut: "Ctrl+Alt+↑";
                                     activated => {
                                         draft-menu.close();
@@ -3701,7 +3701,7 @@ export component EditorPane inherits Rectangle {
                                 }
                                 MenuSep { }
                                 MenuRow {
-                                    title: "Close Editor Below";
+                                    title: @tr("Close Editor Below");
                                     shortcut: "Ctrl+`";
                                     activated => {
                                         draft-menu.close();
@@ -3740,7 +3740,7 @@ export component EditorPane inherits Rectangle {
             width: 236px;
 
             ColourPalette {
-                automatic: "既定の色";
+                automatic: @tr("Default Color");
                 current: root.page-background;
                 chosen(colour) => {
                     root.paper-chosen(root.paper-target, colour);
@@ -3776,7 +3776,7 @@ export component EditorPane inherits Rectangle {
                 spacing: 1px;
 
                 MenuRow {
-                    title: "Close";
+                    title: @tr("Close");
                     shortcut: root.shortcut-keys[3];
                     activated => {
                         tab-menu.close();
@@ -3784,14 +3784,14 @@ export component EditorPane inherits Rectangle {
                     }
                 }
                 MenuRow {
-                    title: "Close Others";
+                    title: @tr("Close Others");
                     activated => {
                         tab-menu.close();
                         root.close-other-tabs();
                     }
                 }
                 MenuRow {
-                    title: "Close Clean";
+                    title: @tr("Close Saved");
                     activated => {
                         tab-menu.close();
                         root.close-clean-tabs();
@@ -3805,7 +3805,7 @@ export component EditorPane inherits Rectangle {
 
                     // 追加要件 2026-09-15（書き手）: TABの右クリックはTABの色。背景はPaperの右クリックから。
                     MenuRow {
-                        title: "Tab Color…";
+                        title: @tr("Tab Color…");
                         activated => {
                             root.open-paper-palette(2, root.tab-menu-x, root.tab-menu-y);
                             tab-menu.close();
@@ -3828,7 +3828,7 @@ export component EditorPane inherits Rectangle {
                     MenuSep { }
 
                     for shell[index] in root.terminal-shells: MenuRow {
-                        title: "Switch to " + shell;
+                        title: @tr("Switch to {}", shell);
                         // **頼んでから閉じる。**`close`はこのメニューの木を捨てる
                         // ——そこにはこの行自身と、行を包む`for`と`if`が入っている。
                         // 捨てられた木の中から`root`へ登ろうとすると、生成された
@@ -3854,7 +3854,7 @@ export component EditorPane inherits Rectangle {
                     MenuSep { }
 
                     for row in root.word-modes: MenuRow {
-                        title: "モード：" + row.name;
+                        title: @tr("Mode: {}", row.name);
                         checked: row.id == root.word-mode;
                         // **頼んでから閉じる**（技術検証 6.24）。
                         activated => {
@@ -3882,7 +3882,7 @@ export component EditorPane inherits Rectangle {
                     MenuSep { }
 
                     MenuRow {
-                        title: "Rename";
+                        title: @tr("Rename");
                         activated => {
                             // **The count is bumped after the menu is closed**,
                             // so the field that appears takes the keyboard from
@@ -3894,14 +3894,14 @@ export component EditorPane inherits Rectangle {
                         }
                     }
                     MenuRow {
-                        title: "同じ文書を別TABで開く";
+                        title: @tr("Open in Another Tab");
                         activated => {
                             root.duplicate-tab-requested(root.tab-menu-target);
                             tab-menu.close();
                         }
                     }
                     MenuRow {
-                        title: "Copy Path";
+                        title: @tr("Copy Path");
                         activated => {
                             root.copy-path-requested(root.tab-menu-target);
                             tab-menu.close();
@@ -3915,7 +3915,7 @@ export component EditorPane inherits Rectangle {
                     MenuSep { }
 
                     MenuRow {
-                        title: "Save";
+                        title: @tr("Save");
                         shortcut: root.shortcut-keys[1];
                         activated => {
                             root.save-requested();
@@ -3923,7 +3923,7 @@ export component EditorPane inherits Rectangle {
                         }
                     }
                     MenuRow {
-                        title: "Save As…";
+                        title: @tr("Save As…");
                         shortcut: root.shortcut-keys[2];
                         activated => {
                             root.save-as-requested();
@@ -3955,21 +3955,21 @@ export component EditorPane inherits Rectangle {
                 // New Tab を作って訊き直したりはしない。前に出ているタブが
                 // まだ何でもないなら、そのタブがそれになる。
                 MenuRow {
-                    title: "New File";
+                    title: @tr("New File");
                     activated => {
                         strip-menu.close();
                         root.new-file-requested();
                     }
                 }
                 MenuRow {
-                    title: "New Tab";
+                    title: @tr("New Tab");
                     activated => {
                         strip-menu.close();
                         root.new-tab-requested();
                     }
                 }
                 MenuRow {
-                    title: "New Terminal";
+                    title: @tr("New Terminal");
                     shortcut: root.terminal-shells[root.default-shell];
                     activated => {
                         strip-menu.close();
@@ -3978,7 +3978,7 @@ export component EditorPane inherits Rectangle {
                 }
 
                 MenuRow {
-                    title: "Open File…";
+                    title: @tr("Open File…");
                     shortcut: root.shortcut-keys[0];
                     activated => {
                         strip-menu.close();
@@ -3987,7 +3987,7 @@ export component EditorPane inherits Rectangle {
                 }
                 MenuSep { }
                 MenuRow {
-                    title: "Close";
+                    title: @tr("Close");
                     shortcut: root.shortcut-keys[3];
                     activated => {
                         strip-menu.close();
@@ -3995,14 +3995,14 @@ export component EditorPane inherits Rectangle {
                     }
                 }
                 MenuRow {
-                    title: "Close All";
+                    title: @tr("Close All");
                     activated => {
                         strip-menu.close();
                         root.close-all-tabs();
                     }
                 }
                 MenuRow {
-                    title: "Close Clean";
+                    title: @tr("Close Saved");
                     activated => {
                         strip-menu.close();
                         root.close-clean-tabs();

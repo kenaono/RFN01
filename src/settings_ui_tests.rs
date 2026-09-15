@@ -915,3 +915,80 @@ fn a_background_image_shows_through_the_paper() {
         WindowEvent::WindowActiveChanged(true),
     );
 }
+
+/// 追加要件 2026-09-15（書き手）: **表示の国際化。**同じ画面が、日本語を選べば日本語の
+/// 文言で、英語なら英語で出る（訳は実行ファイルに埋め込まれている）。
+#[test]
+fn the_screen_speaks_japanese_and_english() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts.clone()));
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 1050.0;
+        screen.height = 640.0;
+        screen.shown_width = 1050.0;
+        screen.shown_height = 540.0;
+        screen.settings = true;
+    });
+    window.set_settings_tab(0);
+    let draw = |name: &str| {
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1100);
+        });
+        let output = PathBuf::from("target/i18n-qa");
+        std::fs::create_dir_all(&output).unwrap();
+        let mut ppm = b"P6\n1100 760\n255\n".to_vec();
+        for pixel in &pixels {
+            ppm.extend([pixel.r, pixel.g, pixel.b]);
+        }
+        std::fs::write(output.join(name), ppm).unwrap();
+        pixels
+    };
+    let click = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = PointerEventButton::Left;
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        slint::platform::update_timers_and_animations();
+    };
+    // **Rustの旗（`i18n::japanese`）は試験のあいだ共有なので触らない。**画面の訳だけを選ぶ。
+    slint::select_bundled_translation("").unwrap();
+    let english = draw("general-en.ppm");
+    slint::select_bundled_translation("ja").unwrap();
+    let japanese = draw("general-ja.ppm");
+    assert_ne!(
+        english, japanese,
+        "the settings read differently in Japanese"
+    );
+    id.update_screen(&window, |screen| screen.settings = false);
+    click(1077.0, 25.0);
+    draw("pane-menu-ja.ppm");
+    assert!(
+        slint::select_bundled_translation("fr").is_err(),
+        "only Japanese is bundled"
+    );
+    slint::select_bundled_translation("").unwrap();
+}
