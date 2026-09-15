@@ -752,6 +752,14 @@ export component AppWindow inherits Window {
     /// (kind, slot) で言う——kind 0 は紙のシート（slot は色の番号、シートは
     /// `sheet`）、1 は端末（0 地、1 字）、2 は語群（slot は語群の番号）。
     callback colour-set(int, int, color);
+    /// 追加要件 2026-09-15: 文字色のセット（10個）。1つは Body・H1〜H6 の文字色を
+    /// 横書き・縦書きの順に14色、`#rrggbb` をカンマで並べた字。空ならまだ無い。
+    in property <[string]> ink-sets: ["", "", "", "", "", "", "", "", "", ""];
+    /// いまの文字色と同じセットの番号。どれとも違えば -1（「Custom」）。Rust が色から決める。
+    in-out property <int> ink-set-chosen: -1;
+    callback ink-set-apply(int);
+    callback ink-set-save(int);
+    callback ink-set-delete(int);
     callback colour-default(int, int);
     callback colour-more(int, int);
     /// 「その他の色」。開くのも決まったあとも Rust。
@@ -3521,6 +3529,124 @@ export component AppWindow inherits Window {
                                         // 下に在る（要件 9）。
                                         if root.settings-tab == 3: VerticalLayout {
                                             spacing: 20px;
+                                            // 追加要件 2026-09-15: **背景を変えるたびに文字色を1つずつ
+                                            // 選び直さない。**セットは両方のシートの文字色をまとめて持つ
+                                            // ——背景を変えれば、横書きも縦書きも読めなくなるので。
+                                            // 形は書き手の選択（一覧＋ボタン）。
+                                            VerticalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: "COLOR SETS";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    letter-spacing: 0.9px;
+                                                }
+                                                HorizontalLayout {
+                                                    spacing: 6px;
+                                                    alignment: start;
+
+                                                    Rectangle {
+                                                        width: 140px;
+                                                        height: 28px;
+
+                                                        TextButton {
+                                                            width: parent.width;
+                                                            wide: true;
+                                                            title: root.ink-set-chosen < 0 ? "Custom"
+                                                                : "Set " + (root.ink-set-chosen + 1)
+                                                                    + (root.ink-sets[root.ink-set-chosen] == "" ? " (empty)" : "");
+                                                            clicked => {
+                                                                ink-set-menu.show();
+                                                            }
+                                                        }
+
+                                                        // 押した釦と同じ箱に置き、その下に出す（技術検証 6.30）。
+                                                        ink-set-menu := PopupWindow {
+                                                            x: 0px;
+                                                            y: 32px;
+                                                            width: 160px;
+                                                            close-policy: close-on-click-outside;
+
+                                                            MenuFrame {
+                                                                width: 160px;
+
+                                                                VerticalLayout {
+                                                                    padding: 6px;
+                                                                    spacing: 1px;
+
+                                                                    // **選んだら、その場で効く**（書き手の求め 2026-09-15：
+                                                                    // 選んでも下の色が替わらないと分かりにくい）。空のセットは
+                                                                    // 選ぶだけで、色は変えない。頼んでから閉じる（技術検証 6.24）。
+                                                                    for held[index] in root.ink-sets: MenuRow {
+                                                                        title: "Set " + (index + 1) + (held == "" ? " (empty)" : "");
+                                                                        checked: index == root.ink-set-chosen;
+                                                                        activated => {
+                                                                            root.ink-set-chosen = index;
+                                                                            if (held != "") {
+                                                                                root.ink-set-apply(index);
+                                                                            }
+                                                                            ink-set-menu.close();
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // **保存先は保存するときに選ぶ。**上の一覧は選べば効くので、
+                                                    // あれで保存先を選ぶと、いま整えた色が先に置き換わってしまう。
+                                                    Rectangle {
+                                                        width: save-button.min-width;
+                                                        height: 28px;
+
+                                                        save-button := TextButton {
+                                                            width: parent.width;
+                                                            title: "Save to…";
+                                                            clicked => { ink-save-menu.show(); }
+                                                        }
+
+                                                        ink-save-menu := PopupWindow {
+                                                            x: 0px;
+                                                            y: 32px;
+                                                            width: 160px;
+                                                            close-policy: close-on-click-outside;
+
+                                                            MenuFrame {
+                                                                width: 160px;
+
+                                                                VerticalLayout {
+                                                                    padding: 6px;
+                                                                    spacing: 1px;
+
+                                                                    for held[index] in root.ink-sets: MenuRow {
+                                                                        title: "Set " + (index + 1) + (held == "" ? " (empty)" : "");
+                                                                        checked: index == root.ink-set-chosen;
+                                                                        activated => {
+                                                                            root.ink-set-chosen = index;
+                                                                            root.ink-set-save(index);
+                                                                            ink-save-menu.close();
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    // 保存したセットを失う操作なので、赤で言う。
+                                                    TextButton {
+                                                        title: "Delete";
+                                                        role: Role.danger;
+                                                        enabled: root.ink-set-chosen >= 0 && root.ink-sets[root.ink-set-chosen] != "";
+                                                        clicked => { root.ink-set-delete(root.ink-set-chosen); }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: "Body・H1〜H6の文字色を、横書き・縦書きまとめて保存します。一覧で選ぶと適用します。";
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    overflow: elide;
+                                                }
+                                            }
+
                                             // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
                                             // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
                                             // 値かは見出しが言う。押した欄のシートを`root.sheet`へ置いてから

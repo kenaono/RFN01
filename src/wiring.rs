@@ -244,6 +244,40 @@ pub fn wire_colours(
         }
     });
 
+    // 追加要件 2026-09-15: 文字色のセット。適用は色を置いて組み直す（組み直しが
+    // 設定を書く）。保存と削除は色を変えないので、その場で書く。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_ink_set_apply(move |index| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let said = window.get_ink_sets().row_data(index.max(0) as usize);
+        if said.is_some_and(|said| crate::apply_ink_set(&held.palette, &said)) {
+            schedule_relayout(&window, &held.states, &held.cache, &held.timer);
+        }
+    });
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_ink_set_save(move |index| {
+        if let Some(window) = weak.upgrade() {
+            let said = crate::ink_set_of(&*held.palette);
+            window
+                .get_ink_sets()
+                .set_row_data(index.max(0) as usize, said.into());
+            save_settings(&window, &held.cache);
+        }
+    });
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_ink_set_delete(move |index| {
+        if let Some(window) = weak.upgrade() {
+            let sets = window.get_ink_sets();
+            sets.set_row_data(index.max(0) as usize, SharedString::new());
+            save_settings(&window, &held.cache);
+        }
+    });
+
     let weak = window.as_weak();
     let held = doors;
     window.on_colour_mixer_accepted(move |colour| {

@@ -2682,12 +2682,16 @@ fn main() -> Result<(), slint::PlatformError> {
     window.set_sheet_numbers(ModelRc::from(numbers.clone()));
     window.set_palette(ModelRc::from(palette.clone()));
     window.set_sheet_fonts(ModelRc::from(sheet_fonts.clone()));
+    // 設定を読む前に置く——読むときは行を書き換えるだけなので。
+    let ink_sets = vec![SharedString::new(); INK_SETS];
+    window.set_ink_sets(ModelRc::new(VecModel::from(ink_sets)));
     // 要件 9: what the last run was set to, before anything is drawn with it.
     if let Some(directory) = app_data::app_directory()
         && let Some(values) = app_data::read_settings(&directory)
     {
         apply_settings(&window, &numbers, &palette, &sheet_fonts, &values);
     }
+    match_ink_set(&window);
     // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
     // 色しか覚えていないので、語はここで初めて手に入る。
     open_word_modes(&window, &live);
@@ -2997,7 +3001,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &window,
                 &reset_live,
                 Question::ResetAll,
-                "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻り、文書ごとに選んだモードは「なし」になります。単語帳とモードは残ります。".to_owned(),
+                "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻り、文書ごとに選んだモードは「なし」になります。単語帳とモード、文字色のセットは残ります。".to_owned(),
                 &["既定に戻す", "キャンセル"],
                 0,
             );
@@ -8855,12 +8859,15 @@ fn typography_for(
 /// What is left alone is the page rather than the text: the line and character
 /// advances, the margin and the paper. Those are how much room the面 gives what
 /// is on it, and the source needs that as much as the preview does.
+///
+/// **一様な色は、既定の墨ではなく Body の文字色**（書き手の報告 2026-09-15：
+/// 文字色のセットが原文に効かない）。紙の色は原文にも効くので、墨だけ既定に
+/// 留めると、暗い紙の上で原文が読めなくなる。見出しの色だけは持ち込まない。
 fn plain_source(spec: &mut Typography, zoom_percent: i32) {
     spec.font_size = font_size_for(BASE_FONT_SIZE, zoom_percent);
     spec.heading_scale = [1.0; MAX_HEADING_LEVEL];
     spec.decorations = [0; 7];
-    spec.ink = DEFAULT_INK;
-    spec.heading_ink = [DEFAULT_INK; MAX_HEADING_LEVEL];
+    spec.heading_ink = [spec.ink; MAX_HEADING_LEVEL];
     spec.body_font = DEFAULT_BODY_FONT.to_owned();
     spec.heading_font = std::array::from_fn(|_| DEFAULT_BODY_FONT.to_owned());
     spec.code_font = DEFAULT_BODY_FONT.to_owned();
@@ -8950,6 +8957,61 @@ fn hex_colour(colour: Color) -> String {
         colour.green(),
         colour.blue()
     )
+}
+
+/// 今の文字色を、セットとして書く形に（横書きの7色、縦書きの7色の順）。
+fn ink_set_of(palette: &impl Model<Data = Color>) -> String {
+    (0..2)
+        .flat_map(|sheet| (0..INK_SET_SLOTS).map(move |slot| colour_row(sheet, slot)))
+        .map(|row| hex_colour(palette.row_data(row).unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// セットの字を14色に。**1色でも読めなければ全部読まない**——半分だけ替わった
+/// 文字色は、書き手が保存したどのセットでもない。
+fn read_ink_set(said: &str) -> Option<Vec<[f32; 3]>> {
+    let colours: Vec<_> = said
+        .split(',')
+        .map(parse_hex_colour)
+        .collect::<Option<_>>()?;
+    (colours.len() == 2 * INK_SET_SLOTS).then_some(colours)
+}
+
+/// セットの文字色を、両方のシートへ置く。読めないセットなら何もしない。
+fn apply_ink_set(palette: &VecModel<Color>, said: &str) -> bool {
+    let Some(colours) = read_ink_set(said) else {
+        return false;
+    };
+    for (index, rgb) in colours.into_iter().enumerate() {
+        set_colour(palette, index / INK_SET_SLOTS, index % INK_SET_SLOTS, rgb);
+    }
+    true
+}
+
+/// 一覧が指すセットを、**いまの文字色と同じセット**にする（書き手の報告
+/// 2026-09-15：開いた直後は Set 1 なのに、色は前回のままで合っていない）。
+/// 覚えておいた番号ではなく色から決めるので、個別に色を変えれば「Custom」になる。
+/// 同じ色のセットが2つあれば、いま指しているほうを優先する。
+fn match_ink_set(window: &AppWindow) {
+    let now = ink_set_of(&window.get_palette());
+    let sets = window.get_ink_sets();
+    let chosen = window.get_ink_set_chosen();
+    let same = |index: usize| {
+        sets.row_data(index)
+            .is_some_and(|held| held == now.as_str())
+    };
+    let found = usize::try_from(chosen)
+        .ok()
+        .filter(|at| same(*at))
+        .or_else(|| (0..sets.row_count()).find(|at| same(*at)));
+    window.set_ink_set_chosen(found.map_or(-1, |at| at as i32));
+}
+
+/// `ink.set.3` → 2（画面の番号は1から）。
+fn ink_set_index(name: &str) -> Option<usize> {
+    let number: usize = name.strip_prefix(INK_SET_SETTING)?.parse().ok()?;
+    (1..=INK_SETS).contains(&number).then(|| number - 1)
 }
 
 /// Put a colour in front of both the panes and the window (要件 9).
@@ -9474,6 +9536,12 @@ const SHELL_SETTING: &str = "terminal.shell";
 const TERMINAL_PAPER_SETTING: &str = "terminal.paper";
 /// C5: 最近使用した色。`#rrggbb` をカンマで並べる。
 const RECENT_COLOURS_SETTING: &str = "colour.recent";
+/// 追加要件 2026-09-15: 文字色のセット。`ink.set.1`〜`ink.set.10`、中身は
+/// [`ink_set_of`]の字。**空のセットは書かない。**
+const INK_SET_SETTING: &str = "ink.set.";
+const INK_SETS: usize = 10;
+/// セットが持つ色：各シートの Body と H1〜H6。
+const INK_SET_SLOTS: usize = 1 + MAX_HEADING_LEVEL;
 const TERMINAL_INK_SETTING: &str = "terminal.ink";
 const TERMINAL_FONT_SETTING: &str = "terminal.font";
 const TERMINAL_SIZE_SETTING: &str = "terminal.size";
@@ -10252,6 +10320,11 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
             .collect::<Vec<_>>()
             .join(","),
     ));
+    for (index, held) in window.get_ink_sets().iter().enumerate() {
+        if !held.is_empty() {
+            values.push((format!("{INK_SET_SETTING}{}", index + 1), held.to_string()));
+        }
+    }
     values.push((
         TERMINAL_PAPER_SETTING.to_owned(),
         hex_colour(window.get_terminal_paper()),
@@ -10372,6 +10445,14 @@ fn apply_settings(
             window
                 .global::<Colours>()
                 .set_recent(ModelRc::new(VecModel::from(recent)));
+            continue;
+        }
+        if let Some(index) = ink_set_index(written) {
+            if read_ink_set(value).is_some() {
+                window
+                    .get_ink_sets()
+                    .set_row_data(index, value.trim().into());
+            }
             continue;
         }
         if written == TERMINAL_PAPER_SETTING {
@@ -10499,6 +10580,8 @@ fn reset_settings_group(
 /// is already waited out by 200ms, so a run of presses on one button writes the
 /// file once rather than once per press.
 fn save_settings(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
+    // 色の変更はどれもここを通るので、一覧が指すセットもここで合わせる。
+    match_ink_set(window);
     let Some(directory) = app_data::app_directory() else {
         return;
     };
@@ -16786,6 +16869,53 @@ fn markdown_block_content_start(line: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 書き手の報告 2026-09-15: 原文は一様な色だが、その色は Body の文字色。
+    #[test]
+    fn the_source_is_one_colour_and_it_is_the_body_ink() {
+        let mut spec = Typography::new(22.0);
+        spec.ink = [0.9, 0.9, 0.8];
+        spec.heading_ink = [[0.5, 0.1, 0.1]; MAX_HEADING_LEVEL];
+        plain_source(&mut spec, 100);
+        assert_eq!(spec.ink, [0.9, 0.9, 0.8]);
+        assert_eq!(spec.heading_ink, [[0.9, 0.9, 0.8]; MAX_HEADING_LEVEL]);
+    }
+
+    /// 追加要件 2026-09-15: 文字色のセットは14色を往復し、紙と文字の背景には触れない。
+    #[test]
+    fn an_ink_set_round_trips_both_sheets_and_leaves_the_paper() {
+        let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+        for row in 0..2 * SHEET_COLOURS {
+            palette.set_row_data(row, Color::from_rgb_u8(row as u8, 0, 0));
+        }
+        let said = ink_set_of(&palette);
+        assert_eq!(said.split(',').count(), 14);
+        let other = VecModel::from(vec![Color::from_rgb_u8(9, 9, 9); 2 * SHEET_COLOURS]);
+        assert!(apply_ink_set(&other, &said));
+        for sheet in 0..2 {
+            for slot in 0..SHEET_COLOURS {
+                let row = colour_row(sheet, slot);
+                let expected = if slot < INK_SET_SLOTS {
+                    Color::from_rgb_u8(row as u8, 0, 0)
+                } else {
+                    Color::from_rgb_u8(9, 9, 9)
+                };
+                assert_eq!(
+                    other.row_data(row),
+                    Some(expected),
+                    "sheet {sheet} slot {slot}"
+                );
+            }
+        }
+        // 1色でも読めなければ、何も替えない。
+        let broken = said.replacen("#", "?", 1);
+        assert!(!apply_ink_set(&other, &broken));
+        assert!(read_ink_set(&said.rsplit_once(',').unwrap().0).is_none());
+        assert_eq!(ink_set_index("ink.set.1"), Some(0));
+        assert_eq!(ink_set_index("ink.set.10"), Some(9));
+        assert_eq!(ink_set_index("ink.set.0"), None);
+        assert_eq!(ink_set_index("ink.set.11"), None);
+    }
     // 取り消しの部品は`open_document`のもので、本体はもう名前で呼んでいない。
     use crate::open_document::{Edit, History, UNDO_JOIN_IDLE};
     // 退避の刻みの規則（要件 8.1）は`saving`のもの。
