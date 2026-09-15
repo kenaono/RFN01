@@ -2217,6 +2217,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wiring::wire_left_panel(&window, &live);
 
     wiring::wire_find(&window, &live);
+    window.on_settings_match(|query, labels| settings_match(&query, labels.iter()));
 
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
@@ -4468,6 +4469,28 @@ impl StatusBar for AppWindow {
     }
 }
 
+/// 設定を探す語が、名前のどれかに含まれるか（書き手の求め 2026-09-15）。
+///
+/// **大文字小文字と全角半角を問わない**——英語の画面で`font`と打っても`Font`に、日本語の画面で
+/// 全角の`Ｈ１`と打っても`H1`に当たる。語の前後の空白は見ない。
+fn settings_match(query: &str, labels: impl IntoIterator<Item = SharedString>) -> bool {
+    let fold = |text: &str| -> String {
+        text.chars()
+            .map(|c| match c {
+                '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+                '\u{3000}' => ' ',
+                _ => c,
+            })
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let query = fold(query.trim());
+    query.is_empty()
+        || labels
+            .into_iter()
+            .any(|label| fold(&label).contains(&query))
+}
+
 /// 問いのやめる側（国際化②）。
 fn cancel() -> &'static str {
     pick("キャンセル", "Cancel")
@@ -5420,6 +5443,10 @@ fn find_rules(window: &AppWindow, id: PaneId) -> find::Rules {
 /// already knows how to show.
 fn find_in_pane(window: &AppWindow, live: &Live, forwards: bool) {
     let id = find_target(window);
+    // 設定のTABでは、この欄は設定を探す語である（窓が一覧を絞る）。裏の代役の文書は探さない。
+    if id.screen(window).settings {
+        return;
+    }
     let needle = id.screen(window).find_needle.to_string();
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
@@ -5560,6 +5587,10 @@ fn choose_find_option(window: &AppWindow, live: &Live, which: i32) {
 /// カーソルを動かさないことでもある。動かす鍵はEnterとF3のほうにある。
 fn count_in_pane(window: &AppWindow, live: &Live) {
     let id = find_target(window);
+    // 設定のTABでは、この欄は設定を探す語である（窓が一覧を絞る）。裏の代役の文書は探さない。
+    if id.screen(window).settings {
+        return;
+    }
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
@@ -5733,6 +5764,10 @@ fn select_source_range(
 /// like anything else typed.
 fn replace_in_pane(window: &AppWindow, live: &Live) {
     let id = find_target(window);
+    // 設定のTABでは、この欄は設定を探す語である（窓が一覧を絞る）。裏の代役の文書は探さない。
+    if id.screen(window).settings {
+        return;
+    }
     let needle = id.screen(window).find_needle.to_string();
     if needle.is_empty() {
         return;
@@ -5790,6 +5825,10 @@ fn replace_in_pane(window: &AppWindow, live: &Live) {
 /// different operation from the one they did.
 fn replace_all_in_pane(window: &AppWindow, live: &Live) {
     let id = find_target(window);
+    // 設定のTABでは、この欄は設定を探す語である（窓が一覧を絞る）。裏の代役の文書は探さない。
+    if id.screen(window).settings {
+        return;
+    }
     let screen = id.screen(window);
     let needle = screen.find_needle.to_string();
     if needle.is_empty() {

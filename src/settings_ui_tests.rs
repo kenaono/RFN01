@@ -1057,3 +1057,144 @@ fn the_screen_speaks_japanese_and_english() {
     );
     slint::select_bundled_translation("").unwrap();
 }
+
+/// 書き手の報告 2026-09-15: **設定のTABで検索欄を開いても検索が効かない。**「可能なら、検索した文字の含まれる
+/// 設定のみがリストされると良い」。
+///
+/// 設定のTABで開いたCtrl+Fの欄の語で、全部の群から名前か見出しに語を含む行だけを出す。裏の代役の文書は探さず
+/// （「見つかりません」を言わない）、Keysの一覧も同じ語で絞る。`EDITOR_SETTINGS_SNAPSHOT`があれば画像も書く。
+#[test]
+fn the_find_bar_searches_the_settings() {
+    assert!(settings_match("font", ["Code Font".into()]));
+    assert!(settings_match("Ｈ１", ["H1".into()]), "full width");
+    assert!(settings_match(" 色 ", ["背景色".into()]), "trimmed");
+    assert!(!settings_match(
+        "margin",
+        ["Line height".into(), "PAGE".into()]
+    ));
+    assert!(settings_match("", []), "nothing asked shows everything");
+
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1000, 740));
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    id.update_screen(&window, |screen| {
+        screen.width = 950.0;
+        screen.height = 700.0;
+    });
+    window.set_autosave(false);
+    let document = OpenDocument::untitled(1, window.as_weak());
+    let live = Live {
+        closed_tabs: Rc::default(),
+        states: PaneStates::new(&document),
+        folder: Rc::default(),
+        tree_paths: Rc::default(),
+        results: Rc::default(),
+        recent: Rc::default(),
+        recent_folders: Rc::default(),
+        find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        replace_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        layout: Rc::new(RefCell::new(Layout::single(0))),
+        pending: Rc::default(),
+        close_run: Rc::default(),
+        cache: Rc::new(RefCell::new(RenderCache::default())),
+        tabs: Rc::new(RefCell::new(Tabs {
+            panes: vec![{
+                let tab = PaneTab::showing(&window, id, document.clone());
+                PaneTabs {
+                    history: vec![NavigationPlace::from(&tab)],
+                    tabs: vec![tab],
+                    ..Default::default()
+                }
+            }],
+        })),
+        writer: Rc::new(FileWriter::start()),
+        searcher: Rc::new(Searcher::start(|| {})),
+        searched: Rc::default(),
+    };
+    shortcuts::wire(&window, &live);
+    window.on_settings_match(|query, labels| settings_match(&query, labels.iter()));
+    open_settings(&window, &live);
+    assert!(id.screen(&window).settings);
+    window.show().unwrap();
+    let shortcut_names = || {
+        let rows = window.get_shortcut_rows();
+        (0..rows.row_count())
+            .filter_map(|at| rows.row_data(at))
+            .filter(|row| !row.header)
+            .map(|row| row.name.to_string())
+            .collect::<Vec<_>>()
+    };
+    let all_shortcuts = shortcut_names().len();
+
+    // Ctrl+Fが設定のTABまで届いて、欄が開く（書き手の報告 2026-09-15：効かなかった）。
+    assert!(window.invoke_shortcut_key("f".into(), true, false, false));
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        window.get_find_open(),
+        "Ctrl+F opens the bar on the settings"
+    );
+    assert_eq!(window.get_find_pane(), id.index());
+    let ask = |needle: &str| {
+        id.update_screen(&window, |screen| screen.find_needle = needle.into());
+        slint::platform::update_timers_and_animations();
+    };
+    ask("Tab");
+    assert_eq!(window.get_settings_query(), "Tab");
+    count_in_pane(&window, &live);
+    assert_eq!(
+        window.get_count_find(),
+        "",
+        "the stand-in document is not searched"
+    );
+    let found = shortcut_names();
+    assert!(
+        !found.is_empty() && found.len() < all_shortcuts,
+        "{found:?}"
+    );
+    assert!(
+        found.iter().all(|name| name.to_lowercase().contains("tab")),
+        "{found:?}"
+    );
+
+    if let Ok(output) = std::env::var("EDITOR_SETTINGS_SNAPSHOT") {
+        let output = PathBuf::from(output);
+        std::fs::create_dir_all(&output).unwrap();
+        for (name, needle) in [("font", "Font"), ("color", "Color"), ("margin", "margin")] {
+            ask(needle);
+            window.window().request_redraw();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+            surface.draw_if_needed(|renderer| {
+                renderer.render(&mut pixels, 1000);
+            });
+            let mut ppm = b"P6\n1000 740\n255\n".to_vec();
+            for pixel in pixels {
+                ppm.extend([pixel.r, pixel.g, pixel.b]);
+            }
+            std::fs::write(output.join(format!("settings-search-{name}.ppm")), ppm).unwrap();
+        }
+    }
+
+    // 欄を閉じれば、Keysの一覧も元に戻る。
+    window.set_find_open(false);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(window.get_settings_query(), "");
+    assert_eq!(shortcut_names().len(), all_shortcuts);
+    window.hide().unwrap();
+}

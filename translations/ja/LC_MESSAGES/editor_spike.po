@@ -627,8 +627,8 @@ msgstr "Body・H1〜H6の文字色を、横書き・縦書きまとめて保存�
 msgid "Search"
 msgstr "検索"
 
-msgid "Search by action"
-msgstr "操作名で探す"
+msgid "Search settings"
+msgstr "設定を探す"
 
 msgid "Search in This Folder"
 msgstr "このフォルダー内を検索"

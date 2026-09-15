@@ -843,6 +843,35 @@ export component AppWindow inherits Window {
     callback shortcut-key-search(string, bool, bool, bool);
     in-out property <string> shortcut-bindings;
     in-out property <string> shortcut-query;
+    /// 設定を探す語（書き手の求め 2026-09-15：「Settingで検索欄が開いていても検索が効きません。可能なら、
+    /// 検索した文字の含まれる設定のみがリストされると良い」）。**設定のTABで開いたCtrl+Fの欄の語**で、
+    /// 空なら今までどおり群ごとに出す。探しているあいだは全部の群から、名前か見出しに語を含む行だけを出す。
+    out property <string> settings-query: root.find-open && root.panes[root.find-pane].settings
+        ? root.panes[root.find-pane].find-needle : "";
+    property <bool> settings-searching: root.settings-query != "";
+    /// 語が名前のどれかに含まれるか（大文字小文字・全角半角を問わない）。Rustが答える。
+    pure callback settings-match(string, [string]) -> bool;
+    /// 行・見出しを出すか。`labels`はその行の名前と、属する見出し。
+    pure function shows-any(labels: [string]) -> bool {
+        return !root.settings-searching || root.settings-match(root.settings-query, labels);
+    }
+    /// 群の面を出すか。探していなければ選んでいる群だけ、探しているあいだは全部（`labels`が
+    /// 空でなければ、そのどれかに一致するときだけ——中の行を1つずつ分けない群）。
+    pure function shows-group(tab: int, labels: [string]) -> bool {
+        if (!root.settings-searching) {
+            return root.settings-tab == tab;
+        }
+        return labels.length == 0 || root.settings-match(root.settings-query, labels);
+    }
+    /// 探しているあいだ、見出しに群の名前を付ける——横書き・縦書きの見出しは群をまたぐと同じ字になる。
+    pure function section-title(group: string, title: string) -> string {
+        return root.settings-searching ? group + " — " + title : title;
+    }
+    // Keysの一覧も同じ語で絞る（「Search by action」の欄はこの欄にまとめた）。
+    changed settings-query => {
+        root.shortcut-query = root.settings-query;
+        root.shortcut-filter();
+    }
     in-out property <string> shortcut-edit;
     in-out property <string> shortcut-status;
     in-out property <int> shortcut-selected: -1;
@@ -2462,6 +2491,11 @@ export component AppWindow inherits Window {
 
                                 settings-scroll := ScrollView {
                                     horizontal-stretch: 1;
+                                    // 語が変われば中身の長さが変わる。前の位置のままだと何も無い所を見ている。
+                                    property <string> query: root.settings-query;
+                                    changed query => {
+                                        self.viewport-y = 0;
+                                    }
 
                                     HorizontalLayout {
                                         padding: 20px;
@@ -2475,7 +2509,7 @@ export component AppWindow inherits Window {
                                             spacing: 8px;
                                             alignment: start;
 
-                                        if root.settings-tab == 6: VerticalLayout {
+                                        if root.settings-searching ? root.shortcut-rows.length > 0 : root.settings-tab == 6: VerticalLayout {
                                             spacing: 10px;
                                             Text { text: @tr("Shortcuts"); color: Tok.ink; font-size: 16px; }
 
@@ -2484,13 +2518,6 @@ export component AppWindow inherits Window {
                                             // Ctrl+Z や Ctrl+A が欄の操作とぶつかるので、2つに分ける。
                                             HorizontalLayout {
                                                 spacing: 8px;
-                                                Field {
-                                                    horizontal-stretch: 1;
-                                                    placeholder: @tr("Search by action");
-                                                    text <=> root.shortcut-query;
-                                                    edited => { root.shortcut-filter(); }
-                                                    escaped => { root.focus-generation += 1; }
-                                                }
                                                 key-search := FocusScope {
                                                     width: 240px;
                                                     height: 28px;
@@ -2674,8 +2701,8 @@ export component AppWindow inherits Window {
                                             }
 
                                             // 書き手の求め 2026-09-15: この面の Reset は、キーの割り当てだけを戻す。
-                                            Rectangle { height: 1px; background: Tok.rule; }
-                                            HorizontalLayout {
+                                            if !root.settings-searching: Rectangle { height: 1px; background: Tok.rule; }
+                                            if !root.settings-searching: HorizontalLayout {
                                                 alignment: start;
                                                 TextButton {
                                                     title: @tr("Reset");
@@ -2684,18 +2711,18 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
-                                        if root.settings-tab == 0: VerticalLayout {
+                                        if root.shows-group(0, []): VerticalLayout {
                                             spacing: 8px;
 
                                             // 追加要件 2026-09-15（書き手）: 表示の言語。言語の名前はその言語で書く
                                             // ——読めない言語で出ている画面から戻れるように。
-                                            Text {
-                                                text: @tr("LANGUAGE");
+                                            if root.shows-any([@tr("LANGUAGE"), @tr("Language")]): Text {
+                                                text: root.section-title(@tr("General"), @tr("LANGUAGE"));
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 letter-spacing: 0.9px;
                                             }
-                                            HorizontalLayout {
+                                            if root.shows-any([@tr("LANGUAGE"), @tr("Language")]): HorizontalLayout {
                                                 spacing: 6px;
                                                 height: 28px;
 
@@ -2748,10 +2775,10 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
                                             }
-                                            Rectangle { height: 12px; }
+                                            if !root.settings-searching: Rectangle { height: 12px; }
 
-                                            Text {
-                                                text: @tr("FILES");
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
+                                                text: root.section-title(@tr("General"), @tr("FILES"));
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -2761,7 +2788,7 @@ export component AppWindow inherits Window {
                                             // Offが何を意味するかを、同じ場所で言う**——「切ってある
                                             // 間は書かない」だけなら、置いてある古い退避が次の起動で
                                             // 戻ってきて、書き手の言ったこととちょうど逆になる。
-                                            HorizontalLayout {
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): HorizontalLayout {
                                                 spacing: 2px;
 
                                                 Text {
@@ -2782,7 +2809,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
-                                            Text {
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
                                                 text: root.autosave
                                                     ? @tr("Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing.")
                                                     : @tr("No backup. Turning it off also deletes the work copies.");
@@ -2790,7 +2817,7 @@ export component AppWindow inherits Window {
                                                 font-size: 11px;
                                                 overflow: elide;
                                             }
-                                            Text {
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
                                                 text: @tr("Ctrl+S writes to the original file.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
@@ -2802,8 +2829,8 @@ export component AppWindow inherits Window {
                                             // ファイルの話ではない——**画面とソースが食い違えば、書き手と
                                             // 私が別のものを指して話すことになる。**記法の読み書きは
                                             // ここから下である。
-                                            Text {
-                                                text: @tr("MARKUP");
+                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby"), @tr("Ruby markup"), @tr("Bullet marks")]): Text {
+                                                text: root.section-title(@tr("General"), @tr("MARKUP"));
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -2814,7 +2841,7 @@ export component AppWindow inherits Window {
                                             // ための字数はルビを含まず、打ち込んだ量を知りたいときは
                                             // 含む。編集器がどちらかに決めると、もう一方の用事の人が
                                             // 毎回数え直すことになる。
-                                            HorizontalLayout {
+                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby")]): HorizontalLayout {
                                                 spacing: 2px;
 
                                                 Text {
@@ -2834,7 +2861,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            Text {
+                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby")]): Text {
                                                 text: root.count-ruby
                                                     ? @tr("Ruby readings 《》 count toward the character count.")
                                                     : @tr("Ruby readings 《》 do not count toward the character count.");
@@ -2847,7 +2874,7 @@ export component AppWindow inherits Window {
                                             // ない**ので、切れなければ「この編集器でしか正しく見えない
                                             // 書き方」を書き手に強いることになる。ルビと傍点を1つの旗で
                                             // 切るのは、同じ記法の一族だからである。
-                                            HorizontalLayout {
+                                            if root.shows-any([@tr("MARKUP"), @tr("Ruby markup")]): HorizontalLayout {
                                                 spacing: 2px;
 
                                                 Text {
@@ -2867,7 +2894,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            Text {
+                                            if root.shows-any([@tr("MARKUP"), @tr("Ruby markup")]): Text {
                                                 text: root.ruby-marks
                                                     ? @tr("Reads ｜漢字《かんじ》 and 《《傍点》》 as markup.")
                                                     : @tr("Shows the marks as plain characters.");
@@ -2881,7 +2908,7 @@ export component AppWindow inherits Window {
                                             // 同格に扱う——**`-`も切れる**（「*も標準ということなら、扱いは
                                             // 同じであるべき」）。切った記号の行はただの本文になり、記号も
                                             // そのまま字として出る（原稿のバイト列は変えない）。
-                                            HorizontalLayout {
+                                            if root.shows-any([@tr("MARKUP"), @tr("Bullet marks")]): HorizontalLayout {
                                                 spacing: 2px;
 
                                                 Text {
@@ -2901,7 +2928,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            Text {
+                                            if root.shows-any([@tr("MARKUP"), @tr("Bullet marks")]): Text {
                                                 text: !root.bullet-marks[0] && !root.bullet-marks[1]
                                                     && !root.bullet-marks[2]
                                                     ? @tr("No bullet marks (every mark is plain text).")
@@ -2917,8 +2944,8 @@ export component AppWindow inherits Window {
 
                                             // 書き手の求め 2026-09-15: **全部を戻す口は General に1つ。**各面の Reset は
                                             // その面だけを戻す。単語帳とモードは書き手が作ったものなので戻さない。
-                                            Rectangle { height: 1px; background: Tok.rule; }
-                                            HorizontalLayout {
+                                            if !root.settings-searching: Rectangle { height: 1px; background: Tok.rule; }
+                                            if !root.settings-searching: HorizontalLayout {
                                                 alignment: start;
                                                 spacing: 10px;
                                                 TextButton {
@@ -2939,20 +2966,20 @@ export component AppWindow inherits Window {
                                         // 黒地で使う人が多く、要件9のシート（原稿の紙）と同じ値で決める
                                         // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
                                         // 無い。
-                                        if root.settings-tab == 1: VerticalLayout {
+                                        if root.shows-group(1, []): VerticalLayout {
                                             spacing: 8px;
 
                                             // 追加要件 2026-09-07: **書字方向を持たない設定はここ**。
                                             // 2026-09-08 からはこの面が丸ごとそれで、シートを選ぶ釦は
                                             // 隣の3面にある。
-                                            Text {
+                                            if root.shows-any([@tr("TERMINAL"), @tr("Default")]): Text {
                                                 text: @tr("TERMINAL");
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
                                             }
 
-                                            PickRow {
+                                            if root.shows-any([@tr("TERMINAL"), @tr("Default")]): PickRow {
                                                 label: @tr("Default");
                                                 value: root.terminal-shells[root.default-shell];
                                                 pressed => {
@@ -2996,13 +3023,13 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            Rectangle {
+                                            if !root.settings-searching: Rectangle {
                                                 height: 1px;
                                                 background: Tok.rule;
                                             }
 
-                                            Text {
-                                                text: @tr("APPEARANCE");
+                                            if root.shows-any([@tr("APPEARANCE"), @tr("Theme"), @tr("Background"), @tr("Text Color"), @tr("Font"), @tr("Size")]): Text {
+                                                text: root.section-title(@tr("Terminal"), @tr("APPEARANCE"));
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -3012,7 +3039,7 @@ export component AppWindow inherits Window {
                                             // 黒のままの画面は読めない——そこを通らせないために、2つを
                                             // 一度に決める道を先に出す。細かく決めたい人のために、下に
                                             // 1色ずつの行も残してある。
-                                            HorizontalLayout {
+                                            if root.shows-any([@tr("APPEARANCE"), @tr("Theme")]): HorizontalLayout {
                                                 spacing: 2px;
 
                                                 Text {
@@ -3037,7 +3064,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            ColorCell {
+                                            if root.shows-any([@tr("APPEARANCE"), @tr("Background")]): ColorCell {
                                                 label: @tr("Background");
                                                 shown: root.terminal-paper;
                                                 chosen(colour) => { root.colour-set(1, 0, colour); }
@@ -3045,7 +3072,7 @@ export component AppWindow inherits Window {
                                                 more => { root.colour-more(1, 0); }
                                             }
 
-                                            ColorCell {
+                                            if root.shows-any([@tr("APPEARANCE"), @tr("Text Color")]): ColorCell {
                                                 label: @tr("Text Color");
                                                 shown: root.terminal-ink;
                                                 chosen(colour) => { root.colour-set(1, 1, colour); }
@@ -3053,7 +3080,7 @@ export component AppWindow inherits Window {
                                                 more => { root.colour-more(1, 1); }
                                             }
 
-                                            PickRow {
+                                            if root.shows-any([@tr("APPEARANCE"), @tr("Font")]): PickRow {
                                                 label: @tr("Font");
                                                 value: root.terminal-font;
                                                 pressed => {
@@ -3062,7 +3089,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            StepRow {
+                                            if root.shows-any([@tr("APPEARANCE"), @tr("Size")]): StepRow {
                                                 label: @tr("Size");
                                                 value: root.terminal-size + " px";
                                                 stepped(by) => {
@@ -3072,7 +3099,7 @@ export component AppWindow inherits Window {
 
                                             // **16色は選ばせない**（要件 6.8）。選ばせれば16回選ぶことに
                                             // なり、しかも選び終えるまで読めない。
-                                            Text {
+                                            if root.shows-any([@tr("APPEARANCE"), @tr("Theme"), @tr("Background"), @tr("Text Color")]): Text {
                                                 text: @tr("The 16 SGR colors are chosen from the background brightness.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
@@ -3080,8 +3107,8 @@ export component AppWindow inherits Window {
                                             }
 
                                             // 書き手の求め 2026-09-15: **この面のResetは、この面だけを戻す。**
-                                            Rectangle { height: 1px; background: Tok.rule; }
-                                            HorizontalLayout {
+                                            if !root.settings-searching: Rectangle { height: 1px; background: Tok.rule; }
+                                            if !root.settings-searching: HorizontalLayout {
                                                 alignment: start;
                                                 TextButton {
                                                     title: @tr("Reset");
@@ -3097,11 +3124,11 @@ export component AppWindow inherits Window {
                                         //
                                         // **どのモードを使うかはここで決めない。**それは文書ごとの話で、
                                         // ステータスバーから選ぶ（要件 10）。ここは中身を作る場所である。
-                                        if root.settings-tab == 2: VerticalLayout {
+                                        if root.shows-group(2, [@tr("Words"), @tr("MODES"), @tr("New Mode"), @tr("New Group"), @tr("Import…"), @tr("Export…"), @tr("Edit…")]): VerticalLayout {
                                             spacing: 8px;
 
                                             Text {
-                                                text: @tr("MODES");
+                                                text: root.section-title(@tr("Words"), @tr("MODES"));
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
@@ -3662,16 +3689,16 @@ export component AppWindow inherits Window {
 
                                         // どの面にいても、値はいまのシートのもの——だから帯のすぐ
                                         // 下に在る（要件 9）。
-                                        if root.settings-tab == 3: VerticalLayout {
+                                        if root.shows-group(3, []): VerticalLayout {
                                             spacing: 20px;
                                             // 追加要件 2026-09-15: **背景を変えるたびに文字色を1つずつ
                                             // 選び直さない。**セットは両方のシートの文字色をまとめて持つ
                                             // ——背景を変えれば、横書きも縦書きも読めなくなるので。
                                             // 形は書き手の選択（一覧＋ボタン）。
-                                            VerticalLayout {
+                                            if root.shows-any([@tr("COLOR SETS"), @tr("Save to…")]): VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: @tr("COLOR SETS");
+                                                    text: root.section-title(@tr("Text"), @tr("COLOR SETS"));
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -3789,8 +3816,8 @@ export component AppWindow inherits Window {
                                             // 頼む——Rustはそれを「どのシートの値か」として読む。
                                             for sheet-index in [0, 1]: VerticalLayout {
                                                 spacing: 8px;
-                                                Text {
-                                                    text: sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL");
+                                                if root.shows-any([@tr("Same as Horizontal"), "Body", "H1", "H2", "H3", "H4", "H5", "H6", @tr("Code Font"), @tr("Font"), @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): Text {
+                                                    text: root.section-title(@tr("Text"), sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL"));
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -3798,7 +3825,7 @@ export component AppWindow inherits Window {
 
                                                 // 追加要件 2026-09-15（書き手）: 縦書きを横書きに合わせる（この面の値）。
                                                 // On の間は縦書きだけにある設定だけを出す。
-                                                if sheet-index == 1: HorizontalLayout {
+                                                if (sheet-index == 1) && (root.shows-any([@tr("Same as Horizontal")])): HorizontalLayout {
                                                     spacing: 6px;
                                                     height: 28px;
 
@@ -3825,7 +3852,7 @@ export component AppWindow inherits Window {
                                                     // family. The numbers are the rows of the models — ten numbers,
                                                     // eight colours and eight families to a sheet — and the same
                                                     // numbers are what the callbacks carry.
-                                                    TextRow {
+                                                    if root.shows-any(["Body", @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): TextRow {
                                                         label: "Body";
                                                         number: root.sheet-numbers[sheet-index * root.sheet-stride];
                                                         unit: "px";
@@ -3857,7 +3884,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    TextRow {
+                                                    if root.shows-any(["H1", @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): TextRow {
                                                         label: "H1";
                                                         number: root.sheet-numbers[sheet-index * root.sheet-stride + 4];
                                                         unit: "%";
@@ -3889,7 +3916,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    TextRow {
+                                                    if root.shows-any(["H2", @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): TextRow {
                                                         label: "H2";
                                                         number: root.sheet-numbers[sheet-index * root.sheet-stride + 5];
                                                         unit: "%";
@@ -3921,7 +3948,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    TextRow {
+                                                    if root.shows-any(["H3", @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): TextRow {
                                                         label: "H3";
                                                         number: root.sheet-numbers[sheet-index * root.sheet-stride + 6];
                                                         unit: "%";
@@ -3953,7 +3980,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    TextRow {
+                                                    if root.shows-any(["H4", @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): TextRow {
                                                         label: "H4";
                                                         number: root.sheet-numbers[sheet-index * root.sheet-stride + 7];
                                                         unit: "%";
@@ -3985,7 +4012,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    TextRow {
+                                                    if root.shows-any(["H5", @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): TextRow {
                                                         label: "H5";
                                                         number: root.sheet-numbers[sheet-index * root.sheet-stride + 8];
                                                         unit: "%";
@@ -4017,7 +4044,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    TextRow {
+                                                    if root.shows-any(["H6", @tr("Color"), @tr("Default Color"), @tr("Bold"), @tr("Italic"), @tr("Strikethrough"), @tr("Rule"), @tr("Paper"), @tr("Same as Paper")]): TextRow {
                                                         label: "H6";
                                                         number: root.sheet-numbers[sheet-index * root.sheet-stride + 9];
                                                         unit: "%";
@@ -4051,7 +4078,7 @@ export component AppWindow inherits Window {
 
                                                     // 書き手の求め 2026-09-15: **コードの書体も文字の設定。**本文・見出しの
                                                     // 書体と同じ面に置く（紙の面にあったのはおかしい）。
-                                                    PickRow {
+                                                    if root.shows-any([@tr("Code Font"), @tr("Font")]): PickRow {
                                                         label: @tr("Code Font");
                                                         value: root.sheet-fonts[sheet-index * 8 + 7];
                                                         pressed => {
@@ -4063,7 +4090,7 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
-                                        if root.settings-tab == 4: VerticalLayout {
+                                        if root.shows-group(4, []): VerticalLayout {
                                             spacing: 20px;
                                             // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
                                             // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
@@ -4071,8 +4098,8 @@ export component AppWindow inherits Window {
                                             // 頼む——Rustはそれを「どのシートの値か」として読む。
                                             for sheet-index in [0, 1]: VerticalLayout {
                                                 spacing: 8px;
-                                                Text {
-                                                    text: sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL");
+                                                if root.shows-any([@tr("Same as Horizontal"), @tr("Line height"), @tr("Column gap"), @tr("Char advance"), @tr("Page margin"), @tr("Wrap"), @tr("Width"), @tr("Pane"), @tr("Line length"), @tr("Line numbers"), @tr("Show spaces and line breaks"), @tr("Ruby size"), @tr("Ruby position"), @tr("Tate-chu-yoko"), @tr("Bullet marks")]): Text {
+                                                    text: root.section-title(@tr("Layout"), sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL"));
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4080,7 +4107,7 @@ export component AppWindow inherits Window {
 
                                                 // 追加要件 2026-09-15（書き手）: 縦書きを横書きに合わせる（この面の値）。
                                                 // On の間は縦書きだけにある設定だけを出す。
-                                                if sheet-index == 1: HorizontalLayout {
+                                                if (sheet-index == 1) && (root.shows-any([@tr("Same as Horizontal")])): HorizontalLayout {
                                                     spacing: 6px;
                                                     height: 28px;
 
@@ -4107,7 +4134,7 @@ export component AppWindow inherits Window {
                                                     // 列間隔 in vertical writing. **One quantity, two names**: the
                                                     // label follows the sheet, because on this sheet that is what
                                                     // it is.
-                                                    StepRow {
+                                                    if root.shows-any([@tr("Line height"), @tr("Column gap")]): StepRow {
                                                         label: sheet-index == 0 ? @tr("Line height") : @tr("Column gap");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 1] + "%";
                                                         stepped(by) => {
@@ -4115,7 +4142,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    StepRow {
+                                                    if root.shows-any([@tr("Char advance")]): StepRow {
                                                         label: @tr("Char advance");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 2] + "%";
                                                         stepped(by) => {
@@ -4123,7 +4150,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    StepRow {
+                                                    if root.shows-any([@tr("Page margin")]): StepRow {
                                                         label: @tr("Page margin");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 3] + " px";
                                                         stepped(by) => {
@@ -4137,7 +4164,7 @@ export component AppWindow inherits Window {
                                                     // "both on" is not a state this can reach — and pressing the
                                                     // one that is on turns it off, which is how the writer says
                                                     // "neither" without a button for it.
-                                                    HorizontalLayout {
+                                                    if root.shows-any([@tr("Wrap"), @tr("Width"), @tr("Pane"), @tr("Line length")]): HorizontalLayout {
                                                         spacing: 2px;
 
                                                         Text {
@@ -4187,7 +4214,7 @@ export component AppWindow inherits Window {
                                                     // In characters of body text, because that is what a line
                                                     // length means: the number stays true when the body size or the
                                                     // zoom changes, and a width in pixels would not.
-                                                    if root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 1: StepRow {
+                                                    if (root.sheet-numbers[sheet-index * root.sheet-stride + 10] == 1) && (root.shows-any([@tr("Wrap"), @tr("Line length")])): StepRow {
                                                         label: @tr("Line length");
                                                         value: @tr("{} chars", root.sheet-numbers[sheet-index * root.sheet-stride + 11]);
                                                         stepped(by) => {
@@ -4198,7 +4225,7 @@ export component AppWindow inherits Window {
                                                     // 要件 9（2026-09-07追加）: 行番号。**どちらの面にも置く**
                                                     // ——横書きでは行の頭の余白に、縦書きでは列の頭（面の上端）に、
                                                     // 同じ形で立つ。数字はどちらでも正立させる。
-                                                    HorizontalLayout {
+                                                    if root.shows-any([@tr("Line numbers")]): HorizontalLayout {
                                                         spacing: 2px;
 
                                                         Text {
@@ -4225,7 +4252,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    HorizontalLayout {
+                                                    if root.shows-any([@tr("Show spaces and line breaks")]): HorizontalLayout {
                                                         Text {
                                                             text: @tr("Show spaces and line breaks");
                                                             color: Tok.ink;
@@ -4247,7 +4274,7 @@ export component AppWindow inherits Window {
                                                     // ルビの置き場所そのものが違うので、読める大きさも同じとは
                                                     // 限らない。位置は0が行の箱の端（行間の空きの外側）で、
                                                     // 上げるほど字に近づく。
-                                                    StepRow {
+                                                    if root.shows-any([@tr("Ruby size")]): StepRow {
                                                         label: @tr("Ruby size");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 13] + "%";
                                                         stepped(by) => {
@@ -4255,7 +4282,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    StepRow {
+                                                    if root.shows-any([@tr("Ruby position")]): StepRow {
                                                         label: @tr("Ruby position");
                                                         value: root.sheet-numbers[sheet-index * root.sheet-stride + 14] + "%";
                                                         stepped(by) => {
@@ -4269,7 +4296,7 @@ export component AppWindow inherits Window {
                                                     // **縦書きのシートにだけ出す**——縦中横は縦書きの中でしか
                                                     // 起きないので、横書きの面に置けば「押しても何も起きない
                                                     // 切り替え」になる。
-                                                    if sheet-index == 1: HorizontalLayout {
+                                                    if (sheet-index == 1) && (root.shows-any([@tr("Tate-chu-yoko")])): HorizontalLayout {
                                                         spacing: 2px;
 
                                                         Text {
@@ -4296,7 +4323,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                if sheet-index == 0 || !root.layout-shared: VerticalLayout {
+                                                if (sheet-index == 0 || !root.layout-shared) && (root.shows-any([@tr("Bullet marks")])): VerticalLayout {
                                                     spacing: 8px;
                                                     // 書き手の決定 2026-09-11: **原稿の記号ごとに、画面へ出る字。**
                                                     // 「三種類の文字に箇条書きの意味を与え、それぞれに、表現として
@@ -4351,14 +4378,14 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
-                                        if root.settings-tab == 5: VerticalLayout {
+                                        if root.shows-group(5, []): VerticalLayout {
                                             spacing: 20px;
                                             // 追加要件 2026-09-15（書き手）: 新しく開いたTABにランダムな紙の色。
                                             // 淡色か濃色かを選ぶ。個別に色を付けたTAB・Paneには効かない。
-                                            VerticalLayout {
+                                            if root.shows-any([@tr("NEW TABS"), @tr("Random Background")]): VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: @tr("NEW TABS");
+                                                    text: root.section-title(@tr("Page"), @tr("NEW TABS"));
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4386,10 +4413,10 @@ export component AppWindow inherits Window {
                                             }
                                             // 追加要件 2026-09-15（書き手）: 背景の壁紙。全体の設定だけ。
                                             // Windowsの壁紙は画面に固定して敷く（窓越しにデスクトップが見える感じ）。
-                                            VerticalLayout {
+                                            if root.shows-any([@tr("BACKGROUND IMAGE"), @tr("Image"), @tr("Fit"), @tr("Image Strength"), @tr("Windows Wallpaper"), @tr("Image File"), @tr("Tile"), @tr("Fit Height"), @tr("Fit Width")]): VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: @tr("BACKGROUND IMAGE");
+                                                    text: root.section-title(@tr("Page"), @tr("BACKGROUND IMAGE"));
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4495,8 +4522,8 @@ export component AppWindow inherits Window {
                                             // 頼む——Rustはそれを「どのシートの値か」として読む。
                                             for sheet-index in [0, 1]: VerticalLayout {
                                                 spacing: 8px;
-                                                Text {
-                                                    text: sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL");
+                                                if root.shows-any([@tr("Same as Horizontal"), @tr("Paper Color"), @tr("Paper")]): Text {
+                                                    text: root.section-title(@tr("Page"), sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL"));
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
@@ -4504,7 +4531,7 @@ export component AppWindow inherits Window {
 
                                                     // 追加要件 2026-09-15（書き手）: 縦書きの紙を横書きに合わせる。
                                                     // On の間は縦書きの色の欄を出さない（選んでも効かない欄を置かない）。
-                                                    if sheet-index == 1: HorizontalLayout {
+                                                    if (sheet-index == 1) && (root.shows-any([@tr("Same as Horizontal")])): HorizontalLayout {
                                                         spacing: 6px;
                                                         height: 28px;
 
@@ -4527,7 +4554,7 @@ export component AppWindow inherits Window {
 
                                                     // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない。
                                                     // （コードの書体は 2026-09-15 に Text へ移した。）
-                                                    if sheet-index == 0 || !root.paper-shared: ColorCell {
+                                                    if (sheet-index == 0 || !root.paper-shared) && (root.shows-any([@tr("Paper Color"), @tr("Paper")])): ColorCell {
                                                         label: @tr("Paper Color");
                                                         shown: root.palette[sheet-index * 15 + 7];
                                                         chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 7, colour); }
@@ -4540,7 +4567,7 @@ export component AppWindow inherits Window {
 
                                         // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
                                         // なので、書式の面にだけ置く。General の2つはこれで戻らない。
-                                        if root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
+                                        if !root.settings-searching && root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
                                             spacing: 8px;
 
                                             Rectangle {

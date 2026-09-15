@@ -1593,7 +1593,8 @@ export component EditorPane inherits Rectangle {
                             horizontal-stretch: 1;
                             min-width: 70px;
                             max-width: 230px;
-                            placeholder: @tr("Find");
+                            // 設定のTABでは設定を探す欄になる（書き手の求め 2026-09-15）。語の数え方や前後の移動は使わない。
+                            placeholder: root.settings ? @tr("Search settings") : @tr("Find");
                             text <=> root.find-needle;
                             // At `init` because the bar is built when it opens,
                             // and on the generation because asking for it again
@@ -1638,7 +1639,7 @@ export component EditorPane inherits Rectangle {
 
                         // E1: 探し方の3つ。**語の隣に置く**——いま何件と
                         // 言っているかは、この3つで変わるからである。
-                        ToggleChip {
+                        if !root.settings: ToggleChip {
                             title: "Aa";
                             tip: @tr("Match case");
                             checked: root.find-match-case;
@@ -1646,7 +1647,7 @@ export component EditorPane inherits Rectangle {
                                 root.find-option(0);
                             }
                         }
-                        ToggleChip {
+                        if !root.settings: ToggleChip {
                             title: "W";
                             tip: @tr("Whole word");
                             checked: root.find-whole-word;
@@ -1654,7 +1655,7 @@ export component EditorPane inherits Rectangle {
                                 root.find-option(1);
                             }
                         }
-                        ToggleChip {
+                        if !root.settings: ToggleChip {
                             title: "[ ]";
                             tip: @tr("In selection");
                             checked: root.find-in-scope;
@@ -1665,7 +1666,7 @@ export component EditorPane inherits Rectangle {
                         // E1（書き手の求め 2026-09-10）: 正規表現。**ワイルド
                         // カードもこれで書ける**（`*`は`.*`、`?`は`.`）ので、
                         // 切り替えは1つにしてある。
-                        ToggleChip {
+                        if !root.settings: ToggleChip {
                             title: ".*";
                             tip: @tr("Regular expression");
                             checked: root.find-regex;
@@ -1674,7 +1675,7 @@ export component EditorPane inherits Rectangle {
                             }
                         }
 
-                        IconButton {
+                        if !root.settings: IconButton {
                             horizontal-stretch: 0;
                             icon: Icons.up;
                             tip: @tr("Previous");
@@ -1682,7 +1683,7 @@ export component EditorPane inherits Rectangle {
                                 root.find-step(false);
                             }
                         }
-                        IconButton {
+                        if !root.settings: IconButton {
                             horizontal-stretch: 0;
                             icon: Icons.down;
                             tip: @tr("Next");
@@ -1709,7 +1710,7 @@ export component EditorPane inherits Rectangle {
                     }
                 }
 
-                if root.find-replacing: Rectangle {
+                if root.find-replacing && !root.settings: Rectangle {
                     height: 34px;
 
                     HorizontalLayout {
