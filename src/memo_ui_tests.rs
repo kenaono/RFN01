@@ -815,10 +815,21 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert_eq!(saves.get(), 1, "new binding dispatches save");
     window.invoke_shortcut_save(true);
     assert_eq!(window.get_shortcut_keys().row_data(1).unwrap(), "Ctrl+S");
-    window.set_shortcut_category(5);
     window.set_shortcut_query("".into());
     window.invoke_shortcut_filter();
-    assert_eq!(window.get_shortcut_rows().row_count(), 12);
+    let keys_in = |category: i32| {
+        window
+            .get_shortcut_rows()
+            .iter()
+            .filter(|row| !row.header && row.category == category)
+            .count()
+    };
+    assert_eq!(keys_in(5), 12);
+    // A folded group keeps its heading and hides its keys.
+    window.invoke_shortcut_fold(5);
+    assert_eq!(keys_in(5), 0);
+    window.invoke_shortcut_fold(5);
+    assert_eq!(keys_in(5), 12);
     window.set_shortcut_selected(24);
     window.invoke_shortcut_capture("k".into(), true, true, false);
     window.invoke_shortcut_save(false);
@@ -846,7 +857,6 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert_eq!(drafts.get(), 1);
     window.invoke_shortcut_save(true);
     window.set_shortcut_selected(1);
-    window.set_shortcut_category(0);
     let modes = Rc::new(RefCell::new(Vec::new()));
     let received = modes.clone();
     window.on_pane_direction_toggled(move |_| received.borrow_mut().push("direction"));
@@ -907,9 +917,36 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     window.set_shortcut_selected(1);
     window.set_shortcut_query("保存".into());
     window.invoke_shortcut_filter();
-    assert_eq!(window.get_shortcut_rows().row_count(), 2);
+    assert_eq!(
+        window
+            .get_shortcut_rows()
+            .iter()
+            .filter(|row| !row.header)
+            .count(),
+        2
+    );
+    // Pressing a key finds what it is bound to, fixed keys included.
+    window.set_shortcut_query("".into());
+    window.invoke_shortcut_key_search("o".into(), true, false, false);
+    let found: Vec<_> = window
+        .get_shortcut_rows()
+        .iter()
+        .filter(|row| !row.header)
+        .map(|row| row.name.to_string())
+        .collect();
+    assert_eq!(found, ["ファイルを開く"]);
+    window.invoke_shortcut_key_search("v".into(), true, false, false);
+    assert_eq!(
+        window
+            .get_shortcut_rows()
+            .iter()
+            .filter(|row| !row.header && row.fixed)
+            .count(),
+        3
+    );
+    window.set_shortcut_key_query("".into());
+    window.invoke_shortcut_filter();
     if let Ok(output) = std::env::var("EDITOR_SHORTCUT_SNAPSHOT") {
-        window.set_shortcut_category(6);
         window.set_shortcut_query("".into());
         window.invoke_shortcut_filter();
         window.set_settings_tab(6);

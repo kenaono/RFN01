@@ -98,6 +98,42 @@ const CATEGORIES: &[i32] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
     5, 0, 0, 0, 0, 0, 6, 6, 6, 6, 4, 4, 4,
 ];
+/// Keys の面の分類（書き手の求め 2026-09-15：タブで切り替えず、全部を並べて
+/// 分類ごとに畳めるように）。番号は[`CATEGORIES`]の値。
+const CATEGORY_NAMES: [&str; 7] = [
+    "本文の操作",
+    "基本編集",
+    "Terminal",
+    "入力欄",
+    "Pane・TAB",
+    "Emacs",
+    "Quick Draft",
+];
+const CATEGORY_NOTES: [&str; 7] = [
+    "本文にフォーカスがあり、IME変換中でないときに有効です。",
+    "固定 · 本文の編集時に使います。Viewerでは編集できません。",
+    "固定 · Terminalにフォーカスがあるときに有効です。その他のキーは実行中のシェル・プログラムへ渡します。",
+    "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。Enter・Escの動作は入力欄ごとの用途に従います。",
+    "本文からのPane・TAB操作です。Terminal内のキーは固定です。",
+    "本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。",
+    "本文から開く操作と、Quick Draft内の操作を区別します。",
+];
+/// 変えられないキー。**同じ一覧に並べる**——「このキーは何か」を探す書き手に
+/// とって、変えられるかどうかは探したあとの話である。
+const FIXED: &[(i32, &str, &str)] = &[
+    (1, "コピー", "Ctrl+C"),
+    (1, "切り取り", "Ctrl+X"),
+    (1, "貼り付け", "Ctrl+V"),
+    (1, "全選択", "Ctrl+A"),
+    (2, "選択した文字をコピー", "Ctrl+Shift+C"),
+    (2, "貼り付け", "Ctrl+V"),
+    (2, "下段を表示・閉じる", "Ctrl+`"),
+    (2, "下段から本文へ戻る", "Ctrl+Alt+Up"),
+    (3, "コピー", "Ctrl+C"),
+    (3, "切り取り", "Ctrl+X"),
+    (3, "貼り付け", "Ctrl+V"),
+    (3, "全選択", "Ctrl+A"),
+];
 /// 追加要件 2026-09-14: 設定のTABが前にあるときに通す操作。**TABとペインを
 /// 移る・閉じる・開く**だけで、本文に効くもの（保存・検索・Undo・字の編集）は
 /// 通さない——設定のTABの下にあるのは代役の空文書で、保存すれば空の無題が
@@ -234,25 +270,72 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
         -1
     }
 }
+/// The Keys page's list: a heading row per group, and under an open one its
+/// keys (書き手の求め 2026-09-15).
+///
+/// **One flat list**, like the tree: the window draws rows and the rows say
+/// what they are. While the writer is searching — by name or by pressing a key
+/// — every group with something to show is open and the others are left out,
+/// because a fold hiding the one match is a search that found nothing.
 fn publish(app: &AppWindow) {
     let keys = bindings(&app.get_shortcut_bindings());
     let query = app.get_shortcut_query().to_lowercase();
-    app.set_shortcut_rows(ModelRc::new(VecModel::from(
-        NAMES
+    let key_query = app.get_shortcut_key_query().to_string();
+    let folded = app.get_shortcut_folded();
+    let searching = !query.is_empty() || !key_query.is_empty();
+    let matches = |name: &str, key: &str| {
+        (query.is_empty()
+            || name.to_lowercase().contains(&query)
+            || key.to_lowercase().contains(&query))
+            && (key_query.is_empty() || key == key_query)
+    };
+    let mut rows = Vec::new();
+    for (category, title) in CATEGORY_NAMES.iter().enumerate() {
+        let category = category as i32;
+        let changeable = NAMES
             .iter()
             .enumerate()
-            .filter(|(i, name)| {
-                CATEGORIES[*i] == app.get_shortcut_category()
-                    && (name.to_lowercase().contains(&query)
-                        || keys[*i].to_lowercase().contains(&query))
+            .filter(|(i, _)| CATEGORIES[*i] == category)
+            .map(|(i, name)| (i as i32, *name, keys[i].as_str(), false));
+        let fixed = FIXED
+            .iter()
+            .filter(|(owner, _, _)| *owner == category)
+            .map(|(_, name, key)| (-1, *name, *key, true));
+        let items: Vec<ShortcutItem> = changeable
+            .chain(fixed)
+            .filter(|(_, name, key, _)| matches(name, key))
+            .map(|(id, name, key, fixed)| ShortcutItem {
+                id,
+                name: name.into(),
+                key: key.into(),
+                header: false,
+                category,
+                open: true,
+                fixed,
+                note: Default::default(),
+                count: 0,
             })
-            .map(|(i, name)| ShortcutItem {
-                id: i as i32,
-                name: (*name).into(),
-                key: keys[i].clone().into(),
-            })
-            .collect::<Vec<_>>(),
-    )));
+            .collect();
+        if searching && items.is_empty() {
+            continue;
+        }
+        let open = searching || folded & (1 << category) == 0;
+        rows.push(ShortcutItem {
+            id: -1,
+            name: (*title).into(),
+            key: Default::default(),
+            header: true,
+            category,
+            open,
+            fixed: false,
+            note: CATEGORY_NOTES[category as usize].into(),
+            count: items.len() as i32,
+        });
+        if open {
+            rows.extend(items);
+        }
+    }
+    app.set_shortcut_rows(ModelRc::new(VecModel::from(rows)));
     app.set_shortcut_keys(ModelRc::new(VecModel::from(
         keys.into_iter()
             .map(Into::into)
@@ -266,6 +349,30 @@ pub fn wire(app: &AppWindow, live: &Live) {
         if let Some(app) = weak.upgrade() {
             publish(&app);
         }
+    });
+    // 書き手の求め 2026-09-15: 分類を畳む・開く。
+    let weak = app.as_weak();
+    app.on_shortcut_fold(move |category| {
+        if let Some(app) = weak.upgrade() {
+            app.set_shortcut_folded(app.get_shortcut_folded() ^ (1 << category.clamp(0, 30)));
+            publish(&app);
+        }
+    });
+    // 書き手の求め 2026-09-15: **キーを押して探す。**「CTRL+O」と打つと綴りを
+    // 間違えるので、割り当てるときと同じように押したキーをそのまま取り込む。
+    let weak = app.as_weak();
+    app.on_shortcut_key_search(move |text, control, alt, shift| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if modifier_only(&text) {
+            return;
+        }
+        let Some(key) = chord(&text, control, alt, shift) else {
+            return;
+        };
+        app.set_shortcut_key_query(key.into());
+        publish(&app);
     });
     let weak = app.as_weak();
     app.on_shortcut_capture(move |text, control, alt, shift| {

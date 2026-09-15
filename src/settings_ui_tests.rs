@@ -197,6 +197,11 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
         for group in 0..7 {
             window.set_settings_tab(group);
             if group == 6 {
+                for category in 0..4 {
+                    window.invoke_shortcut_fold(category);
+                }
+                window.set_shortcut_selected(11);
+                window.set_shortcut_edit("Ctrl+Tab".into());
                 window.invoke_shortcut_filter();
             }
             slint::platform::update_timers_and_animations();
