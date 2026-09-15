@@ -66,6 +66,11 @@ struct PreviewLine {
     /// What is marked inside this line, in UTF-16 units within `visible`
     /// (要件 7.3.2). Empty for the active line, which is shown as its source.
     marks: Vec<Emphasis>,
+    /// 段落の前後の行から持ち越した記号（書き手の判断 2026-09-15）。**`active`と同じ理由で持つ**——
+    /// 前の行で開いた`**`は、この行の字を1つも変えずに、この行の組み方を変える。
+    context: LineContext,
+    /// この行を1行だけで読んだとき、開いて閉じなかった記号。行の字が変わらなければ読み直さない。
+    unclosed: Vec<(usize, &'static str)>,
 }
 
 impl PreviewLine {
@@ -81,6 +86,8 @@ impl PreviewLine {
         style: LineStyle,
         has_break: bool,
         reading: Reading,
+        context: LineContext,
+        unclosed: Vec<(usize, &'static str)>,
     ) -> Self {
         let mut visible = String::with_capacity(source_line.len() + 1);
         let mut marks = Vec::new();
@@ -97,9 +104,16 @@ impl PreviewLine {
             // （`Ornament::Markup`）ので、記号は見えたままである。
             marker = active_markup(source_line, style);
             // 書き手の求め 2026-09-15: **記号は隠さず、ただし太字として見える。**
-            marks = active_marks(source_line, style, reading);
+            marks = active_marks(source_line, style, reading, &context);
         } else {
-            push_visible_line(source_line, style, &mut visible, &mut marks, reading);
+            push_visible_line_in(
+                source_line,
+                style,
+                &mut visible,
+                &mut marks,
+                reading,
+                &context,
+            );
             marker = line_marker(source_line, style);
         }
         let mut source = String::with_capacity(source_line.len() + 1);
@@ -162,6 +176,8 @@ impl PreviewLine {
             preview_byte,
             graphemes,
             marks,
+            context,
+            unclosed,
         }
     }
 
@@ -264,13 +280,51 @@ impl PreviewDocument {
         let styles = line_styles_as(source, reading.bullets);
         let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
         let last = lines.len() - 1;
-        let matches = |kept: &PreviewLine, index: usize, line: &str| {
+        let same_text = |kept: &PreviewLine, index: usize, line: &str| {
             let has_break = index != last;
+            kept.source.len() == line.len() + usize::from(has_break)
+                && kept.source.starts_with(line)
+        };
+        // 書き手の判断 2026-09-15: 段落の中で改行をまたぐ記号。1行だけで読んだ閉じない記号は、
+        // 字の変わらない行なら取っておいたものを使う（前後から揃っているところまで）。
+        let text_head = self
+            .lines
+            .iter()
+            .enumerate()
+            .zip(&lines)
+            .take_while(|((index, kept), line)| same_text(kept, *index, line))
+            .count();
+        let text_rest = lines.len().min(self.lines.len()) - text_head;
+        let text_tail = (0..text_rest)
+            .take_while(|back| {
+                let index = lines.len() - 1 - back;
+                same_text(
+                    &self.lines[self.lines.len() - 1 - back],
+                    index,
+                    lines[index],
+                )
+            })
+            .count();
+        let unclosed = (0..lines.len())
+            .map(|index| {
+                if index < text_head {
+                    self.lines[index].unclosed.clone()
+                } else if index >= lines.len() - text_tail {
+                    self.lines[self.lines.len() - (lines.len() - index)]
+                        .unclosed
+                        .clone()
+                } else {
+                    standalone_unclosed(lines[index], reading)
+                }
+            })
+            .collect::<Vec<_>>();
+        let contexts = paragraph_contexts(&lines, style_at, &unclosed, reading);
+        let matches = |kept: &PreviewLine, index: usize, line: &str| {
             let active = active_index == Some(index);
             kept.active == active
                 && kept.style == style_at(index)
-                && kept.source.len() == line.len() + usize::from(has_break)
-                && kept.source.starts_with(line)
+                && kept.context == contexts[index]
+                && same_text(kept, index, line)
         };
 
         let shared_head = self
@@ -302,6 +356,8 @@ impl PreviewDocument {
                     style_at(index),
                     index != last,
                     reading,
+                    contexts[index].clone(),
+                    unclosed[index].clone(),
                 )
             })
             .collect::<Vec<PreviewLine>>();
@@ -480,16 +536,26 @@ struct LineCounts {
     /// literal line is counted as it was written, and a `> ` inside a fence is
     /// a character of code rather than a marker that comes off.
     style: LineStyle,
+    /// 段落の前後から持ち越した記号と、1行だけで読んだときの閉じない記号（`PreviewLine`と同じ）。
+    context: LineContext,
+    unclosed: Vec<(usize, &'static str)>,
 }
 
 impl LineCounts {
-    fn of(line: &str, style: LineStyle, reading: Reading) -> Self {
+    fn of(
+        line: &str,
+        style: LineStyle,
+        reading: Reading,
+        context: LineContext,
+        unclosed: Vec<(usize, &'static str)>,
+    ) -> Self {
         let mut visible = String::with_capacity(line.len());
         // The counts are about how much text there is, not how it is set.
         // **印は要る**（要件 7.8）：ルビの読みは本文に居残るので、どこからどこ
         // までが読みかを言えるのは印だけである。
         let mut marks = Vec::new();
-        push_visible_line(line, style, &mut visible, &mut marks, reading);
+        // 書き手の判断 2026-09-15: 行をまたぐ太字の記号は、画面と同じく本文に数えない。
+        push_visible_line_in(line, style, &mut visible, &mut marks, reading, &context);
         Self {
             source_graphemes: line.graphemes(true).count(),
             body_graphemes: visible.graphemes(true).count(),
@@ -497,6 +563,8 @@ impl LineCounts {
             characters: line.chars().count(),
             style,
             text: line.to_owned(),
+            context,
+            unclosed,
         }
     }
 }
@@ -542,8 +610,39 @@ impl DocumentCounts {
         // part of what makes a kept line still usable.
         let styles = line_styles_as(source, reading.bullets);
         let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
+        // 書き手の判断 2026-09-15: 段落の中で改行をまたぐ記号（`PreviewDocument::refresh`と同じ）。
+        let same_text = |kept: &LineCounts, line: &str| kept.text == *line;
+        let text_head = self
+            .lines
+            .iter()
+            .zip(&lines)
+            .take_while(|(kept, line)| same_text(kept, line))
+            .count();
+        let text_rest = lines.len().min(self.lines.len()) - text_head;
+        let text_tail = (0..text_rest)
+            .take_while(|back| {
+                same_text(
+                    &self.lines[self.lines.len() - 1 - back],
+                    lines[lines.len() - 1 - back],
+                )
+            })
+            .count();
+        let unclosed = (0..lines.len())
+            .map(|index| {
+                if index < text_head {
+                    self.lines[index].unclosed.clone()
+                } else if index >= lines.len() - text_tail {
+                    self.lines[self.lines.len() - (lines.len() - index)]
+                        .unclosed
+                        .clone()
+                } else {
+                    standalone_unclosed(lines[index], reading)
+                }
+            })
+            .collect::<Vec<_>>();
+        let contexts = paragraph_contexts(&lines, style_at, &unclosed, reading);
         let matches = |kept: &LineCounts, index: usize, line: &str| {
-            kept.text == *line && kept.style == style_at(index)
+            kept.text == *line && kept.style == style_at(index) && kept.context == contexts[index]
         };
         let shared_head = self
             .lines
@@ -563,7 +662,15 @@ impl DocumentCounts {
 
         let changed = shared_head..lines.len() - shared_tail;
         let replacement = changed
-            .map(|index| LineCounts::of(lines[index], style_at(index), reading))
+            .map(|index| {
+                LineCounts::of(
+                    lines[index],
+                    style_at(index),
+                    reading,
+                    contexts[index].clone(),
+                    unclosed[index].clone(),
+                )
+            })
             .collect::<Vec<LineCounts>>();
         let removed = shared_head..self.lines.len() - shared_tail;
         self.lines.splice(removed, replacement);
@@ -2014,13 +2121,21 @@ fn visible_markdown_text_with_active_line(
     let styles = line_styles(source);
     let mut visible = String::with_capacity(source.len());
     let mut line_start = 0;
+    let all = source.lines().collect::<Vec<_>>();
+    let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
+    let unclosed = all
+        .iter()
+        .map(|line| standalone_unclosed(line, reading))
+        .collect::<Vec<_>>();
+    let contexts = paragraph_contexts(&all, style_at, &unclosed, reading);
 
     for (index, line) in source.lines().enumerate() {
         if active_line_start == Some(line_start) {
             visible.push_str(line);
         } else {
-            let style = styles.get(index).copied().unwrap_or_default();
-            push_visible_line(line, style, &mut visible, &mut Vec::new(), reading);
+            let style = style_at(index);
+            let context = &contexts[index];
+            push_visible_line_in(line, style, &mut visible, &mut Vec::new(), reading, context);
         }
         visible.push('\n');
         line_start += line.len() + 1;
@@ -2200,6 +2315,20 @@ fn push_marked(
     at: &mut u32,
     reading: Reading,
 ) {
+    push_marked_recording(content, visible, marks, at, reading, None);
+}
+
+/// [`push_marked`]に、**その行で開いて閉じなかった記号**を書き留める口を足したもの（書き手の判断
+/// 2026-09-15：太字などは標準どおり、同じ段落の中なら改行をまたぐ）。書き留めるのは一番外側だけで、
+/// 位置は`content`の中のバイト。
+fn push_marked_recording(
+    content: &str,
+    visible: &mut String,
+    marks: &mut Vec<Emphasis>,
+    at: &mut u32,
+    reading: Reading,
+    mut unclosed: Option<&mut Vec<(usize, &'static str)>>,
+) {
     let mut rest = content;
     let mut previous = None;
     while let Some(letter) = rest.chars().next() {
@@ -2355,11 +2484,234 @@ fn push_marked(
             rest = after;
             continue;
         }
+        // 開けるのに閉じる相手が行に無い記号。**字として残す**のは今までどおりで、あとで段落の
+        // 次の行が閉じるかを見るために、位置だけを書き留める（`paragraph_contexts`）。
+        if let Some(record) = unclosed.as_deref_mut()
+            && let Some(marker) = unclosed_opener(rest, previous)
+        {
+            record.push((content.len() - rest.len(), marker));
+            for character in marker.chars() {
+                visible.push(character);
+                *at += character.len_utf16() as u32;
+            }
+            previous = marker.chars().next_back();
+            rest = &rest[marker.len()..];
+            continue;
+        }
         visible.push(letter);
         *at += letter.len_utf16() as u32;
         previous = Some(letter);
         rest = &rest[letter.len_utf8()..];
     }
+}
+
+/// 開ける形をしている記号（[`opens_here`]と同じ決まり：後ろが空白でなく、`_`は語の中では開かない）。
+/// 閉じる相手がいるかは見ない——[`opens_here`]が`None`を返したあとに訊く。
+fn unclosed_opener(rest: &str, previous: Option<char>) -> Option<&'static str> {
+    markers()
+        .into_iter()
+        .map(|(marker, _)| marker)
+        .find(|marker| {
+            rest.strip_prefix(marker).is_some_and(|after| {
+                !after.is_empty()
+                    && !after.starts_with([' ', '\t'])
+                    && !(marker.starts_with('_') && previous.is_some_and(char::is_alphanumeric))
+            })
+        })
+}
+
+/// 段落の前の行から持ち越した記号（書き手の判断 2026-09-15：**太字などは標準どおり、同じ段落の中なら
+/// 改行をまたぐ**。閉じなければ太字にしない）。
+///
+/// `prefix`はこの行の頭で開いたままの記号（外側から）、`suffix`はこの行の終わりでまだ閉じていない記号
+/// （内側から）。**どちらも、段落の中でいずれ閉じるものだけ**——閉じない記号は字のままである。
+/// 行は、この記号を前後に仮に足した形で読む（[`with_context`]）。読み方は1行のときと同じものを使う。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LineContext {
+    prefix: Vec<&'static str>,
+    suffix: Vec<&'static str>,
+}
+
+impl LineContext {
+    fn is_empty(&self) -> bool {
+        self.prefix.is_empty() && self.suffix.is_empty()
+    }
+}
+
+/// 持ち越した記号を仮に足した行。閉じる記号は行末の空白の前に置く（空白の後ろでは閉じない）。
+fn with_context(line: &str, context: &LineContext) -> String {
+    let body = line.trim_end();
+    let mut text = String::with_capacity(line.len() + 8);
+    text.extend(context.prefix.iter().copied());
+    text.push_str(body);
+    text.extend(context.suffix.iter().copied());
+    text.push_str(&line[body.len()..]);
+    text
+}
+
+/// 段落として続く本文の行か。見出し・箇条書き・引用・表・コード・字下げ・空行はそこで段落が切れる
+/// （CommonMarkでもそれらは別のブロックである）。
+fn joins_paragraph(line: &str, style: LineStyle) -> bool {
+    style.kind == LineKind::Body
+        && style.quote_depth == 0
+        && style.list_indent == 0
+        && !style.is_literal()
+        && !line.trim().is_empty()
+        && !line.starts_with([' ', '\t'])
+        && heading_level(line) == 0
+}
+
+/// その行を1行だけで読んだとき、開いて閉じなかった記号（位置と記号）。記号の字が無い行は読まない。
+fn standalone_unclosed(line: &str, reading: Reading) -> Vec<(usize, &'static str)> {
+    if !line.contains(['*', '_', '~', '`']) || line.chars().count() > MARKED_LINE_LIMIT {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    push_marked_recording(
+        line,
+        &mut String::new(),
+        &mut Vec::new(),
+        &mut 0,
+        reading,
+        Some(&mut found),
+    );
+    found
+}
+
+/// 各行が段落の前後から持ち越す記号（[`LineContext`]）。`unclosed`は各行を1行だけで読んだときの
+/// 閉じなかった記号——持ち越す記号が無い段落は、これが全部空なので何も読まない。
+fn paragraph_contexts(
+    lines: &[&str],
+    style_at: impl Fn(usize) -> LineStyle,
+    unclosed: &[Vec<(usize, &'static str)>],
+    reading: Reading,
+) -> Vec<LineContext> {
+    let mut contexts = vec![LineContext::default(); lines.len()];
+    let mut index = 0;
+    while index < lines.len() {
+        if !joins_paragraph(lines[index], style_at(index)) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < lines.len() && joins_paragraph(lines[index], style_at(index)) {
+            index += 1;
+        }
+        let run = start..index;
+        if run.len() < 2 || unclosed[run.clone()].iter().all(Vec::is_empty) {
+            continue;
+        }
+        // 1回目：行ごとに、頭で開いたままの記号と、閉じた行を数える。
+        struct Open {
+            marker: &'static str,
+            closes: bool,
+        }
+        let mut opens: Vec<Open> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        let mut at_start: Vec<Vec<usize>> = Vec::with_capacity(run.len());
+        for line in run.clone() {
+            at_start.push(stack.clone());
+            let text = lines[line];
+            let found = if stack.is_empty() {
+                unclosed[line].clone()
+            } else if text.contains(['*', '_', '~', '`']) {
+                let prefix: String = stack.iter().map(|open| opens[*open].marker).collect();
+                let mut found = Vec::new();
+                push_marked_recording(
+                    &format!("{prefix}{text}"),
+                    &mut String::new(),
+                    &mut Vec::new(),
+                    &mut 0,
+                    reading,
+                    Some(&mut found),
+                );
+                // 仮に足した記号は、足した長さの中にある。そこから外へ出た位置を行の位置に戻す。
+                let mut virtual_at = Vec::new();
+                let mut offset = 0;
+                for open in &stack {
+                    virtual_at.push((offset, *open));
+                    offset += opens[*open].marker.len();
+                }
+                let mut next = Vec::new();
+                for (position, marker) in found {
+                    if position < offset {
+                        if let Some((_, open)) = virtual_at.iter().find(|(at, _)| *at == position) {
+                            next.push(*open);
+                        }
+                    } else {
+                        opens.push(Open {
+                            marker,
+                            closes: false,
+                        });
+                        next.push(opens.len() - 1);
+                    }
+                }
+                for open in &stack {
+                    if !next.contains(open) {
+                        opens[*open].closes = true;
+                    }
+                }
+                stack = next;
+                continue;
+            } else {
+                // 記号の字が無い行は、何も閉じず、何も開けない。
+                continue;
+            };
+            for (_, marker) in found {
+                opens.push(Open {
+                    marker,
+                    closes: false,
+                });
+                stack.push(opens.len() - 1);
+            }
+        }
+        // 2回目：閉じる記号だけを、各行の頭と終わりに持ち越す。
+        let closing = |held: &Vec<usize>| {
+            held.iter()
+                .filter(|open| opens[**open].closes)
+                .map(|open| opens[*open].marker)
+                .collect::<Vec<_>>()
+        };
+        for (offset, line) in run.clone().enumerate() {
+            let prefix = closing(&at_start[offset]);
+            let mut suffix = at_start.get(offset + 1).map(&closing).unwrap_or_default();
+            suffix.reverse();
+            contexts[line] = LineContext { prefix, suffix };
+        }
+    }
+    contexts
+}
+
+/// 持ち越した記号を足して1行を読む。**足した記号が対にならなかった**（空白の並びなどで閉じられ
+/// なかった）ときは、足した字が画面に出てしまうので、持ち越しは無かったことにして読み直す。
+fn push_visible_line_in(
+    line: &str,
+    style: LineStyle,
+    visible: &mut String,
+    marks: &mut Vec<Emphasis>,
+    reading: Reading,
+    context: &LineContext,
+) {
+    if context.is_empty() {
+        push_visible_line(line, style, visible, marks, reading);
+        return;
+    }
+    let start = visible.len();
+    let kept_marks = marks.len();
+    push_visible_line(&with_context(line, context), style, visible, marks, reading);
+    if !deletes_only(&visible[start..], line) {
+        visible.truncate(start);
+        marks.truncate(kept_marks);
+        push_visible_line(line, style, visible, marks, reading);
+    }
+}
+
+/// `visible`が`source`から字を消しただけのものか（前から順に拾えるか）。
+fn deletes_only(visible: &str, source: &str) -> bool {
+    let mut rest = source.chars();
+    visible
+        .chars()
+        .all(|wanted| rest.any(|found| found == wanted))
 }
 
 /// 傍点の`《《…》》`（要件 7.8、カクヨム式）。中身と、その後ろ。
@@ -3207,10 +3559,15 @@ pub fn table_tab(source: &str, styles: &[LineStyle], byte: usize, back: bool) ->
 /// 2つ持てば、いつか編集中と整形後で太字の範囲が食い違う。写すのは字の書式（太字・斜体・取消線・
 /// コード・リンク・傍点・注釈）だけで、**字を覆う箱（ルビの読みなど）は写さない**：編集中は記号も読みも
 /// 見せる。印は記号の内側の字に付き、記号そのものは地の字のまま——どこまでが記法かが見える。
-fn active_marks(line: &str, style: LineStyle, reading: Reading) -> Vec<Emphasis> {
+fn active_marks(
+    line: &str,
+    style: LineStyle,
+    reading: Reading,
+    context: &LineContext,
+) -> Vec<Emphasis> {
     let mut shown = String::new();
     let mut formatted = Vec::new();
-    push_visible_line(line, style, &mut shown, &mut formatted, reading);
+    push_visible_line_in(line, style, &mut shown, &mut formatted, reading, context);
     if formatted.is_empty() {
         return formatted;
     }
@@ -5048,6 +5405,93 @@ mod tests {
         assert_eq!(
             preview.utf16_at_source_byte(second_line + 2),
             "見出し\n**".encode_utf16().count()
+        );
+    }
+
+    /// 書き手の判断 2026-09-15: **太字などは標準どおり、同じ段落の中なら改行をまたぐ。閉じなければ太字にしない。**
+    ///
+    /// 空行・見出し・箇条書きで段落が切れれば、またがない。閉じる記号を打った瞬間に、前の行まで太字になる。
+    #[test]
+    fn emphasis_spans_the_lines_of_one_paragraph() {
+        let bold_over = |preview: &PreviewDocument, line: usize, text: &str| {
+            let shown = preview.text.split('\n').nth(line).unwrap();
+            let start = shown[..shown.find(text).unwrap()].encode_utf16().count() as u32;
+            let len = text.encode_utf16().count() as u32;
+            preview.marks()[line].iter().any(|mark| {
+                mark.marks.bold
+                    && mark.utf16_start <= start
+                    && start + len <= mark.utf16_start + mark.utf16_len
+            })
+        };
+        // 3行にまたがる太字：記号は消え、3行とも太字。
+        let source = "前の段落\n\n**ここから\n途中\nここまで**の後\n";
+        let preview = PreviewDocument::from_source(source);
+        assert_eq!(preview.text, "前の段落\n\nここから\n途中\nここまでの後\n");
+        assert!(bold_over(&preview, 2, "ここから"));
+        assert!(bold_over(&preview, 3, "途中"));
+        assert!(bold_over(&preview, 4, "ここまで"));
+        assert!(!bold_over(&preview, 4, "の後"));
+
+        // 閉じなければ、字のまま（後ろの行も太字にならない）。
+        let open = "**閉じない\n次の行\n";
+        let preview = PreviewDocument::from_source(open);
+        assert_eq!(preview.text, open);
+        assert!(
+            preview
+                .marks()
+                .iter()
+                .all(|marks| marks.iter().all(|mark| !mark.marks.bold))
+        );
+
+        // 空行・見出し・箇条書きで段落が切れれば、またがない。
+        for broken in ["**前\n\n後**\n", "**前\n# 見出し**\n", "**前\n- 項目**\n"] {
+            let preview = PreviewDocument::from_source(broken);
+            assert!(
+                preview.text.starts_with("**前"),
+                "{broken:?} → {:?}",
+                preview.text
+            );
+        }
+
+        // 取消線の中に太字、行をまたいで入れ子（`*`と`**`が並ぶ入れ子は、この読み方では区別しない）。
+        let nested = "~~取消の**太字\nまだ太字**取消~~\n";
+        let preview = PreviewDocument::from_source(nested);
+        assert_eq!(preview.text, "取消の太字\nまだ太字取消\n");
+        assert!(bold_over(&preview, 1, "まだ太字"));
+
+        // 編集中の行：記号は見えたまま、持ち越した太字で組む。
+        let second = "**ここから\n".len();
+        let editing = "**ここから\n途中の行\nここまで**\n";
+        let preview = PreviewDocument::from_source_with_active_line(editing, Some(second));
+        assert!(preview.text.contains("\n途中の行\n"));
+        assert!(bold_over(&preview, 1, "途中の行"));
+
+        // 1字ずつ打って閉じたとき、取っておいた行も組み直される。
+        let mut preview = PreviewDocument::from_source("**ここから\n途中\nここまで\n");
+        assert!(!bold_over(&preview, 1, "途中"));
+        preview.refresh("**ここから\n途中\nここまで**\n", None, Reading::all());
+        assert_eq!(preview.text, "ここから\n途中\nここまで\n");
+        assert!(bold_over(&preview, 1, "途中"));
+        assert_eq!(
+            preview.text,
+            visible_markdown_text_with_active_line(
+                "**ここから\n途中\nここまで**\n",
+                None,
+                Reading::all()
+            )
+        );
+        // ステータスバーの本文の字数も、またいだ記号を数えない（1行ずつ数えるほうと素朴なほうが一致する）。
+        let mut counts = DocumentCounts::default();
+        counts.refresh("**ここから\n途中\nここまで\n", Reading::all());
+        counts.refresh("**ここから\n途中\nここまで**\n", Reading::all());
+        let stats = counts.stats();
+        assert_eq!(
+            stats,
+            DocumentStats::from_source("**ここから\n途中\nここまで**\n")
+        );
+        assert_eq!(
+            stats.body_characters,
+            "ここから\n途中\nここまで\n".chars().count()
         );
     }
 
