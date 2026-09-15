@@ -224,6 +224,28 @@ pub fn wire_colours(
         }
     });
 
+    // 追加要件 2026-09-15（書き手）: Left Pane の字の大きさ。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_left_size_stepped(move |by| {
+        if let Some(window) = weak.upgrade() {
+            let (low, high) = crate::LEFT_SIZE_RANGE;
+            window.set_left_size((window.get_left_size() + by).clamp(low, high));
+            save_settings(&window, &held.cache);
+        }
+    });
+
+    // 追加要件 2026-09-15（書き手）: Left Pane の面の Reset。この面の値だけを戻す。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_left_reset(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::reset_left_look(&window);
+            held.cache.borrow_mut().log_diag("spec", "left pane reset");
+            save_settings(&window, &held.cache);
+        }
+    });
+
     // 追加要件 2026-09-15（書き手）: 新しく開いたTABのランダムな紙（0 Off、1 淡色、2 濃色）。
     let weak = window.as_weak();
     let held = doors.clone();
@@ -492,6 +514,29 @@ impl ColourDoors {
                 }
                 after_terminal_look(window, &self.cache);
             }
+            // 追加要件 2026-09-15（書き手）: Left Pane。0 背景、1 文字、2 フォルダ、3 ファイル。
+            // フォルダとファイルは「既定の色」で外すと文字色に従う。
+            6 => {
+                let colour = rgb.map(slint_colour);
+                match slot {
+                    0 => window.set_left_paper(
+                        colour.unwrap_or_else(|| slint_colour(crate::LEFT_PAPER_DEFAULT)),
+                    ),
+                    1 => window.set_left_ink(
+                        colour.unwrap_or_else(|| slint_colour(crate::LEFT_INK_DEFAULT)),
+                    ),
+                    2 => {
+                        window.set_left_folder_own(colour.is_some());
+                        window.set_left_folder_ink(colour.unwrap_or_default());
+                    }
+                    3 => {
+                        window.set_left_file_own(colour.is_some());
+                        window.set_left_file_ink(colour.unwrap_or_default());
+                    }
+                    _ => return,
+                }
+                save_settings(window, &self.cache);
+            }
             2 => {
                 let Some(rgb) = rgb else {
                     return;
@@ -617,6 +662,12 @@ impl ColourDoors {
             }
             1 if slot == 0 => window.get_terminal_paper(),
             1 => window.get_terminal_ink(),
+            6 => match slot {
+                0 => window.get_left_paper(),
+                2 if window.get_left_folder_own() => window.get_left_folder_ink(),
+                3 if window.get_left_file_own() => window.get_left_file_ink(),
+                _ => window.get_left_ink(),
+            },
             _ => word_modes_now()
                 .get(window.get_word_mode_opened_at().max(0) as usize)
                 .and_then(|mode| mode.groups.get(slot_at))

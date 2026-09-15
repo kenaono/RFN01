@@ -24,6 +24,9 @@ msgstr "単語帳へ追加：{}"
 msgid "All Tabs"
 msgstr "すべてのTAB"
 
+msgid "Applies to Explorer, search results, recent files and the outline. Folder and file colors follow the text color until you choose one."
+msgstr "Explorer・検索結果・最近使ったファイル・見出しに効きます。フォルダとファイルの色は、選ぶまで文字色と同じです。"
+
 msgid "Apply Chosen Differences to the Text (Left)"
 msgstr "選んだ差分を本文（左）に反映"
 
@@ -222,6 +225,9 @@ msgstr "書き出す…"
 msgid "FILES"
 msgstr "ファイル"
 
+msgid "File Color"
+msgstr "ファイルの色"
+
 msgid "Find"
 msgstr "検索"
 
@@ -242,6 +248,9 @@ msgstr "横に合わせる"
 
 msgid "Fixed"
 msgstr "固定"
+
+msgid "Folder Color"
+msgstr "フォルダの色"
 
 msgid "Font"
 msgstr "フォント"
@@ -309,6 +318,9 @@ msgstr "キー"
 msgid "LANGUAGE"
 msgstr "言語"
 
+msgid "LEFT PANE"
+msgstr "Left Pane"
+
 msgid "Language"
 msgstr "表示の言語"
 
@@ -317,6 +329,9 @@ msgstr "レイアウト"
 
 msgid "Layout…"
 msgstr "レイアウト…"
+
+msgid "Left Pane"
+msgstr "Left Pane"
 
 msgid "Left: {}"
 msgstr "左：{}"
@@ -573,8 +588,8 @@ msgstr "倍率を戻す"
 msgid "Restore Default"
 msgstr "既定に戻す"
 
-msgid "Restores General, Terminal, Text, Layout, Page and Keys to their defaults and sets each document's mode to \"None\". Word sets and modes are kept."
-msgstr "全般・Terminal・文字・レイアウト・ページ・キーを既定に戻し、文書のモードは「なし」にします。単語帳とモードは残ります。"
+msgid "Restores General, Terminal, Left Pane, Text, Layout, Page and Keys to their defaults and sets each document's mode to \"None\". Word sets and modes are kept."
+msgstr "全般・Terminal・Left Pane・文字・レイアウト・ページ・キーを既定に戻し、文書のモードは「なし」にします。単語帳とモードは残ります。"
 
 msgid "Reveal in Explorer"
 msgstr "エクスプローラーで表示"

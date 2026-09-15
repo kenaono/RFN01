@@ -220,7 +220,7 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
         std::fs::create_dir_all(&output).unwrap();
         window.set_tree_open(false);
         window.show().unwrap();
-        for group in 0..7 {
+        for group in 0..8 {
             window.set_settings_tab(group);
             if group == 6 {
                 for category in 0..4 {
@@ -1197,4 +1197,175 @@ fn the_find_bar_searches_the_settings() {
     assert_eq!(window.get_settings_query(), "");
     assert_eq!(shortcut_names().len(), all_shortcuts);
     window.hide().unwrap();
+}
+
+/// 追加要件 2026-09-15（書き手）: **Left Pane の書式。**文字の大きさ・背景色・文字色と、フォルダ・ファイルの色。
+///
+/// フォルダ・ファイルの色は選ぶまで文字色に従い、「既定の色」で外れる。設定ファイルに残り、面のResetで戻る。
+/// `EDITOR_SETTINGS_SNAPSHOT`があれば、色を付けたExplorerの画像も書く。
+#[test]
+fn the_left_pane_has_its_own_look() {
+    let directory = std::env::temp_dir().join(format!(
+        "editor-left-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = Some(directory.clone()));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts.clone()));
+    surface.set_size(slint::PhysicalSize::new(1000, 740));
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let document = OpenDocument::untitled(1, window.as_weak());
+    let live = Live {
+        closed_tabs: Rc::default(),
+        states: PaneStates::new(&document),
+        folder: Rc::default(),
+        tree_paths: Rc::default(),
+        results: Rc::default(),
+        recent: Rc::default(),
+        recent_folders: Rc::default(),
+        find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        replace_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        layout: Rc::new(RefCell::new(Layout::single(0))),
+        pending: Rc::default(),
+        close_run: Rc::default(),
+        cache: Rc::new(RefCell::new(RenderCache::default())),
+        tabs: Rc::new(RefCell::new(Tabs {
+            panes: vec![{
+                let tab = PaneTab::showing(&window, id, document.clone());
+                PaneTabs {
+                    history: vec![NavigationPlace::from(&tab)],
+                    tabs: vec![tab],
+                    ..Default::default()
+                }
+            }],
+        })),
+        writer: Rc::new(FileWriter::start()),
+        searcher: Rc::new(Searcher::start(|| {})),
+        searched: Rc::default(),
+    };
+    wiring::wire_colours(
+        &window,
+        &live,
+        &live.states,
+        &live.cache,
+        Rc::new(Timer::default()),
+        numbers.clone(),
+        palette.clone(),
+    );
+    // 窓の既定は、Rustの既定と同じ色。
+    assert_eq!(window.get_left_size(), LEFT_SIZE_DEFAULT);
+    assert_eq!(window.get_left_paper(), slint_colour(LEFT_PAPER_DEFAULT));
+    assert_eq!(window.get_left_ink(), slint_colour(LEFT_INK_DEFAULT));
+
+    let navy = Color::from_rgb_u8(0x1f, 0x2a, 0x44);
+    let cream = Color::from_rgb_u8(0xf5, 0xef, 0xdc);
+    let gold = Color::from_rgb_u8(0xe0, 0xb0, 0x40);
+    window.invoke_colour_set(6, 0, navy);
+    window.invoke_colour_set(6, 1, cream);
+    assert!(
+        !window.get_left_folder_own(),
+        "folders follow the text color"
+    );
+    window.invoke_colour_set(6, 2, gold);
+    assert!(window.get_left_folder_own() && window.get_left_folder_ink() == gold);
+    window.invoke_left_size_stepped(3);
+    assert_eq!(window.get_left_size(), 15);
+    window.invoke_left_size_stepped(100);
+    assert_eq!(window.get_left_size(), LEFT_SIZE_RANGE.1);
+    window.invoke_left_size_stepped(-(LEFT_SIZE_RANGE.1 - 14));
+
+    if let Ok(output) = std::env::var("EDITOR_SETTINGS_SNAPSHOT") {
+        let output = PathBuf::from(output);
+        std::fs::create_dir_all(&output).unwrap();
+        window.set_tree_open(true);
+        window.set_left_tab(0);
+        window.set_work_folder("D:\\原稿".into());
+        let row = |name: &str, depth: i32, folder: bool, open: bool| LeftRow {
+            name: name.into(),
+            depth,
+            folder,
+            open,
+            parent: -1,
+        };
+        window.set_left_rows(ModelRc::new(VecModel::from(vec![
+            row("第一部", 0, true, true),
+            row("第一章.md", 1, false, false),
+            row("第二章.md", 1, false, false),
+            row("資料", 0, true, false),
+            row("あらすじ.md", 0, false, false),
+        ])));
+        // 画像のためだけに、ファイルにも色を付ける（読み戻しの前に外す）。
+        window.invoke_colour_set(6, 3, Color::from_rgb_u8(0x9c, 0xc7, 0xe8));
+        window.show().unwrap();
+        slint::platform::update_timers_and_animations();
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+        let mut ppm = b"P6\n1000 740\n255\n".to_vec();
+        for pixel in pixels {
+            ppm.extend([pixel.r, pixel.g, pixel.b]);
+        }
+        std::fs::write(output.join("left-pane.ppm"), ppm).unwrap();
+        window.invoke_colour_default(6, 3);
+        window.hide().unwrap();
+    }
+
+    // 設定ファイルへ出して、別の窓へ読み戻す。
+    let values = settings_values(&window);
+    let value = |name: &str| {
+        values
+            .iter()
+            .find(|(key, _)| key == name)
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_eq!(value("left.size"), "14");
+    assert_eq!(value("left.file"), "", "no file color chosen");
+    let other = AppWindow::new().unwrap();
+    other.set_sheet_stride(SHEET_NUMBERS as i32);
+    other.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    other.set_palette(ModelRc::from(palette.clone()));
+    other.set_sheet_fonts(ModelRc::from(fonts.clone()));
+    apply_settings(&other, &numbers, &palette, &fonts, &values);
+    assert_eq!(other.get_left_size(), 14);
+    assert_eq!(other.get_left_paper(), navy);
+    assert_eq!(other.get_left_ink(), cream);
+    assert!(other.get_left_folder_own() && other.get_left_folder_ink() == gold);
+    assert!(!other.get_left_file_own());
+
+    // 「既定の色」でフォルダの色が外れ、面のResetで全部戻る。
+    window.invoke_colour_default(6, 2);
+    assert!(!window.get_left_folder_own());
+    window.invoke_left_reset();
+    assert_eq!(window.get_left_size(), LEFT_SIZE_DEFAULT);
+    assert_eq!(window.get_left_paper(), slint_colour(LEFT_PAPER_DEFAULT));
+    assert!(!window.get_left_file_own());
 }

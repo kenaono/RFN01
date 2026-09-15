@@ -647,6 +647,18 @@ export component AppWindow inherits Window {
     /// **紙とは別に持つ。**要件 9 のシートは原稿の紙の設定で、端末を黒地で使うことと
     /// 何の関係も無い。書字方向も持たないので、設定でもシートの外に立つ。
     /// 16色（SGR）はここに無い——背景の明るさからRustが決める。
+    /// 追加要件 2026-09-15（書き手）: **Left Pane**（Explorer・検索結果・最近使ったファイル・見出し）の書式。
+    /// 文字の大きさ・背景色・文字色と、フォルダ・ファイルの字の色。書体は変えない（書き手の決め）。
+    /// フォルダ・ファイルの色は、付けていなければ文字色（`-own`が偽）。設定の群はTerminalの次に並ぶ。
+    in-out property <int> left-size: 12;
+    in-out property <color> left-paper: #faf9fc;
+    in-out property <color> left-ink: #171321;
+    in-out property <bool> left-folder-own: false;
+    in-out property <color> left-folder-ink: #171321;
+    in-out property <bool> left-file-own: false;
+    in-out property <color> left-file-ink: #171321;
+    callback left-size-stepped(int);
+    callback left-reset();
     in-out property <color> terminal-paper: #fffefa;
     in-out property <color> terminal-ink: #24211e;
     in-out property <string> terminal-font: "Consolas";
@@ -1279,7 +1291,7 @@ export component AppWindow inherits Window {
 
             if root.tree-open: Rectangle {
                 width: root.tree-width * 1px;
-                background: Tok.chrome;
+                background: root.left-paper;
 
                 VerticalLayout {
                     padding: 0px;
@@ -1336,7 +1348,7 @@ export component AppWindow inherits Window {
                                     ? @tr("No folder open")
                                     : root.work-folder;
                                 color: Tok.ink;
-                                font-size: 12px;
+                                font-size: root.left-size * 1px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                                 overflow: elide;
@@ -1581,7 +1593,7 @@ export component AppWindow inherits Window {
                         property <int> reveal-generation: root.tree-reveal-generation;
                         changed reveal-generation => {
                             if root.left-tab == 0 {
-                                self.viewport-y = -min(max(0, root.tree-selected) * 24px, max(0px, self.viewport-height - self.visible-height));
+                                self.viewport-y = -min(max(0, root.tree-selected) * max(24px, root.left-size * 2px), max(0px, self.viewport-height - self.visible-height));
                             }
                         }
                         // 要件 5.2: the point being carried, but only while it
@@ -1602,7 +1614,8 @@ export component AppWindow inherits Window {
                             alignment: start;
 
                             for row[index] in root.left-rows: tree-row := Rectangle {
-                                height: 24px;
+                                // 追加要件 2026-09-15: 行の高さは字の大きさに合わせる（12pxで24px）。
+                                height: max(24px, root.left-size * 2px);
                                 // 要件 5.2: what this row can be given. A file
                                 // is not a place to put anything, the folder
                                 // it is already in cannot be given what it
@@ -1809,12 +1822,15 @@ export component AppWindow inherits Window {
                                     visible: root.left-tab != 0 || index != root.tree-new-index;
                                     // Depth is drawn rather than nested, because
                                     // the rows arrive flat (see `LeftRow`).
-                                    x: 8px + row.depth * 14px;
+                                    x: 8px + row.depth * root.left-size * 7px / 6;
                                     text: (row.folder ? (row.open ? "▾ " : "▸ ") : "　")
                                         + row.name;
                                     opacity: tree-row.label-opacity;
-                                    color: Tok.ink-strong;
-                                    font-size: 12px;
+                                    // 追加要件 2026-09-15: フォルダとファイルで色を分けられる（Explorerの面）。
+                                    color: row.folder
+                                        ? (root.left-folder-own ? root.left-folder-ink : root.left-ink)
+                                        : (root.left-tab == 0 && root.left-file-own ? root.left-file-ink : root.left-ink);
+                                    font-size: root.left-size * 1px;
                                     vertical-alignment: center;
                                     overflow: elide;
                                     // Room for the `…`, which is not in a layout
@@ -2472,12 +2488,22 @@ export component AppWindow inherits Window {
                                     // いる：General・Terminal・Words は方向を持たず、
                                     // Text・Layout・Page はシート（横書き／縦書き）
                                     // の上の値である。Keys は最後。
-                                    for category[index] in [@tr("General"), @tr("Terminal"), @tr("Words"), @tr("Text"), @tr("Layout"), @tr("Page"), @tr("Keys")]: SideTab {
-                                        title: category;
-                                        current: root.settings-tab == index;
+                                    // 追加要件 2026-09-15: Left Pane は後から足した群なので番号は7、並びだけTerminalの次。
+                                    for category in [
+                                        { id: 0, title: @tr("General") },
+                                        { id: 1, title: @tr("Terminal") },
+                                        { id: 7, title: @tr("Left Pane") },
+                                        { id: 2, title: @tr("Words") },
+                                        { id: 3, title: @tr("Text") },
+                                        { id: 4, title: @tr("Layout") },
+                                        { id: 5, title: @tr("Page") },
+                                        { id: 6, title: @tr("Keys") },
+                                    ]: SideTab {
+                                        title: category.title;
+                                        current: root.settings-tab == category.id;
                                         clicked => {
-                                            root.settings-tab = index;
-                                            if (index == 6) {
+                                            root.settings-tab = category.id;
+                                            if (category.id == 6) {
                                                 root.shortcut-filter();
                                             }
                                         }
@@ -2954,7 +2980,7 @@ export component AppWindow inherits Window {
                                                     clicked => { root.reset-all-requested(); }
                                                 }
                                                 Text {
-                                                    text: @tr("Restores General, Terminal, Text, Layout, Page and Keys to their defaults and sets each document's mode to \"None\". Word sets and modes are kept.");
+                                                    text: @tr("Restores General, Terminal, Left Pane, Text, Layout, Page and Keys to their defaults and sets each document's mode to \"None\". Word sets and modes are kept.");
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     vertical-alignment: center;
@@ -3113,6 +3139,75 @@ export component AppWindow inherits Window {
                                                 TextButton {
                                                     title: @tr("Reset");
                                                     clicked => { root.terminal-reset(); }
+                                                }
+                                            }
+                                        }
+
+                                        // 追加要件 2026-09-15（書き手）: **Left Pane の書式。**Explorer・検索結果・最近使ったファイル・
+                                        // 見出しの4つの面に効く。フォルダとファイルの色は、付けなければ文字色のまま。
+                                        if root.shows-group(7, []): VerticalLayout {
+                                            spacing: 8px;
+
+                                            if root.shows-any([@tr("LEFT PANE"), @tr("Size"), @tr("Background"), @tr("Text Color"), @tr("Folder Color"), @tr("File Color")]): Text {
+                                                text: root.section-title(@tr("Left Pane"), @tr("LEFT PANE"));
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            if root.shows-any([@tr("LEFT PANE"), @tr("Size")]): StepRow {
+                                                label: @tr("Size");
+                                                value: root.left-size + " px";
+                                                stepped(by) => {
+                                                    root.left-size-stepped(by);
+                                                }
+                                            }
+
+                                            if root.shows-any([@tr("LEFT PANE"), @tr("Background")]): ColorCell {
+                                                label: @tr("Background");
+                                                shown: root.left-paper;
+                                                chosen(colour) => { root.colour-set(6, 0, colour); }
+                                                automatic => { root.colour-default(6, 0); }
+                                                more => { root.colour-more(6, 0); }
+                                            }
+
+                                            if root.shows-any([@tr("LEFT PANE"), @tr("Text Color")]): ColorCell {
+                                                label: @tr("Text Color");
+                                                shown: root.left-ink;
+                                                chosen(colour) => { root.colour-set(6, 1, colour); }
+                                                automatic => { root.colour-default(6, 1); }
+                                                more => { root.colour-more(6, 1); }
+                                            }
+
+                                            if root.shows-any([@tr("LEFT PANE"), @tr("Folder Color")]): ColorCell {
+                                                label: @tr("Folder Color");
+                                                shown: root.left-folder-own ? root.left-folder-ink : root.left-ink;
+                                                chosen(colour) => { root.colour-set(6, 2, colour); }
+                                                automatic => { root.colour-default(6, 2); }
+                                                more => { root.colour-more(6, 2); }
+                                            }
+
+                                            if root.shows-any([@tr("LEFT PANE"), @tr("File Color")]): ColorCell {
+                                                label: @tr("File Color");
+                                                shown: root.left-file-own ? root.left-file-ink : root.left-ink;
+                                                chosen(colour) => { root.colour-set(6, 3, colour); }
+                                                automatic => { root.colour-default(6, 3); }
+                                                more => { root.colour-more(6, 3); }
+                                            }
+
+                                            if root.shows-any([@tr("LEFT PANE"), @tr("Size"), @tr("Background"), @tr("Text Color"), @tr("Folder Color"), @tr("File Color")]): Text {
+                                                text: @tr("Applies to Explorer, search results, recent files and the outline. Folder and file colors follow the text color until you choose one.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+
+                                            if !root.settings-searching: Rectangle { height: 1px; background: Tok.rule; }
+                                            if !root.settings-searching: HorizontalLayout {
+                                                alignment: start;
+                                                TextButton {
+                                                    title: @tr("Reset");
+                                                    clicked => { root.left-reset(); }
                                                 }
                                             }
                                         }

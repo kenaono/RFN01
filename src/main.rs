@@ -3089,8 +3089,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 &reset_live,
                 Question::ResetAll,
                 say!(
-                    "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻り、文書ごとに選んだモードは「なし」になります。単語帳とモード、文字色のセットは残ります。",
-                    "Restore all settings to their defaults?\n\nGeneral, Terminal, Text, Layout, Page and Keys return to their defaults, and each document's mode becomes \"None\". Word sets, modes and color sets are kept."
+                    "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Left Pane・Text・Layout・Page・Keys が既定に戻り、文書ごとに選んだモードは「なし」になります。単語帳とモード、文字色のセットは残ります。",
+                    "Restore all settings to their defaults?\n\nGeneral, Terminal, Left Pane, Text, Layout, Page and Keys return to their defaults, and each document's mode becomes \"None\". Word sets, modes and color sets are kept."
                 ),
                 &[pick("既定に戻す", "Restore Defaults"), cancel()],
                 0,
@@ -8511,6 +8511,7 @@ fn reset_all_settings(window: &AppWindow, live: &Live) {
     window.invoke_ruby_marks_toggled(true);
     window.invoke_autosave_toggled(true);
     window.invoke_terminal_reset();
+    window.invoke_left_reset();
     window.invoke_shortcut_reset_all();
     window.invoke_typography_reset(-1);
     window.tell(
@@ -10495,6 +10496,27 @@ const INK_SET_SETTING: &str = "ink.set.";
 const INK_SETS: usize = 10;
 /// セットが持つ色：各シートの Body と H1〜H6。
 const INK_SET_SLOTS: usize = 1 + MAX_HEADING_LEVEL;
+/// 追加要件 2026-09-15（書き手）: Left Pane の書式。フォルダ・ファイルの色は、付けていなければ空。
+const LEFT_SIZE_SETTING: &str = "left.size";
+const LEFT_PAPER_SETTING: &str = "left.paper";
+const LEFT_INK_SETTING: &str = "left.ink";
+const LEFT_FOLDER_SETTING: &str = "left.folder";
+const LEFT_FILE_SETTING: &str = "left.file";
+const LEFT_SIZE_DEFAULT: i32 = 12;
+/// Left Pane の字の大きさの幅（px）。
+const LEFT_SIZE_RANGE: (i32, i32) = (9, 28);
+/// 既定の地と字——窓の`Tok.chrome`と`Tok.ink-strong`と同じ色。
+const LEFT_PAPER_DEFAULT: [f32; 3] = [250.0 / 255.0, 249.0 / 255.0, 252.0 / 255.0];
+const LEFT_INK_DEFAULT: [f32; 3] = [23.0 / 255.0, 19.0 / 255.0, 33.0 / 255.0];
+
+/// Left Pane の書式を既定へ（面のReset・Reset All）。
+fn reset_left_look(window: &AppWindow) {
+    window.set_left_size(LEFT_SIZE_DEFAULT);
+    window.set_left_paper(slint_colour(LEFT_PAPER_DEFAULT));
+    window.set_left_ink(slint_colour(LEFT_INK_DEFAULT));
+    window.set_left_folder_own(false);
+    window.set_left_file_own(false);
+}
 const TERMINAL_INK_SETTING: &str = "terminal.ink";
 const TERMINAL_FONT_SETTING: &str = "terminal.font";
 const TERMINAL_SIZE_SETTING: &str = "terminal.size";
@@ -11415,6 +11437,33 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         hex_colour(window.get_terminal_paper()),
     ));
     values.push((
+        LEFT_SIZE_SETTING.to_owned(),
+        window.get_left_size().to_string(),
+    ));
+    values.push((
+        LEFT_PAPER_SETTING.to_owned(),
+        hex_colour(window.get_left_paper()),
+    ));
+    values.push((
+        LEFT_INK_SETTING.to_owned(),
+        hex_colour(window.get_left_ink()),
+    ));
+    let own = |own: bool, colour: Color| {
+        if own {
+            hex_colour(colour)
+        } else {
+            String::new()
+        }
+    };
+    values.push((
+        LEFT_FOLDER_SETTING.to_owned(),
+        own(window.get_left_folder_own(), window.get_left_folder_ink()),
+    ));
+    values.push((
+        LEFT_FILE_SETTING.to_owned(),
+        own(window.get_left_file_own(), window.get_left_file_ink()),
+    ));
+    values.push((
         TERMINAL_INK_SETTING.to_owned(),
         hex_colour(window.get_terminal_ink()),
     ));
@@ -11580,6 +11629,34 @@ fn apply_settings(
         if written == TERMINAL_PAPER_SETTING {
             if let Some(rgb) = parse_hex_colour(value) {
                 window.set_terminal_paper(slint_colour(rgb));
+            }
+            continue;
+        }
+        if written == LEFT_SIZE_SETTING {
+            if let Ok(size) = value.trim().parse::<i32>() {
+                let (low, high) = LEFT_SIZE_RANGE;
+                window.set_left_size(size.clamp(low, high));
+            }
+            continue;
+        }
+        if written == LEFT_PAPER_SETTING || written == LEFT_INK_SETTING {
+            if let Some(rgb) = parse_hex_colour(value) {
+                if written == LEFT_PAPER_SETTING {
+                    window.set_left_paper(slint_colour(rgb));
+                } else {
+                    window.set_left_ink(slint_colour(rgb));
+                }
+            }
+            continue;
+        }
+        if written == LEFT_FOLDER_SETTING || written == LEFT_FILE_SETTING {
+            let colour = parse_hex_colour(value).map(slint_colour);
+            if written == LEFT_FOLDER_SETTING {
+                window.set_left_folder_own(colour.is_some());
+                window.set_left_folder_ink(colour.unwrap_or_default());
+            } else {
+                window.set_left_file_own(colour.is_some());
+                window.set_left_file_ink(colour.unwrap_or_default());
             }
             continue;
         }
