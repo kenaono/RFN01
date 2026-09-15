@@ -646,7 +646,9 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     assert_eq!(paper(), global, "the tab already open keeps its paper");
     new_tab(&window, &live, id);
     let first = paper();
-    assert!(first.iter().all(|channel| *channel > 0.7), "{first:?}");
+    // 明るい紙は彩度0.32まで・明度0.93からなので、いちばん暗い成分は 0.93×0.68≒0.63
+    // まで下がる（`random_paper`）。0.7で見ていたときは、色によって落ちていた。
+    assert!(first.iter().all(|channel| *channel > 0.6), "{first:?}");
     new_tab(&window, &live, id);
     assert_ne!(first, paper(), "each new tab its own");
     let tabs = live.tabs.borrow();
