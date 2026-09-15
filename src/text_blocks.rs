@@ -1122,6 +1122,11 @@ pub struct GridCell {
     /// source (要件 7.3.1) is one cell holding the whole line, bars included.
     pub utf16_start: u32,
     pub utf16_len: u32,
+    /// セルを開く`|`の位置（ブロックのUTF-16）。原文の1セルでは行の頭。
+    ///
+    /// **位置がどのセルのものかは、字ではなく`|`で決める**（書き手の求め 2026-09-15、表のまま編集）：
+    /// `|`の後ろの余白にあるカーソルは次のセルの頭に、`|`の前の余白にあるものは前のセルの終わりに立つ。
+    pub bar_utf16: u32,
     /// Which row and column, so that a rule and a cell can be talked about
     /// together.
     pub row: usize,
@@ -1151,10 +1156,23 @@ impl TableGrid {
     /// and a caret can still be put in any of them, so the answer has to be a
     /// place on the page. **The cell that begins last before it** is that
     /// place: it is the one the reader would say the caret was just after.
+    ///
+    /// 2026-09-15（表のまま編集）: **決めるのは`|`の位置。**`|`の後ろなら、そのセルである——字の前の
+    /// 余白に立つカーソルは、前のセルの終わりではなく次のセルの頭に見えなければ、打った字の行き先と
+    /// 見た目が食い違う。行の頭（最初の`|`の前）は、その行の最初のセル。
     pub fn cell_at(&self, utf16: u32) -> Option<usize> {
+        if let Some(head) = self
+            .cells
+            .iter()
+            .position(|cell| cell.column == 0 && cell.bar_utf16 == utf16)
+        {
+            return Some(head);
+        }
         let mut found = None;
         for (index, cell) in self.cells.iter().enumerate() {
-            if cell.utf16_start <= utf16 {
+            if cell.bar_utf16 < utf16
+                || cell.utf16_start <= utf16 && cell.bar_utf16 == cell.utf16_start
+            {
                 found = Some(index);
             }
         }

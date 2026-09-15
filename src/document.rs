@@ -96,6 +96,8 @@ impl PreviewLine {
             // 幅を取らせないためにある——覆った字はそのまま溝に描かれる
             // （`Ornament::Markup`）ので、記号は見えたままである。
             marker = active_markup(source_line, style);
+            // 書き手の求め 2026-09-15: **記号は隠さず、ただし太字として見える。**
+            marks = active_marks(source_line, style, reading);
         } else {
             push_visible_line(source_line, style, &mut visible, &mut marks, reading);
             marker = line_marker(source_line, style);
@@ -3083,6 +3085,177 @@ pub fn hidden_indent(source: &str, styles: &[LineStyle], caret: usize) -> Option
     (hidden > 0).then(|| line_start..line_start + hidden)
 }
 
+/// 表の行のセルの字の範囲（文書のバイト）と、行の頭と終わり（改行を除く）（書き手の求め 2026-09-15、
+/// 表のまま編集）。表の行でなければ`None`。
+///
+/// **セルの字は前後の余白を除いたもの**——升目に描かれるのはそこだけで、`|`と余白はどこにも描かれない。
+/// 行を閉じる`|`が残す空のセルは数えない（升目にも無い）。途中の空のセルは、`|`の前の位置を持つ。
+fn table_row_cells(
+    source: &str,
+    styles: &[LineStyle],
+    byte: usize,
+) -> Option<(usize, usize, Vec<Range<usize>>)> {
+    let (line_start, line_end) = line_span(source, byte);
+    let line = source[line_start..line_end]
+        .strip_suffix('\n')
+        .unwrap_or(&source[line_start..line_end]);
+    let index = source[..line_start].matches('\n').count();
+    if styles.get(index)?.kind != LineKind::TableRow {
+        return None;
+    }
+    let found = crate::text_blocks::table_cells(line);
+    let last = found.len().saturating_sub(1);
+    let cells = found
+        .iter()
+        .enumerate()
+        .filter_map(|(at, cell)| {
+            let text = &line[cell.byte_start..cell.byte_end];
+            if at == last && text.trim().is_empty() {
+                return None;
+            }
+            let lead = text.len() - text.trim_start().len();
+            let start = line_start + cell.byte_start + lead;
+            Some(start..start + text.trim().len())
+        })
+        .collect::<Vec<_>>();
+    Some((line_start, line_start + line.len(), cells))
+}
+
+/// 表の行で、←→が跨ぐ先（書き手の求め 2026-09-15：表のまま編集）。
+///
+/// `byte`が**描かれない場所**（`|`とその前後の余白）にあれば、動いた向きで次に立てる場所を返す——
+/// 次のセルの頭、前のセルの終わり、行の外なら隣の行（そこがまた表の行なら、呼ぶ側がもう一度訊く）。
+/// セルの字の中と両端なら`None`（そこは止まり場所である）。
+pub fn table_step(source: &str, styles: &[LineStyle], byte: usize, forward: bool) -> Option<usize> {
+    let (start, end, cells) = table_row_cells(source, styles, byte)?;
+    let (first, last) = (cells.first()?, cells.last()?);
+    if cells
+        .iter()
+        .any(|cell| cell.start <= byte && byte <= cell.end)
+    {
+        return None;
+    }
+    Some(if forward {
+        match cells.iter().find(|cell| cell.start > byte) {
+            Some(next) => next.start,
+            None if end < source.len() => end + 1,
+            None => last.end,
+        }
+    } else {
+        match cells.iter().rev().find(|cell| cell.end < byte) {
+            Some(previous) => previous.end,
+            None if start > 0 => start - 1,
+            None => first.start,
+        }
+    })
+}
+
+/// 表の中の`Tab`／`Shift+Tab`の行き先（書き手の求め 2026-09-15）：次／前のセルの頭。
+///
+/// 行の終わりのセルからは次の表の行の最初のセルへ（区切り行は跨ぐ）、表の終わりのセルでは動かない。
+/// 表の行でなければ`None`——`Tab`は今までどおり字下げか字を入れる。
+pub fn table_tab(source: &str, styles: &[LineStyle], byte: usize, back: bool) -> Option<usize> {
+    let (start, end, cells) = table_row_cells(source, styles, byte)?;
+    // いまのセル：`byte`より前で始まる最後のセル（`|`の後ろの余白は次のセル）。
+    let here = cells
+        .iter()
+        .rposition(|cell| cell.start <= byte)
+        .unwrap_or(0);
+    if !back && here + 1 < cells.len() {
+        return Some(cells[here + 1].start);
+    }
+    if back && byte > cells[here].start {
+        return Some(cells[here].start);
+    }
+    if back && here > 0 {
+        return Some(cells[here - 1].start);
+    }
+    // 隣の表の行へ。区切り行（表の行ではない）は跨ぎ、表の外に出たら動かない。
+    let mut line = if back { start } else { end };
+    loop {
+        if back {
+            if line == 0 {
+                return Some(byte);
+            }
+            line = line_span(source, line - 1).0;
+        } else {
+            if line >= source.len() {
+                return Some(byte);
+            }
+            line += 1;
+        }
+        let index = source[..line].matches('\n').count();
+        match styles.get(index).map(|style| style.kind) {
+            Some(LineKind::TableRow) => {
+                let (_, _, row) = table_row_cells(source, styles, line)?;
+                let cell = if back { row.last() } else { row.first() };
+                return Some(cell.map_or(line, |cell| cell.start));
+            }
+            Some(LineKind::TableRule) => {
+                if !back {
+                    line = line_span(source, line).1.saturating_sub(1);
+                }
+            }
+            _ => return Some(byte),
+        }
+    }
+}
+
+/// 編集中の行の書式（書き手の求め 2026-09-15：「記号は隠さず、ただし太字として見える方がいい」）。
+///
+/// **読み方は整形表示と同じ**（[`push_visible_line`]）で、組んだ行の印を原文の位置へ写す——読み方を
+/// 2つ持てば、いつか編集中と整形後で太字の範囲が食い違う。写すのは字の書式（太字・斜体・取消線・
+/// コード・リンク・傍点・注釈）だけで、**字を覆う箱（ルビの読みなど）は写さない**：編集中は記号も読みも
+/// 見せる。印は記号の内側の字に付き、記号そのものは地の字のまま——どこまでが記法かが見える。
+fn active_marks(line: &str, style: LineStyle, reading: Reading) -> Vec<Emphasis> {
+    let mut shown = String::new();
+    let mut formatted = Vec::new();
+    push_visible_line(line, style, &mut shown, &mut formatted, reading);
+    if formatted.is_empty() {
+        return formatted;
+    }
+    // 組んだ行のUTF-16位置 → 原文のUTF-16位置。整形は原文から字を消すだけなので、`build`と同じく
+    // 前から順に拾えば当たる。
+    let mut map = Vec::with_capacity(shown.encode_utf16().count() + 1);
+    let mut cursor = 0;
+    let mut cursor_utf16 = 0u32;
+    for character in shown.chars() {
+        let remaining = &line[cursor..];
+        let skipped = if remaining.starts_with(character) {
+            0
+        } else {
+            remaining.find(character).unwrap_or(0)
+        };
+        cursor_utf16 += remaining[..skipped].encode_utf16().count() as u32;
+        cursor += skipped;
+        for unit in 0..character.len_utf16() as u32 {
+            map.push(cursor_utf16 + unit);
+        }
+        cursor += character.len_utf8();
+        cursor_utf16 += character.len_utf16() as u32;
+    }
+    map.push(cursor_utf16);
+    formatted
+        .into_iter()
+        .filter(|emphasis| emphasis.ornament.is_none())
+        .filter_map(|emphasis| {
+            let start = *map.get(emphasis.utf16_start as usize)?;
+            let end = emphasis.utf16_start + emphasis.utf16_len;
+            // 終わりは「最後の字の次」。最後の字の位置から数え直し、閉じる記号を含めない。
+            let end = if emphasis.utf16_len == 0 {
+                start
+            } else {
+                map.get(end as usize - 1).map(|last| last + 1)?
+            };
+            Some(Emphasis {
+                utf16_start: start,
+                utf16_len: end.saturating_sub(start),
+                ..emphasis
+            })
+        })
+        .collect()
+}
+
 /// 編集中の行で、行頭の記号が座る箱（要件 7.3.1、書き手の報告 2026-09-10）。
 ///
 /// **隠すためではなく、幅を取らせないための箱。**覆った字はそのまま溝に描かれる
@@ -4876,6 +5049,92 @@ mod tests {
             preview.utf16_at_source_byte(second_line + 2),
             "見出し\n**".encode_utf16().count()
         );
+    }
+
+    /// 書き手の求め 2026-09-15（表のまま編集）: ←→は`|`と余白を跨いでセルからセルへ、`Tab`は次のセルの頭へ。
+    #[test]
+    fn the_caret_walks_a_table_cell_by_cell() {
+        let source = "前\n| 名前 | 役割 |\n| --- | --- |\n| a |  | c |\n後";
+        let styles = line_styles(source);
+        let at = |needle: &str| source.find(needle).unwrap();
+        let name = at("名前");
+        let name_end = name + "名前".len();
+        let role = at("役割");
+        // セルの中と両端は止まり場所。
+        assert_eq!(table_step(source, &styles, name + 3, true), None);
+        assert_eq!(table_step(source, &styles, name_end, true), None);
+        // 端の次（余白）からは、隣のセルの頭／前のセルの終わりへ。
+        assert_eq!(table_step(source, &styles, name_end + 1, true), Some(role));
+        assert_eq!(table_step(source, &styles, role - 1, false), Some(name_end));
+        // 行の頭の`|`は、前へ行けば前の行の終わり、後ろへ行けば最初のセル。
+        let row = at("| 名前");
+        assert_eq!(table_step(source, &styles, row, true), Some(name));
+        assert_eq!(table_step(source, &styles, row, false), Some(row - 1));
+        // 行を閉じる`|`の後ろへ進めば、次の行の頭。
+        let role_end = role + "役割".len();
+        assert_eq!(
+            table_step(source, &styles, role_end + 1, true),
+            Some(at("| --- |"))
+        );
+        // 途中の空のセルにも立てる（`|  |`の2つめの空白の後ろ）。
+        let empty = at("|  |") + 3;
+        assert_eq!(table_step(source, &styles, empty, true), None);
+        // 表の外は知らない。
+        assert_eq!(table_step(source, &styles, 0, true), None);
+
+        // Tab：次のセル、行の終わりからは区切り行を跨いで次の行の最初のセル、表の終わりでは動かない。
+        assert_eq!(table_tab(source, &styles, name, false), Some(role));
+        assert_eq!(table_tab(source, &styles, role, false), Some(at("a |")));
+        let c = at("c |");
+        assert_eq!(table_tab(source, &styles, c, false), Some(c));
+        // Shift+Tab：セルの途中ならそのセルの頭、頭なら前のセル、行の頭なら前の表の行の最後のセル。
+        assert_eq!(table_tab(source, &styles, role + 3, true), Some(role));
+        assert_eq!(table_tab(source, &styles, role, true), Some(name));
+        assert_eq!(table_tab(source, &styles, at("a |"), true), Some(role));
+        assert_eq!(table_tab(source, &styles, 0, false), None, "not in a table");
+    }
+
+    /// 書き手の求め 2026-09-15: **編集中の行も、記号を見せたまま太字などの書式で組む。**
+    ///
+    /// 印は原文の位置の、記号の内側の字に付く。ルビの読みを覆う箱は編集中には付けない（読みも見せる）。
+    #[test]
+    fn the_active_line_keeps_its_emphasis_with_the_markers_showing() {
+        let source = "前の行\n本文**太字**と*斜体*、~~消し~~、`code`、｜漢字《かんじ》\n";
+        let second_line = "前の行\n".len();
+        let preview = PreviewDocument::from_source_with_active_line(source, Some(second_line));
+        let line = "本文**太字**と*斜体*、~~消し~~、`code`、｜漢字《かんじ》";
+        assert!(preview.text.contains(line), "the markers stay");
+        let at = |needle: &str| line[..line.find(needle).unwrap()].encode_utf16().count() as u32;
+        let marks = &preview.marks()[1];
+        let found = |start: u32, len: u32| {
+            marks
+                .iter()
+                .find(|mark| mark.utf16_start == start && mark.utf16_len == len)
+                .map(|mark| mark.marks)
+        };
+        assert!(
+            found(at("太字"), 2).is_some_and(|marks| marks.bold),
+            "{marks:?}"
+        );
+        assert!(
+            found(at("斜体"), 2).is_some_and(|marks| marks.italic),
+            "{marks:?}"
+        );
+        assert!(
+            found(at("消し"), 2).is_some_and(|marks| marks.strike),
+            "{marks:?}"
+        );
+        assert!(
+            found(at("code"), 4).is_some_and(|marks| marks.code),
+            "{marks:?}"
+        );
+        assert!(
+            marks.iter().all(|mark| mark.ornament.is_none()),
+            "no box hides the ruby reading while editing"
+        );
+        // 離れれば、今までどおり記号の無い整形表示。
+        let preview = PreviewDocument::from_source_with_active_line(source, None);
+        assert!(preview.text.contains("本文太字と斜体、消し、code、"));
     }
 
     /// The level and the stripping have to agree line for line. Where they

@@ -39,6 +39,8 @@ mod shell;
 mod shortcuts;
 #[cfg(test)]
 mod tab_position_ui_tests;
+#[cfg(test)]
+mod table_ui_tests;
 mod terminal;
 mod terminal_session;
 mod text_blocks;
@@ -16649,6 +16651,27 @@ fn insert_pane_text(
     }
     let caret = id.caret_byte(&state, &source);
     let selection = selection_source_range(&state.borrow());
+    // 書き手の求め 2026-09-15（表のまま編集）: **表のセルに打った`|`は、区切りではなく字。**
+    // 原稿には`\|`と書き、表を壊さない（整形して見せている面の、1行の入力だけ）。
+    let input = if input.contains('|') && !input.contains('\n') && id.shows_preview(window) {
+        let styles = document
+            .counts
+            .borrow_mut()
+            .get(&source, reading_of(window))
+            .line_styles()
+            .to_vec();
+        let index = source[..caret.min(source.len())].matches('\n').count();
+        let in_table = styles
+            .get(index)
+            .is_some_and(|style| style.kind == text_blocks::LineKind::TableRow);
+        if in_table {
+            input.replace('|', "\\|")
+        } else {
+            input
+        }
+    } else {
+        input
+    };
     // What the change took out, for the undo that puts it back (要件 7.1).
     // Read before the text moves, because afterwards there is nowhere to read
     // it from.
@@ -16934,6 +16957,25 @@ fn tab_in_pane(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
         }
     };
     let across_lines = source[from.min(to)..to.max(from)].contains('\n');
+    // 書き手の求め 2026-09-15（表のまま編集）: **表の中の`Tab`／`Shift+Tab`は、次／前のセルへ。**
+    // 整形して見せている面だけ——原文の面では`|`も字で、`Tab`は今までどおり字を入れる。
+    if from == to && id.shows_preview(window) {
+        let styles = document
+            .counts
+            .borrow_mut()
+            .get(&source, reading_of(window))
+            .line_styles()
+            .to_vec();
+        if let Some(target) = document::table_tab(&source, &styles, from, back) {
+            {
+                let mut state = state.borrow_mut();
+                update_selection_after_move(&mut state, from, target, false);
+                state.preferred_line = None;
+            }
+            refresh_pane_from_state(window, &live.cache, &document, id, &state, &source);
+            return;
+        }
+    }
     let in_item = {
         let index = source[..from.min(to)].matches('\n').count();
         document
@@ -17798,7 +17840,7 @@ fn move_pane_caret(
             .get(&source, reading_of(window))
             .line_styles()
             .to_vec();
-        match document::hidden_indent(&source, &styles, next) {
+        let next = match document::hidden_indent(&source, &styles, next) {
             Some(hidden) if hidden.contains(&next) => {
                 if direction < 0 {
                     // 行の頭より前——ひとつ上の行の終わりへ。文書の頭なら、そこで止まる。
@@ -17808,7 +17850,17 @@ fn move_pane_caret(
                 }
             }
             _ => next,
+        };
+        // 書き手の求め 2026-09-15（表のまま編集）: **表の`|`と余白も描かれない字**なので、←→は
+        // セルの端から隣のセルへ一息に移る。行の外へ出た先がまた表の行なら、もう一度跨ぐ。
+        let mut next = next;
+        for _ in 0..3 {
+            match document::table_step(&source, &styles, next, direction > 0) {
+                Some(to) if to != next => next = to,
+                _ => break,
+            }
         }
+        next
     } else {
         next
     };

@@ -1248,6 +1248,8 @@ struct RowPlan {
 struct CellPlan {
     utf16_start: u32,
     utf16_len: u32,
+    /// セルを開く`|`の位置（ブロックのUTF-16）。原文の1セルでは行の頭。
+    bar_utf16: u32,
     text: String,
     marks: Vec<StyleRun>,
     column: usize,
@@ -1302,12 +1304,17 @@ fn measure_table(
         let source = styled.source_line == Some(index);
         let mut cells = Vec::new();
         let mut header = false;
-        if source {
-            // 要件 7.3.1: the row the caret is on shows its own source, bars
-            // and all — one cell holding the whole line.
+        // 書き手の求め 2026-09-15: **表は表のまま編集する。**カーソルのある行も升目のまま組み、
+        // セルの中身だけを原文で出す（太字の記号なども見える）。区切りの`|`と前後の余白は、
+        // 他の行と同じくどのセルにも入らない。**区切り行（`| --- |`）だけは原文の1セル**——
+        // 揃えを書き換えるのはその行の記号そのものだから。
+        if source && !matches!(kind, LineKind::TableRow) {
+            // 要件 7.3.1: the delimiter row the caret is on shows its own
+            // source, bars and all — one cell holding the whole line.
             cells.push(CellPlan {
                 utf16_start: utf16,
                 utf16_len,
+                bar_utf16: utf16,
                 text: line.to_owned(),
                 marks: Vec::new(),
                 column: 0,
@@ -1337,6 +1344,7 @@ fn measure_table(
                 cells.push(CellPlan {
                     utf16_start: utf16 + start,
                     utf16_len: end - start,
+                    bar_utf16: utf16 + cell.bar_utf16,
                     text,
                     marks,
                     column: cells.len(),
@@ -1456,8 +1464,11 @@ fn measure_table(
             rules.push(flow + plan.flow_size);
         }
         let single = plan.cells.len() == 1 && widths.len() != 1;
-        for cell in &plan.cells {
-            if cell.utf16_len == 0 {
+        let last = plan.cells.len().saturating_sub(1);
+        for (at, cell) in plan.cells.iter().enumerate() {
+            // **行を閉じる`|`が残す空のセルだけを落とす。**途中の空のセルは升目に残す——
+            // 表のまま編集するとき（書き手の求め 2026-09-15）、空のセルに入って書けなければならない。
+            if cell.utf16_len == 0 && (at == last || single) {
                 continue;
             }
             let line_start = if single {
@@ -1473,6 +1484,7 @@ fn measure_table(
             cells.push(GridCell {
                 utf16_start: cell.utf16_start,
                 utf16_len: cell.utf16_len,
+                bar_utf16: cell.bar_utf16,
                 row: lines.len(),
                 column: cell.column,
                 flow_start: flow + room,
@@ -1582,7 +1594,9 @@ fn cell_marks(styled: StyledText<'_>, line: usize, start: u32, end: u32) -> Vec<
         .filter_map(|emphasis| {
             let from = emphasis.utf16_start.max(start);
             let to = (emphasis.utf16_start + emphasis.utf16_len).min(end);
-            (from < to).then_some(StyleRun {
+            // `then`で遅らせる：`then_some`は引数を先に計算するので、セルに掛からない印で
+            // `to - from`が負になる（編集中の行が印を持つようになって当たった、2026-09-15）。
+            (from < to).then(|| StyleRun {
                 utf16_start: from - start,
                 utf16_len: to - from,
                 heading_level: 0,
@@ -3871,6 +3885,7 @@ fn hash_grid(grid: &TableGrid, hasher: &mut DefaultHasher) {
     for cell in &grid.cells {
         cell.utf16_start.hash(hasher);
         cell.utf16_len.hash(hasher);
+        cell.bar_utf16.hash(hasher);
         cell.flow_start.to_bits().hash(hasher);
         cell.flow_size.to_bits().hash(hasher);
         cell.line_start.to_bits().hash(hasher);
@@ -7525,33 +7540,31 @@ mod tests {
         assert!(longest >= 60, "the longest run of ink is {longest} pixels");
     }
 
-    /// 要件 7.3.1: **the row the caret is on shows its bars.** Nothing stands
-    /// over it, so its cells sit where the writer typed them rather than where
-    /// their columns are — which is the whole of what makes the active line the
-    /// source line.
+    /// 書き手の求め 2026-09-15: **表は表のまま編集する。**カーソルのある行も升目のまま組み、
+    /// セルの中身だけを原文で出す——`**とちり**`の記号は見え、`|`と余白は見えない。
     ///
-    /// **And the rest of the table does not move.** The row is still measured,
-    /// so the column it is widest in keeps its width; a table that shifted
-    /// every time the caret walked into a row would be unusable to type in.
+    /// **表のほかの行は動かない**し、カーソルの行の列の頭も他の行と同じところにある。
+    /// 動くのは、原文で出たセルの中の字（記号のぶん後ろへ）だけである。
     #[test]
-    fn the_row_the_caret_is_on_shows_its_bars() {
+    fn the_row_the_caret_is_on_keeps_its_columns() {
         let source = "| 短 | いろは |\n| --- | --- |\n| とても長い見出しの語 | にほへ |\n\
-                      | 狭 | とちり |\n";
+                      | 狭 | **とちり** |\n";
         let mode = WritingMode::Horizontal;
         let styles = crate::document::line_styles(source);
-        let places = |preview: &crate::document::PreviewDocument| {
-            let text = preview.text.clone();
+        let set = |preview: &crate::document::PreviewDocument| {
             let styled = StyledText::marked(&preview.text, &styles, preview.marks())
                 .with_markers(preview.markers())
                 .with_source_line(preview.active_line());
-            let mut engine = engine_set(mode, styled, &plain());
+            engine_set(mode, styled, &plain())
+        };
+        let places = |preview: &crate::document::PreviewDocument| {
+            let mut engine = set(preview);
+            let text = preview.text.clone();
             ["いろは", "にほへ", "とちり"].map(|word| line_axis_at(&mut engine, mode, &text, word))
         };
 
         let quiet = crate::document::PreviewDocument::from_source(source);
         let settled = places(&quiet);
-        // The caret on the last row, whose cells are the narrowest in the
-        // table: the further its column carries them, the plainer the test.
         let at = source.find("| 狭").expect("the row is in the source");
         let active =
             crate::document::PreviewDocument::from_source_with_active_line(source, Some(at));
@@ -7560,38 +7573,40 @@ mod tests {
             Some(3),
             "the caret is on the last row"
         );
+        assert!(
+            active.text.contains("**とちり**"),
+            "the cell shows its source"
+        );
         let now = places(&active);
-
         assert!(
             (settled[0] - now[0]).abs() <= 0.5 && (settled[1] - now[1]).abs() <= 0.5,
             "the other rows moved: {settled:?} became {now:?}"
         );
         assert!(
-            now[2] < settled[2] - 20.0,
-            "the caret's row is still set in its columns: {settled:?} became {now:?}"
+            now[2] > settled[2] + 5.0 && now[2] < settled[2] + 60.0,
+            "only the markers push the word along: {settled:?} became {now:?}"
         );
 
-        // **And an engine that has already set this table has to set it
-        // again.** Moving the caret from one row to another changes not one
-        // character, not one mark and not one marker — so an engine that
-        // compared only those would answer with the boxes it had.
-        let text = quiet.text.clone();
-        let styled = StyledText::marked(&quiet.text, &styles, quiet.marks())
-            .with_markers(quiet.markers())
-            .with_source_line(quiet.active_line());
-        let mut engine = engine_set(mode, styled, &plain());
-        let before = line_axis_at(&mut engine, mode, &text, "とちり");
-        let styled = StyledText::marked(&active.text, &styles, active.marks())
-            .with_markers(active.markers())
-            .with_source_line(active.active_line());
-        engine
-            .update(styled, LineFit::Extent(LINE_EXTENT), &plain())
-            .expect("DirectWrite block measurement");
-        let after = line_axis_at(&mut engine, mode, &text, "とちり");
-        assert!(
-            after < before - 20.0,
-            "the engine kept the boxes it had: {before} then {after}"
-        );
+        // カーソルの行も2つのセルに分かれ、2列目の頭は他の行と同じ。
+        let engine = set(&active);
+        let grid = grid_of(&engine);
+        let heads = |row: usize| {
+            grid.cells
+                .iter()
+                .filter(|cell| cell.row == row)
+                .map(|cell| cell.line_start)
+                .collect::<Vec<f32>>()
+        };
+        let caret_row = grid.cells.iter().map(|cell| cell.row).max().unwrap();
+        assert_eq!(heads(caret_row).len(), heads(0).len(), "{grid:?}");
+        for (caret, head) in heads(caret_row).iter().zip(heads(0)) {
+            assert!(
+                (caret - head).abs() <= 0.5,
+                "{:?} / {:?}",
+                heads(caret_row),
+                heads(0)
+            );
+        }
     }
 
     /// 要件 7.3.1: the delimiter row shows its own `| --- | --- |` when the
