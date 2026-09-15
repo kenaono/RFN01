@@ -218,6 +218,13 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
         }
     }
 
+    // Reset All puts every document's mode back to none (書き手の求め 2026-09-15).
+    live.tabs.borrow_mut().panes[0].tabs[0].word_mode = 3;
+    id.update_screen(&window, |screen| screen.word_mode = 3);
+    reset_all_settings(&window, &live);
+    assert_eq!(live.tabs.borrow().panes[0].tabs[0].word_mode, 0);
+    assert_eq!(id.screen(&window).word_mode, 0);
+
     // Nothing to reopen next time: the session names the document only.
     let session = session::capture_session(&window, &live);
     assert_eq!(session.panes[0].tabs.len(), 1);
@@ -263,7 +270,8 @@ fn each_page_reset_stays_on_its_page() {
         );
         assert_eq!(
             fonts.row_data(font_row(sheet, CODE_SLOT)).unwrap(),
-            "Meiryo"
+            default_font(CODE_SLOT),
+            "the code font is Text's"
         );
     }
 
@@ -277,8 +285,10 @@ fn each_page_reset_stays_on_its_page() {
     assert_eq!(paper(0), slint_colour(default_colour(0, PAPER_SLOT)));
     assert_eq!(
         fonts.row_data(font_row(0, CODE_SLOT)).unwrap(),
-        default_font(CODE_SLOT)
+        "Meiryo",
+        "Text stays"
     );
+    assert_eq!(Setting::UprightDigits.default_value(), 0);
     assert_eq!(
         fonts.row_data(font_row(0, 0)).unwrap(),
         "Meiryo",

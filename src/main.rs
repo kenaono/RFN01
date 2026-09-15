@@ -2987,7 +2987,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &window,
                 &reset_live,
                 Question::ResetAll,
-                "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻ります。単語帳とモードは残ります。".to_owned(),
+                "すべての設定を既定に戻しますか？\n\nGeneral・Terminal・Text・Layout・Page・Keys が既定に戻り、文書ごとに選んだモードは「なし」になります。単語帳とモードは残ります。".to_owned(),
                 &["既定に戻す", "キャンセル"],
                 0,
             );
@@ -7660,7 +7660,19 @@ fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
 /// **Through the same doors the pages use**, so each value does what it does
 /// when the writer changes it by hand — turning 自動退避 back on keeps the work
 /// copies again, and every one of them writes the settings file.
-fn reset_all_settings(window: &AppWindow) {
+fn reset_all_settings(window: &AppWindow, live: &Live) {
+    // 書き手の求め 2026-09-15: **文書ごとに選んだモードは「なし」へ。**モードと
+    // 単語帳そのものは残す——選び直せば元の色分けに戻る。
+    for strip in &mut live.tabs.borrow_mut().panes {
+        for tab in &mut strip.tabs {
+            tab.word_mode = 0;
+        }
+    }
+    for id in PaneId::all(window) {
+        id.update_screen(window, |screen| screen.word_mode = 0);
+    }
+    publish_word_mode_of(window, live);
+    write_session(window, live);
     show_bullet_marks(window, document::BulletMarks::all());
     window.invoke_count_ruby_toggled(false);
     window.invoke_ruby_marks_toggled(true);
@@ -7951,7 +7963,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         ) => {
             cancel_close_run(live);
         }
-        (Question::ResetAll, 0) => reset_all_settings(window),
+        (Question::ResetAll, 0) => reset_all_settings(window, live),
         _ => {}
     }
 }
@@ -9136,9 +9148,8 @@ impl Setting {
             // the numbers when they want them.
             Self::LineNumbers => 0,
             Self::Whitespace => 0,
-            // 入。要件 7.8 は「書き手が何も書かなくても効く」と言っている
-            // ——切りたい書き手が切る側であって、既定が何もしない側ではない。
-            Self::UprightDigits => 1,
+            // 書き手の決定 2026-09-15: **切。**使う書き手が入れる。
+            Self::UprightDigits => 0,
             // 書き手の決定 2026-09-11: いままで描いていた字（`•`）。設定になった
             // からといって、書き手の画面が動くいわれはない——3つの記号とも同じ丸から。
             Self::BulletMark(_) => 0,
@@ -10439,9 +10450,9 @@ fn reset_settings_group(
             }
         }
         for slot in 0..SHEET_FONTS {
-            // The code font is Page's; the rest are the body's and headings'.
-            let page = if slot == CODE_SLOT { 5 } else { 3 };
-            if page == group {
+            // Every family is Text's, the code font included (書き手の求め
+            // 2026-09-15).
+            if group == 3 {
                 fonts.set_row_data(font_row(sheet, slot), default_font(slot).into());
             }
         }

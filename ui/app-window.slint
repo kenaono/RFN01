@@ -2768,7 +2768,7 @@ export component AppWindow inherits Window {
                                                     clicked => { root.reset-all-requested(); }
                                                 }
                                                 Text {
-                                                    text: "General・Terminal・Text・Layout・Page・Keys を既定に戻します。単語帳とモードは残ります。";
+                                                    text: "General・Terminal・Text・Layout・Page・Keys を既定に戻し、文書のモードは「なし」にします。単語帳とモードは残ります。";
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     vertical-alignment: center;
@@ -3720,6 +3720,17 @@ export component AppWindow inherits Window {
                                                             font-menu.show();
                                                         }
                                                     }
+
+                                                    // 書き手の求め 2026-09-15: **コードの書体も文字の設定。**本文・見出しの
+                                                    // 書体と同じ面に置く（紙の面にあったのはおかしい）。
+                                                    PickRow {
+                                                        label: "Code Font";
+                                                        value: root.sheet-fonts[sheet-index * 8 + 7];
+                                                        pressed => {
+                                                            root.sheet = sheet-index; root.font-picked(7);
+                                                            font-menu.show();
+                                                        }
+                                                    }
                                             }
                                         }
 
@@ -3997,9 +4008,8 @@ export component AppWindow inherits Window {
                                                     letter-spacing: 0.9px;
                                                 }
 
-                                                    // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない
-                                                    // ——この面には紙の**色**と、コードの**書体**が並んでいて、
-                                                    // どちらも「紙」「コード」としか言っていなかった。
+                                                    // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない。
+                                                    // （コードの書体は 2026-09-15 に Text へ移した。）
                                                     ColorCell {
                                                         label: "Paper Color";
                                                         shown: root.palette[sheet-index * 15 + 7];
@@ -4008,14 +4018,6 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
 
-                                                    PickRow {
-                                                        label: "Code Font";
-                                                        value: root.sheet-fonts[sheet-index * 8 + 7];
-                                                        pressed => {
-                                                            root.sheet = sheet-index; root.font-picked(7);
-                                                            font-menu.show();
-                                                        }
-                                                    }
                                             }
                                         }
 
