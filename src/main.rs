@@ -37,6 +37,8 @@ mod session;
 mod settings_ui_tests;
 mod shell;
 mod shortcuts;
+#[cfg(test)]
+mod tab_position_ui_tests;
 mod terminal;
 mod terminal_session;
 mod text_blocks;
@@ -3624,6 +3626,8 @@ fn replace_document(
             ..EditorState::default()
         };
         id.set_scroll(window, 0.0);
+        // 縦書きの0は末尾なので、先頭は字で指す（`TabView`の既定と同じ）。
+        hold_view(cache, id, Some(0), None);
     }
     // **この文書を見ている面だけを組み直す。**ReadOnlyは0.5秒ごとにここへ来るので、
     // 全部の面と設定の書き出し（`relayout_panes`）までは払わない。
@@ -3671,7 +3675,7 @@ fn show_document_title(window: &AppWindow, file: &DocumentFile) {
 /// the tab (`vertical`/`horizontal`, `vertical_preview`/`horizontal_preview`,
 /// `scroll_x`/`scroll_y`), which is the same duplication `PaneId` was made to
 /// end.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct TabView {
     state: EditorState,
     /// Along the flow, in whichever screen axis that is for this pane.
@@ -3689,6 +3693,25 @@ struct TabView {
     /// file can be open横書き in one pane and縦書き in another.
     vertical: bool,
     preview: bool,
+}
+
+/// **まだ誰も見ていない表示は、文書の先頭に立つ**（書き手の報告 2026-09-15：
+/// 「縦書き時、キャレットを先頭にしてからTABを閉じ、再び開くと表示位置が末尾になる」）。
+///
+/// 先頭を`scroll`の0で言っていたときは、横書きでは上端＝先頭だが、**縦書きでは0が
+/// 左端＝末尾**だった。同じ面のまま別の文書へ替わると、前の文書の長さとの差だけ
+/// 右端から離れた、途中の位置にも出た（記録：`09`→`10`で`scroll=-66932`）。
+/// **位置は画素ではなく字で持つ**——TABを戻すときと同じ`top`で、向きを問わず先頭になる。
+impl Default for TabView {
+    fn default() -> Self {
+        Self {
+            state: EditorState::default(),
+            scroll: 0.0,
+            top: Some(0),
+            vertical: false,
+            preview: false,
+        }
+    }
 }
 
 impl TabView {
