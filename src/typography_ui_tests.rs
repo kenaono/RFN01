@@ -357,7 +357,6 @@ fn typography_settings_roundtrip_and_render() {
     );
     insert_pane_text(&window, id, &document, &states, &cache, "追加", false);
     splice_source(&window, id, &document, &states, &cache, 0, 1, "", 0);
-    replace_document(&window, &states, &cache, &document, "置換".into());
     undo_in_pane(&window, id, &document, &states, &cache, false);
     undo_in_pane(&window, id, &document, &states, &cache, true);
     set_pane_preedit(&window, id, &document, &states.of(id), &cache, "変換中");

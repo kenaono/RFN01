@@ -532,8 +532,10 @@ pub fn wire(app: &AppWindow, live: &Live) {
                 37 => app.invoke_pane_line_edit(pane.index(), 3),
                 42 => app.invoke_pane_direction_toggled(pane.index()),
                 43 => {
+                    // ReadOnlyはViewerを抜けずに断る（追加要件 2026-09-15）——抜けて
+                    // プレビューへ回すと、読むだけのつもりの面が書ける面になる。
                     let viewer = live.states.of(pane).borrow().viewer;
-                    if viewer {
+                    if viewer && !pane.reads_only(&app) {
                         app.invoke_pane_viewer_toggled(pane.index());
                     }
                     app.invoke_pane_preview_toggled(pane.index());

@@ -385,6 +385,8 @@ export component EditorPane inherits Rectangle {
     /// **本文を書いているタブか。**シェルにも設定の面にも本文は無いので、
     /// 文書にしか意味の無い行とボタンは、この1つで出し入れする。
     property <bool> writing: !root.terminal && !root.settings;
+    // 追加要件 2026-09-15（書き手）: ソース表示で本のボタンを押した形。横書きだけ。
+    property <bool> reading-only: root.viewer && !root.preview;
     /// 要件 7.9（2026-09-08）: いまこの面に効いている語群の名前。**選んだ語を
     /// 足す先**として右ボタンのメニューに並ぶ。空なら行そのものが出ない。
     in property <[string]> word-sets;
@@ -1149,7 +1151,7 @@ export component EditorPane inherits Rectangle {
                         // The grid is rows of cells across; there is nothing
                         // here for 要件 7.2's other mode to mean, so the two
                         // buttons are dimmed rather than left to do nothing.
-                        enabled: root.writing;
+                        enabled: root.writing && !root.reading-only;
                         clicked => {
                             if (root.vertical) {
                                 root.direction-toggled();
@@ -1160,7 +1162,7 @@ export component EditorPane inherits Rectangle {
                         icon: Icons.vertical;
                         tip: "Vertical" + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
                         checked: root.vertical;
-                        enabled: root.writing;
+                        enabled: root.writing && !root.reading-only;
                         clicked => {
                             if (!root.vertical) {
                                 root.direction-toggled();
@@ -1178,7 +1180,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: "M1 2h5l2 2 2-2h5v12h-5l-2 1-2-1H1z M8 4v11";
-                        tip: (root.viewer ? "Viewerを終了" : "Viewerモード") + (root.shortcut-keys[44] == "" ? "" : " · " + root.shortcut-keys[44]);
+                        tip: (root.reading-only ? "ReadOnlyを終了" : root.viewer ? "Viewerを終了" : root.preview ? "Viewerモード" : "ReadOnlyモード") + (root.shortcut-keys[44] == "" ? "" : " · " + root.shortcut-keys[44]);
                         checked: root.viewer;
                         enabled: root.writing;
                         clicked => { root.viewer-toggled(); }

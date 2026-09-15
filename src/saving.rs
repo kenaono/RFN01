@@ -424,11 +424,26 @@ pub fn check_external_change(window: &AppWindow, live: &Live) {
     // **開いている文書を全部見る**（書き手のレビュー 2026-09-11、S2）。前にある
     // 文書だけを見ていると、**後ろのタブで起きた変更は、そのタブへ移るまで誰も
     // 気づかない**——戻ったときには、書き手はもうそのファイルのことを忘れている。
+    check_documents(window, live, crate::open_documents(live));
+}
+
+/// 同じ見回りを、**ReadOnlyで前に出ている文書だけ**に（追加要件 2026-09-15、書き手の選択）。
+///
+/// 0.5秒ごとに来る。ReadOnlyは書き手が編集しないので、変われば必ず読み直しになる
+/// ——流れているログがそのまま流れて見える。何も開いていなければ何もしない。
+pub fn check_read_only_change(window: &AppWindow, live: &Live) {
+    let reading = crate::read_only_documents(window, live);
+    if !reading.is_empty() {
+        check_documents(window, live, reading);
+    }
+}
+
+fn check_documents(window: &AppWindow, live: &Live, documents: Vec<Rc<OpenDocument>>) {
     let active = live.active(window);
     // **何も起きていなければ、画面に触らない。**この見回りは2秒ごとに来るので、
     // 毎回タブを組み直すと、何事もない時間のほうが高くつく。
     let mut noticed = false;
-    for document in crate::open_documents(live) {
+    for document in documents {
         let file = &document.file;
         let change = file.borrow().external_change();
         if change == ExternalChange::Missing {
@@ -455,23 +470,34 @@ pub fn check_external_change(window: &AppWindow, live: &Live) {
         if !file.borrow_mut().take_report(stamp) {
             continue;
         }
-        noticed = true;
-        if !document.text.edited() {
-            // **失うものが無ければ読み直す**（要件 8.3）。書き手が手でするのと
-            // 同じことで、前にある文書でなくても同じである。
+        // **読むだけの面（ReadOnly・Viewer）で開いていて、失うものが無ければ取り込む**
+        // （要件 8.3、書き手の判断 2026-09-15）。前にある文書でなくても同じである。
+        if !document.text.edited() && crate::has_reading_view(window, live, &document) {
+            noticed = true;
             reload_document(window, live, &document);
             continue;
         }
-        // **印は片付くまで消えない**（S2）。`render_status`は書き手が次へ動けば
-        // 畳むので、そちらは「いま気づいた」ことだけを言う。
-        document.outside.set(true);
+        // **編集モードでは取り込まない**（書き手の判断 2026-09-15：「警告を出したら、
+        // 読み直す指示があるまで外部からの取り込みの更新は止めていてもいい」）。
+        // 書いている面の下で本文が替わると、読んでいた場所も見失う。未編集でも同じで、
+        // 読み直すかReadOnlyで読むかは印から訊く（`ask_outside_change`）。
+        //
+        // **知らせは1度だけ**：書き足され続けるログは2秒ごとに印を立て直すが、
+        // 印は片付くまで消えないので（S2）、立っているあいだは黙っている。
+        if document.outside.replace(true) {
+            continue;
+        }
+        noticed = true;
         if Rc::ptr_eq(&document, &active) {
-            window.set_render_status("別のアプリがこのファイルを変更しました".into());
+            window.set_render_status(
+                "別のアプリがこのファイルを変更しました。「⚠ 外で変更」から読み直せます".into(),
+            );
         }
         live.cache.borrow_mut().log_diag(
             "external",
             &format!(
-                "modified edited=1 active={} action=mark",
+                "modified edited={} active={} action=mark",
+                u8::from(document.text.edited()),
                 u8::from(Rc::ptr_eq(&document, &active))
             ),
         );
@@ -696,6 +722,15 @@ pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
         );
         return;
     }
+    // 追加要件 2026-09-15: **ReadOnlyの上書きは断る。**書き足され続けるファイルへ、
+    // 少し前に読んだ断面を書き戻すことになる——その間に足された行が消える。
+    // 断面として残したいなら、別名で保存する（そのときReadOnlyは解ける）。
+    if !ask_for_name && focused_pane(window).reads_only(window) {
+        window.set_render_status(
+            "ReadOnlyモードでは上書き保存しません。残すときは別名で保存してください".into(),
+        );
+        return;
+    }
     // **求めが届いたことを、まず残す**（書き手の報告 2026-09-10：「縦書きだと
     // 警告が出ていません」）。**鍵が届かなかった回は、ログのどこにも出ない**
     // ——書けたか断られたかの行しか無ければ、「効かなかった」と「届いていない」を
@@ -882,6 +917,7 @@ pub fn write_document_in(
     // Taken before the save, because 名前を付けて保存 moves the document to
     // another file and the copy on disk is still under the old name.
     let previous = work_identity(&file.borrow());
+    let moved = file.borrow().path() != Some(target.as_path());
     let saved_to = target.clone();
     let outcome = file.borrow_mut().save_to_as(target, &text, form);
     match outcome {
@@ -902,6 +938,9 @@ pub fn write_document_in(
             // その組み直しは来ない。
             crate::publish_active_encoding(window, live);
             window.set_render_status("保存しました".into());
+            if moved && crate::release_read_only(window, live, document) {
+                window.set_render_status("別名で保存しました。ReadOnlyモードを解除しました".into());
+            }
             // 単語チェックモード要件 5.4（2026-09-08）: **保存されたのが辞書
             // そのものなら、そこから読み直す。**書き手が直したのは表であって、
             // 画面の表と食い違ったまま進むと、次に語を1つ足した拍子に書き手の

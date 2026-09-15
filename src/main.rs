@@ -27,6 +27,8 @@ mod open_document;
 mod pane_layout;
 mod pty;
 mod quick_draft;
+#[cfg(test)]
+mod read_only_ui_tests;
 mod saving;
 mod searcher;
 mod session;
@@ -428,6 +430,14 @@ const WORK_COPY_SETTLE: Duration = Duration::from_secs(3);
 /// not a read, and a watcher is a thread, a queue and a set of platform events
 /// for something that is being asked twice a second anyway.
 const EXTERNAL_CHECK_TICK: Duration = Duration::from_secs(2);
+/// 追加要件 2026-09-15（書き手の選択）: **ReadOnlyで見ている文書だけ、見回りを短く。**
+/// ログが流れるのを2秒おきに見るのは遅い。ほかの文書は今までどおり
+/// `EXTERNAL_CHECK_TICK`ごとで、見回りの回数は増やさない。
+const READ_ONLY_CHECK_TICK: Duration = Duration::from_millis(500);
+/// 最下行に「いる」とみなす余り（px）。ホイールの止まり方で1px足りないことがある。
+const READ_ONLY_END_SLACK: f32 = 2.0;
+/// ReadOnlyのあいだは縦書き・プレビューへ切り替えない（追加要件 2026-09-15）。
+const READ_ONLY_STAYS: &str = "ReadOnlyモードでは縦書き・プレビューに切り替えられません";
 /// How much one press of a typography control moves it, in percent. Character
 /// spacing is a fraction of the size rather than a multiple, so it steps finer.
 /// How large a heading is set at each level, as a percentage of body size
@@ -476,6 +486,13 @@ const PERF_LOG_LINE_LIMIT: usize = 20_000;
 #[derive(Clone, Debug, Default)]
 struct EditorState {
     viewer: bool,
+    /// 追加要件 2026-09-15（書き手）: **ReadOnlyで最下行を追っているか。**
+    ///
+    /// ReadOnly（Viewerをソース表示で開いた形）だけが読む。入った時点で立ち、
+    /// 書き手が上へスクロールすると下り、最下行まで戻すとまた立つ——ログを
+    /// 読む人が`tail -f`でしていることを、スクロールだけで言えるようにする。
+    /// **TABが持つ**のは、同じ文書を別のTABで止めて読めるように。
+    follow: bool,
     caret_source_byte: Option<usize>,
     selection_anchor_source_byte: Option<usize>,
     active_line_start: Option<usize>,
@@ -962,6 +979,12 @@ struct PaneView {
     /// time the writer can press a key, and asking twice could answer twice.
     selection_source: Vec<(usize, usize)>,
     preedit_range: Option<(u32, u32)>,
+    /// ReadOnlyが最下行を追うか決めたときの、面の高さ（追加要件 2026-09-15）。
+    ///
+    /// **面が縮んだのは、書き手が上へスクロールしたのではない。**窓を縮めても
+    /// 横のスクロールバーが出ても、末尾は画面の下へ外れる——それで追うのを
+    /// やめると、ログは書き手が何もしないうちに止まって見える。
+    read_only_viewport: f32,
 }
 
 /// A place in the text that a pane is holding its view on (要件 8.5).
@@ -1875,8 +1898,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let watch_live = live.clone();
     let mut tree_watcher = tree_watch::Watcher::new().ok();
-    watch_timer.start(TimerMode::Repeated, EXTERNAL_CHECK_TICK, move || {
+    let rounds = (EXTERNAL_CHECK_TICK.as_millis() / READ_ONLY_CHECK_TICK.as_millis()) as u32;
+    let mut tick = 0u32;
+    watch_timer.start(TimerMode::Repeated, READ_ONLY_CHECK_TICK, move || {
         if let Some(window) = weak.upgrade() {
+            // ReadOnlyで見ている文書は毎回、全部は`EXTERNAL_CHECK_TICK`ごと。
+            tick = (tick + 1) % rounds;
+            if tick != 0 {
+                saving::check_read_only_change(&window, &watch_live);
+                return;
+            }
             check_external_change(&window, &watch_live);
             if window.get_tree_open()
                 && window.get_left_tab() == 0
@@ -2280,10 +2311,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // repeater is a matter of the pane passing `index` instead of a literal
     // (ペイン分割設計 5).
     let weak = window.as_weak();
+    let states = pane_states.clone();
     let cache = render_cache.clone();
     window.on_pane_scroll_changed(move |pane, offset| {
         if let Some(window) = weak.upgrade() {
-            refresh_after_scroll(&window, &cache, PaneId::from_index(pane), offset);
+            let id = PaneId::from_index(pane);
+            let following = follow_scroll(&window, &states, &cache, id, offset);
+            refresh_after_scroll(&window, &cache, id, offset);
+            // 組み直しで末尾が伸びたら、追っている面はそこまで付いて行く。
+            if following {
+                scroll_to_end(&window, &cache, id);
+            }
         }
     });
 
@@ -2777,6 +2815,11 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_preview_toggled(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
+            // 追加要件 2026-09-15（書き手）: ReadOnlyはソース表示のまま。
+            if id.reads_only(&window) {
+                window.set_render_status(READ_ONLY_STAYS.into());
+                return;
+            }
             let document = states.document(id);
             id.set_shows_preview(&window, !id.shows_preview(&window));
             let source = document.text.borrow().clone();
@@ -2789,25 +2832,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let cache = render_cache.clone();
     window.on_pane_viewer_toggled(move |pane| {
         if let Some(window) = weak.upgrade() {
-            let id = PaneId::from_index(pane);
-            let document = states.document(id);
-            if document.read_only() {
-                return;
-            }
-            let viewer = !states.of(id).borrow().viewer;
-            states.of(id).borrow_mut().viewer = viewer;
-            let source = document.text.borrow().clone();
-            states.of(id).borrow_mut().preedit.clear();
-            id.set_ime_buffer(&window, "");
-            refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
-            window.set_render_status(
-                if viewer {
-                    "Viewerモードに切り替えました"
-                } else {
-                    "編集モードに戻りました"
-                }
-                .into(),
-            );
+            toggle_viewer(&window, &states, &cache, PaneId::from_index(pane));
         }
     });
 
@@ -2825,6 +2850,11 @@ fn main() -> Result<(), slint::PlatformError> {
             // are dimmed over one, and the answer is the same wherever else the
             // ask could come from.
             if cache.borrow_mut().pane(id).terminal.is_some() {
+                return;
+            }
+            // 追加要件 2026-09-15（書き手）: ReadOnlyは横書きだけ。
+            if id.reads_only(&window) {
+                window.set_render_status(READ_ONLY_STAYS.into());
                 return;
             }
             toggle_pane_direction(&window, &states, &cache, id);
@@ -3509,11 +3539,14 @@ fn replace_document(
     document: &Rc<OpenDocument>,
     text: String,
 ) {
-    let id = PaneId::from_index(window.get_focused_pane());
-    if document.read_only() || id.screen(window).viewer {
-        window.set_render_status("Viewerでは編集できません".into());
+    // **ファイルを読み直すことで、書き手の編集ではない**（追加要件 2026-09-15）。
+    // ここで前にある面のViewerを見て断っていたときは、Viewerにいるあいだの外部変更が
+    // 「読み込みました」と言いながら本文に届かなかった——ReadOnlyはそれを読むための形である。
+    if document.read_only() {
         return;
     }
+    // **書き足されただけなら、位置はそのまま意味を持つ**（ログ）。
+    let appended = text.starts_with(document.text.borrow().as_str());
     *document.text.borrow_mut() = text;
     // Nothing recorded against the old text names anything in this one.
     // `History::undo_into` checks as well, but that check is the last line of
@@ -3523,13 +3556,47 @@ fn replace_document(
     // because no position in the old text means anything in the new one (6.7),
     // and the beginning is a different scroll on each side because the flows
     // run opposite ways. A pane looking at another file is not involved.
+    //
+    // **ViewerとReadOnlyは解けない**（追加要件 2026-09-15）。
+    //
+    // **書き足されただけなら、どの面もカーソル・選択・表示位置を残す**（書き手の報告
+    // 2026-09-15）。先頭へ戻していたときは、ログを下まで読んでいくと読み直しのたびに
+    // スクロールバーが上へ跳ねた。
+    let mut following = Vec::new();
+    let mut shown = Vec::new();
     for id in PaneId::all(window) {
-        if Rc::ptr_eq(&states.document(id), document) {
-            *states.of(id).borrow_mut() = EditorState::default();
-            id.set_scroll(window, 0.0);
+        if !Rc::ptr_eq(&states.document(id), document) {
+            continue;
+        }
+        shown.push(id);
+        let reading = id.reads_only(window);
+        let state = states.of(id);
+        if reading && state.borrow().follow {
+            following.push(id);
+        }
+        if appended {
+            continue;
+        }
+        let (viewer, follow) = (state.borrow().viewer, state.borrow().follow);
+        *state.borrow_mut() = EditorState {
+            viewer,
+            follow,
+            ..EditorState::default()
+        };
+        id.set_scroll(window, 0.0);
+    }
+    // **この文書を見ている面だけを組み直す。**ReadOnlyは0.5秒ごとにここへ来るので、
+    // 全部の面と設定の書き出し（`relayout_panes`）までは払わない。
+    let source = document.text.borrow().clone();
+    for id in shown {
+        states.of(id).borrow_mut().preferred_line = None;
+        if id.is_shown(window) {
+            refresh_pane_from_state(window, cache, document, id, &states.of(id), &source);
         }
     }
-    relayout_panes(window, states, cache);
+    for id in following {
+        scroll_to_end(window, cache, id);
+    }
 }
 
 /// Put the name of what is in front of the writer where they can see it.
@@ -4185,6 +4252,10 @@ impl Live {
         let state = self.states.of(id);
         let source = document.text.borrow().clone();
         refresh_pane_from_state(window, &self.cache, document, id, &state, &source);
+        // 追加要件 2026-09-15: 後ろにいたあいだに書き足されたログも、戻れば最下行。
+        if id.reads_only(window) && state.borrow().follow {
+            scroll_to_end(window, &self.cache, id);
+        }
     }
 }
 
@@ -4219,6 +4290,104 @@ fn open_documents(live: &Live) -> Vec<Rc<OpenDocument>> {
     open
 }
 
+/// この文書を、読むだけの面（ReadOnly・Viewer）で開いているか（要件 8.3、2026-09-15）。
+///
+/// **開いていれば外の変更をそのまま取り込む。**書かない面には守る場所が無い。後ろの
+/// TABも数える——前にあるTABの控えは切り替えた時点のものなので、前の分は面から訊く。
+fn has_reading_view(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) -> bool {
+    let in_front = PaneId::all(window).into_iter().any(|id| {
+        Rc::ptr_eq(&live.states.document(id), document) && live.states.of(id).borrow().viewer
+    });
+    in_front
+        || live.tabs.try_borrow().is_ok_and(|tabs| {
+            tabs.panes.iter().any(|strip| {
+                strip.tabs.iter().enumerate().any(|(index, tab)| {
+                    index != strip.active
+                        && Rc::ptr_eq(&tab.document, document)
+                        && tab.view.state.viewer
+                })
+            })
+        })
+}
+
+/// 外で変わった文書を、印の問いから「ReadOnlyモードで読む」（書き手の判断 2026-09-15）。
+///
+/// 本のボタンと同じ道を通す。ReadOnlyはソース表示なので、プレビューやViewerなら先に外す。
+fn enter_read_only(window: &AppWindow, live: &Live, id: PaneId) {
+    if id.reads_only(window) {
+        return;
+    }
+    live.states.of(id).borrow_mut().viewer = false;
+    id.set_shows_preview(window, false);
+    toggle_viewer(window, &live.states, &live.cache, id);
+}
+
+/// ReadOnlyの面が前に出している文書（追加要件 2026-09-15）。**0.5秒ごとの見回りの相手。**
+///
+/// 前にある面だけ：後ろのTABのReadOnlyは、ほかの文書と同じ2秒の見回りで足りる
+/// ——戻ったときに最下行へ行く（`Live::show_tab`）。
+fn read_only_documents(window: &AppWindow, live: &Live) -> Vec<Rc<OpenDocument>> {
+    let mut held: Vec<Rc<OpenDocument>> = Vec::new();
+    for id in PaneId::all(window) {
+        if !id.is_shown(window) || !id.reads_only(window) {
+            continue;
+        }
+        let document = live.states.document(id);
+        if !document.read_only() && !held.iter().any(|seen| Rc::ptr_eq(seen, &document)) {
+            held.push(document);
+        }
+    }
+    held
+}
+
+/// 別名で保存したら、その文書のReadOnlyは解ける（追加要件 2026-09-15、書き手）。
+///
+/// **保存は断面で、文書はもう別のファイル**——元のログがこれ以上書き足されても、
+/// この文書には届かない。追うものが無いのに「読むだけ」の面を残す理由は無い。
+/// 後ろのTABも同じ。返すのは、解いた面があったか。
+fn release_read_only(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) -> bool {
+    let mut released = false;
+    let source = document.text.borrow().clone();
+    for id in PaneId::all(window) {
+        if !Rc::ptr_eq(&live.states.document(id), document) || !id.reads_only(window) {
+            continue;
+        }
+        let state = live.states.of(id);
+        state.borrow_mut().viewer = false;
+        state.borrow_mut().follow = false;
+        refresh_pane_from_state(
+            window,
+            &live.cache,
+            document,
+            id,
+            &live.states.of(id),
+            &source,
+        );
+        released = true;
+    }
+    // 後ろのTAB。前にあるTABの控えは切り替えた時点のもので、いまの状態は上で見た。
+    if let Ok(mut tabs) = live.tabs.try_borrow_mut() {
+        let views = tabs.panes.iter_mut().flat_map(|strip| {
+            let front = strip.active;
+            strip
+                .tabs
+                .iter_mut()
+                .enumerate()
+                .filter(move |(index, _)| *index != front)
+                .map(|(_, tab)| tab)
+        });
+        for tab in views {
+            let view = &mut tab.view;
+            if Rc::ptr_eq(&tab.document, document) && view.state.viewer && !view.preview {
+                view.state.viewer = false;
+                view.state.follow = false;
+                released = true;
+            }
+        }
+    }
+    released
+}
+
 /// 外で変わったまま片付いていない文書について、どうするかを訊く（要件 8.3、
 /// 書き手のレビュー 2026-09-11、S2）。
 ///
@@ -4240,6 +4409,21 @@ fn ask_outside_change(window: &AppWindow, live: &Live) {
         };
         (path, file.form(), file.title())
     };
+    // 書き手の判断 2026-09-15: **失うものが無ければ、読み直すか、ReadOnlyで読むか。**
+    // 上書き・別名保存は守る本文が無いので出さない。比べるのはPaneメニューの
+    // 「保存版と比較」がそのまま同じことをする。ReadOnlyは未保存の本文を捨てるので、
+    // 編集した文書の問いには出さない。
+    if !document.text.edited() {
+        ask_question(
+            window,
+            live,
+            Question::OutsideChanged(path),
+            format!("「{title}」は別のアプリで変更されています。"),
+            &["外部の変更を読み込む", "ReadOnlyモードで読む", "キャンセル"],
+            -1,
+        );
+        return;
+    }
     ask_question(
         window,
         live,
@@ -4350,6 +4534,130 @@ fn merge_documents(
 /// document being measured again — the price of a deliberate switch, never of a
 /// keystroke. The IME is told as well when it is the pane being typed in: its
 /// candidate list is laid out from the composition font's direction (7.2).
+/// 本のボタン（E14②、追加要件 2026-09-15）。
+///
+/// **プレビューで押せばViewer、ソース表示で押せばReadOnly。**どちらも「このTABでは
+/// 書かない」で、違うのは見せ方だけなので、ボタンは1つのまま。ReadOnlyはログのように
+/// 書き足され続けるファイルを読むためのもので、**横書きだけ**——縦書きで押されたら
+/// 先に横書きへ回す。入った時点で最下行を見せ、そこから追う（`EditorState::follow`）。
+fn toggle_viewer(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+) {
+    let document = states.document(id);
+    if document.read_only() {
+        return;
+    }
+    let viewer = !states.of(id).borrow().viewer;
+    let reading = viewer && !id.shows_preview(window);
+    if reading && id.vertical(window) {
+        toggle_pane_direction(window, states, cache, id);
+        // 回したときのカーソル合わせは要らない：見せたいのは最下行である。
+        let mut borrowed = cache.borrow_mut();
+        let view = &mut borrowed.pane(id).view;
+        view.direction_fraction = None;
+        view.reveal_after_direction = false;
+    }
+    {
+        let held = states.of(id);
+        let mut state = held.borrow_mut();
+        state.viewer = viewer;
+        state.follow = reading;
+        state.preedit.clear();
+    }
+    id.set_ime_buffer(window, "");
+    let source = document.text.borrow().clone();
+    refresh_pane_from_state(window, cache, &document, id, &states.of(id), &source);
+    if reading {
+        scroll_to_end(window, cache, id);
+    }
+    cache.borrow_mut().log_diag(
+        "readonly",
+        &format!(
+            "book pane={} viewer={} reading={}",
+            id.log_name(),
+            u8::from(viewer),
+            u8::from(reading)
+        ),
+    );
+    window.set_render_status(
+        match (viewer, reading) {
+            (true, true) => "ReadOnlyモードに切り替えました（最下行を追います）",
+            (true, false) => "Viewerモードに切り替えました",
+            (false, _) => "編集モードに戻りました",
+        }
+        .into(),
+    );
+}
+
+/// ReadOnlyの面を最下行へ（追加要件 2026-09-15）。
+///
+/// **位置の保持は外す。**TABを戻したときなどに立つ`top_anchor`が残っていると、
+/// 次の描画がそこへ引き戻す——追っている面が見ていたいのは、いつも末尾である。
+fn scroll_to_end(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, id: PaneId) {
+    let viewport = id.viewport_flow(window);
+    let content = {
+        let mut borrowed = cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        pane.view.top_anchor = None;
+        pane.view.read_only_viewport = viewport;
+        pane.graphics.engine.total_flow_size() as f32
+    };
+    let end = (content - viewport).max(0.0);
+    id.set_scroll(window, -end);
+}
+
+/// 書き手のスクロールで、ReadOnlyが最下行を追うかを決め直す（追加要件 2026-09-15）。
+///
+/// **上へ動かせば止まり、最下行まで戻せば再開する。**比べる長さは面がいま持っている
+/// 長さで、`ScrollView`が止まる位置もその長さから決まっている——組み直しで長さが
+/// 変わるのはこの後（`refresh_after_scroll`）である。
+///
+/// 返すのは「追っているか」。
+fn follow_scroll(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    offset: f32,
+) -> bool {
+    if !id.reads_only(window) {
+        return false;
+    }
+    let viewport = id.viewport_flow(window);
+    let (content, resized) = {
+        let mut borrowed = cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        let before = std::mem::replace(&mut pane.view.read_only_viewport, viewport);
+        let content = pane.graphics.engine.total_flow_size() as f32;
+        (content, (before - viewport).abs() >= 0.5)
+    };
+    let end = (content - viewport).max(0.0);
+    let was = states.of(id).borrow().follow;
+    if was && resized {
+        return true;
+    }
+    let at_end = -offset >= end - READ_ONLY_END_SLACK;
+    states.of(id).borrow_mut().follow = at_end;
+    if was != at_end {
+        window.set_render_status(
+            if at_end {
+                "最下行に戻ったので、自動スクロールを再開しました"
+            } else {
+                "自動スクロールを止めました（最下行まで戻すと再開します）"
+            }
+            .into(),
+        );
+        cache.borrow_mut().log_diag(
+            "readonly",
+            &format!("follow={} at={offset:.0} end={end:.0}", u8::from(at_end)),
+        );
+    }
+    at_end
+}
+
 fn toggle_pane_direction(
     window: &AppWindow,
     states: &PaneStates,
@@ -7695,6 +8003,9 @@ enum Question {
         path: PathBuf,
         form: file_io::TextForm,
     },
+    /// 保存していない変更の無い文書が、外で変わった（要件 8.3、書き手の判断 2026-09-15）。
+    /// 読み直すか、ReadOnlyで読むか。
+    OutsideChanged(PathBuf),
     /// 名前を付けて保存の宛先を、別のタブが開いていて、そちらに未保存がある
     /// （書き手のレビュー 2026-09-11、P1）。**捨てる前に訊く。**
     SaveOverOpen {
@@ -8034,6 +8345,15 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             }
         }
         (Question::SaveConflict { path, .. }, 3) => open_external_snapshot(window, live, &path),
+        (Question::OutsideChanged(path), choice @ (0 | 1)) => {
+            let Some(document) = asked_document(window, live, &path) else {
+                return;
+            };
+            saving::reload_document(window, live, &document);
+            if choice == 1 {
+                enter_read_only(window, live, focused_pane(window));
+            }
+        }
         (Question::MissingFile(path), 0) => {
             if asked_document(window, live, &path).is_some() {
                 save_document(window, live, true);
@@ -11022,10 +11342,10 @@ fn refresh_pane_from_state(
     state: &Rc<RefCell<EditorState>>,
     source: &str,
 ) {
+    // 追加要件 2026-09-15（書き手）: **Viewerがプレビューを連れて来ない。**
+    // プレビューで本のボタンを押せばViewer、ソース表示で押せばReadOnlyで、
+    // どちらの見せ方かはTABのプレビューの印がそのまま言う。
     id.update_screen(window, |screen| screen.viewer = state.borrow().viewer);
-    if state.borrow().viewer {
-        id.set_shows_preview(window, true);
-    }
     let (caret_source_byte, selection, preedit) = {
         let state = state.borrow();
         (
@@ -11454,6 +11774,14 @@ impl PaneId {
     /// tree hands out the editing area, and a pane it does not name gets none.
     fn is_shown(self, window: &AppWindow) -> bool {
         self.screen(window).width > 0.0
+    }
+
+    /// 追加要件 2026-09-15（書き手）: **ソース表示のReadOnly**——Viewerを
+    /// ソース表示のまま開いた形。編集できないのはViewerと同じで、原文を横書きで見せ、
+    /// ファイルが書き足されれば最下行を追う。
+    fn reads_only(self, window: &AppWindow) -> bool {
+        let screen = self.screen(window);
+        screen.viewer && !screen.preview
     }
 
     /// Whether this pane shows the formatted text rather than the source, which
@@ -15310,7 +15638,7 @@ fn pane_text<'a>(
     source: &'a str,
     active_line_start: Option<usize>,
 ) -> PaneText<'a> {
-    if id.shows_preview(window) || id.screen(window).viewer {
+    if id.shows_preview(window) {
         let active_line_start = if id.screen(window).viewer {
             None
         } else {
