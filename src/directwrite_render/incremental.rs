@@ -203,7 +203,7 @@ impl TextEngine {
 
     pub fn viewport_anchor(&mut self, scroll: f32, extent: f32) -> Option<(u32, f32)> {
         let visible =
-            crate::text_blocks::visible_flow_range(scroll, extent, self.total_flow_size() as f32);
+            crate::text_blocks::visible_flow_range(scroll, extent, self.plan.flow_bounds());
         let at = self
             .plan
             .blocks
@@ -252,7 +252,7 @@ impl TextEngine {
             return Ok(());
         }
         let visible =
-            crate::text_blocks::visible_flow_range(scroll, extent, self.total_flow_size() as f32);
+            crate::text_blocks::visible_flow_range(scroll, extent, self.plan.flow_bounds());
         let needed = self
             .deferred_blocks
             .iter()
@@ -286,7 +286,7 @@ impl TextEngine {
     /// vertical content changes its origin as the estimated tail changes size.
     pub fn viewport_end_utf16(&self, scroll: f32, extent: f32) -> u32 {
         let visible =
-            crate::text_blocks::visible_flow_range(scroll, extent, self.total_flow_size() as f32);
+            crate::text_blocks::visible_flow_range(scroll, extent, self.plan.flow_bounds());
         self.plan
             .blocks
             .iter()
@@ -601,17 +601,10 @@ mod tests {
                         assert_eq!(lines, block.lines);
                     }
                 }
+                // The caret before the edit keeps its coordinate in both modes:
+                // the origin is where the document starts (2026-09-16).
                 let after = engine.caret_geometry(target).unwrap();
-                if mode == WritingMode::Horizontal {
-                    assert_eq!(caret.y, after.y);
-                } else {
-                    assert!(
-                        ((before.total_flow_size - caret.x)
-                            - (engine.plan.total_flow_size - after.x))
-                            .abs()
-                            < 1.1
-                    );
-                }
+                assert_eq!((caret.x, caret.y), (after.x, after.y), "{mode:?}");
                 engine
                     .update(StyledText::plain(&text), LineFit::Extent(700), &typography)
                     .unwrap();

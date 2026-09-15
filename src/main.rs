@@ -2364,6 +2364,7 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_scroll_changed(move |pane, offset| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
+            let offset = id.scroll_from_page(&window, offset);
             let following = follow_scroll(&window, &states, &cache, id, offset);
             refresh_after_scroll(&window, &cache, id, offset);
             // 組み直しで末尾が伸びたら、追っている面はそこまで付いて行く。
@@ -2458,6 +2459,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 SelectionPhase::Begin
             };
             let state = states.of(id);
+            let x = id.flow_x(&window, x);
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
         }
     });
@@ -2465,8 +2467,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let link_live = live.clone();
     window.on_pane_link_open(move |pane, x, y| {
-        weak.upgrade()
-            .is_some_and(|window| open_link_at(&window, &link_live, PaneId::from_index(pane), x, y))
+        weak.upgrade().is_some_and(|window| {
+            let id = PaneId::from_index(pane);
+            open_link_at(&window, &link_live, id, id.flow_x(&window, x), y)
+        })
     });
 
     // E3の②: 行そのものを動かす・写す・消す。**番号は窓と1対1**で、増えたときに
@@ -2521,6 +2525,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let document = states.document(id);
             let state = states.of(id);
             let phase = SelectionPhase::Update;
+            let x = id.flow_x(&window, x);
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
         }
     });
@@ -2532,6 +2537,7 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let index = usize::try_from(index).unwrap_or(usize::MAX);
+            let x = id.flow_x(&window, x);
             resize_picture(&window, &picture_live, id, index, phase, (x, y));
         }
     });
@@ -2545,6 +2551,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let document = states.document(id);
             let state = states.of(id);
             let phase = SelectionPhase::End;
+            let x = id.flow_x(&window, x);
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
         }
     });
@@ -3688,8 +3695,17 @@ fn replace_document(
             follow,
             ..EditorState::default()
         };
-        id.set_scroll(window, 0.0);
-        // 縦書きの0は末尾なので、先頭は字で指す（`TabView`の既定と同じ）。
+        let total = cache
+            .borrow_mut()
+            .pane(id)
+            .graphics
+            .engine
+            .total_flow_size() as f32;
+        id.set_scroll(
+            window,
+            id.start_scroll(window, id.viewport_flow(window), total),
+        );
+        // 先頭は字でも指す（`TabView`の既定と同じ）：組み直しで長さが変わっても先頭に立つ。
         hold_view(cache, id, Some(0), None);
     }
     // **この文書を見ている面だけを組み直す。**ReadOnlyは0.5秒ごとにここへ来るので、
@@ -12076,8 +12092,8 @@ fn collect_layout_results(
                     .graphics
                     .engine
                     .total_flow_size() as f32;
-                let offset =
-                    (screen_flow - flow).clamp(-(total - id.shown_flow(window)).max(0.0), 0.0);
+                let (low, high) = id.scroll_range(window, id.shown_flow(window), total);
+                let offset = (screen_flow - flow).clamp(low, high);
                 id.set_scroll(window, offset);
                 refresh_after_scroll(window, cache, id, offset);
             }
@@ -12477,13 +12493,59 @@ impl PaneId {
         }
     }
 
+    /// 流れの座標を紙（Slintの`page`）の座標へ直すときに足す量（2026-09-16、書き手の決定）。
+    ///
+    /// **原点は読み始め**：横書きは上端、縦書きは右端が0（`text_blocks::place_blocks`）。紙は左上が0
+    /// なので、縦書きのxだけは紙の幅を足す。**直すのはSlintとの受け渡しの所だけ**——Rustの中の位置・
+    /// スクロール・保持は、どれも流れの座標のまま扱う。
+    fn page_shift(self, window: &AppWindow) -> f32 {
+        let screen = self.screen(window);
+        if screen.vertical {
+            screen.content_width as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// Slintから届いた紙のxを、流れの座標へ。
+    fn flow_x(self, window: &AppWindow, page_x: f32) -> f32 {
+        page_x - self.page_shift(window)
+    }
+
+    /// Slintのスクロール（紙の上で見えている低い端の、符号を返した位置）を、流れの座標でのスクロールへ。
+    fn scroll_from_page(self, window: &AppWindow, page_offset: f32) -> f32 {
+        page_offset + self.page_shift(window)
+    }
+
+    /// The scroll along the flow: **the negated flow coordinate at the view's low
+    /// edge** — the top horizontally, the left vertically. In flow coordinates,
+    /// so a document that grows at its end leaves it where it was.
     fn scroll(self, window: &AppWindow) -> f32 {
         let screen = self.screen(window);
         if self.vertical(window) {
-            screen.scroll_x
+            screen.scroll_x + screen.content_width as f32
         } else {
             screen.scroll_y
         }
+    }
+
+    /// How far the scroll can go, as `(low, high)`, for a document `total` long
+    /// in a view `visible` long. The view stops at the document's two ends:
+    /// horizontally that is `visible - total..0`, and vertically the same range
+    /// moved by the document's length, because the origin is at its right end.
+    fn scroll_range(self, window: &AppWindow, visible: f32, total: f32) -> (f32, f32) {
+        let low = (visible - total).min(0.0);
+        if self.vertical(window) {
+            (low + total, total)
+        } else {
+            (low, 0.0)
+        }
+    }
+
+    /// The scroll that shows the start of the document.
+    fn start_scroll(self, window: &AppWindow, visible: f32, total: f32) -> f32 {
+        let (low, high) = self.scroll_range(window, visible, total);
+        if self.vertical(window) { low } else { high }
     }
 
     /// Move the view along the flow, and tell the pane to follow (要件 8.5).
@@ -12507,7 +12569,7 @@ impl PaneId {
         let vertical = self.vertical(window);
         self.update_screen(window, |screen| {
             if vertical {
-                screen.scroll_x = offset;
+                screen.scroll_x = offset - screen.content_width as f32;
             } else {
                 screen.scroll_y = offset;
             }
@@ -12517,7 +12579,16 @@ impl PaneId {
     /// The global flow range the pane shows. Everything that clips work to the
     /// viewport goes through here, so the bounds cannot drift apart.
     fn flow_range(self, window: &AppWindow, total_flow: f32) -> (f32, f32) {
-        visible_flow_range(self.scroll(window), self.shown_flow(window), total_flow)
+        let order = if self.vertical(window) {
+            text_blocks::FlowOrder::Descending
+        } else {
+            text_blocks::FlowOrder::Ascending
+        };
+        visible_flow_range(
+            self.scroll(window),
+            self.shown_flow(window),
+            text_blocks::flow_bounds(order, total_flow),
+        )
     }
 
     /// Whether this pane is on screen at all.
@@ -12580,7 +12651,7 @@ impl PaneId {
     fn caret_flow(self, window: &AppWindow) -> f32 {
         let screen = self.screen(window);
         if self.vertical(window) {
-            screen.caret_x
+            screen.caret_x - screen.content_width as f32
         } else {
             screen.caret_y
         }
@@ -12590,7 +12661,7 @@ impl PaneId {
     fn ime_anchor_flow(self, window: &AppWindow) -> f32 {
         let screen = self.screen(window);
         if self.vertical(window) {
-            screen.ime_anchor_x
+            screen.ime_anchor_x - screen.content_width as f32
         } else {
             screen.ime_anchor_y
         }
@@ -12598,10 +12669,18 @@ impl PaneId {
 
     /// The laid-out document's size: how far it reaches along the flow, and how
     /// far across it.
+    ///
+    /// **The scroll stays where it is in flow coordinates.** Vertically the sheet
+    /// grows at its left, so the same view is a different offset on it: the
+    /// pane is told the new one, and the text the writer was looking at does not
+    /// slide (技術検証 4.3 — which used to be a correction applied after the
+    /// fact, and was once skipped for a whole release).
     fn set_content_size(self, window: &AppWindow, flow: u32, line_extent: u32) {
+        let vertical = self.vertical(window);
+        let kept = self.scroll(window);
         let flow = flow as i32;
         let line_extent = line_extent as i32;
-        let vertical = self.vertical(window);
+        let changed = self.screen(window).content_width != flow;
         self.update_screen(window, |screen| {
             if vertical {
                 screen.content_width = flow;
@@ -12611,12 +12690,18 @@ impl PaneId {
                 screen.content_height = flow;
             }
         });
+        if vertical && changed {
+            let (low, high) = self.scroll_range(window, self.viewport_flow(window), flow as f32);
+            let kept = kept.clamp(low, high);
+            self.record_scroll(window, kept);
+            self.update_screen(window, |screen| screen.scroll_generation += 1);
+        }
     }
 
     /// Where one rendered slice sits. A vertical tile is as tall as the pane and
     /// stacked along x; a horizontal one spans the pane and is stacked along y.
-    fn tile(vertical: bool, span: TileSpan, source: Image) -> PreviewTile {
-        let flow_start = span.flow_start as i32;
+    fn tile(vertical: bool, shift: f32, span: TileSpan, source: Image) -> PreviewTile {
+        let flow_start = span.flow_start + shift as i32;
         let flow_size = span.flow_size as i32;
         // 要件 9: where this slice sits across the page. A page that fits its
         // pane is one slice starting at nothing, which is what every tile was.
@@ -12664,18 +12749,34 @@ impl PaneId {
 
     /// E1: 範囲内検索の範囲の矩形。**いちばん薄く敷かれる。**
     fn set_scope(self, window: &AppWindow, rects: &[SelectionRect]) {
-        let model = ModelRc::new(VecModel::from(preview_rects(rects)));
+        let model = ModelRc::new(VecModel::from(self.preview_rects(window, rects)));
         self.update_screen(window, |screen| screen.scope_rects = model);
     }
 
     /// E1: 見えている一致の矩形。**選択と同じ形で渡し、描く側が薄く敷く。**
     fn set_matches(self, window: &AppWindow, rects: &[SelectionRect]) {
-        let model = ModelRc::new(VecModel::from(preview_rects(rects)));
+        let model = ModelRc::new(VecModel::from(self.preview_rects(window, rects)));
         self.update_screen(window, |screen| screen.match_rects = model);
     }
 
+    /// 流れの座標の矩形を、紙の座標でSlintへ（[`Self::page_shift`]）。
+    fn preview_rects(
+        self,
+        window: &AppWindow,
+        rects: &[SelectionRect],
+    ) -> Vec<PreviewSelectionRect> {
+        let shift = self.page_shift(window);
+        preview_rects(rects)
+            .into_iter()
+            .map(|rect| PreviewSelectionRect {
+                x: rect.x + shift,
+                ..rect
+            })
+            .collect()
+    }
+
     fn set_selection(self, window: &AppWindow, rects: &[SelectionRect]) {
-        let model = ModelRc::new(VecModel::from(preview_rects(rects)));
+        let model = ModelRc::new(VecModel::from(self.preview_rects(window, rects)));
         self.update_screen(window, |screen| screen.selection_rects = model);
     }
 
@@ -12683,10 +12784,11 @@ impl PaneId {
     /// measurement that is not its own line extent. Both are written: the row
     /// carries them, and which one is read is the pane's business.
     fn set_caret(self, window: &AppWindow, caret: Option<&CaretGeometry>) {
+        let shift = self.page_shift(window);
         self.update_screen(window, |screen| {
             screen.caret_visible = caret.is_some();
             if let Some(caret) = caret {
-                screen.caret_x = caret.x;
+                screen.caret_x = caret.x + shift;
                 screen.caret_y = caret.y;
                 screen.caret_width = caret.width;
                 screen.caret_height = caret.height;
@@ -12701,8 +12803,9 @@ impl PaneId {
     }
 
     fn set_ime_anchor(self, window: &AppWindow, x: f32, y: f32, caret: &CaretGeometry) {
+        let shift = self.page_shift(window);
         self.update_screen(window, |screen| {
-            screen.ime_anchor_x = x;
+            screen.ime_anchor_x = x + shift;
             screen.ime_anchor_y = y;
             screen.ime_anchor_width = caret.width;
             screen.ime_anchor_height = caret.height;
@@ -12975,8 +13078,10 @@ impl RenderCache {
         // ever anywhere but the near edge when the line is longer than the pane.
         let scroll_across = id.scroll_across(window);
         let shown_across = id.shown_across_flow(window);
-        // Which way the tiles stack, asked before the cache is borrowed.
+        // Which way the tiles stack, and where the sheet puts flow 0, asked before
+        // the cache is borrowed.
         let vertical = id.vertical(window);
+        let shift = id.page_shift(window);
         // Taken apart so the engine and the images can be held at once: reaching
         // through `self` for each of them would borrow the whole cache.
         let Pane { graphics, view, .. } = self.pane(id);
@@ -13049,7 +13154,7 @@ impl RenderCache {
             .filter_map(|(span, signature)| {
                 let cached = images.get_mut(signature)?;
                 cached.last_flow = span.flow_start as i32;
-                Some(PaneId::tile(vertical, *span, cached.image.clone()))
+                Some(PaneId::tile(vertical, shift, *span, cached.image.clone()))
             })
             .collect::<Vec<_>>();
 
@@ -13092,7 +13197,7 @@ impl RenderCache {
             .iter()
             .map(|(_, rect, _)| *rect)
             .collect::<Vec<_>>();
-        let model = ModelRc::new(VecModel::from(preview_rects(&rects)));
+        let model = ModelRc::new(VecModel::from(id.preview_rects(window, &rects)));
         id.update_screen(window, |screen| screen.picture_rects = model);
         self.pane(id).view.pictures = pictures;
     }
@@ -13141,7 +13246,7 @@ impl RenderCache {
                 rects.extend(found);
             }
         }
-        let model = ModelRc::new(VecModel::from(preview_rects(&rects)));
+        let model = ModelRc::new(VecModel::from(id.preview_rects(window, &rects)));
         id.update_screen(window, |screen| screen.difference_rects = model);
         Ok(())
     }
@@ -13390,9 +13495,6 @@ struct PaneLayout {
     /// 範囲内検索の範囲（E1、書き手の求め 2026-09-09）。**検索が選択を動かす
     /// ので、範囲は選択では見えない**——だから別に出す。
     scope: Option<(u32, u32)>,
-    /// How far the content reached before this layout, for the panes whose
-    /// document start is not at the origin.
-    previous_flow: u32,
     measured: directwrite_render::UpdateCost,
     preview_ms: f64,
     layout_ms: f64,
@@ -13544,7 +13646,6 @@ fn lay_out_pane(
 
     let layout_started = Instant::now();
     let engine = &mut pane.graphics.engine;
-    let previous_flow = engine.total_flow_size();
     // **下書きが乗っている行の印だけを外す**（書き手の報告 2026-09-12：
     // 「横書きで作業すると、IMEをON/OFFするたびに全体が上下に揺れます。
     // 1行くらい揺れる」）。
@@ -13640,7 +13741,6 @@ fn lay_out_pane(
         selection_source,
         matches,
         scope,
-        previous_flow,
         measured,
         preview_ms,
         layout_ms,
@@ -14748,7 +14848,6 @@ fn refresh_pane(
         selection_source,
         matches,
         scope,
-        previous_flow,
         measured,
         preview_ms,
         layout_ms,
@@ -14758,25 +14857,10 @@ fn refresh_pane(
         let engine = &cache.pane(id).graphics.engine;
         (engine.total_flow_size(), engine.line_extent())
     };
-    // Vertical text anchors the document's start at the right edge, so blocks
-    // are placed right to left and a new column widens the content there: the
-    // text *before* the edit slides right unless the viewport slides with it.
-    // Keeping the distance from that edge constant leaves the earlier text where
-    // it was and lets the later text flow leftwards, which is the direction
-    // Japanese vertical text actually grows. This used to be skipped whenever a
-    // caret existed, so it never ran while editing.
-    //
-    // The horizontal pane wants none of it. That document starts at the top and
-    // grows downwards, so a new line moves nothing that is already above it.
-    if id.vertical(window) && previous_flow > 0 && previous_flow != content_flow {
-        let scrolled = scroll_after_content_resize(
-            id.scroll(window),
-            id.shown_flow(window),
-            previous_flow as f32,
-            content_flow as f32,
-        );
-        id.set_scroll(window, scrolled);
-    }
+    // A new column widens a vertical document at its end, and flow coordinates
+    // start at its beginning, so the text before the edit keeps its place
+    // without anything here doing it — `set_content_size` only tells the sheet
+    // its new width.
     id.set_content_size(window, content_flow, line_extent);
 
     // 要件 8.5: put the view back where the writer left it, in spite of the
@@ -14796,11 +14880,11 @@ fn refresh_pane(
         // before the window stands still, and a place found in one of the
         // earlier ones can sit beyond the last — a view pinned there shows
         // paper, which is what "the top is cut off" looks like.
-        let last = (content_flow as f32 - id.shown_flow(window)).max(0.0);
-        Some(flow.clamp(0.0, last))
+        let (low, high) = id.scroll_range(window, id.shown_flow(window), content_flow as f32);
+        Some((-flow).clamp(low, high))
     });
-    if let Some(flow) = anchored {
-        id.set_scroll(window, -flow);
+    if let Some(offset) = anchored {
+        id.set_scroll(window, offset);
     }
 
     let geometry_started = Instant::now();
@@ -14918,15 +15002,11 @@ fn refresh_pane(
     }
     if let (Some(fraction), Some(caret)) = (cache.pane(id).view.direction_fraction, caret.as_ref())
     {
+        let viewport = id.viewport_flow(window);
+        let range = id.scroll_range(window, viewport, content_flow as f32);
         id.set_scroll(
             window,
-            direction_caret_scroll(
-                id.vertical(window),
-                caret,
-                fraction,
-                id.viewport_flow(window),
-                content_flow as f32,
-            ),
+            direction_caret_scroll(id.vertical(window), caret, fraction, viewport, range),
         );
     }
     apply_pane_geometry(
@@ -15141,7 +15221,8 @@ fn apply_pane_geometry(
     };
     let was = id.scroll(window);
     let viewport = id.viewport_flow(window);
-    let scroll = caret_visible_scroll(was, viewport, content_flow, caret_flow, caret_size);
+    let range = id.scroll_range(window, viewport, content_flow);
+    let scroll = caret_visible_scroll(was, viewport, range, caret_flow, caret_size);
     // Both extents, because they differ on purpose and the difference is
     // invisible in every other figure: the tile side errs high and this side
     // must not (6.16).
@@ -15170,10 +15251,11 @@ fn apply_pane_geometry(
     } else {
         (caret.x, caret.width)
     };
+    let shown_across = id.shown_across_flow(window);
     let across = caret_visible_scroll(
         id.scroll_across(window),
-        id.shown_across_flow(window),
-        id.content_across(window),
+        shown_across,
+        ((shown_across - id.content_across(window)).min(0.0), 0.0),
         caret_across,
         across_size,
     );
@@ -15279,17 +15361,6 @@ fn refresh_after_scroll(
     let total = engine.total_flow_size();
     let extent = engine.line_extent();
     if previous != total {
-        if id.vertical(window) {
-            id.set_scroll(
-                window,
-                scroll_after_content_resize(
-                    offset,
-                    id.shown_flow(window),
-                    previous as f32,
-                    total as f32,
-                ),
-            );
-        }
         id.set_content_size(window, total, extent);
     }
     let drawn = cache.refresh_pane_tiles(window, id, TILE_PREFETCH_COUNT);
@@ -15523,21 +15594,6 @@ fn next_grapheme_byte(text: &str, byte: usize) -> usize {
 
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
-}
-
-fn scroll_after_content_resize(
-    viewport_x: f32,
-    visible_width: f32,
-    previous_width: f32,
-    next_width: f32,
-) -> f32 {
-    if next_width <= visible_width {
-        return 0.0;
-    }
-    let previous_right = -viewport_x + visible_width;
-    let distance_from_right = (previous_width - previous_right).max(0.0);
-    let next_right = (next_width - distance_from_right).max(visible_width);
-    (visible_width - next_right).clamp(visible_width - next_width, 0.0)
 }
 
 /// 要件 10: the caret's place in the file, when the pane that just acted is
@@ -15870,7 +15926,7 @@ fn direction_caret_scroll(
     caret: &CaretGeometry,
     fraction: f32,
     viewport: f32,
-    content: f32,
+    range: (f32, f32),
 ) -> f32 {
     let centre = if vertical {
         caret.x + caret.width / 2.0
@@ -15878,21 +15934,23 @@ fn direction_caret_scroll(
         caret.y + caret.height / 2.0
     };
     let fraction = if vertical { 1.0 - fraction } else { fraction };
-    (viewport * fraction - centre).clamp(-(content - viewport).max(0.0), 0.0)
+    (viewport * fraction - centre).clamp(range.0, range.1)
 }
 
+/// `range` is where the scroll may go (`PaneId::scroll_range`): a document no
+/// longer than the view has nowhere to go, and stays at the high end.
 fn caret_visible_scroll(
     viewport: f32,
     visible: f32,
-    content: f32,
+    range: (f32, f32),
     caret_start: f32,
     caret_size: f32,
 ) -> f32 {
-    if visible <= 0.0 || content <= visible {
-        return 0.0;
+    let (minimum, maximum) = range;
+    if visible <= 0.0 || minimum >= maximum {
+        return maximum;
     }
 
-    let minimum = visible - content;
     let caret_low = caret_start + viewport;
     let caret_high = caret_low + caret_size;
     let target = if caret_low < CARET_SCROLL_PADDING {
@@ -15903,7 +15961,7 @@ fn caret_visible_scroll(
         viewport
     };
 
-    target.clamp(minimum, 0.0)
+    target.clamp(minimum, maximum)
 }
 
 /// What a pane has selected, as the runs its last layout cut (要件 7.1).
@@ -16394,9 +16452,10 @@ fn resize_picture(
     let vertical = id.vertical(window);
     let (width, outline) = pictures::resized(rect, vertical, to, line_box, id.zoom(window));
     if phase < 2 {
+        let shift = id.page_shift(window);
         id.update_screen(window, |screen| {
             screen.picture_outline = PreviewSelectionRect {
-                x: outline[0],
+                x: outline[0] + shift,
                 y: outline[1],
                 width: outline[2],
                 height: outline[3],
@@ -19465,24 +19524,41 @@ mod tests {
         assert_eq!(usable_horizontal_width(880.0), 880);
     }
 
-    /// The horizontal document is anchored at the top, so a line added anywhere
-    /// leaves everything above it where it was and the viewport must not move.
-    /// The vertical pane is the one that has to compensate.
+    /// The scroll range `PaneId::scroll_range` gives a horizontal document.
+    fn forwards(visible: f32, content: f32) -> (f32, f32) {
+        ((visible - content).min(0.0), 0.0)
+    }
+
     #[test]
     fn keeps_the_horizontal_caret_inside_its_viewport() {
         // A caret at the bottom edge pulls the viewport down.
         assert_eq!(
-            caret_visible_scroll(0.0, 600.0, 2400.0, 590.0, 22.0),
+            caret_visible_scroll(0.0, 600.0, forwards(600.0, 2400.0), 590.0, 22.0),
             -36.0,
             "a caret below the fold scrolls the pane"
         );
         // One already in view moves nothing.
         assert_eq!(
-            caret_visible_scroll(-100.0, 600.0, 2400.0, 400.0, 22.0),
+            caret_visible_scroll(-100.0, 600.0, forwards(600.0, 2400.0), 400.0, 22.0),
             -100.0
         );
         // A document shorter than the pane never scrolls.
-        assert_eq!(caret_visible_scroll(0.0, 600.0, 400.0, 380.0, 22.0), 0.0);
+        assert_eq!(
+            caret_visible_scroll(0.0, 600.0, forwards(600.0, 400.0), 380.0, 22.0),
+            0.0
+        );
+        // Vertically the origin is the document's right end and the range moves
+        // with it: a caret 300 left of it in a 2400 document, viewed from the
+        // start, is on screen; one 900 left of it pulls the view along.
+        let backwards = (600.0 - 2400.0 + 2400.0, 2400.0);
+        assert_eq!(
+            caret_visible_scroll(600.0, 600.0, backwards, -300.0, 22.0),
+            600.0
+        );
+        assert_eq!(
+            caret_visible_scroll(600.0, 600.0, backwards, -900.0, 22.0),
+            924.0
+        );
     }
 
     #[test]
@@ -19502,19 +19578,23 @@ mod tests {
 
     #[test]
     fn keeps_the_vertical_caret_inside_the_horizontal_viewport() {
+        let range = forwards(600.0, 1200.0);
         assert_eq!(
-            caret_visible_scroll(0.0, 600.0, 1200.0, 1140.0, 24.0),
+            caret_visible_scroll(0.0, 600.0, range, 1140.0, 24.0),
             -588.0
         );
         assert_eq!(
-            caret_visible_scroll(-588.0, 600.0, 1200.0, 540.0, 24.0),
+            caret_visible_scroll(-588.0, 600.0, range, 540.0, 24.0),
             -516.0
         );
         assert_eq!(
-            caret_visible_scroll(-516.0, 600.0, 1200.0, 700.0, 24.0),
+            caret_visible_scroll(-516.0, 600.0, range, 700.0, 24.0),
             -516.0
         );
-        assert_eq!(caret_visible_scroll(-80.0, 600.0, 500.0, 450.0, 24.0), 0.0);
+        assert_eq!(
+            caret_visible_scroll(-80.0, 600.0, forwards(600.0, 500.0), 450.0, 24.0),
+            0.0
+        );
     }
 
     /// Closing 無題2 and asking for a new document gives 無題2 back, rather
@@ -19789,8 +19869,8 @@ mod tests {
     /// when this was found: 585 shown, 760 estimated, 861 of content.
     #[test]
     fn an_over_estimated_viewport_cannot_reach_the_last_line() {
-        let real = caret_visible_scroll(0.0, 585.0, 861.0, 840.0, 24.0);
-        let over = caret_visible_scroll(0.0, 760.0, 861.0, 840.0, 24.0);
+        let real = caret_visible_scroll(0.0, 585.0, forwards(585.0, 861.0), 840.0, 24.0);
+        let over = caret_visible_scroll(0.0, 760.0, forwards(760.0, 861.0), 840.0, 24.0);
         assert_eq!(real, 585.0 - 861.0, "the true viewport reaches the end");
         assert_eq!(over, 760.0 - 861.0);
         assert!(
@@ -20007,48 +20087,6 @@ mod tests {
             bounded_extent(stale, 0.0),
             stale,
             "a pane given nothing yet is not bounded to nothing"
-        );
-    }
-
-    /// Inserting a line break must push the text after it leftwards, not drag
-    /// the text before it rightwards.
-    ///
-    /// Vertical text starts at the right, and a new column widens the content at
-    /// the right edge. The viewport has to follow that edge by the same amount,
-    /// or everything already written appears to slide sideways.
-    #[test]
-    fn a_new_column_moves_the_later_text_left_and_leaves_the_earlier_text_put() {
-        let visible = 640.0;
-        let before = 5000.0;
-        let column = 36.0;
-        let after = before + column;
-        // Parked in the middle of the document.
-        let viewport = -2000.0;
-
-        let next = scroll_after_content_resize(viewport, visible, before, after);
-
-        assert_eq!(
-            next,
-            viewport - column,
-            "the viewport must follow the right edge so earlier text stays put"
-        );
-        let earlier_text_on_screen = |scroll: f32, content_width: f32| content_width + scroll;
-        assert_eq!(
-            earlier_text_on_screen(next, after),
-            earlier_text_on_screen(viewport, before),
-            "the document start must land in the same place on screen"
-        );
-    }
-
-    #[test]
-    fn keeps_the_same_distance_from_the_vertical_document_start_after_resize() {
-        assert_eq!(
-            scroll_after_content_resize(0.0, 640.0, 665.0, 86_386.0),
-            -85_721.0
-        );
-        assert_eq!(
-            scroll_after_content_resize(-2000.0, 640.0, 5000.0, 6000.0),
-            -3000.0
         );
     }
 
@@ -20459,8 +20497,8 @@ mod tests {
     fn a_document_wide_selection_only_measures_the_visible_blocks() {
         let text = long_document(30_000);
         let mut engine = engine_for(&text, 100);
-        let width = engine.total_flow_size() as f32;
-        let visible = visible_flow_range(0.0, 640.0, width);
+        let bounds = engine.flow_bounds();
+        let visible = visible_flow_range(-bounds.0, 640.0, bounds);
 
         let rects = engine
             .selection_rects(Some((0, engine.utf16_len())), visible)

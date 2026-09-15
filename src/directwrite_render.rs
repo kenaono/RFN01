@@ -4327,6 +4327,13 @@ impl TextEngine {
         self.plan.total_flow_size.ceil().max(1.0) as u32
     }
 
+    /// 文書が流れの軸で占める範囲。原点は読み始め——縦書きは右端が0で`-total..0`
+    /// （`text_blocks::place_blocks`）。
+    #[cfg(test)]
+    pub fn flow_bounds(&self) -> (f32, f32) {
+        self.plan.flow_bounds()
+    }
+
     /// The pane's extent along the line axis: pane height in vertical writing,
     /// pane width in horizontal writing.
     pub fn line_extent(&self) -> u32 {
@@ -6869,7 +6876,8 @@ mod tests {
         for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
             let mut spec = plain();
             let mut engine = engine_set(mode, StyledText::plain("変更していない本文"), &spec);
-            let tiles = engine.visible_tiles(0.0, 2000.0, 0, 0.0, LINE_EXTENT as f32);
+            let tiles =
+                engine.visible_tiles(-engine.flow_bounds().0, 2000.0, 0, 0.0, LINE_EXTENT as f32);
             let tile = tiles[0];
             let before = engine.tile_signature(tile, None);
             spec.heading_scale[5] = 3.0;
@@ -7372,7 +7380,7 @@ mod tests {
             let mut engine = engine_set(mode, StyledText::plain(source), &spec);
             let margin = engine.margin;
             let tiles = engine.visible_tiles(
-                0.0,
+                -engine.flow_bounds().0,
                 engine.total_flow_size() as f32,
                 0,
                 0.0,
@@ -7419,7 +7427,13 @@ mod tests {
                     };
                     let mut engine = engine_set(mode, StyledText::plain(source), &spec);
                     let flow = engine.total_flow_size();
-                    let tiles = engine.visible_tiles(0.0, flow as f32, 0, 0.0, LINE_EXTENT as f32);
+                    let tiles = engine.visible_tiles(
+                        -engine.flow_bounds().0,
+                        flow as f32,
+                        0,
+                        0.0,
+                        LINE_EXTENT as f32,
+                    );
                     let mut drawn = DrawnTiles::default();
                     engine.render_tiles(&tiles, None, &mut drawn).unwrap();
                     (
@@ -7458,7 +7472,13 @@ mod tests {
                 .with_markers(preview.markers());
             let mut engine = engine_set(mode, styled, &plain());
             let flow = engine.total_flow_size();
-            let tiles = engine.visible_tiles(0.0, flow as f32, 0, 0.0, LINE_EXTENT as f32);
+            let tiles = engine.visible_tiles(
+                -engine.flow_bounds().0,
+                flow as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
             let mut drawn = DrawnTiles::default();
             engine
                 .render_tiles(&tiles, None, &mut drawn)
@@ -7526,7 +7546,13 @@ mod tests {
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Vertical, styled, &spec);
             let flow = engine.total_flow_size();
-            let tiles = engine.visible_tiles(0.0, flow as f32, 0, 0.0, LINE_EXTENT as f32);
+            let tiles = engine.visible_tiles(
+                -engine.flow_bounds().0,
+                flow as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
             let mut drawn = DrawnTiles::default();
             engine
                 .render_tiles(&tiles, None, &mut drawn)
@@ -7617,7 +7643,13 @@ mod tests {
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Horizontal, styled, &spec);
             let flow = engine.total_flow_size();
-            let tiles = engine.visible_tiles(0.0, flow as f32, 0, 0.0, LINE_EXTENT as f32);
+            let tiles = engine.visible_tiles(
+                -engine.flow_bounds().0,
+                flow as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
             let mut drawn = DrawnTiles::default();
             engine
                 .render_tiles(&tiles, None, &mut drawn)
@@ -7681,7 +7713,7 @@ mod tests {
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Vertical, styled, &plain());
             let tiles = engine.visible_tiles(
-                0.0,
+                -engine.flow_bounds().0,
                 engine.total_flow_size() as f32,
                 0,
                 0.0,
@@ -7745,7 +7777,7 @@ mod tests {
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Vertical, styled, &spec);
             let tiles = engine.visible_tiles(
-                0.0,
+                -engine.flow_bounds().0,
                 engine.total_flow_size() as f32,
                 0,
                 0.0,
@@ -7786,7 +7818,7 @@ mod tests {
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Vertical, styled, &plain());
             let tiles = engine.visible_tiles(
-                0.0,
+                -engine.flow_bounds().0,
                 engine.total_flow_size() as f32,
                 0,
                 0.0,
@@ -7836,7 +7868,7 @@ mod tests {
             .with_markers(preview.markers());
         let mut engine = engine_set(WritingMode::Vertical, styled, &plain());
         let tiles = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -7985,7 +8017,7 @@ mod tests {
     /// tests where the two directions are not the same arithmetic.
     fn rules_across(engine: &mut TextEngine, mode: WritingMode) -> Vec<usize> {
         let tiles = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -8073,7 +8105,7 @@ mod tests {
         // are passed over**: where two rules cross, the paper is painted twice
         // and comes out as dark as ink.
         let tiles = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -8152,7 +8184,7 @@ mod tests {
             .with_markers(preview.markers());
         let mut engine = engine_set(WritingMode::Horizontal, styled, &plain());
         let tiles = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -8944,7 +8976,7 @@ mod tests {
         let mut engine = engine_for(&text, 22.0);
         assert!(engine.block_count() > 1, "the sample must span many blocks");
         let all = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -8989,7 +9021,13 @@ mod tests {
 
         // A pane looking at the far end of the line.
         let far = engine.line_extent() as f32 - 600.0;
-        let tiles = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0, -far, 600.0);
+        let tiles = engine.visible_tiles(
+            -engine.flow_bounds().0,
+            engine.total_flow_size() as f32,
+            0,
+            -far,
+            600.0,
+        );
         assert!(
             tiles.iter().all(|tile| tile.cross_index > 0),
             "the near slice is not wanted at the far end: {tiles:?}"
@@ -9020,7 +9058,7 @@ mod tests {
         let mut engine = engine_in(WritingMode::Horizontal, &text, 22.0);
         assert!(engine.block_count() > 1, "the sample must span many blocks");
         let all = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -9154,7 +9192,7 @@ mod tests {
         let with_ring = styled(&ring);
         let flow = with_dot.total_flow_size() as f32;
         let span = *with_dot
-            .visible_tiles(0.0, flow, 0, 0.0, LINE_EXTENT as f32)
+            .visible_tiles(-with_dot.flow_bounds().0, flow, 0, 0.0, LINE_EXTENT as f32)
             .first()
             .expect("タイルがある");
 
@@ -9632,7 +9670,7 @@ mod tests {
 
         // A short document is one block, and that block is one tile.
         let all = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -9671,7 +9709,7 @@ mod tests {
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Horizontal, styled, &plain());
             let tiles = engine.visible_tiles(
-                0.0,
+                -engine.flow_bounds().0,
                 engine.total_flow_size() as f32,
                 0,
                 0.0,
@@ -9740,7 +9778,7 @@ mod tests {
 
         // Block 0 holds the first paragraph and sits at the far right.
         let all = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -9817,7 +9855,7 @@ mod tests {
             .collect::<Vec<_>>();
         let before = engine
             .visible_tiles(
-                0.0,
+                -engine.flow_bounds().0,
                 engine.total_flow_size() as f32,
                 0,
                 0.0,
@@ -9850,7 +9888,7 @@ mod tests {
             engine.total_flow_size()
         );
         let after = engine.visible_tiles(
-            0.0,
+            -engine.flow_bounds().0,
             engine.total_flow_size() as f32,
             0,
             0.0,
@@ -9879,11 +9917,13 @@ mod tests {
                 now.block_index
             );
             if now.block_index < edited_block {
-                // Their x is the sum of everything to their left, which now
-                // includes one more column.
-                assert!(
-                    now.flow_start > tile.flow_start,
-                    "blocks before the edit follow the right edge"
+                // **They do not move at all**: flow coordinates start where the
+                // document does (2026-09-16), and nothing before them changed.
+                // Until then their x was the sum of everything to their left,
+                // which the new column had joined.
+                assert_eq!(
+                    now.flow_start, tile.flow_start,
+                    "blocks before the edit stay where they are"
                 );
                 kept_right += 1;
             } else if now.block_index > edited_block {
@@ -9908,8 +9948,8 @@ mod tests {
     fn selection_rectangles_stay_inside_the_viewport() {
         let text = "選択範囲の描画を確認する段落です。\n\n".repeat(40);
         let mut engine = engine_for(&text, 22.0);
-        let content_width = engine.total_flow_size() as f32;
-        let visible = visible_flow_range(0.0, 640.0, content_width);
+        let bounds = engine.flow_bounds();
+        let visible = visible_flow_range(-bounds.0, 640.0, bounds);
 
         let rects = engine
             .selection_rects(Some((0, engine.utf16_len())), visible)

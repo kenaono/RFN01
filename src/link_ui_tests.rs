@@ -102,9 +102,12 @@ fn local_links_open_without_losing_the_source() {
         set_pane_direction(&window, &live.cache, id, vertical);
         refresh_pane_from_state(&window, &live.cache, &memo, id, &live.states.of(id), source);
         // Locate the actual glyph through the same rendered hit test as a mouse click.
+        // 紙の上の点を、クリックと同じく組版の座標へ直して訊く（縦書きの原点は右端）。
+        let shift = id.page_shift(&window);
         let mut point = None;
         'search: for y in (1..600).step_by(4) {
             for x in (1..900).step_by(4) {
+                let x = x as f32 - shift;
                 let hit = hit_test_pane(
                     &window,
                     &mut live.cache.borrow_mut(),
@@ -112,7 +115,7 @@ fn local_links_open_without_losing_the_source() {
                     id,
                     source,
                     None,
-                    x as f32,
+                    x,
                     y as f32,
                 );
                 if hit.is_some_and(|h| {
@@ -120,7 +123,7 @@ fn local_links_open_without_losing_the_source() {
                         && document::link_target_at(source, h.letter)
                             == Some(("次の原稿.md", false))
                 }) {
-                    point = Some((x as f32, y as f32));
+                    point = Some((x, y as f32));
                     break 'search;
                 }
             }

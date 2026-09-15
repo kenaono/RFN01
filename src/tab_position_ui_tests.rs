@@ -96,18 +96,21 @@ fn a_new_vertical_tab_opens_at_the_start() {
             .graphics
             .engine
             .total_flow_size() as f32;
-        -(content - id.viewport_flow(&window)).max(0.0)
+        (
+            content,
+            id.start_scroll(&window, id.viewport_flow(&window), content),
+        )
     };
     let at_start = |what: &str| {
+        let (content, start) = start();
         assert!(
-            start() < -100.0,
+            content - id.viewport_flow(&window) > 100.0,
             "{what}: the document is wider than the pane"
         );
         assert!(
-            (id.scroll(&window) - start()).abs() < 1.0,
-            "{what}: scroll {} should be the start {}",
+            (id.scroll(&window) - start).abs() < 1.0,
+            "{what}: scroll {} should be the start {start}",
             id.scroll(&window),
-            start()
         );
     };
 

@@ -301,8 +301,10 @@ fn a_click_on_a_vertical_picture_keeps_the_caret_on_its_line() {
     // 2枚目の絵の真ん中（開く前の組みで、その行に当たる列の中央）。
     let start = source.find("![[").unwrap();
     let end = start + "![[a.bmp|200]]".len();
+    // 紙の左端から右へ9pxずつ。組版の座標は読み始め（右端）が0なので、紙の幅を引く。
+    let shift = id.page_shift(&window);
     let on_line = (0..100)
-        .map(|step| step as f32 * 9.0)
+        .map(|step| step as f32 * 9.0 - shift)
         .filter(|&x| {
             let mut borrowed = cache.borrow_mut();
             let hit = hit_test_pane(
@@ -502,14 +504,10 @@ fn dragging_the_corner_of_a_picture_writes_its_width() {
         counted.set(counted.get() + 1);
         let window = weak.upgrade().unwrap();
         let index = usize::try_from(index).unwrap_or(usize::MAX);
-        resize_picture(
-            &window,
-            &resize_live,
-            PaneId::from_index(pane),
-            index,
-            phase,
-            (x, y),
-        );
+        // 窓の配線と同じ：Slintの紙のxを、組版の座標へ。
+        let id = PaneId::from_index(pane);
+        let x = id.flow_x(&window, x);
+        resize_picture(&window, &resize_live, id, index, phase, (x, y));
     });
     id.update_screen(&window, |screen| {
         screen.width = 950.0;

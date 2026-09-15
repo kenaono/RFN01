@@ -160,7 +160,10 @@ fn incremental_ui_input_and_completion() {
     let scroll_cache = cache.clone();
     window.on_pane_scroll_changed(move |pane, offset| {
         if let Some(window) = weak.upgrade() {
-            refresh_after_scroll(&window, &scroll_cache, PaneId::from_index(pane), offset);
+            // 窓の配線と同じ：Slintの紙のスクロールを、組版の座標のスクロールへ。
+            let id = PaneId::from_index(pane);
+            let offset = id.scroll_from_page(&window, offset);
+            refresh_after_scroll(&window, &scroll_cache, id, offset);
         }
     });
     for fraction in [2, 4] {
@@ -242,15 +245,11 @@ fn incremental_ui_input_and_completion() {
                 .graphics
                 .engine
                 .total_flow_size() as f32;
+            let viewport = id.viewport_flow(&window);
+            let range = id.scroll_range(&window, viewport, total);
             id.set_scroll(
                 &window,
-                direction_caret_scroll(
-                    id.vertical(&window),
-                    &caret,
-                    fraction,
-                    id.viewport_flow(&window),
-                    total,
-                ),
+                direction_caret_scroll(id.vertical(&window), &caret, fraction, viewport, range),
             );
             let before = caret_view_fraction(
                 id.vertical(&window),

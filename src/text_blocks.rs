@@ -1908,6 +1908,11 @@ fn cut_long_line(
 /// end for [`FlowOrder::Ascending`], at the high end for
 /// [`FlowOrder::Descending`], with the margin outside it either way.
 ///
+/// **原点は読み始め**（2026-09-16、書き手の決定）。横書きは上端が0で下へ正、縦書きは右端が0で
+/// 左へ負——軸の向きは画面のまま、原点だけが文書の頭にある。だから後ろのブロックが伸び縮みしても、
+/// 前のブロックの座標は動かない。以前の縦書きは左端（文書の末尾）が0で、列が1本増えるたびに
+/// 書き終えた部分の座標がすべて動き、スクロールや保持の側で補正していた（技術検証 4.3）。
+///
 /// Every block edge lands on a whole pixel, and each extent is rounded on its
 /// own rather than by rounding the running edge.
 ///
@@ -1941,22 +1946,29 @@ pub fn place_blocks(
         })
         .collect::<Vec<_>>();
 
-    // Stack from the end the document starts at. Only the order of the walk
-    // differs: a block still runs from its own `flow_start` upwards, because a
-    // coordinate is the low edge of what it describes in either direction.
-    let mut edge = margin;
-    let last = blocks.len().saturating_sub(1);
-    for step in 0..blocks.len() {
-        let index = match order {
-            FlowOrder::Ascending => step,
-            FlowOrder::Descending => last - step,
-        };
-        blocks[index].flow_start = edge;
-        edge += blocks[index].flow_size;
+    // Stack from the start of the document, in reading order. A block still
+    // runs from its own `flow_start` upwards, because a coordinate is the low
+    // edge of what it describes in either direction — so going backwards the
+    // edge moves first and the block is placed below it.
+    let mut edge = match order {
+        FlowOrder::Ascending => margin,
+        FlowOrder::Descending => -margin,
+    };
+    for block in &mut blocks {
+        match order {
+            FlowOrder::Ascending => {
+                block.flow_start = edge;
+                edge += block.flow_size;
+            }
+            FlowOrder::Descending => {
+                edge -= block.flow_size;
+                block.flow_start = edge;
+            }
+        }
     }
 
     BlockLayoutPlan {
-        total_flow_size: edge + margin,
+        total_flow_size: edge.abs() + margin,
         blocks,
         margin,
         order,
@@ -1964,6 +1976,12 @@ pub fn place_blocks(
 }
 
 impl BlockLayoutPlan {
+    /// 文書が流れの軸で占める範囲（余白を含む）。横書きは`0..total`、縦書きは`-total..0`
+    /// ——原点は読み始め（[`place_blocks`]）。
+    pub fn flow_bounds(&self) -> (f32, f32) {
+        flow_bounds(self.order, self.total_flow_size)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
@@ -2140,7 +2158,8 @@ pub struct TileSpan {
     /// wrapped document and exactly what this was before a line could be longer
     /// than the pane it is written in.
     pub cross_index: u32,
-    pub flow_start: u32,
+    /// 縦書きでは負（原点は読み始めの右端、[`place_blocks`]）。
+    pub flow_start: i32,
     pub flow_size: u32,
     pub cross_start: u32,
     pub cross_size: u32,
@@ -2170,7 +2189,8 @@ impl CrossSlices {
     fn shown(&self) -> (u32, u32) {
         let size = self.tile_size.max(1);
         let count = self.extent.max(1).div_ceil(size);
-        let (start, end) = visible_flow_range(self.viewport, self.visible, self.extent as f32);
+        let (start, end) =
+            visible_flow_range(self.viewport, self.visible, (0.0, self.extent as f32));
         let first = (start as u32 / size).min(count - 1);
         let last = ((end.ceil() as u32).saturating_sub(1) / size).min(count - 1);
         (first, last + 1)
@@ -2185,8 +2205,8 @@ impl CrossSlices {
 }
 
 impl TileSpan {
-    pub fn flow_end(&self) -> u32 {
-        self.flow_start + self.flow_size
+    pub fn flow_end(&self) -> i32 {
+        self.flow_start + self.flow_size as i32
     }
 }
 
@@ -2211,10 +2231,11 @@ impl BlockPlacement {
     fn tile(&self, sub_index: u32, tile_flow_size: u32, order: FlowOrder) -> TileSpan {
         let count = self.tile_count(tile_flow_size);
         let sub_index = sub_index.min(count - 1);
-        let edge = self.flow_start.max(0.0) as u32;
+        let edge = self.flow_start as i32;
         let size = self.flow_size.max(0.0) as u32;
         // Cut at rounded fractions of the block so the slices tile it exactly.
-        let cut = |slice: u32| (size as u64 * slice as u64).div_ceil(count as u64) as u32;
+        let cut = |slice: u32| (size as u64 * slice as u64).div_ceil(count as u64) as i32;
+        let size = size as i32;
         let (start, end) = match order {
             FlowOrder::Ascending => (edge + cut(sub_index), edge + cut(sub_index + 1)),
             FlowOrder::Descending => (
@@ -2229,7 +2250,7 @@ impl BlockPlacement {
             // is cut the same way there, by the page (`CrossSlices`).
             cross_index: 0,
             flow_start: start,
-            flow_size: end.saturating_sub(start),
+            flow_size: (end - start).max(0) as u32,
             cross_start: 0,
             cross_size: 0,
         }
@@ -2256,11 +2277,11 @@ impl BlockLayoutPlan {
         if self.blocks.is_empty() || tile_flow_size == 0 {
             return Vec::new();
         }
-        let (view_start, view_end) =
-            visible_flow_range(viewport_flow, visible_flow, self.total_flow_size);
+        let bounds = self.flow_bounds();
+        let (view_start, view_end) = visible_flow_range(viewport_flow, visible_flow, bounds);
         let reach = (prefetch * tile_flow_size) as f32;
-        let view_start = (view_start - reach).max(0.0);
-        let view_end = (view_end + reach).min(self.total_flow_size.max(1.0));
+        let view_start = (view_start - reach).max(bounds.0);
+        let view_end = (view_end + reach).min(bounds.1.max(bounds.0 + 1.0));
 
         let mut tiles = Vec::new();
         for block_index in self.blocks_in_flow_range(view_start, view_end) {
@@ -2294,10 +2315,23 @@ impl BlockLayoutPlan {
 }
 
 /// The global flow range a viewport shows, used to clip selection geometry.
-pub fn visible_flow_range(viewport_flow: f32, visible_flow: f32, total_flow: f32) -> (f32, f32) {
-    let start = (-viewport_flow).max(0.0);
-    let end = (start + visible_flow.max(1.0)).min(total_flow.max(1.0));
+///
+/// `viewport_flow` is the scroll offset: the negated flow coordinate at the
+/// viewport's low edge. `bounds` is what the document covers
+/// ([`BlockLayoutPlan::flow_bounds`]).
+pub fn visible_flow_range(viewport_flow: f32, visible_flow: f32, bounds: (f32, f32)) -> (f32, f32) {
+    let (low, high) = bounds;
+    let start = (-viewport_flow).max(low);
+    let end = (start + visible_flow.max(1.0)).min(high.max(low + 1.0));
     (start, end.max(start))
+}
+
+/// 文書が流れの軸で占める範囲。原点は読み始め（[`place_blocks`]）。
+pub fn flow_bounds(order: FlowOrder, total_flow: f32) -> (f32, f32) {
+    match order {
+        FlowOrder::Ascending => (0.0, total_flow),
+        FlowOrder::Descending => (-total_flow, 0.0),
+    }
 }
 
 /// A conservative upper bound for one block's flow extent, used as the layout
@@ -3979,6 +4013,8 @@ mod tests {
         assert!(typography.size_scale(6) > 1.0);
     }
 
+    /// Going backwards the origin is still where reading starts — the right
+    /// edge — and the document runs into negative coordinates from it.
     #[test]
     fn places_the_first_block_at_the_right_edge() {
         let text = "";
@@ -3988,10 +4024,11 @@ mod tests {
         let plan = place_blocks(&spans, &measures, 30.0, FlowOrder::Descending);
 
         assert_eq!(plan.total_flow_size, 30.0 + 350.0 + 30.0);
-        assert_eq!(plan.blocks[0].flow_start, 30.0 + 250.0);
-        assert_eq!(plan.blocks[1].flow_start, 30.0 + 50.0);
-        assert_eq!(plan.blocks[2].flow_start, 30.0);
-        assert_eq!(plan.blocks[0].flow_end(), plan.total_flow_size - 30.0);
+        assert_eq!(plan.flow_bounds(), (-410.0, 0.0));
+        assert_eq!(plan.blocks[0].flow_start, -30.0 - 100.0);
+        assert_eq!(plan.blocks[1].flow_start, -30.0 - 300.0);
+        assert_eq!(plan.blocks[2].flow_start, -30.0 - 350.0);
+        assert_eq!(plan.blocks[0].flow_end(), -30.0);
     }
 
     /// The same stacking with the flow axis running the other way, which is what
@@ -4060,12 +4097,13 @@ mod tests {
         let measures = [measure(100.0, 2), measure(200.0, 4), measure(50.0, 1)];
         let plan = place_blocks(&spans, &measures, 30.0, FlowOrder::Descending);
 
-        assert_eq!(plan.block_at_flow(300.0), 0);
-        assert_eq!(plan.block_at_flow(280.0), 0);
-        assert_eq!(plan.block_at_flow(200.0), 1);
-        assert_eq!(plan.block_at_flow(80.0), 1);
-        assert_eq!(plan.block_at_flow(40.0), 2);
-        assert_eq!(plan.block_at_flow(-100.0), 2, "clamps below the content");
+        // Block 0 covers [-130, -30), block 1 covers [-330, -130), block 2 covers [-380, -330).
+        assert_eq!(plan.block_at_flow(-110.0), 0);
+        assert_eq!(plan.block_at_flow(-130.0), 0);
+        assert_eq!(plan.block_at_flow(-210.0), 1);
+        assert_eq!(plan.block_at_flow(-330.0), 1);
+        assert_eq!(plan.block_at_flow(-370.0), 2);
+        assert_eq!(plan.block_at_flow(-510.0), 2, "clamps below the content");
         assert_eq!(plan.block_at_flow(9_999.0), 0, "clamps above the content");
     }
 
@@ -4093,16 +4131,16 @@ mod tests {
         let measures = [measure(100.0, 2), measure(200.0, 4), measure(50.0, 1)];
         let plan = place_blocks(&spans, &measures, 30.0, FlowOrder::Descending);
 
-        // Block 0 covers [280, 380), block 1 covers [80, 280), block 2 covers [30, 80).
-        assert_eq!(plan.blocks_in_flow_range(290.0, 400.0), 0..1);
-        assert_eq!(plan.blocks_in_flow_range(100.0, 200.0), 1..2);
+        // Block 0 covers [-130, -30), block 1 covers [-330, -130), block 2 covers [-380, -330).
+        assert_eq!(plan.blocks_in_flow_range(-120.0, -10.0), 0..1);
+        assert_eq!(plan.blocks_in_flow_range(-310.0, -210.0), 1..2);
         assert_eq!(
-            plan.blocks_in_flow_range(60.0, 90.0),
+            plan.blocks_in_flow_range(-350.0, -320.0),
             1..3,
             "a viewport straddling a block edge needs both blocks"
         );
-        assert_eq!(plan.blocks_in_flow_range(0.0, 400.0), 0..3);
-        assert_eq!(plan.blocks_in_flow_range(400.0, 400.0), 0..0);
+        assert_eq!(plan.blocks_in_flow_range(-410.0, -10.0), 0..3);
+        assert_eq!(plan.blocks_in_flow_range(-10.0, -10.0), 0..0);
     }
 
     #[test]
@@ -4224,10 +4262,10 @@ mod tests {
         let plan = place_blocks(&spans, &measures, 20.0, FlowOrder::Descending);
         let block = &plan.blocks[0];
 
-        assert_eq!(block.flow_start, 20.0);
-        assert_eq!(block.draw_origin(), -380.0);
-        assert_eq!(block.to_layout_flow(20.0), 400.0);
-        assert_eq!(block.to_global_flow(400.0), 20.0);
+        assert_eq!(block.flow_start, -120.0);
+        assert_eq!(block.draw_origin(), -520.0);
+        assert_eq!(block.to_layout_flow(-120.0), 400.0);
+        assert_eq!(block.to_global_flow(400.0), -120.0);
     }
 
     #[test]
@@ -4239,14 +4277,14 @@ mod tests {
         let plan = place_blocks(&spans, &measures, 0.0, FlowOrder::Descending);
         let block = &plan.blocks[0];
 
-        // Line 0 sits at global [120, 160), line 3 at [0, 40).
-        assert_eq!(block.visible_utf16_range(120.0, 160.0), Some((0, 10)));
-        assert_eq!(block.visible_utf16_range(0.0, 40.0), Some((30, 40)));
-        // [70, 130) clips into lines 0, 1 and 2, which cover units 0..30.
-        assert_eq!(block.visible_utf16_range(70.0, 130.0), Some((0, 30)));
-        assert_eq!(block.visible_utf16_range(0.0, 160.0), Some((0, 40)));
+        // Line 0 sits at global [-40, 0), line 3 at [-160, -120).
+        assert_eq!(block.visible_utf16_range(-40.0, 0.0), Some((0, 10)));
+        assert_eq!(block.visible_utf16_range(-160.0, -120.0), Some((30, 40)));
+        // [-90, -30) clips into lines 0, 1 and 2, which cover units 0..30.
+        assert_eq!(block.visible_utf16_range(-90.0, -30.0), Some((0, 30)));
+        assert_eq!(block.visible_utf16_range(-160.0, 0.0), Some((0, 40)));
         assert_eq!(
-            block.visible_utf16_range(400.0, 500.0),
+            block.visible_utf16_range(240.0, 340.0),
             None,
             "a block scrolled off screen contributes nothing"
         );
@@ -4257,7 +4295,13 @@ mod tests {
         for order in BOTH_ORDERS {
             // Block 0 is wider than a tile, so it is cut; the other two are not.
             let plan = plan_of(&[2500.0, 1000.0, 700.0], 30.0, order);
-            let all = plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice());
+            let all = plan.visible_tiles(
+                -plan.flow_bounds().0,
+                plan.total_flow_size,
+                1024,
+                0,
+                one_slice(),
+            );
 
             assert_eq!(
                 all.first().map(|tile| (tile.block_index, tile.sub_index)),
@@ -4268,8 +4312,8 @@ mod tests {
             let block = &plan.blocks[0];
             match order {
                 // Slice 0 is cut from the edge the block is read from.
-                FlowOrder::Ascending => assert_eq!(first.flow_start, block.flow_start as u32),
-                FlowOrder::Descending => assert_eq!(first.flow_end(), block.flow_end() as u32),
+                FlowOrder::Ascending => assert_eq!(first.flow_start, block.flow_start as i32),
+                FlowOrder::Descending => assert_eq!(first.flow_end(), block.flow_end() as i32),
             }
             assert_eq!(
                 all.iter().filter(|tile| tile.block_index == 0).count(),
@@ -4337,7 +4381,13 @@ mod tests {
     #[test]
     fn a_page_that_fits_the_pane_is_one_slice() {
         let plan = plan_of(&[900.0; 3], 0.0, FlowOrder::Ascending);
-        let tiles = plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice());
+        let tiles = plan.visible_tiles(
+            -plan.flow_bounds().0,
+            plan.total_flow_size,
+            1024,
+            0,
+            one_slice(),
+        );
 
         assert!(
             tiles.iter().all(|tile| tile.cross_index == 0
@@ -4352,23 +4402,25 @@ mod tests {
         for order in BOTH_ORDERS {
             let plan = plan_of(&[900.0; 40], 0.0, order);
 
-            let at_start = plan.visible_tiles(0.0, 640.0, 1024, 0, one_slice());
-            assert_eq!(at_start.len(), 1);
-            let expected = match order {
-                FlowOrder::Ascending => 0,
-                FlowOrder::Descending => 39,
+            // The scroll that shows the start of the document, and one 18000 in:
+            // going backwards the view's low edge is a view's length before it.
+            let (at_start, at_middle, edge) = match order {
+                FlowOrder::Ascending => (0.0, -18_000.0, 18_000),
+                FlowOrder::Descending => (640.0, 18_640.0, -18_000),
             };
+            let at_start = plan.visible_tiles(at_start, 640.0, 1024, 0, one_slice());
+            assert_eq!(at_start.len(), 1);
             assert_eq!(
-                at_start[0].block_index, expected,
-                "the block at the origin end of the flow axis ({order:?})"
+                at_start[0].block_index, 0,
+                "the origin is where the document starts ({order:?})"
             );
 
-            let middle = plan.visible_tiles(-18_000.0, 640.0, 1024, 0, one_slice());
+            let middle = plan.visible_tiles(at_middle, 640.0, 1024, 0, one_slice());
             assert!(middle.len() <= 2);
             assert!(
                 middle
                     .iter()
-                    .any(|tile| tile.flow_start <= 18_000 && tile.flow_end() > 18_000)
+                    .any(|tile| tile.flow_start <= edge && tile.flow_end() >= edge)
             );
         }
     }
@@ -4377,9 +4429,11 @@ mod tests {
     /// slides half the document sideways, and none of the other blocks' tiles may
     /// change identity or size, because none of their pixels changed.
     ///
-    /// Which half slides is the one thing the order decides. The document is
-    /// anchored at the end it starts from, so going backwards the blocks *before*
-    /// the edit move and going forwards the ones *after* it do.
+    /// Which half slides is the same either way: the origin is where the
+    /// document starts, so only the blocks *after* the edit move — forwards
+    /// going forwards, backwards going backwards. (Before 2026-09-16 the origin
+    /// of a vertical document was its end, and there the blocks *before* the
+    /// edit moved: everything already written.)
     #[test]
     fn widening_one_block_leaves_every_other_block_s_tiles_alone() {
         for order in BOTH_ORDERS {
@@ -4390,7 +4444,13 @@ mod tests {
             let after = plan_of(&widths, 30.0, order);
 
             let tiles_of = |plan: &BlockLayoutPlan| {
-                plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice())
+                plan.visible_tiles(
+                    -plan.flow_bounds().0,
+                    plan.total_flow_size,
+                    1024,
+                    0,
+                    one_slice(),
+                )
             };
             let (before, after) = (tiles_of(&before), tiles_of(&after));
             assert_eq!(before.len(), after.len());
@@ -4408,11 +4468,11 @@ mod tests {
                     a.flow_size, b.flow_size,
                     "an untouched block keeps its slicing"
                 );
-                let moves = match order {
-                    FlowOrder::Ascending => a.block_index > 5,
-                    FlowOrder::Descending => a.block_index < 5,
+                let shift = match (a.block_index > 5, order) {
+                    (false, _) => 0,
+                    (true, FlowOrder::Ascending) => line as i32,
+                    (true, FlowOrder::Descending) => -(line as i32),
                 };
-                let shift = if moves { line as u32 } else { 0 };
                 assert_eq!(
                     a.flow_start,
                     b.flow_start + shift,
@@ -4435,11 +4495,17 @@ mod tests {
         assert_eq!(total, backwards.total_flow_size);
         for (ahead, back) in forwards.blocks.iter().zip(&backwards.blocks) {
             assert_eq!(ahead.flow_size, back.flow_size);
-            assert_eq!(ahead.flow_start, total - back.flow_end());
+            assert_eq!(ahead.flow_start, -back.flow_end());
         }
 
         let tiles_of = |plan: &BlockLayoutPlan| {
-            plan.visible_tiles(0.0, plan.total_flow_size, 1024, 0, one_slice())
+            plan.visible_tiles(
+                -plan.flow_bounds().0,
+                plan.total_flow_size,
+                1024,
+                0,
+                one_slice(),
+            )
         };
         let (ahead, back) = (tiles_of(&forwards), tiles_of(&backwards));
         assert_eq!(ahead.len(), back.len());
@@ -4450,7 +4516,7 @@ mod tests {
                 "tiles come back in reading order either way"
             );
             assert_eq!(ahead.flow_size, back.flow_size);
-            assert_eq!(ahead.flow_start, total as u32 - back.flow_end());
+            assert_eq!(ahead.flow_start, -back.flow_end());
         }
 
         // Points well inside a block, since a mirrored half-open interval is
@@ -4458,7 +4524,7 @@ mod tests {
         for flow in [100.0, 1000.0, 3500.0, 4500.0] {
             assert_eq!(
                 forwards.block_at_flow(flow),
-                backwards.block_at_flow(total - flow),
+                backwards.block_at_flow(-flow),
                 "the same distance into the document is the same block"
             );
         }
@@ -4469,16 +4535,21 @@ mod tests {
         for order in BOTH_ORDERS {
             let plan = plan_of(&[900.0; 40], 0.0, order);
 
-            let plain = plan.visible_tiles(-18_000.0, 640.0, 1024, 0, one_slice());
-            let prefetched = plan.visible_tiles(-18_000.0, 640.0, 1024, 1, one_slice());
+            let (at_middle, at_start) = match order {
+                FlowOrder::Ascending => (-18_000.0, 0.0),
+                FlowOrder::Descending => (18_640.0, 640.0),
+            };
+            let plain = plan.visible_tiles(at_middle, 640.0, 1024, 0, one_slice());
+            let prefetched = plan.visible_tiles(at_middle, 640.0, 1024, 1, one_slice());
             assert!(prefetched.len() > plain.len());
+            let (low, high) = plan.flow_bounds();
             assert!(
                 prefetched
                     .iter()
-                    .all(|tile| tile.flow_end() <= plan.total_flow_size as u32)
+                    .all(|tile| tile.flow_start >= low as i32 && tile.flow_end() <= high as i32)
             );
             assert!(
-                plan.visible_tiles(0.0, 640.0, 1024, 1, one_slice())
+                plan.visible_tiles(at_start, 640.0, 1024, 1, one_slice())
                     .iter()
                     .all(|tile| tile.flow_size > 0)
             );
@@ -4487,14 +4558,22 @@ mod tests {
 
     #[test]
     fn clips_the_visible_range_to_the_content() {
-        assert_eq!(visible_flow_range(0.0, 640.0, 10_000.0), (0.0, 640.0));
+        let forwards = (0.0, 10_000.0);
+        assert_eq!(visible_flow_range(0.0, 640.0, forwards), (0.0, 640.0));
         assert_eq!(
-            visible_flow_range(-2500.0, 640.0, 10_000.0),
+            visible_flow_range(-2500.0, 640.0, forwards),
             (2500.0, 3140.0)
         );
         assert_eq!(
-            visible_flow_range(-9800.0, 640.0, 10_000.0),
+            visible_flow_range(-9800.0, 640.0, forwards),
             (9800.0, 10_000.0)
+        );
+        // Going backwards the document lies below the origin.
+        let backwards = (-10_000.0, 0.0);
+        assert_eq!(visible_flow_range(640.0, 640.0, backwards), (-640.0, 0.0));
+        assert_eq!(
+            visible_flow_range(10_200.0, 640.0, backwards),
+            (-10_000.0, -9_360.0)
         );
     }
 

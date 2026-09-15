@@ -130,6 +130,8 @@ fn snapshot(
         for column in 0..16 {
             let x = left + 20.0 + column as f32 * 62.0;
             let y = top + 20.0 + row as f32 * 45.0;
+            // 紙の座標で選んだ点を、クリックと同じく組版の座標へ直して訊く。
+            let x = id.flow_x(window, x);
             let hit = {
                 let mut borrowed = live.cache.borrow_mut();
                 hit_test_pane(window, &mut borrowed, document, id, &source, revealed, x, y)
@@ -249,12 +251,10 @@ fn layout_snapshot() {
                 let scroll_cache = live.cache.clone();
                 window.on_pane_scroll_changed(move |pane, offset| {
                     if let Some(window) = weak.upgrade() {
-                        refresh_after_scroll(
-                            &window,
-                            &scroll_cache,
-                            PaneId::from_index(pane),
-                            offset,
-                        );
+                        // 窓の配線と同じ：Slintの紙のスクロールを、組版の座標のスクロールへ。
+                        let id = PaneId::from_index(pane);
+                        let offset = id.scroll_from_page(&window, offset);
+                        refresh_after_scroll(&window, &scroll_cache, id, offset);
                     }
                 });
                 id.update_screen(&window, |screen| {
@@ -297,6 +297,18 @@ fn layout_snapshot() {
                     state.active_line_start = Some(0);
                 }
                 refresh(&live);
+                // **文書の頭から。**前の文書のスクロールが行に残っているので、明示的に送る。
+                let content = live
+                    .cache
+                    .borrow_mut()
+                    .pane(id)
+                    .graphics
+                    .engine
+                    .total_flow_size() as f32;
+                let start = id.start_scroll(&window, id.viewport_flow(&window), content);
+                id.set_scroll(&window, start);
+                refresh_after_scroll(&window, &live.cache, id, start);
+                wait_for_layout(&window, &live.states, &live.cache);
                 snapshot(
                     &surface,
                     &window,
@@ -347,7 +359,6 @@ fn layout_snapshot() {
                 } else {
                     scroll - 300.0
                 };
-                let visible = id.shown_flow(&window);
                 let content = live
                     .cache
                     .borrow_mut()
@@ -355,7 +366,8 @@ fn layout_snapshot() {
                     .graphics
                     .engine
                     .total_flow_size() as f32;
-                let target = target.clamp((visible - content).min(0.0), 0.0);
+                let (low, high) = id.scroll_range(&window, id.shown_flow(&window), content);
+                let target = target.clamp(low, high);
                 id.set_scroll(&window, target);
                 refresh_after_scroll(&window, &live.cache, id, target);
                 wait_for_layout(&window, &live.states, &live.cache);
