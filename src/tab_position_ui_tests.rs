@@ -201,3 +201,58 @@ fn a_message_goes_when_another_pane_takes_over() {
         "the window's message stays, with no name"
     );
 }
+
+/// 書き手の報告 2026-09-15: **余白をクリックしてもActive Paneが動かない。**
+///
+/// 本文の押下は入力欄が鍵盤を取ってPaneを替えるが、紙の周りと紙の外には受け手が無かった。
+#[test]
+fn a_click_on_the_margin_makes_the_pane_active() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 2);
+    for (id, x) in [(PaneId::from_index(0), 0.0), (PaneId::from_index(1), 530.0)] {
+        id.update_screen(&window, |screen| {
+            screen.x = x;
+            screen.width = 500.0;
+            screen.height = 640.0;
+        });
+    }
+    window.set_focused_pane(0);
+    // 本文の押下が届いたら数える——余白の押下は本文に届かないことも見る。
+    let selected = Rc::new(std::cell::Cell::new(0));
+    let seen = selected.clone();
+    window.on_pane_selection_start(move |_, _, _, _| seen.set(seen.get() + 1));
+    window.show().unwrap();
+    let click = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = PointerEventButton::Left;
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        slint::platform::update_timers_and_animations();
+    };
+    // 紙の左端は窓の x=60（本文の押下が返す位置から逆算）。そのすぐ左は紙の周りの余白である。
+    click(588.0, 500.0);
+    assert_eq!(window.get_focused_pane(), 1, "the right pane's margin");
+    click(58.0, 500.0);
+    assert_eq!(window.get_focused_pane(), 0, "the left pane's margin");
+    assert_eq!(selected.get(), 0, "the margin is not the text");
+}

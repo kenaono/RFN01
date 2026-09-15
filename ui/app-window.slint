@@ -2397,6 +2397,11 @@ export component AppWindow inherits Window {
                             root.ime-vertical-requested(pane.vertical);
                             root.focused-pane = pane.id;
                         }
+                        // 余白の押下：このPaneを前にし、鍵盤を渡す（入力欄が取れば`focus-taken`が来る）。
+                        margin-pressed => {
+                            root.focused-pane = pane.id;
+                            root.focus-generation += 1;
+                        }
                         focus-trace(event) => { root.pane-focus-trace(pane.id, event); }
 
                         // 追加要件 2026-09-14（書き手）: **設定はTABで開く。**

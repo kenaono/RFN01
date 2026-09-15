@@ -620,6 +620,8 @@ export component EditorPane inherits Rectangle {
     callback home-end(bool, bool, bool);
     /// This pane now has the keyboard.
     callback focus-taken();
+    /// 紙の周りの余白が押された——このPaneへ移る（書き手の報告 2026-09-15）。
+    callback margin-pressed();
     callback focus-trace(string);
     callback save-requested();
     /// Show another of this pane's tabs, close one, or open a new one. The
@@ -1901,6 +1903,19 @@ export component EditorPane inherits Rectangle {
 
             // The bar occupies layout space, but the document keeps its
             // original origin and height. Only its covered top is clipped.
+        // 書き手の報告 2026-09-15: **余白をクリックしてもActive Paneが動かない。**本文の押下は
+        // 入力欄が鍵盤を取ることでPaneを替えるが、紙の周りの余白には受け手が無かった。
+        // 紙より後ろに敷くので、本文の押下はこれまでどおり本文が受ける。
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down {
+                    root.margin-pressed();
+                }
+            }
+        }
+
         VerticalBox {
             y: -root.find-bar-height;
             width: parent.width;
@@ -1979,6 +1994,17 @@ export component EditorPane inherits Rectangle {
                         root.resized();
                     } else {
                         root.scrolled(self.viewport-y / 1px);
+                    }
+                }
+
+                // 紙の外側（行の長さを決めて紙が真ん中に立っているときの左右など）。
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.down {
+                            root.margin-pressed();
+                        }
                     }
                 }
 
