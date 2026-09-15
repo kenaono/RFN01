@@ -256,3 +256,66 @@ fn a_click_on_the_margin_makes_the_pane_active() {
     assert_eq!(window.get_focused_pane(), 0, "the left pane's margin");
     assert_eq!(selected.get(), 0, "the margin is not the text");
 }
+
+/// 書き手の報告 2026-09-15: **横書きでTABを切り替えると、一瞬描画がカクっとする**（幅を固定すると
+/// 起きない、縦書きでは起きない）。
+///
+/// 左右の余白は横書きの面にだけ付く。縦書きのTABから替わった直後の組版は、まだ縦書きのときの
+/// 見えている幅（余白なし）で折り返し、画面に余白が付いて幅が24px縮んだ知らせで、200ms後に
+/// 全段落を折り返し直していた（記録：`extent=1183`の直後に`extent=1159`、どちらも全段落を測る）。
+/// **向きを替えるときに、新しい向きの余白で見えている大きさを置き直す。**置いた値が、画面が
+/// あとで知らせてくる値と同じなら、組み直しは1回で済む。
+#[test]
+fn switching_direction_expects_the_new_margins() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    // 縦書きと横書きで上下の余白も違う場合。
+    Setting::PageMargin.write(&numbers, 0, 20);
+    Setting::PageMargin.write(&numbers, 1, 32);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1000, 740));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    id.update_screen(&window, |screen| {
+        screen.width = 950.0;
+        screen.height = 640.0;
+    });
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    let draw = || {
+        surface.draw_if_needed(|renderer| {
+            let mut buffer =
+                vec![slint::platform::software_renderer::Rgb565Pixel::default(); 1000 * 740];
+            renderer.render(&mut buffer, 1000);
+        });
+        slint::platform::update_timers_and_animations();
+        let screen = id.screen(&window);
+        (screen.shown_width, screen.shown_height, screen.wrap_height)
+    };
+    let reported = || {
+        let screen = id.screen(&window);
+        (screen.shown_width, screen.shown_height, screen.wrap_height)
+    };
+    for vertical in [true, false, true] {
+        draw();
+        set_pane_direction(&window, &cache, id, vertical);
+        let expected = reported();
+        let shown = draw();
+        assert_eq!(
+            expected, shown,
+            "vertical={vertical}: expected before the pane says"
+        );
+    }
+}

@@ -4928,7 +4928,32 @@ fn set_pane_direction(
     if !moved {
         return;
     }
+    // 書き手の報告 2026-09-15: **横書きでTABを切り替えると一瞬カクっとする**（幅を固定すると起きない）。
+    // 余白は向きで違う——左右の余白は横書きの面にだけ付き、上下の余白はそれぞれのシートの値。
+    // 見えている大きさを前の向きのまま組むと、画面が余白を付け直した知らせ（`resized`）で
+    // 200ms後に全段落を折り返し直していた（記録：`extent=1183`の直後に`extent=1159`）。
+    // **画面が知らせてくる大きさを、ここで先に置く**（窓の`side-padding`・`page-margin`と同じ式）。
+    let margins = |vertical: bool| {
+        let page = Setting::PageMargin.read_own(window, usize::from(vertical)) as f32;
+        let side = if vertical {
+            0.0
+        } else {
+            Setting::PageMargin.read_own(window, 0) as f32
+        };
+        (side, page)
+    };
+    let (was_side, was_page) = margins(!vertical);
+    let (side, page) = margins(vertical);
     id.update_screen(window, |screen| {
+        if screen.shown_width > 0.0 {
+            screen.shown_width = (screen.shown_width + 2.0 * (was_side - side)).max(0.0);
+        }
+        if screen.shown_height > 0.0 {
+            screen.shown_height = (screen.shown_height + 2.0 * (was_page - page)).max(0.0);
+        }
+        if screen.wrap_height > 0.0 {
+            screen.wrap_height = (screen.wrap_height + 2.0 * (was_page - page)).max(0.0);
+        }
         screen.vertical = vertical;
         // **Both scrolls go.** The one along the old flow means nothing in the
         // new direction, and — worse — it is the *cross* axis now, where a
