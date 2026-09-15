@@ -1010,21 +1010,20 @@ fn picture_box(ornament: Ornament, mode: WritingMode, line_box: f32) -> Option<P
     })
 }
 
-/// 画像の行の箱へ絵を描く（追加要件 2026-09-15）。**回さない**——縦書きでも絵は立ったまま、
+/// 画像の行の箱のどこへ絵を置くか（追加要件 2026-09-15）。**回さない**——縦書きでも絵は立ったまま、
 /// 箱の行に沿う向きの頭から、縮めた大きさで置く。
 ///
 /// 行に交わる向きは**箱の基線に合わせる**（`apply_marker_boxes`が決めた位置）：横書きは絵の下端が
 /// 基線、縦書きは絵の真ん中が行の中心。絵が字より低い行は字の高さで組まれるので、行の上端から
 /// 描くと字の地に隠れる。
-fn draw_pictures(
-    target: &ID2D1RenderTarget,
+fn picture_places(
     layout: &IDWriteTextLayout,
     runs: &[StyleRun],
     origin: windows_numerics::Vector2,
     mode: WritingMode,
     line_box: f32,
-    pictures: &Pictures,
-) -> Result<()> {
+) -> Result<Vec<(u64, u32, D2D_RECT_F)>> {
+    let mut places = Vec::new();
     let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
     let lines = line_metrics(layout)?;
     for run in runs {
@@ -1034,9 +1033,6 @@ fn draw_pictures(
         let (Ornament::Image { key, .. }, Some(fitted)) =
             (ornament, picture_box(ornament, mode, line_box))
         else {
-            continue;
-        };
-        let Some(picture) = pictures.get(&key) else {
             continue;
         };
         let mut count = 0;
@@ -1086,6 +1082,25 @@ fn draw_pictures(
             top,
             right: left + width,
             bottom: top + height,
+        };
+        places.push((key, run.utf16_start, rect));
+    }
+    Ok(places)
+}
+
+/// 画像の行の箱へ絵を描く。置き場所は[`picture_places`]。
+fn draw_pictures(
+    target: &ID2D1RenderTarget,
+    layout: &IDWriteTextLayout,
+    runs: &[StyleRun],
+    origin: windows_numerics::Vector2,
+    mode: WritingMode,
+    line_box: f32,
+    pictures: &Pictures,
+) -> Result<()> {
+    for (key, _, rect) in picture_places(layout, runs, origin, mode, line_box)? {
+        let Some(picture) = pictures.get(&key) else {
+            continue;
         };
         let mut dpi_x = 96.0;
         let mut dpi_y = 96.0;
@@ -5670,6 +5685,58 @@ impl TextEngine {
             Ok(())
         })?;
 
+        Ok(rects)
+    }
+
+    /// 見えている絵の置き場所（追加要件 2026-09-16：絵の大きさをマウスで変える）。
+    ///
+    /// **描くときと同じ置き方**（[`picture_places`]）を、選択の矩形と同じ原点で訊くので、面の座標の
+    /// まま返る。組にするのは、その箱が立つUTF-16の位置（本文のどの行か）と、絵が縮む行の長さ。
+    pub fn picture_rects(
+        &mut self,
+        visible_flow: (f32, f32),
+    ) -> Result<Vec<(u32, SelectionRect, f32)>> {
+        let view = self
+            .plan
+            .blocks_in_flow_range(visible_flow.0, visible_flow.1);
+        let margin = self.margin;
+        let mode = self.mode;
+        let mut rects = Vec::new();
+        with_graphics(|graphics| {
+            for block_index in view {
+                if self.deferred_blocks.contains(&block_index)
+                    || self.plan.blocks[block_index].grid.is_some()
+                {
+                    continue;
+                }
+                let runs = self.block_marks(block_index).runs;
+                if !runs
+                    .iter()
+                    .any(|run| run.ornament.is_some_and(Ornament::is_image))
+                {
+                    continue;
+                }
+                let layout = self.layout_for(graphics, block_index)?;
+                let block = &self.plan.blocks[block_index];
+                let inset = block_inset(&block.span, &self.typography);
+                let (x, y) = mode.to_screen(block.draw_origin(), margin + inset);
+                let origin = windows_numerics::Vector2 { X: x, Y: y };
+                let line_box = self.block_line_box(&block.span);
+                for (_, utf16, rect) in picture_places(&layout, &runs, origin, mode, line_box)? {
+                    rects.push((
+                        block.span.utf16_start + utf16,
+                        SelectionRect {
+                            left: rect.left,
+                            top: rect.top,
+                            right: rect.right,
+                            bottom: rect.bottom,
+                        },
+                        line_box,
+                    ));
+                }
+            }
+            Ok(())
+        })?;
         Ok(rects)
     }
 

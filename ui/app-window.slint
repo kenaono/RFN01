@@ -509,6 +509,7 @@ export component AppWindow inherits Window {
     callback pane-enter(int, bool);
     callback pane-selection-update(int, float, float);
     callback pane-selection-end(int, float, float);
+    callback pane-picture-resize(int, int, int, float, float);
     callback pane-select-all(int);
     callback pane-scroll-changed(int, float);
     callback pane-across-scroll-changed(int, float);
@@ -2057,6 +2058,10 @@ export component AppWindow inherits Window {
                         comparison-dismissed => { root.comparison-dismissed(pane.id); }
                         match-rects: pane.match-rects;
                         scope-rects: pane.scope-rects;
+                        picture-rects: pane.picture-rects;
+                        picture-outline: pane.picture-outline;
+                        picture-outline-shown: pane.picture-outline-shown;
+                        picture-resize(index, phase, x, y) => { root.pane-picture-resize(pane.id, index, phase, x, y); }
                         content-width: pane.content-width;
                         content-height: pane.content-height;
                         caret-visible: pane.caret-visible;

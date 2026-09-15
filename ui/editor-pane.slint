@@ -136,6 +136,10 @@ export struct PaneScreen {
     selection-rects: [PreviewSelectionRect],
     difference-rects: [PreviewSelectionRect],
     comparison-note: string,
+    /// 追加要件 2026-09-16（書き手）: 見えている絵（角を引いて大きさを変える）と、引いているあいだの枠。
+    picture-rects: [PreviewSelectionRect],
+    picture-outline: PreviewSelectionRect,
+    picture-outline-shown: bool,
     /// E1: 見えている一致（書き手の求め 2026-09-09）。**選択より薄い**——
     /// 「どこにあるか」を出しつつ、「いまどれにいるか」を選択に譲る。
     match-rects: [PreviewSelectionRect],
@@ -503,6 +507,9 @@ export component EditorPane inherits Rectangle {
     callback comparison-dismissed();
     in property <[PreviewSelectionRect]> match-rects;
     in property <[PreviewSelectionRect]> scope-rects;
+    in property <[PreviewSelectionRect]> picture-rects;
+    in property <PreviewSelectionRect> picture-outline;
+    in property <bool> picture-outline-shown;
     // The laid-out document's size, in pixels.
     in property <int> content-width;
     in property <int> content-height;
@@ -569,6 +576,8 @@ export component EditorPane inherits Rectangle {
     callback link-open(float, float) -> bool;
     callback selection-update(float, float);
     callback selection-end(float, float);
+    // 追加要件 2026-09-16: 絵の角を引く。何枚目の絵か、0押した・1引いている・2離した・3取りやめ、面の座標。
+    callback picture-resize(int, int, float, float);
     callback select-all();
     /// Text arriving through the hidden field: what was typed, pasted, or
     /// committed out of a conversion. **The flag says which** — a conversion is
@@ -3100,6 +3109,58 @@ export component EditorPane inherits Rectangle {
                                     }
                                 }
                             }
+                        }
+
+                        // 追加要件 2026-09-16（書き手）: **絵の大きさはマウスで変える。**絵の上にポインタが
+                        // あると、止まっている角の対角（横書きは右下、縦書きは左下）につまみが出る。
+                        // 引いているあいだは枠だけを描き、離したら記法の幅（`|300`）を書き換える
+                        // ——組み直すのは離したときの1回。
+                        for picture[index] in root.picture-rects: TouchArea {
+                            x: (root.vertical ? picture.x : picture.x + picture.width) * 1px - 8px;
+                            y: (picture.y + picture.height) * 1px - 8px;
+                            width: 16px;
+                            height: 16px;
+                            mouse-cursor: root.vertical ? nesw-resize : nwse-resize;
+                            pointer-event(event) => {
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                    root.picture-resize(index, 0, (self.x + self.mouse-x) / 1px, (self.y + self.mouse-y) / 1px);
+                                } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                    root.picture-resize(index, 2, (self.x + self.mouse-x) / 1px, (self.y + self.mouse-y) / 1px);
+                                } else if event.kind == PointerEventKind.cancel {
+                                    root.picture-resize(index, 3, 0, 0);
+                                }
+                            }
+                            moved => {
+                                if self.pressed {
+                                    root.picture-resize(index, 1, (self.x + self.mouse-x) / 1px, (self.y + self.mouse-y) / 1px);
+                                }
+                            }
+
+                            Rectangle {
+                                x: 4px;
+                                y: 4px;
+                                width: 8px;
+                                height: 8px;
+                                background: Tok.accent;
+                                border-color: root.page-background;
+                                border-width: 1px;
+                                visible: parent.has-hover || parent.pressed
+                                    || (pointer.has-hover
+                                        && pointer.mouse-x >= picture.x * 1px
+                                        && pointer.mouse-x <= (picture.x + picture.width) * 1px
+                                        && pointer.mouse-y >= picture.y * 1px
+                                        && pointer.mouse-y <= (picture.y + picture.height) * 1px);
+                            }
+                        }
+
+                        if root.picture-outline-shown: Rectangle {
+                            x: root.picture-outline.x * 1px;
+                            y: root.picture-outline.y * 1px;
+                            width: root.picture-outline.width * 1px;
+                            height: root.picture-outline.height * 1px;
+                            background: Tok.accent-soft.transparentize(0.8);
+                            border-color: Tok.accent;
+                            border-width: 1px;
                         }
 
                         // The vertical pane's own pointer, lying across the column

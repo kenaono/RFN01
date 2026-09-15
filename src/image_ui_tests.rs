@@ -383,3 +383,238 @@ fn a_short_vertical_document_starts_at_the_right() {
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// 絵の角のつまみを引くと大きさが変わり、記法の幅が書き換わる（追加要件 2026-09-16、書き手）。
+/// 横書きは右下、縦書きは左下の角。**つまみに当たったことはコールバックの数で確かめる**——本文の
+/// 押下に落ちると選択が動くだけで、記法は変わらない。
+#[test]
+fn dragging_the_corner_of_a_picture_writes_its_width() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let directory = std::env::temp_dir().join(format!(
+        "editor-image-resize-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = Some(directory.clone()));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    std::fs::write(directory.join("a.bmp"), solid_bmp(200, 100, [255, 0, 0])).unwrap();
+    let path = directory.join("原稿.md");
+    std::fs::write(&path, "![赤](a.bmp)\n本文。\n").unwrap();
+
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    let (width, height) = (1000usize, 700usize);
+    surface.set_size(slint::PhysicalSize::new(width as u32, height as u32));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let (file, text) = DocumentFile::open(&path, MAX_DOCUMENT_CHARACTERS).unwrap();
+    let document = OpenDocument::new(file, text, window.as_weak());
+    let live = Live {
+        closed_tabs: Rc::default(),
+        states: PaneStates::new(&document),
+        folder: Rc::default(),
+        tree_paths: Rc::default(),
+        results: Rc::default(),
+        recent: Rc::default(),
+        recent_folders: Rc::default(),
+        find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        replace_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
+        layout: Rc::new(RefCell::new(Layout::single(0))),
+        pending: Rc::default(),
+        close_run: Rc::default(),
+        cache: Rc::new(RefCell::new(RenderCache::default())),
+        tabs: Rc::new(RefCell::new(Tabs {
+            panes: vec![{
+                let tab = PaneTab::showing(&window, id, document.clone());
+                PaneTabs {
+                    history: vec![NavigationPlace::from(&tab)],
+                    tabs: vec![tab],
+                    ..Default::default()
+                }
+            }],
+        })),
+        writer: Rc::new(FileWriter::start()),
+        searcher: Rc::new(Searcher::start(|| {})),
+        searched: Rc::default(),
+    };
+    let calls = Rc::new(Cell::new(0));
+    let weak = window.as_weak();
+    let resize_live = live.clone();
+    let counted = calls.clone();
+    window.on_pane_picture_resize(move |pane, index, phase, x, y| {
+        counted.set(counted.get() + 1);
+        let window = weak.upgrade().unwrap();
+        let index = usize::try_from(index).unwrap_or(usize::MAX);
+        resize_picture(
+            &window,
+            &resize_live,
+            PaneId::from_index(pane),
+            index,
+            phase,
+            (x, y),
+        );
+    });
+    id.update_screen(&window, |screen| {
+        screen.width = 950.0;
+        screen.height = 600.0;
+        screen.shown_width = 950.0;
+        screen.shown_height = 560.0;
+        screen.preview = true;
+    });
+    window.show().unwrap();
+    let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+
+    // 横書きは1.5倍に、縦書きはそこから半分に。
+    for (vertical, scale, written) in [
+        (false, 1.5, "![赤|300](a.bmp)"),
+        (true, 0.5, "![赤|150](a.bmp)"),
+    ] {
+        set_pane_direction(&window, &live.cache, id, vertical);
+        let source = document.text.borrow().clone();
+        // カーソルは本文の行の末尾：絵の行は開かない。
+        {
+            let state = live.states.of(id);
+            let mut state = state.borrow_mut();
+            let end = source.len() - 1;
+            state.caret_source_byte = Some(end);
+            state.selection_anchor_source_byte = Some(end);
+            state.active_line_start = source.rfind("本文");
+        }
+        refresh_pane_from_state(
+            &window,
+            &live.cache,
+            &document,
+            id,
+            &live.states.of(id),
+            &source,
+        );
+        window.window().request_redraw();
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+        let red = pixels
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| pixel.r > 200 && pixel.g < 60 && pixel.b < 60)
+            .map(|(index, _)| (index % width, index / width))
+            .collect::<Vec<_>>();
+        let left = red.iter().map(|(x, _)| *x).min().unwrap() as f32;
+        let top = red.iter().map(|(_, y)| *y).min().unwrap() as f32;
+        let pictures = live.cache.borrow_mut().pane(id).view.pictures.clone();
+        assert_eq!(pictures.len(), 1, "vertical={vertical}");
+        let rect = pictures[0].1;
+        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+        // 面の座標から窓の座標へ：描いた赤の左上と、渡した矩形の左上の差。
+        let (dx, dy) = (left - rect.left, top - rect.top);
+        let corner = |scale: f32| {
+            if vertical {
+                (rect.right - w * scale + dx, rect.top + h * scale + dy)
+            } else {
+                (rect.left + w * scale + dx, rect.top + h * scale + dy)
+            }
+        };
+        let press = corner(1.0);
+        let release = corner(scale);
+        let at = |(x, y): (f32, f32)| slint::LogicalPosition::new(x, y);
+        // つまみは絵の上にポインタがあるときだけ見える（角の外側の画素が変わる）。
+        let mut grip_pixel = |pointer: (f32, f32)| {
+            window.window().dispatch_event(WindowEvent::PointerMoved {
+                position: at(pointer),
+            });
+            window.window().request_redraw();
+            surface.draw_if_needed(|renderer| {
+                renderer.render(&mut pixels, width);
+            });
+            let (x, y) = (press.0.round() as usize, press.1.round() as usize + 2);
+            let x = if vertical { x - 3 } else { x + 2 };
+            pixels[y * width + x]
+        };
+        let away = grip_pixel((5.0, 690.0));
+        let over = grip_pixel(corner(0.5));
+        assert_ne!(away, over, "vertical={vertical}: grip on hover");
+        let before = calls.get();
+        window.window().dispatch_event(WindowEvent::PointerMoved {
+            position: at(press),
+        });
+        window.window().dispatch_event(WindowEvent::PointerPressed {
+            position: at(press),
+            button: PointerEventButton::Left,
+        });
+        window.window().dispatch_event(WindowEvent::PointerMoved {
+            position: at(release),
+        });
+        if let Ok(output) = std::env::var("EDITOR_SETTINGS_SNAPSHOT") {
+            window.window().request_redraw();
+            surface.draw_if_needed(|renderer| {
+                renderer.render(&mut pixels, width);
+            });
+            let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+            for pixel in &pixels {
+                ppm.extend([pixel.r, pixel.g, pixel.b]);
+            }
+            let name = format!(
+                "image-resize-{}.ppm",
+                if vertical { "vertical" } else { "horizontal" }
+            );
+            std::fs::write(PathBuf::from(output).join(name), ppm).unwrap();
+        }
+        let outline = id.screen(&window).picture_outline;
+        assert!(
+            id.screen(&window).picture_outline_shown && (outline.width - w * scale).abs() < 2.0,
+            "vertical={vertical} outline {outline:?}"
+        );
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased {
+                position: at(release),
+                button: PointerEventButton::Left,
+            });
+        assert!(
+            calls.get() - before >= 3,
+            "grip not hit: vertical={vertical}"
+        );
+        let text = document.text.borrow().clone();
+        assert_eq!(text.lines().next(), Some(written), "vertical={vertical}");
+        assert!(!id.screen(&window).picture_outline_shown);
+        // カーソルは本文の行に残る（絵の行は開かない）。
+        let caret = live.states.of(id).borrow().caret_source_byte;
+        assert_eq!(caret, Some(text.len() - 1), "vertical={vertical}");
+        // 組み直した絵は新しい大きさ。
+        let resized = live.cache.borrow_mut().pane(id).view.pictures.clone();
+        let rect = resized[0].1;
+        assert!(
+            ((rect.right - rect.left) - w * scale).abs() < 2.0,
+            "vertical={vertical} resized {rect:?}"
+        );
+    }
+    // 取り消しは1回で1つ前の幅へ戻る。
+    undo_in_pane(&window, id, &document, &live.states, &live.cache, false);
+    assert_eq!(
+        document.text.borrow().lines().next(),
+        Some("![赤|300](a.bmp)")
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}

@@ -1023,6 +1023,9 @@ struct PaneView {
     /// 横のスクロールバーが出ても、末尾は画面の下へ外れる——それで追うのを
     /// やめると、ログは書き手が何もしないうちに止まって見える。
     read_only_viewport: f32,
+    /// 見えている絵：箱が立つUTF-16の位置、面の座標の矩形、絵が縮む行の長さ（追加要件 2026-09-16）。
+    /// **Slintへ渡した`picture-rects`と同じ並び**で、つまみは何枚目かで名指す。
+    pictures: Vec<(u32, SelectionRect, f32)>,
 }
 
 /// A place in the text that a pane is holding its view on (要件 8.5).
@@ -2517,6 +2520,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let state = states.of(id);
             let phase = SelectionPhase::Update;
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
+        }
+    });
+
+    // 追加要件 2026-09-16: 絵の角を引いて大きさを変える。
+    let weak = window.as_weak();
+    let picture_live = live.clone();
+    window.on_pane_picture_resize(move |pane, index, phase, x, y| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let index = usize::try_from(index).unwrap_or(usize::MAX);
+            resize_picture(&window, &picture_live, id, index, phase, (x, y));
         }
     });
 
@@ -13061,6 +13075,26 @@ impl RenderCache {
         Ok((tile_count, keyed.len(), rendered, reused, spare_held))
     }
 
+    /// 見えている絵の置き場所を、つまみのために渡す（追加要件 2026-09-16）。**描いたときと同じ組み**
+    /// から訊くので、組み直し（`refresh_pane`）とスクロール（`refresh_pane_selection`）の両方で呼ぶ。
+    /// 閲覧の面は書き換えないので、つまみを出さない。
+    fn refresh_pane_pictures(&mut self, window: &AppWindow, id: PaneId) {
+        let pictures = if id.screen(window).viewer {
+            Vec::new()
+        } else {
+            let engine = &mut self.pane(id).graphics.engine;
+            let visible = id.flow_range(window, engine.total_flow_size() as f32);
+            engine.picture_rects(visible).unwrap_or_default()
+        };
+        let rects = pictures
+            .iter()
+            .map(|(_, rect, _)| *rect)
+            .collect::<Vec<_>>();
+        let model = ModelRc::new(VecModel::from(preview_rects(&rects)));
+        id.update_screen(window, |screen| screen.picture_rects = model);
+        self.pane(id).view.pictures = pictures;
+    }
+
     fn refresh_pane_differences(
         &mut self,
         window: &AppWindow,
@@ -13117,6 +13151,7 @@ impl RenderCache {
         id: PaneId,
     ) -> windows::core::Result<()> {
         self.refresh_pane_differences(window, id)?;
+        self.refresh_pane_pictures(window, id);
         let selection = self.pane(id).view.selection_utf16.clone();
         if selection.is_empty() {
             return Ok(());
@@ -14874,6 +14909,7 @@ fn refresh_pane(
         }
     };
     id.set_scope(window, &scope_rects);
+    cache.refresh_pane_pictures(window, id);
     let rects = selection_rects.len();
     if cache.pane(id).view.direction_caret_source != caret_source_byte {
         cache.pane(id).view.direction_fraction = None;
@@ -16312,6 +16348,109 @@ fn update_pane_selection(
             &format!("drag pane={} ms={ms:.1}", id.log_name()),
         );
     }
+}
+
+/// 絵の角を引いて、大きさを変える（追加要件 2026-09-16、書き手）。
+///
+/// **引いているあいだは枠だけ**で、組み直さない。離したら、その絵の行の幅の指定（`|300`）を
+/// 書き換える——編集の道は1本（`apply_span_edit`）なので、取り消しは1回で戻る。**カーソルは
+/// 動かさない**：絵の行へ移すと行が開き、横書きでは記法が上に出て、引いた絵が動いて見える。
+///
+/// `phase`は0押した・1引いている・2離した・3取りやめ（Slintの`picture-resize`）。
+fn resize_picture(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    index: usize,
+    phase: i32,
+    to: (f32, f32),
+) {
+    let place = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .view
+        .pictures
+        .get(index)
+        .copied();
+    let Some((utf16, rect, line_box)) = place else {
+        live.cache.borrow_mut().log_diag(
+            &format!("picture.{}", id.diag_suffix()),
+            &format!(
+                "resize pane={} index={index} phase={phase} missing",
+                id.log_name()
+            ),
+        );
+        return;
+    };
+    let rect = [
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+    ];
+    let vertical = id.vertical(window);
+    let (width, outline) = pictures::resized(rect, vertical, to, line_box, id.zoom(window));
+    if phase < 2 {
+        id.update_screen(window, |screen| {
+            screen.picture_outline = PreviewSelectionRect {
+                x: outline[0],
+                y: outline[1],
+                width: outline[2],
+                height: outline[3],
+            };
+            screen.picture_outline_shown = true;
+        });
+        return;
+    }
+    id.update_screen(window, |screen| screen.picture_outline_shown = false);
+    if phase != 2 {
+        return;
+    }
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let byte = {
+        let active = PaneId::revealed_line(vertical, &state, &source);
+        let mut borrowed = live.cache.borrow_mut();
+        let slot = &mut borrowed.pane(id).view.preview_slot;
+        pane_text(window, &document, id, slot, &source, active).source_byte_at_utf16(utf16 as usize)
+    };
+    let (start, end) = document::line_span(&source, byte);
+    let line = source[start..end].trim_end_matches(['\n', '\r']);
+    let told = format!("picture width={width} line={start}");
+    let Some(text) = document::with_image_width(line, width).filter(|text| text != line) else {
+        live.cache.borrow_mut().log_diag(
+            &format!("picture.{}", id.diag_suffix()),
+            &format!("resize pane={} {told} unchanged", id.log_name()),
+        );
+        return;
+    };
+    let region = start..start + line.len();
+    // 絵の行より後ろのカーソルは、書き換えで伸び縮みしたぶんだけ動く。
+    let kept = |at: usize| {
+        if at >= region.end {
+            at - region.len() + text.len()
+        } else {
+            at.min(region.start + text.len())
+        }
+    };
+    let caret = state
+        .borrow()
+        .caret_source_byte
+        .unwrap_or(0)
+        .min(source.len());
+    let caret = kept(caret);
+    apply_span_edit(
+        window,
+        live,
+        id,
+        &source,
+        region,
+        &text,
+        (caret, caret),
+        &told,
+    );
 }
 
 /// Move the caret and re-cut the selection without laying the document out.

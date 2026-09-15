@@ -135,6 +135,42 @@ pub fn size(picture: &Picture, width: Option<u32>, zoom_percent: i32) -> (u32, u
     )
 }
 
+/// 引いて変えられる、いちばん小さい幅（画面の画素）。
+const SMALLEST: f32 = 16.0;
+
+/// 絵の角を引いた先から決まる大きさ（追加要件 2026-09-16：絵の大きさをマウスで変える）。
+///
+/// `rect`は今の絵（面の座標で左・上・幅・高さ）、`to`は引いている点。**止まっている角は、組み直しても
+/// 絵が動かない角**——横書きは左上、縦書きは右上（縦書きは右から積むので、列が太っても右端は動かない）。
+/// 大きさは引いた点を対角線へ写して決め、縦横比を保つ。行に沿う長さは`line_box`まで（組むときも
+/// そこで縮む）、幅は`SMALLEST`から。
+///
+/// 返すのは、記法に書く幅（表示倍率を外した画素）と、引いているあいだの枠（面の座標）。
+pub fn resized(
+    rect: [f32; 4],
+    vertical: bool,
+    to: (f32, f32),
+    line_box: f32,
+    zoom_percent: i32,
+) -> (u32, [f32; 4]) {
+    let [left, top, width, height] = rect;
+    let (width, height) = (width.max(1.0), height.max(1.0));
+    let across = if vertical {
+        left + width - to.0
+    } else {
+        to.0 - left
+    };
+    let down = to.1 - top;
+    let along = if vertical { height } else { width };
+    let scale = ((across * width + down * height) / (width * width + height * height))
+        .min(line_box.max(1.0) / along)
+        .max(SMALLEST / width);
+    let (wide, tall) = (width * scale, height * scale);
+    let x = if vertical { left + width - wide } else { left };
+    let zoom = zoom_percent.max(1) as f32 / 100.0;
+    ((wide / zoom).round().max(1.0) as u32, [x, top, wide, tall])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +201,49 @@ mod tests {
         assert_eq!(size(&picture, None, 100), (400, 200));
         assert_eq!(size(&picture, Some(300), 100), (300, 150));
         assert_eq!(size(&picture, None, 150), (600, 300));
+    }
+
+    #[test]
+    fn dragging_a_corner_keeps_the_shape_and_the_fixed_corner() {
+        // 横書き：左上が止まる。右下の角を右下へ50%引けば1.5倍。
+        let (width, outline) = resized(
+            [10.0, 20.0, 200.0, 100.0],
+            false,
+            (310.0, 170.0),
+            600.0,
+            100,
+        );
+        assert_eq!((width, outline), (300, [10.0, 20.0, 300.0, 150.0]));
+        // 縦書き：右上が止まる。左下の角を左へ引く。表示倍率200%なら書く幅は半分。
+        let (width, outline) = resized([100.0, 20.0, 200.0, 100.0], true, (0.0, 170.0), 600.0, 200);
+        assert_eq!((width, outline), (150, [0.0, 20.0, 300.0, 150.0]));
+        // 行に沿う長さは行まで、幅は16pxから。
+        assert_eq!(
+            resized(
+                [10.0, 20.0, 200.0, 100.0],
+                false,
+                (900.0, 900.0),
+                400.0,
+                100
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            resized([10.0, 20.0, 200.0, 100.0], false, (0.0, 0.0), 400.0, 100).0,
+            16
+        );
+        assert_eq!(
+            resized(
+                [100.0, 20.0, 200.0, 100.0],
+                true,
+                (-500.0, 900.0),
+                150.0,
+                100
+            )
+            .0,
+            300
+        );
     }
 
     #[test]

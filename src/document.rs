@@ -2808,6 +2808,39 @@ pub fn image_of_line(line: &str) -> Option<ImageRef<'_>> {
     (picture && !target.is_empty() && !target.contains("://")).then_some(ImageRef { target, width })
 }
 
+/// 画像の行の幅の指定を`width`にした行（追加要件 2026-09-16：絵の大きさをマウスで変える）。
+///
+/// 指定があれば置き換え、無ければ足す。`300x200`の高さは捨てる——縦横比は絵が保つ。行の前後の
+/// 空白はそのまま。画像の行でなければ`None`。
+pub fn with_image_width(line: &str, width: u32) -> Option<String> {
+    image_of_line(line)?;
+    let head = line.len() - line.trim_start().len();
+    let body = line.trim();
+    let tail = &line[head + body.len()..];
+    let body = if let Some(inner) = body
+        .strip_prefix("![[")
+        .and_then(|rest| rest.strip_suffix("]]"))
+    {
+        let target = inner.split_once('|').map_or(inner, |(target, _)| target);
+        format!("![[{target}|{width}]]")
+    } else {
+        let (alt, after) = body.strip_prefix("![")?.split_once("](")?;
+        let sized = |option: &str| {
+            option
+                .trim()
+                .split('x')
+                .next()
+                .is_some_and(|width| width.parse::<u32>().is_ok_and(|width| width > 0))
+        };
+        let alt = match alt.rsplit_once('|') {
+            Some((text, option)) if sized(option) => text,
+            _ => alt,
+        };
+        format!("![{alt}|{width}]({after}")
+    };
+    Some(format!("{}{body}{tail}", &line[..head]))
+}
+
 /// 絵を指す鍵：行き先と幅から決まる（同じ書き方なら同じ鍵）。
 pub fn image_key(image: ImageRef<'_>) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -6547,6 +6580,38 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(pictures[..3], [true, false, false]);
+    }
+
+    /// 追加要件 2026-09-16: 絵の大きさを変えたら、幅の指定を書き換える（無ければ足す）。
+    #[test]
+    fn resizing_a_picture_writes_its_width() {
+        let resized = |line| with_image_width(line, 240);
+        assert_eq!(
+            resized("![説明](a.png)").as_deref(),
+            Some("![説明|240](a.png)")
+        );
+        assert_eq!(resized("![](a.png)").as_deref(), Some("![|240](a.png)"));
+        assert_eq!(
+            resized("  ![説明|300](<写真 1.png> \"題\") ").as_deref(),
+            Some("  ![説明|240](<写真 1.png> \"題\") ")
+        );
+        assert_eq!(
+            resized("![a|b](a.png)").as_deref(),
+            Some("![a|b|240](a.png)")
+        );
+        assert_eq!(resized("![[a.png]]").as_deref(), Some("![[a.png|240]]"));
+        assert_eq!(
+            resized("![[a.png|300x200]]").as_deref(),
+            Some("![[a.png|240]]")
+        );
+        assert_eq!(resized("![[ノート]]"), None);
+        for line in ["![説明](a.png)", "![[a.png|300x200]]"] {
+            let written = resized(line).unwrap();
+            assert_eq!(
+                image_of_line(&written).map(|image| image.width),
+                Some(Some(240))
+            );
+        }
     }
 
     /// The shown text is marked as a link, and emphasis inside it still counts:
