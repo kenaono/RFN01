@@ -68,8 +68,11 @@ fn prints_a_horizontal_sample_to_pdf() {
 }
 
 fn print_sample(mode: WritingMode, name: &str) {
-    let source = std::fs::read_to_string("testdata/13_ルビ・傍点・縦中横.md")
-        .expect("the ruby and emphasis sample");
+    print_file("testdata/13_ルビ・傍点・縦中横.md", mode, name);
+}
+
+fn print_file(from: &str, mode: WritingMode, name: &str) {
+    let source = std::fs::read_to_string(from).expect("the sample document");
     let paper = Paper::default();
     let mut engine = engine_on_paper(&source, mode, paper);
     let pages = page_count(&engine, paper);
@@ -94,27 +97,46 @@ fn print_sample(mode: WritingMode, name: &str) {
     );
 }
 
-/// 紙の1枚目を絵にして置く。**私と書き手が目で見るためのもの**で、プリンタへ
-/// 送る1枚と同じ処理が描いている。
+/// 折り返しを入れていない原稿を刷る。**縦書きの段がどこまで伸びるか**を見る
+/// ためのもので、原稿の側で短く折り返してあれば段もそこで終わる。
+#[test]
+#[ignore = "Windowsの印刷へ本当に仕事を出す"]
+fn prints_a_document_without_hard_wraps() {
+    print_file(
+        "testdata/09_段落長の計測.md",
+        WritingMode::Vertical,
+        "long-lines.pdf",
+    );
+}
+
+/// 紙を絵にして置く。**私と書き手が目で見るためのもの**で、プリンタへ送る1枚と
+/// 同じ処理が描いている。`EDITOR_PRINT_PAGES`で対象を変えられる
+/// （`<ファイル>:<縦か横>:<何枚目まで>`）。
 #[test]
 #[ignore = "紙の絵を置く"]
 fn draws_pages_as_pictures() {
-    let source = std::fs::read_to_string("testdata/13_ルビ・傍点・縦中横.md")
-        .expect("the ruby and emphasis sample");
+    let want = std::env::var("EDITOR_PRINT_PAGES")
+        .unwrap_or_else(|_| "testdata/13_ルビ・傍点・縦中横.md:v:3".to_owned());
+    let mut parts = want.split(':');
+    let file = parts.next().unwrap_or_default();
+    let mode = match parts.next() {
+        Some("h") => WritingMode::Horizontal,
+        _ => WritingMode::Vertical,
+    };
+    let limit: usize = parts.next().and_then(|at| at.parse().ok()).unwrap_or(3);
+    let source = std::fs::read_to_string(file).expect("the sample document");
     let paper = Paper::default();
-    for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
-        let mut engine = engine_on_paper(&source, mode, paper);
-        for page in 0..page_count(&engine, paper) {
-            let (pixels, width, height) =
-                directwrite_render::print::render_page(&mut engine, paper, page, 2.0)
-                    .expect("draw the page");
-            let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-            for bgra in pixels.chunks_exact(4) {
-                ppm.extend([bgra[2], bgra[1], bgra[0]]);
-            }
-            let name = format!("{mode:?}-{}.ppm", page + 1).to_lowercase();
-            std::fs::write(out_dir().join(&name), ppm).expect("write the page picture");
-            println!("{name}: {width}x{height}");
+    let mut engine = engine_on_paper(&source, mode, paper);
+    for page in 0..limit.min(page_count(&engine, paper)) {
+        let (pixels, width, height) =
+            directwrite_render::print::render_page(&mut engine, paper, page, 2.0)
+                .expect("draw the page");
+        let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for bgra in pixels.chunks_exact(4) {
+            ppm.extend([bgra[2], bgra[1], bgra[0]]);
         }
+        let name = format!("{mode:?}-{}.ppm", page + 1).to_lowercase();
+        std::fs::write(out_dir().join(&name), ppm).expect("write the page picture");
+        println!("{name}: {width}x{height}");
     }
 }

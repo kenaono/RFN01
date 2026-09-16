@@ -47,7 +47,7 @@ use windows::{
 };
 
 use super::{Graphics, Inks, TextEngine, WritingMode, colour, draw_block, with_graphics};
-use crate::text_blocks::{CrossSlices, FlowOrder};
+use crate::text_blocks::{CrossSlices, FlowOrder, LineOrnament, TileSpan};
 
 /// Direct2Dが長さを数える単位（1/96インチ）でのミリメートル。
 ///
@@ -333,7 +333,7 @@ fn draw_page_onto(
             visible: page_cross,
         },
     );
-    let tasks = engine.tile_tasks(&tiles, None);
+    let tasks = page_tasks(engine, &tiles);
     let inks = Inks::on(target)?;
     // **この紙のぶんだけを見せる。**切れ目は行の切れ目に置いてあるが、ブロックは
     // 行より大きい単位なので、紙をまたぐブロックは丸ごと描かれる——次の紙が同じ
@@ -389,6 +389,20 @@ fn draw_page_onto(
     // anything else in page coordinates.
     unsafe { target.SetTransform(&place(scale, 0.0, 0.0)) };
     Ok(())
+}
+
+/// この紙に載せるブロックたち。
+///
+/// 画面のタイルと同じものだが、**改ページの破線だけ落とす**（2026-09-16、書き手の
+/// 判断）。あの破線は画面が紙を切らないから引いてあるもので、紙では実際にページが
+/// 変わる——両方あると「消し忘れの線」に見える。
+fn page_tasks(engine: &TextEngine, tiles: &[TileSpan]) -> Vec<super::TileTask> {
+    let mut tasks = engine.tile_tasks(tiles, None);
+    for task in &mut tasks {
+        task.lines
+            .retain(|run| run.ornament != LineOrnament::PageBreak);
+    }
+    tasks
 }
 
 /// 拡大と移動を1つにした変換。**拡大してから動かす**ので、渡す位置は紙の寸法で
@@ -568,6 +582,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 要件 7.10: 紙では改ページの破線を引かない。**画面では引く**——画面は紙を
+    /// 切らないので、あの線だけが切れ目を言っている。
+    #[test]
+    fn the_page_break_dashes_stay_on_the_screen() {
+        let paper = Paper::default();
+        let source = "はじめの行です。\n\n［＃改ページ］\n\n次の紙に出る行です。\n";
+        let engine = engine_on_paper(source, WritingMode::Vertical, paper);
+        // 文書の端から端まで。**縦書きの流れは負の側へ進む**ので、見ている位置は
+        // その端を裏返した値で言う（`visible_flow_range`）。
+        let (low, high) = engine.plan.flow_bounds();
+        let tiles = engine.visible_tiles(-low, high - low, 0, 0.0, 4000.0);
+        let on_screen = engine.tile_tasks(&tiles, None);
+        assert!(
+            on_screen.iter().any(|task| task
+                .lines
+                .iter()
+                .any(|run| run.ornament == LineOrnament::PageBreak)),
+            "the screen draws the dashes"
+        );
+        let on_paper = page_tasks(&engine, &tiles);
+        assert!(
+            on_paper.iter().all(|task| task
+                .lines
+                .iter()
+                .all(|run| run.ornament != LineOrnament::PageBreak)),
+            "the paper does not"
+        );
     }
 
     /// 紙と紙のあいだで本文が消えたり、二度出たりしない。**前の紙が終わったところ
