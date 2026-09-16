@@ -617,18 +617,22 @@ mod tests {
         );
         window.set_diff_selected_row(-1);
         assert!(!window.get_diff_can_previous());
-        click(50.0, 22.0);
+        // 帯のボタンの中。**字の幅がボタンの幅を決める**ので、文言を変えたらここも見直す
+        // （国際化で「Next Difference」が長くなり、押していた点が2つのボタンのすき間に落ちていた）。
+        let previous_button = (60.0, 20.0);
+        let next_button = (206.0, 20.0);
+        click(previous_button.0, previous_button.1);
         assert_eq!(window.get_diff_selected_row(), -1);
-        click(145.0, 22.0);
+        click(next_button.0, next_button.1);
         let first = window.get_diff_selected_row();
         assert!(first >= 0, "next button reaches the comparison");
-        click(145.0, 22.0);
+        click(next_button.0, next_button.1);
         assert!(window.get_diff_selected_row() > first);
-        click(50.0, 22.0);
+        click(previous_button.0, previous_button.1);
         assert_eq!(window.get_diff_selected_row(), first);
         assert!(!window.get_diff_can_previous());
         window.window().dispatch_event(WindowEvent::PointerMoved {
-            position: slint::LogicalPosition::new(145.0, 22.0),
+            position: slint::LogicalPosition::new(next_button.0, next_button.1),
         });
         window.window().request_redraw();
         surface.draw_if_needed(|renderer| {
@@ -641,17 +645,23 @@ mod tests {
             ppm.extend([pixel.r, pixel.g, pixel.b]);
         }
         std::fs::write(output.join("comparison.ppm"), ppm).unwrap();
+        let mut guard = 0;
         while window.get_diff_can_next() {
-            click(145.0, 22.0);
+            click(next_button.0, next_button.1);
+            guard += 1;
+            assert!(
+                guard < 100,
+                "the next button must reach the last difference"
+            );
         }
         let last = window.get_diff_selected_row();
-        click(145.0, 22.0);
+        click(next_button.0, next_button.1);
         assert_eq!(window.get_diff_selected_row(), last);
         assert!(window.get_diff_can_previous());
         populate(&window, "同じ".into(), "同じ".into());
         assert!(!window.get_diff_can_previous());
         assert!(!window.get_diff_can_next());
-        click(235.0, 22.0);
+        click(330.0, 20.0);
         assert!(!window.get_diff_active(), "exit button restores the editor");
         window.set_diff_active(true);
         window.window().request_redraw();

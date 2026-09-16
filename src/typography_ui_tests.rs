@@ -266,7 +266,9 @@ fn typography_settings_roundtrip_and_render() {
     );
     let received = copied.clone();
     window.on_pane_copy_body(move |_| received.set(received.get() + 1));
-    let position = slint::LogicalPosition::new(200.0, 200.0);
+    // **紙の上で押す。**右クリックのメニューは本文のものなので、紙の外（縦書きの短い文書では
+    // 左の余白）では出ない。戻る／進むは面のどこでも効くので、上ではその外を押している。
+    let position = slint::LogicalPosition::new(800.0, 200.0);
     for event in [
         WindowEvent::PointerPressed {
             position,
@@ -288,7 +290,7 @@ fn typography_settings_roundtrip_and_render() {
         ppm.extend([pixel.r, pixel.g, pixel.b]);
     }
     std::fs::write(output.join("body-copy-menu.ppm"), ppm).unwrap();
-    click(240.0, 376.0);
+    click(840.0, 376.0);
     assert_eq!(
         copied.get(),
         1,
@@ -327,7 +329,7 @@ fn typography_settings_roundtrip_and_render() {
     };
     assert!(!id.screen(&window).can_undo);
     open_menu();
-    click(240.0, 219.0);
+    click(840.0, 219.0);
     assert_eq!(undo_calls.get(), 0, "disabled Undo must not dispatch");
     click(700.0, 700.0);
     insert_pane_text(&window, id, &document, &states, &cache, "追加", false);
@@ -339,12 +341,12 @@ fn typography_settings_roundtrip_and_render() {
     assert_ne!(edited, source);
     assert!(id.screen(&window).can_undo);
     open_menu();
-    click(240.0, 219.0);
+    click(840.0, 219.0);
     assert_eq!(undo_calls.get(), 1);
     assert_eq!(&*document.text.borrow(), source);
     assert!(id.screen(&window).can_redo);
     open_menu();
-    click(240.0, 248.0);
+    click(840.0, 248.0);
     assert_eq!(undo_calls.get(), 2);
     assert_eq!(&*document.text.borrow(), &edited);
     undo_in_pane(&window, id, &document, &states, &cache, false);

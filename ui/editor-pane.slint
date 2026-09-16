@@ -1920,6 +1920,16 @@ export component EditorPane inherits Rectangle {
             width: parent.width;
             height: parent.height;
             pointer-event(event) => {
+                // 追加要件 2026-09-16: **戻る／進むは面のどこでも効く。**紙は面いっぱいとは限らず
+                // （縦書きの短い文書は右端に寄る、行の長さを決めた横書きは真ん中に立つ）、紙の外で
+                // 押したときに何も起きないのは、鍵盤の戻る／進むとの食い違いになる。
+                if event.button == PointerEventButton.back
+                    || event.button == PointerEventButton.forward {
+                    if event.kind == PointerEventKind.down {
+                        root.navigate-requested(event.button == PointerEventButton.forward);
+                    }
+                    return;
+                }
                 if event.kind == PointerEventKind.down {
                     root.margin-pressed();
                 }
@@ -2007,11 +2017,19 @@ export component EditorPane inherits Rectangle {
                     }
                 }
 
-                // 紙の外側（行の長さを決めて紙が真ん中に立っているときの左右など）。
+                // 紙の外側（行の長さを決めて紙が真ん中に立っているとき、縦書きの短い文書の左など）。
                 TouchArea {
                     width: parent.width;
                     height: parent.height;
                     pointer-event(event) => {
+                        // 戻る／進むは面のどこでも効く（下の余白と同じ扱い）。
+                        if event.button == PointerEventButton.back
+                            || event.button == PointerEventButton.forward {
+                            if event.kind == PointerEventKind.down {
+                                root.navigate-requested(event.button == PointerEventButton.forward);
+                            }
+                            return;
+                        }
                         if event.kind == PointerEventKind.down {
                             root.margin-pressed();
                         }
