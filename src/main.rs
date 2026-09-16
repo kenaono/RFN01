@@ -387,12 +387,27 @@ const ZOOM_STEP: i32 = 10;
 const ZOOM_MIN: i32 = 50;
 const ZOOM_MAX: i32 = 240;
 /// What a pane magnifies by until anything says otherwise.
-const ZOOM_DEFAULT: i32 = 100;
+/// 画面の拡大の既定（書き手の決定 2026-09-16）。
+///
+/// **本文の大きさと組みで決まっている。**本文の既定は紙の大きさ（10.5pt、
+/// [`BASE_FONT_SIZE`]）にしてあるので、画面ではそのままだと小さい——読む側の拡大で
+/// 補う。**紙に焼く大きさと、光る面を読む大きさは別のもの**で、分けたのがこの2つである。
+const ZOOM_DEFAULT: i32 = 150;
 /// How long the caret must stop moving before the Markdown of its line is
 /// revealed. Revealing rewrites that block's text, which costs a whole block's
 /// worth of pixels; a held arrow key would pay that on every repeat.
 const REVEAL_SETTLE: Duration = Duration::from_millis(120);
-const BASE_FONT_SIZE: i32 = 22;
+/// 本文の大きさの既定、画面の画素で（96dpiなので0.75を掛けるとポイント）。
+///
+/// **10.5pt**（書き手の決定 2026-09-16）。Wordの既定が11pt、Excelが10.5ptで、
+/// **紙に置いたときに普通に見える大きさ**がこれである。以前は22（16.5pt）で、画面では
+/// 読みやすかったが、そのまま刷ると不自然に大きかった——画面で読む大きさは
+/// [`ZOOM_DEFAULT`]が持つ。
+const BASE_FONT_SIZE: i32 = 14;
+/// 2026-09-16より前の既定（16.5pt）。**移し替えのためだけに残してある**
+/// ——設定ファイルには既定の値も書いてあるので、これが入っていれば
+/// 「誰も選んでいない」ということである。
+const OLD_BASE_FONT_SIZE: i32 = 22;
 /// A paragraph past this many characters is called out in the status bar.
 ///
 /// Not an engine limit and not enforced: the writer is told, and the document is
@@ -10544,10 +10559,10 @@ const LANGUAGE_SETTING: &str = "language";
 /// 置き方（0 タイル・1 縦・2 横）、濃さ（%）。
 const WALL_KIND_SETTING: &str = "wallpaper.kind";
 const WALL_PATH_SETTING: &str = "wallpaper.path";
-/// 要件 7.10: 印刷の字体と大きさ（書き手の問い 2026-09-16：「印刷のフォントと
-/// サイズはどこで決めるのですか」）。**画面の設定とは別に持つ**——画面の大きさは
-/// 光る面を読むために選ぶもので、紙に焼く大きさではない。大きさは10分の1ポイント。
-const PRINT_FONT_SETTING: &str = "print.font";
+/// 要件 7.10: 紙の本文の大きさ、10分の1ポイント。**0なら画面の設定のまま**
+/// （書き手の決定 2026-09-16：「デフォルトは画面の指定をそのまま使い、Optionalで、
+/// 印刷用のフォントサイズ指定が出来るのがいい」）。字体・色・見出しの倍率は画面の
+/// 設定がそのまま紙へ行くので、**紙が持つのはこの1つだけ**である。
 const PRINT_SIZE_SETTING: &str = "print.size";
 const WALL_FIT_SETTING: &str = "wallpaper.fit";
 const WALL_STRENGTH_SETTING: &str = "wallpaper.strength";
@@ -11469,10 +11484,6 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_wall_path().to_string(),
     ));
     values.push((
-        PRINT_FONT_SETTING.to_owned(),
-        window.get_print_font().to_string(),
-    ));
-    values.push((
         PRINT_SIZE_SETTING.to_owned(),
         window.get_print_size().to_string(),
     ));
@@ -11654,14 +11665,11 @@ fn apply_settings(
             window.set_wall_path(value.trim().into());
             continue;
         }
-        if written == PRINT_FONT_SETTING {
-            window.set_print_font(value.trim().into());
-            continue;
-        }
         if written == PRINT_SIZE_SETTING {
-            // 6ptより小さいと読めず、24ptより大きいと1行に数字しか入らない。
-            let size = value.trim().parse::<i32>().unwrap_or(105);
-            window.set_print_size(size.clamp(60, 240));
+            // 0は「画面の設定のまま」。6ptより小さいと読めず、24ptより大きいと
+            // 1行に数字しか入らない。
+            let size = value.trim().parse::<i32>().unwrap_or(0);
+            window.set_print_size(if size == 0 { 0 } else { size.clamp(60, 240) });
             continue;
         }
         if written == WALL_FIT_SETTING {
@@ -11786,6 +11794,17 @@ fn apply_settings(
         if let Some(setting) = Setting::from_name(name) {
             let (low, high) = setting.range();
             if let Ok(number) = value.parse::<i32>() {
+                // **誰も選んでいない大きさは、新しい既定へ移す**（2026-09-16、
+                // 書き手の決定で本文の既定を22画素＝16.5ptから14画素＝10.5ptへ
+                // 下げた）。設定ファイルには既定の値も書き出してあるので、そのまま
+                // 読むと**既定を変えても誰にも届かない**。自分で選んだ大きさ
+                // （22以外）はそのまま——選んだものを黙って動かさない。
+                let number = if matches!(setting, Setting::BodySize) && number == OLD_BASE_FONT_SIZE
+                {
+                    BASE_FONT_SIZE
+                } else {
+                    number
+                };
                 for sheet in sheets {
                     setting.write(numbers, *sheet, number.clamp(low, high));
                 }
@@ -20488,13 +20507,16 @@ mod tests {
     #[test]
     fn thirty_thousand_characters_need_at_most_three_resident_tiles() {
         let text = long_document(30_000);
-        let engine = engine_for(&text, 100);
+        // **画面の拡大で測る**（`ZOOM_DEFAULT`）。本文の既定は紙の大きさになったので
+        // （10.5pt、2026-09-16）、素の大きさで組むと同じ文書が狭くなる——ここで欲しいのは
+        // 「一画面では到底収まらない広さ」である。
+        let engine = engine_for(&text, ZOOM_DEFAULT);
         let width = engine.total_flow_size();
         let middle = -((width / 2) as f32);
 
         assert!(
             width > 65_536,
-            "the sample must be a genuinely wide document"
+            "the sample must be a genuinely wide document: {width}"
         );
         let tiles = engine.visible_tiles(middle, 640.0, 0, 0.0, PREVIEW_HEIGHT as f32);
         assert!(

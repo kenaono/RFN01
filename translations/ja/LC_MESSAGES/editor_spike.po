@@ -639,6 +639,12 @@ msgstr "印刷"
 msgid "Margin"
 msgstr "余白"
 
+msgid "Text size"
+msgstr "本文の大きさ"
+
+msgid "as on screen"
+msgstr "画面のまま"
+
 msgid "Save As…"
 msgstr "名前を付けて保存…"
 

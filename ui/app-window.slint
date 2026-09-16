@@ -669,8 +669,6 @@ export component AppWindow inherits Window {
     /// 書体の一覧は要件 9 のものと同じ`font-menu`を使う。**どちらの欄のために
     /// 開いたか**を、開いた側がここで言う——戻る先だけが違う。
     in-out property <bool> font-for-terminal: false;
-    /// 書体の一覧が**印刷のために**開いているか（`font-for-terminal`と同じ作法）。
-    in-out property <bool> font-for-print: false;
     callback terminal-size-stepped(int);
     /// 黒地／紙のひとまとめの選択。**背景と文字を一度に置く**——片方だけ変えた状態は
     /// 読めない画面で、そこを通らせない。
@@ -907,14 +905,13 @@ export component AppWindow inherits Window {
     in property <int> print-pages;
     in-out property <string> print-status;
     in property <string> print-paper-note;
-    /// 印刷の字体と大きさ（要件 7.10、書き手の問い 2026-09-16：「印刷のフォントと
-    /// サイズはどこで決めるのですか」）。**画面の設定とは別のもの**——画面の大きさは
-    /// 光る面を読むために選ぶもので、紙に焼く大きさではない。
-    in-out property <string> print-font;
-    /// 10分の1ポイント（105 = 10.5pt）。
-    in-out property <int> print-size: 105;
-    callback print-font-pressed();
+    /// 紙の本文の大きさ、10分の1ポイント。**0なら画面の設定のまま**（要件 7.10、
+    /// 書き手の決定 2026-09-16：「印刷のフォント指定は、デフォルトは画面の指定を
+    /// そのまま使い、Optionalで、印刷用のフォントサイズ指定が出来るのがいい」）。
+    /// 字体・色・見出しの倍率は画面の設定がそのまま紙へ行く。
+    in-out property <int> print-size: 0;
     callback print-size-stepped(int);
+    callback print-size-from-screen();
     in-out property <bool> print-working;
     callback print-turned(int);
     callback print-margin-stepped(int);
@@ -5475,13 +5472,9 @@ export component AppWindow inherits Window {
             pages: root.print-pages;
             status: root.print-status;
             paper-note: root.print-paper-note;
-            font: root.print-font;
             size: root.print-size;
-            font-pressed => {
-                root.print-font-pressed();
-                font-menu.show();
-            }
             size-stepped(by) => { root.print-size-stepped(by); }
+            size-from-screen => { root.print-size-from-screen(); }
             working: root.print-working;
             turned(to) => { root.print-turned(to); }
             margin-stepped(by) => { root.print-margin-stepped(by); }

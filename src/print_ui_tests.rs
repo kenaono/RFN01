@@ -47,8 +47,8 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     reset_settings(&numbers, &palette, &fonts);
     window.set_sheet_stride(SHEET_NUMBERS as i32);
     window.set_sheet_numbers(ModelRc::from(numbers.clone()));
-    window.set_palette(ModelRc::from(palette));
-    window.set_sheet_fonts(ModelRc::from(fonts));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts.clone()));
     let (width, height) = (1000usize, 740usize);
     surface.set_size(slint::PhysicalSize::new(width as u32, height as u32));
     window.set_tree_open(false);
@@ -174,28 +174,58 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         "a wider margin needs at least as many sheets: {narrow_pages} against {pages}"
     );
 
-    // **紙の字体と大きさは紙のもの**（書き手の問い 2026-09-16：「印刷のフォントと
-    // サイズはどこで決めるのですか」）。画面の大きさを変えても紙は変わらない。
-    let paper_note = window.get_print_paper_note().to_string();
-    numbers.set_row_data(SHEET_NUMBERS + Setting::BodySize.row_in_sheet(), 40);
-    numbers.set_row_data(Setting::BodySize.row_in_sheet(), 40);
-    print_view::step_size(&window, &live, 0);
+    // **画面で設定したとおりに刷る**（書き手の決定 2026-09-16）。既定では紙の
+    // 大きさを持たず、画面の設定がそのまま行く。
     assert_eq!(
-        window.get_print_paper_note().to_string(),
-        paper_note,
-        "the screen's size must not reach the paper"
+        window.get_print_size(),
+        0,
+        "by default the paper follows the screen"
     );
-    // そして紙の大きさを変えれば、紙は変わる。
+    let paper_note = window.get_print_paper_note().to_string();
+    // **本文の大きさだけは紙のものを持てる**（任意）。1度押せば画面のいまの大きさから。
     print_view::step_size(&window, &live, -4);
     let smaller = window.get_print_paper_note().to_string();
+    assert!(
+        window.get_print_size() > 0,
+        "stepping must take the paper off the screen's size"
+    );
     assert!(
         smaller != paper_note,
         "2pt smaller must change the paper: {paper_note} then {smaller}"
     );
+    // そして画面へ戻せる。
+    print_view::use_screen_size(&window, &live);
     assert_eq!(
         window.get_print_size(),
-        85,
-        "and the setting holds the size"
+        0,
+        "and it can go back to the screen"
+    );
+    assert_eq!(
+        window.get_print_paper_note().to_string(),
+        paper_note,
+        "back to what the screen says"
+    );
+
+    // **画面で決めた色と字体は紙にも行く**（書き手の指摘 2026-09-16：「画面で見出しに
+    // 色指定していても、印刷でフォント変更すると色が無視されます」）。見出しのH1に
+    // 赤を置き、コードだけ別の字体にして、紙の体裁がそれを持っていることを見る。
+    set_colour(&palette, 1, 1, [1.0, 0.0, 0.0]);
+    fonts.set_row_data(font_row(1, CODE_SLOT), "MS Gothic".into());
+    fonts.set_row_data(font_row(1, 0), "Yu Mincho".into());
+    let spec = print_view::paper_typography(&window, WritingMode::Vertical);
+    assert_eq!(
+        spec.heading_ink[0],
+        [1.0, 0.0, 0.0],
+        "the heading's colour must reach the paper"
+    );
+    assert_eq!(spec.body_font, "Yu Mincho", "and the body's own face");
+    assert_eq!(
+        spec.code_font, "MS Gothic",
+        "and code keeps its own face — the paper does not put everything in one"
+    );
+    assert!(
+        !spec.line_numbers,
+        "the line numbers are for editing, not paper"
     );
 
     print_view::close(&window, &live);

@@ -117,6 +117,10 @@ fn an_image_line_is_shown_as_the_picture() {
             screen.shown_width = 950.0;
             screen.shown_height = 560.0;
             screen.preview = true;
+            // **素の大きさで測る**（2026-09-16、画面の拡大の既定が150%になった）。
+            // ここで確かめるのは「絵が元の大きさで、回さずに描かれる」ことなので、
+            // 拡大が掛かっていると測る相手が変わる。
+            screen.zoom = 100;
             screen.tabs = ModelRc::new(VecModel::from(vec![TabInfo {
                 title: "原稿.md".into(),
                 ..Default::default()

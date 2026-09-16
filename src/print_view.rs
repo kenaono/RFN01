@@ -173,7 +173,7 @@ fn lay_out(
     let styles = document::line_styles_reading(&source, reading);
     let styled =
         StyledText::marked(&preview.text, &styles, preview.marks()).with_markers(preview.markers());
-    let spec = for_paper(window, mode);
+    let spec = paper_typography(window, mode);
     // **行の長さは紙の寸法。**字数では決めない（書き手の指摘 2026-09-16：「字数は
     // 英数字だとかなりちがいますし、禁則文字もあるため一意に決められません」）
     // ——半角の字は送りが違い、禁則で追い込み・追い出しも起きるので、「1行◯字」と
@@ -191,41 +191,29 @@ fn lay_out(
 
 /// 紙の体裁。
 ///
-/// **字体と大きさは紙のもの**（要件 7.10、書き手の問い 2026-09-16：「印刷のフォントと
-/// サイズはどこで決めるのですか」）。画面の大きさは**光る面を長く読むために**選ぶ
-/// もので、紙に焼く大きさではない——画面を大きくしたからといって、紙の字まで大きく
-/// なるのはおかしい。だから印刷は自分の字体と大きさを持つ（プレビューの下の帯で決め、
-/// 設定として覚えている）。
+/// **画面で設定したとおりに刷る**（要件 7.10、書き手の決定 2026-09-16：「まず、画面で
+/// 設定したフォントが印刷できるのが一番いいです。そうすることで、画面のイメージに近く
+/// 出力できるからです」）。字体は本文・コード・見出しの6段それぞれのものがそのまま
+/// 行き、見出しの色も行く——**紙のために1つの字体へまとめない**。行送り・字間・
+/// 見出しの倍率・ルビ・縦中横も、その原稿をどう組むかという決めごとなので、そのまま。
 ///
-/// **それ以外は画面の設定のまま。**行送り・字間・見出しの倍率・ルビの大きさと位置・
-/// 縦中横は、その原稿をどう組むかという書き手の決めごとなので、紙へもそのまま持って
-/// いく（要件 7.10：画面と同じ結果を出す）。
+/// **本文の大きさだけは紙のものを持てる**（任意。`print.size`が0なら画面のまま）。
+/// 画面の大きさは光る面を長く読むために選ぶもので、紙に焼く大きさとは限らない
+/// ——見出しは倍率で付いてくるので、**動かすのは本文の1つで足りる**。
 ///
-/// 色は紙の側が持っている——白い紙に黒い字である。行番号と空白の印は、読むためでは
-/// なく編むための印なので出さない。
-fn for_paper(window: &AppWindow, mode: WritingMode) -> Typography {
+/// 落とすのは**紙が自分で持っているものと、編むための印**だけ：紙の色（紙は白い）、
+/// 行番号、空白の印。
+pub fn paper_typography(window: &AppWindow, mode: WritingMode) -> Typography {
     let vertical = matches!(mode, WritingMode::Vertical);
     // 画面の拡大（Ctrl+ホイール）は紙には効かない。拡大は読むためのものである。
     let screen = crate::typography_for(window, 100, vertical, true);
-    // ポイントは1/72インチ、Direct2Dが数えるのは1/96インチ。
-    let size = (window.get_print_size().clamp(60, 240) as f32 / 10.0) * (96.0 / 72.0);
-    let font = window.get_print_font().to_string();
-    let family = |screen: &str| {
-        if font.is_empty() {
-            screen.to_owned()
-        } else {
-            font.clone()
-        }
+    let font_size = match window.get_print_size() {
+        0 => screen.font_size,
+        // ポイントは1/72インチ、Direct2Dが数えるのは1/96インチ。
+        tenths => (tenths.clamp(60, 240) as f32 / 10.0) * (96.0 / 72.0),
     };
     Typography {
-        font_size: size,
-        body_font: family(&screen.body_font),
-        heading_font: std::array::from_fn(|at| family(&screen.heading_font[at])),
-        code_font: family(&screen.code_font),
-        paper: [1.0, 1.0, 1.0],
-        ink: [0.0, 0.0, 0.0],
-        heading_ink: [[0.0, 0.0, 0.0]; crate::MAX_HEADING_LEVEL],
-        backgrounds: [[1.0, 1.0, 1.0]; 7],
+        font_size,
         paper_painted: false,
         line_numbers: false,
         whitespace: false,
@@ -233,9 +221,15 @@ fn for_paper(window: &AppWindow, mode: WritingMode) -> Typography {
     }
 }
 
-/// 紙の字の大きさを0.5ptずつ動かす。
+/// 紙の本文の大きさを0.5ptずつ動かす。
+///
+/// **画面のままから離れるのもここ**——1度押せば、画面のいまの大きさから始まる。
 pub fn step_size(window: &AppWindow, live: &Live, by: i32) {
-    let size = (window.get_print_size() + by * 5).clamp(60, 240);
+    let now = match window.get_print_size() {
+        0 => screen_size(window, live),
+        tenths => tenths,
+    };
+    let size = (now + by * 5).clamp(60, 240);
     if size == window.get_print_size() {
         return;
     }
@@ -243,17 +237,22 @@ pub fn step_size(window: &AppWindow, live: &Live, by: i32) {
     relay(window, live);
 }
 
-/// 紙の字体を選んだとき（書体の一覧から）。
-pub fn choose_font(window: &AppWindow, live: &Live, family: &str) {
-    window.set_print_font(family.into());
+/// 画面の設定へ戻す（紙の大きさを持たない）。
+pub fn use_screen_size(window: &AppWindow, live: &Live) {
+    if window.get_print_size() == 0 {
+        return;
+    }
+    window.set_print_size(0);
     relay(window, live);
 }
 
-/// 書体の一覧を、印刷のために開く。
-pub fn ask_font(window: &AppWindow) {
-    crate::wiring::fill_font_names(window);
-    window.set_font_for_print(true);
-    window.set_font_current(window.get_print_font());
+/// 画面の本文の大きさを、10分の1ポイントで。
+fn screen_size(window: &AppWindow, live: &Live) -> i32 {
+    let _ = live;
+    let vertical = matches!(mode_of(window), WritingMode::Vertical);
+    let pixels = crate::typography_for(window, 100, vertical, true).font_size;
+    // 画素は96dpi、ポイントは72dpi。
+    ((pixels * 72.0 / 96.0) * 10.0).round().clamp(60.0, 240.0) as i32
 }
 
 /// いまの紙のまま組み直す（字体・大きさが変わったとき）。

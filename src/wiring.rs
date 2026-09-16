@@ -1291,17 +1291,10 @@ pub fn wire_typography(
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
     let families = sheet_fonts.clone();
-    let print_fonts = live.clone();
     window.on_font_chosen(move |slot, family| {
         if let Some(window) = weak.upgrade() {
             // 追加要件 2026-09-08: **同じ一覧が2つの欄のために開く。**どちらの
             // ために開いたかは、開いた側が旗で言う（要件 6.8 の端末の書体）。
-            // 要件 7.10: **紙のための一覧か**（`font_for_terminal`と同じ作法）。
-            if window.get_font_for_print() {
-                window.set_font_for_print(false);
-                crate::print_view::choose_font(&window, &print_fonts, &family);
-                return;
-            }
             if window.get_font_for_terminal() {
                 window.set_font_for_terminal(false);
                 window.set_terminal_font(family.clone());
@@ -1498,9 +1491,10 @@ pub fn wire_saving(window: &AppWindow, live: &Live) {
     });
 
     let weak = window.as_weak();
-    window.on_print_font_pressed(move || {
+    let print_live = live.clone();
+    window.on_print_size_from_screen(move || {
         if let Some(window) = weak.upgrade() {
-            crate::print_view::ask_font(&window);
+            crate::print_view::use_screen_size(&window, &print_live);
         }
     });
 
