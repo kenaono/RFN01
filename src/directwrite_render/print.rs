@@ -59,7 +59,7 @@ use windows::{
                 CLSCTX_INPROC_SERVER, CoCreateInstance, IStream, STGM_CREATE, STGM_READWRITE,
                 STREAM_SEEK_SET, StructuredStorage::CreateStreamOnHGlobal,
             },
-            Memory::{GlobalLock, GlobalUnlock},
+            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
         },
         UI::{
             Controls::Dialogs::{
@@ -681,6 +681,53 @@ mod tests {
         engine
     }
 
+    /// 要件 7.10: プリンタの名前が、Windowsが読む形で渡ること（`DEVNAMES`）。
+    ///
+    /// **位置は字の数で数える**——バイトで数えると名前が半分から始まる。これを
+    /// 渡すのは、印刷ダイアログを**いまの用紙の設定から始める**ためである
+    /// （書き手の報告 2026-09-17：「Landscapeを設定してから、Printを押すと、その
+    /// 印刷ダイアログではPortraitになっています」）。
+    #[test]
+    fn the_printer_name_travels_in_the_shape_windows_reads() {
+        let bytes = devnames_bytes(PDF_PRINTER);
+        // SAFETY: The block was just built here and is a `DEVNAMES` with its
+        // strings behind it.
+        let (names, words) = unsafe {
+            (
+                &*(bytes.as_ptr() as *const DEVNAMES),
+                std::slice::from_raw_parts(bytes.as_ptr() as *const u16, bytes.len() / 2),
+            )
+        };
+        let read = |at: u16| {
+            let start = at as usize;
+            let end = start + words[start..].iter().position(|c| *c == 0).unwrap_or(0);
+            String::from_utf16_lossy(&words[start..end])
+        };
+        assert_eq!(read(names.wDeviceOffset), PDF_PRINTER, "the printer's name");
+        assert_eq!(read(names.wDriverOffset), "winspool", "and the driver's");
+        assert_eq!(read(names.wOutputOffset), "", "and no port of our own");
+    }
+
+    /// 既定のプリンタが何と言っているかを見る。
+    #[test]
+    #[ignore = "この機械のプリンタを見るためのもの"]
+    fn shows_the_default_printer() {
+        match default_printer() {
+            Some(printer) => {
+                let paper = printer.paper(20.0 * MM);
+                let (name, landscape) = printer.paper_name();
+                println!(
+                    "{} — {name}{} {:.0}×{:.0}mm",
+                    printer.name,
+                    if landscape { " (landscape)" } else { "" },
+                    paper.width / MM,
+                    paper.height / MM
+                );
+            }
+            None => println!("no printer on this machine"),
+        }
+    }
+
     /// 要件 7.10: **禁則は組版器がしている**（書き手の指摘 2026-09-16：「禁則文字も
     /// あるため一意に決められません」）。行頭に句読点や閉じ括弧は来ない——だから
     /// 1行に入る字数は行ごとに違い、一意には決まらない。
@@ -1011,13 +1058,17 @@ impl Printer {
 pub fn default_printer() -> Option<Printer> {
     // SAFETY: The dialog is asked not to show itself, so nothing here touches
     // the screen; every handle it fills is freed inside.
-    unsafe { ask_windows(HWND::default(), PD_RETURNDEFAULT) }
+    unsafe { ask_windows(HWND::default(), PD_RETURNDEFAULT, None) }
 }
 
 /// Windowsのプリンタ選択を出す。書き手が取り消せば`None`。
-pub fn ask_printer(owner: HWND) -> Option<Printer> {
+///
+/// **いまの設定から始める**（書き手の報告 2026-09-17：「Landscapeを設定してから、
+/// Printを押すと、その印刷ダイアログではPortraitになっています」）。渡さなければ
+/// ダイアログはプリンタの既定から始まるので、「用紙…」で決めた向きがそこで消えた。
+pub fn ask_printer(owner: HWND, standing: Option<&Printer>) -> Option<Printer> {
     // SAFETY: As above, and the owner window outlives the modal dialog.
-    unsafe { ask_windows(owner, PRINTDLGEX_FLAGS(0)) }
+    unsafe { ask_windows(owner, PRINTDLGEX_FLAGS(0), standing) }
 }
 
 /// **このプリンタの設定画面**（用紙の大きさ・向き・給紙・両面……）をWindowsに
@@ -1058,10 +1109,27 @@ pub fn ask_paper(owner: HWND, printer: &Printer) -> Option<Printer> {
 }
 
 /// 余白はこの編集器が持つので、Windowsからは**プリンタと設定だけ**受け取る。
-unsafe fn ask_windows(owner: HWND, extra: PRINTDLGEX_FLAGS) -> Option<Printer> {
+unsafe fn ask_windows(
+    owner: HWND,
+    extra: PRINTDLGEX_FLAGS,
+    standing: Option<&Printer>,
+) -> Option<Printer> {
+    // SAFETY: The two blocks are handed to the dialog, which owns them from
+    // here on — it frees or replaces them, and the caller frees what comes back.
+    let (settings, names) = unsafe {
+        match standing {
+            Some(printer) => (
+                moved_block(&printer.settings),
+                moved_block(&devnames_bytes(&printer.name)),
+            ),
+            None => (None, None),
+        }
+    };
     let mut dialog = PRINTDLGW {
         lStructSize: size_of::<PRINTDLGW>() as u32,
         hwndOwner: owner,
+        hDevMode: settings.unwrap_or_default(),
+        hDevNames: names.unwrap_or_default(),
         Flags: PRINTDLGEX_FLAGS(
             PD_NOPAGENUMS.0 | PD_NOSELECTION.0 | PD_USEDEVMODECOPIESANDCOLLATE.0,
         ) | extra,
@@ -1138,5 +1206,55 @@ unsafe fn paper_of_settings(printer: &str, devmode: *const DEVMODEW) -> Option<P
         let measured = paper_of(context);
         let _ = DeleteDC(context);
         measured
+    }
+}
+
+/// Windowsへ渡せる形（移動できる大域ブロック）に写す。
+///
+/// **渡したら手を離す**——受け取った側が持ち主になり、こちらは触らない。
+unsafe fn moved_block(bytes: &[u8]) -> Option<HGLOBAL> {
+    if bytes.is_empty() {
+        return None;
+    }
+    // SAFETY: The block is locked and unlocked around the one write, and its
+    // size is the slice's own.
+    unsafe {
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).ok()?;
+        let at = GlobalLock(handle) as *mut u8;
+        if at.is_null() {
+            let _ = GlobalFree(Some(handle));
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
+        let _ = GlobalUnlock(handle);
+        Some(handle)
+    }
+}
+
+/// プリンタの名前を`DEVNAMES`の形に。**位置は字の数で数える**（バイトではない）。
+fn devnames_bytes(printer: &str) -> Vec<u8> {
+    let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(std::iter::once(0)).collect() };
+    let driver = wide("winspool");
+    let device = wide(printer);
+    let output = wide("");
+    let head = size_of::<DEVNAMES>() / size_of::<u16>();
+    let mut block: Vec<u16> = vec![0; head];
+    let driver_at = head;
+    block.extend_from_slice(&driver);
+    let device_at = block.len();
+    block.extend_from_slice(&device);
+    let output_at = block.len();
+    block.extend_from_slice(&output);
+    let names = DEVNAMES {
+        wDriverOffset: driver_at as u16,
+        wDeviceOffset: device_at as u16,
+        wOutputOffset: output_at as u16,
+        wDefault: 0,
+    };
+    // SAFETY: The head was reserved above and `DEVNAMES` is plain data.
+    unsafe {
+        std::ptr::copy_nonoverlapping(&names, block.as_mut_ptr() as *mut DEVNAMES, 1);
+        std::slice::from_raw_parts(block.as_ptr() as *const u8, block.len() * size_of::<u16>())
+            .to_vec()
     }
 }

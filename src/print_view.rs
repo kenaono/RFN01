@@ -361,8 +361,17 @@ pub fn print_now(window: &AppWindow, live: &Live) {
     live.cache
         .borrow_mut()
         .log_diag("print", "asking Windows for a printer");
-    let Some(chosen) = print::ask_printer(crate::ime::window_handle(window).unwrap_or_default())
-    else {
+    // **いまの用紙の設定から始める**（書き手の報告 2026-09-17）。渡さなければ
+    // ダイアログはプリンタの既定から始まり、「用紙…」で決めた向きがそこで消える。
+    let standing = live
+        .preview
+        .borrow()
+        .as_ref()
+        .and_then(|preview| preview.printer.clone());
+    let Some(chosen) = print::ask_printer(
+        crate::ime::window_handle(window).unwrap_or_default(),
+        standing.as_ref(),
+    ) else {
         // 取り消しは何事も無かったことである。**残す**——押したのに何も起きな
         // かった、という報告がここへ来る。
         live.cache
