@@ -80,24 +80,32 @@ pub const MM: f32 = 96.0 / 25.4;
 /// 一枚の紙。
 ///
 /// **余白はこの編集器が持つ**（要件 7.10）。用紙の大きさと向きはWindowsのプリンタが
-/// 決めるので、いずれそちらから来る——それまでは既定のA4縦を使う。
+/// 決め、そこからどれだけ空けるかはこちらが決める。
+///
+/// **二つの余白がある。**流れの軸（縦書きなら上下）は書き手が決める数で、行の軸
+/// （縦書きなら左右）は**字詰めから決まる結果**である——原稿は「1行◯字」で組むもので、
+/// 行の長さを余白の引き算で決めると、字が半端に余って改行の位置が揃わない
+/// （書き手の指摘 2026-09-16：「画面のWidthを持ち込むのが間違っていませんか」）。
 #[derive(Clone, Copy, Debug)]
 pub struct Paper {
     /// 紙の幅と高さ。
     pub width: f32,
     pub height: f32,
-    /// 四辺の余白。
+    /// 流れの軸の余白。縦書きなら上下、横書きなら左右。
     pub margin: f32,
+    /// 行の軸の余白。縦書きなら左右、横書きなら上下。**字詰めを決めると決まる**
+    /// （[`Paper::fit_cells`]）。
+    pub line_margin: f32,
 }
 
 impl Default for Paper {
-    /// A4縦、四辺20mm。**試作の値**で、既定は書き手が刷ったものを見てから決める
-    /// （追加要件）。
+    /// A4縦、四辺20mm。字詰めを決めるまでは四辺とも同じ。
     fn default() -> Self {
         Self {
             width: 210.0 * MM,
             height: 297.0 * MM,
             margin: 20.0 * MM,
+            line_margin: 20.0 * MM,
         }
     }
 }
@@ -108,13 +116,64 @@ impl Paper {
     /// **どちらが幅になるかは組み方で入れ替わる**——縦書きは行が縦に立って右へ
     /// 流れるので、流れの軸が紙の幅である。
     pub fn printable(&self, mode: WritingMode) -> (f32, f32) {
-        let width = (self.width - self.margin * 2.0).max(1.0);
-        let height = (self.height - self.margin * 2.0).max(1.0);
+        let (flow, line) = self.size(mode);
+        (
+            (flow - self.margin * 2.0).max(1.0),
+            (line - self.line_margin * 2.0).max(1.0),
+        )
+    }
+
+    /// 紙そのものの大きさを、流れの軸と行の軸で。
+    fn size(&self, mode: WritingMode) -> (f32, f32) {
         match mode {
-            WritingMode::Vertical => (width, height),
-            WritingMode::Horizontal => (height, width),
+            WritingMode::Vertical => (self.width, self.height),
+            WritingMode::Horizontal => (self.height, self.width),
         }
     }
+
+    /// 本文の左上（画面の座標で）。
+    fn corner(&self, mode: WritingMode) -> (f32, f32) {
+        match mode {
+            WritingMode::Vertical => (self.margin, self.line_margin),
+            WritingMode::Horizontal => (self.line_margin, self.margin),
+        }
+    }
+
+    /// 紙の下の余白。ノンブルはここに入る。
+    fn foot(&self, mode: WritingMode) -> f32 {
+        match mode {
+            WritingMode::Vertical => self.line_margin,
+            WritingMode::Horizontal => self.margin,
+        }
+    }
+
+    /// **1行◯字**に合わせて、行の軸の余白を決め直す。
+    ///
+    /// 行の箱がちょうど`cells`字ぶんになるよう`line_margin`を置き、残りを両側へ
+    /// 等分する。**組版器が行の両端に取る枠**（見出しの印のぶん、`frame`）も足して
+    /// おく——そのぶんは本文が入らない。
+    pub fn fit_cells(&self, mode: WritingMode, cells: u32, cell: f32, frame: f32) -> Self {
+        let (_, line) = self.size(mode);
+        let wanted = cells.max(1) as f32 * cell.max(1.0) + frame * 2.0;
+        Self {
+            line_margin: ((line - wanted) / 2.0).max(0.0),
+            ..*self
+        }
+    }
+
+    /// この紙が受け入れられる字詰めの上限（両端の枠を引いたぶん）。
+    pub fn most_cells(&self, mode: WritingMode, cell: f32, frame: f32) -> u32 {
+        let (_, line) = self.size(mode);
+        ((line - frame * 2.0) / cell.max(1.0)).floor().max(1.0) as u32
+    }
+}
+
+/// 組版器が行の両端に取る枠（見出しの印が立つところ）。
+///
+/// **字詰めを決めるのに要る。**行の箱はこの枠を引いた残りなので、`1行◯字`を
+/// 紙の寸法へ直すときに足しておく。
+pub fn frame_margin(typography: &super::Typography, mode: WritingMode) -> Result<f32> {
+    super::heading_margin(typography, mode)
 }
 
 /// 出力先。
@@ -213,6 +272,7 @@ pub fn print(engine: &mut TextEngine, paper: Paper, to: Destination<'_>) -> Resu
 pub fn page_grid(engine: &TextEngine, paper: Paper) -> (u32, u32) {
     let (page_flow, _) = paper.printable(engine.mode);
     let cell = engine.typography.cell_advance();
+    // 行の箱はちょうど字詰めぶん（[`Paper::fit_cells`]）なので、割り切れる。
     let line_box = engine.fit.line_box(engine.margin, 0.0);
     let line = engine
         .plan
@@ -390,13 +450,14 @@ fn draw_page_onto(
     // 中身が1ページぶんに満たず、そこを紙の端まで開けておくと、次の紙に出るはずの
     // 行がこの紙の余白に出る。
     let (clip_from, clip_to) = (low - flow_low, high - flow_low);
+    let (corner_x, corner_y) = paper.corner(mode);
     let (left, top) = {
         let (x, y) = mode.to_screen(clip_from, 0.0);
-        (paper.margin + x, paper.margin + y)
+        (corner_x + x, corner_y + y)
     };
     let (right, bottom) = {
         let (x, y) = mode.to_screen(clip_to, page_cross);
-        (paper.margin + x, paper.margin + y)
+        (corner_x + x, corner_y + y)
     };
     let clip = D2D_RECT_F {
         left,
@@ -419,7 +480,7 @@ fn draw_page_onto(
         let (dx, dy) = mode.to_screen(flow_offset, cross_offset);
         // SAFETY: The transform is set on the live target and put back below.
         unsafe {
-            target.SetTransform(&place(scale, paper.margin + dx, paper.margin + dy));
+            target.SetTransform(&place(scale, corner_x + dx, corner_y + dy));
         }
         let cached = match task.block.grid {
             Some(_) => None,
@@ -438,7 +499,16 @@ fn draw_page_onto(
         .first()
         .map(|task| task.typography.clone())
         .unwrap_or_else(|| std::sync::Arc::new(super::Typography::new(14.0)));
-    draw_nombre(graphics, target, &inks, paper, page, ranges.len(), &spec)?;
+    draw_nombre(
+        graphics,
+        target,
+        &inks,
+        paper,
+        mode,
+        page,
+        ranges.len(),
+        &spec,
+    )?;
     Ok(())
 }
 
@@ -452,6 +522,7 @@ fn draw_nombre(
     target: &ID2D1RenderTarget,
     inks: &Inks,
     paper: Paper,
+    mode: WritingMode,
     page: usize,
     pages: usize,
     spec: &super::Typography,
@@ -469,12 +540,13 @@ fn draw_nombre(
     };
     let format = graphics.text_format(&spec, WritingMode::Horizontal)?;
     let text: Vec<u16> = (page + 1).to_string().encode_utf16().collect();
+    let foot = paper.foot(mode);
     let band = D2D_RECT_F {
-        left: paper.margin,
+        left: paper.line_margin.min(paper.margin),
         // 余白の真ん中あたり。本文の下端からも紙の端からも離れる。
-        top: paper.height - paper.margin * 0.72,
-        right: paper.width - paper.margin,
-        bottom: paper.height - paper.margin * 0.2,
+        top: paper.height - foot * 0.72,
+        right: paper.width - paper.line_margin.min(paper.margin),
+        bottom: paper.height - foot * 0.2,
     };
     // SAFETY: The format and brush outlive the call, and the text is a live
     // buffer for its length.
@@ -645,6 +717,64 @@ mod tests {
             )
             .expect("lay the document out at the paper's size");
         engine
+    }
+
+    /// 紙の寸法で、**1行◯字**に合わせて組んだ組版器。`print_view`と同じ算段。
+    fn engine_at_cells(
+        source: &str,
+        mode: WritingMode,
+        paper: Paper,
+        cells: u32,
+    ) -> (TextEngine, Paper) {
+        let preview = PreviewDocument::from_source(source);
+        let styles = line_styles_reading(source, Reading::all());
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let spec = Typography::new(14.0);
+        let cell = spec.cell_advance();
+        let frame = frame_margin(&spec, mode).expect("the frame the engine takes");
+        let paper = paper.fit_cells(mode, cells, cell, frame);
+        let extent = cells as f32 * cell + frame * 2.0;
+        let mut engine = TextEngine::new(mode);
+        engine
+            .update(
+                styled,
+                LineFit::Extent(extent.round().max(1.0) as u32),
+                &spec,
+            )
+            .expect("lay the document out at the paper's size");
+        (engine, paper)
+    }
+
+    /// 要件 7.10: **決めた字数でちょうど折り返す**（書き手の指摘 2026-09-16：
+    /// 「画面のWidthを持ち込むのが間違っていませんか」）。行の長さを余白の引き算で
+    /// 決めると字が半端に余り、行末が揃わない。
+    #[test]
+    fn a_line_holds_exactly_the_characters_it_was_given() {
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            for cells in [20_u32, 32, 40] {
+                let full = "あ".repeat(cells as usize);
+                let (engine, paper) = engine_at_cells(&full, mode, Paper::default(), cells);
+                assert_eq!(
+                    page_grid(&engine, paper).0,
+                    cells,
+                    "the sheet must be {cells} characters wide ({mode:?})"
+                );
+                assert_eq!(
+                    engine.plan.blocks[0].lines.len(),
+                    1,
+                    "{cells} characters must stay on one line ({mode:?})"
+                );
+                // そして1字足せば、そこで折り返す。
+                let over = format!("{full}あ");
+                let (engine, _) = engine_at_cells(&over, mode, Paper::default(), cells);
+                assert_eq!(
+                    engine.plan.blocks[0].lines.len(),
+                    2,
+                    "one character more must wrap ({cells}, {mode:?})"
+                );
+            }
+        }
     }
 
     fn long_document(paragraphs: usize) -> String {

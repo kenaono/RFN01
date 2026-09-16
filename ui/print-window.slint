@@ -20,8 +20,9 @@ export component PrintView inherits Rectangle {
     in property <string> paper-note;
     in property <bool> working;
     callback turned(int);
-    /// 余白を1段ずつ。字数と行数はこれで決まる（書き手の問い 2026-09-16）。
-    callback margin-stepped(int);
+    /// 1行の字数を1字ずつ。**紙の行の長さはここで決まる**（書き手の指摘
+    /// 2026-09-16：「画面のWidthと、印刷のWidthは異なるもの」）。余白はその結果。
+    callback cells-stepped(int);
     callback print-requested();
     callback dismissed();
 
@@ -122,8 +123,8 @@ export component PrintView inherits Rectangle {
             }
         }
 
-        // 紙のことを言う帯。**余白はここで変える**——mmだけ言われても原稿が何字詰めに
-        // なるかは分からないので、字数と行数を隣に出す。
+        // 紙のことを言う帯。**1行の字数はここで変える**——原稿は「1行◯字」で組む
+        // ものなので、決めるのは字数で、余白はその結果である。
         Rectangle {
             height: 34px;
             background: Tok.chrome;
@@ -134,7 +135,7 @@ export component PrintView inherits Rectangle {
                 spacing: 6px;
                 alignment: start;
                 Text {
-                    text: @tr("Margin");
+                    text: @tr("Line length");
                     color: Tok.ink-muted;
                     font-size: 13px;
                     vertical-alignment: center;
@@ -142,12 +143,12 @@ export component PrintView inherits Rectangle {
                 TextButton {
                     title: "−";
                     enabled: !root.working;
-                    clicked => { root.margin-stepped(-1); }
+                    clicked => { root.cells-stepped(-1); }
                 }
                 TextButton {
                     title: "+";
                     enabled: !root.working;
-                    clicked => { root.margin-stepped(1); }
+                    clicked => { root.cells-stepped(1); }
                 }
                 Text {
                     text: root.paper-note;
