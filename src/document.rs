@@ -2281,6 +2281,12 @@ fn push_visible_line(
     } else {
         content
     };
+    // 同じく、行の頭の`［＃地付き］`・`［＃地から2字上げ］`（`LineStyle::tail_cells`）。
+    let content = if reading.ruby {
+        note_tail_head(content).map_or(content, |(_, rest)| rest)
+    } else {
+        content
+    };
     // **A line long enough to be pathological is left literal.** Looking for
     // the closer of a marker that has none costs a scan to the end of the line,
     // so a line made mostly of unclosed markers costs the square of its length.
@@ -3556,6 +3562,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
             comment: CommentSyntax::None,
             list_indent: levels.depth_of(columns) + 1,
             note_indent: 0,
+            tail_cells: None,
         };
     }
     // 要件 7.3.2: a paragraph written under an item belongs to it and is set in
@@ -3572,6 +3579,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
             comment: CommentSyntax::None,
             list_indent: indent,
             note_indent: 0,
+            tail_cells: None,
         };
     }
     // **The rule the preview reads a line by**: indented text that continues
@@ -3590,6 +3598,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
         comment: CommentSyntax::None,
         list_indent: 0,
         note_indent: 0,
+        tail_cells: None,
     }
 }
 
@@ -3604,6 +3613,22 @@ pub enum NoteIndent {
     From(u8),
     /// ここで終わり。
     End,
+}
+
+/// 行末へ寄せる注記（要件 7.8、2026-09-16）。`［＃地付き］`と`［＃地から2字上げ］`を、
+/// 行の頭に置く形で読む。返すのは**行の終わりから空ける字数**（地付きは0）と、注記を外した残り。
+///
+/// 署名や結び、詩の行末ぞろえに使う。範囲の形（`［＃ここから地付き］`）は、要ると言われてから。
+pub fn note_tail_head(line: &str) -> Option<(u8, &str)> {
+    let rest = line.strip_prefix("［＃")?;
+    let close = rest.find("］")?;
+    let inner = &rest[..close];
+    let after = &rest[close + "］".len()..];
+    if inner == "地付き" {
+        return Some((0, after));
+    }
+    let count = inner.strip_prefix("地から")?.strip_suffix("字上げ")?;
+    Some((note_count(count)?, after))
 }
 
 /// 行の全体が字下げの注記なら、それ。指示だけの行は本文ではない（[`LineKind::Note`]）。
@@ -3933,7 +3958,7 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
         // measured cells say. It is built where they are measured, so that no
         // two places have an opinion about the box over that line (技術検証 7.7).
         // 要件 7.8（2026-09-16）: 体裁の注記だけの行も同じ——指示は本文ではない。
-        LineKind::Rule | LineKind::Fence | LineKind::Note => Ornament::Hidden,
+        LineKind::Rule | LineKind::Fence | LineKind::Note | LineKind::PageBreak => Ornament::Hidden,
         // 要件 7.3.2: the white space a writer typed to line a continuation up
         // under its item. **The style is what says it is that** — the same
         // spaces under nothing are text, and shown as text.
@@ -4042,10 +4067,25 @@ fn line_style(
             }
             None => {}
         }
+        // 要件 7.8・要件 7.10（2026-09-16）: 改ページ。**画面では紙を切らない**ので、
+        // ここに切れ目があることを見せる行になる。
+        if line.trim() == "［＃改ページ］" {
+            *table = None;
+            return LineStyle {
+                note_indent: *note_indent,
+                ..LineStyle::of_kind(LineKind::PageBreak)
+            };
+        }
     }
     // 行の頭の`［＃2字下げ］`は、その行だけ。範囲の中にいればそこへ足す。
     let head_indent = if reading.ruby && fence.is_none() {
         note_indent_head(line).map(|(count, _)| count)
+    } else {
+        None
+    };
+    // 行の頭の`［＃地付き］`・`［＃地から2字上げ］`も、その行だけ。
+    let tail = if reading.ruby && fence.is_none() {
+        note_tail_head(line).map(|(count, _)| count)
     } else {
         None
     };
@@ -4093,6 +4133,7 @@ fn line_style(
     *table = None;
     LineStyle {
         note_indent: *note_indent + head_indent.unwrap_or(0),
+        tail_cells: tail,
         ..style
     }
 }
@@ -5591,6 +5632,18 @@ mod tests {
             "{}",
             preview.text
         );
+        // 地付きと改ページ（2026-09-16）。
+        let source =
+            "地の文。\n［＃地付き］署名。\n［＃地から2字上げ］結び。\n［＃改ページ］\n次の章。\n";
+        let styles = line_styles(source);
+        assert_eq!(styles[1].tail_cells, Some(0), "地付き");
+        assert_eq!(styles[2].tail_cells, Some(2), "地から2字上げ");
+        assert_eq!(styles[3].kind, LineKind::PageBreak);
+        let preview = PreviewDocument::from_source(source);
+        assert_eq!(preview.text.lines().nth(1), Some("署名。"));
+        assert_eq!(preview.text.lines().nth(2), Some("結び。"));
+        assert!(preview.markers()[3].is_some(), "改ページの行が隠れていない");
+
         // 読み方を切れば、どれも本文の字のまま——字下げもしない。
         let plain = line_styles_reading(
             source,

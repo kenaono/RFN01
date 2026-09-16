@@ -742,7 +742,7 @@ fn a_note_indent_moves_where_the_line_starts() {
     window.set_tree_open(false);
     publish_panes(&window, 1);
     let id = PaneId::FIRST;
-    let source = "地の文。\n［＃ここから2字下げ］\n手紙の行。\n［＃ここで字下げ終わり］\n                  地の文。\n［＃1字下げ］この行だけ。\n";
+    let source = "地の文。\n［＃ここから2字下げ］\n手紙の行。\n［＃ここで字下げ終わり］\n地の文。\n［＃1字下げ］この行だけ。\n［＃地付き］署名。\n［＃地から2字上げ］結び。\n";
     let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
     let states = PaneStates::new(&document);
     let cache = Rc::new(RefCell::new(RenderCache::default()));
@@ -785,6 +785,27 @@ fn a_note_indent_moves_where_the_line_starts() {
         assert!(
             (single - body - cell).abs() < cell * 0.6,
             "vertical={vertical}: 1字下げになっていない（地の文{body}、その行{single}）"
+        );
+        // 地付きは行の終わりへ寄る。地から2字上げは、そこから2字ぶん手前で終わる。
+        let end_of = |needle: &str| {
+            let mut borrowed = cache.borrow_mut();
+            let pane = borrowed.pane(id);
+            let shown = pane.view.preview_slot.preview.text.clone();
+            let at = shown.find(needle).unwrap() + needle.len();
+            let utf16 = shown[..at].encode_utf16().count() as u32;
+            let caret = pane.graphics.engine.caret_geometry(utf16).unwrap();
+            if vertical { caret.y } else { caret.x }
+        };
+        let plain_end = end_of("地の文。");
+        let flush = end_of("署名。");
+        let raised = end_of("結び。");
+        assert!(
+            flush > plain_end + cell * 2.0,
+            "vertical={vertical}: 地付きが行末へ寄っていない（地の文{plain_end}、署名{flush}）"
+        );
+        assert!(
+            (flush - raised - cell * 2.0).abs() < cell * 0.6,
+            "vertical={vertical}: 地から2字上げになっていない（地付き{flush}、結び{raised}）"
         );
     }
 }

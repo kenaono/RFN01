@@ -3187,6 +3187,22 @@ fn draw_line_ornaments(
                     unsafe { target.FillRectangle(&rect, brush) };
                 }
             }
+            // 改ページ（2026-09-16）：ページの切れ目を**破線**で見せる。罫線と同じ太さ・
+            // 同じ場所に引くと、`---`とどちらか分からない。**画面では紙を切らない**
+            // （要件 7.10：編集面は続いた1枚）ので、ここにあるのは印だけである。
+            LineOrnament::PageBreak => {
+                let half = stroke * 0.5;
+                let middle = (flow.0 + flow.1) * 0.5;
+                let dash = stroke * 8.0;
+                let mut at = near;
+                while at < far {
+                    let end = (at + dash).min(far);
+                    let rect = page.rect((middle - half, middle + half), (at, end));
+                    // SAFETY: As above.
+                    unsafe { target.FillRectangle(&rect, brush) };
+                    at = end + dash;
+                }
+            }
             // Across the page, halfway along the room the line took.
             LineOrnament::Rule => {
                 let half = stroke * 0.5;
@@ -3406,6 +3422,9 @@ struct MeasureTask {
     block_box: f32,
     max_flow_size: f32,
     keep_trailing_empty_line: bool,
+    /// 行末へ寄せるブロックか（地付き、要件 7.8、2026-09-16）。**箱はもう短くしてある**
+    /// （`block_line_box`が地から空ける字数を引いている）ので、ここは寄せ方だけを言う。
+    tail_aligned: bool,
 }
 
 /// The layout one block is set in, built from the block and nothing else.
@@ -3415,6 +3434,7 @@ struct MeasureTask {
 /// built differently in any of the three is a caret standing where the text is
 /// not. It takes the block's own text and spec rather than the engine, so that
 /// the measuring threads can call it too (要件 2, 技術検証 7.4).
+#[allow(clippy::too_many_arguments)]
 fn build_block_layout(
     graphics: &mut Graphics,
     typography: &Typography,
@@ -3423,6 +3443,7 @@ fn build_block_layout(
     runs: &[StyleRun],
     max_flow_size: f32,
     line_box: f32,
+    tail_aligned: bool,
 ) -> Result<IDWriteTextLayout> {
     let format = graphics.text_format(typography, mode)?;
     let utf16 = text.encode_utf16().collect::<Vec<u16>>();
@@ -3441,6 +3462,11 @@ fn build_block_layout(
     // ここで（レイアウトを作るところで）済ませる——描くときだけ広げたら、字と読みがずれる。
     apply_ruby_fit(&layout, text, runs, typography)?;
     apply_marker_boxes(&layout, typography, runs, mode, line_box)?;
+    // 要件 7.8（2026-09-16）: 地付き——行末へ寄せる。箱は地から空ける字数のぶん短くしてある。
+    if tail_aligned {
+        // SAFETY: the layout is alive for the call.
+        unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)? };
+    }
     Ok(layout)
 }
 
@@ -3463,6 +3489,7 @@ fn measure_task(
         &task.runs,
         task.max_flow_size,
         task.block_box,
+        task.tail_aligned,
     )?;
     let measure = measure_block(
         &layout,
@@ -3747,6 +3774,7 @@ fn draw_tile(
                 &task.runs,
                 task.block.max_flow_size,
                 task.line_box,
+                task.block.span.tail_cells.is_some(),
             )?,
         };
         // 要件 9: a heading is drawn in its own ink. **Set on the layout before
@@ -4947,6 +4975,7 @@ impl TextEngine {
                     block_box,
                     max_flow_size,
                     keep_trailing_empty_line,
+                    tail_aligned: span.tail_cells.is_some(),
                 });
             }
         }
@@ -5330,7 +5359,10 @@ impl TextEngine {
     /// here the layout the block was placed by.
     fn block_line_box(&self, span: &BlockSpan) -> f32 {
         let inset = block_inset(span, &self.typography);
-        self.fit.line_box(self.margin, inset)
+        // 地付きのブロックは、地から空ける字数のぶん箱が短い（要件 7.8、2026-09-16）。
+        // **短くした箱の終わりへ寄せる**ので、空きはそのまま行末の余白になる。
+        let tail = f32::from(span.tail_cells.unwrap_or(0)) * self.typography.cell_advance();
+        (self.fit.line_box(self.margin, inset) - tail).max(1.0)
     }
 
     /// Every range one block sets, and the marks that stand over its whole
@@ -5466,13 +5498,14 @@ impl TextEngine {
         if self.deferred_blocks.contains(&block_index) {
             return Err(Error::new(E_FAIL, "layout is not yet available"));
         }
-        let (byte_start, byte_end, max_flow_size, line_box) = {
+        let (byte_start, byte_end, max_flow_size, line_box, tail_aligned) = {
             let block = &self.plan.blocks[block_index];
             (
                 block.span.byte_start,
                 block.span.byte_end,
                 block.max_flow_size,
                 self.block_line_box(&block.span),
+                block.span.tail_cells.is_some(),
             )
         };
         // 要件 7.3.2: the table's boxes are measured again here rather than
@@ -5500,6 +5533,7 @@ impl TextEngine {
             &runs,
             max_flow_size,
             line_box,
+            tail_aligned,
         )?;
         self.layouts.insert(0, (key, layout.clone()));
         self.layouts.truncate(LAYOUT_CACHE_LIMIT);
@@ -9667,6 +9701,7 @@ mod tests {
             utf16_start: 0,
             utf16_end: 0,
             indent_cells,
+            tail_cells: None,
         }
     }
 
@@ -9751,6 +9786,7 @@ mod tests {
                     block_box: 400.0,
                     max_flow_size: 4000.0,
                     keep_trailing_empty_line: false,
+                    tail_aligned: false,
                 }
             })
             .collect()

@@ -388,6 +388,9 @@ pub struct LineStyle {
     /// under an item lines up with that item's text, and has no marker and no
     /// depth of its own to derive it from.
     pub list_indent: u8,
+    /// 行末へ寄せる——地付き（`［＃地付き］`・`［＃地から2字上げ］`、要件 7.8、2026-09-16）。
+    /// `Some(n)`は行の終わりからn字空けて寄せる（0が地付き）。
+    pub tail_cells: Option<u8>,
     /// 体裁の注記が言う字下げ（`［＃ここから2字下げ］`、要件 7.8、2026-09-16）。
     ///
     /// **引用や箇条書きの字下げと同じ側にいる**（[`Self::indent_steps`]がまとめて数える）ので、
@@ -471,6 +474,11 @@ pub enum LineKind {
     /// **指示であって本文ではない**ので、整形表示では字を隠す（`---`やフェンスと同じ
     /// 全行の箱）。行そのものは残るので、**1行ぶんの空きになる**。
     Note,
+    /// 改ページの注記（`［＃改ページ］`、要件 7.8・要件 7.10、2026-09-16）。
+    ///
+    /// **画面では紙を切らない**（編集面は続いた1枚である、要件 7.10）ので、ここに切れ目が
+    /// あることを破線で見せるだけ。紙にするとき（PDF）はこの行でページを改める。
+    PageBreak,
 }
 
 impl LineKind {
@@ -935,7 +943,7 @@ impl LineStyle {
         self.kind.is_code()
             || matches!(
                 self.kind,
-                LineKind::Rule | LineKind::TableRule | LineKind::Note
+                LineKind::Rule | LineKind::TableRule | LineKind::Note | LineKind::PageBreak
             )
     }
 
@@ -1158,6 +1166,12 @@ pub struct BlockSpan {
     /// ask for it and they add: an item inside a quote is set in by both. See
     /// [`LineStyle::indent_cells`], which is where the two are counted.
     pub indent_cells: u8,
+    /// 行末へ寄せるか——地付き（`［＃地付き］`・`［＃地から2字上げ］`、要件 7.8、2026-09-16）。
+    ///
+    /// **`Some(n)`は「行の終わりからn字空けて寄せる」**（0が地付き）。字下げと同じく
+    /// **ブロックの性質**である：寄せ方はレイアウト箱に効くもので、行の頭の箱では動かせない。
+    /// だから寄せ方が変わるところでブロックが切れる。
+    pub tail_cells: Option<u8>,
 }
 
 impl BlockSpan {
@@ -1739,6 +1753,7 @@ pub fn split_blocks(
     let mut block_utf16_start = 0_u32;
     let mut block_cells = 0_u32;
     let mut block_indent = 0_u8;
+    let mut block_tail: Option<u8> = None;
     let mut block_table = 0_u8;
 
     while byte_cursor < text.len() {
@@ -1770,6 +1785,9 @@ pub fn split_blocks(
         // gets no boxes — the markers are its text, and an indent would move
         // the very markup being read.
         let indent = if indents { style.indent_cells() } else { 0 };
+        // 要件 7.8（2026-09-16）: 行末へ寄せる指示も、字下げと同じくブロックの性質である
+        // （レイアウト箱に効く）ので、変わるところでブロックが切れる。原文の面では効かない。
+        let tail = if indents { style.tail_cells } else { None };
         let line_cells = line_cells(characters, cells_per_line, typography, style);
 
         // 要件 7.3.2: a block is set in one layout box, so a change of indenting
@@ -1800,7 +1818,7 @@ pub fn split_blocks(
         } else {
             0
         };
-        if block_indent != indent || block_table != table {
+        if block_indent != indent || block_tail != tail || block_table != table {
             if block_byte_start < byte_cursor {
                 blocks.push(BlockSpan {
                     byte_start: block_byte_start,
@@ -1808,12 +1826,14 @@ pub fn split_blocks(
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
                     indent_cells: block_indent,
+                    tail_cells: block_tail,
                 });
                 block_byte_start = byte_cursor;
                 block_utf16_start = utf16_cursor;
                 block_cells = 0;
             }
             block_indent = indent;
+            block_tail = tail;
             block_table = table;
         }
 
@@ -1834,6 +1854,7 @@ pub fn split_blocks(
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
                     indent_cells: block_indent,
+                    tail_cells: block_tail,
                 });
                 block_byte_start = byte_cursor;
                 block_utf16_start = utf16_cursor;
@@ -1855,6 +1876,7 @@ pub fn split_blocks(
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
                     indent_cells: block_indent,
+                    tail_cells: block_tail,
                 });
                 block_byte_start = piece_end;
                 block_utf16_start = utf16_cursor;
@@ -1869,6 +1891,7 @@ pub fn split_blocks(
                 utf16_start: block_utf16_start,
                 utf16_end: utf16_cursor,
                 indent_cells: block_indent,
+                tail_cells: block_tail,
             });
             block_byte_start = line_end;
             block_utf16_start = utf16_cursor;
@@ -1922,6 +1945,7 @@ pub fn split_blocks(
                 utf16_start: block_utf16_start,
                 utf16_end: utf16_cursor,
                 indent_cells: block_indent,
+                tail_cells: block_tail,
             });
             block_byte_start = byte_cursor;
             block_utf16_start = utf16_cursor;
@@ -1936,6 +1960,7 @@ pub fn split_blocks(
             utf16_start: block_utf16_start,
             utf16_end: utf16_cursor,
             indent_cells: block_indent,
+            tail_cells: block_tail,
         });
     }
 
@@ -2471,6 +2496,9 @@ pub enum LineOrnament {
     Quote { depth: u8 },
     /// The stroke a `---` line is set as.
     Rule,
+    /// 改ページの切れ目（`［＃改ページ］`、2026-09-16）。**破線**——`---`の罫線と同じ
+    /// 太さで引くと、どちらがどちらか分からない。
+    PageBreak,
     /// The ground a fenced block sits on.
     ///
     /// **One run for the whole block**, for the reason a quote's bar is one
@@ -2643,6 +2671,15 @@ pub fn line_runs(styled: StyledText<'_>) -> Vec<LineRun> {
                 utf16_start,
                 utf16_len,
                 ornament: LineOrnament::Rule,
+                own_ends: (true, true),
+            });
+        }
+        // 改ページも1行で1つ（2026-09-16）。罫線と同じく、まとめない。
+        if matches!(style.kind, LineKind::PageBreak) {
+            runs.push(LineRun {
+                utf16_start,
+                utf16_len,
+                ornament: LineOrnament::PageBreak,
                 own_ends: (true, true),
             });
         }
@@ -2895,6 +2932,7 @@ mod tests {
             utf16_start: text[..byte_start].encode_utf16().count() as u32,
             utf16_end: text[..byte_end].encode_utf16().count() as u32,
             indent_cells: 0,
+            tail_cells: None,
         }
     }
 
@@ -3884,6 +3922,30 @@ mod tests {
     /// **The two are not exclusive.** `> ---` is a rule inside a quote and
     /// carries both marks, the way `quote_depth` sits beside `kind` rather than
     /// inside it.
+    /// 要件 7.8・要件 7.10（2026-09-16）: 改ページの注記は、罫線とは別の飾りになる。
+    /// **画面では紙を切らない**ので、ここに切れ目があることを見せる印だけが立つ。
+    #[test]
+    fn a_page_break_note_stands_apart_from_a_rule() {
+        let text = "前の章\n［＃改ページ］\n---\n次の章\n";
+        let levels = [
+            LineStyle::default(),
+            LineStyle::of_kind(LineKind::PageBreak),
+            LineStyle::of_kind(LineKind::Rule),
+            LineStyle::default(),
+        ];
+        // 整形表示の印は「行の頭の箱がある」ことで言う（`is_preview`）。
+        let markers = [None, None, None, None];
+        let runs = line_runs(StyledText::new(text, &levels).with_markers(&markers));
+        let kinds = runs.iter().map(|run| run.ornament).collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![LineOrnament::PageBreak, LineOrnament::Rule],
+            "改ページと罫線は別の飾り"
+        );
+        // 原文の面には飾りが立たない——記法そのものが見えている。
+        assert!(line_runs(StyledText::new(text, &levels)).is_empty());
+    }
+
     #[test]
     fn a_quoted_rule_carries_both_marks() {
         let quoted_rule = LineStyle {
