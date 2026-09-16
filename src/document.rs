@@ -284,7 +284,7 @@ impl PreviewDocument {
         //
         // 書き手の決定 2026-09-11: **読むと決めた記号だけが印**——切った記号の行は
         // プレビューでも本文の1行で、記号は字として出る。
-        let styles = line_styles_as(source, reading.bullets);
+        let styles = line_styles_reading(source, reading);
         let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
         let last = lines.len() - 1;
         let same_text = |kept: &PreviewLine, index: usize, line: &str| {
@@ -666,7 +666,7 @@ impl DocumentCounts {
         // past its own line. A line whose text did not change may still be
         // counted differently because a fence opened above it, so the flag is
         // part of what makes a kept line still usable.
-        let styles = line_styles_as(source, reading.bullets);
+        let styles = line_styles_reading(source, reading);
         let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
         // 書き手の判断 2026-09-15: 段落の中で改行をまたぐ記号（`PreviewDocument::refresh`と同じ）。
         let same_text = |kept: &LineCounts, line: &str| kept.text == *line;
@@ -2226,7 +2226,7 @@ fn push_visible_line(
     let indented = line.starts_with([' ', '\t']) && style.list_indent == 0;
     // 要件 7.3.2: the blockquote marker comes off whatever is under it — a rule
     // inside a quote is still a rule, and the quoting itself is the block's
-    // indent (`BlockSpan::indent_steps`, 技術検証 7.1). **A box was tried at the
+    // indent (`BlockSpan::indent_cells`, 技術検証 7.1). **A box was tried at the
     // head of the line instead and taken out again**: it indented the first
     // line of a quoted paragraph and left every line it wrapped to flush with
     // the body, because a box reaches that head and no further.
@@ -2274,6 +2274,13 @@ fn push_visible_line(
         return;
     }
     let content = strip_heading_marker(content);
+    // 要件 7.8（2026-09-16）: 行の頭の`［＃2字下げ］`は、その行の字下げとしてもう効いている
+    // （`LineStyle::note_indent`）。**字としては消える**——ルビの縦線と同じで、指示は本文ではない。
+    let content = if reading.ruby {
+        note_indent_head(content).map_or(content, |(_, rest)| rest)
+    } else {
+        content
+    };
     // **A line long enough to be pathological is left literal.** Looking for
     // the closer of a marker that has none costs a scan to the end of the line,
     // so a line made mostly of unclosed markers costs the square of its length.
@@ -3548,6 +3555,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
             quote_depth,
             comment: CommentSyntax::None,
             list_indent: levels.depth_of(columns) + 1,
+            note_indent: 0,
         };
     }
     // 要件 7.3.2: a paragraph written under an item belongs to it and is set in
@@ -3563,6 +3571,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
             quote_depth,
             comment: CommentSyntax::None,
             list_indent: indent,
+            note_indent: 0,
         };
     }
     // **The rule the preview reads a line by**: indented text that continues
@@ -3580,7 +3589,61 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
         quote_depth,
         comment: CommentSyntax::None,
         list_indent: 0,
+        note_indent: 0,
     }
+}
+
+/// 体裁の注記が言う字下げ（要件 7.8、2026-09-16、書き手「組版の表現拡大」）。
+///
+/// 青空文庫の言い方をそのまま読む：`［＃ここから2字下げ］`から`［＃ここで字下げ終わり］`までと、
+/// 行の頭に置く`［＃2字下げ］`（その行だけ）。**数字は半角でも全角でもよい**——テキストで配られる
+/// 原稿はどちらも使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteIndent {
+    /// ここから、この字数だけ下げる。
+    From(u8),
+    /// ここで終わり。
+    End,
+}
+
+/// 行の全体が字下げの注記なら、それ。指示だけの行は本文ではない（[`LineKind::Note`]）。
+pub fn note_indent_of(line: &str) -> Option<NoteIndent> {
+    let body = line.trim();
+    if body == "［＃ここで字下げ終わり］" {
+        return Some(NoteIndent::End);
+    }
+    let inner = body.strip_prefix("［＃")?.strip_suffix("］")?;
+    let count = inner.strip_prefix("ここから")?.strip_suffix("字下げ")?;
+    Some(NoteIndent::From(note_count(count)?))
+}
+
+/// 行の頭に置く`［＃2字下げ］`。字数と、注記を外した残り。
+pub fn note_indent_head(line: &str) -> Option<(u8, &str)> {
+    let rest = line.strip_prefix("［＃")?;
+    let close = rest.find("］")?;
+    let count = rest[..close].strip_suffix("字下げ")?;
+    // 「ここから」は範囲の側の言い方で、1行の指示ではない。
+    if count.starts_with("ここから") {
+        return None;
+    }
+    let count = note_count(count)?;
+    Some((count, &rest[close + "］".len()..]))
+}
+
+/// 注記の中の字数。半角と全角の数字を読む（1桁で足りる——2桁下げる原稿は無い）。
+fn note_count(text: &str) -> Option<u8> {
+    let digits = text
+        .chars()
+        .map(|letter| match letter {
+            '0'..='9' => Some(letter as u8 - b'0'),
+            '０'..='９' => Some(letter as u32 as u8 - '０' as u32 as u8),
+            _ => None,
+        })
+        .collect::<Option<Vec<u8>>>()?;
+    if digits.is_empty() || digits.len() > 2 {
+        return None;
+    }
+    Some(digits.iter().fold(0u8, |total, digit| total * 10 + digit))
 }
 
 /// How much of `content` the marker at its head takes, in UTF-16 units.
@@ -3869,7 +3932,8 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
         // its box has to be as wide as the table, and how wide that is only the
         // measured cells say. It is built where they are measured, so that no
         // two places have an opinion about the box over that line (技術検証 7.7).
-        LineKind::Rule | LineKind::Fence => Ornament::Hidden,
+        // 要件 7.8（2026-09-16）: 体裁の注記だけの行も同じ——指示は本文ではない。
+        LineKind::Rule | LineKind::Fence | LineKind::Note => Ornament::Hidden,
         // 要件 7.3.2: the white space a writer typed to line a continuation up
         // under its item. **The style is what says it is that** — the same
         // spaces under nothing are text, and shown as text.
@@ -3959,8 +4023,32 @@ fn line_style(
     fence: &mut Option<Fence>,
     levels: &mut ListLevels,
     table: &mut Option<TablePlace>,
-    marks: BulletMarks,
+    reading: Reading,
+    note_indent: &mut u8,
 ) -> LineStyle {
+    let marks = reading.bullets;
+    // 要件 7.8（2026-09-16）: 体裁の注記。**フェンスの中は本文ではない**ので読まない。
+    if reading.ruby && fence.is_none() {
+        match note_indent_of(line) {
+            Some(NoteIndent::From(count)) => {
+                *note_indent = count;
+                *table = None;
+                return LineStyle::of_kind(LineKind::Note);
+            }
+            Some(NoteIndent::End) => {
+                *note_indent = 0;
+                *table = None;
+                return LineStyle::of_kind(LineKind::Note);
+            }
+            None => {}
+        }
+    }
+    // 行の頭の`［＃2字下げ］`は、その行だけ。範囲の中にいればそこへ足す。
+    let head_indent = if reading.ruby && fence.is_none() {
+        note_indent_head(line).map(|(count, _)| count)
+    } else {
+        None
+    };
     let style = match (*fence, fence_marker(line)) {
         (None, Some(opened)) => {
             *fence = Some(Fence {
@@ -4003,7 +4091,10 @@ fn line_style(
     // Anything a fence decides ends whatever table was open: a table's rows are
     // bars at the margin, and a fenced line is code whatever it is made of.
     *table = None;
-    style
+    LineStyle {
+        note_indent: *note_indent + head_indent.unwrap_or(0),
+        ..style
+    }
 }
 
 /// How every logical line of `source` is set (要件 7.3.2).
@@ -4027,9 +4118,23 @@ pub fn line_styles(source: &str) -> Vec<LineStyle> {
 
 /// 同じことを、**どの記号を印として読むかを言われて**する（書き手の決定 2026-09-11）。
 pub fn line_styles_as(source: &str, marks: BulletMarks) -> Vec<LineStyle> {
+    line_styles_reading(
+        source,
+        Reading {
+            ruby: true,
+            bullets: marks,
+        },
+    )
+}
+
+/// 同じことを、**記法をどこまで読むかを言われて**する（要件 E9・要件 7.8）。
+/// 体裁の注記（字下げ）はルビと同じ旗で切れる——同じ記法の一族である。
+pub fn line_styles_reading(source: &str, reading: Reading) -> Vec<LineStyle> {
     let mut fence = None;
     let mut levels = ListLevels::default();
     let mut table = None;
+    // 字下げの範囲は行をまたいで続く（フェンスと同じ道）。
+    let mut note_indent = 0;
     let mut lines = source.split('\n').peekable();
     let mut styles = Vec::new();
     while let Some(line) = lines.next() {
@@ -4043,7 +4148,8 @@ pub fn line_styles_as(source: &str, marks: BulletMarks) -> Vec<LineStyle> {
             &mut fence,
             &mut levels,
             &mut table,
-            marks,
+            reading,
+            &mut note_indent,
         ));
     }
     styles
@@ -4075,6 +4181,7 @@ pub fn outline(source: &str) -> Vec<Heading> {
     let mut fence = None;
     let mut levels = ListLevels::default();
     let mut table = None;
+    let mut note_indent = 0;
     let mut lines = source.split('\n').peekable();
     while let Some(line) = lines.next() {
         let next = lines.peek().copied().unwrap_or_default();
@@ -4088,7 +4195,8 @@ pub fn outline(source: &str) -> Vec<Heading> {
             &mut fence,
             &mut levels,
             &mut table,
-            BulletMarks::all(),
+            Reading::all(),
+            &mut note_indent,
         );
         let level = style.heading_level;
         if level > 0 {
@@ -5447,6 +5555,54 @@ mod tests {
         assert!(dots.iter().any(|mark| mark.marks.beside == Beside::Dot));
     }
 
+    /// 要件 7.8（2026-09-16、書き手「組版の表現拡大」）: 体裁の注記が字下げを言う。
+    #[test]
+    fn a_note_indents_the_lines_it_covers() {
+        let source = "地の文。\n［＃ここから2字下げ］\n手紙の一行目。\n手紙の二行目。\n                      ［＃ここで字下げ終わり］\n地の文へ戻る。\n［＃1字下げ］この行だけ。\n";
+        let styles = line_styles(source);
+        let indents = styles
+            .iter()
+            .map(|style| (style.kind, style.indent_cells()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            indents,
+            vec![
+                (LineKind::Body, 0),
+                (LineKind::Note, 0),
+                (LineKind::Body, 2),
+                (LineKind::Body, 2),
+                (LineKind::Note, 0),
+                (LineKind::Body, 0),
+                (LineKind::Body, 1),
+                (LineKind::Body, 0),
+            ]
+        );
+        // 指示の行は字を隠す（`---`やフェンスと同じ全行の箱）。行そのものは残る。
+        let preview = PreviewDocument::from_source(source);
+        assert!(
+            preview.markers()[1].is_some(),
+            "指示の行が隠れていない: {:?}",
+            preview.markers()[1]
+        );
+        // 行の頭の`［＃1字下げ］`は字としては消える。
+        assert_eq!(
+            preview.text.lines().nth(6),
+            Some("この行だけ。"),
+            "{}",
+            preview.text
+        );
+        // 読み方を切れば、どれも本文の字のまま——字下げもしない。
+        let plain = line_styles_reading(
+            source,
+            Reading {
+                ruby: false,
+                ..Reading::all()
+            },
+        );
+        assert!(plain.iter().all(|style| style.indent_cells() == 0));
+        assert!(plain.iter().all(|style| style.kind != LineKind::Note));
+    }
+
     /// 要件 7.8（2026-09-16、書き手「組版の表現拡大」）: 注記は印の種類を名指す。
     #[test]
     fn a_note_names_which_mark_goes_beside_the_word() {
@@ -6573,15 +6729,15 @@ mod tests {
         assert_eq!(alone[2].kind, LineKind::Body);
     }
 
-    /// An item is set in one step for being an item and one more for each level
-    /// it is under, and a quoted one is set in by both (要件 7.3.2).
+    /// An item is set in one step (2字) for being an item and one more for each
+    /// level it is under, and a quoted one is set in by both (要件 7.3.2).
     #[test]
     fn a_nested_item_asks_its_block_for_a_step_a_level() {
         let styles = line_styles("- 一\n  - 二\n> - 三\n");
 
-        assert_eq!(styles[0].indent_steps(), 1);
-        assert_eq!(styles[1].indent_steps(), 2);
-        assert_eq!(styles[2].indent_steps(), 2, "quoted, and an item");
+        assert_eq!(styles[0].indent_cells(), 2);
+        assert_eq!(styles[1].indent_cells(), 4);
+        assert_eq!(styles[2].indent_cells(), 4, "quoted, and an item");
     }
 
     /// 要件 7.3.2: a link shows what it was given to show, and where it points

@@ -718,3 +718,73 @@ fn every_kind_of_mark_beside_the_word_reaches_the_pixels() {
         "塗った丸のほうが墨が多い: {seen:?}"
     );
 }
+
+/// 要件 7.8（2026-09-16、書き手「組版の表現拡大」）: **体裁の注記の字下げが、組みに届く。**
+///
+/// `［＃ここからN字下げ］`の中の行と`［＃N字下げ］`の行は、地の文より字数ぶん内側から始まる。
+#[test]
+fn a_note_indent_moves_where_the_line_starts() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let source = "地の文。\n［＃ここから2字下げ］\n手紙の行。\n［＃ここで字下げ終わり］\n                  地の文。\n［＃1字下げ］この行だけ。\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    for vertical in [true, false] {
+        id.update_screen(&window, |screen| {
+            screen.width = 1050.0;
+            screen.height = 640.0;
+            screen.shown_width = 1050.0;
+            screen.shown_height = 540.0;
+            screen.preview = true;
+            screen.vertical = false;
+        });
+        set_pane_direction(&window, &cache, id, vertical);
+        {
+            let state = states.of(id);
+            let mut state = state.borrow_mut();
+            state.caret_source_byte = Some(source.len());
+            state.active_line_start = Some(source.len());
+        }
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+        // 行の頭がどこから始まるか——行の軸（縦書きはy、横書きはx）で見る。
+        let head_of = |needle: &str| {
+            let mut borrowed = cache.borrow_mut();
+            let pane = borrowed.pane(id);
+            let shown = pane.view.preview_slot.preview.text.clone();
+            let at = shown.find(needle).unwrap();
+            let utf16 = shown[..at].encode_utf16().count() as u32;
+            let caret = pane.graphics.engine.caret_geometry(utf16).unwrap();
+            if vertical { caret.y } else { caret.x }
+        };
+        let body = head_of("地の文。");
+        let letter = head_of("手紙の行。");
+        let single = head_of("この行だけ。");
+        let cell = 22.0 * 1.3;
+        assert!(
+            (letter - body - cell * 2.0).abs() < cell * 0.6,
+            "vertical={vertical}: 2字下げになっていない（地の文{body}、手紙{letter}）"
+        );
+        assert!(
+            (single - body - cell).abs() < cell * 0.6,
+            "vertical={vertical}: 1字下げになっていない（地の文{body}、その行{single}）"
+        );
+    }
+}

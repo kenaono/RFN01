@@ -1214,7 +1214,7 @@ fn draw_pictures(
 /// `- [x]` are four, five and eight characters, and all three set their text at
 /// the same place. That used to be the box's width; it is the block's indent
 /// now, so the box over a marker is width-less and only hides. See
-/// [`LineStyle::indent_steps`].
+/// [`LineStyle::indent_cells`].
 fn apply_marker_boxes(
     layout: &IDWriteTextLayout,
     typography: &Typography,
@@ -4613,12 +4613,15 @@ struct NumberColumn {
 /// scroll that follows the caret. A place that forgot it would put the caret
 /// beside the text it is in.
 fn block_inset(span: &BlockSpan, typography: &Typography) -> f32 {
-    indent_of(span.indent_steps, typography)
+    indent_of(span.indent_cells, typography)
 }
 
-/// What a count of indent steps is worth on the line axis.
-fn indent_of(steps: u8, typography: &Typography) -> f32 {
-    f32::from(steps) * typography.indent_step()
+/// What a count of indented **cells** is worth on the line axis（2026-09-16）。
+///
+/// **数えるのは字**（`LineStyle::indent_cells`）：引用と箇条書きの1段は2字、体裁の注記は
+/// 書いてある字数そのもの。段で数えていたころは`［＃1字下げ］`が表せなかった。
+fn indent_of(cells: u8, typography: &Typography) -> f32 {
+    f32::from(cells) * typography.cell_advance()
 }
 
 /// The pane's line extent, less what one block's own indent takes.
@@ -5228,7 +5231,7 @@ impl TextEngine {
                 byte_start: line.byte_start,
                 text: line.text.clone(),
                 style: line.style,
-                indent_steps: line.indent_steps,
+                indent_cells: line.indent_cells,
                 marks: line.marks.clone(),
                 marker: line.marker,
                 starts: starts.clone(),
@@ -6406,7 +6409,7 @@ struct ParagraphWraps {
     /// but it is what the layout was actually made at, and a key that leaves
     /// out a thing that moves a break is the kind that goes wrong quietly.
     style: LineStyle,
-    indent_steps: u8,
+    indent_cells: u8,
     marks: Vec<Emphasis>,
     marker: Option<LineMarker>,
     /// Byte offsets where each line after the first begins.
@@ -6419,7 +6422,7 @@ impl ParagraphWraps {
     /// is — the text apart, which each caller compares its own way.
     fn matches(&self, line: LongLine<'_>) -> bool {
         self.style == line.style
-            && self.indent_steps == line.indent_steps
+            && self.indent_cells == line.indent_cells
             && self.marker == line.marker
     }
 }
@@ -6466,15 +6469,15 @@ impl WrapPage {
     /// **An indented paragraph is asked at the width it will be cut at.** A
     /// wrap position is only a line start for a layout of the same width, and
     /// the pieces are measured in the block's own narrower box (要件 7.3.2).
-    fn indented_extent(&self, steps: u8) -> u32 {
-        let inset = indent_of(steps, &self.typography);
+    fn indented_extent(&self, cells: u8) -> u32 {
+        let inset = indent_of(cells, &self.typography);
         self.line_extent.saturating_sub(inset as u32).max(1)
     }
 
     /// And the box that goes with it, which is what the pieces are measured
     /// in once they are cut.
-    fn indented_box(&self, steps: u8) -> f32 {
-        let inset = indent_of(steps, &self.typography);
+    fn indented_box(&self, cells: u8) -> f32 {
+        let inset = indent_of(cells, &self.typography);
         (self.line_box - inset).max(1.0)
     }
 }
@@ -6601,7 +6604,7 @@ fn window_end(page: &WrapPage, line: LongLine<'_>, start: usize) -> usize {
     let level = style.heading_level;
     let flow_per_line = typography.font_size * 2.2 * typography.flow_scale(level);
     let lines = (MAX_LAYOUT_FLOW / flow_per_line.max(1.0)).floor().max(1.0);
-    let extent = page.indented_extent(line.indent_steps);
+    let extent = page.indented_extent(line.indent_cells);
     let cells = cells_per_line(extent, typography) as f32;
     let per_line = (cells / typography.size_scale(level)).max(1.0);
     let characters = (lines * per_line) as usize;
@@ -6639,10 +6642,10 @@ fn wrap_offsets_in(
     let markers = [line.marker.filter(|_| from == 0)];
     let marked = StyledText::marked(text, &levels, &spans);
     let styled = marked.with_markers(&markers);
-    let steps = line.indent_steps;
+    let cells = line.indent_cells;
     let typography = &page.typography;
-    let bound = block_flow_bound(styled, page.indented_extent(steps), typography);
-    let line_box = page.indented_box(steps);
+    let bound = block_flow_bound(styled, page.indented_extent(cells), typography);
+    let line_box = page.indented_box(cells);
     let (max_width, max_height) = page.mode.to_screen(bound, line_box);
     let utf16 = text.encode_utf16().collect::<Vec<u16>>();
     // SAFETY: The UTF-16 buffer outlives CreateTextLayout, and the format
@@ -9657,32 +9660,35 @@ mod tests {
     }
 
     /// A block covering nothing, set in by the given number of steps.
-    fn indented_span(indent_steps: u8) -> BlockSpan {
+    fn indented_span(indent_cells: u8) -> BlockSpan {
         BlockSpan {
             byte_start: 0,
             byte_end: 0,
             utf16_start: 0,
             utf16_end: 0,
-            indent_steps,
+            indent_cells,
         }
     }
 
-    /// An indented block is moved in from the margin by one step per level, and
-    /// set in a box narrower by the same amount (要件 7.3.2). **Every line of
-    /// it**, which is the whole reason the indent belongs to the block rather
-    /// than to the head of a line.
+    /// An indented block is moved in from the margin by one cell per counted
+    /// cell, and set in a box narrower by the same amount (要件 7.3.2).
+    /// **Every line of it**, which is the whole reason the indent belongs to
+    /// the block rather than to the head of a line.
+    ///
+    /// 2026-09-16: 数えるのは**字**になった（引用と箇条書きの1段は2字、体裁の注記は
+    /// 書いてある字数）。
     #[test]
-    fn an_indented_block_is_set_in_by_one_step_a_level() {
+    fn an_indented_block_is_set_in_by_one_cell_a_cell() {
         let typography = plain();
-        let step = typography.indent_step();
+        let cell = typography.cell_advance();
 
         assert_eq!(block_inset(&indented_span(0), &typography), 0.0);
-        assert_eq!(block_inset(&indented_span(1), &typography), step);
-        assert_eq!(block_inset(&indented_span(2), &typography), step * 2.0);
+        assert_eq!(block_inset(&indented_span(1), &typography), cell);
+        assert_eq!(block_inset(&indented_span(2), &typography), cell * 2.0);
         assert_eq!(block_extent(&indented_span(0), 800, &typography), 800);
         assert_eq!(
             block_extent(&indented_span(1), 800, &typography),
-            800 - step as u32
+            800 - cell as u32
         );
         // A pane narrower than the indent still leaves a box to lay out in.
         assert_eq!(block_extent(&indented_span(4), 10, &typography), 1);

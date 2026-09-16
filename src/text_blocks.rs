@@ -388,6 +388,12 @@ pub struct LineStyle {
     /// under an item lines up with that item's text, and has no marker and no
     /// depth of its own to derive it from.
     pub list_indent: u8,
+    /// 体裁の注記が言う字下げ（`［＃ここから2字下げ］`、要件 7.8、2026-09-16）。
+    ///
+    /// **引用や箇条書きの字下げと同じ側にいる**（[`Self::indent_steps`]がまとめて数える）ので、
+    /// ブロックの切れ目も組み方も、そちらの仕組みがそのまま効く。字下げの範囲の中にある行は
+    /// どれもこの値を持ち、注記の行そのものは[`LineKind::Note`]で隠れる。
+    pub note_indent: u8,
 }
 
 /// What begins a comment in one language, for the lines inside a fence
@@ -459,6 +465,12 @@ pub enum LineKind {
     /// 画像だけの行（`![説明](画像.png)`・`![[画像.png|300]]`、追加要件 2026-09-15 書き手）。
     /// **1行が1枚の絵**で、整形表示では字の代わりに絵の大きさの箱が立つ。
     Image,
+    /// 体裁の注記だけの行（`［＃ここから2字下げ］`・`［＃ここで字下げ終わり］`、
+    /// 要件 7.8、2026-09-16、書き手「組版の表現拡大」）。
+    ///
+    /// **指示であって本文ではない**ので、整形表示では字を隠す（`---`やフェンスと同じ
+    /// 全行の箱）。行そのものは残るので、**1行ぶんの空きになる**。
+    Note,
 }
 
 impl LineKind {
@@ -731,7 +743,7 @@ pub enum Ornament {
     /// block its padding at each end.
     ///
     /// A blockquote has no box of its own — the preview takes its marker off,
-    /// and its indent belongs to the block ([`BlockSpan::indent_steps`]) the
+    /// and its indent belongs to the block ([`BlockSpan::indent_cells`]) the
     /// way a list item's does.
     Hidden,
     /// **編集中の行の、行頭の記号そのもの**（要件 7.3.1、書き手の報告 2026-09-10）。
@@ -920,7 +932,11 @@ impl LineStyle {
     /// box that hides a rule is measured on the line the preview shows, so the
     /// two have to agree about how long that line is.
     pub fn is_literal(&self) -> bool {
-        self.kind.is_code() || matches!(self.kind, LineKind::Rule | LineKind::TableRule)
+        self.kind.is_code()
+            || matches!(
+                self.kind,
+                LineKind::Rule | LineKind::TableRule | LineKind::Note
+            )
     }
 
     /// How many steps of indenting a line set this way asks its block for
@@ -939,8 +955,10 @@ impl LineStyle {
     /// changes, and the search for a long line's wrap positions lays it out at
     /// the width this leaves. A second opinion would cut blocks at one width
     /// and measure them at another.
-    pub fn indent_steps(&self) -> u8 {
-        self.quote_depth + self.list_indent
+    /// **数えるのは字**（2026-09-16）。引用と箇条書きは1段＝2字、体裁の注記は書いてある字数
+    /// そのもの（`［＃2字下げ］`は2字）。段で数えていたころは、注記の「1字下げ」が表せなかった。
+    pub fn indent_cells(&self) -> u8 {
+        (self.quote_depth + self.list_indent) * 2 + self.note_indent
     }
 }
 
@@ -1138,8 +1156,8 @@ pub struct BlockSpan {
     ///
     /// **A count of steps rather than a depth of quoting**, because two things
     /// ask for it and they add: an item inside a quote is set in by both. See
-    /// [`LineStyle::indent_steps`], which is where the two are counted.
-    pub indent_steps: u8,
+    /// [`LineStyle::indent_cells`], which is where the two are counted.
+    pub indent_cells: u8,
 }
 
 impl BlockSpan {
@@ -1523,11 +1541,11 @@ pub struct LongLine<'a> {
     ///
     /// **Told rather than worked out again.** Whether a line is indented at all
     /// depends on which pane is asking (要件 7.3.1), and the split is where
-    /// that is decided; a search that read [`LineStyle::indent_steps`] for
+    /// that is decided; a search that read [`LineStyle::indent_cells`] for
     /// itself would look for wrap positions at the full width of a source pane
     /// whose blocks are cut at it, and at the full width of a preview whose
     /// blocks are not.
-    pub indent_steps: u8,
+    pub indent_cells: u8,
 }
 
 impl LongLine<'_> {
@@ -1592,7 +1610,7 @@ pub struct AskedLine {
     pub style: LineStyle,
     pub marks: Vec<Emphasis>,
     pub marker: Option<LineMarker>,
-    pub indent_steps: u8,
+    pub indent_cells: u8,
 }
 
 impl AskedLine {
@@ -1603,7 +1621,7 @@ impl AskedLine {
             style: self.style,
             marks: &self.marks,
             marker: self.marker,
-            indent_steps: self.indent_steps,
+            indent_cells: self.indent_cells,
         }
     }
 }
@@ -1645,7 +1663,7 @@ impl WrapPoints for RecordedWraps {
             style: line.style,
             marks: line.marks.to_vec(),
             marker: line.marker,
-            indent_steps: line.indent_steps,
+            indent_cells: line.indent_cells,
         });
         Vec::new()
     }
@@ -1751,7 +1769,7 @@ pub fn split_blocks(
         // 要件 7.3.1: the source pane is set at the margin, for the reason it
         // gets no boxes — the markers are its text, and an indent would move
         // the very markup being read.
-        let indent = if indents { style.indent_steps() } else { 0 };
+        let indent = if indents { style.indent_cells() } else { 0 };
         let line_cells = line_cells(characters, cells_per_line, typography, style);
 
         // 要件 7.3.2: a block is set in one layout box, so a change of indenting
@@ -1789,7 +1807,7 @@ pub fn split_blocks(
                     byte_end: byte_cursor,
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
-                    indent_steps: block_indent,
+                    indent_cells: block_indent,
                 });
                 block_byte_start = byte_cursor;
                 block_utf16_start = utf16_cursor;
@@ -1815,7 +1833,7 @@ pub fn split_blocks(
                     byte_end: byte_cursor,
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
-                    indent_steps: block_indent,
+                    indent_cells: block_indent,
                 });
                 block_byte_start = byte_cursor;
                 block_utf16_start = utf16_cursor;
@@ -1825,7 +1843,7 @@ pub fn split_blocks(
                 style,
                 marks: styled.marks_at(index),
                 marker: styled.marker_at(index),
-                indent_steps: indent,
+                indent_cells: indent,
             };
             let pieces = cut_long_line(long, cells_per_line, typography, wraps);
             for piece_end in pieces {
@@ -1836,7 +1854,7 @@ pub fn split_blocks(
                     byte_end: piece_end,
                     utf16_start: block_utf16_start,
                     utf16_end: utf16_cursor,
-                    indent_steps: block_indent,
+                    indent_cells: block_indent,
                 });
                 block_byte_start = piece_end;
                 block_utf16_start = utf16_cursor;
@@ -1850,7 +1868,7 @@ pub fn split_blocks(
                 byte_end: line_end,
                 utf16_start: block_utf16_start,
                 utf16_end: utf16_cursor,
-                indent_steps: block_indent,
+                indent_cells: block_indent,
             });
             block_byte_start = line_end;
             block_utf16_start = utf16_cursor;
@@ -1903,7 +1921,7 @@ pub fn split_blocks(
                 byte_end: byte_cursor,
                 utf16_start: block_utf16_start,
                 utf16_end: utf16_cursor,
-                indent_steps: block_indent,
+                indent_cells: block_indent,
             });
             block_byte_start = byte_cursor;
             block_utf16_start = utf16_cursor;
@@ -1917,7 +1935,7 @@ pub fn split_blocks(
             byte_end: text.len(),
             utf16_start: block_utf16_start,
             utf16_end: utf16_cursor,
-            indent_steps: block_indent,
+            indent_cells: block_indent,
         });
     }
 
@@ -2876,7 +2894,7 @@ mod tests {
             byte_end,
             utf16_start: text[..byte_start].encode_utf16().count() as u32,
             utf16_end: text[..byte_end].encode_utf16().count() as u32,
-            indent_steps: 0,
+            indent_cells: 0,
         }
     }
 
@@ -3227,18 +3245,18 @@ mod tests {
 
         let depths = blocks
             .iter()
-            .map(|block| block.indent_steps)
+            .map(|block| block.indent_cells)
             .collect::<Vec<u8>>();
         let ends = blocks
             .iter()
             .map(|block| block.byte_end)
             .collect::<Vec<usize>>();
-        assert_eq!(depths, vec![0, 1, 0]);
+        assert_eq!(depths, vec![0, 2, 0], "1段は2字");
         // The source pane shows the `>` itself, so nothing about it indents and
         // nothing about it ends a block.
         let source = split_with(StyledText::new(text, &levels), &plain_typography());
         assert_eq!(source.len(), 1);
-        assert_eq!(source[0].indent_steps, 0);
+        assert_eq!(source[0].indent_cells, 0);
         // The boundaries fall where the quoting changes and nowhere else: these
         // lines are far too short to end a block on their own.
         assert_eq!(
@@ -3272,16 +3290,16 @@ mod tests {
 
         let steps = blocks
             .iter()
-            .map(|block| block.indent_steps)
+            .map(|block| block.indent_cells)
             .collect::<Vec<u8>>();
         let run_end = "本文\n- 一つめ\n- 二つめ\n- 三つめ\n".len();
-        assert_eq!(steps, vec![0, 1, 0]);
+        assert_eq!(steps, vec![0, 2, 0], "1段は2字");
         assert_eq!(blocks[1].byte_end, run_end);
         // 要件 7.3.1: the source pane shows the markers themselves, so nothing
         // about them indents and nothing about them ends a block.
         let source = split_with(StyledText::new(text, &levels), &plain_typography());
         assert_eq!(source.len(), 1);
-        assert_eq!(source[0].indent_steps, 0);
+        assert_eq!(source[0].indent_cells, 0);
     }
 
     /// Being quoted and being an item are both indents, and they add: a block
@@ -3296,20 +3314,26 @@ mod tests {
             ..LineStyle::default()
         };
 
-        assert_eq!(LineStyle::default().indent_steps(), 0);
-        assert_eq!(LineStyle::of_kind(LineKind::Bullet).indent_steps(), 1);
-        assert_eq!(quoted_item.indent_steps(), 2);
+        assert_eq!(LineStyle::default().indent_cells(), 0);
+        assert_eq!(LineStyle::of_kind(LineKind::Bullet).indent_cells(), 2);
+        assert_eq!(quoted_item.indent_cells(), 4);
         // A rule and a fence are whole lines of marks, not things set in.
-        assert_eq!(LineStyle::of_kind(LineKind::Rule).indent_steps(), 0);
+        assert_eq!(LineStyle::of_kind(LineKind::Rule).indent_cells(), 0);
         // **A line that continues an item has the indent without the kind**,
-        // which is the whole reason this is a count of steps rather than a
-        // depth of nesting: there is no marker under it to count from.
+        // which is the whole reason this is a count rather than a depth of
+        // nesting: there is no marker under it to count from.
         let continuing = LineStyle {
             list_indent: 2,
             ..LineStyle::default()
         };
         assert!(!continuing.kind.is_list());
-        assert_eq!(continuing.indent_steps(), 2);
+        assert_eq!(continuing.indent_cells(), 4, "2段＝4字");
+        // 体裁の注記は字で数える（2026-09-16）ので、1字下げもそのまま表せる。
+        let noted = LineStyle {
+            note_indent: 1,
+            ..LineStyle::default()
+        };
+        assert_eq!(noted.indent_cells(), 1);
     }
 
     /// A cut position is a line start only for a layout set the way the pieces
@@ -3381,7 +3405,7 @@ mod tests {
             style: LineStyle::default(),
             marks: &[],
             marker: None,
-            indent_steps: 0,
+            indent_cells: 0,
         };
         let wraps = EveryNCharacters(CELLS as usize).line_starts(stub);
         for piece in &cut[..cut.len() - 1] {
