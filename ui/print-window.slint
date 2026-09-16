@@ -1,0 +1,136 @@
+// 要件 7.10: 紙の形で見る——印刷プレビュー。
+//
+// **プリンタは刷る前に何も見せない。**この面が無ければ、用紙と余白が合っているかを
+// 刷ってから知ることになる。ここに映る1枚と、プリンタへ送る1枚は、同じ処理が描いた
+// 同じ絵である（`directwrite_render::print::draw_page_onto`）。
+import { Tok } from "tokens.slint";
+import { Role, TextButton } from "controls.slint";
+
+export component PrintView inherits Rectangle {
+    background: Tok.chrome-sunken;
+    in property <string> title;
+    in property <image> page;
+    /// 紙の縦横比（幅÷高さ）。**絵から測らない**——絵の大きさから紙の大きさを
+    /// 決め、紙の大きさが絵の大きさを決める、という輪になる。
+    in property <float> aspect: 0.707;
+    in property <int> at;
+    in property <int> pages;
+    in property <string> status;
+    in property <bool> working;
+    callback turned(int);
+    callback print-requested();
+    callback dismissed();
+
+    // 面の中を触った音が下の編集画面へ抜けないように。
+    TouchArea { }
+
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.dismissed(); }
+            // 紙を繰るのは矢印でもできる。**紙の向きに関わらず、左が前・右が次**
+            // ——繰っているのは紙であって、本文ではない。
+            if event.text == Key.LeftArrow { root.turned(root.at - 1); }
+            if event.text == Key.RightArrow { root.turned(root.at + 1); }
+            if event.text == Key.PageUp { root.turned(root.at - 1); }
+            if event.text == Key.PageDown { root.turned(root.at + 1); }
+            if event.text == Key.Home { root.turned(0); }
+            if event.text == Key.End { root.turned(root.pages - 1); }
+            return accept;
+        }
+    }
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 44px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding: 7px;
+                spacing: 8px;
+                alignment: start;
+
+                Text {
+                    text: @tr("Print");
+                    color: Tok.ink-strong;
+                    font-size: 14px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.title;
+                    color: Tok.ink-muted;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                TextButton {
+                    title: "‹";
+                    enabled: root.at > 0 && !root.working;
+                    clicked => { root.turned(root.at - 1); }
+                }
+                Text {
+                    // 何枚目か。**1から数える**——紙を数えるのは人である。
+                    text: "\{root.at + 1} / \{root.pages}";
+                    color: Tok.ink;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    min-width: 64px;
+                }
+                TextButton {
+                    title: "›";
+                    enabled: root.at + 1 < root.pages && !root.working;
+                    clicked => { root.turned(root.at + 1); }
+                }
+                TextButton {
+                    title: @tr("Print…");
+                    role: Role.primary;
+                    enabled: root.pages > 0 && !root.working;
+                    clicked => { root.print-requested(); }
+                }
+                TextButton {
+                    title: @tr("Close");
+                    clicked => { root.dismissed(); }
+                }
+            }
+        }
+
+        Rectangle {
+            background: Tok.chrome-sunken;
+            // 紙そのもの。**影を一枚敷く**ので、地と紙の境目が分かる。
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: min(parent.width - 48px, (parent.height - 48px) * root.aspect);
+                height: self.width / max(0.01, root.aspect);
+                drop-shadow-blur: 12px;
+                drop-shadow-color: Tok.scrim;
+                background: Tok.paper;
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.page;
+                    image-fit: contain;
+                }
+            }
+        }
+
+        if root.status != "": Rectangle {
+            height: 30px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                Text {
+                    text: root.status;
+                    color: Tok.ink-muted;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

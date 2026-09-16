@@ -59,6 +59,7 @@ const NAMES: &[(&str, &str)] = &[
         "Toggle Source / Preview (Exits Viewer)",
     ),
     ("Viewerを開始・終了", "Start or Exit Viewer"),
+    ("印刷プレビューを開く", "Open Print Preview"),
 ];
 const DEFAULTS: &[&str] = &[
     "Ctrl+O",
@@ -106,10 +107,11 @@ const DEFAULTS: &[&str] = &[
     "",
     "",
     "",
+    "Ctrl+P",
 ];
 const CATEGORIES: &[i32] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 0, 0, 0, 0, 0, 6, 6, 6, 6, 4, 4, 4,
+    5, 0, 0, 0, 0, 0, 6, 6, 6, 6, 4, 4, 4, 0,
 ];
 /// Keys の面の分類（書き手の求め 2026-09-15：タブで切り替えず、全部を並べて
 /// 分類ごとに畳めるように）。番号は[`CATEGORIES`]の値。
@@ -195,7 +197,7 @@ fn shown((japanese, english): (&'static str, &'static str)) -> &'static str {
 const SETTINGS_PASS: &[i32] = &[0, 3, 4, 7, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20];
 const SCOPES: &[i32] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0,
 ];
 fn normalize(value: &str) -> Option<String> {
     if value.is_empty() {
@@ -617,6 +619,9 @@ pub fn wire(app: &AppWindow, live: &Live) {
                     app.invoke_pane_preview_toggled(pane.index());
                 }
                 44 => app.invoke_pane_viewer_toggled(pane.index()),
+                // 要件 7.10: 紙の形で見る。**入口は窓に一つ**なので、どの面から
+                // 押しても同じ——刷るのは前に出ている文書である。
+                45 => app.invoke_print_requested(),
                 _ => {}
             }
         });

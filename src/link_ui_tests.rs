@@ -62,6 +62,7 @@ fn local_links_open_without_losing_the_source() {
     let (file, text) = DocumentFile::open(&source_path, MAX_DOCUMENT_CHARACTERS).unwrap();
     let memo = OpenDocument::new(file, text, window.as_weak());
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&memo),
         folder: Rc::default(),

@@ -33,6 +33,9 @@ mod pane_layout;
 mod pictures;
 #[cfg(test)]
 mod print_tests;
+#[cfg(test)]
+mod print_ui_tests;
+mod print_view;
 mod pty;
 mod quick_draft;
 #[cfg(test)]
@@ -1768,6 +1771,7 @@ fn main() -> Result<(), slint::PlatformError> {
         states: pane_states.clone(),
         folder: Rc::new(RefCell::new(work_folder)),
         tree_paths: Rc::new(RefCell::new(Vec::new())),
+        preview: Rc::default(),
         results: Rc::new(RefCell::new(Vec::new())),
         recent: Rc::new(RefCell::new(remembered)),
         recent_folders: Rc::new(RefCell::new(visited)),
@@ -4263,6 +4267,11 @@ struct Live {
     close_run: Rc<RefCell<Option<CloseRun>>>,
     cache: Rc<RefCell<RenderCache>>,
     tabs: Rc<RefCell<Tabs>>,
+    /// 要件 7.10: 紙に切った文書、印刷プレビューが開いているあいだだけ。
+    ///
+    /// **窓に1つ。**プレビューは窓を覆うので、2つ開くことはない。閉じれば捨てる
+    /// ——紙のぶんの組版は編集には要らない。
+    preview: Rc<RefCell<Option<print_view::Preview>>>,
     /// The thread that writes work copies, so that the flush at the end of one
     /// does not land in the middle of somebody's sentence (要件 2).
     writer: Rc<FileWriter>,

@@ -55,6 +55,7 @@ fn a_table_is_edited_as_a_table() {
     let text = "| 名前 | 役割 |\n| --- | --- |\n| 主人公 | **語り手** |\n| 犬 | 相棒 |\n";
     let document = OpenDocument::new(DocumentFile::untitled(1), text.into(), window.as_weak());
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),

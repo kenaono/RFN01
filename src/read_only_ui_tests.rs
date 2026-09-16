@@ -64,6 +64,7 @@ fn read_only_follows_a_growing_file_until_scrolled_away() {
     let (file, text) = DocumentFile::open(&log_path, MAX_DOCUMENT_CHARACTERS).unwrap();
     let document = OpenDocument::new(file, text, window.as_weak());
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),

@@ -224,6 +224,7 @@ fn layout_snapshot() {
                     states: PaneStates::new(&document),
                     folder: Rc::default(),
                     tree_paths: Rc::default(),
+                    preview: Rc::default(),
                     results: Rc::default(),
                     recent: Rc::default(),
                     recent_folders: Rc::default(),

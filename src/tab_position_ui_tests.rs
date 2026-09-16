@@ -60,6 +60,7 @@ fn a_new_vertical_tab_opens_at_the_start() {
     let short = untitled(1, "春はあけぼの。\n".repeat(60));
     let long = untitled(2, "夏は夜。月のころはさらなり。\n".repeat(200));
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&short),
         folder: Rc::default(),

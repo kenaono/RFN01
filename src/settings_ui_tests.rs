@@ -59,6 +59,7 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     let document = OpenDocument::untitled(1, window.as_weak());
     *document.text.borrow_mut() = "本文".into();
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
@@ -506,6 +507,7 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     let document = OpenDocument::untitled(1, window.as_weak());
     *document.text.borrow_mut() = "本文".into();
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
@@ -1098,6 +1100,7 @@ fn the_find_bar_searches_the_settings() {
     window.set_autosave(false);
     let document = OpenDocument::untitled(1, window.as_weak());
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
@@ -1241,6 +1244,7 @@ fn the_left_pane_has_its_own_look() {
     let id = PaneId::from_index(0);
     let document = OpenDocument::untitled(1, window.as_weak());
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),

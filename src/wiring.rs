@@ -1468,6 +1468,36 @@ pub fn wire_saving(window: &AppWindow, live: &Live) {
         }
     });
 
+    // 要件 7.10: 紙の形で見る。**入口は一つ**——PDFはプリンタの一つなので、
+    // PDF専用の行は作らない。
+    let weak = window.as_weak();
+    let print_live = live.clone();
+    window.on_print_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            if window.get_print_active() {
+                crate::print_view::print_now(&window, &print_live);
+            } else {
+                crate::print_view::open(&window, &print_live);
+            }
+        }
+    });
+
+    let weak = window.as_weak();
+    let print_live = live.clone();
+    window.on_print_turned(move |to| {
+        if let Some(window) = weak.upgrade() {
+            crate::print_view::turn(&window, &print_live, to);
+        }
+    });
+
+    let weak = window.as_weak();
+    let print_live = live.clone();
+    window.on_print_dismissed(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::print_view::close(&window, &print_live);
+        }
+    });
+
     let weak = window.as_weak();
     let file_live = live.clone();
     window.on_reveal_requested(move || {

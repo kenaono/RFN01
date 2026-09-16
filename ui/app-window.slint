@@ -9,6 +9,7 @@ export { Ime }
 import { QuickDraft } from "quick-draft.slint";
 export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
+import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 
 /// 要件 7.9: 設定画面が出す語群の1行。
@@ -895,6 +896,19 @@ export component AppWindow inherits Window {
     callback shortcut-capture(string, bool, bool, bool);
     callback shortcut-key(string, bool, bool, bool) -> bool;
 
+    // 要件 7.10: 紙の形で見る——印刷プレビュー。
+    in-out property <bool> print-active: false;
+    in property <string> print-title;
+    in property <image> print-page;
+    in property <float> print-aspect: 0.707;
+    in-out property <int> print-at;
+    in property <int> print-pages;
+    in-out property <string> print-status;
+    in-out property <bool> print-working;
+    callback print-turned(int);
+    callback print-requested();
+    callback print-dismissed();
+
     in-out property <bool> diff-active: false;
     in property <[DiffRow]> diff-rows;
     in property <string> diff-left-path;
@@ -1171,6 +1185,15 @@ export component AppWindow inherits Window {
                                     app-menu.close();
                                     root.save-all-requested();
                                     root.focus-generation += 1;
+                                }
+                            }
+                            // 要件 7.10: 紙の形で見る。**PDFはプリンタの一つ**
+                            // なので、PDF専用の行は作らない。
+                            MenuRow {
+                                title: @tr("Print…");
+                                shortcut: root.shortcut-keys[45]; activated => {
+                                    app-menu.close();
+                                    root.print-requested();
                                 }
                             }
                             MenuSep { }
@@ -5428,6 +5451,26 @@ export component AppWindow inherits Window {
         cancelled => {
             root.colour-mixer-open = false;
             root.focus-generation += 1;
+        }
+    }
+
+    // 編集画面はそのまま下に残す（比較と同じ作法）。
+    if root.print-active: Rectangle {
+        background: Tok.chrome-sunken;
+        TouchArea { }
+        PrintView {
+            width: parent.width;
+            height: parent.height;
+            title: root.print-title;
+            page: root.print-page;
+            aspect: root.print-aspect;
+            at: root.print-at;
+            pages: root.print-pages;
+            status: root.print-status;
+            working: root.print-working;
+            turned(to) => { root.print-turned(to); }
+            print-requested => { root.print-requested(); }
+            dismissed => { root.print-dismissed(); }
         }
     }
 

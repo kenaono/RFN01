@@ -218,6 +218,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let memo = OpenDocument::untitled(1, window.as_weak());
     *memo.text.borrow_mut() = "残す本文".into();
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&memo),
         folder: Rc::default(),
@@ -1007,6 +1008,7 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
     let memo = OpenDocument::untitled(1, window.as_weak());
     *memo.text.borrow_mut() = "残す本文".into();
     let live = Live {
+        preview: Rc::default(),
         closed_tabs: Rc::default(),
         states: PaneStates::new(&memo),
         folder: Rc::default(),
