@@ -77,6 +77,16 @@ pub fn open(window: &AppWindow, live: &Live) {
     window.set_print_active(true);
     note_paper(window, live);
     draw(window, live);
+    // **開けたことも残す**（書き手の報告を追うため）。失敗の行しか無ければ、
+    // 「効かなかった」と「届いていない」を見分けられない。
+    let note = window.get_print_paper_note().to_string();
+    live.cache.borrow_mut().log_diag(
+        "print",
+        &format!(
+            "preview opened pages={pages} vertical={} {note}",
+            u8::from(matches!(mode, WritingMode::Vertical))
+        ),
+    );
 }
 
 /// 紙を繰る。範囲の外は繰らない（端で押しても何も起きない）。
@@ -210,10 +220,26 @@ fn for_paper(screen: &Typography) -> Typography {
 /// 紙と違えば、**組み直してから刷る**——見たとおりに出ないなら、プレビューは嘘を
 /// ついたことになる。
 pub fn print_now(window: &AppWindow, live: &Live) {
+    live.cache
+        .borrow_mut()
+        .log_diag("print", "asking Windows for a printer");
     let Some(chosen) = print::ask(crate::ime::window_handle(window).unwrap_or_default()) else {
-        // 取り消しは何事も無かったことである。
+        // 取り消しは何事も無かったことである。**残す**——押したのに何も起きな
+        // かった、という報告がここへ来る。
+        live.cache
+            .borrow_mut()
+            .log_diag("print", "the printer dialog was cancelled");
         return;
     };
+    live.cache.borrow_mut().log_diag(
+        "print",
+        &format!(
+            "printer={} paper={}x{}",
+            chosen.printer,
+            chosen.paper().width.round(),
+            chosen.paper().height.round()
+        ),
+    );
     let title = {
         let held = live.preview.borrow();
         held.as_ref()
