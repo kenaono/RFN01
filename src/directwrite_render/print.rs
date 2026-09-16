@@ -23,14 +23,19 @@ use windows::{
             Direct2D::{
                 Common::{D2D_RECT_F, D2D_SIZE_F},
                 D2D1_ANTIALIAS_MODE_ALIASED, D2D1_COLOR_SPACE_SRGB,
-                D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_PRINT_CONTROL_PROPERTIES,
-                D2D1_PRINT_FONT_SUBSET_MODE_DEFAULT, ID2D1CommandList, ID2D1DeviceContext,
-                ID2D1Factory1, ID2D1RenderTarget,
+                D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+                D2D1_PRINT_CONTROL_PROPERTIES, D2D1_PRINT_FONT_SUBSET_MODE_DEFAULT,
+                ID2D1CommandList, ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget,
             },
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
                 ID3D11Device,
+            },
+            DirectWrite::{
+                DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
             },
             Dxgi::IDXGIDevice,
             Gdi::{
@@ -402,9 +407,68 @@ fn draw_page_onto(
         target.SetTransform(&place(scale, 0.0, 0.0));
         target.PopAxisAlignedClip();
     }
-    // SAFETY: Putting the transform back is what lets the caller clear or draw
-    // anything else in page coordinates.
-    unsafe { target.SetTransform(&place(scale, 0.0, 0.0)) };
+    // **ノンブルは本文の外**（要件 7.10）。切り取る枠の外に出るので、閂を外して
+    // から描く。
+    let spec = tasks
+        .first()
+        .map(|task| task.typography.clone())
+        .unwrap_or_else(|| std::sync::Arc::new(super::Typography::new(14.0)));
+    draw_nombre(graphics, target, &inks, paper, page, ranges.len(), &spec)?;
+    Ok(())
+}
+
+/// 何枚目かを、紙の下の余白に打つ。
+///
+/// **ページという概念は紙にしか無い**（要件 7.10）ので、画面には出ない数である。
+/// 下の余白の中ほどに、本文より小さく、横書きで置く——縦書きの本でもノンブルは
+/// 横に寝かせて読む。
+fn draw_nombre(
+    graphics: &mut Graphics,
+    target: &ID2D1RenderTarget,
+    inks: &Inks,
+    paper: Paper,
+    page: usize,
+    pages: usize,
+    spec: &super::Typography,
+) -> Result<()> {
+    if pages == 0 {
+        return Ok(());
+    }
+    // 本文の7割。小さすぎると読めず、大きいと本文と競う。
+    let size = (spec.font_size * 0.7).max(6.0);
+    let spec = super::Typography {
+        font_size: size,
+        line_spacing: 1.0,
+        ruby_room: false,
+        ..spec.clone()
+    };
+    let format = graphics.text_format(&spec, WritingMode::Horizontal)?;
+    let text: Vec<u16> = (page + 1).to_string().encode_utf16().collect();
+    let band = D2D_RECT_F {
+        left: paper.margin,
+        // 余白の真ん中あたり。本文の下端からも紙の端からも離れる。
+        top: paper.height - paper.margin * 0.72,
+        right: paper.width - paper.margin,
+        bottom: paper.height - paper.margin * 0.2,
+    };
+    // SAFETY: The format and brush outlive the call, and the text is a live
+    // buffer for its length.
+    unsafe {
+        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        target.DrawText(
+            &text,
+            &format,
+            &band,
+            &inks.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        // **借りた書式は返す。**画面のタイルと同じ入れ物を使っているので、寄せ方を
+        // 置いたままにすると本文が真ん中へ寄る。
+        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+    }
     Ok(())
 }
 
@@ -628,6 +692,39 @@ mod tests {
                 .iter()
                 .all(|run| run.ornament != LineOrnament::PageBreak)),
             "the paper does not"
+        );
+    }
+
+    /// 要件 7.10: ノンブルは**下の余白**に、紙の真ん中で打つ。本文の枠の中には
+    /// 入らない——入れば1行ぶん本文が減る。
+    #[test]
+    fn the_page_number_stands_in_the_bottom_margin() {
+        let paper = Paper::default();
+        let mut engine = engine_on_paper(&long_document(40), WritingMode::Vertical, paper);
+        let (pixels, width, height) =
+            render_page(&mut engine, paper, 1, 1.0).expect("draw the page");
+        let dark = |x: u32, y: u32| {
+            let at = ((y * width + x) * 4) as usize;
+            pixels.get(at).is_some_and(|blue| *blue < 120)
+        };
+        let band = |from: f32, to: f32| {
+            let (from, to) = (from.round() as u32, (to.round() as u32).min(height));
+            (from..to)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .filter(|(x, y)| dark(*x, *y))
+                .count()
+        };
+        // 本文が終わったところから紙の端までに、数が1つ立っている。
+        let margin = paper.margin;
+        assert!(
+            band(paper.height - margin, paper.height) > 0,
+            "the page number must be printed below the text"
+        );
+        // そして本文の枠には食い込まない。
+        assert_eq!(
+            band(paper.height - margin - 4.0, paper.height - margin),
+            0,
+            "and must not reach into the text area"
         );
     }
 
