@@ -56,8 +56,11 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     let id = PaneId::from_index(0);
 
     // 紙を何枚も要る長さに。**段落ごとに1行**で、紙の側で折り返させる。
-    let source: String = (0..80)
-        .map(|at| format!("{at}段落目。紙を何枚も要る長さにするための本文です。\n\n"))
+    let source: String = std::iter::once("# 見出し\n\n".to_owned())
+        .chain(
+            (0..80)
+                .map(|at| format!("{at}段落目。**紙を何枚も要る長さ**にするための本文です。\n\n")),
+        )
         .collect();
     let path = directory.join("原稿.md");
     std::fs::write(&path, &source).unwrap();
@@ -212,7 +215,7 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     set_colour(&palette, 1, 1, [1.0, 0.0, 0.0]);
     fonts.set_row_data(font_row(1, CODE_SLOT), "MS Gothic".into());
     fonts.set_row_data(font_row(1, 0), "Yu Mincho".into());
-    let spec = print_view::paper_typography(&window, WritingMode::Vertical);
+    let spec = print_view::paper_typography(&window, WritingMode::Vertical, true);
     assert_eq!(
         spec.heading_ink[0],
         [1.0, 0.0, 0.0],
@@ -227,6 +230,36 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         !spec.line_numbers,
         "the line numbers are for editing, not paper"
     );
+
+    // **ソースのTABはソースのまま刷る**（書き手の指摘 2026-09-16：「ソースで印刷を
+    // 選択したら、ソースのまま印刷されるのが正しい」）。記号が字としてそこにあり、
+    // 見出しも本文と同じ大きさ・同じ字体で出る。
+    let laid = print_view::paper_typography(&window, WritingMode::Vertical, true);
+    assert!(
+        laid.heading_scale[0] > 1.0,
+        "the preview sets a heading larger than the body"
+    );
+    let raw = print_view::paper_typography(&window, WritingMode::Vertical, false);
+    assert_eq!(
+        raw.heading_scale, [1.0; MAX_HEADING_LEVEL],
+        "the source sets every line at one size"
+    );
+    assert_eq!(
+        raw.heading_ink[0], raw.ink,
+        "and in one ink — the colours belong to the formatted view"
+    );
+    assert_eq!(raw.code_font, raw.body_font, "and in one face");
+
+    // そして**紙に出る本文そのものが変わる**：`**`も`#`も字としてそこにある。
+    print_view::close(&window, &live);
+    id.update_screen(&window, |screen| screen.preview = false);
+    print_view::open(&window, &live);
+    let as_source = shot(&surface, width, height);
+    assert!(
+        as_source != first,
+        "the source must not print as the formatted view"
+    );
+    id.update_screen(&window, |screen| screen.preview = true);
 
     print_view::close(&window, &live);
     assert!(!window.get_print_active(), "Close must put the paper away");

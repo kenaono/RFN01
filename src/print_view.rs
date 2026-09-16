@@ -156,31 +156,41 @@ fn lay_out(
 ) -> windows::core::Result<TextEngine> {
     let source = document.text.borrow().clone();
     let reading = crate::reading_of(window);
-    let mut preview = PreviewDocument::default();
-    // **編集行の原文表示はしない**（活性行は`None`）。紙に出るのは、どの行も
-    // 組まれた姿である——原文が見たいときは画面で見る。
-    preview.refresh(&source, None, reading);
-    let folder = live.folder.borrow().root.clone();
-    preview.size_images(|image| {
-        let picture = pictures::load(&pictures::resolve(folder.as_deref(), image.target)?)?;
-        // 絵は紙の寸法で入れる。**画面の拡大率は紙には効かない**——拡大は読むための
-        // もので、刷る大きさではない。
-        let size = pictures::size(&picture, image.width, 100);
-        Some((picture, size))
-    });
     // **行の体裁は原稿から読む。**プレビューの本文は行頭の注記（`［＃地付き］`）を
     // 既に取り除いてあるので、そちらから数えると地付きが消える。
     let styles = document::line_styles_reading(&source, reading);
-    let styled =
-        StyledText::marked(&preview.text, &styles, preview.marks()).with_markers(preview.markers());
-    let spec = paper_typography(window, mode);
+    let mut engine = TextEngine::new(mode);
+    // **ソースのTABはソースのまま刷る**（書き手の指摘 2026-09-16：「ソースで印刷を
+    // 選択したら、ソースのまま印刷されるのが正しい」）。画面がそう見せているものを
+    // 紙にするのが印刷であって、紙にするときに整形し直すものではない。
+    let preview_mode = focused_pane(window).shows_preview(window);
+    let mut preview = PreviewDocument::default();
+    if preview_mode {
+        // **編集行の原文表示はしない**（活性行は`None`）。紙に出るのは、どの行も
+        // 組まれた姿である——原文が見たいときは画面で見る。
+        preview.refresh(&source, None, reading);
+        let folder = live.folder.borrow().root.clone();
+        preview.size_images(|image| {
+            let picture = pictures::load(&pictures::resolve(folder.as_deref(), image.target)?)?;
+            // 絵は紙の寸法で入れる。**画面の拡大率は紙には効かない**——拡大は読む
+            // ためのもので、刷る大きさではない。
+            let size = pictures::size(&picture, image.width, 100);
+            Some((picture, size))
+        });
+        engine.set_pictures(preview.pictures().clone());
+    }
+    // ソースには印も箱も無い（記法は字としてそこにある）。整形表示には両方ある。
+    let styled = if preview_mode {
+        StyledText::marked(&preview.text, &styles, preview.marks()).with_markers(preview.markers())
+    } else {
+        StyledText::marked(&source, &styles, &[])
+    };
+    let spec = paper_typography(window, mode, preview_mode);
     // **行の長さは紙の寸法。**字数では決めない（書き手の指摘 2026-09-16：「字数は
     // 英数字だとかなりちがいますし、禁則文字もあるため一意に決められません」）
     // ——半角の字は送りが違い、禁則で追い込み・追い出しも起きるので、「1行◯字」と
     // いう長さはそもそも無い。**字体と大きさを決め、この幅で組ませる**のが組版である。
     let (_, cross) = paper.printable(mode);
-    let mut engine = TextEngine::new(mode);
-    engine.set_pictures(preview.pictures().clone());
     engine.update(
         styled,
         LineFit::Extent(cross.round().max(1.0) as u32),
@@ -203,10 +213,12 @@ fn lay_out(
 ///
 /// 落とすのは**紙が自分で持っているものと、編むための印**だけ：紙の色（紙は白い）、
 /// 行番号、空白の印。
-pub fn paper_typography(window: &AppWindow, mode: WritingMode) -> Typography {
+pub fn paper_typography(window: &AppWindow, mode: WritingMode, preview: bool) -> Typography {
     let vertical = matches!(mode, WritingMode::Vertical);
     // 画面の拡大（Ctrl+ホイール）は紙には効かない。拡大は読むためのものである。
-    let screen = crate::typography_for(window, 100, vertical, true);
+    // **`preview`が偽ならソースの体裁**——記号がそこにある1つの字体・1つの大きさで、
+    // 画面がソースを見せているのと同じ姿である（`plain_source`）。
+    let screen = crate::typography_for(window, 100, vertical, preview);
     let font_size = match window.get_print_size() {
         0 => screen.font_size,
         // ポイントは1/72インチ、Direct2Dが数えるのは1/96インチ。
@@ -250,7 +262,8 @@ pub fn use_screen_size(window: &AppWindow, live: &Live) {
 fn screen_size(window: &AppWindow, live: &Live) -> i32 {
     let _ = live;
     let vertical = matches!(mode_of(window), WritingMode::Vertical);
-    let pixels = crate::typography_for(window, 100, vertical, true).font_size;
+    let preview = crate::focused_pane(window).shows_preview(window);
+    let pixels = crate::typography_for(window, 100, vertical, preview).font_size;
     // 画素は96dpi、ポイントは72dpi。
     ((pixels * 72.0 / 96.0) * 10.0).round().clamp(60.0, 240.0) as i32
 }
