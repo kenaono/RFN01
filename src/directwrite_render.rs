@@ -467,6 +467,10 @@ impl Graphics {
         // SAFETY: the format is alive here and for as long as the cache holds it.
         unsafe {
             format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            // **帯の中で真ん中に置く**（2026-09-16）。帯は親文字の幅（長い読みは前後へ
+            // かけたぶんだけ広い、`ruby_fit_of`）で、読みはその中央に来る。端に寄せると、
+            // 枡目の見積もりと実際の送りの差がそのまま片寄りになって出る。
+            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
         self.ruby_formats.insert(key, format.clone());
         Ok(format)
@@ -2198,6 +2202,175 @@ fn ruby_size(typography: &Typography, heading_level: u8) -> f32 {
     (base * typography.ruby_scale).max(1.0)
 }
 
+/// 読みが親文字より長いときの収め方（要件 7.8、2026-09-16、書き手：「組版の表現拡大」）。
+///
+/// **前後の仮名へ1字までかけ、それでも余るぶんは親文字の字間を広げる。**これは縦組みの
+/// 決まりごとで、かけてよいのは仮名まで——漢字や記号の上にかけると、そちらの字が何の
+/// 読みを持っているのか分からなくなる。かける先に別のルビが立っていればそちら側へはかけない
+/// （読みどうしが重なる）。**それでも入らなければ親文字を広げる**：字の側が動くほうが、
+/// 読みが隣の読みに突き当たるより読める。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RubyFit {
+    /// 親文字の手前へかける長さ（画素）。
+    lead: f32,
+    /// 親文字の先へかける長さ（画素）。
+    trail: f32,
+    /// 親文字1字あたりに足す送り（画素）。
+    spread: f32,
+}
+
+/// `base_cells`は親文字の枡目の数、`reading_cells`は読みの枡目の数（半角は0.5）。
+/// `cell`は本文1字の送り、`ruby_cell`は読み1字の送り。`lead_room`・`trail_room`は
+/// その側へかけてよい長さ（かけられないなら0）。
+fn ruby_fit(
+    base_cells: f32,
+    reading_cells: f32,
+    cell: f32,
+    ruby_cell: f32,
+    lead_room: f32,
+    trail_room: f32,
+) -> RubyFit {
+    let base = base_cells.max(0.0) * cell;
+    let reading = reading_cells.max(0.0) * ruby_cell;
+    let over = reading - base;
+    if over <= 0.0 {
+        return RubyFit {
+            lead: 0.0,
+            trail: 0.0,
+            spread: 0.0,
+        };
+    }
+    // 半分ずつ両側へ。片側が足りなければ、余りをもう片側へ回す。
+    let lead = (over / 2.0).min(lead_room.max(0.0));
+    let trail = (over / 2.0).min(trail_room.max(0.0));
+    let left = over - lead - trail;
+    let trail = trail + left.min((trail_room.max(0.0) - trail).max(0.0));
+    let left = over - lead - trail;
+    let lead = lead + left.min((lead_room.max(0.0) - lead).max(0.0));
+    let left = (over - lead - trail).max(0.0);
+    RubyFit {
+        lead,
+        trail,
+        spread: if base_cells >= 1.0 {
+            left / base_cells
+        } else {
+            left
+        },
+    }
+}
+
+/// かけてよい側か——仮名（と長音符・繰り返し記号）で、そこに別のルビが立っていない。
+fn ruby_may_hang(letter: Option<char>) -> bool {
+    letter.is_some_and(|letter| {
+        matches!(letter,
+            '\u{3041}'..='\u{309f}' | '\u{30a0}'..='\u{30ff}' | '\u{ff66}'..='\u{ff9f}')
+    })
+}
+
+/// 読みや親文字が占める枡目の数。**半角は半マス**——読みに`ABC`と書く人がいる。
+fn cells_of(text: &str) -> f32 {
+    text.chars()
+        .map(|letter| if letter.is_ascii() { 0.5 } else { 1.0 })
+        .sum()
+}
+
+/// ブロックの中のルビ1つぶんの収め方（[`ruby_fit`]）。走りの番号で引く。
+///
+/// **組むときと描くときが同じ答えを使う**——親文字の字間は組む前に広げ（測りも同じ形になる）、
+/// 前後へかけるぶんは描くときの帯の広さになる。2か所で別々に決めたら、読みと親文字がずれる。
+fn ruby_fit_of(
+    text: &str,
+    runs: &[StyleRun],
+    run: &StyleRun,
+    base_utf16: u32,
+    typography: &Typography,
+) -> RubyFit {
+    let size = typography.font_size * typography.size_scale(run.heading_level);
+    let cell = size * (1.0 + typography.character_spacing.max(0.0));
+    let ruby_cell = ruby_size(typography, run.heading_level);
+    let base_start = run.utf16_start - base_utf16;
+    let base = utf16_slice(text, base_start, base_utf16);
+    let reading = ruby_reading(text, run);
+    // かけてよいのは仮名で、そこに別のルビ（読みでも親文字でも）が立っていないとき。
+    let covered_by_ruby = |at: u32| {
+        runs.iter().any(|other| match other.ornament {
+            Some(Ornament::Ruby {
+                base_utf16: other_base,
+            }) => {
+                let start = other.utf16_start - other_base;
+                (start..other.utf16_start + other.utf16_len).contains(&at)
+            }
+            _ => false,
+        })
+    };
+    let before = base_start.checked_sub(1);
+    let lead_room = match before {
+        Some(at) if !covered_by_ruby(at) => {
+            let letter = utf16_slice(text, at, 1).chars().next();
+            if ruby_may_hang(letter) { cell } else { 0.0 }
+        }
+        _ => 0.0,
+    };
+    let after = run.utf16_start + run.utf16_len;
+    let trail_room = if covered_by_ruby(after) {
+        0.0
+    } else {
+        let letter = utf16_slice(text, after, 1).chars().next();
+        if ruby_may_hang(letter) { cell } else { 0.0 }
+    };
+    ruby_fit(
+        cells_of(base),
+        cells_of(reading),
+        cell,
+        ruby_cell,
+        lead_room,
+        trail_room,
+    )
+}
+
+/// UTF-16の位置と長さで本文を切る（範囲の外は空）。
+fn utf16_slice(text: &str, start: u32, length: u32) -> &str {
+    let from = byte_at_utf16(text, start);
+    let to = byte_at_utf16(text, start + length);
+    text.get(from..to).unwrap_or("")
+}
+
+/// 親文字の字間を広げて、長い読みを収める（[`ruby_fit_of`]の`spread`）。
+///
+/// # Safety
+///
+/// 走りの範囲はブロックの本文の中にある（[`style_runs`]）。
+fn apply_ruby_fit(
+    layout: &IDWriteTextLayout,
+    text: &str,
+    runs: &[StyleRun],
+    typography: &Typography,
+) -> Result<()> {
+    let spread = runs.iter().filter_map(|run| match run.ornament {
+        Some(Ornament::Ruby { base_utf16 }) if base_utf16 > 0 && base_utf16 <= run.utf16_start => {
+            let fit = ruby_fit_of(text, runs, run, base_utf16, typography);
+            (fit.spread > 0.0).then_some((run, base_utf16, fit.spread))
+        }
+        _ => None,
+    });
+    let mut layout1 = None;
+    for (run, base_utf16, extra) in spread {
+        let layout1 = match &layout1 {
+            Some(layout1) => layout1,
+            None => layout1.insert(layout.cast::<IDWriteTextLayout1>()?),
+        };
+        let size = typography.font_size * typography.size_scale(run.heading_level);
+        let half = (size * typography.character_spacing.max(0.0) + extra) * 0.5;
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: run.utf16_start - base_utf16,
+            length: base_utf16,
+        };
+        // SAFETY: the range is the run's own base, inside the block's text.
+        unsafe { layout1.SetCharacterSpacing(half, half, 0.0, range)? };
+    }
+    Ok(())
+}
+
 /// 帯を字へ寄せる量（要件 7.8）。本文の大きさに対する比率で、正が字へ近づく。
 fn ruby_offset(typography: &Typography, heading_level: u8) -> f32 {
     typography.font_size * typography.size_scale(heading_level) * typography.ruby_offset
@@ -2313,7 +2486,11 @@ fn draw_ruby(
         }
         let utf16 = reading.encode_utf16().collect::<Vec<u16>>();
         let cell = typography.font_size * typography.size_scale(run.heading_level);
+        // 要件 7.8: 長い読みは前後の仮名へかける（`ruby_fit_of`）。親文字の字間は組むときに
+        // 広げてあるので、ここで足すのは**かける側の長さだけ**である。
+        let fit = ruby_fit_of(text, runs, run, base_utf16, typography);
         let rect = beside_the_line(&regions[0], mode, thickness, towards, cell);
+        let rect = hanging_over(rect, mode, fit.lead, fit.trail);
         // SAFETY: The buffer, the format and the brush all outlive the call,
         // and the rectangle is read before it returns.
         unsafe {
@@ -2328,6 +2505,25 @@ fn draw_ruby(
         }
     }
     Ok(())
+}
+
+/// 帯を前後へ広げる——長い読みが隣の仮名へかかるぶん（要件 7.8、2026-09-16）。
+///
+/// 行の軸の前へ`lead`、先へ`trail`。前がどちらかは書字方向ではなく**行の中の向き**で、
+/// 行の軸は横書きならx、縦書きならyである（読みは行に沿って並ぶ）。
+fn hanging_over(rect: D2D_RECT_F, mode: WritingMode, lead: f32, trail: f32) -> D2D_RECT_F {
+    match mode {
+        WritingMode::Horizontal => D2D_RECT_F {
+            left: rect.left - lead,
+            right: rect.right + trail,
+            ..rect
+        },
+        WritingMode::Vertical => D2D_RECT_F {
+            top: rect.top - lead,
+            bottom: rect.bottom + trail,
+            ..rect
+        },
+    }
 }
 
 /// Put a dot beside every character of every stretch marked for them
@@ -3123,6 +3319,9 @@ fn build_block_layout(
             .CreateTextLayout(&utf16, &format, max_width, max_height)?
     };
     apply_typography(&layout, typography, runs, utf16.len() as u32)?;
+    // 要件 7.8: 長い読みは親文字の字間を広げて収める。**測るのと同じ組みになる**ように、
+    // ここで（レイアウトを作るところで）済ませる——描くときだけ広げたら、字と読みがずれる。
+    apply_ruby_fit(&layout, text, runs, typography)?;
     apply_marker_boxes(&layout, typography, runs, mode, line_box)?;
     Ok(layout)
 }
@@ -7772,7 +7971,9 @@ mod tests {
                 ruby_scale: percent,
                 ..Typography::new(22.0)
             };
-            let (preview, styles) = preview_of("｜漢字《かんじ》\n");
+            // **段落の2行目で測る。**先頭の行の読みは、帯がブロックの外（＝タイルの外）へ
+            // 出るぶんだけ切れる——大きさの届き方を見るここでは、その切れ方を測りたくない。
+            let (preview, styles) = preview_of("本文\n｜漢字《かんじ》\n");
             let styled = StyledText::marked(&preview.text, &styles, preview.marks())
                 .with_markers(preview.markers());
             let mut engine = engine_set(WritingMode::Vertical, styled, &spec);
@@ -8752,6 +8953,56 @@ mod tests {
             engine.block_count(),
             error / boundaries
         );
+    }
+
+    /// 追加要件 2026-09-16: 長い読みは前後の仮名へ1字までかけ、余れば親文字を広げる。
+    #[test]
+    fn a_long_reading_hangs_over_kana_then_spreads_its_base() {
+        let (cell, ruby) = (30.0, 15.0);
+        // 「彼《かのじょ》」：親1字30px、読み4字60px。余り30pxは前後の仮名へ15pxずつ。
+        let fit = ruby_fit(1.0, 4.0, cell, ruby, cell, cell);
+        assert_eq!(
+            fit,
+            RubyFit {
+                lead: 15.0,
+                trail: 15.0,
+                spread: 0.0
+            }
+        );
+        // 前が漢字なら、かけられるのは後ろだけ。1字ぶん（30px）までなので、残りは親文字が広がる。
+        let fit = ruby_fit(1.0, 4.0, cell, ruby, 0.0, cell);
+        assert_eq!(
+            fit,
+            RubyFit {
+                lead: 0.0,
+                trail: 30.0,
+                spread: 0.0
+            }
+        );
+        // 読みが長ければ、かけたうえで親文字1字ごとに広がる。
+        let fit = ruby_fit(2.0, 8.0, cell, ruby, cell, cell);
+        assert_eq!(fit.lead, cell);
+        assert_eq!(fit.trail, cell);
+        assert_eq!(fit.spread, 0.0);
+        let fit = ruby_fit(2.0, 10.0, cell, ruby, cell, cell);
+        assert_eq!((fit.lead, fit.trail, fit.spread), (cell, cell, 15.0));
+        // 読みが短ければ何もしない。
+        assert_eq!(
+            ruby_fit(2.0, 2.0, cell, ruby, cell, cell),
+            RubyFit {
+                lead: 0.0,
+                trail: 0.0,
+                spread: 0.0
+            }
+        );
+        // かける先は仮名だけ。
+        assert!(
+            ruby_may_hang(Some('の')) && ruby_may_hang(Some('ン')) && ruby_may_hang(Some('ー'))
+        );
+        assert!(!ruby_may_hang(Some('漢')) && !ruby_may_hang(Some('、')) && !ruby_may_hang(None));
+        // 半角は半マス。
+        assert_eq!(cells_of("かのじょ"), 4.0);
+        assert_eq!(cells_of("ABC"), 1.5);
     }
 
     /// A heading takes its size from the range it is set over, so the line it

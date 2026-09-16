@@ -473,3 +473,75 @@ fn typography_settings_roundtrip_and_render() {
     assert_eq!(&*document.text.borrow(), whitespace_source);
     assert_eq!(document.history.borrow().done.len(), history);
 }
+
+/// 追加要件 2026-09-16（書き手「組版の表現拡大」）: **長い読みは前後の仮名へかけ、かけられない
+/// ときは親文字を広げる。**前者では本文の送りが変わらず、後者では親文字のぶんだけ行が伸びる。
+#[test]
+fn a_long_reading_hangs_over_kana_and_widens_only_when_it_cannot() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    // 行末のカーソルがどこに立つか＝その行がどこまで伸びたか。
+    let line_reach = |source: &str, vertical: bool| {
+        id.update_screen(&window, |screen| {
+            screen.width = 1050.0;
+            screen.height = 640.0;
+            screen.shown_width = 1050.0;
+            screen.shown_height = 540.0;
+            screen.preview = true;
+            screen.vertical = false;
+        });
+        let document =
+            OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+        let states = PaneStates::new(&document);
+        set_pane_direction(&window, &cache, id, vertical);
+        {
+            let state = states.of(id);
+            let mut state = state.borrow_mut();
+            // カーソルは次の行に置く：ルビの行は編集中にせず、整形したまま測る。
+            state.caret_source_byte = Some(source.len());
+            state.active_line_start = Some(source.len());
+        }
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+        let mut borrowed = cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        let shown = pane.view.preview_slot.preview.text.clone();
+        let at = shown.find('\n').unwrap_or(shown.len());
+        let utf16 = shown[..at].encode_utf16().count() as u32;
+        let caret = pane.graphics.engine.caret_geometry(utf16).unwrap();
+        if vertical { caret.y } else { caret.x }
+    };
+    for vertical in [false, true] {
+        let plain = line_reach("漢字漢字\n\n", vertical);
+        // 前後が漢字なので、どちらへもかけられない：親文字（字）が広がる。
+        let spread = line_reach("漢｜字《ながいよみです》漢字\n\n", vertical);
+        assert!(
+            spread > plain + 20.0,
+            "vertical={vertical}: 親文字が広がっていない（{plain} → {spread}）"
+        );
+        // 前後が仮名なら、かけて済む：本文の送りは変わらない。
+        let kana = line_reach("のののの\n\n", vertical);
+        let hung = line_reach("の｜の《ながいよみ》のの\n\n", vertical);
+        assert!(
+            (hung - kana).abs() < 1.0,
+            "vertical={vertical}: 仮名へかけずに広げている（{kana} → {hung}）"
+        );
+    }
+}
