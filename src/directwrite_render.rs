@@ -357,10 +357,12 @@ struct Graphics {
     /// Keyed by size *and* mode: the two modes need different reading and flow
     /// directions set on the format, and this cache is shared by every engine on
     /// the thread.
-    /// Keyed by the three things a format itself carries: the body size, the
-    /// line spacing and the family (要件 9). Everything else typography asks
+    /// Keyed by the things a format itself carries: the body size, the line
+    /// spacing, the family (要件 9) and the room the ruby band needs (要件 7.8)
+    /// ——それも行送りを決めるからで、鍵から漏れていたときは読み方を切っても行間が
+    /// 戻らなかった（書き手の報告 2026-09-16）。Everything else typography asks
     /// for is set per range on the layout, because it varies within a block.
-    formats: HashMap<(u32, u32, WritingMode, String), IDWriteTextFormat>,
+    formats: HashMap<(u32, u32, WritingMode, String, u32), IDWriteTextFormat>,
     /// The line numbers' format (要件 9、2026-09-07追加), keyed by size and
     /// family. **Its own map**: it is set to the trailing edge of its box, and
     /// an alignment set on a format shared with the body would move the body.
@@ -666,7 +668,22 @@ impl Graphics {
         // 要件 9: the family is part of what makes two formats different, and
         // the writer can change it while the editor is running.
         let family = typography.body_family().to_owned();
-        let key = (font_size.to_bits(), line_spacing.to_bits(), mode, family);
+        // 要件 7.8（2026-09-16、書き手の報告：「ルビOFFでも行間はかわりませんね」）:
+        // **帯のぶんの空きも書式を別物にする。**鍵に入れていなかったので、読み方を切っても
+        // 空きを持ったままの書式が使い回され、行間が戻らなかった。大きさも入る——ルビを
+        // 大きくすれば要る空きも変わる。
+        let room = if typography.ruby_room {
+            typography.ruby_scale.max(0.0)
+        } else {
+            0.0
+        };
+        let key = (
+            font_size.to_bits(),
+            line_spacing.to_bits(),
+            mode,
+            family,
+            room.to_bits(),
+        );
         if let Some(format) = self.formats.get(&key) {
             return Ok(format.clone());
         }
@@ -9056,6 +9073,38 @@ mod tests {
             engine.block_count(),
             error / boundaries
         );
+    }
+
+    /// 要件 7.8（2026-09-16、書き手の報告：「ルビOFFでも行間はかわりませんね」）:
+    /// **読み方を切れば、帯のぶんの空きも返る。**書式の使い回しの鍵に空きが入っていなかったので、
+    /// 切っても広いままの書式が返ってきていた。
+    #[test]
+    fn turning_the_reading_off_gives_the_line_room_back() {
+        let text = "本文の行\n本文の行\n本文の行\n";
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            let room = Typography {
+                ruby_room: true,
+                ..plain()
+            };
+            let tight = Typography {
+                ruby_room: false,
+                ..plain()
+            };
+            let with = engine_set(mode, StyledText::plain(text), &room);
+            let without = engine_set(mode, StyledText::plain(text), &tight);
+            let (wide, narrow) = (with.total_flow_size(), without.total_flow_size());
+            assert!(
+                wide > narrow,
+                "{mode:?}: 帯のぶんが空いていない（{narrow} → {wide}）"
+            );
+            // 空くのはルビの厚みぶんまで。3行ぶんなので、そのくらいの差になる。
+            let band = plain().font_size * plain().ruby_scale;
+            let room = (wide - narrow) as f32 / 3.0;
+            assert!(
+                room <= band + 1.0,
+                "{mode:?}: 1行あたり{room}px空いた（ルビの厚みは{band}px）"
+            );
+        }
     }
 
     /// 追加要件 2026-09-16: 長い読みは前後の仮名へ1字までかけ、余れば親文字を広げる。
