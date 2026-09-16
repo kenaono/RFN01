@@ -1500,9 +1500,9 @@ pub fn wire_saving(window: &AppWindow, live: &Live) {
 
     let weak = window.as_weak();
     let print_live = live.clone();
-    window.on_print_trim_stepped(move |head, at| {
+    window.on_print_trim_written(move |head, at, said| {
         if let Some(window) = weak.upgrade() {
-            crate::print_view::step_trim(&window, &print_live, head, at);
+            crate::print_view::write_trim(&window, &print_live, head, at, &said);
         }
     });
 

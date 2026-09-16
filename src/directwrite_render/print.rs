@@ -494,63 +494,39 @@ fn draw_page_onto(
     Ok(())
 }
 
-/// 天地の余白に入れるもの（要件 7.10、書き手の求め 2026-09-17）。
+/// 天地の余白に入れる字（要件 7.10、書き手の求め 2026-09-17）。
 ///
-/// **多機能である必要はない。**紙に添えたいのは、どの原稿の、いつの、何枚目か
-/// ——その3つで足りる。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Mark {
-    #[default]
-    Nothing,
-    /// ファイルの名前。
-    Name,
-    /// 刷った日。
-    Date,
-    /// 「3 / 17」。**総数も出す**——あと何枚かが分からないと、紙の束を見失う。
-    Page,
-}
-
-impl Mark {
-    /// 設定に書く数。
-    pub fn number(self) -> i32 {
-        match self {
-            Self::Nothing => 0,
-            Self::Name => 1,
-            Self::Date => 2,
-            Self::Page => 3,
-        }
-    }
-
-    pub fn from_number(number: i32) -> Self {
-        match number {
-            1 => Self::Name,
-            2 => Self::Date,
-            3 => Self::Page,
-            _ => Self::Nothing,
-        }
-    }
-
-    /// 押すたびに次のものへ（なし→名前→日付→ページ→なし）。
-    pub fn next(self) -> Self {
-        Self::from_number((self.number() + 1) % 4)
-    }
-}
-
-/// 天と地、それぞれの左・中・右。**6つの場所**で、どれに何を入れるかだけを持つ。
+/// **書き手が打った字がそのまま出る。**決まったものを選ばせるのではなく、
+/// 「第一稿　{ページ} / {総数}」のように**書ける**——押して選ぶ形では、1か所に
+/// 1つしか入れられなかった（書き手の指摘）。
+///
+/// 決まった字は中括弧で書き、刷るときに置き換える：
+/// `{ファイル名}`・`{日付}`・`{ページ}`・`{総数}`。
 #[derive(Clone, Debug, Default)]
 pub struct Trim {
-    pub head: [Mark; 3],
-    pub foot: [Mark; 3],
+    /// 天の左・中・右。
+    pub head: [String; 3],
+    /// 地の左・中・右。
+    pub foot: [String; 3],
     /// 名乗る名前（ファイルの名前）。
     pub name: String,
 }
+
+/// 置き換える言葉。**日本語と英語の両方で書ける**——画面がどちらの言葉でも、
+/// 書き手が打ったほうが通る。
+const TOKENS: [(&str, &str); 4] = [
+    ("ファイル名", "name"),
+    ("日付", "date"),
+    ("ページ", "page"),
+    ("総数", "pages"),
+];
 
 impl Trim {
     /// 何も言われていないとき。**地の真ん中にノンブル**——紙の当たり前である。
     pub fn standing() -> Self {
         Self {
-            head: [Mark::Nothing; 3],
-            foot: [Mark::Nothing, Mark::Page, Mark::Nothing],
+            head: [String::new(), String::new(), String::new()],
+            foot: [String::new(), "{ページ} / {総数}".to_owned(), String::new()],
             name: String::new(),
         }
     }
@@ -559,7 +535,24 @@ impl Trim {
         self.head
             .iter()
             .chain(self.foot.iter())
-            .all(|mark| *mark == Mark::Nothing)
+            .all(|said| said.trim().is_empty())
+    }
+
+    /// 決まった字を、その紙の値に置き換える。
+    fn filled(&self, said: &str, page: usize, pages: usize, today: &str) -> String {
+        let mut said = said.to_owned();
+        let values = [
+            self.name.as_str(),
+            today,
+            &(page + 1).to_string(),
+            &pages.to_string(),
+        ];
+        for ((japanese, english), value) in TOKENS.iter().zip(values) {
+            said = said
+                .replace(&format!("{{{japanese}}}"), value)
+                .replace(&format!("{{{english}}}"), value);
+        }
+        said
     }
 }
 
@@ -592,12 +585,6 @@ fn draw_trim(
     };
     let format = graphics.text_format(&spec, WritingMode::Horizontal)?;
     let today = today();
-    let said = |mark: Mark| match mark {
-        Mark::Nothing => String::new(),
-        Mark::Name => trim.name.clone(),
-        Mark::Date => today.clone(),
-        Mark::Page => format!("{} / {pages}", page + 1),
-    };
     let bands = [
         // 天：紙の端と本文の上端のあいだ。
         (&trim.head, paper.margin * 0.2, paper.margin * 0.8),
@@ -615,8 +602,8 @@ fn draw_trim(
     ];
     for (marks, top, bottom) in bands {
         for (at, mark) in marks.iter().enumerate() {
-            let text = said(*mark);
-            if text.is_empty() {
+            let text = trim.filled(mark, page, pages, &today);
+            if text.trim().is_empty() {
                 continue;
             }
             let text: Vec<u16> = text.encode_utf16().collect();
@@ -994,17 +981,46 @@ mod tests {
         );
     }
 
-    /// 要件 7.10: 天地に入れるものは、押すたびに回る（なし→名前→日付→ページ）。
+    /// 要件 7.10: 決まった字は、その紙の値に置き換わる（書き手の求め 2026-09-17）。
     #[test]
-    fn the_marks_go_round_one_press_at_a_time() {
-        assert_eq!(Mark::default(), Mark::Nothing);
-        assert_eq!(Mark::Nothing.next(), Mark::Name);
-        assert_eq!(Mark::Name.next(), Mark::Date);
-        assert_eq!(Mark::Date.next(), Mark::Page);
-        assert_eq!(Mark::Page.next(), Mark::Nothing, "and round again");
-        for mark in [Mark::Nothing, Mark::Name, Mark::Date, Mark::Page] {
-            assert_eq!(Mark::from_number(mark.number()), mark, "written and read");
-        }
+    fn the_standing_words_become_this_sheets_own() {
+        let trim = Trim {
+            head: [String::new(), String::new(), String::new()],
+            foot: [
+                "{ファイル名}".to_owned(),
+                "\u{7b2c}\u{4e00}\u{7a3f}".to_owned(),
+                "{page} / {pages}".to_owned(),
+            ],
+            name: "\u{539f}\u{7a3f}.md".to_owned(),
+        };
+        assert_eq!(
+            trim.filled(&trim.foot[0], 2, 17, "2026-09-17"),
+            "\u{539f}\u{7a3f}.md",
+            "the file's name"
+        );
+        assert_eq!(
+            trim.filled(&trim.foot[1], 2, 17, "2026-09-17"),
+            "\u{7b2c}\u{4e00}\u{7a3f}",
+            "plain words are left alone"
+        );
+        assert_eq!(
+            trim.filled(&trim.foot[2], 2, 17, "2026-09-17"),
+            "3 / 17",
+            "and the sheet's number counts from one, with the total"
+        );
+        assert_eq!(
+            trim.filled("{日付}", 0, 1, "2026-09-17"),
+            "2026-09-17",
+            "the day it was printed"
+        );
+        assert!(
+            Trim::default().empty(),
+            "nothing written is nothing to draw"
+        );
+        assert!(
+            !Trim::standing().empty(),
+            "and the page number is something"
+        );
     }
 
     /// 要件 7.10: **天にも地にも、左・中・右に入る**（書き手の求め 2026-09-17）。
@@ -1048,8 +1064,12 @@ mod tests {
 
         // 天の左にファイル名、天の右に日付、地の右にページ。
         let named = Trim {
-            head: [Mark::Name, Mark::Nothing, Mark::Date],
-            foot: [Mark::Nothing, Mark::Nothing, Mark::Page],
+            head: [
+                "{ファイル名}".to_owned(),
+                String::new(),
+                "{日付}".to_owned(),
+            ],
+            foot: [String::new(), String::new(), "{ページ}".to_owned()],
             name: "\u{539f}\u{7a3f}.md".to_owned(),
         };
         assert!(

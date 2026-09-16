@@ -266,57 +266,59 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         far > close,
         "zooming out must put more sheets on screen: {close} then {far}"
     );
-    assert!(far <= 6, "and no more than six: {far}");
     assert!(
-        window.get_print_columns() > 1,
-        "laid across: {}",
-        window.get_print_columns()
+        far <= 8,
+        "and the smallest size is the one six sheets fit at: {far}"
     );
-    // 拡大しきれば1枚に戻る。
+    // 拡大しきれば元の枚数に戻る（上限は「1枚が場所いっぱいに入る大きさ」）。
     for _ in 0..30 {
         print_view::step_zoom(&window, &live, 1);
     }
     assert_eq!(
         window.get_print_sheets().row_count(),
-        1,
-        "and zooming right in leaves one"
+        close,
+        "and zooming right in leaves what it started with"
     );
 
-    // **天地に入れるものは押すたびに回る**（書き手の求め 2026-09-17）。既定は
-    // 地の真ん中にノンブルだけ。
+    // **天地には字を書く**（書き手の求め 2026-09-17）。決まったものを選ばせるので
+    // はなく、「第一稿　3 / 17」のように並べられる。既定は地の真ん中にノンブル。
     assert_eq!(
-        window.get_print_foot().row_data(1),
-        Some(3),
+        window
+            .get_print_foot()
+            .row_data(1)
+            .unwrap_or_default()
+            .to_string(),
+        "{\u{30da}\u{30fc}\u{30b8}} / {\u{7dcf}\u{6570}}",
         "the page number stands in the middle of the foot"
     );
     assert_eq!(
-        window.get_print_head().row_data(0),
-        Some(0),
+        window
+            .get_print_head()
+            .row_data(0)
+            .unwrap_or_default()
+            .to_string(),
+        "",
         "and nothing at the head"
     );
-    print_view::step_trim(&window, &live, true, 0);
+    let bare = shot(&surface, width, height);
+    let wanted = "\u{7b2c}\u{4e00}\u{7a3f}\u{3000}{\u{30d5}\u{30a1}\u{30a4}\u{30eb}\u{540d}}";
+    print_view::write_trim(&window, &live, true, 0, wanted);
     assert_eq!(
-        window.get_print_head().row_data(0),
-        Some(1),
-        "one press puts the file's name at the left of the head"
+        window
+            .get_print_head()
+            .row_data(0)
+            .unwrap_or_default()
+            .to_string(),
+        wanted,
+        "what was written is what is kept"
     );
-    print_view::step_trim(&window, &live, true, 0);
-    assert_eq!(
-        window.get_print_head().row_data(0),
-        Some(2),
-        "then the date"
-    );
-    print_view::step_trim(&window, &live, true, 0);
-    assert_eq!(
-        window.get_print_head().row_data(0),
-        Some(3),
-        "then the page"
-    );
-    print_view::step_trim(&window, &live, true, 0);
-    assert_eq!(
-        window.get_print_head().row_data(0),
-        Some(0),
-        "and round to nothing again"
+    let with_head = shot(&surface, width, height);
+    print_view::write_trim(&window, &live, true, 0, "");
+    let without = shot(&surface, width, height);
+    assert!(with_head != without, "what is written reaches the paper");
+    assert!(
+        without == bare,
+        "and taking it away puts the sheet back as it was"
     );
 
     // そして**紙に出る本文そのものが変わる**：`**`も`#`も字としてそこにある。

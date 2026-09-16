@@ -11493,11 +11493,11 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     ));
     values.push((
         PRINT_HEAD_SETTING.to_owned(),
-        print_view::said_trim(&window.get_print_head(), "0,0,0"),
+        print_view::said_trim(&window.get_print_head(), &print_view::standing_trim().0),
     ));
     values.push((
         PRINT_FOOT_SETTING.to_owned(),
-        print_view::said_trim(&window.get_print_foot(), "0,3,0"),
+        print_view::said_trim(&window.get_print_foot(), &print_view::standing_trim().1),
     ));
     values.push((
         WALL_FIT_SETTING.to_owned(),
@@ -11681,12 +11681,12 @@ fn apply_settings(
             let head = if written == PRINT_HEAD_SETTING {
                 value.to_owned()
             } else {
-                print_view::said_trim(&window.get_print_head(), "0,0,0")
+                print_view::said_trim(&window.get_print_head(), &print_view::standing_trim().0)
             };
             let foot = if written == PRINT_FOOT_SETTING {
                 value.to_owned()
             } else {
-                print_view::said_trim(&window.get_print_foot(), "0,3,0")
+                print_view::said_trim(&window.get_print_foot(), &print_view::standing_trim().1)
             };
             print_view::hold_trim(window, &head, &foot);
             continue;

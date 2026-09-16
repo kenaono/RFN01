@@ -10,9 +10,9 @@
 //! 続いた1枚のまま、何も変わらない。
 use std::rc::Rc;
 
-use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
-use crate::directwrite_render::print::{self, Destination, Mark, Paper, Printer, Trim};
+use crate::directwrite_render::print::{self, Destination, Paper, Printer, Trim};
 use crate::directwrite_render::{LineFit, TextEngine, WritingMode};
 use crate::document::{self, PreviewDocument};
 use crate::open_document::OpenDocument;
@@ -126,14 +126,12 @@ pub fn close(window: &AppWindow, live: &Live) {
 /// 大きく描いても、画素を捨てるだけである。
 fn draw(window: &AppWindow, live: &Live) {
     let at = window.get_print_at().max(0) as usize;
-    let (columns, rows, sheet_width) = grid(window, live);
+    let (count, sheet_width) = grid(window, live);
     let mut held = live.preview.borrow_mut();
     let Some(preview) = held.as_mut() else {
         return;
     };
-    let count = (columns * rows)
-        .min(MOST_SHEETS)
-        .min(preview.pages - at.min(preview.pages));
+    let count = count.min(preview.pages - at.min(preview.pages));
     // 紙1枚を何倍の細かさで描くか。映る大きさの1.5倍まで——拡大したときに粗く
     // 見えない程度で、縮めたときは無駄に描かない。
     let scale = (sheet_width / preview.paper.width.max(1.0) * 1.5).clamp(0.4, 2.0);
@@ -157,34 +155,37 @@ fn draw(window: &AppWindow, live: &Live) {
             }
         }
     }
-    window.set_print_columns(columns.max(1) as i32);
     window.set_print_sheet_width(sheet_width);
     window.set_print_sheets(ModelRc::new(VecModel::from(sheets)));
 }
 
-/// 一度に並べる紙の上限。**6枚**（書き手の求め 2026-09-17）——それ以上は、紙の姿を
-/// 見るには小さすぎる。
-const MOST_SHEETS: usize = 6;
+/// 拡大をどこまで縮められるかの目安。**この枚数が並ぶ大きさが下限**（書き手の求め
+/// 2026-09-17）——枚数で頭打ちにすると、入るのに出さない紙が出て並びが欠けて見える。
+/// 出す枚数は**大きさに合わせる**ので、ここは下限を決める数でしかない。
+const SHEETS_AT_SMALLEST: f32 = 6.0;
 
-/// いくつ並ぶか（横の数、縦の数）と、紙1枚の幅。
+/// いくつ並ぶかと、紙1枚の幅。
+///
+/// **並ぶ向きは本文の流れと同じ**（書き手の指摘 2026-09-17）——縦書きは右から左へ
+/// 横に並び、横書きは上から下へ縦に並ぶ。原稿が続いていく向きに紙も続く。
 ///
 /// **拡大100%は「1枚が場所いっぱいに入る大きさ」**で、縮めればその割合で小さくなり、
 /// 空いたぶんに次の紙が並ぶ。
-fn grid(window: &AppWindow, live: &Live) -> (usize, usize, f32) {
+fn grid(window: &AppWindow, live: &Live) -> (usize, f32) {
     let aspect = window.get_print_aspect().max(0.01);
     let (room_wide, room_tall) = (
         window.get_print_room_wide().max(1.0),
         window.get_print_room_tall().max(1.0),
     );
-    let zoom = window.get_print_zoom().clamp(ZOOM_LEAST, ZOOM_MOST) as f32 / 100.0;
-    // 1枚だけを置いたときの大きさ。そこから縮める。
-    let one = (room_wide - 48.0)
-        .min((room_tall - 48.0) * aspect)
-        .max(24.0);
+    let zoom = window.get_print_zoom().clamp(least_zoom(window), ZOOM_MOST) as f32 / 100.0;
+    let one = one_sheet(room_wide, room_tall, aspect);
     let wide = (one * zoom).max(24.0);
     let tall = wide / aspect;
-    let across = ((room_wide + 16.0) / (wide + 16.0)).floor().max(1.0) as usize;
-    let down = ((room_tall + 16.0) / (tall + 16.0)).floor().max(1.0) as usize;
+    let along = if window.get_print_vertical() {
+        (room_wide + GAP) / (wide + GAP)
+    } else {
+        (room_tall + GAP) / (tall + GAP)
+    };
     let pages = live
         .preview
         .borrow()
@@ -192,19 +193,44 @@ fn grid(window: &AppWindow, live: &Live) -> (usize, usize, f32) {
         .map_or(1, |preview| preview.pages);
     let at = window.get_print_at().max(0) as usize;
     let left = pages.saturating_sub(at).max(1);
-    // 残りの紙より多くは並べない。
-    let across = across.min(MOST_SHEETS).min(left);
-    let down = down.min(MOST_SHEETS.div_ceil(across.max(1))).max(1);
-    (across, down, wide)
+    ((along.floor().max(1.0) as usize).min(left), wide)
 }
 
-/// 拡大の下限と上限。**縮めるほうへ広く**——並べて見るためのものだからである。
-const ZOOM_LEAST: i32 = 30;
-const ZOOM_MOST: i32 = 200;
+/// 紙と紙のあいだ、そして紙と縁のあいだ。
+const GAP: f32 = 16.0;
+
+/// 1枚だけを置いたときの紙の幅。
+fn one_sheet(room_wide: f32, room_tall: f32, aspect: f32) -> f32 {
+    (room_wide - 48.0)
+        .min((room_tall - 48.0) * aspect)
+        .max(24.0)
+}
+
+/// これ以上は縮められない百分率。**6枚が並ぶ大きさ**で止める。
+fn least_zoom(window: &AppWindow) -> i32 {
+    let aspect = window.get_print_aspect().max(0.01);
+    let (room_wide, room_tall) = (
+        window.get_print_room_wide().max(1.0),
+        window.get_print_room_tall().max(1.0),
+    );
+    let one = one_sheet(room_wide, room_tall, aspect);
+    // 6枚ぶんが場所に収まる紙の幅。
+    let wide = if window.get_print_vertical() {
+        (room_wide + GAP) / SHEETS_AT_SMALLEST - GAP
+    } else {
+        ((room_tall + GAP) / SHEETS_AT_SMALLEST - GAP) * aspect
+    };
+    ((wide / one * 100.0).round() as i32).clamp(10, ZOOM_MOST)
+}
+
+/// 拡大の上限。**1枚が場所いっぱいに入るところまで**——それより大きくしても、
+/// はみ出したところへ行く手立てが無い（紙を動かす仕組みは持たない）。縮めるのは
+/// 並べて見るためで、そちらは[`SHEETS_AT_SMALLEST`]まで開けてある。
+const ZOOM_MOST: i32 = 100;
 
 /// Ctrl+ホイールの拡大。
 pub fn step_zoom(window: &AppWindow, live: &Live, by: i32) {
-    let zoom = (window.get_print_zoom() + by * 10).clamp(ZOOM_LEAST, ZOOM_MOST);
+    let zoom = (window.get_print_zoom() + by * 10).clamp(least_zoom(window), ZOOM_MOST);
     if zoom == window.get_print_zoom() {
         return;
     }
@@ -639,15 +665,11 @@ fn mode_of(window: &AppWindow) -> WritingMode {
     }
 }
 
-/// 天地の余白に何を入れるか。窓が持っている3つずつを読み、名乗る名前はいまの文書。
+/// 天地の余白に何を入れるか。窓が持っている6つの欄を読み、名乗る名前はいまの文書。
 fn trim_of(window: &AppWindow, name: &str) -> Trim {
     ensure_trim(window);
-    let read = |marks: &ModelRc<i32>| -> [Mark; 3] {
-        let mut read = [Mark::Nothing; 3];
-        for (at, slot) in read.iter_mut().enumerate() {
-            *slot = Mark::from_number(marks.row_data(at).unwrap_or(0));
-        }
-        read
+    let read = |marks: &ModelRc<SharedString>| -> [String; 3] {
+        std::array::from_fn(|at| marks.row_data(at).unwrap_or_default().to_string())
     };
     Trim {
         head: read(&window.get_print_head()),
@@ -656,11 +678,28 @@ fn trim_of(window: &AppWindow, name: &str) -> Trim {
     }
 }
 
-/// 天地の6つの場所のひとつを、次のものへ（なし→名前→日付→ページ→なし）。
-///
-/// **押すたびに回る**（書き手の求め 2026-09-17）。入れられるものは3つで足りるので、
-/// 選ぶ窓を開くより押して回すほうが早い。
-pub fn step_trim(window: &AppWindow, live: &Live, head: bool, at: i32) {
+/// 窓が6つの欄を持っていることを確かめる。**空なら既定を置く**——設定ファイルに
+/// 何も書かれていない最初の一度だけ通る。既定は**地の真ん中にノンブル**である。
+fn ensure_trim(window: &AppWindow) {
+    let standing = Trim::standing();
+    if window.get_print_head().row_count() != 3 {
+        window.set_print_head(said_model(&standing.head));
+    }
+    if window.get_print_foot().row_count() != 3 {
+        window.set_print_foot(said_model(&standing.foot));
+    }
+}
+
+fn said_model(said: &[String; 3]) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        said.iter()
+            .map(|one| SharedString::from(one.as_str()))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// 天地の6つの欄のひとつを書き換える（編集の窓から）。
+pub fn write_trim(window: &AppWindow, live: &Live, head: bool, at: i32, said: &str) {
     ensure_trim(window);
     let marks = if head {
         window.get_print_head()
@@ -668,8 +707,10 @@ pub fn step_trim(window: &AppWindow, live: &Live, head: bool, at: i32) {
         window.get_print_foot()
     };
     let at = at.clamp(0, 2) as usize;
-    let turned = Mark::from_number(marks.row_data(at).unwrap_or(0)).next();
-    marks.set_row_data(at, turned.number());
+    if marks.row_data(at).unwrap_or_default() == said {
+        return;
+    }
+    marks.set_row_data(at, said.into());
     let title = live
         .preview
         .borrow()
@@ -682,40 +723,37 @@ pub fn step_trim(window: &AppWindow, live: &Live, head: bool, at: i32) {
     draw(window, live);
 }
 
-/// 窓が3つずつ持っていることを確かめる。**空なら既定を置く**——設定ファイルに
-/// 何も書かれていない最初の一度だけ通る。既定は**地の真ん中にノンブル**である。
-fn ensure_trim(window: &AppWindow) {
-    if window.get_print_head().row_count() != 3 {
-        window.set_print_head(ModelRc::new(VecModel::from(vec![0, 0, 0])));
-    }
-    if window.get_print_foot().row_count() != 3 {
-        window.set_print_foot(ModelRc::new(VecModel::from(vec![0, 3, 0])));
-    }
-}
-
-/// 天地に入れるものを、設定の文字列（「0,3,0」）から窓へ。
+/// 天地に入れる字を、設定の1行から窓へ。**欄の区切りはタブ**——書き手が打つ字に
+/// タブは無い（欄は1行ぶんである）。
 pub fn hold_trim(window: &AppWindow, head: &str, foot: &str) {
-    let read = |said: &str| -> Vec<i32> {
-        let mut marks = vec![0; 3];
-        for (at, part) in said.split(',').take(3).enumerate() {
-            marks[at] = part.trim().parse().unwrap_or(0).clamp(0, 3);
-        }
-        marks
+    let read = |said: &str| -> ModelRc<SharedString> {
+        let mut parts = said.split('\t');
+        ModelRc::new(VecModel::from(
+            (0..3)
+                .map(|_| SharedString::from(parts.next().unwrap_or("")))
+                .collect::<Vec<_>>(),
+        ))
     };
-    window.set_print_head(ModelRc::new(VecModel::from(read(head))));
-    window.set_print_foot(ModelRc::new(VecModel::from(read(foot))));
+    window.set_print_head(read(head));
+    window.set_print_foot(read(foot));
 }
 
-/// そして設定へ戻すときの文字列。
+/// そして設定へ戻すときの1行。
 ///
-/// **まだ置いていなければ既定を書く**——空の一覧をそのまま書き出すと、次に読んだ
+/// **まだ置いていなければ既定を書く**——空の欄をそのまま書き出すと、次に読んだ
 /// ときに「どこにも何も入れない」になり、ノンブルが消える。
-pub fn said_trim(marks: &ModelRc<i32>, standing: &str) -> String {
+pub fn said_trim(marks: &ModelRc<SharedString>, standing: &[String; 3]) -> String {
     if marks.row_count() != 3 {
-        return standing.to_owned();
+        return standing.join("\t");
     }
     (0..3)
-        .map(|at| marks.row_data(at).unwrap_or(0).to_string())
+        .map(|at| marks.row_data(at).unwrap_or_default().to_string())
         .collect::<Vec<_>>()
-        .join(",")
+        .join("\t")
+}
+
+/// 既定の天と地（設定を書き出すときの控え）。
+pub fn standing_trim() -> ([String; 3], [String; 3]) {
+    let standing = Trim::standing();
+    (standing.head, standing.foot)
 }

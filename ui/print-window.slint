@@ -4,31 +4,23 @@
 // 刷ってから知ることになる。ここに映る1枚と、プリンタへ送る1枚は、同じ処理が描いた
 // 同じ絵である（`directwrite_render::print::draw_page_onto`）。
 import { Tok } from "tokens.slint";
-import { Role, TextButton } from "controls.slint";
+import { Field, Role, TextButton } from "controls.slint";
 
 export component PrintView inherits Rectangle {
-    /// 天地に入れるもの（0なし／1ファイル名／2日付／3ページ）を、押せる字にする。
-    pure function said(mark: int) -> string {
-        return mark == 1 ? @tr("Name")
-            : mark == 2 ? @tr("Date")
-            : mark == 3 ? @tr("Page")
-            : "·";
-    }
     background: Tok.chrome-sunken;
     in property <string> title;
     /// いま映っている紙たち。**何枚出すかは拡大が決める**（書き手の求め
     /// 2026-09-17）——縮めれば並ぶ枚数が増える。縦書きは右から読むので、行の中は
     /// 右から左へ置く。
     in property <[image]> sheets;
-    /// 1行に何枚並ぶか、そして紙1枚の幅。どちらも組む側（Rust）が決める。
-    in property <int> columns: 1;
+    /// 紙1枚の幅。**組む側（Rust）が決める**——並ぶ枚数も向きもここから出る。
     in property <length> sheet-width: 100px;
     in property <bool> vertical;
     /// 拡大の百分率。Ctrl+ホイールで動く。
     in property <int> zoom: 100;
-    /// 天と地に入れるもの、左・中・右。
-    in property <[int]> head;
-    in property <[int]> foot;
+    /// 天と地に入れる字、左・中・右。
+    in property <[string]> head;
+    in property <[string]> foot;
     /// 紙の縦横比（幅÷高さ）。**絵から測らない**——絵の大きさから紙の大きさを
     /// 決め、紙の大きさが絵の大きさを決める、という輪になる。
     in property <float> aspect: 0.707;
@@ -53,14 +45,24 @@ export component PrintView inherits Rectangle {
     callback size-from-screen();
     /// 用紙の大きさと向きを、Windowsのプリンタ設定画面で決める。
     callback paper-pressed();
+    /// 天地の字を書く窓が開いているか。
+    in-out property <bool> editing-trim: false;
+    /// いま触っている欄（天の左が0、地の右が5）。−1はどれでもない。
+    in-out property <int> slot: -1;
+    /// その欄にいま入っている字。
+    pure function said-at(slot: int) -> string {
+        return slot < 0 ? ""
+            : slot < 3 ? root.head[slot]
+            : root.foot[slot - 3];
+    }
     /// いま並んでいる枚数。頭の帯と繰り幅がこれに従う。
     out property <int> shown: max(1, root.sheets.length);
     /// 紙を置く場所の広さが変わったことを知らせる（拡大と枚数はそこから決まる）。
     callback room-changed(length, length);
     /// Ctrl+ホイールの拡大。
     callback zoomed(int);
-    /// 天（真）か地（偽）の、左0・中1・右2を次のものへ。
-    callback trim-stepped(bool, int);
+    /// 天（真）か地（偽）の、左0・中1・右2に、この字を入れる。
+    callback trim-written(bool, int, string);
     callback print-requested();
     callback dismissed();
 
@@ -167,19 +169,21 @@ export component PrintView inherits Rectangle {
             init => { root.room-changed(self.width, self.height); }
 
             property <length> sheet-height: root.sheet-width / max(0.01, root.aspect);
-            property <int> rows: ceil(root.shown / max(1, root.columns));
 
             for sheet[index] in root.sheets: Rectangle {
-                // 行の中の場所。**縦書きは右から左**——読む順に並べる。
-                property <int> column: mod(index, max(1, root.columns));
-                property <int> down: floor(index / max(1, root.columns));
+                // **並ぶ向きは本文の流れと同じ**（書き手の指摘 2026-09-17）
+                // ——縦書きは右から左へ横に、横書きは上から下へ縦に。
                 property <int> place: root.vertical
-                    ? max(0, root.columns - 1) - self.column
-                    : self.column;
-                x: (parent.width - (root.sheet-width + 16px) * root.columns + 16px) / 2
-                    + (root.sheet-width + 16px) * self.place;
-                y: (parent.height - (parent.sheet-height + 16px) * parent.rows + 16px) / 2
-                    + (parent.sheet-height + 16px) * self.down;
+                    ? max(0, root.shown - 1) - index
+                    : index;
+                x: root.vertical
+                    ? (parent.width - (root.sheet-width + 16px) * root.shown + 16px) / 2
+                        + (root.sheet-width + 16px) * self.place
+                    : (parent.width - root.sheet-width) / 2;
+                y: root.vertical
+                    ? (parent.height - parent.sheet-height) / 2
+                    : (parent.height - (parent.sheet-height + 16px) * root.shown + 16px) / 2
+                        + (parent.sheet-height + 16px) * self.place;
                 width: root.sheet-width;
                 height: parent.sheet-height;
                 drop-shadow-blur: 12px;
@@ -232,30 +236,13 @@ export component PrintView inherits Rectangle {
                     clicked => { root.size-stepped(1); }
                 }
                 Rectangle { width: 8px; }
-                // **天地の余白に入れるもの**（書き手の求め 2026-09-17）。左・中・右
-                // の3つずつを、押すたびに「なし→名前→日付→ページ」と回す——3つし
-                // か入れられないので、選ぶ窓を開くより押して回すほうが早い。
-                Text {
-                    text: @tr("Head");
-                    color: Tok.ink-muted;
-                    font-size: 13px;
-                    vertical-alignment: center;
-                }
-                for mark[at] in root.head: TextButton {
-                    title: root.said(mark);
+                // **天地の余白に入れる字**（書き手の求め 2026-09-17）。決まった
+                // ものを選ばせるのではなく、書ける窓を開く——1か所に1つしか
+                // 入れられないのでは、「第一稿　3 / 17」が書けない。
+                TextButton {
+                    title: @tr("Head and Foot…");
                     enabled: !root.working;
-                    clicked => { root.trim-stepped(true, at); }
-                }
-                Text {
-                    text: @tr("Foot");
-                    color: Tok.ink-muted;
-                    font-size: 13px;
-                    vertical-alignment: center;
-                }
-                for mark[at] in root.foot: TextButton {
-                    title: root.said(mark);
-                    enabled: !root.working;
-                    clicked => { root.trim-stepped(false, at); }
+                    clicked => { root.editing-trim = true; }
                 }
                 Rectangle { width: 8px; }
                 // **用紙の大きさと向きはWindowsが持っている**（書き手の問い
@@ -297,6 +284,92 @@ export component PrintView inherits Rectangle {
                     font-size: 13px;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+
+    // 天地の字を書く窓（書き手の求め 2026-09-17）。**6つの欄に自由に書く**ので、
+    // 「第一稿　3 / 17」のように並べられる。決まった字は押して差し込む。
+    if root.editing-trim: Rectangle {
+        background: Tok.scrim;
+        TouchArea { clicked => { root.editing-trim = false; } }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(560px, parent.width - 48px);
+            height: card.preferred-height;
+            background: Tok.chrome;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Tok.rule;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Tok.scrim;
+            TouchArea { }
+            card := VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: @tr("Head and Foot");
+                    color: Tok.ink-strong;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: @tr("Pick a box, then add what you want in it.");
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                }
+                // 差し込める決まった字。**いま触っている欄の末尾へ足す。**
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    for word in [@tr("File name"), @tr("Date"), @tr("Page"), @tr("Total")]:
+                        TextButton {
+                            title: word;
+                            enabled: root.slot >= 0;
+                            clicked => {
+                                root.trim-written(
+                                    root.slot < 3,
+                                    mod(root.slot, 3),
+                                    root.said-at(root.slot) + "{" + word + "}");
+                            }
+                        }
+                }
+                for band[side] in [@tr("Head"), @tr("Foot")]: VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: band;
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        for place[at] in [@tr("Left"), @tr("Centre"), @tr("Right")]:
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: place;
+                                    color: Tok.ink-faint;
+                                    font-size: 11px;
+                                }
+                                field := Field {
+                                    text: side == 0 ? root.head[at] : root.foot[at];
+                                    changed has-focus => {
+                                        if (field.has-focus) { root.slot = side * 3 + at; }
+                                    }
+                                    edited => { root.trim-written(side == 0, at, field.text); }
+                                }
+                            }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    TextButton {
+                        title: @tr("Close");
+                        clicked => { root.editing-trim = false; }
+                    }
                 }
             }
         }

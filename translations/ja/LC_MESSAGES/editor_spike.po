@@ -642,6 +642,30 @@ msgstr "余白"
 msgid "Paper…"
 msgstr "用紙…"
 
+msgid "Right"
+msgstr "右"
+
+msgid "Centre"
+msgstr "中"
+
+msgid "Left"
+msgstr "左"
+
+msgid "Total"
+msgstr "総数"
+
+msgid "File name"
+msgstr "ファイル名"
+
+msgid "Pick a box, then add what you want in it."
+msgstr "欄を選んでから、入れたいものを足してください。"
+
+msgid "Head and Foot"
+msgstr "天地の文字"
+
+msgid "Head and Foot…"
+msgstr "天地の文字…"
+
 msgid "Date"
 msgstr "日付"
 
