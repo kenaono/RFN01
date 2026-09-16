@@ -31,6 +31,8 @@ mod memo_ui_tests;
 mod open_document;
 mod pane_layout;
 mod pictures;
+#[cfg(test)]
+mod print_tests;
 mod pty;
 mod quick_draft;
 #[cfg(test)]

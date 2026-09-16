@@ -332,17 +332,77 @@ struct RenderTargetCache {
     height: u32,
     bitmap: IWICBitmap,
     target: ID2D1RenderTarget,
+    inks: Inks,
+}
+
+/// Every brush one draw needs, made on the target that will use them.
+///
+/// **A brush belongs to the target that made it**, while the colours are
+/// settings that outlive every target (要件 9). So the set is made once per
+/// target and told its colours before each draw — and because the set is made
+/// from a target rather than from the tile cache, **the same drawing goes to
+/// paper**: the printer's surface asks for its own set and nothing else changes
+/// (要件 7.10).
+#[derive(Clone)]
+struct Inks {
     brush: ID2D1SolidColorBrush,
     /// One per heading level (要件 9), for the levels drawn in another colour
-    /// than the body. **Made with the target and told their colour before every
-    /// tile**, because a brush belongs to the target that made it while a
-    /// colour is a setting that outlives any of them.
+    /// than the body.
     heading_brushes: Vec<ID2D1SolidColorBrush>,
     /// 要件 7.9: 単語帳1冊につき1本（2026-09-08）。**`SetDrawingEffect`は筆を
     /// 覚える**ので、1本を色を変えながら使い回すと、最後に置いた色で全部が塗られる。
     word_brushes: Vec<ID2D1SolidColorBrush>,
     /// And the one a comment inside code is drawn in (要件 7.3.2).
     comment_brush: ID2D1SolidColorBrush,
+}
+
+impl Inks {
+    /// A set of brushes on this target. Any colour: each is set to the ink of
+    /// the moment before every draw.
+    fn on(target: &ID2D1RenderTarget) -> Result<Self> {
+        // SAFETY: The target outlives the brushes, which the caller keeps
+        // beside it.
+        unsafe {
+            let brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
+            let mut heading_brushes = Vec::with_capacity(MAX_HEADING_LEVEL);
+            for _ in 0..MAX_HEADING_LEVEL {
+                heading_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
+            }
+            let comment_brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
+            let mut word_brushes = Vec::with_capacity(crate::word_marks::MAX_WORD_GROUPS);
+            for _ in 0..crate::word_marks::MAX_WORD_GROUPS {
+                word_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
+            }
+            Ok(Self {
+                brush,
+                heading_brushes,
+                word_brushes,
+                comment_brush,
+            })
+        }
+    }
+
+    /// Point the brushes at the inks this spec asks for now.
+    fn set(&self, typography: &Typography, words: &crate::word_marks::WordMarks) {
+        // SAFETY: Setting a colour on a live brush; every one of these is owned
+        // by `self`.
+        unsafe {
+            self.brush.SetColor(&colour(typography.ink));
+            for (level, heading_brush) in self.heading_brushes.iter().enumerate() {
+                heading_brush.SetColor(&colour(typography.ink_for(level as u8 + 1)));
+            }
+            self.comment_brush
+                .SetColor(&colour(typography.comment_ink()));
+            // 要件 7.9: 帳ごとの色。使っていない筆はそのままでよい——参照されない。
+            // **色を持たない語群（除外語群、2026-09-08）の筆は触らない**——描く側で
+            // その印ごと飛ばすので、この筆は参照されない。
+            for (at, group) in words.mode.groups.iter().enumerate() {
+                if let (Some(word_brush), Some(ink)) = (self.word_brushes.get(at), group.colour) {
+                    word_brush.SetColor(&colour(ink));
+                }
+            }
+        }
+    }
 }
 
 /// Per-thread DirectWrite, Direct2D and WIC state.
@@ -744,7 +804,7 @@ impl Graphics {
             };
             // SAFETY: The bitmap outlives the render target created from it,
             // both being owned by the cache entry stored below.
-            let (bitmap, target, brush, heading_brushes, comment_brush, word_brushes) = unsafe {
+            let (bitmap, target) = unsafe {
                 let bitmap = self.wic.CreateBitmap(
                     width,
                     height,
@@ -757,37 +817,15 @@ impl Graphics {
                 // Slint as an image and may be scaled, so the subpixel trick is
                 // wrong here anyway; greyscale is both cheaper and more correct.
                 target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-                // Any colour: the brush is set to the ink of the moment before
-                // every tile is drawn, because the ink is a setting now and the
-                // render target outlives a change to it.
-                let brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
-                let mut heading_brushes = Vec::with_capacity(MAX_HEADING_LEVEL);
-                for _ in 0..MAX_HEADING_LEVEL {
-                    heading_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
-                }
-                let comment_brush = target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?;
-                let mut word_brushes = Vec::with_capacity(crate::word_marks::MAX_WORD_GROUPS);
-                for _ in 0..crate::word_marks::MAX_WORD_GROUPS {
-                    word_brushes.push(target.CreateSolidColorBrush(&colour(DEFAULT_INK), None)?);
-                }
-                (
-                    bitmap,
-                    target,
-                    brush,
-                    heading_brushes,
-                    comment_brush,
-                    word_brushes,
-                )
+                (bitmap, target)
             };
+            let inks = Inks::on(&target)?;
             self.target = Some(RenderTargetCache {
                 width,
                 height,
                 bitmap,
                 target,
-                brush,
-                heading_brushes,
-                comment_brush,
-                word_brushes,
+                inks,
             });
         }
         Ok(self.target.as_ref().expect("render target created above"))
@@ -3673,33 +3711,17 @@ fn draw_tile(
     // 要件 9: this sheet's paper. The window paints the page behind the tiles
     // from the same setting, so the two cannot show a seam.
     let paper = colour(typography.paper);
-    let ink = colour(typography.ink);
-    let line_extent = task.line_extent;
-    let margin = task.margin;
     let (surface_width, surface_height) = mode.to_surface(task.surface_size, task.surface_cross);
-    let (target, brush, heading_brushes, comment_brush, word_brushes, bitmap) = {
+    let (target, inks, bitmap) = {
         let cache = graphics.render_target(surface_width, surface_height)?;
         (
             cache.target.clone(),
-            cache.brush.clone(),
-            cache.heading_brushes.clone(),
-            cache.comment_brush.clone(),
-            cache.word_brushes.clone(),
+            cache.inks.clone(),
             cache.bitmap.clone(),
         )
     };
-    // 要件 7.9: この帯の中のどこに、どの帳の色が付くか（2026-09-08）。
-    // **ブロックの本文だけを見る**——タイルの中の位置は全部ブロックから数えて
-    // あるので、文書のどこにあるブロックかを知る必要が無い。
-    let word_marks = if task.words.is_empty() {
-        Vec::new()
-    } else {
-        task.words
-            .marks_in(&task.text, crate::word_marks::MAX_MARKS_PER_BLOCK)
-    };
-
-    // SAFETY: The target, brush and bitmap are kept alive by the cache for the
-    // whole draw, and BeginDraw/EndDraw are paired.
+    // SAFETY: The target and bitmap are kept alive by the cache for the whole
+    // draw, and BeginDraw/EndDraw are paired.
     unsafe {
         target.BeginDraw();
         // 壁紙を敷いているあいだは、紙は面が塗る（`Typography::paper_painted`）。
@@ -3709,25 +3731,76 @@ fn draw_tile(
             D2D1_COLOR_F::default()
         };
         target.Clear(Some(&ground));
-        // The brushes the target keeps, told what the inks are now. Cheaper
-        // than building them per tile, and the settings may have moved since
-        // the target was made (要件 9).
-        brush.SetColor(&ink);
-        for (level, heading_brush) in heading_brushes.iter().enumerate() {
-            let heading_ink = colour(typography.ink_for(level as u8 + 1));
-            heading_brush.SetColor(&heading_ink);
-        }
-        comment_brush.SetColor(&colour(typography.comment_ink()));
-        // 要件 7.9: 帳ごとの色。使っていない筆はそのままでよい——参照されない。
-        // **色を持たない語群（除外語群、2026-09-08）の筆は触らない**——下で
-        // その印ごと飛ばすので、この筆は参照されない。
-        for (at, group) in task.words.mode.groups.iter().enumerate() {
-            if let (Some(word_brush), Some(ink)) = (word_brushes.get(at), group.colour) {
-                word_brush.SetColor(&colour(ink));
-            }
-        }
     }
+    // The brushes the target keeps, told what the inks are now. Cheaper than
+    // building them per tile, and the settings may have moved since the target
+    // was made (要件 9).
+    inks.set(typography, &task.words);
+    draw_block(graphics, &target, &inks, task, cached)?;
+    // SAFETY: Paired with BeginDraw above.
+    unsafe { target.EndDraw(None, None)? };
 
+    let (tile_width, tile_height) = task.pixel_size();
+    let stride = tile_width * 4;
+    let needed = stride as usize * tile_height as usize;
+    let Some(pixels) = into.get_mut(..needed) else {
+        return Err(Error::new(
+            E_FAIL,
+            "the tile buffer is smaller than the tile",
+        ));
+    };
+    // The tile was drawn at the origin of the surface, so only its own pixels
+    // are read back.
+    let rect = WICRect {
+        X: 0,
+        Y: 0,
+        Width: tile_width as i32,
+        Height: tile_height as i32,
+    };
+    // SAFETY: The rectangle lies inside the bitmap and the buffer matches the
+    // requested stride and height.
+    unsafe {
+        let source: IWICBitmapSource = bitmap.cast()?;
+        source.CopyPixels(&rect, stride, pixels)?;
+    }
+    Ok(())
+}
+
+/// Draw one block onto a target that is already between `BeginDraw` and
+/// `EndDraw`, with its brushes already told their colours.
+///
+/// **Everything the writer sees is drawn here**, and nothing in it knows what
+/// the target is made of. That is the point: the screen's tile is a WIC bitmap
+/// and the printer's page is a command list, and **both get the same drawing**
+/// (要件 7.10——組版器を二つ持てば、画面と紙で違う原稿になる). The block sits at
+/// its tile's own offset, so a caller that wants it somewhere else moves the
+/// target's transform rather than the numbers here.
+fn draw_block(
+    graphics: &mut Graphics,
+    target: &ID2D1RenderTarget,
+    inks: &Inks,
+    task: &TileTask,
+    cached: Option<IDWriteTextLayout>,
+) -> Result<()> {
+    let Inks {
+        brush,
+        heading_brushes,
+        word_brushes,
+        comment_brush,
+    } = inks.clone();
+    let mode = task.mode;
+    let typography = &task.typography;
+    let line_extent = task.line_extent;
+    let margin = task.margin;
+    // 要件 7.9: この帯の中のどこに、どの帳の色が付くか（2026-09-08）。
+    // **ブロックの本文だけを見る**——タイルの中の位置は全部ブロックから数えて
+    // あるので、文書のどこにあるブロックかを知る必要が無い。
+    let word_marks = if task.words.is_empty() {
+        Vec::new()
+    } else {
+        task.words
+            .marks_in(&task.text, crate::word_marks::MAX_MARKS_PER_BLOCK)
+    };
     // The block is drawn at its own offset inside the tile, and the margin plus
     // the block's own indent sit on the line axis. All of it swaps with the mode.
     let block_origin = task.block.draw_origin() - task.span.flow_start as f32;
@@ -3971,32 +4044,6 @@ fn draw_tile(
                 &target, &brush, &ruby, &layout, &task.runs, &task.text, origin, mode, typography,
             )?;
         }
-    }
-    // SAFETY: Paired with BeginDraw above.
-    unsafe { target.EndDraw(None, None)? };
-
-    let (tile_width, tile_height) = task.pixel_size();
-    let stride = tile_width * 4;
-    let needed = stride as usize * tile_height as usize;
-    let Some(pixels) = into.get_mut(..needed) else {
-        return Err(Error::new(
-            E_FAIL,
-            "the tile buffer is smaller than the tile",
-        ));
-    };
-    // The tile was drawn at the origin of the surface, so only its own pixels
-    // are read back.
-    let rect = WICRect {
-        X: 0,
-        Y: 0,
-        Width: tile_width as i32,
-        Height: tile_height as i32,
-    };
-    // SAFETY: The rectangle lies inside the bitmap and the buffer matches the
-    // requested stride and height.
-    unsafe {
-        let source: IWICBitmapSource = bitmap.cast()?;
-        source.CopyPixels(&rect, stride, pixels)?;
     }
     Ok(())
 }
@@ -4390,6 +4437,8 @@ pub struct TextEngine {
 }
 
 mod incremental;
+/// 要件 7.10: 紙の形で見る——印刷。
+pub mod print;
 
 /// Everything about the spec that changes a layout, hashed.
 ///
@@ -5379,6 +5428,22 @@ impl TextEngine {
             runs: style_runs(styled, self.mode.stands_digits_upright(&self.typography)),
             lines: line_runs(styled),
         }
+    }
+
+    /// 要件 7.8/7.10: このブロックの中で`［＃改ページ］`が立っている位置
+    /// （ブロックの中のUTF-16）。**紙を切る側が読む**——画面ではこれが破線になり、
+    /// 紙ではここでページが変わる。
+    #[allow(dead_code)] // 読むのは`print`（画面からの入口はまだ無い）。
+    fn page_break_lines(&self, block_index: usize) -> Vec<u32> {
+        if self.plan.blocks[block_index].grid.is_some() {
+            return Vec::new();
+        }
+        self.block_marks(block_index)
+            .lines
+            .iter()
+            .filter(|run| run.ornament == LineOrnament::PageBreak)
+            .map(|run| run.utf16_start)
+            .collect()
     }
 
     /// The rectangles a selection covers inside one table (要件 7.3.2).
@@ -11109,7 +11174,7 @@ pub mod cells {
                 let cache = graphics.render_target(width, height)?;
                 (
                     cache.target.clone(),
-                    cache.brush.clone(),
+                    cache.inks.brush.clone(),
                     cache.bitmap.clone(),
                 )
             };

@@ -60,6 +60,18 @@ windows = { version = "0.62.2", features = [
     # new package is fetched and `--offline` still resolves.
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    # 印刷（要件 7.10）。**画面と同じ描画を紙へ出すため**の口である。Direct2Dの
+    # 印刷は1.1の口（`ID2D1Device`）にあり、それはDXGIのデバイスから作る——だから
+    # D3D11とDXGIがここにある。絵を描くためではなく、**印刷の口を開けるためだけ**
+    # に通る道で、画面の組版は今までどおりWICのビットマップに描く。
+    # `Win32_Storage_Xps_Printing`は、その口が書き込む先（プリンタ、あるいは
+    # 「Microsoft Print to PDF」が吐くファイル）を作るところ。
+    # **どれも既に持っているクレートの機能**なので、新しい package は取りに行かず
+    # `--offline`のまま解決する。
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Storage_Xps_Printing",
 ] }
 # `windows::core` re-exports this, but the `implement` macro expands to absolute
 # `::windows_core::…` paths, which only resolve for a crate named that in this
