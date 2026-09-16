@@ -46,7 +46,7 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     ]));
     reset_settings(&numbers, &palette, &fonts);
     window.set_sheet_stride(SHEET_NUMBERS as i32);
-    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
     window.set_palette(ModelRc::from(palette));
     window.set_sheet_fonts(ModelRc::from(fonts));
     let (width, height) = (1000usize, 740usize);
@@ -172,6 +172,30 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     assert!(
         narrow_pages >= pages,
         "a wider margin needs at least as many sheets: {narrow_pages} against {pages}"
+    );
+
+    // **紙の字体と大きさは紙のもの**（書き手の問い 2026-09-16：「印刷のフォントと
+    // サイズはどこで決めるのですか」）。画面の大きさを変えても紙は変わらない。
+    let paper_note = window.get_print_paper_note().to_string();
+    numbers.set_row_data(SHEET_NUMBERS + Setting::BodySize.row_in_sheet(), 40);
+    numbers.set_row_data(Setting::BodySize.row_in_sheet(), 40);
+    print_view::step_size(&window, &live, 0);
+    assert_eq!(
+        window.get_print_paper_note().to_string(),
+        paper_note,
+        "the screen's size must not reach the paper"
+    );
+    // そして紙の大きさを変えれば、紙は変わる。
+    print_view::step_size(&window, &live, -4);
+    let smaller = window.get_print_paper_note().to_string();
+    assert!(
+        smaller != paper_note,
+        "2pt smaller must change the paper: {paper_note} then {smaller}"
+    );
+    assert_eq!(
+        window.get_print_size(),
+        85,
+        "and the setting holds the size"
     );
 
     print_view::close(&window, &live);

@@ -173,16 +173,7 @@ fn lay_out(
     let styles = document::line_styles_reading(&source, reading);
     let styled =
         StyledText::marked(&preview.text, &styles, preview.marks()).with_markers(preview.markers());
-    let spec = for_paper(&crate::typography_for(
-        window,
-        // **画面の拡大率は紙には効かない**（書き手の指摘 2026-09-16：
-        // 「プレビューでは行の文字数が画面より少なくかなり拡大されている」）。
-        // Ctrl+ホイールの拡大は**読むための**もので、刷る大きさではない。紙は
-        // 書き手が設定したBody sizeそのままで組む。
-        100,
-        matches!(mode, WritingMode::Vertical),
-        true,
-    ));
+    let spec = for_paper(window, mode);
     // **行の長さは紙の寸法。**字数では決めない（書き手の指摘 2026-09-16：「字数は
     // 英数字だとかなりちがいますし、禁則文字もあるため一意に決められません」）
     // ——半角の字は送りが違い、禁則で追い込み・追い出しも起きるので、「1行◯字」と
@@ -198,16 +189,39 @@ fn lay_out(
     Ok(engine)
 }
 
-/// 画面の体裁を、紙の体裁に直す。
+/// 紙の体裁。
 ///
-/// **変えるのは色と、画面のための印だけ。**字体・大きさ・行送り・ルビの設定は
-/// 書き手のものなので、そのまま紙へ持っていく（要件 7.10：画面と同じ結果を出す）。
+/// **字体と大きさは紙のもの**（要件 7.10、書き手の問い 2026-09-16：「印刷のフォントと
+/// サイズはどこで決めるのですか」）。画面の大きさは**光る面を長く読むために**選ぶ
+/// もので、紙に焼く大きさではない——画面を大きくしたからといって、紙の字まで大きく
+/// なるのはおかしい。だから印刷は自分の字体と大きさを持つ（プレビューの下の帯で決め、
+/// 設定として覚えている）。
 ///
-/// 色は紙の側が持っている——白い紙に黒い字である。画面の紙はアイボリーで、墨も紙も
-/// 書き手が選べるが（要件 9）、それは**光る面を長く見るための選択**であって、紙に
-/// 焼く色ではない。行番号と空白の印は、読むためではなく編むための印なので出さない。
-fn for_paper(screen: &Typography) -> Typography {
+/// **それ以外は画面の設定のまま。**行送り・字間・見出しの倍率・ルビの大きさと位置・
+/// 縦中横は、その原稿をどう組むかという書き手の決めごとなので、紙へもそのまま持って
+/// いく（要件 7.10：画面と同じ結果を出す）。
+///
+/// 色は紙の側が持っている——白い紙に黒い字である。行番号と空白の印は、読むためでは
+/// なく編むための印なので出さない。
+fn for_paper(window: &AppWindow, mode: WritingMode) -> Typography {
+    let vertical = matches!(mode, WritingMode::Vertical);
+    // 画面の拡大（Ctrl+ホイール）は紙には効かない。拡大は読むためのものである。
+    let screen = crate::typography_for(window, 100, vertical, true);
+    // ポイントは1/72インチ、Direct2Dが数えるのは1/96インチ。
+    let size = (window.get_print_size().clamp(60, 240) as f32 / 10.0) * (96.0 / 72.0);
+    let font = window.get_print_font().to_string();
+    let family = |screen: &str| {
+        if font.is_empty() {
+            screen.to_owned()
+        } else {
+            font.clone()
+        }
+    };
     Typography {
+        font_size: size,
+        body_font: family(&screen.body_font),
+        heading_font: std::array::from_fn(|at| family(&screen.heading_font[at])),
+        code_font: family(&screen.code_font),
         paper: [1.0, 1.0, 1.0],
         ink: [0.0, 0.0, 0.0],
         heading_ink: [[0.0, 0.0, 0.0]; crate::MAX_HEADING_LEVEL],
@@ -215,7 +229,42 @@ fn for_paper(screen: &Typography) -> Typography {
         paper_painted: false,
         line_numbers: false,
         whitespace: false,
-        ..screen.clone()
+        ..screen
+    }
+}
+
+/// 紙の字の大きさを0.5ptずつ動かす。
+pub fn step_size(window: &AppWindow, live: &Live, by: i32) {
+    let size = (window.get_print_size() + by * 5).clamp(60, 240);
+    if size == window.get_print_size() {
+        return;
+    }
+    window.set_print_size(size);
+    relay(window, live);
+}
+
+/// 紙の字体を選んだとき（書体の一覧から）。
+pub fn choose_font(window: &AppWindow, live: &Live, family: &str) {
+    window.set_print_font(family.into());
+    relay(window, live);
+}
+
+/// 書体の一覧を、印刷のために開く。
+pub fn ask_font(window: &AppWindow) {
+    crate::wiring::fill_font_names(window);
+    window.set_font_for_print(true);
+    window.set_font_current(window.get_print_font());
+}
+
+/// いまの紙のまま組み直す（字体・大きさが変わったとき）。
+fn relay(window: &AppWindow, live: &Live) {
+    let Some(paper) = live.preview.borrow().as_ref().map(|preview| preview.paper) else {
+        return;
+    };
+    if let Err(error) = reopen(window, live, paper) {
+        live.cache
+            .borrow_mut()
+            .log_diag("print", &format!("re-laying the paper failed: {error}"));
     }
 }
 

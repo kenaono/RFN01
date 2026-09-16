@@ -10544,6 +10544,11 @@ const LANGUAGE_SETTING: &str = "language";
 /// 置き方（0 タイル・1 縦・2 横）、濃さ（%）。
 const WALL_KIND_SETTING: &str = "wallpaper.kind";
 const WALL_PATH_SETTING: &str = "wallpaper.path";
+/// 要件 7.10: 印刷の字体と大きさ（書き手の問い 2026-09-16：「印刷のフォントと
+/// サイズはどこで決めるのですか」）。**画面の設定とは別に持つ**——画面の大きさは
+/// 光る面を読むために選ぶもので、紙に焼く大きさではない。大きさは10分の1ポイント。
+const PRINT_FONT_SETTING: &str = "print.font";
+const PRINT_SIZE_SETTING: &str = "print.size";
 const WALL_FIT_SETTING: &str = "wallpaper.fit";
 const WALL_STRENGTH_SETTING: &str = "wallpaper.strength";
 /// どの記号を箇条書きの印として読むか（書き手の決定 2026-09-11）。
@@ -11464,6 +11469,14 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_wall_path().to_string(),
     ));
     values.push((
+        PRINT_FONT_SETTING.to_owned(),
+        window.get_print_font().to_string(),
+    ));
+    values.push((
+        PRINT_SIZE_SETTING.to_owned(),
+        window.get_print_size().to_string(),
+    ));
+    values.push((
         WALL_FIT_SETTING.to_owned(),
         window.get_wall_fit().to_string(),
     ));
@@ -11639,6 +11652,16 @@ fn apply_settings(
         }
         if written == WALL_PATH_SETTING {
             window.set_wall_path(value.trim().into());
+            continue;
+        }
+        if written == PRINT_FONT_SETTING {
+            window.set_print_font(value.trim().into());
+            continue;
+        }
+        if written == PRINT_SIZE_SETTING {
+            // 6ptより小さいと読めず、24ptより大きいと1行に数字しか入らない。
+            let size = value.trim().parse::<i32>().unwrap_or(105);
+            window.set_print_size(size.clamp(60, 240));
             continue;
         }
         if written == WALL_FIT_SETTING {

@@ -18,12 +18,20 @@ export component PrintView inherits Rectangle {
     in property <string> status;
     /// 紙の姿を一行で：大きさ、余白、そして**何字詰めの何行**か。
     in property <string> paper-note;
+    /// 印刷の字体と大きさ。**画面の設定とは別のもの**（書き手の問い 2026-09-16）。
+    in property <string> font;
+    /// 10分の1ポイント（105 = 10.5pt）。
+    in property <int> size;
     in property <bool> working;
     callback turned(int);
     /// 余白を1段（5mm）ずつ。**紙の行の長さはここで決まる**——行の長さは紙から
     /// 余白を引いたぶんで、そこへ字体と大きさで組ませる（書き手の指摘 2026-09-16：
     /// 「フォントとサイズを設定して、組版するのが正しいのではないですか」）。
     callback margin-stepped(int);
+    /// 書体の一覧を開く。
+    callback font-pressed();
+    /// 字の大きさを0.5ptずつ。
+    callback size-stepped(int);
     callback print-requested();
     callback dismissed();
 
@@ -135,6 +143,32 @@ export component PrintView inherits Rectangle {
                 padding-right: 10px;
                 spacing: 6px;
                 alignment: start;
+                // 紙の字体と大きさ。**画面の設定とは別のもの**——画面の大きさは
+                // 光る面を読むために選ぶもので、紙に焼く大きさではない。
+                TextButton {
+                    title: root.font == "" ? @tr("Font") : root.font;
+                    enabled: !root.working;
+                    clicked => { root.font-pressed(); }
+                }
+                TextButton {
+                    title: "−";
+                    enabled: !root.working;
+                    clicked => { root.size-stepped(-1); }
+                }
+                Text {
+                    text: "\{floor(root.size / 10)}.\{mod(root.size, 10)}pt";
+                    color: Tok.ink;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    min-width: 48px;
+                }
+                TextButton {
+                    title: "+";
+                    enabled: !root.working;
+                    clicked => { root.size-stepped(1); }
+                }
+                Rectangle { width: 8px; }
                 Text {
                     text: @tr("Margin");
                     color: Tok.ink-muted;
