@@ -72,6 +72,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Storage_Xps_Printing",
+    "Win32_Graphics_Printing",
     "Win32_Graphics_Printing_PrintTicket",
     "Win32_System_Com_StructuredStorage",
 ] }

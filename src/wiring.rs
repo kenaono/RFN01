@@ -1492,6 +1492,14 @@ pub fn wire_saving(window: &AppWindow, live: &Live) {
 
     let weak = window.as_weak();
     let print_live = live.clone();
+    window.on_print_paper_pressed(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::print_view::ask_paper(&window, &print_live);
+        }
+    });
+
+    let weak = window.as_weak();
+    let print_live = live.clone();
     window.on_print_size_from_screen(move || {
         if let Some(window) = weak.upgrade() {
             crate::print_view::use_screen_size(&window, &print_live);

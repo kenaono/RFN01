@@ -39,12 +39,16 @@ use windows::{
             },
             Dxgi::IDXGIDevice,
             Gdi::{
-                DEVMODEA, DEVMODEW, DeleteDC, GetDeviceCaps, HDC, LOGPIXELSX, LOGPIXELSY,
+                CreateICW, DEVMODEA, DEVMODEW, DM_IN_BUFFER, DM_IN_PROMPT, DM_OUT_BUFFER,
+                DMORIENT_LANDSCAPE, DeleteDC, GetDeviceCaps, HDC, LOGPIXELSX, LOGPIXELSY,
                 PHYSICALHEIGHT, PHYSICALWIDTH,
             },
             Imaging::{IWICBitmapSource, WICRect},
-            Printing::PrintTicket::{
-                PTCloseProvider, PTConvertDevModeToPrintTicket, PTOpenProvider, kPTJobScope,
+            Printing::{
+                ClosePrinter, DocumentPropertiesW, OpenPrinterW, PRINTER_HANDLE,
+                PrintTicket::{
+                    PTCloseProvider, PTConvertDevModeToPrintTicket, PTOpenProvider, kPTJobScope,
+                },
             },
         },
         Storage::Xps::Printing::{
@@ -59,7 +63,7 @@ use windows::{
         },
         UI::{
             Controls::Dialogs::{
-                DEVNAMES, PD_NOPAGENUMS, PD_NOSELECTION, PD_RETURNDEFAULT, PD_RETURNIC,
+                DEVNAMES, PD_NOPAGENUMS, PD_NOSELECTION, PD_RETURNDEFAULT,
                 PD_USEDEVMODECOPIESANDCOLLATE, PRINTDLGEX_FLAGS, PRINTDLGW, PrintDlgW,
             },
             Shell::SHCreateStreamOnFileEx,
@@ -147,7 +151,7 @@ pub fn cell_and_frame(typography: &super::Typography, mode: WritingMode) -> Resu
 /// 出力先。
 pub enum Destination<'a> {
     /// 書き手が選んだプリンタへ、Windowsに訊いた設定のまま送る。
-    Printer(&'a Chosen),
+    Printer(&'a Printer),
     /// 「Microsoft Print to PDF」にこのファイルを書かせる。
     ///
     /// **PDF専用の道ではない**——同じプリンタに、訊かずに書く先を教えているだけで
@@ -169,7 +173,7 @@ pub fn print(engine: &mut TextEngine, paper: Paper, to: Destination<'_>) -> Resu
         return Ok(0);
     }
     let (printer, file, ticket) = match to {
-        Destination::Printer(chosen) => (chosen.printer.clone(), None, chosen.ticket.clone()),
+        Destination::Printer(printer) => (printer.name.clone(), None, printer.ticket()),
         Destination::PdfFile(path) => (PDF_PRINTER.to_owned(), Some(path), None),
     };
     with_graphics(|graphics| {
@@ -872,93 +876,6 @@ mod tests {
     }
 }
 
-/// プリンタの答え：どこへ、どの紙で、どの設定で刷るか。
-///
-/// **用紙・向き・部数はWindowsに訊く**（要件 7.10）。訊いた結果はそのまま印刷の
-/// 仕組みへ渡す「印刷チケット」になり、紙の大きさだけこちらも読む——プレビューが
-/// 実際の紙を映すためである。
-pub struct Chosen {
-    pub printer: String,
-    pub paper: Paper,
-    /// Windowsの設定をそのまま包んだもの。プリンタへ渡す。
-    ticket: Option<IStream>,
-}
-
-impl Chosen {
-    /// 紙の大きさだけ知りたいとき（プレビューを開くとき）。
-    pub fn paper(&self) -> Paper {
-        self.paper
-    }
-}
-
-/// 既定のプリンタを、何も訊かずに読む。
-///
-/// **プレビューは実際の紙を映す**（要件 7.10）ので、開く前にここを通る。プリンタが
-/// 1台も無ければ`None`で、そのときは[`Paper::default`]（A4縦）を使う。
-pub fn default_printer() -> Option<Chosen> {
-    // SAFETY: The dialog is asked not to show itself, so nothing here touches
-    // the screen; every handle it fills is freed in `chosen_from`.
-    unsafe { ask_windows(HWND::default(), PD_RETURNDEFAULT) }
-}
-
-/// Windowsのプリンタ選択を出す。書き手が取り消せば`None`。
-pub fn ask(owner: HWND) -> Option<Chosen> {
-    // SAFETY: As above, and the owner window outlives the modal dialog.
-    unsafe { ask_windows(owner, PRINTDLGEX_FLAGS(0)) }
-}
-
-/// 余白はこの編集器が持つので、Windowsからは**紙の大きさだけ**受け取る。
-unsafe fn ask_windows(owner: HWND, extra: PRINTDLGEX_FLAGS) -> Option<Chosen> {
-    let mut dialog = PRINTDLGW {
-        lStructSize: size_of::<PRINTDLGW>() as u32,
-        hwndOwner: owner,
-        // `PD_RETURNIC`は測るためだけの軽い手がかり（絵は描かない）。紙の大きさを
-        // 訊くのに要る。ページ番号と選択範囲は、こちらが紙を切るので出さない。
-        Flags: PRINTDLGEX_FLAGS(
-            PD_RETURNIC.0 | PD_NOPAGENUMS.0 | PD_NOSELECTION.0 | PD_USEDEVMODECOPIESANDCOLLATE.0,
-        ) | extra,
-        nCopies: 1,
-        ..Default::default()
-    };
-    // SAFETY: The struct is filled in above and every handle it comes back with
-    // is released below.
-    unsafe {
-        if !PrintDlgW(&mut dialog).as_bool() {
-            return None;
-        }
-    }
-    // SAFETY: Both handles are the dialog's own and are unlocked and freed here.
-    let chosen = unsafe {
-        let printer = device_name(dialog.hDevNames);
-        let devmode = GlobalLock(dialog.hDevMode) as *const DEVMODEW;
-        let paper = paper_of(dialog.hDC).unwrap_or_default();
-        let ticket = printer
-            .as_ref()
-            .and_then(|name| ticket_of(name, devmode).ok());
-        if !devmode.is_null() {
-            let _ = GlobalUnlock(dialog.hDevMode);
-        }
-        printer.map(|printer| Chosen {
-            printer,
-            paper,
-            ticket,
-        })
-    };
-    // SAFETY: Each handle is freed once, and the information context is a DC.
-    unsafe {
-        if !dialog.hDevMode.is_invalid() {
-            let _ = GlobalFree(Some(dialog.hDevMode));
-        }
-        if !dialog.hDevNames.is_invalid() {
-            let _ = GlobalFree(Some(dialog.hDevNames));
-        }
-        if !dialog.hDC.is_invalid() {
-            let _ = DeleteDC(dialog.hDC);
-        }
-    }
-    chosen
-}
-
 /// `DEVNAMES`の中のプリンタ名。**名前の並びの中の位置**で入っている。
 unsafe fn device_name(handle: HGLOBAL) -> Option<String> {
     if handle.is_invalid() {
@@ -1032,5 +949,194 @@ unsafe fn ticket_of(printer: &str, devmode: *const DEVMODEW) -> Result<IStream> 
         converted?;
         stream.Seek(0, STREAM_SEEK_SET, None)?;
         Ok(stream)
+    }
+}
+
+/// 書き手が選んだプリンタの設定を、そのまま持っておく。
+///
+/// **用紙の大きさと向きはWindowsが持っている**（要件 7.10）。ここにあるのはその
+/// 設定の塊（`DEVMODE`）そのもので、紙の大きさはそこから測り、刷るときは印刷
+/// チケットへ直して渡す——**こちらで解釈しない**ので、給紙トレイでも両面でも、
+/// Windowsの設定画面で決めたことがそのままプリンタへ行く。
+#[derive(Clone)]
+pub struct Printer {
+    pub name: String,
+    /// `DEVMODE`のバイト列（`dmSize + dmDriverExtra`ぶん）。
+    settings: Vec<u8>,
+}
+
+impl Printer {
+    /// このプリンタが送る紙。
+    pub fn paper(&self, margin: f32) -> Paper {
+        // SAFETY: The block is a DEVMODE the printer filled, kept whole.
+        let measured = unsafe { paper_of_settings(&self.name, self.devmode()) };
+        Paper {
+            margin,
+            ..measured.unwrap_or_default()
+        }
+    }
+
+    /// 用紙の名前（「A4」など）と、横置きかどうか。
+    pub fn paper_name(&self) -> (String, bool) {
+        // SAFETY: as above.
+        unsafe {
+            let devmode = self.devmode();
+            if devmode.is_null() {
+                return (String::new(), false);
+            }
+            let name = PCWSTR((*devmode).dmFormName.as_ptr())
+                .to_string()
+                .unwrap_or_default();
+            let landscape =
+                (*devmode).Anonymous1.Anonymous1.dmOrientation == DMORIENT_LANDSCAPE as i16;
+            (name.trim().to_owned(), landscape)
+        }
+    }
+
+    fn devmode(&self) -> *const DEVMODEW {
+        if self.settings.len() < size_of::<DEVMODEW>() {
+            std::ptr::null()
+        } else {
+            self.settings.as_ptr() as *const DEVMODEW
+        }
+    }
+
+    fn ticket(&self) -> Option<IStream> {
+        // SAFETY: The block is a whole DEVMODE for this printer.
+        unsafe { ticket_of(&self.name, self.devmode()).ok() }
+    }
+}
+
+/// 既定のプリンタと、その設定。プリンタが1台も無ければ`None`。
+pub fn default_printer() -> Option<Printer> {
+    // SAFETY: The dialog is asked not to show itself, so nothing here touches
+    // the screen; every handle it fills is freed inside.
+    unsafe { ask_windows(HWND::default(), PD_RETURNDEFAULT) }
+}
+
+/// Windowsのプリンタ選択を出す。書き手が取り消せば`None`。
+pub fn ask_printer(owner: HWND) -> Option<Printer> {
+    // SAFETY: As above, and the owner window outlives the modal dialog.
+    unsafe { ask_windows(owner, PRINTDLGEX_FLAGS(0)) }
+}
+
+/// **このプリンタの設定画面**（用紙の大きさ・向き・給紙・両面……）をWindowsに
+/// 出させる。取り消せば`None`。
+///
+/// 書き手の問い（2026-09-16）：「印刷の紙のサイズ(A4など)と、Landscapeの設定が
+/// どこで反映されるかわかりません」——**Windowsが持っているものはWindowsに訊く**
+/// （9の色と同じ理由）ので、この編集器に用紙の一覧は持たない。
+pub fn ask_paper(owner: HWND, printer: &Printer) -> Option<Printer> {
+    let name = HSTRING::from(printer.name.as_str());
+    // SAFETY: The handle is closed below, and each call is given a buffer of
+    // the size the driver asked for.
+    unsafe {
+        let mut handle = PRINTER_HANDLE::default();
+        OpenPrinterW(PCWSTR(name.as_ptr()), &mut handle, None).ok()?;
+        let wanted = DocumentPropertiesW(Some(owner), handle, PCWSTR(name.as_ptr()), None, None, 0);
+        let chosen = if wanted < size_of::<DEVMODEW>() as i32 {
+            None
+        } else {
+            let mut settings = vec![0u8; wanted as usize];
+            let taken = DocumentPropertiesW(
+                Some(owner),
+                handle,
+                PCWSTR(name.as_ptr()),
+                Some(settings.as_mut_ptr() as *mut DEVMODEW),
+                Some(printer.devmode()),
+                (DM_IN_BUFFER.0 | DM_IN_PROMPT.0 | DM_OUT_BUFFER.0) as u32,
+            );
+            // IDOK。取り消しはIDCANCEL（2）で、そのときは何も変えない。
+            (taken == 1).then(|| Printer {
+                name: printer.name.clone(),
+                settings,
+            })
+        };
+        let _ = ClosePrinter(handle);
+        chosen
+    }
+}
+
+/// 余白はこの編集器が持つので、Windowsからは**プリンタと設定だけ**受け取る。
+unsafe fn ask_windows(owner: HWND, extra: PRINTDLGEX_FLAGS) -> Option<Printer> {
+    let mut dialog = PRINTDLGW {
+        lStructSize: size_of::<PRINTDLGW>() as u32,
+        hwndOwner: owner,
+        Flags: PRINTDLGEX_FLAGS(
+            PD_NOPAGENUMS.0 | PD_NOSELECTION.0 | PD_USEDEVMODECOPIESANDCOLLATE.0,
+        ) | extra,
+        nCopies: 1,
+        ..Default::default()
+    };
+    // SAFETY: The struct is filled in above and every handle it comes back with
+    // is released below.
+    unsafe {
+        if !PrintDlgW(&mut dialog).as_bool() {
+            return None;
+        }
+    }
+    // SAFETY: Both handles are the dialog's own and are unlocked and freed here.
+    let printer = unsafe {
+        let name = device_name(dialog.hDevNames);
+        let settings = settings_of(dialog.hDevMode);
+        name.zip(settings)
+            .map(|(name, settings)| Printer { name, settings })
+    };
+    // SAFETY: Each handle is freed once.
+    unsafe {
+        if !dialog.hDevMode.is_invalid() {
+            let _ = GlobalFree(Some(dialog.hDevMode));
+        }
+        if !dialog.hDevNames.is_invalid() {
+            let _ = GlobalFree(Some(dialog.hDevNames));
+        }
+        if !dialog.hDC.is_invalid() {
+            let _ = DeleteDC(dialog.hDC);
+        }
+    }
+    printer
+}
+
+/// `DEVMODE`を丸ごと写し取る。**解釈しない**——プリンタの持ち物である。
+unsafe fn settings_of(handle: HGLOBAL) -> Option<Vec<u8>> {
+    if handle.is_invalid() {
+        return None;
+    }
+    // SAFETY: The handle is the dialog's, and the block is unlocked before
+    // returning.
+    unsafe {
+        let devmode = GlobalLock(handle) as *const DEVMODEW;
+        if devmode.is_null() {
+            return None;
+        }
+        let size = usize::from((*devmode).dmSize) + usize::from((*devmode).dmDriverExtra);
+        let copied = std::slice::from_raw_parts(devmode as *const u8, size).to_vec();
+        let _ = GlobalUnlock(handle);
+        Some(copied)
+    }
+}
+
+/// この設定でこのプリンタが送る紙の大きさ（DIP）。
+///
+/// **端から端まで**（`PHYSICAL…`）を訊く。印字できる範囲ではなく紙そのもので、
+/// 余白はこちらが持っているからである。**向きはこの数に入っている**——横置きなら
+/// 幅と高さが入れ替わって返る。
+unsafe fn paper_of_settings(printer: &str, devmode: *const DEVMODEW) -> Option<Paper> {
+    let name = HSTRING::from(printer);
+    // SAFETY: The information context is deleted below, and the settings block
+    // is whole.
+    unsafe {
+        let context = CreateICW(
+            PCWSTR::null(),
+            PCWSTR(name.as_ptr()),
+            PCWSTR::null(),
+            (!devmode.is_null()).then_some(devmode),
+        );
+        if context.is_invalid() {
+            return None;
+        }
+        let measured = paper_of(context);
+        let _ = DeleteDC(context);
+        measured
     }
 }

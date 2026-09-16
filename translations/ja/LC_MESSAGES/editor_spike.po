@@ -639,6 +639,9 @@ msgstr "印刷"
 msgid "Margin"
 msgstr "余白"
 
+msgid "Paper…"
+msgstr "用紙…"
+
 msgid "Text size"
 msgstr "本文の大きさ"
 

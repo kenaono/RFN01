@@ -900,6 +900,8 @@ export component AppWindow inherits Window {
     in-out property <bool> print-active: false;
     in property <string> print-title;
     in property <image> print-page;
+    in property <image> print-next-page;
+    in property <bool> print-vertical;
     in property <float> print-aspect: 0.707;
     in-out property <int> print-at;
     in property <int> print-pages;
@@ -912,6 +914,7 @@ export component AppWindow inherits Window {
     in-out property <int> print-size: 0;
     callback print-size-stepped(int);
     callback print-size-from-screen();
+    callback print-paper-pressed();
     in-out property <bool> print-working;
     callback print-turned(int);
     callback print-margin-stepped(int);
@@ -5467,6 +5470,8 @@ export component AppWindow inherits Window {
             height: parent.height;
             title: root.print-title;
             page: root.print-page;
+            next-page: root.print-next-page;
+            vertical: root.print-vertical;
             aspect: root.print-aspect;
             at: root.print-at;
             pages: root.print-pages;
@@ -5475,6 +5480,7 @@ export component AppWindow inherits Window {
             size: root.print-size;
             size-stepped(by) => { root.print-size-stepped(by); }
             size-from-screen => { root.print-size-from-screen(); }
+            paper-pressed => { root.print-paper-pressed(); }
             working: root.print-working;
             turned(to) => { root.print-turned(to); }
             margin-stepped(by) => { root.print-margin-stepped(by); }

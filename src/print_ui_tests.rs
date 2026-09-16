@@ -133,15 +133,20 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     let second = shot(&surface, width, height);
     assert!(first != second, "a different sheet must be drawn");
 
-    // 端の外へは繰らない。
-    print_view::turn(&window, &live, -1);
+    // 端では止まる（行き過ぎた先を断ると、見開きで端の1枚が出せなくなる）。
+    print_view::turn(&window, &live, -3);
     assert_eq!(
         window.get_print_at(),
-        1,
-        "before the first sheet is nowhere"
+        0,
+        "before the first sheet is the first"
     );
-    print_view::turn(&window, &live, pages);
-    assert_eq!(window.get_print_at(), 1, "and neither is past the last");
+    print_view::turn(&window, &live, pages + 5);
+    assert_eq!(
+        window.get_print_at(),
+        pages - 1,
+        "and past the last is the last"
+    );
+    print_view::turn(&window, &live, 1);
 
     if let Ok(into) = std::env::var("EDITOR_PRINT_OUT") {
         let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();

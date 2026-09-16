@@ -10,6 +10,10 @@ export component PrintView inherits Rectangle {
     background: Tok.chrome-sunken;
     in property <string> title;
     in property <image> page;
+    /// 次の紙。**窓が広ければ2枚並べる**（見開き）。縦書きは右から読むので、
+    /// 次の紙は左に置く。
+    in property <image> next-page;
+    in property <bool> vertical;
     /// 紙の縦横比（幅÷高さ）。**絵から測らない**——絵の大きさから紙の大きさを
     /// 決め、紙の大きさが絵の大きさを決める、という輪になる。
     in property <float> aspect: 0.707;
@@ -32,11 +36,25 @@ export component PrintView inherits Rectangle {
     callback size-stepped(int);
     /// 画面の設定のままへ戻す。
     callback size-from-screen();
+    /// 用紙の大きさと向きを、Windowsのプリンタ設定画面で決める。
+    callback paper-pressed();
+    /// 2枚並んでいるか。紙を置く側が決め、頭の帯と繰り幅がそれに従う。
+    out property <bool> spread: sheets.spread;
     callback print-requested();
     callback dismissed();
 
-    // 面の中を触った音が下の編集画面へ抜けないように。
-    TouchArea { }
+    // 面の中を触った音が下の編集画面へ抜けないように。そして**ホイールで紙を繰る**
+    // （書き手の求め 2026-09-16）——下へ回せば次の紙。紙の上でも余白の上でも効く。
+    TouchArea {
+        scroll-event(event) => {
+            if (event.delta-y < 0 || event.delta-x < 0) {
+                root.turned(root.at + (root.spread ? 2 : 1));
+            } else if (event.delta-y > 0 || event.delta-x > 0) {
+                root.turned(root.at - (root.spread ? 2 : 1));
+            }
+            return accept;
+        }
+    }
 
     FocusScope {
         init => { self.focus(); }
@@ -83,11 +101,14 @@ export component PrintView inherits Rectangle {
                 TextButton {
                     title: "‹";
                     enabled: root.at > 0 && !root.working;
-                    clicked => { root.turned(root.at - 1); }
+                    clicked => { root.turned(root.at - (root.spread ? 2 : 1)); }
                 }
                 Text {
                     // 何枚目か。**1から数える**——紙を数えるのは人である。
-                    text: "\{root.at + 1} / \{root.pages}";
+                    // 見開きなら2枚とも言う。
+                    text: root.spread
+                        ? "\{root.at + 1}–\{root.at + 2} / \{root.pages}"
+                        : "\{root.at + 1} / \{root.pages}";
                     color: Tok.ink;
                     font-size: 13px;
                     vertical-alignment: center;
@@ -96,8 +117,8 @@ export component PrintView inherits Rectangle {
                 }
                 TextButton {
                     title: "›";
-                    enabled: root.at + 1 < root.pages && !root.working;
-                    clicked => { root.turned(root.at + 1); }
+                    enabled: root.at + (root.spread ? 2 : 1) < root.pages && !root.working;
+                    clicked => { root.turned(root.at + (root.spread ? 2 : 1)); }
                 }
                 TextButton {
                     title: @tr("Print…");
@@ -112,13 +133,25 @@ export component PrintView inherits Rectangle {
             }
         }
 
-        Rectangle {
+        sheets := Rectangle {
             background: Tok.chrome-sunken;
-            // 紙そのもの。**影を一枚敷く**ので、地と紙の境目が分かる。
-            Rectangle {
+            // **2枚入るなら2枚見せる**（書き手の求め 2026-09-16）。紙1枚ぶんの幅を
+            // 二つ並べて余白が残るかどうかで決める——数を選ばせない。
+            // **窓の寸法から決める**（自分が測られた大きさからではなく）。頭の帯が
+            // 何枚目かを言い、その字の幅が並びを決め、並びが高さを決め……と輪になる。
+            // 帯の高さは決め打ちなので、窓から引けばよい。
+            property <length> room: root.height - 44px - 34px;
+            property <bool> spread: root.at + 1 < root.pages
+                && root.width > (self.room - 48px) * root.aspect * 2 + 72px;
+            property <length> sheet-width: self.spread
+                ? min((root.width - 72px) / 2, (self.room - 48px) * root.aspect)
+                : min(root.width - 48px, (self.room - 48px) * root.aspect);
+
+            // 1枚のとき、2枚のとき。**置き方が違うだけで、同じ絵を出す。**
+            if !self.spread: Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
-                width: min(parent.width - 48px, (parent.height - 48px) * root.aspect);
+                width: parent.sheet-width;
                 height: self.width / max(0.01, root.aspect);
                 drop-shadow-blur: 12px;
                 drop-shadow-color: Tok.scrim;
@@ -127,6 +160,40 @@ export component PrintView inherits Rectangle {
                     width: parent.width;
                     height: parent.height;
                     source: root.page;
+                    image-fit: contain;
+                }
+            }
+            if self.spread: Rectangle {
+                x: root.vertical
+                    ? parent.width / 2 + 12px
+                    : parent.width / 2 - 12px - self.width;
+                y: (parent.height - self.height) / 2;
+                width: parent.sheet-width;
+                height: self.width / max(0.01, root.aspect);
+                drop-shadow-blur: 12px;
+                drop-shadow-color: Tok.scrim;
+                background: Tok.paper;
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.page;
+                    image-fit: contain;
+                }
+            }
+            if self.spread: Rectangle {
+                x: root.vertical
+                    ? parent.width / 2 - 12px - self.width
+                    : parent.width / 2 + 12px;
+                y: (parent.height - self.height) / 2;
+                width: parent.sheet-width;
+                height: self.width / max(0.01, root.aspect);
+                drop-shadow-blur: 12px;
+                drop-shadow-color: Tok.scrim;
+                background: Tok.paper;
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.next-page;
                     image-fit: contain;
                 }
             }
@@ -170,6 +237,14 @@ export component PrintView inherits Rectangle {
                     clicked => { root.size-stepped(1); }
                 }
                 Rectangle { width: 8px; }
+                // **用紙の大きさと向きはWindowsが持っている**（書き手の問い
+                // 2026-09-16：「A4などとLandscapeの設定がどこで反映されるか
+                // わかりません」）。この編集器に用紙の一覧は持たない。
+                TextButton {
+                    title: @tr("Paper…");
+                    enabled: !root.working;
+                    clicked => { root.paper-pressed(); }
+                }
                 Text {
                     text: @tr("Margin");
                     color: Tok.ink-muted;

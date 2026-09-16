@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
-use crate::directwrite_render::print::{self, Destination, Paper};
+use crate::directwrite_render::print::{self, Destination, Paper, Printer};
 use crate::directwrite_render::{LineFit, TextEngine, WritingMode};
 use crate::document::{self, PreviewDocument};
 use crate::open_document::OpenDocument;
@@ -23,6 +23,10 @@ use crate::{AppWindow, Live, StatusBar, focused_pane, pictures, say};
 pub struct Preview {
     engine: TextEngine,
     paper: Paper,
+    /// 刷る先と、その設定（用紙の大きさ・向き・給紙……）。**Windowsが持っている
+    /// ものをそのまま持ち回る**——紙の大きさはここから測り、刷るときは印刷
+    /// チケットへ直して渡す。
+    printer: Option<Printer>,
     pages: usize,
     /// **絵の細かさ**。紙のDIPに対する倍率で、画面に映すぶんだけ大きく描く。
     scale: f32,
@@ -38,10 +42,12 @@ const PREVIEW_SCALE: f32 = 1.5;
 /// ☰の Print… と Ctrl+P。
 pub fn open(window: &AppWindow, live: &Live) {
     let document = live.active(window);
-    // **プレビューは実際の紙を映す。**既定のプリンタが送る紙の大きさを先に訊いて
-    // おく（要件 7.10：用紙はWindowsに訊く）。プリンタが1台も無ければA4縦。
-    let paper = print::default_printer()
-        .map(|printer| printer.paper())
+    // **プレビューは実際の紙を映す。**既定のプリンタが送る紙の大きさと向きを先に
+    // 訊いておく（要件 7.10：用紙はWindowsに訊く）。プリンタが1台も無ければA4縦。
+    let printer = print::default_printer();
+    let paper = printer
+        .as_ref()
+        .map(|printer| printer.paper(Paper::default().margin))
         .unwrap_or_default();
     let mode = mode_of(window);
     let engine = match lay_out(window, live, &document, mode, paper) {
@@ -65,6 +71,7 @@ pub fn open(window: &AppWindow, live: &Live) {
     *live.preview.borrow_mut() = Some(Preview {
         engine,
         paper,
+        printer,
         pages,
         scale: PREVIEW_SCALE,
         document,
@@ -74,6 +81,7 @@ pub fn open(window: &AppWindow, live: &Live) {
     window.set_print_at(0);
     window.set_print_status(Default::default());
     window.set_print_aspect(paper.width / paper.height);
+    window.set_print_vertical(matches!(mode, WritingMode::Vertical));
     window.set_print_active(true);
     note_paper(window, live);
     draw(window, live);
@@ -96,7 +104,13 @@ pub fn turn(window: &AppWindow, live: &Live, to: i32) {
         .borrow()
         .as_ref()
         .map_or(0, |preview| preview.pages) as i32;
-    if to < 0 || to >= pages || to == window.get_print_at() {
+    if pages == 0 {
+        return;
+    }
+    // **端で止める。**見開きでは2枚ずつ繰るので、行き過ぎた先を断ると端の1枚が
+    // 出せなくなる——止めるのであって、断るのではない。
+    let to = to.clamp(0, pages - 1);
+    if to == window.get_print_at() {
         return;
     }
     window.set_print_at(to);
@@ -112,25 +126,41 @@ pub fn close(window: &AppWindow, live: &Live) {
 }
 
 /// いま見ている紙を描いて、窓へ渡す。
+///
+/// **次の紙も描く。**窓が広ければ2枚並べる（見開き）ので、そのときに要る——描いて
+/// おけば繰ったときも待たない。
 fn draw(window: &AppWindow, live: &Live) {
     let at = window.get_print_at().max(0) as usize;
     let mut held = live.preview.borrow_mut();
     let Some(preview) = held.as_mut() else {
         return;
     };
-    match print::render_page(&mut preview.engine, preview.paper, at, preview.scale) {
-        Ok((pixels, width, height)) => {
-            window.set_print_page(image_of(&pixels, width, height));
-        }
+    let mut sheet = |page: usize| match print::render_page(
+        &mut preview.engine,
+        preview.paper,
+        page,
+        preview.scale,
+    ) {
+        Ok((pixels, width, height)) => Some(image_of(&pixels, width, height)),
         Err(error) => {
             live.cache
                 .borrow_mut()
-                .log_diag("print", &format!("page {at} failed: {error}"));
-            window.set_print_status(
-                say!("この紙を描けませんでした", "This sheet could not be drawn").into(),
-            );
+                .log_diag("print", &format!("page {page} failed: {error}"));
+            None
         }
+    };
+    match sheet(at) {
+        Some(image) => window.set_print_page(image),
+        None => window.set_print_status(
+            say!("この紙を描けませんでした", "This sheet could not be drawn").into(),
+        ),
     }
+    let next = if at + 1 < preview.pages {
+        sheet(at + 1)
+    } else {
+        None
+    };
+    window.set_print_next_page(next.unwrap_or_default());
 }
 
 /// Direct2Dが返すBGRAを、窓が読む絵にする。
@@ -249,6 +279,48 @@ pub fn step_size(window: &AppWindow, live: &Live, by: i32) {
     relay(window, live);
 }
 
+/// 用紙の大きさと向きを、**Windowsのプリンタ設定画面**で決める。
+///
+/// 書き手の問い（2026-09-16）：「印刷の紙のサイズ(A4など)と、Landscapeの設定が
+/// どこで反映されるかわかりません」——**Windowsが持っているものはWindowsに訊く**
+/// （要件 9の色と同じ理由）ので、この編集器に用紙の一覧は持たない。決めた紙は
+/// その場でプレビューに出る。
+pub fn ask_paper(window: &AppWindow, live: &Live) {
+    let Some(printer) = live
+        .preview
+        .borrow()
+        .as_ref()
+        .and_then(|preview| preview.printer.clone())
+    else {
+        window.set_print_status(
+            say!(
+                "プリンタが見つかりません",
+                "No printer to ask about the paper"
+            )
+            .into(),
+        );
+        return;
+    };
+    let owner = crate::ime::window_handle(window).unwrap_or_default();
+    let Some(chosen) = print::ask_paper(owner, &printer) else {
+        return;
+    };
+    let margin = live
+        .preview
+        .borrow()
+        .as_ref()
+        .map_or(Paper::default().margin, |preview| preview.paper.margin);
+    let paper = chosen.paper(margin);
+    if let Some(preview) = live.preview.borrow_mut().as_mut() {
+        preview.printer = Some(chosen);
+    }
+    if let Err(error) = reopen(window, live, paper) {
+        live.cache
+            .borrow_mut()
+            .log_diag("print", &format!("paper change failed: {error}"));
+    }
+}
+
 /// 画面の設定へ戻す（紙の大きさを持たない）。
 pub fn use_screen_size(window: &AppWindow, live: &Live) {
     if window.get_print_size() == 0 {
@@ -289,7 +361,8 @@ pub fn print_now(window: &AppWindow, live: &Live) {
     live.cache
         .borrow_mut()
         .log_diag("print", "asking Windows for a printer");
-    let Some(chosen) = print::ask(crate::ime::window_handle(window).unwrap_or_default()) else {
+    let Some(chosen) = print::ask_printer(crate::ime::window_handle(window).unwrap_or_default())
+    else {
         // 取り消しは何事も無かったことである。**残す**——押したのに何も起きな
         // かった、という報告がここへ来る。
         live.cache
@@ -301,9 +374,9 @@ pub fn print_now(window: &AppWindow, live: &Live) {
         "print",
         &format!(
             "printer={} paper={}x{}",
-            chosen.printer,
-            chosen.paper().width.round(),
-            chosen.paper().height.round()
+            chosen.name,
+            chosen.paper(0.0).width.round(),
+            chosen.paper(0.0).height.round()
         ),
     );
     let title = {
@@ -320,11 +393,11 @@ pub fn print_now(window: &AppWindow, live: &Live) {
         Ok(pages) => {
             live.cache.borrow_mut().log_diag(
                 "print",
-                &format!("printed {pages} pages to {} ({title})", chosen.printer),
+                &format!("printed {pages} pages to {} ({title})", chosen.name),
             );
             window.set_print_status(Default::default());
             close(window, live);
-            let printer = &chosen.printer;
+            let printer = &chosen.name;
             window.tell_tab(
                 if crate::i18n::japanese() {
                     format!("{printer}へ{pages}枚送りました")
@@ -350,12 +423,13 @@ pub fn print_now(window: &AppWindow, live: &Live) {
 }
 
 /// 選ばれたプリンタの紙に合わせ直して、全ページを送る。
-fn print_pages(
-    window: &AppWindow,
-    live: &Live,
-    chosen: &print::Chosen,
-) -> windows::core::Result<usize> {
-    let paper = chosen.paper();
+fn print_pages(window: &AppWindow, live: &Live, chosen: &Printer) -> windows::core::Result<usize> {
+    let margin = live
+        .preview
+        .borrow()
+        .as_ref()
+        .map_or(Paper::default().margin, |preview| preview.paper.margin);
+    let paper = chosen.paper(margin);
     let same = {
         let held = live.preview.borrow();
         held.as_ref().is_some_and(|preview| {
@@ -367,6 +441,9 @@ fn print_pages(
         // 紙が違えば折り返しも違う。**開き直す**のではなく、同じ文書を新しい紙で
         // 組み直して、プレビューもその紙になる。
         reopen(window, live, paper)?;
+    }
+    if let Some(preview) = live.preview.borrow_mut().as_mut() {
+        preview.printer = Some(chosen.clone());
     }
     let mut held = live.preview.borrow_mut();
     let Some(preview) = held.as_mut() else {
@@ -414,9 +491,15 @@ fn reopen(window: &AppWindow, live: &Live, paper: Paper) -> windows::core::Resul
     let mode = mode_of(window);
     let engine = lay_out(window, live, &document, mode, paper)?;
     let pages = print::page_count(&engine, paper);
+    let printer = live
+        .preview
+        .borrow()
+        .as_ref()
+        .and_then(|preview| preview.printer.clone());
     *live.preview.borrow_mut() = Some(Preview {
         engine,
         paper,
+        printer,
         pages,
         scale: PREVIEW_SCALE,
         document,
@@ -440,11 +523,33 @@ fn note_paper(window: &AppWindow, live: &Live) {
     let millimetres = |value: f32| (value / print::MM).round() as i32;
     let (wide, tall) = (millimetres(paper.width), millimetres(paper.height));
     let margin = millimetres(paper.margin);
+    // **どのプリンタの、どの用紙か**を言う（書き手の問い 2026-09-16）。
+    let sheet = preview
+        .printer
+        .as_ref()
+        .map(|printer| {
+            let (name, landscape) = printer.paper_name();
+            let name = if name.is_empty() {
+                format!("{wide}×{tall}mm")
+            } else {
+                name
+            };
+            if landscape {
+                if crate::i18n::japanese() {
+                    format!("{name}（横）")
+                } else {
+                    format!("{name} landscape")
+                }
+            } else {
+                name
+            }
+        })
+        .unwrap_or_else(|| format!("{wide}×{tall}mm"));
     window.set_print_paper_note(
         if crate::i18n::japanese() {
-            format!("余白{margin}mm　{wide}×{tall}mm　全角なら約{cells}字×{lines}行")
+            format!("{sheet}　{wide}×{tall}mm　余白{margin}mm　全角なら約{cells}字×{lines}行")
         } else {
-            format!("margin {margin}mm · {wide}×{tall}mm · about {cells} × {lines}")
+            format!("{sheet} · {wide}×{tall}mm · margin {margin}mm · about {cells} × {lines}")
         }
         .into(),
     );
