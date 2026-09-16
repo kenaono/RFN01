@@ -79,13 +79,18 @@ fn print_file(from: &str, mode: WritingMode, name: &str) {
     assert!(pages > 0, "the sample must fill at least one page");
     let path = out_dir().join(name);
     let _ = std::fs::remove_file(&path);
-    let printed = directwrite_render::print::print(&mut engine, paper, Destination::PdfFile(&path))
-        .unwrap_or_else(|error| {
-            panic!(
-                "printing to {PDF_PRINTER} failed: {error}\n\
+    let printed = directwrite_render::print::print(
+        &mut engine,
+        paper,
+        Destination::PdfFile(&path),
+        &directwrite_render::print::Trim::standing(),
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "printing to {PDF_PRINTER} failed: {error}\n\
                  （このプリンタはWindowsの機能なので、切ってあれば無い）"
-            )
-        });
+        )
+    });
     assert_eq!(printed, pages, "every page must reach the printer");
     let written = std::fs::metadata(&path)
         .unwrap_or_else(|error| panic!("{} was not written: {error}", path.display()))
@@ -128,9 +133,14 @@ fn draws_pages_as_pictures() {
     let paper = Paper::default();
     let mut engine = engine_on_paper(&source, mode, paper);
     for page in 0..limit.min(page_count(&engine, paper)) {
-        let (pixels, width, height) =
-            directwrite_render::print::render_page(&mut engine, paper, page, 2.0)
-                .expect("draw the page");
+        let (pixels, width, height) = directwrite_render::print::render_page(
+            &mut engine,
+            paper,
+            page,
+            2.0,
+            &directwrite_render::print::Trim::standing(),
+        )
+        .expect("draw the page");
         let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
         for bgra in pixels.chunks_exact(4) {
             ppm.extend([bgra[2], bgra[1], bgra[0]]);

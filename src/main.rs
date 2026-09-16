@@ -10564,6 +10564,10 @@ const WALL_PATH_SETTING: &str = "wallpaper.path";
 /// 印刷用のフォントサイズ指定が出来るのがいい」）。字体・色・見出しの倍率は画面の
 /// 設定がそのまま紙へ行くので、**紙が持つのはこの1つだけ**である。
 const PRINT_SIZE_SETTING: &str = "print.size";
+/// 要件 7.10: 天地の余白に入れるもの、左・中・右（書き手の求め 2026-09-17）。
+/// 「0,3,0」のように書く——0なし／1ファイル名／2日付／3ページ。
+const PRINT_HEAD_SETTING: &str = "print.head";
+const PRINT_FOOT_SETTING: &str = "print.foot";
 const WALL_FIT_SETTING: &str = "wallpaper.fit";
 const WALL_STRENGTH_SETTING: &str = "wallpaper.strength";
 /// どの記号を箇条書きの印として読むか（書き手の決定 2026-09-11）。
@@ -11488,6 +11492,14 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_print_size().to_string(),
     ));
     values.push((
+        PRINT_HEAD_SETTING.to_owned(),
+        print_view::said_trim(&window.get_print_head(), "0,0,0"),
+    ));
+    values.push((
+        PRINT_FOOT_SETTING.to_owned(),
+        print_view::said_trim(&window.get_print_foot(), "0,3,0"),
+    ));
+    values.push((
         WALL_FIT_SETTING.to_owned(),
         window.get_wall_fit().to_string(),
     ));
@@ -11663,6 +11675,20 @@ fn apply_settings(
         }
         if written == WALL_PATH_SETTING {
             window.set_wall_path(value.trim().into());
+            continue;
+        }
+        if written == PRINT_HEAD_SETTING || written == PRINT_FOOT_SETTING {
+            let head = if written == PRINT_HEAD_SETTING {
+                value.to_owned()
+            } else {
+                print_view::said_trim(&window.get_print_head(), "0,0,0")
+            };
+            let foot = if written == PRINT_FOOT_SETTING {
+                value.to_owned()
+            } else {
+                print_view::said_trim(&window.get_print_foot(), "0,3,0")
+            };
+            print_view::hold_trim(window, &head, &foot);
             continue;
         }
         if written == PRINT_SIZE_SETTING {

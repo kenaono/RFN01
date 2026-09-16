@@ -642,6 +642,18 @@ msgstr "余白"
 msgid "Paper…"
 msgstr "用紙…"
 
+msgid "Date"
+msgstr "日付"
+
+msgid "Name"
+msgstr "ファイル名"
+
+msgid "Foot"
+msgstr "地"
+
+msgid "Head"
+msgstr "天"
+
 msgid "Text size"
 msgstr "本文の大きさ"
 

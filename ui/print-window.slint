@@ -7,13 +7,28 @@ import { Tok } from "tokens.slint";
 import { Role, TextButton } from "controls.slint";
 
 export component PrintView inherits Rectangle {
+    /// 天地に入れるもの（0なし／1ファイル名／2日付／3ページ）を、押せる字にする。
+    pure function said(mark: int) -> string {
+        return mark == 1 ? @tr("Name")
+            : mark == 2 ? @tr("Date")
+            : mark == 3 ? @tr("Page")
+            : "·";
+    }
     background: Tok.chrome-sunken;
     in property <string> title;
-    in property <image> page;
-    /// 次の紙。**窓が広ければ2枚並べる**（見開き）。縦書きは右から読むので、
-    /// 次の紙は左に置く。
-    in property <image> next-page;
+    /// いま映っている紙たち。**何枚出すかは拡大が決める**（書き手の求め
+    /// 2026-09-17）——縮めれば並ぶ枚数が増える。縦書きは右から読むので、行の中は
+    /// 右から左へ置く。
+    in property <[image]> sheets;
+    /// 1行に何枚並ぶか、そして紙1枚の幅。どちらも組む側（Rust）が決める。
+    in property <int> columns: 1;
+    in property <length> sheet-width: 100px;
     in property <bool> vertical;
+    /// 拡大の百分率。Ctrl+ホイールで動く。
+    in property <int> zoom: 100;
+    /// 天と地に入れるもの、左・中・右。
+    in property <[int]> head;
+    in property <[int]> foot;
     /// 紙の縦横比（幅÷高さ）。**絵から測らない**——絵の大きさから紙の大きさを
     /// 決め、紙の大きさが絵の大きさを決める、という輪になる。
     in property <float> aspect: 0.707;
@@ -38,8 +53,14 @@ export component PrintView inherits Rectangle {
     callback size-from-screen();
     /// 用紙の大きさと向きを、Windowsのプリンタ設定画面で決める。
     callback paper-pressed();
-    /// 2枚並んでいるか。紙を置く側が決め、頭の帯と繰り幅がそれに従う。
-    out property <bool> spread: sheets.spread;
+    /// いま並んでいる枚数。頭の帯と繰り幅がこれに従う。
+    out property <int> shown: max(1, root.sheets.length);
+    /// 紙を置く場所の広さが変わったことを知らせる（拡大と枚数はそこから決まる）。
+    callback room-changed(length, length);
+    /// Ctrl+ホイールの拡大。
+    callback zoomed(int);
+    /// 天（真）か地（偽）の、左0・中1・右2を次のものへ。
+    callback trim-stepped(bool, int);
     callback print-requested();
     callback dismissed();
 
@@ -47,10 +68,16 @@ export component PrintView inherits Rectangle {
     // （書き手の求め 2026-09-16）——下へ回せば次の紙。紙の上でも余白の上でも効く。
     TouchArea {
         scroll-event(event) => {
+            // **Ctrlを押していれば拡大**（書き手の求め 2026-09-17）。編集画面の
+            // Ctrl+ホイールと同じ手つきである。
+            if (event.modifiers.control) {
+                root.zoomed(event.delta-y > 0 || event.delta-x > 0 ? 1 : -1);
+                return accept;
+            }
             if (event.delta-y < 0 || event.delta-x < 0) {
-                root.turned(root.at + (root.spread ? 2 : 1));
+                root.turned(root.at + root.shown);
             } else if (event.delta-y > 0 || event.delta-x > 0) {
-                root.turned(root.at - (root.spread ? 2 : 1));
+                root.turned(root.at - root.shown);
             }
             return accept;
         }
@@ -62,10 +89,10 @@ export component PrintView inherits Rectangle {
             if event.text == Key.Escape { root.dismissed(); }
             // 紙を繰るのは矢印でもできる。**紙の向きに関わらず、左が前・右が次**
             // ——繰っているのは紙であって、本文ではない。
-            if event.text == Key.LeftArrow { root.turned(root.at - 1); }
-            if event.text == Key.RightArrow { root.turned(root.at + 1); }
-            if event.text == Key.PageUp { root.turned(root.at - 1); }
-            if event.text == Key.PageDown { root.turned(root.at + 1); }
+            if event.text == Key.LeftArrow { root.turned(root.at - root.shown); }
+            if event.text == Key.RightArrow { root.turned(root.at + root.shown); }
+            if event.text == Key.PageUp { root.turned(root.at - root.shown); }
+            if event.text == Key.PageDown { root.turned(root.at + root.shown); }
             if event.text == Key.Home { root.turned(0); }
             if event.text == Key.End { root.turned(root.pages - 1); }
             return accept;
@@ -101,13 +128,13 @@ export component PrintView inherits Rectangle {
                 TextButton {
                     title: "‹";
                     enabled: root.at > 0 && !root.working;
-                    clicked => { root.turned(root.at - (root.spread ? 2 : 1)); }
+                    clicked => { root.turned(root.at - root.shown); }
                 }
                 Text {
                     // 何枚目か。**1から数える**——紙を数えるのは人である。
                     // 見開きなら2枚とも言う。
-                    text: root.spread
-                        ? "\{root.at + 1}–\{root.at + 2} / \{root.pages}"
+                    text: root.shown > 1
+                        ? "\{root.at + 1}–\{min(root.at + root.shown, root.pages)} / \{root.pages}"
                         : "\{root.at + 1} / \{root.pages}";
                     color: Tok.ink;
                     font-size: 13px;
@@ -117,8 +144,8 @@ export component PrintView inherits Rectangle {
                 }
                 TextButton {
                     title: "›";
-                    enabled: root.at + (root.spread ? 2 : 1) < root.pages && !root.working;
-                    clicked => { root.turned(root.at + (root.spread ? 2 : 1)); }
+                    enabled: root.at + root.shown < root.pages && !root.working;
+                    clicked => { root.turned(root.at + root.shown); }
                 }
                 TextButton {
                     title: @tr("Print…");
@@ -133,67 +160,35 @@ export component PrintView inherits Rectangle {
             }
         }
 
-        sheets := Rectangle {
+        paper-room := Rectangle {
             background: Tok.chrome-sunken;
-            // **2枚入るなら2枚見せる**（書き手の求め 2026-09-16）。紙1枚ぶんの幅を
-            // 二つ並べて余白が残るかどうかで決める——数を選ばせない。
-            // **窓の寸法から決める**（自分が測られた大きさからではなく）。頭の帯が
-            // 何枚目かを言い、その字の幅が並びを決め、並びが高さを決め……と輪になる。
-            // 帯の高さは決め打ちなので、窓から引けばよい。
-            property <length> room: root.height - 44px - 34px;
-            property <bool> spread: root.at + 1 < root.pages
-                && root.width > (self.room - 48px) * root.aspect * 2 + 72px;
-            property <length> sheet-width: self.spread
-                ? min((root.width - 72px) / 2, (self.room - 48px) * root.aspect)
-                : min(root.width - 48px, (self.room - 48px) * root.aspect);
+            changed width => { root.room-changed(self.width, self.height); }
+            changed height => { root.room-changed(self.width, self.height); }
+            init => { root.room-changed(self.width, self.height); }
 
-            // 1枚のとき、2枚のとき。**置き方が違うだけで、同じ絵を出す。**
-            if !self.spread: Rectangle {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: parent.sheet-width;
-                height: self.width / max(0.01, root.aspect);
+            property <length> sheet-height: root.sheet-width / max(0.01, root.aspect);
+            property <int> rows: ceil(root.shown / max(1, root.columns));
+
+            for sheet[index] in root.sheets: Rectangle {
+                // 行の中の場所。**縦書きは右から左**——読む順に並べる。
+                property <int> column: mod(index, max(1, root.columns));
+                property <int> down: floor(index / max(1, root.columns));
+                property <int> place: root.vertical
+                    ? max(0, root.columns - 1) - self.column
+                    : self.column;
+                x: (parent.width - (root.sheet-width + 16px) * root.columns + 16px) / 2
+                    + (root.sheet-width + 16px) * self.place;
+                y: (parent.height - (parent.sheet-height + 16px) * parent.rows + 16px) / 2
+                    + (parent.sheet-height + 16px) * self.down;
+                width: root.sheet-width;
+                height: parent.sheet-height;
                 drop-shadow-blur: 12px;
                 drop-shadow-color: Tok.scrim;
                 background: Tok.paper;
                 Image {
                     width: parent.width;
                     height: parent.height;
-                    source: root.page;
-                    image-fit: contain;
-                }
-            }
-            if self.spread: Rectangle {
-                x: root.vertical
-                    ? parent.width / 2 + 12px
-                    : parent.width / 2 - 12px - self.width;
-                y: (parent.height - self.height) / 2;
-                width: parent.sheet-width;
-                height: self.width / max(0.01, root.aspect);
-                drop-shadow-blur: 12px;
-                drop-shadow-color: Tok.scrim;
-                background: Tok.paper;
-                Image {
-                    width: parent.width;
-                    height: parent.height;
-                    source: root.page;
-                    image-fit: contain;
-                }
-            }
-            if self.spread: Rectangle {
-                x: root.vertical
-                    ? parent.width / 2 - 12px - self.width
-                    : parent.width / 2 + 12px;
-                y: (parent.height - self.height) / 2;
-                width: parent.sheet-width;
-                height: self.width / max(0.01, root.aspect);
-                drop-shadow-blur: 12px;
-                drop-shadow-color: Tok.scrim;
-                background: Tok.paper;
-                Image {
-                    width: parent.width;
-                    height: parent.height;
-                    source: root.next-page;
+                    source: sheet;
                     image-fit: contain;
                 }
             }
@@ -237,6 +232,32 @@ export component PrintView inherits Rectangle {
                     clicked => { root.size-stepped(1); }
                 }
                 Rectangle { width: 8px; }
+                // **天地の余白に入れるもの**（書き手の求め 2026-09-17）。左・中・右
+                // の3つずつを、押すたびに「なし→名前→日付→ページ」と回す——3つし
+                // か入れられないので、選ぶ窓を開くより押して回すほうが早い。
+                Text {
+                    text: @tr("Head");
+                    color: Tok.ink-muted;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                for mark[at] in root.head: TextButton {
+                    title: root.said(mark);
+                    enabled: !root.working;
+                    clicked => { root.trim-stepped(true, at); }
+                }
+                Text {
+                    text: @tr("Foot");
+                    color: Tok.ink-muted;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                for mark[at] in root.foot: TextButton {
+                    title: root.said(mark);
+                    enabled: !root.working;
+                    clicked => { root.trim-stepped(false, at); }
+                }
+                Rectangle { width: 8px; }
                 // **用紙の大きさと向きはWindowsが持っている**（書き手の問い
                 // 2026-09-16：「A4などとLandscapeの設定がどこで反映されるか
                 // わかりません」）。この編集器に用紙の一覧は持たない。
@@ -266,6 +287,9 @@ export component PrintView inherits Rectangle {
                     color: Tok.ink;
                     font-size: 13px;
                     vertical-alignment: center;
+                    // 帯が狭いときは後ろから省く（数は前のほうが大事である）。
+                    overflow: elide;
+                    horizontal-stretch: 1;
                 }
                 Text {
                     text: root.status;

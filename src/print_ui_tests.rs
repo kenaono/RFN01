@@ -255,6 +255,70 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     );
     assert_eq!(raw.code_font, raw.body_font, "and in one face");
 
+    // **縮めれば並ぶ枚数が増える**（書き手の求め 2026-09-17）。6枚まで。
+    print_view::turn(&window, &live, 0);
+    let close = window.get_print_sheets().row_count();
+    for _ in 0..20 {
+        print_view::step_zoom(&window, &live, -1);
+    }
+    let far = window.get_print_sheets().row_count();
+    assert!(
+        far > close,
+        "zooming out must put more sheets on screen: {close} then {far}"
+    );
+    assert!(far <= 6, "and no more than six: {far}");
+    assert!(
+        window.get_print_columns() > 1,
+        "laid across: {}",
+        window.get_print_columns()
+    );
+    // 拡大しきれば1枚に戻る。
+    for _ in 0..30 {
+        print_view::step_zoom(&window, &live, 1);
+    }
+    assert_eq!(
+        window.get_print_sheets().row_count(),
+        1,
+        "and zooming right in leaves one"
+    );
+
+    // **天地に入れるものは押すたびに回る**（書き手の求め 2026-09-17）。既定は
+    // 地の真ん中にノンブルだけ。
+    assert_eq!(
+        window.get_print_foot().row_data(1),
+        Some(3),
+        "the page number stands in the middle of the foot"
+    );
+    assert_eq!(
+        window.get_print_head().row_data(0),
+        Some(0),
+        "and nothing at the head"
+    );
+    print_view::step_trim(&window, &live, true, 0);
+    assert_eq!(
+        window.get_print_head().row_data(0),
+        Some(1),
+        "one press puts the file's name at the left of the head"
+    );
+    print_view::step_trim(&window, &live, true, 0);
+    assert_eq!(
+        window.get_print_head().row_data(0),
+        Some(2),
+        "then the date"
+    );
+    print_view::step_trim(&window, &live, true, 0);
+    assert_eq!(
+        window.get_print_head().row_data(0),
+        Some(3),
+        "then the page"
+    );
+    print_view::step_trim(&window, &live, true, 0);
+    assert_eq!(
+        window.get_print_head().row_data(0),
+        Some(0),
+        "and round to nothing again"
+    );
+
     // そして**紙に出る本文そのものが変わる**：`**`も`#`も字としてそこにある。
     print_view::close(&window, &live);
     id.update_screen(&window, |screen| screen.preview = false);

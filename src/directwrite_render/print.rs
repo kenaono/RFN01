@@ -35,7 +35,7 @@ use windows::{
             DirectWrite::{
                 DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
                 DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
-                DWRITE_TEXT_ALIGNMENT_LEADING,
+                DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
             },
             Dxgi::IDXGIDevice,
             Gdi::{
@@ -60,6 +60,7 @@ use windows::{
                 STREAM_SEEK_SET, StructuredStorage::CreateStreamOnHGlobal,
             },
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
+            SystemInformation::GetLocalTime,
         },
         UI::{
             Controls::Dialogs::{
@@ -167,7 +168,12 @@ pub const PDF_PRINTER: &str = "Microsoft Print to PDF";
 /// `engine`は**紙の寸法で組んであること**——画面の幅で組んだものをそのまま紙へ
 /// 出せば、折り返しが紙に合わない。切る前に[`page_count`]と同じ寸法で
 /// `update`しておく。
-pub fn print(engine: &mut TextEngine, paper: Paper, to: Destination<'_>) -> Result<usize> {
+pub fn print(
+    engine: &mut TextEngine,
+    paper: Paper,
+    to: Destination<'_>,
+    trim: &Trim,
+) -> Result<usize> {
     let pages = page_count(engine, paper);
     if pages == 0 {
         return Ok(0);
@@ -222,7 +228,7 @@ pub fn print(engine: &mut TextEngine, paper: Paper, to: Destination<'_>) -> Resu
             height: paper.height,
         };
         for page in 0..pages {
-            let list = draw_page(graphics, &context, engine, paper, page)?;
+            let list = draw_page(graphics, &context, engine, paper, page, trim)?;
             // SAFETY: The command list is closed inside `draw_page` and lives
             // until the call returns.
             unsafe { control.AddPage(&list, size, None, None, None)? };
@@ -354,6 +360,7 @@ fn draw_page(
     engine: &mut TextEngine,
     paper: Paper,
     page: usize,
+    trim: &Trim,
 ) -> Result<ID2D1CommandList> {
     // SAFETY: The command list outlives the draw, the target is set and cleared
     // around it, and BeginDraw/EndDraw are paired.
@@ -364,7 +371,7 @@ fn draw_page(
         list
     };
     let target: ID2D1RenderTarget = context.clone().into();
-    draw_page_onto(graphics, &target, engine, paper, page, 1.0)?;
+    draw_page_onto(graphics, &target, engine, paper, page, 1.0, trim)?;
     // SAFETY: Paired with BeginDraw above; closing the list is what makes it
     // replayable by the print control.
     unsafe {
@@ -384,6 +391,7 @@ fn draw_page(
 /// そして**字を並べるのは画面のタイルと同じ処理**（[`super::draw_block`]）。紙の
 /// 上のどこに置くかは面の変換で動かすので、並べる側は自分が紙に出ていることを
 /// 知らない。
+#[allow(clippy::too_many_arguments)]
 fn draw_page_onto(
     graphics: &mut Graphics,
     target: &ID2D1RenderTarget,
@@ -391,6 +399,7 @@ fn draw_page_onto(
     paper: Paper,
     page: usize,
     scale: f32,
+    trim: &Trim,
 ) -> Result<()> {
     let mode = engine.mode;
     let (_, page_cross) = paper.printable(mode);
@@ -472,25 +481,105 @@ fn draw_page_onto(
         .first()
         .map(|task| task.typography.clone())
         .unwrap_or_else(|| std::sync::Arc::new(super::Typography::new(14.0)));
-    draw_nombre(graphics, target, &inks, paper, page, ranges.len(), &spec)?;
+    draw_trim(
+        graphics,
+        target,
+        &inks,
+        paper,
+        trim,
+        page,
+        ranges.len(),
+        &spec,
+    )?;
     Ok(())
 }
 
-/// 何枚目かを、紙の下の余白に打つ。
+/// 天地の余白に入れるもの（要件 7.10、書き手の求め 2026-09-17）。
 ///
-/// **ページという概念は紙にしか無い**（要件 7.10）ので、画面には出ない数である。
-/// 下の余白の中ほどに、本文より小さく、横書きで置く——縦書きの本でもノンブルは
-/// 横に寝かせて読む。
-fn draw_nombre(
+/// **多機能である必要はない。**紙に添えたいのは、どの原稿の、いつの、何枚目か
+/// ——その3つで足りる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Mark {
+    #[default]
+    Nothing,
+    /// ファイルの名前。
+    Name,
+    /// 刷った日。
+    Date,
+    /// 「3 / 17」。**総数も出す**——あと何枚かが分からないと、紙の束を見失う。
+    Page,
+}
+
+impl Mark {
+    /// 設定に書く数。
+    pub fn number(self) -> i32 {
+        match self {
+            Self::Nothing => 0,
+            Self::Name => 1,
+            Self::Date => 2,
+            Self::Page => 3,
+        }
+    }
+
+    pub fn from_number(number: i32) -> Self {
+        match number {
+            1 => Self::Name,
+            2 => Self::Date,
+            3 => Self::Page,
+            _ => Self::Nothing,
+        }
+    }
+
+    /// 押すたびに次のものへ（なし→名前→日付→ページ→なし）。
+    pub fn next(self) -> Self {
+        Self::from_number((self.number() + 1) % 4)
+    }
+}
+
+/// 天と地、それぞれの左・中・右。**6つの場所**で、どれに何を入れるかだけを持つ。
+#[derive(Clone, Debug, Default)]
+pub struct Trim {
+    pub head: [Mark; 3],
+    pub foot: [Mark; 3],
+    /// 名乗る名前（ファイルの名前）。
+    pub name: String,
+}
+
+impl Trim {
+    /// 何も言われていないとき。**地の真ん中にノンブル**——紙の当たり前である。
+    pub fn standing() -> Self {
+        Self {
+            head: [Mark::Nothing; 3],
+            foot: [Mark::Nothing, Mark::Page, Mark::Nothing],
+            name: String::new(),
+        }
+    }
+
+    fn empty(&self) -> bool {
+        self.head
+            .iter()
+            .chain(self.foot.iter())
+            .all(|mark| *mark == Mark::Nothing)
+    }
+}
+
+/// 天地の余白に、名前・日付・何枚目かを入れる。
+///
+/// **ページという概念は紙にしか無い**（要件 7.10）ので、画面には出ないものである。
+/// 余白の中ほどに、本文より小さく、横書きで置く——縦書きの本でもノンブルは横に
+/// 寝かせて読む。
+#[allow(clippy::too_many_arguments)]
+fn draw_trim(
     graphics: &mut Graphics,
     target: &ID2D1RenderTarget,
     inks: &Inks,
     paper: Paper,
+    trim: &Trim,
     page: usize,
     pages: usize,
     spec: &super::Typography,
 ) -> Result<()> {
-    if pages == 0 {
+    if pages == 0 || trim.empty() {
         return Ok(());
     }
     // 本文の7割。小さすぎると読めず、大きいと本文と競う。
@@ -502,33 +591,72 @@ fn draw_nombre(
         ..spec.clone()
     };
     let format = graphics.text_format(&spec, WritingMode::Horizontal)?;
-    let text: Vec<u16> = (page + 1).to_string().encode_utf16().collect();
-    let band = D2D_RECT_F {
-        left: paper.margin,
-        // 余白の真ん中あたり。本文の下端からも紙の端からも離れる。
-        top: paper.height - paper.margin * 0.72,
-        right: paper.width - paper.margin,
-        bottom: paper.height - paper.margin * 0.2,
+    let today = today();
+    let said = |mark: Mark| match mark {
+        Mark::Nothing => String::new(),
+        Mark::Name => trim.name.clone(),
+        Mark::Date => today.clone(),
+        Mark::Page => format!("{} / {pages}", page + 1),
     };
-    // SAFETY: The format and brush outlive the call, and the text is a live
-    // buffer for its length.
+    let bands = [
+        // 天：紙の端と本文の上端のあいだ。
+        (&trim.head, paper.margin * 0.2, paper.margin * 0.8),
+        // 地：本文の下端と紙の端のあいだ。
+        (
+            &trim.foot,
+            paper.height - paper.margin * 0.8,
+            paper.height - paper.margin * 0.2,
+        ),
+    ];
+    let places = [
+        DWRITE_TEXT_ALIGNMENT_LEADING,
+        DWRITE_TEXT_ALIGNMENT_CENTER,
+        DWRITE_TEXT_ALIGNMENT_TRAILING,
+    ];
+    for (marks, top, bottom) in bands {
+        for (at, mark) in marks.iter().enumerate() {
+            let text = said(*mark);
+            if text.is_empty() {
+                continue;
+            }
+            let text: Vec<u16> = text.encode_utf16().collect();
+            let band = D2D_RECT_F {
+                left: paper.margin,
+                top,
+                right: paper.width - paper.margin,
+                bottom,
+            };
+            // SAFETY: The format and brush outlive the call, and the text is a
+            // live buffer for its length.
+            unsafe {
+                format.SetTextAlignment(places[at.min(2)])?;
+                format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                target.DrawText(
+                    &text,
+                    &format,
+                    &band,
+                    &inks.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        }
+    }
+    // **借りた書式は返す。**画面のタイルと同じ入れ物を使っているので、寄せ方を
+    // 置いたままにすると本文が真ん中へ寄る。
+    // SAFETY: the format is alive here.
     unsafe {
-        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-        target.DrawText(
-            &text,
-            &format,
-            &band,
-            &inks.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-        // **借りた書式は返す。**画面のタイルと同じ入れ物を使っているので、寄せ方を
-        // 置いたままにすると本文が真ん中へ寄る。
         format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
         format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
     }
     Ok(())
+}
+
+/// 今日。**刷った日**であって、原稿の日付ではない。
+fn today() -> String {
+    // SAFETY: The call fills a plain struct and takes nothing.
+    let now = unsafe { GetLocalTime() };
+    format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
 }
 
 /// この紙に載せるブロックたち。
@@ -581,6 +709,7 @@ pub fn render_page(
     paper: Paper,
     page: usize,
     scale: f32,
+    trim: &Trim,
 ) -> Result<(Vec<u8>, u32, u32)> {
     let width = (paper.width * scale).round().max(1.0) as u32;
     let height = (paper.height * scale).round().max(1.0) as u32;
@@ -596,7 +725,7 @@ pub fn render_page(
             // 紙は白い。**画面のアイボリーではない**——紙の色は紙が持っている。
             target.Clear(Some(&colour([1.0, 1.0, 1.0])));
         }
-        draw_page_onto(graphics, &target, engine, paper, page, scale)?;
+        draw_page_onto(graphics, &target, engine, paper, page, scale, trim)?;
         // SAFETY: Paired with BeginDraw above.
         unsafe { target.EndDraw(None, None)? };
         let stride = width * 4;
@@ -865,6 +994,88 @@ mod tests {
         );
     }
 
+    /// 要件 7.10: 天地に入れるものは、押すたびに回る（なし→名前→日付→ページ）。
+    #[test]
+    fn the_marks_go_round_one_press_at_a_time() {
+        assert_eq!(Mark::default(), Mark::Nothing);
+        assert_eq!(Mark::Nothing.next(), Mark::Name);
+        assert_eq!(Mark::Name.next(), Mark::Date);
+        assert_eq!(Mark::Date.next(), Mark::Page);
+        assert_eq!(Mark::Page.next(), Mark::Nothing, "and round again");
+        for mark in [Mark::Nothing, Mark::Name, Mark::Date, Mark::Page] {
+            assert_eq!(Mark::from_number(mark.number()), mark, "written and read");
+        }
+    }
+
+    /// 要件 7.10: **天にも地にも、左・中・右に入る**（書き手の求め 2026-09-17）。
+    /// 何も言われていなければ地の真ん中にノンブルだけ。
+    #[test]
+    fn the_head_and_the_foot_carry_what_they_were_given() {
+        let paper = Paper::default();
+        let mut engine = engine_on_paper(&long_document(40), WritingMode::Vertical, paper);
+        let mut ink = |trim: &Trim, from: f32, to: f32, left: f32, right: f32| {
+            let (pixels, width, height) =
+                render_page(&mut engine, paper, 1, 1.0, trim).expect("draw the page");
+            let (from, to) = (from.round() as u32, (to.round() as u32).min(height));
+            let (left, right) = (left.round() as u32, (right.round() as u32).min(width));
+            (from..to)
+                .flat_map(|y| (left..right).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    let at = ((y * width + x) * 4) as usize;
+                    pixels.get(at).is_some_and(|blue| *blue < 120)
+                })
+                .count()
+        };
+        let head = 0.0..paper.margin;
+        let foot = (paper.height - paper.margin)..paper.height;
+        let (left, middle, right) = (
+            0.0..paper.width / 3.0,
+            paper.width / 3.0..paper.width * 2.0 / 3.0,
+            paper.width * 2.0 / 3.0..paper.width,
+        );
+
+        // 既定：地の真ん中だけ。
+        let standing = Trim::standing();
+        assert!(
+            ink(&standing, foot.start, foot.end, middle.start, middle.end) > 0,
+            "the page number stands in the middle of the foot"
+        );
+        assert_eq!(
+            ink(&standing, head.start, head.end, 0.0, paper.width),
+            0,
+            "and nothing is put at the head"
+        );
+
+        // 天の左にファイル名、天の右に日付、地の右にページ。
+        let named = Trim {
+            head: [Mark::Name, Mark::Nothing, Mark::Date],
+            foot: [Mark::Nothing, Mark::Nothing, Mark::Page],
+            name: "\u{539f}\u{7a3f}.md".to_owned(),
+        };
+        assert!(
+            ink(&named, head.start, head.end, left.start, left.end) > 0,
+            "the name stands at the left of the head"
+        );
+        assert!(
+            ink(&named, head.start, head.end, right.start, right.end) > 0,
+            "the date at its right"
+        );
+        assert_eq!(
+            ink(&named, head.start, head.end, middle.start, middle.end),
+            0,
+            "and nothing between them"
+        );
+        assert!(
+            ink(&named, foot.start, foot.end, right.start, right.end) > 0,
+            "the page number at the right of the foot"
+        );
+        assert_eq!(
+            ink(&named, foot.start, foot.end, middle.start, middle.end),
+            0,
+            "and no longer in the middle"
+        );
+    }
+
     /// 要件 7.10: ノンブルは**下の余白**に、紙の真ん中で打つ。本文の枠の中には
     /// 入らない——入れば1行ぶん本文が減る。
     #[test]
@@ -872,7 +1083,7 @@ mod tests {
         let paper = Paper::default();
         let mut engine = engine_on_paper(&long_document(40), WritingMode::Vertical, paper);
         let (pixels, width, height) =
-            render_page(&mut engine, paper, 1, 1.0).expect("draw the page");
+            render_page(&mut engine, paper, 1, 1.0, &Trim::standing()).expect("draw the page");
         let dark = |x: u32, y: u32| {
             let at = ((y * width + x) * 4) as usize;
             pixels.get(at).is_some_and(|blue| *blue < 120)

@@ -899,9 +899,20 @@ export component AppWindow inherits Window {
     // 要件 7.10: 紙の形で見る——印刷プレビュー。
     in-out property <bool> print-active: false;
     in property <string> print-title;
-    in property <image> print-page;
-    in property <image> print-next-page;
+    in property <[image]> print-sheets;
+    in property <int> print-columns: 1;
+    in property <float> print-sheet-width: 100;
     in property <bool> print-vertical;
+    in-out property <int> print-zoom: 100;
+    in-out property <float> print-room-wide: 800;
+    in-out property <float> print-room-tall: 600;
+    callback print-room-changed(length, length);
+    callback print-zoomed(int);
+    /// 天と地の余白に入れるもの。**左・中・右の3つずつ**を「0,3,0」のように持つ
+    /// （0なし／1ファイル名／2日付／3ページ）。
+    in property <[int]> print-head;
+    in property <[int]> print-foot;
+    callback print-trim-stepped(bool, int);
     in property <float> print-aspect: 0.707;
     in-out property <int> print-at;
     in property <int> print-pages;
@@ -5469,9 +5480,16 @@ export component AppWindow inherits Window {
             width: parent.width;
             height: parent.height;
             title: root.print-title;
-            page: root.print-page;
-            next-page: root.print-next-page;
+            sheets: root.print-sheets;
+            columns: root.print-columns;
+            sheet-width: root.print-sheet-width * 1px;
+            zoom: root.print-zoom;
             vertical: root.print-vertical;
+            room-changed(wide, tall) => { root.print-room-changed(wide, tall); }
+            zoomed(by) => { root.print-zoomed(by); }
+            head: root.print-head;
+            foot: root.print-foot;
+            trim-stepped(head, at) => { root.print-trim-stepped(head, at); }
             aspect: root.print-aspect;
             at: root.print-at;
             pages: root.print-pages;

@@ -10,9 +10,9 @@
 //! 続いた1枚のまま、何も変わらない。
 use std::rc::Rc;
 
-use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
+use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
-use crate::directwrite_render::print::{self, Destination, Paper, Printer};
+use crate::directwrite_render::print::{self, Destination, Mark, Paper, Printer, Trim};
 use crate::directwrite_render::{LineFit, TextEngine, WritingMode};
 use crate::document::{self, PreviewDocument};
 use crate::open_document::OpenDocument;
@@ -23,21 +23,15 @@ use crate::{AppWindow, Live, StatusBar, focused_pane, pictures, say};
 pub struct Preview {
     engine: TextEngine,
     paper: Paper,
+    /// 天地の余白に添えるもの（名前・日付・何枚目か）と、名乗る名前。
+    trim: Trim,
     /// 刷る先と、その設定（用紙の大きさ・向き・給紙……）。**Windowsが持っている
     /// ものをそのまま持ち回る**——紙の大きさはここから測り、刷るときは印刷
     /// チケットへ直して渡す。
     printer: Option<Printer>,
     pages: usize,
-    /// **絵の細かさ**。紙のDIPに対する倍率で、画面に映すぶんだけ大きく描く。
-    scale: f32,
     document: Rc<OpenDocument>,
 }
-
-/// プレビューの絵をどれだけ大きく描くか。
-///
-/// A4なら約1190×1684画素。**窓より大きく描いて縮めて見せる**ので、窓を広げても
-/// 字が粗くならない。
-const PREVIEW_SCALE: f32 = 1.5;
 
 /// ☰の Print… と Ctrl+P。
 pub fn open(window: &AppWindow, live: &Live) {
@@ -71,9 +65,9 @@ pub fn open(window: &AppWindow, live: &Live) {
     *live.preview.borrow_mut() = Some(Preview {
         engine,
         paper,
+        trim: trim_of(window, &title),
         printer,
         pages,
-        scale: PREVIEW_SCALE,
         document,
     });
     window.set_print_title(title.into());
@@ -125,42 +119,109 @@ pub fn close(window: &AppWindow, live: &Live) {
     crate::restore_editor_focus(window);
 }
 
-/// いま見ている紙を描いて、窓へ渡す。
+/// いま映る紙たちを描いて、窓へ渡す。
 ///
-/// **次の紙も描く。**窓が広ければ2枚並べる（見開き）ので、そのときに要る——描いて
-/// おけば繰ったときも待たない。
+/// **何枚描くかは拡大が決める**（書き手の求め 2026-09-17）。縮めれば並ぶ枚数が
+/// 増え、最大6枚まで。**絵の細かさも映る大きさに合わせる**——小さく映すものを
+/// 大きく描いても、画素を捨てるだけである。
 fn draw(window: &AppWindow, live: &Live) {
     let at = window.get_print_at().max(0) as usize;
+    let (columns, rows, sheet_width) = grid(window, live);
     let mut held = live.preview.borrow_mut();
     let Some(preview) = held.as_mut() else {
         return;
     };
-    let mut sheet = |page: usize| match print::render_page(
-        &mut preview.engine,
-        preview.paper,
-        page,
-        preview.scale,
-    ) {
-        Ok((pixels, width, height)) => Some(image_of(&pixels, width, height)),
-        Err(error) => {
-            live.cache
-                .borrow_mut()
-                .log_diag("print", &format!("page {page} failed: {error}"));
-            None
+    let count = (columns * rows)
+        .min(MOST_SHEETS)
+        .min(preview.pages - at.min(preview.pages));
+    // 紙1枚を何倍の細かさで描くか。映る大きさの1.5倍まで——拡大したときに粗く
+    // 見えない程度で、縮めたときは無駄に描かない。
+    let scale = (sheet_width / preview.paper.width.max(1.0) * 1.5).clamp(0.4, 2.0);
+    let mut sheets = Vec::with_capacity(count);
+    for page in at..at + count {
+        match print::render_page(
+            &mut preview.engine,
+            preview.paper,
+            page,
+            scale,
+            &preview.trim,
+        ) {
+            Ok((pixels, width, height)) => sheets.push(image_of(&pixels, width, height)),
+            Err(error) => {
+                live.cache
+                    .borrow_mut()
+                    .log_diag("print", &format!("page {page} failed: {error}"));
+                window.set_print_status(
+                    say!("この紙を描けませんでした", "This sheet could not be drawn").into(),
+                );
+            }
         }
-    };
-    match sheet(at) {
-        Some(image) => window.set_print_page(image),
-        None => window.set_print_status(
-            say!("この紙を描けませんでした", "This sheet could not be drawn").into(),
-        ),
     }
-    let next = if at + 1 < preview.pages {
-        sheet(at + 1)
-    } else {
-        None
-    };
-    window.set_print_next_page(next.unwrap_or_default());
+    window.set_print_columns(columns.max(1) as i32);
+    window.set_print_sheet_width(sheet_width);
+    window.set_print_sheets(ModelRc::new(VecModel::from(sheets)));
+}
+
+/// 一度に並べる紙の上限。**6枚**（書き手の求め 2026-09-17）——それ以上は、紙の姿を
+/// 見るには小さすぎる。
+const MOST_SHEETS: usize = 6;
+
+/// いくつ並ぶか（横の数、縦の数）と、紙1枚の幅。
+///
+/// **拡大100%は「1枚が場所いっぱいに入る大きさ」**で、縮めればその割合で小さくなり、
+/// 空いたぶんに次の紙が並ぶ。
+fn grid(window: &AppWindow, live: &Live) -> (usize, usize, f32) {
+    let aspect = window.get_print_aspect().max(0.01);
+    let (room_wide, room_tall) = (
+        window.get_print_room_wide().max(1.0),
+        window.get_print_room_tall().max(1.0),
+    );
+    let zoom = window.get_print_zoom().clamp(ZOOM_LEAST, ZOOM_MOST) as f32 / 100.0;
+    // 1枚だけを置いたときの大きさ。そこから縮める。
+    let one = (room_wide - 48.0)
+        .min((room_tall - 48.0) * aspect)
+        .max(24.0);
+    let wide = (one * zoom).max(24.0);
+    let tall = wide / aspect;
+    let across = ((room_wide + 16.0) / (wide + 16.0)).floor().max(1.0) as usize;
+    let down = ((room_tall + 16.0) / (tall + 16.0)).floor().max(1.0) as usize;
+    let pages = live
+        .preview
+        .borrow()
+        .as_ref()
+        .map_or(1, |preview| preview.pages);
+    let at = window.get_print_at().max(0) as usize;
+    let left = pages.saturating_sub(at).max(1);
+    // 残りの紙より多くは並べない。
+    let across = across.min(MOST_SHEETS).min(left);
+    let down = down.min(MOST_SHEETS.div_ceil(across.max(1))).max(1);
+    (across, down, wide)
+}
+
+/// 拡大の下限と上限。**縮めるほうへ広く**——並べて見るためのものだからである。
+const ZOOM_LEAST: i32 = 30;
+const ZOOM_MOST: i32 = 200;
+
+/// Ctrl+ホイールの拡大。
+pub fn step_zoom(window: &AppWindow, live: &Live, by: i32) {
+    let zoom = (window.get_print_zoom() + by * 10).clamp(ZOOM_LEAST, ZOOM_MOST);
+    if zoom == window.get_print_zoom() {
+        return;
+    }
+    window.set_print_zoom(zoom);
+    draw(window, live);
+}
+
+/// 紙を置く場所の広さが変わった（窓の大きさ、帯の出入り）。
+pub fn room_changed(window: &AppWindow, live: &Live, wide: f32, tall: f32) {
+    if (window.get_print_room_wide() - wide).abs() < 1.0
+        && (window.get_print_room_tall() - tall).abs() < 1.0
+    {
+        return;
+    }
+    window.set_print_room_wide(wide);
+    window.set_print_room_tall(tall);
+    draw(window, live);
 }
 
 /// Direct2Dが返すBGRAを、窓が読む絵にする。
@@ -458,10 +519,12 @@ fn print_pages(window: &AppWindow, live: &Live, chosen: &Printer) -> windows::co
     let Some(preview) = held.as_mut() else {
         return Ok(0);
     };
+    let trim = preview.trim.clone();
     print::print(
         &mut preview.engine,
         preview.paper,
         Destination::Printer(chosen),
+        &trim,
     )
 }
 
@@ -500,17 +563,21 @@ fn reopen(window: &AppWindow, live: &Live, paper: Paper) -> windows::core::Resul
     let mode = mode_of(window);
     let engine = lay_out(window, live, &document, mode, paper)?;
     let pages = print::page_count(&engine, paper);
-    let printer = live
-        .preview
-        .borrow()
-        .as_ref()
-        .and_then(|preview| preview.printer.clone());
+    let (printer, trim) = {
+        let held = live.preview.borrow();
+        let printer = held.as_ref().and_then(|preview| preview.printer.clone());
+        let trim = held
+            .as_ref()
+            .map(|preview| preview.trim.clone())
+            .unwrap_or_default();
+        (printer, trim)
+    };
     *live.preview.borrow_mut() = Some(Preview {
         engine,
         paper,
+        trim,
         printer,
         pages,
-        scale: PREVIEW_SCALE,
         document,
     });
     window.set_print_pages(pages as i32);
@@ -570,4 +637,85 @@ fn mode_of(window: &AppWindow) -> WritingMode {
     } else {
         WritingMode::Horizontal
     }
+}
+
+/// 天地の余白に何を入れるか。窓が持っている3つずつを読み、名乗る名前はいまの文書。
+fn trim_of(window: &AppWindow, name: &str) -> Trim {
+    ensure_trim(window);
+    let read = |marks: &ModelRc<i32>| -> [Mark; 3] {
+        let mut read = [Mark::Nothing; 3];
+        for (at, slot) in read.iter_mut().enumerate() {
+            *slot = Mark::from_number(marks.row_data(at).unwrap_or(0));
+        }
+        read
+    };
+    Trim {
+        head: read(&window.get_print_head()),
+        foot: read(&window.get_print_foot()),
+        name: name.to_owned(),
+    }
+}
+
+/// 天地の6つの場所のひとつを、次のものへ（なし→名前→日付→ページ→なし）。
+///
+/// **押すたびに回る**（書き手の求め 2026-09-17）。入れられるものは3つで足りるので、
+/// 選ぶ窓を開くより押して回すほうが早い。
+pub fn step_trim(window: &AppWindow, live: &Live, head: bool, at: i32) {
+    ensure_trim(window);
+    let marks = if head {
+        window.get_print_head()
+    } else {
+        window.get_print_foot()
+    };
+    let at = at.clamp(0, 2) as usize;
+    let turned = Mark::from_number(marks.row_data(at).unwrap_or(0)).next();
+    marks.set_row_data(at, turned.number());
+    let title = live
+        .preview
+        .borrow()
+        .as_ref()
+        .map(|preview| preview.trim.name.clone())
+        .unwrap_or_default();
+    if let Some(preview) = live.preview.borrow_mut().as_mut() {
+        preview.trim = trim_of(window, &title);
+    }
+    draw(window, live);
+}
+
+/// 窓が3つずつ持っていることを確かめる。**空なら既定を置く**——設定ファイルに
+/// 何も書かれていない最初の一度だけ通る。既定は**地の真ん中にノンブル**である。
+fn ensure_trim(window: &AppWindow) {
+    if window.get_print_head().row_count() != 3 {
+        window.set_print_head(ModelRc::new(VecModel::from(vec![0, 0, 0])));
+    }
+    if window.get_print_foot().row_count() != 3 {
+        window.set_print_foot(ModelRc::new(VecModel::from(vec![0, 3, 0])));
+    }
+}
+
+/// 天地に入れるものを、設定の文字列（「0,3,0」）から窓へ。
+pub fn hold_trim(window: &AppWindow, head: &str, foot: &str) {
+    let read = |said: &str| -> Vec<i32> {
+        let mut marks = vec![0; 3];
+        for (at, part) in said.split(',').take(3).enumerate() {
+            marks[at] = part.trim().parse().unwrap_or(0).clamp(0, 3);
+        }
+        marks
+    };
+    window.set_print_head(ModelRc::new(VecModel::from(read(head))));
+    window.set_print_foot(ModelRc::new(VecModel::from(read(foot))));
+}
+
+/// そして設定へ戻すときの文字列。
+///
+/// **まだ置いていなければ既定を書く**——空の一覧をそのまま書き出すと、次に読んだ
+/// ときに「どこにも何も入れない」になり、ノンブルが消える。
+pub fn said_trim(marks: &ModelRc<i32>, standing: &str) -> String {
+    if marks.row_count() != 3 {
+        return standing.to_owned();
+    }
+    (0..3)
+        .map(|at| marks.row_data(at).unwrap_or(0).to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }

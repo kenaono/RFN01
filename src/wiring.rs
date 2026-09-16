@@ -1492,6 +1492,30 @@ pub fn wire_saving(window: &AppWindow, live: &Live) {
 
     let weak = window.as_weak();
     let print_live = live.clone();
+    window.on_print_room_changed(move |wide, tall| {
+        if let Some(window) = weak.upgrade() {
+            crate::print_view::room_changed(&window, &print_live, wide, tall);
+        }
+    });
+
+    let weak = window.as_weak();
+    let print_live = live.clone();
+    window.on_print_trim_stepped(move |head, at| {
+        if let Some(window) = weak.upgrade() {
+            crate::print_view::step_trim(&window, &print_live, head, at);
+        }
+    });
+
+    let weak = window.as_weak();
+    let print_live = live.clone();
+    window.on_print_zoomed(move |by| {
+        if let Some(window) = weak.upgrade() {
+            crate::print_view::step_zoom(&window, &print_live, by);
+        }
+    });
+
+    let weak = window.as_weak();
+    let print_live = live.clone();
     window.on_print_paper_pressed(move || {
         if let Some(window) = weak.upgrade() {
             crate::print_view::ask_paper(&window, &print_live);
