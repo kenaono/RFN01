@@ -904,8 +904,10 @@ export component AppWindow inherits Window {
     in-out property <int> print-at;
     in property <int> print-pages;
     in-out property <string> print-status;
+    in property <string> print-paper-note;
     in-out property <bool> print-working;
     callback print-turned(int);
+    callback print-margin-stepped(int);
     callback print-requested();
     callback print-dismissed();
 
@@ -1185,15 +1187,6 @@ export component AppWindow inherits Window {
                                     app-menu.close();
                                     root.save-all-requested();
                                     root.focus-generation += 1;
-                                }
-                            }
-                            // 要件 7.10: 紙の形で見る。**PDFはプリンタの一つ**
-                            // なので、PDF専用の行は作らない。
-                            MenuRow {
-                                title: @tr("Print…");
-                                shortcut: root.shortcut-keys[45]; activated => {
-                                    app-menu.close();
-                                    root.print-requested();
                                 }
                             }
                             MenuSep { }
@@ -2239,6 +2232,10 @@ export component AppWindow inherits Window {
                         compare-requested => {
                             root.focused-pane = pane.id;
                             root.compare-files-requested();
+                        }
+                        print-requested => {
+                            root.focused-pane = pane.id;
+                            root.print-requested();
                         }
                         goto-requested(taking) => {
                             root.focused-pane = pane.id;
@@ -5467,8 +5464,10 @@ export component AppWindow inherits Window {
             at: root.print-at;
             pages: root.print-pages;
             status: root.print-status;
+            paper-note: root.print-paper-note;
             working: root.print-working;
             turned(to) => { root.print-turned(to); }
+            margin-stepped(by) => { root.print-margin-stepped(by); }
             print-requested => { root.print-requested(); }
             dismissed => { root.print-dismissed(); }
         }

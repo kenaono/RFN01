@@ -149,6 +149,31 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         let _ = std::fs::write(std::path::Path::new(&into).join("preview.ppm"), ppm);
     }
 
+    // 余白を動かせば、行に入る字数が変わる。**紙の姿はその場で言い直される**
+    // （書き手の問い 2026-09-16：「Widthはどこで設定するか」）。
+    let before = window.get_print_paper_note().to_string();
+    assert!(
+        before.contains('字') || before.contains('×'),
+        "the sheet must say how many characters fit: {before}"
+    );
+    print_view::step_margin(&window, &live, 1);
+    let wider = window.get_print_paper_note().to_string();
+    assert!(
+        wider != before,
+        "a wider margin must change the sheet: {before} then {wider}"
+    );
+    let narrow_pages = window.get_print_pages();
+    print_view::step_margin(&window, &live, -1);
+    assert_eq!(
+        window.get_print_paper_note().to_string(),
+        before,
+        "and stepping back must put it where it was"
+    );
+    assert!(
+        narrow_pages >= pages,
+        "a wider margin needs at least as many sheets: {narrow_pages} against {pages}"
+    );
+
     print_view::close(&window, &live);
     assert!(!window.get_print_active(), "Close must put the paper away");
     assert!(

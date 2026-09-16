@@ -75,6 +75,7 @@ pub fn open(window: &AppWindow, live: &Live) {
     window.set_print_status(Default::default());
     window.set_print_aspect(paper.width / paper.height);
     window.set_print_active(true);
+    note_paper(window, live);
     draw(window, live);
 }
 
@@ -168,7 +169,16 @@ fn lay_out(
     engine.update(
         styled,
         LineFit::Extent(cross.round().max(1.0) as u32),
-        &for_paper(&crate::pane_typography(window, focused_pane(window))),
+        &for_paper(&crate::typography_for(
+            window,
+            // **画面の拡大率は紙には効かない**（書き手の指摘 2026-09-16：
+            // 「プレビューでは行の文字数が画面より少なくかなり拡大されている」）。
+            // Ctrl+ホイールの拡大は**読むための**もので、刷る大きさではない。紙は
+            // 書き手が設定したBody sizeそのままで組む。
+            100,
+            matches!(mode, WritingMode::Vertical),
+            true,
+        )),
     )?;
     Ok(engine)
 }
@@ -277,6 +287,28 @@ fn print_pages(
     )
 }
 
+/// 余白を1段（5mm）動かす。
+///
+/// **字数と行数はこれで決まる**（書き手の問い 2026-09-16：「Widthはどこで設定
+/// するか」）。余白が動けば行の長さが変わるので、そのたびに組み直す——プレビューは
+/// 刷るものそのものである。
+pub fn step_margin(window: &AppWindow, live: &Live, by: i32) {
+    let Some(paper) = live.preview.borrow().as_ref().map(|preview| preview.paper) else {
+        return;
+    };
+    let step = 5.0 * print::MM;
+    // 5mmより狭いと紙の端に届き、40mmより広いと本文がひどく細る。
+    let margin = (paper.margin + by as f32 * step).clamp(5.0 * print::MM, 40.0 * print::MM);
+    if (margin - paper.margin).abs() < 0.5 {
+        return;
+    }
+    if let Err(error) = reopen(window, live, Paper { margin, ..paper }) {
+        live.cache
+            .borrow_mut()
+            .log_diag("print", &format!("margin change failed: {error}"));
+    }
+}
+
 /// この紙で組み直し、プレビューも新しい紙にする。
 fn reopen(window: &AppWindow, live: &Live, paper: Paper) -> windows::core::Result<()> {
     let document = {
@@ -299,8 +331,30 @@ fn reopen(window: &AppWindow, live: &Live, paper: Paper) -> windows::core::Resul
     window.set_print_pages(pages as i32);
     window.set_print_at(window.get_print_at().min(pages as i32 - 1).max(0));
     window.set_print_aspect(paper.width / paper.height);
+    note_paper(window, live);
     draw(window, live);
     Ok(())
+}
+
+/// 紙の姿を一行で：大きさ、余白、そして**何字詰めの何行**か。
+fn note_paper(window: &AppWindow, live: &Live) {
+    let held = live.preview.borrow();
+    let Some(preview) = held.as_ref() else {
+        return;
+    };
+    let paper = preview.paper;
+    let (cells, lines) = print::page_grid(&preview.engine, paper);
+    let millimetres = |value: f32| (value / print::MM).round() as i32;
+    let (wide, tall) = (millimetres(paper.width), millimetres(paper.height));
+    let margin = millimetres(paper.margin);
+    window.set_print_paper_note(
+        if crate::i18n::japanese() {
+            format!("{margin}mm　{wide}×{tall}mm　{cells}字×{lines}行")
+        } else {
+            format!("{margin}mm · {wide}×{tall}mm · {cells} × {lines}")
+        }
+        .into(),
+    );
 }
 
 fn mode_of(window: &AppWindow) -> WritingMode {

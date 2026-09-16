@@ -703,6 +703,9 @@ export component EditorPane inherits Rectangle {
     /// 「そちらへ移りたい」**であって、閉じてほしいという意味ではない。
     callback goto-requested(bool);
     callback compare-requested();
+    /// 要件 7.10: 紙の形で見る。**このペインのこのTABを刷る**——窓の☰に置くと、
+    /// どのペインのどのTABが出るのか押す側から分からない（書き手の指摘 2026-09-16）。
+    callback print-requested();
     callback compare-saved-requested();
     callback compare-head-requested();
     callback reopen-closed-requested();
@@ -1486,6 +1489,16 @@ export component EditorPane inherits Rectangle {
                             title: @tr("Compare with Another File…");
                             activated => {
                                 root.compare-requested();
+                                pane-menu.close();
+                            }
+                        }
+                        // 要件 7.10: 紙の形で見る。**シェルと設定のTABには無い**
+                        // ——刷る本文が無い。
+                        if root.writing: MenuRow {
+                            title: @tr("Print…");
+                            shortcut: root.shortcut-keys[45];
+                            activated => {
+                                root.print-requested();
                                 pane-menu.close();
                             }
                         }

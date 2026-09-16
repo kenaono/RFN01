@@ -16,8 +16,12 @@ export component PrintView inherits Rectangle {
     in property <int> at;
     in property <int> pages;
     in property <string> status;
+    /// 紙の姿を一行で：大きさ、余白、そして**何字詰めの何行**か。
+    in property <string> paper-note;
     in property <bool> working;
     callback turned(int);
+    /// 余白を1段ずつ。字数と行数はこれで決まる（書き手の問い 2026-09-16）。
+    callback margin-stepped(int);
     callback print-requested();
     callback dismissed();
 
@@ -118,17 +122,45 @@ export component PrintView inherits Rectangle {
             }
         }
 
-        if root.status != "": Rectangle {
-            height: 30px;
+        // 紙のことを言う帯。**余白はここで変える**——mmだけ言われても原稿が何字詰めに
+        // なるかは分からないので、字数と行数を隣に出す。
+        Rectangle {
+            height: 34px;
             background: Tok.chrome;
             HorizontalLayout {
+                padding: 4px;
                 padding-left: 10px;
                 padding-right: 10px;
+                spacing: 6px;
+                alignment: start;
+                Text {
+                    text: @tr("Margin");
+                    color: Tok.ink-muted;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                TextButton {
+                    title: "−";
+                    enabled: !root.working;
+                    clicked => { root.margin-stepped(-1); }
+                }
+                TextButton {
+                    title: "+";
+                    enabled: !root.working;
+                    clicked => { root.margin-stepped(1); }
+                }
+                Text {
+                    text: root.paper-note;
+                    color: Tok.ink;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
                 Text {
                     text: root.status;
                     color: Tok.ink-muted;
                     font-size: 13px;
                     vertical-alignment: center;
+                    horizontal-stretch: 1;
                 }
             }
         }

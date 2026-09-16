@@ -203,6 +203,31 @@ pub fn print(engine: &mut TextEngine, paper: Paper, to: Destination<'_>) -> Resu
     })
 }
 
+/// この紙に何字入り、何行入るか。
+///
+/// **書き手が見たいのはこの2つ**（書き手の問い 2026-09-16：「Widthはどこで設定
+/// するか」）。余白を動かせば字数と行数が動く、という関係をその場で見せるために
+/// ある——余白をmmで言われても、原稿が何字詰めになるかは分からない。
+///
+/// どちらも**本文の並の行**での数で、見出しや字下げのある行はこれより少ない。
+pub fn page_grid(engine: &TextEngine, paper: Paper) -> (u32, u32) {
+    let (page_flow, _) = paper.printable(engine.mode);
+    let cell = engine.typography.cell_advance();
+    let line_box = engine.fit.line_box(engine.margin, 0.0);
+    let line = engine
+        .plan
+        .blocks
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| line.flow_size)
+        .find(|size| *size > 0.0)
+        .unwrap_or(cell);
+    (
+        (line_box / cell).floor().max(0.0) as u32,
+        (page_flow / line).floor().max(0.0) as u32,
+    )
+}
+
 /// この文書がこの紙で何枚になるか。
 pub fn page_count(engine: &TextEngine, paper: Paper) -> usize {
     page_ranges(engine, paper).len()

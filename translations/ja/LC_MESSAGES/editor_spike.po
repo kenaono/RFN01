@@ -636,6 +636,9 @@ msgstr "印刷…"
 msgid "Print"
 msgstr "印刷"
 
+msgid "Margin"
+msgstr "余白"
+
 msgid "Save As…"
 msgstr "名前を付けて保存…"
 
