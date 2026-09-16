@@ -20,9 +20,10 @@ export component PrintView inherits Rectangle {
     in property <string> paper-note;
     in property <bool> working;
     callback turned(int);
-    /// 1行の字数を1字ずつ。**紙の行の長さはここで決まる**（書き手の指摘
-    /// 2026-09-16：「画面のWidthと、印刷のWidthは異なるもの」）。余白はその結果。
-    callback cells-stepped(int);
+    /// 余白を1段（5mm）ずつ。**紙の行の長さはここで決まる**——行の長さは紙から
+    /// 余白を引いたぶんで、そこへ字体と大きさで組ませる（書き手の指摘 2026-09-16：
+    /// 「フォントとサイズを設定して、組版するのが正しいのではないですか」）。
+    callback margin-stepped(int);
     callback print-requested();
     callback dismissed();
 
@@ -123,8 +124,8 @@ export component PrintView inherits Rectangle {
             }
         }
 
-        // 紙のことを言う帯。**1行の字数はここで変える**——原稿は「1行◯字」で組む
-        // ものなので、決めるのは字数で、余白はその結果である。
+        // 紙のことを言う帯。**余白はここで変える**——行の長さは紙から余白を引いた
+        // ぶんで、字数はその結果の目安である（1行に何字入るかは一意に決まらない）。
         Rectangle {
             height: 34px;
             background: Tok.chrome;
@@ -135,7 +136,7 @@ export component PrintView inherits Rectangle {
                 spacing: 6px;
                 alignment: start;
                 Text {
-                    text: @tr("Line length");
+                    text: @tr("Margin");
                     color: Tok.ink-muted;
                     font-size: 13px;
                     vertical-alignment: center;
@@ -143,12 +144,12 @@ export component PrintView inherits Rectangle {
                 TextButton {
                     title: "−";
                     enabled: !root.working;
-                    clicked => { root.cells-stepped(-1); }
+                    clicked => { root.margin-stepped(-1); }
                 }
                 TextButton {
                     title: "+";
                     enabled: !root.working;
-                    clicked => { root.cells-stepped(1); }
+                    clicked => { root.margin-stepped(1); }
                 }
                 Text {
                     text: root.paper-note;

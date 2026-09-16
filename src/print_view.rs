@@ -23,8 +23,6 @@ use crate::{AppWindow, Live, StatusBar, focused_pane, pictures, say};
 pub struct Preview {
     engine: TextEngine,
     paper: Paper,
-    /// **1行◯字**。紙の側の決めごとで、行の軸の余白はここから決まる。
-    cells: u32,
     pages: usize,
     /// **絵の細かさ**。紙のDIPに対する倍率で、画面に映すぶんだけ大きく描く。
     scale: f32,
@@ -46,9 +44,8 @@ pub fn open(window: &AppWindow, live: &Live) {
         .map(|printer| printer.paper())
         .unwrap_or_default();
     let mode = mode_of(window);
-    let cells = cells_for(window, mode, paper);
-    let (engine, paper) = match lay_out(window, live, &document, mode, paper, cells) {
-        Ok(laid) => laid,
+    let engine = match lay_out(window, live, &document, mode, paper) {
+        Ok(engine) => engine,
         Err(error) => {
             window.tell_tab(
                 say!(
@@ -68,7 +65,6 @@ pub fn open(window: &AppWindow, live: &Live) {
     *live.preview.borrow_mut() = Some(Preview {
         engine,
         paper,
-        cells,
         pages,
         scale: PREVIEW_SCALE,
         document,
@@ -157,8 +153,7 @@ fn lay_out(
     document: &OpenDocument,
     mode: WritingMode,
     paper: Paper,
-    cells: u32,
-) -> windows::core::Result<(TextEngine, Paper)> {
+) -> windows::core::Result<TextEngine> {
     let source = document.text.borrow().clone();
     let reading = crate::reading_of(window);
     let mut preview = PreviewDocument::default();
@@ -188,37 +183,19 @@ fn lay_out(
         matches!(mode, WritingMode::Vertical),
         true,
     ));
-    // **行の長さは字詰めで決まる**（書き手の指摘 2026-09-16：「画面のWidthと、
-    // 印刷のWidthは異なるもの」）。余白の引き算で決めると字が半端に余り、行末が
-    // 揃わない——`1行◯字`を先に決め、余白はその結果とする。
-    let (cell, frame) = print::cell_and_frame(&spec, mode)?;
-    let cells = cells.clamp(1, paper.most_cells(mode, cell, frame));
-    let paper = paper.fit_cells(mode, cells, cell, frame);
-    let extent = cells as f32 * cell + frame * 2.0;
+    // **行の長さは紙の寸法。**字数では決めない（書き手の指摘 2026-09-16：「字数は
+    // 英数字だとかなりちがいますし、禁則文字もあるため一意に決められません」）
+    // ——半角の字は送りが違い、禁則で追い込み・追い出しも起きるので、「1行◯字」と
+    // いう長さはそもそも無い。**字体と大きさを決め、この幅で組ませる**のが組版である。
+    let (_, cross) = paper.printable(mode);
     let mut engine = TextEngine::new(mode);
     engine.set_pictures(preview.pictures().clone());
     engine.update(
         styled,
-        LineFit::Extent(extent.round().max(1.0) as u32),
+        LineFit::Extent(cross.round().max(1.0) as u32),
         &spec,
     )?;
-    Ok((engine, paper))
-}
-
-/// この紙に素直に収まる字詰め。**書き手が何も言わないときの数**で、流れの軸と
-/// 同じだけ（既定20mm）空けたときに入るぶんである。
-fn cells_for(window: &AppWindow, mode: WritingMode, paper: Paper) -> u32 {
-    let spec = for_paper(&crate::typography_for(
-        window,
-        100,
-        matches!(mode, WritingMode::Vertical),
-        true,
-    ));
-    let Ok((cell, frame)) = print::cell_and_frame(&spec, mode) else {
-        return 1;
-    };
-    let (_, line) = paper.printable(mode);
-    ((line - frame * 2.0) / cell).floor().max(1.0) as u32
+    Ok(engine)
 }
 
 /// 画面の体裁を、紙の体裁に直す。
@@ -328,8 +305,7 @@ fn print_pages(
     if !same {
         // 紙が違えば折り返しも違う。**開き直す**のではなく、同じ文書を新しい紙で
         // 組み直して、プレビューもその紙になる。
-        let cells = cells_for(window, mode_of(window), paper);
-        reopen(window, live, paper, cells)?;
+        reopen(window, live, paper)?;
     }
     let mut held = live.preview.borrow_mut();
     let Some(preview) = held.as_mut() else {
@@ -342,34 +318,31 @@ fn print_pages(
     )
 }
 
-/// 1行の字数を1字ずつ動かす。
+/// 余白を1段（5mm）動かす。
 ///
 /// **紙の行の長さはここで決まる**（書き手の問い 2026-09-16：「Widthはどこで設定
-/// するか」）。原稿は「1行◯字」で組むものなので、決めるのは字数で、余白はその
-/// 結果である。行の長さが変われば折り返しも変わるので、そのたびに組み直す
-/// ——プレビューは刷るものそのものである。
-pub fn step_cells(window: &AppWindow, live: &Live, by: i32) {
-    let Some((paper, cells)) = live
-        .preview
-        .borrow()
-        .as_ref()
-        .map(|preview| (preview.paper, preview.cells))
-    else {
+/// するか」）。行の長さは紙から余白を引いたぶんで、そこへ字体と大きさで組ませる
+/// ——余白が動けば行の長さが変わるので、そのたびに組み直す。プレビューは刷るもの
+/// そのものである。
+pub fn step_margin(window: &AppWindow, live: &Live, by: i32) {
+    let Some(paper) = live.preview.borrow().as_ref().map(|preview| preview.paper) else {
         return;
     };
-    let wanted = (cells as i32 + by).max(1) as u32;
-    if wanted == cells {
+    let step = 5.0 * print::MM;
+    // 5mmより狭いとプリンタが刷れない端に届き、40mmより広いと本文がひどく細る。
+    let margin = (paper.margin + by as f32 * step).clamp(5.0 * print::MM, 40.0 * print::MM);
+    if (margin - paper.margin).abs() < 0.5 {
         return;
     }
-    if let Err(error) = reopen(window, live, paper, wanted) {
+    if let Err(error) = reopen(window, live, Paper { margin, ..paper }) {
         live.cache
             .borrow_mut()
-            .log_diag("print", &format!("line length change failed: {error}"));
+            .log_diag("print", &format!("margin change failed: {error}"));
     }
 }
 
 /// この紙で組み直し、プレビューも新しい紙にする。
-fn reopen(window: &AppWindow, live: &Live, paper: Paper, cells: u32) -> windows::core::Result<()> {
+fn reopen(window: &AppWindow, live: &Live, paper: Paper) -> windows::core::Result<()> {
     let document = {
         let held = live.preview.borrow();
         let Some(preview) = held.as_ref() else {
@@ -378,13 +351,11 @@ fn reopen(window: &AppWindow, live: &Live, paper: Paper, cells: u32) -> windows:
         preview.document.clone()
     };
     let mode = mode_of(window);
-    let (engine, paper) = lay_out(window, live, &document, mode, paper, cells)?;
+    let engine = lay_out(window, live, &document, mode, paper)?;
     let pages = print::page_count(&engine, paper);
-    let cells = print::page_grid(&engine, paper).0;
     *live.preview.borrow_mut() = Some(Preview {
         engine,
         paper,
-        cells,
         pages,
         scale: PREVIEW_SCALE,
         document,
@@ -407,12 +378,12 @@ fn note_paper(window: &AppWindow, live: &Live) {
     let (cells, lines) = print::page_grid(&preview.engine, paper);
     let millimetres = |value: f32| (value / print::MM).round() as i32;
     let (wide, tall) = (millimetres(paper.width), millimetres(paper.height));
-    let (margin, side) = (millimetres(paper.margin), millimetres(paper.line_margin));
+    let margin = millimetres(paper.margin);
     window.set_print_paper_note(
         if crate::i18n::japanese() {
-            format!("{cells}字×{lines}行　{wide}×{tall}mm　余白{margin}／{side}mm")
+            format!("余白{margin}mm　{wide}×{tall}mm　全角なら約{cells}字×{lines}行")
         } else {
-            format!("{cells} × {lines}　{wide}×{tall}mm　margin {margin}/{side}mm")
+            format!("margin {margin}mm · {wide}×{tall}mm · about {cells} × {lines}")
         }
         .into(),
     );

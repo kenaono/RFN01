@@ -149,29 +149,29 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         let _ = std::fs::write(std::path::Path::new(&into).join("preview.ppm"), ppm);
     }
 
-    // **1行の字数を決めるのは紙の側**（書き手の指摘 2026-09-16）。1字ずつ動かせて、
-    // 紙の姿はその場で言い直される。
+    // **余白で行の長さが決まる**（書き手の指摘 2026-09-16：「フォントとサイズを
+    // 設定して、組版するのが正しい」）。紙の姿はその場で言い直される。
     let before = window.get_print_paper_note().to_string();
     assert!(
-        before.contains('字') || before.contains('×'),
-        "the sheet must say how many characters fit: {before}"
+        before.contains("mm"),
+        "the sheet must say its measurements: {before}"
     );
-    print_view::step_cells(&window, &live, -1);
-    let shorter = window.get_print_paper_note().to_string();
+    print_view::step_margin(&window, &live, 1);
+    let wider = window.get_print_paper_note().to_string();
     assert!(
-        shorter != before,
-        "one character fewer must change the sheet: {before} then {shorter}"
+        wider != before,
+        "a wider margin must change the sheet: {before} then {wider}"
     );
-    let short_pages = window.get_print_pages();
-    print_view::step_cells(&window, &live, 1);
+    let narrow_pages = window.get_print_pages();
+    print_view::step_margin(&window, &live, -1);
     assert_eq!(
         window.get_print_paper_note().to_string(),
         before,
         "and stepping back must put it where it was"
     );
     assert!(
-        short_pages >= pages,
-        "a shorter line needs at least as many sheets: {short_pages} against {pages}"
+        narrow_pages >= pages,
+        "a wider margin needs at least as many sheets: {narrow_pages} against {pages}"
     );
 
     print_view::close(&window, &live);

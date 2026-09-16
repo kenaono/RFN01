@@ -907,7 +907,7 @@ export component AppWindow inherits Window {
     in property <string> print-paper-note;
     in-out property <bool> print-working;
     callback print-turned(int);
-    callback print-cells-stepped(int);
+    callback print-margin-stepped(int);
     callback print-requested();
     callback print-dismissed();
 
@@ -5467,7 +5467,7 @@ export component AppWindow inherits Window {
             paper-note: root.print-paper-note;
             working: root.print-working;
             turned(to) => { root.print-turned(to); }
-            cells-stepped(by) => { root.print-cells-stepped(by); }
+            margin-stepped(by) => { root.print-margin-stepped(by); }
             print-requested => { root.print-requested(); }
             dismissed => { root.print-dismissed(); }
         }
