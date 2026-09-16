@@ -686,7 +686,22 @@ impl Graphics {
             )?
         };
         mode.apply_to(&format)?;
-        apply_line_spacing(&format, line_spacing)?;
+        // 要件 7.8（2026-09-16、書き手の決定「文書全体の間隔をルビが入る広さに」）:
+        // **行と行のあいだに、ルビの帯が入るだけの空きを置く。**帯が行の箱に収まれば、
+        // 段落の先頭の行でも読みがブロックの外（＝タイルの外）へ出ず、切れない。
+        // 空きは**読み始めの側へ寄せる**（`leadingBefore`）——帯が出るのはそちらである。
+        let room = if typography.ruby_room {
+            let (height, baseline) = natural_line_metrics(&self.dwrite, &format)?;
+            Some(ruby_room(
+                font_size,
+                ruby_size(typography, 0),
+                height,
+                baseline,
+            ))
+        } else {
+            None
+        };
+        apply_line_spacing(&format, line_spacing, room)?;
         self.formats.insert(key, format.clone());
         Ok(format)
     }
@@ -876,14 +891,48 @@ fn apply_fixed_line_spacing(
     }
 }
 
-fn apply_line_spacing(format: &IDWriteTextFormat, line_spacing: f32) -> Result<()> {
-    if (line_spacing - 1.0).abs() < f32::EPSILON {
+/// 書体が決める素の行箱（送りと基線、倍率を掛ける前）。**帯のぶんを足すために要る**
+/// （要件 7.8、2026-09-16）。1字だけの組みで測るので、書体と大きさごとに一度きり。
+fn natural_line_metrics(dwrite: &IDWriteFactory, format: &IDWriteTextFormat) -> Result<(f32, f32)> {
+    // 全角の仮名1字（`\u{3042}`＝「あ」）。**日英の対を数える試験に拾わせない**ので、
+    // 画面に出ない見本の字はエスケープで書く。
+    let utf16 = "\u{3042}".encode_utf16().collect::<Vec<u16>>();
+    // SAFETY: the buffer and the format outlive the call.
+    let layout = unsafe { dwrite.CreateTextLayout(&utf16, format, 10_000.0, 10_000.0)? };
+    Ok(line_metrics(&layout)?
+        .first()
+        .map_or((0.0, 0.0), |line| (line.height, line.baseline)))
+}
+
+/// ルビの帯のぶんだけ行箱を広げる倍率（送り・基線、要件 7.8、2026-09-16）。
+///
+/// **足すのは足りないぶんだけ。**行箱には素のままでも字の外に空きがあり（`(送り-字)/2`）、
+/// 帯がそこに収まるなら広げない。広げたぶんは**基線を同じだけ送って読み始めの側へ寄せる**
+/// ——比例の行送りは空きを両側へ分けるので、基線を動かさないと帯の側に半分しか来ない。
+fn ruby_room(font_size: f32, band: f32, height: f32, baseline: f32) -> (f32, f32) {
+    if height <= 0.0 || baseline <= 0.0 {
+        return (1.0, 1.0);
+    }
+    let free = ((height - font_size) / 2.0).max(0.0);
+    let extra = (band - free).max(0.0);
+    ((height + extra) / height, (baseline + extra) / baseline)
+}
+
+/// `room`は[`ruby_room`]の倍率（送り・基線）。書き手の行送りはその上に掛かる。
+fn apply_line_spacing(
+    format: &IDWriteTextFormat,
+    line_spacing: f32,
+    room: Option<(f32, f32)>,
+) -> Result<()> {
+    let (height, baseline) = room.unwrap_or((1.0, 1.0));
+    let (height, baseline) = (height * line_spacing, baseline * line_spacing);
+    if (height - 1.0).abs() < f32::EPSILON && (baseline - 1.0).abs() < f32::EPSILON {
         return Ok(());
     }
     let spacing = DWRITE_LINE_SPACING {
         method: DWRITE_LINE_SPACING_METHOD_PROPORTIONAL,
-        height: line_spacing,
-        baseline: line_spacing,
+        height,
+        baseline,
         leadingBefore: 0.0,
         fontLineGapUsage: DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
     };
@@ -2185,12 +2234,6 @@ fn draw_upright_digits(
     Ok(())
 }
 
-/// 傍点に使う字（要件 7.8）。
-///
-/// **中黒を採る。**ゴマ点（`﹅`）のほうが組版としては正しいが、持っていない
-/// 書体があり、無い字は豆腐になる——**点が出ないより、形が少し違うほうがいい。**
-const DOT: &str = "・";
-
 /// ルビと傍点を組む大きさ（要件 7.8・要件 9）。
 ///
 /// **書き手の比率を、下限だけ押さえて使う。**0pxの書式は作れないので。
@@ -2397,11 +2440,29 @@ fn beside_the_line(
     thickness: f32,
     towards: f32,
     cell: f32,
+    room: bool,
 ) -> D2D_RECT_F {
     let (flow_start, line_start) = mode.to_axes(region.left, region.top);
     let (flow_extent, line_extent) = mode.to_axes(region.width, region.height);
     // `towards`は字へ寄せる量（要件 7.8）。**どちらの書字方向でも「字のほう」へ
     // 動く**ので、流れ軸の向きで符号が反転する。
+    // 帯のぶんの空きがあるとき（`Typography::ruby_room`）は、行の箱の**読み始めの端**に
+    // 帯を置く。空きはそちらへ寄せてある（`apply_line_spacing`の`leadingBefore`）ので、
+    // 字とは重ならず、帯は行の箱の中に収まる——だからブロックの外へ出ない。
+    if room {
+        let band = match mode.flow_order() {
+            FlowOrder::Descending => flow_start + flow_extent - thickness - towards,
+            FlowOrder::Ascending => flow_start + towards,
+        };
+        let (left, top) = mode.to_screen(band, line_start);
+        let (width, height) = mode.to_screen(thickness, line_extent);
+        return D2D_RECT_F {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        };
+    }
     let band = match mode.flow_order() {
         // **縦書きは字の墨のすぐ隣**（書き手の報告 2026-09-09、`Ruby_縦書き.png`：
         // 「ルビの横にまだ広いスペースがあります」）。
@@ -2489,7 +2550,14 @@ fn draw_ruby(
         // 要件 7.8: 長い読みは前後の仮名へかける（`ruby_fit_of`）。親文字の字間は組むときに
         // 広げてあるので、ここで足すのは**かける側の長さだけ**である。
         let fit = ruby_fit_of(text, runs, run, base_utf16, typography);
-        let rect = beside_the_line(&regions[0], mode, thickness, towards, cell);
+        let rect = beside_the_line(
+            &regions[0],
+            mode,
+            thickness,
+            towards,
+            cell,
+            typography.ruby_room,
+        );
         let rect = hanging_over(rect, mode, fit.lead, fit.trail);
         // SAFETY: The buffer, the format and the brush all outlive the call,
         // and the rectangle is read before it returns.
@@ -2547,10 +2615,9 @@ fn draw_emphasis_dots(
     mode: WritingMode,
     typography: &Typography,
 ) -> Result<()> {
-    let dot = DOT.encode_utf16().collect::<Vec<u16>>();
     let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
     for run in runs {
-        if !run.marks.dots {
+        if run.marks.beside.is_none() {
             continue;
         }
         let Some((_, format)) = formats
@@ -2589,17 +2656,51 @@ fn draw_emphasis_dots(
             if count == 0 {
                 continue;
             }
-            let rect = beside_the_line(&regions[0], mode, thickness, towards, cell);
-            // SAFETY: as in `draw_ruby`.
-            unsafe {
-                target.DrawText(
-                    &dot,
-                    format,
-                    &rect,
-                    brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
+            let rect = beside_the_line(
+                &regions[0],
+                mode,
+                thickness,
+                towards,
+                cell,
+                typography.ruby_room,
+            );
+            match run.marks.beside.glyph() {
+                Some(glyph) => {
+                    let glyph = glyph.encode_utf16().collect::<Vec<u16>>();
+                    // SAFETY: as in `draw_ruby`.
+                    unsafe {
+                        target.DrawText(
+                            &glyph,
+                            format,
+                            &rect,
+                            brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
+                }
+                // 傍線：点ではなく、字の脇を通る線（要件 7.8、2026-09-16）。
+                // **縦書きは字の右、横書きは字の下**——縦書きの傍線は行の右に引き、横書きでは
+                // 下線として引くのが日本語の組みの決まりで、横書きだけ帯の反対側になる。
+                None => {
+                    let stroke = rule_stroke(cell);
+                    let region = &regions[0];
+                    let rule = match mode {
+                        WritingMode::Horizontal => D2D_RECT_F {
+                            left: region.left,
+                            right: region.left + region.width,
+                            top: region.top + region.height - stroke,
+                            bottom: region.top + region.height,
+                        },
+                        WritingMode::Vertical => D2D_RECT_F {
+                            left: rect.left,
+                            right: rect.left + stroke,
+                            ..rect
+                        },
+                    };
+                    // SAFETY: the target and the brush outlive the call.
+                    unsafe { target.FillRectangle(&rule, brush) };
+                }
             }
         }
     }
@@ -2608,7 +2709,7 @@ fn draw_emphasis_dots(
 
 /// Whether anything on this block goes in the band beside the line (要件 7.8).
 fn run_rides_beside(run: &StyleRun) -> bool {
-    run.marks.dots || run.ornament.is_some_and(Ornament::rides_beside_the_line)
+    !run.marks.beside.is_none() || run.ornament.is_some_and(Ornament::rides_beside_the_line)
 }
 
 /// How thick a drawn rule is, at the size the writer set (要件 7.3.2).
@@ -4276,6 +4377,8 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // 動かず、**古くなるのはタイルだけ**である。混ぜていないと、絵置き場の
     // 古い絵がそのまま出る（6.18の罠）。
     typography.ruby_scale.to_bits().hash(hasher);
+    // 2026-09-16: **帯のぶんの行送りは幾何に効く**（`text_format`）ので、色の側ではなくここ。
+    typography.ruby_room.hash(hasher);
     typography.ruby_offset.to_bits().hash(hasher);
     // 要件 7.8（2026-09-09）: 縦中横。**こちらは寸法の側**——3桁の数字は
     // 1マスに収まるのと1桁ずつ縦に並ぶのとで占める長さが違う。

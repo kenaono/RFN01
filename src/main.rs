@@ -9780,6 +9780,9 @@ fn typography_for(
     // タイルの署名（`hash_style_runs`が混ぜる`Typography`）にも自然に入る
     // ——大きさだけ変えたときに古い絵が残る、が起きない。
     spec.ruby_scale = percent(number(Setting::RubySize));
+    // 要件 7.8（2026-09-16）: **ルビを読まないなら、その空きも要らない。**読み方の設定を切った
+    // 文書にはルビも傍点も無いので、帯のぶんの行送りは払わせない。
+    spec.ruby_room = window.get_ruby_marks();
     spec.ruby_offset = percent(number(Setting::RubyOffset));
     for (level, scale) in spec.heading_scale.iter_mut().enumerate() {
         *scale = percent(number(Setting::Heading(level)));

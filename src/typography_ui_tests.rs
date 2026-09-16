@@ -545,3 +545,176 @@ fn a_long_reading_hangs_over_kana_and_widens_only_when_it_cannot() {
         );
     }
 }
+
+/// 追加要件 2026-09-16（書き手の決定）: **段落の先頭の行でもルビが切れない。**
+///
+/// ルビの帯は行の箱の中に収まる（`Typography::ruby_room`）ので、ブロック＝タイルの外へ出ない。
+/// 帯が行からはみ出していたころは、段落の先頭の列の読みだけが前の段落のタイルへ出て切れていた
+/// （同じルビで墨10画素対15画素）。
+#[test]
+fn a_reading_at_the_head_of_a_paragraph_is_not_cut_off() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    let (width, height) = (1100usize, 760usize);
+    surface.set_size(slint::PhysicalSize::new(width as u32, height as u32));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    // 同じルビが、段落の先頭の行と、段落の2行目に出る。
+    let source = "｜宿《やど》です。\n\n本文の行。\n｜宿《やど》です。\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    for vertical in [true, false] {
+        id.update_screen(&window, |screen| {
+            screen.width = 1050.0;
+            screen.height = 640.0;
+            screen.shown_width = 1050.0;
+            screen.shown_height = 540.0;
+            screen.preview = true;
+            screen.vertical = false;
+        });
+        set_pane_direction(&window, &cache, id, vertical);
+        {
+            let state = states.of(id);
+            let mut state = state.borrow_mut();
+            state.caret_source_byte = Some(source.len());
+            state.active_line_start = Some(source.len());
+        }
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+        // 読みの墨は本文より小さい字なので、行（列）ごとに数えれば2つの山になる。
+        // 山を大きい順に2つ取り、同じ量であることを見る。
+        let mut bands = std::collections::BTreeMap::<usize, usize>::new();
+        for (index, pixel) in pixels.iter().enumerate() {
+            if pixel.r < 150 && pixel.g < 150 && pixel.b < 150 {
+                let (x, y) = (index % width, index / width);
+                if (60..620).contains(&y) && x > 120 {
+                    *bands.entry(if vertical { x } else { y }).or_default() += 1;
+                }
+            }
+        }
+        // 山を切れ目で分ける。
+        let mut groups: Vec<usize> = Vec::new();
+        let mut last = None;
+        for (at, ink) in &bands {
+            match last {
+                Some(previous) if at - previous <= 1 => *groups.last_mut().unwrap() += ink,
+                _ => groups.push(*ink),
+            }
+            last = Some(*at);
+        }
+        groups.sort_unstable();
+        // いちばん小さい2つの山が、2つの読み（本文の列より墨が少ない）。
+        let readings = &groups[..2];
+        assert!(
+            readings[0] * 4 >= readings[1] * 3,
+            "vertical={vertical}: 読みの墨が揃わない（{readings:?}、全部で{groups:?}）"
+        );
+    }
+}
+
+/// 要件 7.8（2026-09-16、書き手「組版の表現拡大」）: **注記が名指した印が、画素に届く。**
+///
+/// 種類ごとに墨の量が違う（丸は白丸より多い）ので、どれか1つでも既定の点に落ちていれば分かる。
+/// 傍線は点ではなく続いた線なので、字の並びと同じ長さの筋になる。
+#[test]
+fn every_kind_of_mark_beside_the_word_reaches_the_pixels() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    let (width, height) = (1100usize, 760usize);
+    surface.set_size(slint::PhysicalSize::new(width as u32, height as u32));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    let ink_of = |note: &str| {
+        let source = format!("ここに印{note}を振る。\n");
+        let document = OpenDocument::new(
+            DocumentFile::untitled(1),
+            source.clone().into(),
+            window.as_weak(),
+        );
+        let states = PaneStates::new(&document);
+        id.update_screen(&window, |screen| {
+            screen.width = 1050.0;
+            screen.height = 640.0;
+            screen.shown_width = 1050.0;
+            screen.shown_height = 540.0;
+            screen.preview = true;
+            screen.vertical = false;
+        });
+        set_pane_direction(&window, &cache, id, false);
+        {
+            let state = states.of(id);
+            let mut state = state.borrow_mut();
+            state.caret_source_byte = Some(source.len());
+            state.active_line_start = Some(source.len());
+        }
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), &source);
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+        pixels
+            .iter()
+            .filter(|pixel| pixel.r < 150 && pixel.g < 150 && pixel.b < 150)
+            .count()
+    };
+    let plain = ink_of("");
+    let mut seen = Vec::new();
+    for note in [
+        "［＃「印」に傍点］",
+        "［＃「印」に丸傍点］",
+        "［＃「印」に白丸傍点］",
+        "［＃「印」に二重丸傍点］",
+        "［＃「印」にゴマ傍点］",
+        "［＃「印」に×傍点］",
+        "［＃「印」に傍線］",
+    ] {
+        let ink = ink_of(note);
+        assert!(ink > plain, "{note}: 印の墨が出ていない（{plain} → {ink}）");
+        seen.push((note, ink));
+    }
+    let ink = |name: &str| {
+        seen.iter()
+            .find(|(note, _)| note.contains(name))
+            .map(|(_, ink)| *ink)
+            .unwrap()
+    };
+    assert!(
+        ink("丸傍点］") > ink("白丸傍点］"),
+        "塗った丸のほうが墨が多い: {seen:?}"
+    );
+}

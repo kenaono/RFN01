@@ -3,8 +3,8 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text_blocks::{
-    CommentSyntax, Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, Picture, Pictures,
-    is_table_row, table_alignments,
+    Beside, CommentSyntax, Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, Picture,
+    Pictures, is_table_row, table_alignments,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2412,7 +2412,7 @@ fn push_marked_recording(
                 utf16_start: start,
                 utf16_len: *at - start,
                 marks: Marks {
-                    dots: true,
+                    beside: Beside::Dot,
                     ..Marks::default()
                 },
                 ornament: None,
@@ -2425,7 +2425,7 @@ fn push_marked_recording(
         // **これだけが後ろを向いている。**注記は自分より前にある語を指すので、
         // いま書き出した`visible`の中をさかのぼって、その語に点を打つ。
         if reading.ruby
-            && let Some((word, after)) = dots_note_here(rest)
+            && let Some((word, beside, after)) = dots_note_here(rest)
         {
             if let Some(found) = visible.rfind(word) {
                 let start = visible[..found].encode_utf16().count() as u32;
@@ -2433,7 +2433,7 @@ fn push_marked_recording(
                     utf16_start: start,
                     utf16_len: word.encode_utf16().count() as u32,
                     marks: Marks {
-                        dots: true,
+                        beside,
                         ..Marks::default()
                     },
                     ornament: None,
@@ -2912,24 +2912,40 @@ fn dots_here(rest: &str) -> Option<(&str, &str)> {
     Some((&after_open[..close], &after_open[close + "》》".len()..]))
 }
 
-/// 青空文庫の注記形式の傍点（`［＃「本当に」に傍点］`、要件 7.8）。
-/// 点を打つ語と、注記の後ろ。
+/// 青空文庫の注記形式の傍点・傍線（`［＃「本当に」に傍点］`、要件 7.8）。
+/// 印を打つ語、印の種類、注記の後ろ。
 ///
 /// **注記は後ろから前を指す**ので、返すのは語そのものである——どこに打つかは
 /// 呼び出し側が`visible`をさかのぼって決める。ここは書式を読むだけ。
 ///
-/// 「傍点」以外の注記（`［＃改ページ］`など）は読まない。**知らない注記は
-/// 本文として残す**：消してしまうと、原文にある指示が画面から消えたまま
-/// 何も起きないことになる。
-fn dots_note_here(rest: &str) -> Option<(&str, &str)> {
+/// 種類は青空文庫の言い方をそのまま読む（2026-09-16、書き手「組版の表現拡大」）：
+/// 傍点・ゴマ傍点・丸傍点・白丸傍点・二重丸傍点・×傍点・傍線。**知らない注記
+/// （`［＃改ページ］`など）は読まない**：消してしまうと、原文にある指示が画面から
+/// 消えたまま何も起きないことになる。
+fn dots_note_here(rest: &str) -> Option<(&str, Beside, &str)> {
     let after_open = rest.strip_prefix("［＃「")?;
-    let close = after_open.find("」に傍点］")?;
+    // 長い言い方から先に見る——「丸傍点」は「傍点」でも終わるので、短いほうから
+    // 当てると種類が落ちる。
+    let kinds = [
+        ("」に二重丸傍点］", Beside::Double),
+        ("」に白丸傍点］", Beside::Open),
+        ("」にゴマ傍点］", Beside::Sesame),
+        ("」に丸傍点］", Beside::Solid),
+        ("」に×傍点］", Beside::Cross),
+        ("」に傍点］", Beside::Dot),
+        ("」に傍線］", Beside::Line),
+    ];
+    let (close, note, beside) = kinds
+        .iter()
+        .filter_map(|(note, beside)| after_open.find(note).map(|at| (at, *note, *beside)))
+        .min_by_key(|(at, note, _)| (*at, std::cmp::Reverse(note.len())))?;
     if close == 0 {
         return None;
     }
     Some((
         &after_open[..close],
-        &after_open[close + "」に傍点］".len()..],
+        beside,
+        &after_open[close + note.len()..],
     ))
 }
 
@@ -5330,7 +5346,7 @@ mod tests {
             Marks { italic: true, .. } => "italic",
             Marks { strike: true, .. } => "strike",
             Marks { code: true, .. } => "code",
-            Marks { dots: true, .. } => "dots",
+            Marks { beside, .. } if !beside.is_none() => "dots",
             _ => "none",
         }
     }
@@ -5428,7 +5444,60 @@ mod tests {
         );
 
         let (_, dots) = preview_of_as("これは《《本当に》》おかしい", Reading::all());
-        assert!(dots.iter().any(|mark| mark.marks.dots));
+        assert!(dots.iter().any(|mark| mark.marks.beside == Beside::Dot));
+    }
+
+    /// 要件 7.8（2026-09-16、書き手「組版の表現拡大」）: 注記は印の種類を名指す。
+    #[test]
+    fn a_note_names_which_mark_goes_beside_the_word() {
+        let beside = |line: &str| {
+            let (visible, marks) = preview_of(line);
+            let beside = marks
+                .iter()
+                .map(|mark| mark.marks.beside)
+                .find(|beside| !beside.is_none());
+            (visible, beside)
+        };
+        assert_eq!(
+            beside("彼は来た［＃「来た」に傍点］"),
+            ("彼は来た".to_owned(), Some(Beside::Dot))
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」に丸傍点］").1,
+            Some(Beside::Solid)
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」に白丸傍点］").1,
+            Some(Beside::Open)
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」に二重丸傍点］").1,
+            Some(Beside::Double)
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」にゴマ傍点］").1,
+            Some(Beside::Sesame)
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」に×傍点］").1,
+            Some(Beside::Cross)
+        );
+        assert_eq!(beside("彼は来た［＃「来た」に傍線］").1, Some(Beside::Line));
+        // 知らない注記は本文のまま。
+        assert_eq!(
+            beside("彼は来た［＃改ページ］"),
+            ("彼は来た［＃改ページ］".to_owned(), None)
+        );
+        // 読み方を切れば、注記も字のまま出る。
+        let (visible, marks) = preview_of_as(
+            "彼は来た［＃「来た」に丸傍点］",
+            Reading {
+                ruby: false,
+                ..Reading::all()
+            },
+        );
+        assert_eq!(visible, "彼は来た［＃「来た」に丸傍点］");
+        assert!(marks.iter().all(|mark| mark.marks.beside.is_none()));
     }
 
     /// E9: **旗が変われば、取っておいた行は全部使えない。**行を取っておく条件は
