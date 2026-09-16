@@ -191,8 +191,7 @@ fn lay_out(
     // **行の長さは字詰めで決まる**（書き手の指摘 2026-09-16：「画面のWidthと、
     // 印刷のWidthは異なるもの」）。余白の引き算で決めると字が半端に余り、行末が
     // 揃わない——`1行◯字`を先に決め、余白はその結果とする。
-    let cell = spec.cell_advance();
-    let frame = print::frame_margin(&spec, mode)?;
+    let (cell, frame) = print::cell_and_frame(&spec, mode)?;
     let cells = cells.clamp(1, paper.most_cells(mode, cell, frame));
     let paper = paper.fit_cells(mode, cells, cell, frame);
     let extent = cells as f32 * cell + frame * 2.0;
@@ -215,8 +214,7 @@ fn cells_for(window: &AppWindow, mode: WritingMode, paper: Paper) -> u32 {
         matches!(mode, WritingMode::Vertical),
         true,
     ));
-    let cell = spec.cell_advance();
-    let Ok(frame) = print::frame_margin(&spec, mode) else {
+    let Ok((cell, frame)) = print::cell_and_frame(&spec, mode) else {
         return 1;
     };
     let (_, line) = paper.printable(mode);

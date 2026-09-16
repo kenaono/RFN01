@@ -4602,14 +4602,66 @@ fn margin_for(font_size: f32) -> f32 {
     heading_margin(&Typography::new(font_size), WritingMode::Vertical).expect("heading margin")
 }
 
-fn heading_margin(typography: &Typography, mode: WritingMode) -> Result<f32> {
-    with_graphics(|graphics| {
-        let mut margin = 16.0_f32;
-        for level in 1..=6 {
-            margin = margin.max(graphics.heading_marker(typography, mode, level)?.1);
-        }
-        Ok(margin.ceil())
+/// **全角1字が実際にどれだけ送るか**（要件 7.10、書き手の指摘 2026-09-16：
+/// 「正確には、文字数はフォントで決まるのではないですか」）。
+///
+/// `Typography::cell_advance`は「全角1字＝フォントの大きさ」と**見なしている**数で、
+/// 字間の設定をそこに掛けたものである。多くの日本語の字体ではそれで合うが、合うかどうかは
+/// **字体が決めること**——合わない字体を選ばれれば、1行◯字の「◯」が嘘になる。
+///
+/// **組むのと同じ道で測る。**同じ書式で全角の字を並べ、行の軸にどれだけ伸びたかを
+/// 字数で割る。`SetCharacterSpacing`（字間）も同じ道にあるので、一緒に入る。
+fn measured_cell_advance(
+    graphics: &mut Graphics,
+    typography: &Typography,
+    mode: WritingMode,
+) -> Result<f32> {
+    // 「あ」を並べて測る。**1字では端の丸めが効く**ので、まとめて測って割る。
+    const CELLS: usize = 16;
+    let format = graphics.text_format(typography, mode)?;
+    let sample = "\u{3042}".repeat(CELLS);
+    let utf16 = sample.encode_utf16().collect::<Vec<u16>>();
+    // 折り返させない大きさで。
+    let room = typography.cell_advance() * (CELLS as f32 + 4.0) * 4.0;
+    let (max_width, max_height) = mode.to_screen(room, room);
+    // SAFETY: The buffer outlives the call and the layout owns what it needs.
+    let layout = unsafe {
+        graphics
+            .dwrite
+            .CreateTextLayout(&utf16, &format, max_width, max_height)?
+    };
+    apply_typography(&layout, typography, &[], utf16.len() as u32)?;
+    let mut metrics = DWRITE_TEXT_METRICS::default();
+    // SAFETY: the layout is alive for the call and the struct is plain data.
+    unsafe { layout.GetMetrics(&mut metrics)? };
+    let (_, reach) = mode.to_axes(metrics.width, metrics.height);
+    let advance = reach / CELLS as f32;
+    // 測れなかったときは見なしの数へ戻る。字体が無い・読めないときでも、紙は組める。
+    Ok(if advance.is_finite() && advance > 0.5 {
+        advance
+    } else {
+        typography.cell_advance()
     })
+}
+
+fn heading_margin(typography: &Typography, mode: WritingMode) -> Result<f32> {
+    with_graphics(|graphics| heading_margin_in(graphics, typography, mode))
+}
+
+/// 同じことを、**道具をもう持っているところから**。
+///
+/// `with_graphics`は入れ子にできない（同じ`RefCell`を二度借りる）ので、道具を
+/// 持っている呼び手はこちらを通る。
+fn heading_margin_in(
+    graphics: &mut Graphics,
+    typography: &Typography,
+    mode: WritingMode,
+) -> Result<f32> {
+    let mut margin = 16.0_f32;
+    for level in 1..=6 {
+        margin = margin.max(graphics.heading_marker(typography, mode, level)?.1);
+    }
+    Ok(margin.ceil())
 }
 
 /// How much room the line numbers ask for beside the page (要件 9、2026-09-07

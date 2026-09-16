@@ -168,12 +168,21 @@ impl Paper {
     }
 }
 
-/// 組版器が行の両端に取る枠（見出しの印が立つところ）。
+/// 紙の字詰めを決めるのに要る2つの数。
 ///
-/// **字詰めを決めるのに要る。**行の箱はこの枠を引いた残りなので、`1行◯字`を
-/// 紙の寸法へ直すときに足しておく。
-pub fn frame_margin(typography: &super::Typography, mode: WritingMode) -> Result<f32> {
-    super::heading_margin(typography, mode)
+/// - **1字の送り**：全角1字が実際にどれだけ送るか。**字体から測る**（書き手の指摘
+///   2026-09-16：「正確には、文字数はフォントで決まるのではないですか」）——
+///   `Typography::cell_advance`は「全角1字＝フォントの大きさ」と見なした数で、
+///   そう組む字体ばかりではない。字間の設定も測った値に入る。
+/// - **枠**：組版器が行の両端に取るぶん（見出しの印が立つところ）。行の箱はこれを
+///   引いた残りなので、`1行◯字`を紙の寸法へ直すときに足しておく。
+pub fn cell_and_frame(typography: &super::Typography, mode: WritingMode) -> Result<(f32, f32)> {
+    with_graphics(|graphics| {
+        Ok((
+            super::measured_cell_advance(graphics, typography, mode)?,
+            super::heading_margin_in(graphics, typography, mode)?,
+        ))
+    })
 }
 
 /// 出力先。
@@ -271,8 +280,11 @@ pub fn print(engine: &mut TextEngine, paper: Paper, to: Destination<'_>) -> Resu
 /// どちらも**本文の並の行**での数で、見出しや字下げのある行はこれより少ない。
 pub fn page_grid(engine: &TextEngine, paper: Paper) -> (u32, u32) {
     let (page_flow, _) = paper.printable(engine.mode);
-    let cell = engine.typography.cell_advance();
-    // 行の箱はちょうど字詰めぶん（[`Paper::fit_cells`]）なので、割り切れる。
+    // **字体から測った送り**で割る（`cell_and_frame`）。行の箱はちょうど字詰めぶん
+    // （[`Paper::fit_cells`]）なので、割り切れる。
+    let cell = cell_and_frame(&engine.typography, engine.mode)
+        .map(|(cell, _)| cell)
+        .unwrap_or_else(|_| engine.typography.cell_advance());
     let line_box = engine.fit.line_box(engine.margin, 0.0);
     let line = engine
         .plan
@@ -731,8 +743,7 @@ mod tests {
         let styled = StyledText::marked(&preview.text, &styles, preview.marks())
             .with_markers(preview.markers());
         let spec = Typography::new(14.0);
-        let cell = spec.cell_advance();
-        let frame = frame_margin(&spec, mode).expect("the frame the engine takes");
+        let (cell, frame) = cell_and_frame(&spec, mode).expect("the font's own advance");
         let paper = paper.fit_cells(mode, cells, cell, frame);
         let extent = cells as f32 * cell + frame * 2.0;
         let mut engine = TextEngine::new(mode);
@@ -744,6 +755,63 @@ mod tests {
             )
             .expect("lay the document out at the paper's size");
         (engine, paper)
+    }
+
+    #[test]
+    #[ignore = "字体ごとの送りを見るためのもの"]
+    fn shows_the_advance_of_each_face() {
+        for family in [
+            "",
+            "MS Gothic",
+            "MS Mincho",
+            "MS PGothic",
+            "MS PMincho",
+            "Yu Gothic",
+            "Yu Mincho",
+            "Meiryo",
+            "BIZ UDGothic",
+            "BIZ UDPGothic",
+            "BIZ UDMincho",
+            "BIZ UDPMincho",
+        ] {
+            let spec = Typography {
+                body_font: family.to_owned(),
+                ..Typography::new(20.0)
+            };
+            match cell_and_frame(&spec, WritingMode::Vertical) {
+                Ok((cell, frame)) => println!(
+                    "{family:<16} measured={cell:6.2} assumed={:6.2} frame={frame:5.1}",
+                    spec.cell_advance()
+                ),
+                Err(error) => println!("{family:<16} {error}"),
+            }
+        }
+    }
+
+    /// 要件 7.10: 1字の送りは**字体が決める**（書き手の指摘 2026-09-16：「正確には、
+    /// 文字数はフォントで決まるのではないですか」）。見なしの数（フォントの大きさ）と
+    /// 測った数が、字体によって違うことを押さえる。
+    #[test]
+    fn the_font_decides_how_far_a_character_advances() {
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            let plain = Typography::new(20.0);
+            let (cell, _) = cell_and_frame(&plain, mode).expect("the font's own advance");
+            assert!(
+                (cell - plain.cell_advance()).abs() < 2.0,
+                "a Japanese face sets a full-width character on its own size: {cell} against {} ({mode:?})",
+                plain.cell_advance()
+            );
+            // **字間を空ければ送りも伸びる。**見なしの数と同じ向きに動くこと。
+            let spaced = Typography {
+                character_spacing: 0.5,
+                ..plain.clone()
+            };
+            let (wider, _) = cell_and_frame(&spaced, mode).expect("the font's own advance");
+            assert!(
+                wider > cell + 1.0,
+                "letting the characters apart must widen the advance: {wider} against {cell} ({mode:?})"
+            );
+        }
     }
 
     /// 要件 7.10: **決めた字数でちょうど折り返す**（書き手の指摘 2026-09-16：
