@@ -732,6 +732,7 @@ pub fn write_trim(window: &AppWindow, live: &Live, head: bool, at: i32, said: &s
 /// タブは無い（欄は1行ぶんである）。
 pub fn hold_trim(window: &AppWindow, head: &str, foot: &str) {
     let read = |said: &str| -> ModelRc<SharedString> {
+        let said = moved_from_numbers(said);
         let mut parts = said.split('\t');
         ModelRc::new(VecModel::from(
             (0..3)
@@ -741,6 +742,47 @@ pub fn hold_trim(window: &AppWindow, head: &str, foot: &str) {
     };
     window.set_print_head(read(head));
     window.set_print_foot(read(foot));
+}
+
+/// 前の形から移し替える（書き手の報告 2026-09-17：「0.0.0, 0.3.0が入っていますが、
+/// これは何か意味がありますか」）。
+///
+/// **一度だけ、押して選ぶ番号だった。**「0,3,0」は「左はなし・中はページ・右はなし」
+/// で、いまは字を書く欄なので、そのまま読むと**その番号が字として紙に出る**。
+/// 番号3つだけの行はその名残とみなして、いまの言い方へ直す。**書き手が打った字は
+/// 触らない**——3つとも1桁の数字で、区切りがカンマのときだけ通る。
+fn moved_from_numbers(said: &str) -> String {
+    if said.contains('\t') {
+        return said.to_owned();
+    }
+    let parts: Vec<&str> = said.split(',').collect();
+    let numbers: Option<Vec<usize>> = (parts.len() == 3)
+        .then(|| {
+            parts
+                .iter()
+                .map(|part| match part.trim() {
+                    "0" => Some(0),
+                    "1" => Some(1),
+                    "2" => Some(2),
+                    "3" => Some(3),
+                    _ => None,
+                })
+                .collect()
+        })
+        .flatten();
+    let Some(numbers) = numbers else {
+        return said.to_owned();
+    };
+    numbers
+        .iter()
+        .map(|number| match number {
+            1 => "{name}",
+            2 => "{date}",
+            3 => "{page} / {pages}",
+            _ => "",
+        })
+        .collect::<Vec<_>>()
+        .join("\t")
 }
 
 /// そして設定へ戻すときの1行。

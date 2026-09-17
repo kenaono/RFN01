@@ -296,6 +296,50 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         print_view::step_zoom(&window, &live, -1);
     }
 
+    // **前の形（番号3つ）は、いまの言い方へ移す**（書き手の報告 2026-09-17：
+    // 「0.0.0, 0.3.0が入っていますが、これは何か意味がありますか」）。そのまま
+    // 読むと、その番号が字として紙に出る。
+    print_view::hold_trim(&window, "0,0,0", "0,3,0");
+    assert_eq!(
+        window
+            .get_print_head()
+            .row_data(0)
+            .unwrap_or_default()
+            .to_string(),
+        "",
+        "nothing was nothing"
+    );
+    assert_eq!(
+        window
+            .get_print_foot()
+            .row_data(1)
+            .unwrap_or_default()
+            .to_string(),
+        "{page} / {pages}",
+        "and the page number is what it always meant"
+    );
+    // **書き手が打った字は触らない。**
+    print_view::hold_trim(&window, "1,2,3", "\u{7b2c}\u{4e00}\u{7a3f}\t\t{page}");
+    assert_eq!(
+        window
+            .get_print_head()
+            .row_data(2)
+            .unwrap_or_default()
+            .to_string(),
+        "{page} / {pages}",
+        "three digits are the old shape"
+    );
+    assert_eq!(
+        window
+            .get_print_foot()
+            .row_data(0)
+            .unwrap_or_default()
+            .to_string(),
+        "\u{7b2c}\u{4e00}\u{7a3f}",
+        "but a line with tabs is the writer's own"
+    );
+    print_view::hold_trim(&window, "\t\t", "\t{page} / {pages}\t");
+
     // **天地には字を書く**（書き手の求め 2026-09-17）。決まったものを選ばせるので
     // はなく、「第一稿　3 / 17」のように並べられる。既定は地の真ん中にノンブル。
     assert_eq!(
