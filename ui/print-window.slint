@@ -53,12 +53,6 @@ export component PrintView inherits Rectangle {
     in-out property <bool> editing-trim: false;
     /// いま触っている欄（天の左が0、地の右が5）。−1はどれでもない。
     in-out property <int> slot: -1;
-    /// その欄にいま入っている字。
-    pure function said-at(slot: int) -> string {
-        return slot < 0 ? ""
-            : slot < 3 ? root.head[slot]
-            : root.foot[slot - 3];
-    }
     /// いま並んでいる枚数。頭の帯と繰り幅がこれに従う。
     out property <int> shown: max(1, root.sheets.length);
     /// 紙を置く場所の広さが変わったことを知らせる（拡大と枚数はそこから決まる）。
@@ -354,46 +348,134 @@ export component PrintView inherits Rectangle {
                     font-size: 12px;
                 }
                 // 差し込める決まった字。**いま触っている欄の末尾へ足す。**
+                //
+                // **入れるのは合言葉であって、押した字ではない**（書き手の報告
+                // 2026-09-17：「{Page}/{Total}の表示がうまく設定できません」）。
+                // 押す字は人が読むためのもので、画面の言葉によって変わる——それを
+                // そのまま入れると、通らない合言葉が入っていた。合言葉は一組だけ。
+                // 差し込みは**欄と組む側の両方へ書く**。打ち始めた欄は外からの
+                // 束縛が切れているので、組む側へ書くだけでは欄の字が増えない
+                // （書き手の報告 2026-09-17：「設定画面は変化しませんが、
+                // プレビューでは追加されていたりします」）。
+                inserter := Rectangle {
+                    height: 0px;
+                    function put(word: string) {
+                        if (root.slot == 0) {
+                            head-left.text += word;
+                            root.trim-written(true, 0, head-left.text);
+                        } else if (root.slot == 1) {
+                            head-middle.text += word;
+                            root.trim-written(true, 1, head-middle.text);
+                        } else if (root.slot == 2) {
+                            head-right.text += word;
+                            root.trim-written(true, 2, head-right.text);
+                        } else if (root.slot == 3) {
+                            foot-left.text += word;
+                            root.trim-written(false, 0, foot-left.text);
+                        } else if (root.slot == 4) {
+                            foot-middle.text += word;
+                            root.trim-written(false, 1, foot-middle.text);
+                        } else if (root.slot == 5) {
+                            foot-right.text += word;
+                            root.trim-written(false, 2, foot-right.text);
+                        }
+                    }
+                }
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
-                    for word in [@tr("File name"), @tr("Date"), @tr("Page"), @tr("Total")]:
-                        TextButton {
-                            title: word;
-                            enabled: root.slot >= 0;
-                            clicked => {
-                                root.trim-written(
-                                    root.slot < 3,
-                                    mod(root.slot, 3),
-                                    root.said-at(root.slot) + "{" + word + "}");
-                            }
-                        }
-                }
-                for band[side] in [@tr("Head"), @tr("Foot")]: VerticalLayout {
-                    spacing: 4px;
-                    Text {
-                        text: band;
-                        color: Tok.ink-muted;
-                        font-size: 12px;
+                    TextButton {
+                        title: @tr("File name");
+                        enabled: root.slot >= 0;
+                        clicked => { inserter.put("{name}"); }
                     }
-                    HorizontalLayout {
-                        spacing: 6px;
-                        for place[at] in [@tr("Left"), @tr("Centre"), @tr("Right")]:
-                            VerticalLayout {
-                                spacing: 2px;
-                                Text {
-                                    text: place;
-                                    color: Tok.ink-faint;
-                                    font-size: 11px;
-                                }
-                                field := Field {
-                                    text: side == 0 ? root.head[at] : root.foot[at];
-                                    changed has-focus => {
-                                        if (field.has-focus) { root.slot = side * 3 + at; }
-                                    }
-                                    edited => { root.trim-written(side == 0, at, field.text); }
-                                }
-                            }
+                    TextButton {
+                        title: @tr("Date");
+                        enabled: root.slot >= 0;
+                        clicked => { inserter.put("{date}"); }
+                    }
+                    TextButton {
+                        title: @tr("Page");
+                        enabled: root.slot >= 0;
+                        clicked => { inserter.put("{page}"); }
+                    }
+                    TextButton {
+                        title: @tr("Total");
+                        enabled: root.slot >= 0;
+                        clicked => { inserter.put("{pages}"); }
+                    }
+                }
+                // **6つの欄を名前で置く**（並べて作らない）。打ち始めると欄の字は
+                // こちらのものになり、外からの束縛は切れる——差し込む側が名指しで
+                // 書き足せるように、一つずつ置いてある。
+                Text {
+                    text: @tr("Head");
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: @tr("Left"); color: Tok.ink-faint; font-size: 11px; }
+                        head-left := Field {
+                            text: root.head[0];
+                            changed has-focus => { if (head-left.has-focus) { root.slot = 0; } }
+                            edited => { root.trim-written(true, 0, head-left.text); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: @tr("Centre"); color: Tok.ink-faint; font-size: 11px; }
+                        head-middle := Field {
+                            text: root.head[1];
+                            changed has-focus => { if (head-middle.has-focus) { root.slot = 1; } }
+                            edited => { root.trim-written(true, 1, head-middle.text); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: @tr("Right"); color: Tok.ink-faint; font-size: 11px; }
+                        head-right := Field {
+                            text: root.head[2];
+                            changed has-focus => { if (head-right.has-focus) { root.slot = 2; } }
+                            edited => { root.trim-written(true, 2, head-right.text); }
+                        }
+                    }
+                }
+                Text {
+                    text: @tr("Foot");
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: @tr("Left"); color: Tok.ink-faint; font-size: 11px; }
+                        foot-left := Field {
+                            text: root.foot[0];
+                            changed has-focus => { if (foot-left.has-focus) { root.slot = 3; } }
+                            edited => { root.trim-written(false, 0, foot-left.text); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: @tr("Centre"); color: Tok.ink-faint; font-size: 11px; }
+                        foot-middle := Field {
+                            text: root.foot[1];
+                            changed has-focus => { if (foot-middle.has-focus) { root.slot = 4; } }
+                            edited => { root.trim-written(false, 1, foot-middle.text); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: @tr("Right"); color: Tok.ink-faint; font-size: 11px; }
+                        foot-right := Field {
+                            text: root.foot[2];
+                            changed has-focus => { if (foot-right.has-focus) { root.slot = 5; } }
+                            edited => { root.trim-written(false, 2, foot-right.text); }
+                        }
                     }
                 }
                 HorizontalLayout {

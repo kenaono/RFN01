@@ -497,7 +497,7 @@ fn draw_page_onto(
 /// 天地の余白に入れる字（要件 7.10、書き手の求め 2026-09-17）。
 ///
 /// **書き手が打った字がそのまま出る。**決まったものを選ばせるのではなく、
-/// 「第一稿　{ページ} / {総数}」のように**書ける**——押して選ぶ形では、1か所に
+/// 「第一稿　{page} / {pages}」のように**書ける**——押して選ぶ形では、1か所に
 /// 1つしか入れられなかった（書き手の指摘）。
 ///
 /// 決まった字は中括弧で書き、刷るときに置き換える：
@@ -512,13 +512,14 @@ pub struct Trim {
     pub name: String,
 }
 
-/// 置き換える言葉。**日本語と英語の両方で書ける**——画面がどちらの言葉でも、
-/// 書き手が打ったほうが通る。
-const TOKENS: [(&str, &str); 4] = [
-    ("ファイル名", "name"),
-    ("日付", "date"),
-    ("ページ", "page"),
-    ("総数", "pages"),
+/// 置き換える合言葉。**大小も言葉も問わない**（書き手の報告 2026-09-17：
+/// 「{Page}/{Total}の表示がうまく設定できません」）——押して入るのは`{page}`だが、
+/// 手で`{Page}`とも`{ページ}`とも書けるべきである。
+const TOKENS: [(&[&str], usize); 4] = [
+    (&["name", "ファイル名", "ファイル"], 0),
+    (&["date", "日付", "ひづけ"], 1),
+    (&["page", "ページ", "頁"], 2),
+    (&["pages", "total", "総数", "総ページ"], 3),
 ];
 
 impl Trim {
@@ -526,7 +527,7 @@ impl Trim {
     pub fn standing() -> Self {
         Self {
             head: [String::new(), String::new(), String::new()],
-            foot: [String::new(), "{ページ} / {総数}".to_owned(), String::new()],
+            foot: [String::new(), "{page} / {pages}".to_owned(), String::new()],
             name: String::new(),
         }
     }
@@ -538,21 +539,43 @@ impl Trim {
             .all(|said| said.trim().is_empty())
     }
 
-    /// 決まった字を、その紙の値に置き換える。
+    /// 決まった合言葉を、その紙の値に置き換える。
+    ///
+    /// **知らない合言葉はそのまま残す**——書き手が中括弧を字として使うことも
+    /// あるし、打ち間違いが黙って消えるより、そのまま出たほうが気づける。
     fn filled(&self, said: &str, page: usize, pages: usize, today: &str) -> String {
-        let mut said = said.to_owned();
         let values = [
-            self.name.as_str(),
-            today,
-            &(page + 1).to_string(),
-            &pages.to_string(),
+            self.name.clone(),
+            today.to_owned(),
+            (page + 1).to_string(),
+            pages.to_string(),
         ];
-        for ((japanese, english), value) in TOKENS.iter().zip(values) {
-            said = said
-                .replace(&format!("{{{japanese}}}"), value)
-                .replace(&format!("{{{english}}}"), value);
+        let mut out = String::with_capacity(said.len());
+        let mut rest = said;
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('}') else {
+                out.push_str(&rest[open..]);
+                return out;
+            };
+            let word = &after[..close];
+            let folded = word.trim().to_lowercase();
+            match TOKENS
+                .iter()
+                .find(|(names, _)| names.iter().any(|name| *name == folded))
+            {
+                Some((_, at)) => out.push_str(&values[*at]),
+                None => {
+                    out.push('{');
+                    out.push_str(word);
+                    out.push('}');
+                }
+            }
+            rest = &after[close + 1..];
         }
-        said
+        out.push_str(rest);
+        out
     }
 }
 
@@ -981,38 +1004,37 @@ mod tests {
         );
     }
 
-    /// 要件 7.10: 決まった字は、その紙の値に置き換わる（書き手の求め 2026-09-17）。
+    /// 要件 7.10: 合言葉はその紙の値に置き換わる。**大小も言葉も問わない**
+    /// （書き手の報告 2026-09-17：「{Page}/{Total}の表示がうまく設定できません」）。
     #[test]
     fn the_standing_words_become_this_sheets_own() {
         let trim = Trim {
-            head: [String::new(), String::new(), String::new()],
-            foot: [
-                "{ファイル名}".to_owned(),
-                "\u{7b2c}\u{4e00}\u{7a3f}".to_owned(),
-                "{page} / {pages}".to_owned(),
-            ],
             name: "\u{539f}\u{7a3f}.md".to_owned(),
+            ..Trim::default()
         };
+        let filled = |said: &str| trim.filled(said, 2, 17, "2026-09-17");
+        assert_eq!(filled("{name}"), "\u{539f}\u{7a3f}.md", "the file's name");
+        assert_eq!(filled("{date}"), "2026-09-17", "the day it was printed");
         assert_eq!(
-            trim.filled(&trim.foot[0], 2, 17, "2026-09-17"),
-            "\u{539f}\u{7a3f}.md",
-            "the file's name"
+            filled("{page} / {pages}"),
+            "3 / 17",
+            "the sheet counts from one, and the total is there"
+        );
+        // 押して入るのは小文字だが、手で書くなら大小も言葉も問わない。
+        assert_eq!(filled("{Page}/{Total}"), "3/17", "as the writer typed it");
+        assert_eq!(
+            filled("{\u{30da}\u{30fc}\u{30b8}} / {\u{7dcf}\u{6570}}"),
+            "3 / 17",
+            "or in Japanese"
         );
         assert_eq!(
-            trim.filled(&trim.foot[1], 2, 17, "2026-09-17"),
+            filled("\u{7b2c}\u{4e00}\u{7a3f}"),
             "\u{7b2c}\u{4e00}\u{7a3f}",
             "plain words are left alone"
         );
-        assert_eq!(
-            trim.filled(&trim.foot[2], 2, 17, "2026-09-17"),
-            "3 / 17",
-            "and the sheet's number counts from one, with the total"
-        );
-        assert_eq!(
-            trim.filled("{日付}", 0, 1, "2026-09-17"),
-            "2026-09-17",
-            "the day it was printed"
-        );
+        // 知らない合言葉はそのまま残す——黙って消えるより気づける。
+        assert_eq!(filled("{\u{7ae0}}"), "{\u{7ae0}}", "an unknown word stays");
+        assert_eq!(filled("{page"), "{page", "and so does an unclosed brace");
         assert!(
             Trim::default().empty(),
             "nothing written is nothing to draw"
@@ -1064,12 +1086,8 @@ mod tests {
 
         // 天の左にファイル名、天の右に日付、地の右にページ。
         let named = Trim {
-            head: [
-                "{ファイル名}".to_owned(),
-                String::new(),
-                "{日付}".to_owned(),
-            ],
-            foot: [String::new(), String::new(), "{ページ}".to_owned()],
+            head: ["{name}".to_owned(), String::new(), "{date}".to_owned()],
+            foot: [String::new(), String::new(), "{page}".to_owned()],
             name: "\u{539f}\u{7a3f}.md".to_owned(),
         };
         assert!(

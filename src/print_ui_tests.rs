@@ -304,7 +304,7 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
             .row_data(1)
             .unwrap_or_default()
             .to_string(),
-        "{\u{30da}\u{30fc}\u{30b8}} / {\u{7dcf}\u{6570}}",
+        "{page} / {pages}",
         "the page number stands in the middle of the foot"
     );
     assert_eq!(
