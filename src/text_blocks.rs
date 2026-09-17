@@ -165,6 +165,14 @@ pub struct Typography {
     /// 横書きの面には初めから効かない（縦中横は縦書きの中でだけ起きる）ので、
     /// シートに出すのは縦書きの面だけ——**働かない切り替えを画面に置かない。**
     pub upright_digits: bool,
+    /// 半角記号の縦中横を効かせるか（要件 7.8、書き手の決定 2026-09-17）。
+    ///
+    /// **数字とは別の旗。**「半角数字が縦に並ぶ違和感」と「`!?`が縦に並ぶ違和感」は
+    /// 別のものなので、別々に入切する——小説の原稿にいちばん多く出るのは`!?`のほうである。
+    ///
+    /// 数字と同じく**幾何に効き**（`hash_typography`に入れてある）、**縦書きの面にしか
+    /// 出さない**。既定は切。
+    pub upright_marks: bool,
     /// 箇条書きの印として**画面に出る字**（要件 9、書き手の決定 2026-09-11）。
     ///
     /// **原稿の記号1つにつき1つ**——`-`／`*`／`+`の順で、原稿にその記号で書かれた
@@ -239,6 +247,7 @@ impl Typography {
             whitespace: false,
             // 要件 7.8: 書き手が何も書かなくても効く、が既定。
             upright_digits: true,
+            upright_marks: true,
             // E10の③: いままで描いていた字。
             bullets: [DEFAULT_BULLET; 3],
         }
@@ -657,6 +666,11 @@ pub struct Marks {
     /// **幾何は動かさない。**印は行の外（ルビと同じ帯）に出るので、字送りも
     /// 折り返し位置も印の有無で変わらない。
     pub beside: Beside,
+    /// 注記が言う字の大きさ（`［＃小さな文字］`、要件 7.8、2026-09-17）。
+    ///
+    /// **こちらは幾何を動かす。**[`Beside`]と違って字そのものが小さく（大きく）なるので、
+    /// 送りも折り返しも変わる——太字や斜体と同じ側にいて、同じように入れ子になれる。
+    pub scale: TextScale,
 }
 
 /// 字の脇に出る印の種類（要件 7.8、2026-09-16、書き手「組版の表現拡大」）。
@@ -682,6 +696,32 @@ pub enum Beside {
     /// 傍線——点ではなく、字の脇を通る線。Markdownに下線が無いので、縦書きの原稿では
     /// これが使われる。
     Line,
+    /// 二重傍線（2026-09-17）。
+    DoubleLine,
+    /// 波線（2026-09-17）。
+    WaveLine,
+    /// 鎖線——長い線と点が交互に来る（2026-09-17）。
+    ChainLine,
+    /// 破線（2026-09-17）。
+    DashLine,
+}
+
+/// 傍線の引き方（2026-09-17、書き手「組版の表現拡大」②）。
+///
+/// **傍点の種類と同じ作り**——[`Beside`]が種類を名指し、点なら[`Beside::glyph`]が字を返し、
+/// 線ならこれが引き方を返す。線を引くのはタイル描画側で、ここは何本をどう刻むかだけを言う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BesideRule {
+    /// 1本の実線。
+    Solid,
+    /// 2本の実線。
+    Double,
+    /// 波打つ線。
+    Wave,
+    /// 長い刻みと点が交互に来る線。
+    Chain,
+    /// 等間隔の刻み。
+    Dash,
 }
 
 impl Beside {
@@ -690,16 +730,111 @@ impl Beside {
         matches!(self, Self::None)
     }
 
-    /// この印として1字ごとに打つ字。線（`Line`）と`None`は字を持たない。
+    /// この印として1字ごとに打つ字。線と`None`は字を持たない。
     pub fn glyph(self) -> Option<&'static str> {
         match self {
-            Self::None | Self::Line => None,
+            Self::None
+            | Self::Line
+            | Self::DoubleLine
+            | Self::WaveLine
+            | Self::ChainLine
+            | Self::DashLine => None,
             Self::Dot => Some("・"),
             Self::Sesame => Some("\u{fe45}"),
             Self::Solid => Some("●"),
             Self::Open => Some("○"),
             Self::Double => Some("◎"),
             Self::Cross => Some("×"),
+        }
+    }
+
+    /// 線として引くならその引き方（2026-09-17）。**点は`None`**——字で打つほうへ回る。
+    ///
+    /// **線は1字ずつではなく、当たった範囲ごとに引く。**刻みのある線（破線・鎖線・波線）を
+    /// 字ごとに引き直すと、字の境目で必ず刻みが切れて模様が揃わない。
+    pub fn rule(self) -> Option<BesideRule> {
+        match self {
+            Self::Line => Some(BesideRule::Solid),
+            Self::DoubleLine => Some(BesideRule::Double),
+            Self::WaveLine => Some(BesideRule::Wave),
+            Self::ChainLine => Some(BesideRule::Chain),
+            Self::DashLine => Some(BesideRule::Dash),
+            _ => None,
+        }
+    }
+}
+
+/// 帯が字のどちら側に出るか（要件 7.8、2026-09-17）。
+///
+/// **書字方向では言わない。**「前の行がある側」が`Near`で、横書きなら字の上、縦書きなら
+/// 字の右——ルビも傍点もそこに出る。`Far`はその反対で、左の注記だけが使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BandSide {
+    Near,
+    Far,
+}
+
+/// この字並びが取る枡目の数。**半角は半マス**——読みや割注に`ABC`と書く人がいる。
+///
+/// **組む側と描く側で同じ答えを使う**ので、どちらからも見えるところに置いてある。
+pub fn cells_of(text: &str) -> f32 {
+    text.chars()
+        .map(|letter| if letter.is_ascii() { 0.5 } else { 1.0 })
+        .sum()
+}
+
+/// 割注を2行に割る位置——前の行になるバイト数（要件 7.8、2026-09-17）。
+///
+/// **枡目の数で半分に割る。**字の数ではない——半角が混じった割注を字数で割ると、
+/// 2行の長さが目に見えて食い違う。割れ目は枡目がちょうど半分を超えるところで、
+/// **前の行が長いか等しい**（余りは上に置く、が日本語の組みの習い）。
+pub fn warichu_halves(text: &str) -> (&str, &str) {
+    let half = cells_of(text) / 2.0;
+    let mut taken = 0.0;
+    for (at, letter) in text.char_indices() {
+        if taken >= half {
+            return (&text[..at], &text[at..]);
+        }
+        taken += if letter.is_ascii() { 0.5 } else { 1.0 };
+    }
+    (text, "")
+}
+
+/// 割注の箱が行に沿って取る長さ、本文1字の1/10を単位として（[`Ornament::Warichu`]）。
+///
+/// **長いほうの行が決める。**2行は並んで走るので、短いほうが余白になる。半分の大きさで
+/// 組むので、枡目の数の半分がそのまま長さになる。
+pub fn warichu_cells_x10(text: &str) -> u16 {
+    let (first, second) = warichu_halves(text);
+    let cells = cells_of(first).max(cells_of(second)) * 0.5;
+    ((cells * 10.0).ceil() as u32).clamp(1, u16::MAX as u32) as u16
+}
+
+/// 注記が言う字の大きさ（要件 7.8、2026-09-17、書き手「組版の表現拡大」③）。
+///
+/// **本文に対する比率であって、見出しの深さとは別の軸。**見出しの中に`［＃小さな文字］`が
+/// あれば、見出しの字の比率で小さくなる——ルビや縦中横が親の大きさに乗るのと同じ考え方である。
+///
+/// **幾何に効く。**字が小さくなれば送りも折り返しも変わるので、これは色ではなく寸法の側にいる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextScale {
+    #[default]
+    Normal,
+    /// `［＃小さな文字］…［＃小さな文字終わり］`。
+    Small,
+    /// `［＃大きな文字］…［＃大きな文字終わり］`。
+    Large,
+}
+
+impl TextScale {
+    /// 本文（またはその見出し）の大きさに掛ける比率。
+    ///
+    /// **3/4と3/2**——半分にすると本文と並べたときルビに見え、1割では変えた意味が読めない。
+    pub fn factor(self) -> f32 {
+        match self {
+            Self::Normal => 1.0,
+            Self::Small => 0.75,
+            Self::Large => 1.5,
         }
     }
 }
@@ -781,6 +916,15 @@ pub enum Ornament {
     /// 描くときはそこから親文字の矩形を出し、その脇へ読みを小さく組む。
     /// 親と読みが1つの走りに収まっているので、**組の対応が壊れようがない**。
     Ruby { base_utf16: u32 },
+    /// 左の注記——`［＃「東京」の左に「とうきょう」の注記］`（要件 7.8、2026-09-17）。
+    ///
+    /// **[`Ornament::Ruby`]の反対側**。帯の仕組みはそのままで、出る側だけが逆になる
+    /// （縦書きなら字の左、横書きなら字の下）。右にルビ、左に注——2本を同じ字に出せる。
+    ///
+    /// ルビと違うのは**親文字が箱の直前にあるとは限らない**ことである。注記は文のどこからでも
+    /// 前の語を名指すので、箱の頭から親文字の頭までの距離（`back_utf16`）と親文字の長さ
+    /// （`base_utf16`）の2つを持つ。ルビは`back_utf16 == base_utf16`の場合にあたる。
+    LeftNote { back_utf16: u32, base_utf16: u32 },
     /// 縦中横——縦書きの列の中で、半角の数字を正立させる（要件 7.8）。
     ///
     /// **書き手は何も書かない。**「20歳」が「2」と「0」に割れて縦に並ぶのは、
@@ -791,7 +935,21 @@ pub enum Ornament {
     /// （[`Ornament::Number`]と同じく、箱が覆っている範囲の字をそのまま描く）。
     /// 1〜2桁で1つの箱、3桁以上は**1桁につき1つ**——要件 7.8 の「3桁以上は
     /// 縦に並べる」がそれで、桁ごとに正立した箱が列に並ぶ。
+    ///
+    /// **書き手が名指すこともできる**（2026-09-17）：`［＃縦中横］10［＃縦中横終わり］`。
+    /// 自動の規則（半角数字・半角記号）が拾わないものを立てるための口で、旗の入切に
+    /// 関わらず効く——書いてあるものは書いてあるとおりに組む。
     Upright,
+    /// 割注——1行の中に、半分の大きさで2行入れる（要件 7.8、2026-09-17）。
+    ///
+    /// `［＃割り注］…［＃割り注終わり］`。**箱が場所を取り、中の字は箱が隠す**
+    /// （[`Ornament::Upright`]と同じ作り）——2行に割るのは描くときで、覆っている字を
+    /// そのまま読み出して半分ずつに分ける。
+    ///
+    /// `cells_x10`は箱が行に沿って取る長さ、**本文1字の1/10を単位とする**。
+    /// 割り方（[`warichu_halves`]）は組むときと描くときで同じ答えを使うので、
+    /// 長さは記法を読んだところで一度だけ決める。
+    Warichu { cells_x10: u16 },
     /// 画像（追加要件 2026-09-15、書き手：ライブプレビューの本文中に、画像だけの行をブロックとして出す）。
     ///
     /// `key`は絵を指す（`document::image_key`）。`width`×`height`は描く大きさ（画面の画素、倍率込み、
@@ -825,7 +983,30 @@ impl Ornament {
     /// the two are placed off different axes. Asked here rather than at the
     /// place that draws, so that a new ornament has to answer it.
     pub fn rides_beside_the_line(self) -> bool {
-        matches!(self, Self::Ruby { .. })
+        matches!(self, Self::Ruby { .. } | Self::LeftNote { .. })
+    }
+
+    /// この箱が指す親文字——`(箱の頭から親文字の頭までの距離, 親文字の長さ)`（要件 7.8）。
+    ///
+    /// **ルビも左の注も、同じ問いに違う答えを返すだけ**にしてある。ルビの親は箱の直前に
+    /// あるので距離と長さが等しく、左の注は文のどこからでも前の語を名指せる。
+    pub fn beside_base(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Ruby { base_utf16 } => Some((base_utf16, base_utf16)),
+            Self::LeftNote {
+                back_utf16,
+                base_utf16,
+            } => Some((back_utf16, base_utf16)),
+            _ => None,
+        }
+    }
+
+    /// 帯が字のどちら側に出るか（要件 7.8、2026-09-17）。
+    pub fn beside_side(self) -> BandSide {
+        match self {
+            Self::LeftNote { .. } => BandSide::Far,
+            _ => BandSide::Near,
+        }
     }
 
     /// How far the box reaches along the line axis.
@@ -840,6 +1021,8 @@ impl Ornament {
         match self {
             Self::Hidden => indent_step,
             Self::Upright => font_size,
+            // 割注は中の字数で決まる（`Ornament::Warichu`）。
+            Self::Warichu { cells_x10 } => font_size * f32::from(cells_x10) / 10.0,
             _ => 0.0,
         }
     }
@@ -855,7 +1038,7 @@ impl Ornament {
     /// **Only the upright digits do.** A marker's ink stands before the text,
     /// ruby stands over it, and these stand exactly where the box is.
     pub fn stands_in_its_box(self) -> bool {
-        matches!(self, Self::Upright)
+        matches!(self, Self::Upright | Self::Warichu { .. })
     }
 }
 
@@ -2459,7 +2642,7 @@ pub fn block_flow_bound(styled: StyledText<'_>, line_extent: u32, typography: &T
 }
 
 /// One stretch of a block that is set at a size of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct StyleRun {
     /// UTF-16 offset **relative to the block**, which is what DirectWrite text
     /// ranges are relative to and what keeps this independent of everything
@@ -2712,6 +2895,17 @@ fn finished(held: Option<Gathering>) -> Option<LineRun> {
     })
 }
 
+impl StyleRun {
+    /// この走りの字の大きさに掛かる比率（要件 7.8、2026-09-17）。
+    ///
+    /// **見出しの深さと、注記が言う大きさの両方。**「その走りの大きさで組む」はルビも
+    /// 縦中横も割注も守っている決まりで、`［＃小さな文字］`はそこへもう1つ掛かるだけである
+    /// ——見出しの中の小さな文字は、見出しの字の3/4になる。
+    pub fn size_scale(&self, typography: &Typography) -> f32 {
+        typography.size_scale(self.heading_level) * self.marks.scale.factor()
+    }
+}
+
 /// The block-local ranges that are not body text.
 ///
 /// Body lines are left out, so a document with no headings costs nothing to
@@ -2720,12 +2914,12 @@ fn finished(held: Option<Gathering>) -> Option<LineRun> {
 /// and leaving it at body size keeps the empty line a block gives up (see
 /// `measure_block`) the size it has always been.
 ///
-/// `upright_digits`は**縦書きの面だけが立てる旗**（要件 7.8）。ここが
-/// [`WritingMode`]を知らずに真偽で受けるのは、`text_blocks`が画面の向きを
-/// 一度も知らずに済んでいるからで、知る必要があるのは「この面は数字を正立
+/// `upright`は**縦書きの面だけが立てる旗**（要件 7.8）。ここが
+/// [`WritingMode`]を知らずに受けるのは、`text_blocks`が画面の向きを
+/// 一度も知らずに済んでいるからで、知る必要があるのは「この面は何を正立
 /// させるか」だけである。面ごとに違う答えでよい——ブロックを測るのは面ごと
-/// なので、同じ文書が横書きの面では数字をそのまま組む。
-pub fn style_runs(styled: StyledText<'_>, upright_digits: bool) -> Vec<StyleRun> {
+/// なので、同じ文書が横書きの面では数字も記号もそのまま組む。
+pub fn style_runs(styled: StyledText<'_>, upright: UprightRules) -> Vec<StyleRun> {
     let mut runs = Vec::new();
     let mut utf16_start = 0_u32;
     for (index, line) in styled.text.split('\n').enumerate() {
@@ -2786,7 +2980,7 @@ pub fn style_runs(styled: StyledText<'_>, upright_digits: bool) -> Vec<StyleRun>
         }
         // 要件 7.8: 縦中横。**最後に足す**ので、上で置かれた箱（行頭のマーカー、
         // ルビの読み）の範囲がもう分かっている——同じ字に2つの箱は張れない。
-        if upright_digits && !kind.is_code() {
+        if upright.any() && !kind.is_code() {
             // **借りて、返す。**張ってある箱の範囲を先に写しておく——
             // 数字の箱を足しながら同じ`runs`を読むことはできない。
             let boxed = runs
@@ -2796,7 +2990,7 @@ pub fn style_runs(styled: StyledText<'_>, upright_digits: bool) -> Vec<StyleRun>
                 .collect::<Vec<_>>();
             let taken =
                 |from: u32, to: u32| boxed.iter().any(|(start, end)| *start < to && from < *end);
-            for (from, len) in digit_runs(line) {
+            for (from, len) in upright_runs(line, upright) {
                 // 1〜2桁は1つの箱に並べ、3桁以上は1桁ずつ縦に並べる。
                 let step = if len <= 2 { len } else { 1 };
                 for cell in (0..len).step_by(step as usize) {
@@ -2821,28 +3015,80 @@ pub fn style_runs(styled: StyledText<'_>, upright_digits: bool) -> Vec<StyleRun>
     runs
 }
 
-/// 行の中の半角数字の連なり——`(始まり, 長さ)`をUTF-16単位で（要件 7.8）。
+/// 面が何を勝手に正立させるか（要件 7.8、書き手の決定 2026-09-17）。
 ///
-/// **連なりで見るのは、桁数が組み方を決めるからである。**`2026`の`20`だけを
-/// 縦中横にすると、読めない数になる。半角の`0-9`だけを数字とする——全角の
-/// `０-９`は縦書きの中でもとから正立しているので、何もしなくてよい。
-fn digit_runs(line: &str) -> Vec<(u32, u32)> {
+/// **数字と記号は別の旗。**「半角数字が縦に並ぶ違和感」と「`!?`が縦に並ぶ違和感」は
+/// 別のものなので、別々に入切する——どちらも既定は切で、使う書き手が入れる。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct UprightRules {
+    /// 半角数字（`20歳`）。
+    pub digits: bool,
+    /// 半角の感嘆符・疑問符とその組（`!?`・`!!`・`⁉`・`‼`）。
+    pub marks: bool,
+}
+
+impl UprightRules {
+    /// どちらも立てない面——横書きと、両方切ってある縦書き。
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// 何か立てるか。**立てないなら行を1度も読まない。**
+    pub fn any(self) -> bool {
+        self.digits || self.marks
+    }
+
+    /// 試験と、旗を全部入れたいところのために。
+    #[cfg(test)]
+    pub fn all() -> Self {
+        Self {
+            digits: true,
+            marks: true,
+        }
+    }
+}
+
+/// 縦中横として正立させる半角記号（要件 7.8、2026-09-17）。
+///
+/// **小説の原稿にいちばん多く出る形**——`!?`と`!!`、そしてそれを1字にした`⁉`・`‼`。
+/// 全角の`！``？`はもとから正立しているので触らない。
+fn is_upright_mark(letter: char) -> bool {
+    matches!(letter, '!' | '?' | '‼' | '⁉' | '⁇' | '⁈')
+}
+
+/// 行の中で正立させる連なり——`(始まり, 長さ)`をUTF-16単位で（要件 7.8）。
+///
+/// **連なりで見るのは、長さが組み方を決めるからである。**`2026`の`20`だけを
+/// 縦中横にすると読めない数になり、`!?`の`!`だけを立てても形が壊れる。半角の
+/// `0-9`だけを数字とする——全角の`０-９`は縦書きの中でもとから正立している。
+///
+/// **数字と記号は連ならない。**`5!`は「5」と「!」の2つで、1マスに詰めるものではない。
+fn upright_runs(line: &str, upright: UprightRules) -> Vec<(u32, u32)> {
     let mut found = Vec::new();
     let mut at = 0_u32;
-    let mut run: Option<(u32, u32)> = None;
+    let mut run: Option<(u32, u32, bool)> = None;
     for letter in line.chars() {
         let units = letter.len_utf16() as u32;
-        if letter.is_ascii_digit() {
-            run = Some(match run {
-                Some((from, len)) => (from, len + units),
-                None => (at, units),
-            });
-        } else if let Some(span) = run.take() {
-            found.push(span);
+        let digit = letter.is_ascii_digit();
+        let taken = (digit && upright.digits) || (is_upright_mark(letter) && upright.marks);
+        match run {
+            Some((from, len, was_digit)) if taken && was_digit == digit => {
+                run = Some((from, len + units, digit));
+            }
+            _ => {
+                if let Some((from, len, _)) = run.take() {
+                    found.push((from, len));
+                }
+                if taken {
+                    run = Some((at, units, digit));
+                }
+            }
         }
         at += units;
     }
-    found.extend(run);
+    if let Some((from, len, _)) = run {
+        found.push((from, len));
+    }
     found
 }
 
@@ -2856,11 +3102,17 @@ mod tests {
     fn digits_stand_upright_a_cell_at_a_time() {
         let boxes = |text: &str| -> Vec<(u32, u32)> {
             let levels = vec![LineStyle::default(); text.split('\n').count()];
-            style_runs(StyledText::new(text, &levels), true)
-                .into_iter()
-                .filter(|run| run.ornament == Some(Ornament::Upright))
-                .map(|run| (run.utf16_start, run.utf16_len))
-                .collect()
+            style_runs(
+                StyledText::new(text, &levels),
+                UprightRules {
+                    digits: true,
+                    marks: false,
+                },
+            )
+            .into_iter()
+            .filter(|run| run.ornament == Some(Ornament::Upright))
+            .map(|run| (run.utf16_start, run.utf16_len))
+            .collect()
         };
 
         // 2桁は1つの箱に並ぶ。
@@ -2875,13 +3127,70 @@ mod tests {
         assert_eq!(boxes("２０歳"), vec![]);
     }
 
+    /// 要件 7.8（書き手の決定 2026-09-17）: **半角記号の縦中横。**小説の原稿に
+    /// いちばん多く出る形（`!?`・`!!`）を1マスに正立・横並びにする。
+    ///
+    /// **旗は数字と分かれている**ので、片方だけ入れれば片方だけが立つ。
+    #[test]
+    fn half_width_marks_stand_upright_on_their_own_flag() {
+        let boxes = |text: &str, upright: UprightRules| -> Vec<(u32, u32)> {
+            let levels = vec![LineStyle::default(); text.split('\n').count()];
+            style_runs(StyledText::new(text, &levels), upright)
+                .into_iter()
+                .filter(|run| run.ornament == Some(Ornament::Upright))
+                .map(|run| (run.utf16_start, run.utf16_len))
+                .collect()
+        };
+        let marks_only = UprightRules {
+            digits: false,
+            marks: true,
+        };
+        let digits_only = UprightRules {
+            digits: true,
+            marks: false,
+        };
+
+        // 2つで1マス。
+        assert_eq!(boxes("えっ!?と言った", marks_only), vec![(2, 2)]);
+        assert_eq!(boxes("嘘だ!!", marks_only), vec![(2, 2)]);
+        // 1字にまとまった記号も立てる。
+        assert_eq!(boxes("まさか⁉", marks_only), vec![(3, 1)]);
+        assert_eq!(boxes("本当に‼", marks_only), vec![(3, 1)]);
+        // 1つでも寝ているのは同じなので立てる。
+        assert_eq!(boxes("行くぞ!", marks_only), vec![(3, 1)]);
+        // **旗は別**——記号だけ入れても数字は寝たまま、逆も同じ。
+        assert_eq!(boxes("20歳!?", marks_only), vec![(3, 2)]);
+        assert_eq!(boxes("20歳!?", digits_only), vec![(0, 2)]);
+        assert_eq!(boxes("20歳!?", UprightRules::all()), vec![(0, 2), (3, 2)]);
+        assert_eq!(boxes("20歳!?", UprightRules::none()), vec![]);
+        // **数字と記号は連ならない。**`5!`は1マスに詰めるものではない。
+        assert_eq!(boxes("5!", UprightRules::all()), vec![(0, 1), (1, 1)]);
+        // 全角はもとから正立している。
+        assert_eq!(boxes("えっ！？", UprightRules::all()), vec![]);
+    }
+
+    /// 要件 7.8（2026-09-17）: **割注は枡目の数で半分に割る。**余りは前の行へ。
+    #[test]
+    fn a_warichu_is_halved_by_the_cells_it_takes() {
+        assert_eq!(warichu_halves("注記です"), ("注記", "です"));
+        // 5マスは前が3、後ろが2。
+        assert_eq!(warichu_halves("あいうえお"), ("あいう", "えお"));
+        // 半角は半マス——**字数ではなく枡目で割る。**6字だが、前に4字で2マスずつ。
+        assert_eq!(warichu_halves("ABCDあい"), ("ABCD", "あい"));
+        // 箱が取るのは長いほうの行、その半分の大きさで。
+        assert_eq!(warichu_cells_x10("注記です"), 10);
+        assert_eq!(warichu_cells_x10("あいうえお"), 15);
+        // 1字でも場所は要る。
+        assert_eq!(warichu_cells_x10("注"), 5);
+    }
+
     /// **横書きの面は数字に触らない。**横書きの数字はもともと正立していて、
     /// そこへ箱を張れば送りだけが変わる——何も直さずに幾何を動かすことになる。
     #[test]
     fn a_horizontal_sheet_leaves_its_digits_alone() {
         let text = "20歳";
         let levels = vec![LineStyle::default()];
-        let runs = style_runs(StyledText::new(text, &levels), false);
+        let runs = style_runs(StyledText::new(text, &levels), UprightRules::none());
 
         assert!(runs.iter().all(|run| run.ornament.is_none()));
     }
@@ -2897,7 +3206,13 @@ mod tests {
             utf16_len: 4,
             ornament: Ornament::Number,
         })];
-        let runs = style_runs(StyledText::new(text, &levels).with_markers(&markers), true);
+        let runs = style_runs(
+            StyledText::new(text, &levels).with_markers(&markers),
+            UprightRules {
+                digits: true,
+                marks: false,
+            },
+        );
 
         assert_eq!(
             runs.iter()
@@ -3773,7 +4088,7 @@ mod tests {
             LineStyle::heading(2),
         ];
 
-        let runs = style_runs(StyledText::new(text, &levels), false);
+        let runs = style_runs(StyledText::new(text, &levels), UprightRules::none());
 
         assert_eq!(
             runs,
@@ -3810,7 +4125,7 @@ mod tests {
             LineStyle::default(),
         ];
 
-        let runs = style_runs(StyledText::new(text, &levels), false);
+        let runs = style_runs(StyledText::new(text, &levels), UprightRules::none());
 
         let ranges = runs
             .iter()
@@ -3845,7 +4160,7 @@ mod tests {
         let markers = [None, Some(bullet), Some(number)];
 
         let styled = StyledText::new(text, &levels).with_markers(&markers);
-        let boxes = style_runs(styled, false)
+        let boxes = style_runs(styled, UprightRules::none())
             .into_iter()
             .filter(|run| run.ornament.is_some())
             .collect::<Vec<StyleRun>>();
@@ -3875,7 +4190,7 @@ mod tests {
         let text = "- 箇条書き";
         let levels = [LineStyle::of_kind(LineKind::Bullet)];
 
-        let runs = style_runs(StyledText::new(text, &levels), false);
+        let runs = style_runs(StyledText::new(text, &levels), UprightRules::none());
         assert!(runs.iter().all(|run| run.ornament.is_none()));
     }
 
@@ -4121,7 +4436,10 @@ mod tests {
             }],
         ];
 
-        let runs = style_runs(StyledText::marked(text, &levels, &spans), false);
+        let runs = style_runs(
+            StyledText::marked(text, &levels, &spans),
+            UprightRules::none(),
+        );
 
         // The heading's own run, then what is marked inside it, then the
         // marked stretch on the body line.
@@ -4136,7 +4454,7 @@ mod tests {
         assert_eq!(shape, wanted);
         // A line nobody worked out has no marked stretches, and the headings
         // are unchanged by the shorter list.
-        let plain = style_runs(StyledText::new(text, &levels), false);
+        let plain = style_runs(StyledText::new(text, &levels), UprightRules::none());
         assert_eq!(plain.len(), 1);
     }
 

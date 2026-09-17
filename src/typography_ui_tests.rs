@@ -717,6 +717,245 @@ fn every_kind_of_mark_beside_the_word_reaches_the_pixels() {
         ink("丸傍点］") > ink("白丸傍点］"),
         "塗った丸のほうが墨が多い: {seen:?}"
     );
+    // 線の種類（2026-09-17、書き手「組版の表現拡大」②）。**刻みのある線は実線より墨が
+    // 少なく、二重傍線は多い**——どれも同じ実線に落ちていないことがこれで分かる。
+    // **長い語で見る。**1字ぶんの線では刻みが1つも入らず、どの種類も同じ墨になる。
+    let mut lines = Vec::new();
+    for note in [
+        "［＃「ここに印」に傍線］",
+        "［＃「ここに印」に二重傍線］",
+        "［＃「ここに印」に波線］",
+        "［＃「ここに印」に鎖線］",
+        "［＃「ここに印」に破線］",
+    ] {
+        let ink = ink_of(note);
+        assert!(ink > plain, "{note}: 線の墨が出ていない（{plain} → {ink}）");
+        lines.push((note, ink));
+    }
+    let line = |name: &str| {
+        lines
+            .iter()
+            .find(|(note, _)| note.contains(name))
+            .map(|(_, ink)| *ink)
+            .unwrap()
+    };
+    // **どれも同じ実線に落ちていない。**5種類とも墨の量が違う。
+    for (at, (note, ink)) in lines.iter().enumerate() {
+        assert!(
+            lines[..at].iter().all(|(_, other)| other != ink),
+            "{note}: ほかの線と同じ墨になっている: {lines:?}"
+        );
+    }
+    assert!(
+        line("二重傍線］") > line("に傍線］"),
+        "2本のほうが墨が多い: {lines:?}"
+    );
+    // 刻んだぶんだけ墨が減る——破線がいちばん空いている。
+    assert!(
+        line("破線］") < line("鎖線］") && line("鎖線］") < line("に傍線］"),
+        "刻みの多さと墨の量が合わない: {lines:?}"
+    );
+}
+
+/// 要件 7.8（2026-09-17、書き手「組版の表現拡大」①③）: **組み方の注記が、幾何に届く。**
+///
+/// 行末のカーソルがどこに立つか＝その行がどこまで伸びたか、で測る。縦中横は寝ていた
+/// 2字を1マスに、割注は4字を1マスに、文字の大きさは字そのものを縮める（広げる）。
+#[test]
+fn the_notes_that_set_a_stretch_change_how_far_the_line_reaches() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    // 縦中横の旗は2つとも入れる（既定は切）。縦書きのシートだけが持つ。
+    Setting::UprightDigits.write(&numbers, 1, 1);
+    Setting::UprightMarks.write(&numbers, 1, 1);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    let line_reach = |source: &str, vertical: bool| {
+        // **面の向きは画面にも言う。**縦書きにしか無い設定（縦中横）は縦書きのシートから
+        // 読まれるので、`screen.vertical`が横のままだと横書きのシートの値で組まれる。
+        id.update_screen(&window, |screen| {
+            screen.width = 1050.0;
+            screen.height = 640.0;
+            screen.shown_width = 1050.0;
+            screen.shown_height = 540.0;
+            screen.preview = true;
+            screen.vertical = vertical;
+        });
+        let document =
+            OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+        let states = PaneStates::new(&document);
+        set_pane_direction(&window, &cache, id, vertical);
+        {
+            let state = states.of(id);
+            let mut state = state.borrow_mut();
+            // カーソルは次の行に置く：組んだ姿のまま測る。
+            state.caret_source_byte = Some(source.len());
+            state.active_line_start = Some(source.len());
+        }
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+        let mut borrowed = cache.borrow_mut();
+        let pane = borrowed.pane(id);
+        let shown = pane.view.preview_slot.preview.text.clone();
+        let at = shown.find('\n').unwrap_or(shown.len());
+        let utf16 = shown[..at].encode_utf16().count() as u32;
+        let caret = pane.graphics.engine.caret_geometry(utf16).unwrap();
+        if vertical { caret.y } else { caret.x }
+    };
+
+    // **枡目は差で測る。**カーソルの座標には紙の余白が入っているので、1字増やしたときの
+    // 伸びぶんが1マスであり、そこから余白を割り出す。
+    let cell = line_reach("あいうえおか\n\n", true) - line_reach("あいうえお\n\n", true);
+    let margin = line_reach("あいうえお\n\n", true) - cell * 5.0;
+    let cells = |source: &str, vertical: bool| (line_reach(source, vertical) - margin) / cell;
+
+    // ① 半角記号の縦中横。**全角の`！？`は2マス、半角の`!?`は1マス。**
+    let sideways = cells("えっ！？と\n\n", true);
+    let upright = cells("えっ!?と\n\n", true);
+    assert!(
+        (sideways - 5.0).abs() < 0.2,
+        "全角5字が5マスになっていない（{sideways}マス）"
+    );
+    assert!(
+        (upright - 4.0).abs() < 0.2,
+        "`!?`が1マスに収まっていない（{upright}マス）"
+    );
+
+    // ① 書き手が名指した縦中横も1マス。3字でも枡目からはみ出さない。
+    let named = cells("第［＃縦中横］10［＃縦中横終わり］章\n\n", true);
+    assert!(
+        (named - 3.0).abs() < 0.2,
+        "名指した縦中横が1マスに収まっていない（{named}マス）"
+    );
+
+    // ③ 割注。4字が半分の大きさで2行になるので、1マスぶんしか取らない。
+    let plain = cells("本文注記ですの続き\n\n", true);
+    let warichu = cells("本文［＃割り注］注記です［＃割り注終わり］の続き\n\n", true);
+    assert!(
+        (plain - 9.0).abs() < 0.2,
+        "地の文が9マスになっていない（{plain}マス）"
+    );
+    assert!(
+        (warichu - 6.0).abs() < 0.3,
+        "割注が1マスに収まっていない（{warichu}マス）"
+    );
+
+    // ③ 文字の大きさ。**どちらの書字方向でも効く**——箱ではなく字そのものの大きさである。
+    for vertical in [false, true] {
+        let body = line_reach("ここは細かい話です\n\n", vertical);
+        let small = line_reach(
+            "ここは［＃小さな文字］細かい話［＃小さな文字終わり］です\n\n",
+            vertical,
+        );
+        let large = line_reach(
+            "ここは［＃大きな文字］細かい話［＃大きな文字終わり］です\n\n",
+            vertical,
+        );
+        assert!(
+            small < body && body < large,
+            "vertical={vertical}: 字の大きさが効いていない（小{small} 本文{body} 大{large}）"
+        );
+    }
+}
+
+/// 要件 7.8（2026-09-17、書き手「組版の表現拡大」②）: **左の注記が画素に届く。**
+///
+/// どちら側に出るかは帯の置き場所を決める`beside_the_line`の仕事で、そちらはその場で
+/// 測ってある（`the_band_of_a_left_note_is_on_the_other_side`）。ここで見るのは、
+/// 注記の字がちゃんと組まれて墨になっていること——注記が消えて何も出ない、が起きないこと。
+#[test]
+fn a_left_note_lands_on_the_other_side_of_the_word() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers));
+    window.set_palette(ModelRc::from(palette));
+    window.set_sheet_fonts(ModelRc::from(fonts));
+    let (width, height) = (1100usize, 760usize);
+    surface.set_size(slint::PhysicalSize::new(width as u32, height as u32));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    // 1列のうち、どのxに墨があるか。縦書きなので列は右から並ぶ。
+    let columns_of = |source: &str| {
+        let document = OpenDocument::new(
+            DocumentFile::untitled(1),
+            source.to_owned().into(),
+            window.as_weak(),
+        );
+        let states = PaneStates::new(&document);
+        id.update_screen(&window, |screen| {
+            screen.width = 1050.0;
+            screen.height = 640.0;
+            screen.shown_width = 1050.0;
+            screen.shown_height = 540.0;
+            screen.preview = true;
+            screen.vertical = true;
+        });
+        set_pane_direction(&window, &cache, id, true);
+        {
+            let state = states.of(id);
+            let mut state = state.borrow_mut();
+            state.caret_source_byte = Some(source.len());
+            state.active_line_start = Some(source.len());
+        }
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+        let mut ink = vec![0usize; width];
+        for (at, pixel) in pixels.iter().enumerate() {
+            if pixel.r < 150 && pixel.g < 150 && pixel.b < 150 {
+                ink[at % width] += 1;
+            }
+        }
+        ink
+    };
+    let total = |ink: &[usize]| -> usize { ink.iter().sum() };
+
+    let bare = total(&columns_of("東京\n"));
+    let ruby = total(&columns_of("｜東京《とうきょう》\n"));
+    let note = total(&columns_of(
+        "東京［＃「東京」の左に「とうきょう」の注記］\n",
+    ));
+    // 右と左に1本ずつ。同じ5字を組むので、増える墨はどちらも同じくらいになる。
+    let both = total(&columns_of(
+        "｜東京《とうきょう》［＃「東京」の左に「とうけい」の注記］\n",
+    ));
+
+    assert!(ruby > bare, "ルビの墨が出ていない（{bare} → {ruby}）");
+    assert!(note > bare, "左の注の墨が出ていない（{bare} → {note}）");
+    assert!(
+        both > ruby && both > note,
+        "両側に出していない（右{ruby} 左{note} 両方{both}）"
+    );
 }
 
 /// 要件 7.8（2026-09-16、書き手「組版の表現拡大」）: **体裁の注記の字下げが、組みに届く。**

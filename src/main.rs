@@ -9790,6 +9790,7 @@ fn typography_for(
     // 要件 7.8（書き手の決定 2026-09-09）: 縦中横。**寸法に効く**ので、
     // 切り替えれば組み直しが起きる。
     spec.upright_digits = number(Setting::UprightDigits) != 0;
+    spec.upright_marks = number(Setting::UprightMarks) != 0;
     // 書き手の決定 2026-09-11: 画面に出る印の字を、**原稿の記号ごとに**。**色と同じ
     // 側**——箱は幅0なので幾何は動かないが、`hash_typography`に入れてあるのでタイルは
     // 捨てられる。
@@ -9891,7 +9892,7 @@ fn plain_source(spec: &mut Typography, zoom_percent: i32) {
 /// to 12 the two places that had written the absolute row instead were missed —
 /// the vertical pane then took its page margin from the line height. One
 /// definition, sent over.
-const SHEET_NUMBERS: usize = 20 + 7 * 5;
+const SHEET_NUMBERS: usize = 21 + 7 * 5;
 /// `Setting::WrapMode` set to "the width the writer named" (要件 9). The other
 /// two values are `2`, the pane's own width, and `0`, not wrapping at all —
 /// **which is written down and not yet built**: tiles are cut along the flow
@@ -10090,6 +10091,12 @@ enum Setting {
     /// 横書きのシートに置けば「押しても何も起きない切り替え」になる
     /// ——働いていない状態を画面に置かない（単語チェックモード要件 2.1.1）。
     UprightDigits,
+    /// 半角記号の縦中横を効かせるか（要件 7.8、書き手の決定 2026-09-17）。
+    ///
+    /// **数字とは別の旗。**「半角数字が縦に並ぶ違和感」と「`!?`が縦に並ぶ違和感」は
+    /// 別のものなので、別々に入切する。置き場所は[`Setting::UprightDigits`]の隣で、
+    /// 同じく**縦書きのシートにしか出さない。**
+    UprightMarks,
     /// 箇条書きの印として**画面に出る字**（E10の③、書き手の選択 2026-09-11）。
     ///
     /// **シートが持つ。**これは組み方である——同じ原稿を別の紙で開けば別の丸に
@@ -10126,6 +10133,8 @@ impl Setting {
             13 => Some(Self::RubySize),
             14 => Some(Self::RubyOffset),
             15 => Some(Self::UprightDigits),
+            // **見出しの飾りの先に足す**ので、既にある行の番号は動かない。
+            55 => Some(Self::UprightMarks),
             16..=18 => Some(Self::BulletMark(index as usize - 16)),
             19..=53 => Some(Self::Decoration(
                 (index as usize - 19) / 5,
@@ -10150,6 +10159,7 @@ impl Setting {
             Self::RubySize => 7 + MAX_HEADING_LEVEL,
             Self::RubyOffset => 8 + MAX_HEADING_LEVEL,
             Self::UprightDigits => 9 + MAX_HEADING_LEVEL,
+            Self::UprightMarks => 55,
             Self::BulletMark(mark) => 10 + MAX_HEADING_LEVEL + mark.min(2),
         }
     }
@@ -10173,6 +10183,7 @@ impl Setting {
             Self::LineNumbers => 1,
             Self::Whitespace => 1,
             Self::UprightDigits => 1,
+            Self::UprightMarks => 1,
             Self::BulletMark(_) => 1,
             Self::WrapChars => 2,
             Self::RubySize => 2,
@@ -10198,6 +10209,7 @@ impl Setting {
             Self::LineNumbers => (0, 1),
             Self::Whitespace => (0, 1),
             Self::UprightDigits => (0, 1),
+            Self::UprightMarks => (0, 1),
             Self::BulletMark(_) => (0, BULLET_GLYPHS.len() as i32 - 1),
             Self::WrapChars => (10, 200),
             // 親文字より大きいルビは、ルビではなく別の本文である。
@@ -10226,6 +10238,8 @@ impl Setting {
             Self::Whitespace => 0,
             // 書き手の決定 2026-09-15: **切。**使う書き手が入れる。
             Self::UprightDigits => 0,
+            // 書き手の決定 2026-09-17: 同じく**切**。数字とは別に入れる旗である。
+            Self::UprightMarks => 0,
             // 書き手の決定 2026-09-11: いままで描いていた字（`•`）。設定になった
             // からといって、書き手の画面が動くいわれはない——3つの記号とも同じ丸から。
             Self::BulletMark(_) => 0,
@@ -10241,7 +10255,7 @@ impl Setting {
     fn read(self, window: &AppWindow, sheet: usize) -> i32 {
         // **縦書きにしか無い設定は共通にしない**（書き手の求め 2026-09-15）。縦中横は
         // 横書きのシートに値が無いので、合わせても縦書きの値を読む。
-        let sheet = if matches!(self, Self::UprightDigits) {
+        let sheet = if matches!(self, Self::UprightDigits | Self::UprightMarks) {
             sheet
         } else {
             shared_sheet(window, sheet, self.page())
@@ -10331,6 +10345,7 @@ impl Setting {
             Self::LineNumbers => "line-numbers",
             Self::Whitespace => "whitespace",
             Self::UprightDigits => "upright-digits",
+            Self::UprightMarks => "upright-marks",
             Self::BulletMark(0) => "bullet-mark-hyphen",
             Self::BulletMark(1) => "bullet-mark-star",
             Self::BulletMark(_) => "bullet-mark-plus",

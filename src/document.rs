@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text_blocks::{
     Beside, CommentSyntax, Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, Picture,
-    Pictures, is_table_row, table_alignments,
+    Pictures, TextScale, is_table_row, table_alignments, warichu_cells_x10,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2135,7 +2135,7 @@ pub fn plain_body_text(source: &str, ranges: &[(usize, usize)]) -> String {
                     let position = preview.source_starts[index] + line.source_byte[utf16] as usize;
                     let hidden = line.marker.is_some_and(|m| utf16 < m.utf16_len as usize)
                         || line.marks.iter().any(|mark| {
-                            matches!(mark.ornament, Some(Ornament::Ruby { .. }))
+                            mark.ornament.is_some_and(Ornament::rides_beside_the_line)
                                 && (mark.utf16_start as usize
                                     ..(mark.utf16_start + mark.utf16_len) as usize)
                                     .contains(&utf16)
@@ -2434,6 +2434,38 @@ fn push_marked_recording(
             rest = after;
             continue;
         }
+        // 要件 7.8（2026-09-17）: 左の注記（`［＃「東京」の左に「とうきょう」の注記］`）。
+        // **傍点の注記より先に読む。**どちらも`［＃「`で始まるので、順に訊く以外の
+        // 見分け方は無い。こちらも後ろを向いていて、指す語は`visible`の中にいる。
+        //
+        // 読みは**本文に居残ったまま箱で隠される**（ルビと同じ道、`Ornament::Ruby`に
+        // その理由が書いてある）。親文字は箱の直前にいるとは限らないので、箱は
+        // そこまでの距離を持つ（`Ornament::LeftNote`）。
+        if reading.ruby
+            && let Some((word, said, after)) = side_note_here(rest)
+        {
+            if let Some(found) = visible.rfind(word) {
+                let base_start = visible[..found].encode_utf16().count() as u32;
+                let base_utf16 = word.encode_utf16().count() as u32;
+                let reading_start = *at;
+                for character in said.chars() {
+                    visible.push(character);
+                    *at += character.len_utf16() as u32;
+                }
+                marks.push(Emphasis {
+                    utf16_start: reading_start,
+                    utf16_len: *at - reading_start,
+                    marks: Marks::default(),
+                    ornament: Some(Ornament::LeftNote {
+                        back_utf16: reading_start - base_start,
+                        base_utf16,
+                    }),
+                });
+            }
+            // 指す先が無ければ注記ごと消える（傍点の注記と同じ）。**原文には残っている。**
+            rest = after;
+            continue;
+        }
         // 要件 7.8: 青空文庫の注記形式（`［＃「本当に」に傍点］`）。
         // **これだけが後ろを向いている。**注記は自分より前にある語を指すので、
         // いま書き出した`visible`の中をさかのぼって、その語に点を打つ。
@@ -2454,6 +2486,67 @@ fn push_marked_recording(
             }
             // 指す先が無くても注記そのものは消える。**原文には残っている**ので
             // 失われるものは無く、本文に`［＃…］`が出続けるほうが読みにくい。
+            rest = after;
+            continue;
+        }
+        // 要件 7.8（2026-09-17）: 範囲を囲む注記——縦中横・割り注・文字の大きさ。
+        //
+        // **箱で隠すものと、旗を立てるものに分かれる。**縦中横と割り注は組み方そのもの
+        // なので中の字を箱が覆い（描くときに覆った字を読み出す）、文字の大きさは太字と
+        // 同じ旗なので、中は普通の本文としてそのまま入れ子になる。
+        if reading.ruby
+            && let Some((inner, note, after)) = range_note_here(rest)
+        {
+            let start = *at;
+            match note {
+                RangeNote::Upright | RangeNote::Warichu => {
+                    // 箱の中は**書いてあるとおりの字**（`Ornament::Number`と同じ道）。
+                    // ここで太字を読んでも、描くのは覆った字そのものなので効かない。
+                    for character in inner.chars() {
+                        visible.push(character);
+                        *at += character.len_utf16() as u32;
+                    }
+                    marks.push(Emphasis {
+                        utf16_start: start,
+                        utf16_len: *at - start,
+                        marks: Marks::default(),
+                        ornament: Some(if note == RangeNote::Upright {
+                            Ornament::Upright
+                        } else {
+                            Ornament::Warichu {
+                                cells_x10: warichu_cells_x10(inner),
+                            }
+                        }),
+                    });
+                }
+                RangeNote::Small | RangeNote::Large => {
+                    let scale = if note == RangeNote::Small {
+                        TextScale::Small
+                    } else {
+                        TextScale::Large
+                    };
+                    let from = marks.len();
+                    push_marked(inner, visible, marks, at, reading);
+                    // **中の走りにも大きさを配る。**ルビも縦中横も「その走りの大きさで組む」
+                    // ので、内側の走りが本文の大きさのままだと、親文字だけが小さくなって
+                    // 読みが元の大きさで残る。入れ子の注記は内側が勝つ（先に置かれている）。
+                    for mark in &mut marks[from..] {
+                        if mark.marks.scale == TextScale::Normal {
+                            mark.marks.scale = scale;
+                        }
+                    }
+                    marks.push(Emphasis {
+                        utf16_start: start,
+                        utf16_len: *at - start,
+                        marks: Marks {
+                            scale,
+                            ..Marks::default()
+                        },
+                        ornament: None,
+                    });
+                }
+            }
+            previous = inner.chars().next_back().or(previous);
             rest = after;
             continue;
         }
@@ -2925,18 +3018,106 @@ fn dots_here(rest: &str) -> Option<(&str, &str)> {
     Some((&after_open[..close], &after_open[close + "》》".len()..]))
 }
 
+/// 範囲を囲む注記（要件 7.8、2026-09-17、書き手「組版の表現拡大」①③）。
+///
+/// **開きと閉じで挟むものだけがここにいる。**後ろから前を指す注記（`［＃「…」に傍点］`）は
+/// [`dots_note_here`]、行そのものの体裁（`［＃ここから2字下げ］`）は[`format_note`]である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeNote {
+    /// `［＃縦中横］…［＃縦中横終わり］`——自動の規則が拾わないものを1マスに正立させる。
+    Upright,
+    /// `［＃割り注］…［＃割り注終わり］`——1行の中に半分の大きさで2行。
+    Warichu,
+    /// `［＃小さな文字］…［＃小さな文字終わり］`。
+    Small,
+    /// `［＃大きな文字］…［＃大きな文字終わり］`。
+    Large,
+}
+
+/// 開き・閉じ・種類。**長い言い方から先に並べる**必要はない——開きは`］`まで含めて
+/// 比べるので、「小さな文字」と「文字」のような取りこぼしが起きない。
+const RANGE_NOTES: [(&str, &str, RangeNote); 4] = [
+    ("［＃縦中横］", "［＃縦中横終わり］", RangeNote::Upright),
+    ("［＃割り注］", "［＃割り注終わり］", RangeNote::Warichu),
+    (
+        "［＃小さな文字］",
+        "［＃小さな文字終わり］",
+        RangeNote::Small,
+    ),
+    (
+        "［＃大きな文字］",
+        "［＃大きな文字終わり］",
+        RangeNote::Large,
+    ),
+];
+
+/// `rest`の頭にある範囲の注記——中身、種類、注記の後ろ（2026-09-17）。
+///
+/// **閉じないものは注記ではない。**太字の`**`と同じ規則で、閉じない`［＃縦中横］`は
+/// 字のまま本文に残る——原文にある指示が画面から消えたまま何も起きない、を避ける道である。
+/// 空の`［＃縦中横］［＃縦中横終わり］`も組む相手がいないので記法ではない。
+fn range_note_here(rest: &str) -> Option<(&str, RangeNote, &str)> {
+    if !rest.starts_with("［＃") {
+        return None;
+    }
+    for (open, close, kind) in RANGE_NOTES {
+        let Some(after) = rest.strip_prefix(open) else {
+            continue;
+        };
+        let Some(at) = after.find(close) else {
+            continue;
+        };
+        if at == 0 {
+            continue;
+        }
+        return Some((&after[..at], kind, &after[at + close.len()..]));
+    }
+    None
+}
+
+/// 左の注記（`［＃「東京」の左に「とうきょう」の注記］`、要件 7.8、2026-09-17）。
+/// 指す語、左に出す字、注記の後ろ。
+///
+/// **傍点の注記と同じく後ろを向いている**ので、どこに出すかは呼び出し側が`visible`を
+/// さかのぼって決める。ここは書式を読むだけ。
+fn side_note_here(rest: &str) -> Option<(&str, &str, &str)> {
+    let after_open = rest.strip_prefix("［＃「")?;
+    let close = after_open.find("」の左に「")?;
+    if close == 0 {
+        return None;
+    }
+    let word = &after_open[..close];
+    let after_word = &after_open[close + "」の左に「".len()..];
+    let end = after_word.find("」の注記］")?;
+    if end == 0 {
+        return None;
+    }
+    Some((
+        word,
+        &after_word[..end],
+        &after_word[end + "」の注記］".len()..],
+    ))
+}
+
 /// 青空文庫の注記形式の傍点・傍線（`［＃「本当に」に傍点］`、要件 7.8）。
 /// 印を打つ語、印の種類、注記の後ろ。
 ///
 /// **注記は後ろから前を指す**ので、返すのは語そのものである——どこに打つかは
 /// 呼び出し側が`visible`をさかのぼって決める。ここは書式を読むだけ。
 ///
-/// 種類は青空文庫の言い方をそのまま読む（2026-09-16、書き手「組版の表現拡大」）：
-/// 傍点・ゴマ傍点・丸傍点・白丸傍点・二重丸傍点・×傍点・傍線。**知らない注記
+/// 種類は青空文庫の言い方をそのまま読む（2026-09-16、線の種類は2026-09-17）：
+/// 傍点・ゴマ傍点・丸傍点・白丸傍点・二重丸傍点・×傍点と、傍線・二重傍線・波線・
+/// 鎖線・破線。**知らない注記
 /// （`［＃改ページ］`など）は読まない**：消してしまうと、原文にある指示が画面から
 /// 消えたまま何も起きないことになる。
 fn dots_note_here(rest: &str) -> Option<(&str, Beside, &str)> {
     let after_open = rest.strip_prefix("［＃「")?;
+    // **1つの注記の中で閉じる。**探すのは最初の`］`までで、そこに種類が無ければ
+    // この注記は傍点のものではない——先の別の注記の`］`まで届くと、そのあいだの
+    // 本文ごと語として飲み込んでしまう（2026-09-17、左の注記を足して分かった）。
+    let inside = after_open
+        .find('］')
+        .map_or(after_open, |at| &after_open[..at + '］'.len_utf8()]);
     // 長い言い方から先に見る——「丸傍点」は「傍点」でも終わるので、短いほうから
     // 当てると種類が落ちる。
     let kinds = [
@@ -2946,11 +3127,15 @@ fn dots_note_here(rest: &str) -> Option<(&str, Beside, &str)> {
         ("」に丸傍点］", Beside::Solid),
         ("」に×傍点］", Beside::Cross),
         ("」に傍点］", Beside::Dot),
+        ("」に二重傍線］", Beside::DoubleLine),
+        ("」に波線］", Beside::WaveLine),
+        ("」に鎖線］", Beside::ChainLine),
+        ("」に破線］", Beside::DashLine),
         ("」に傍線］", Beside::Line),
     ];
     let (close, note, beside) = kinds
         .iter()
-        .filter_map(|(note, beside)| after_open.find(note).map(|at| (at, *note, *beside)))
+        .filter_map(|(note, beside)| inside.find(note).map(|at| (at, *note, *beside)))
         .min_by_key(|(at, note, _)| (*at, std::cmp::Reverse(note.len())))?;
     if close == 0 {
         return None;
@@ -3039,7 +3224,7 @@ fn is_kanji(letter: char) -> bool {
 fn ruby_graphemes(visible: &str, marks: &[Emphasis]) -> usize {
     marks
         .iter()
-        .filter(|mark| matches!(mark.ornament, Some(Ornament::Ruby { .. })))
+        .filter(|mark| mark.ornament.is_some_and(Ornament::rides_beside_the_line))
         .map(|mark| {
             let start = byte_at_utf16_in(visible, mark.utf16_start);
             let end = byte_at_utf16_in(visible, mark.utf16_start + mark.utf16_len);
@@ -5692,6 +5877,23 @@ mod tests {
             Some(Beside::Cross)
         );
         assert_eq!(beside("彼は来た［＃「来た」に傍線］").1, Some(Beside::Line));
+        // 線の種類（2026-09-17、書き手「組版の表現拡大」②）。
+        assert_eq!(
+            beside("彼は来た［＃「来た」に二重傍線］").1,
+            Some(Beside::DoubleLine)
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」に波線］").1,
+            Some(Beside::WaveLine)
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」に鎖線］").1,
+            Some(Beside::ChainLine)
+        );
+        assert_eq!(
+            beside("彼は来た［＃「来た」に破線］").1,
+            Some(Beside::DashLine)
+        );
         // 知らない注記は本文のまま。
         assert_eq!(
             beside("彼は来た［＃改ページ］"),
@@ -5707,6 +5909,118 @@ mod tests {
         );
         assert_eq!(visible, "彼は来た［＃「来た」に丸傍点］");
         assert!(marks.iter().all(|mark| mark.marks.beside.is_none()));
+    }
+
+    /// 要件 7.8（2026-09-17、書き手「組版の表現拡大」②）: **右にルビ、左に注。**
+    ///
+    /// 注記は文のどこからでも前の語を名指すので、箱は親文字までの距離を持つ
+    /// （`Ornament::LeftNote`）。読みはルビと同じく本文に居残り、箱が隠す。
+    #[test]
+    fn a_note_can_stand_on_the_left_of_a_word() {
+        let (visible, marks) =
+            preview_of("彼は東京へ行った［＃「東京」の左に「とうきょう」の注記］");
+
+        // 注記の記法は消え、左に出す字だけが居残る。
+        assert_eq!(visible, "彼は東京へ行ったとうきょう");
+        let note = marks
+            .iter()
+            .find_map(|mark| match mark.ornament {
+                Some(Ornament::LeftNote {
+                    back_utf16,
+                    base_utf16,
+                }) => Some((mark.utf16_start, mark.utf16_len, back_utf16, base_utf16)),
+                _ => None,
+            })
+            .expect("左の注記が読まれていない");
+        // 読みは8文字目から5字。親文字「東京」は2文字目からの2字なので、距離は6。
+        assert_eq!(note, (8, 5, 6, 2));
+
+        // 同じ語に右のルビと左の注を両方。
+        let (visible, marks) =
+            preview_of("｜東京《とうきょう》［＃「東京」の左に「とうけい」の注記］");
+        assert_eq!(visible, "東京《とうきょう》とうけい");
+        assert_eq!(
+            marks
+                .iter()
+                .filter(|mark| mark.ornament.is_some_and(Ornament::rides_beside_the_line))
+                .count(),
+            2
+        );
+
+        // 指す先が無ければ注記ごと消える（傍点の注記と同じ）。
+        assert_eq!(
+            preview_of("彼は来た［＃「京都」の左に「きょうと」の注記］").0,
+            "彼は来た"
+        );
+    }
+
+    /// 要件 7.8（2026-09-17、書き手「組版の表現拡大」①③）: 範囲を囲む注記。
+    ///
+    /// **縦中横と割り注は箱が字を覆い**（描くときに読み出す）、**文字の大きさは旗**
+    /// （中は普通の本文としてそのまま入れ子になる）。
+    #[test]
+    fn a_range_note_says_how_its_own_stretch_is_set() {
+        let ornament = |line: &str| {
+            let (visible, marks) = preview_of(line);
+            (visible, marks.iter().find_map(|mark| mark.ornament))
+        };
+
+        assert_eq!(
+            ornament("第［＃縦中横］10［＃縦中横終わり］章"),
+            ("第10章".to_owned(), Some(Ornament::Upright))
+        );
+        // 自動の規則が拾わない字も、名指せば立つ。
+        assert_eq!(
+            ornament("［＃縦中横］ABC［＃縦中横終わり］").1,
+            Some(Ornament::Upright)
+        );
+        // 割注は中の字数で場所を取る。「注記です」は4マス、半分ずつで1マスぶん。
+        assert_eq!(
+            ornament("本文［＃割り注］注記です［＃割り注終わり］の続き"),
+            (
+                "本文注記ですの続き".to_owned(),
+                Some(Ornament::Warichu { cells_x10: 10 })
+            )
+        );
+
+        // 文字の大きさは箱ではなく旗——中の太字もそのまま読む。
+        let (visible, marks) =
+            preview_of("ここは［＃小さな文字］**細かい**話［＃小さな文字終わり］です");
+        assert_eq!(visible, "ここは細かい話です");
+        assert!(marks.iter().any(|mark| mark.marks.bold));
+        assert_eq!(
+            marks
+                .iter()
+                .map(|mark| mark.marks.scale)
+                .find(|scale| *scale != TextScale::Normal),
+            Some(TextScale::Small)
+        );
+        assert_eq!(
+            preview_of("［＃大きな文字］大見得［＃大きな文字終わり］")
+                .1
+                .iter()
+                .map(|mark| mark.marks.scale)
+                .find(|scale| *scale != TextScale::Normal),
+            Some(TextScale::Large)
+        );
+
+        // **閉じないものは注記ではない。**字のまま本文に残る。
+        assert_eq!(
+            ornament("［＃縦中横］10章"),
+            ("［＃縦中横］10章".to_owned(), None)
+        );
+        // 読み方を切れば、どれも字のまま。
+        assert_eq!(
+            preview_of_as(
+                "第［＃縦中横］10［＃縦中横終わり］章",
+                Reading {
+                    ruby: false,
+                    ..Reading::all()
+                },
+            )
+            .0,
+            "第［＃縦中横］10［＃縦中横終わり］章"
+        );
     }
 
     /// E9: **旗が変われば、取っておいた行は全部使えない。**行を取っておく条件は

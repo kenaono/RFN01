@@ -927,3 +927,8 @@ msgstr "⚠ 外で変更"
 msgid "⚠ File not found"
 msgstr "⚠ ファイルが見つかりません"
 
+msgid "Digits"
+msgstr "数字"
+
+msgid "Marks (!? !!)"
+msgstr "記号（!? !!）"

@@ -299,12 +299,6 @@ fn page_ranges(engine: &TextEngine, paper: Paper) -> Vec<(f32, f32)> {
     let mut opened = false;
     for (index, block) in engine.plan.blocks.iter().enumerate() {
         let breaks = engine.page_break_lines(index);
-        if !breaks.is_empty() {
-            eprintln!(
-                "DEBUG block {index} breaks at {breaks:?} lines={}",
-                block.lines.len()
-            );
-        }
         // 表には行の表が無い（`measure_table`）。**丸ごと一つの単位**として扱う
         // ——紙をまたぐ表は上から出て、はみ出したぶんは切り落とされる。
         let units: Vec<(f32, f32, bool)> = if block.grid.is_some() || block.lines.is_empty() {

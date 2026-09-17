@@ -4450,6 +4450,13 @@ export component AppWindow inherits Window {
                                                             horizontal-stretch: 1;
                                                         }
 
+                                                        Text {
+                                                            text: @tr("Digits");
+                                                            color: Tok.ink-faint;
+                                                            font-size: 11px;
+                                                            vertical-alignment: center;
+                                                        }
+
                                                         TextButton {
                                                             title: root.sheet-numbers[sheet-index * root.sheet-stride + 15] == 1
                                                                 ? @tr("Upright")
@@ -4460,6 +4467,40 @@ export component AppWindow inherits Window {
                                                             clicked => {
                                                                 root.sheet = sheet-index; root.sheet-chose(15,
                                                                     root.sheet-numbers[sheet-index * root.sheet-stride + 15] == 1
+                                                                        ? 0
+                                                                        : 1);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // 書き手の決定 2026-09-17: **半角記号は数字と別の旗。**
+                                                    // 「半角数字が縦に並ぶ違和感」と「`!?`が縦に並ぶ違和感」は
+                                                    // 別のものなので、別々に入切する。数字の隣に置く。
+                                                    if (sheet-index == 1) && (root.shows-any([@tr("Tate-chu-yoko")])): HorizontalLayout {
+                                                        spacing: 2px;
+
+                                                        Text {
+                                                            text: "";
+                                                            horizontal-stretch: 1;
+                                                        }
+
+                                                        Text {
+                                                            text: @tr("Marks (!? !!)");
+                                                            color: Tok.ink-faint;
+                                                            font-size: 11px;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        TextButton {
+                                                            title: root.sheet-numbers[sheet-index * root.sheet-stride + 55] == 1
+                                                                ? @tr("Upright")
+                                                                : @tr("Sideways");
+                                                            role: root.sheet-numbers[sheet-index * root.sheet-stride + 55] == 1
+                                                                ? Role.primary
+                                                                : Role.normal;
+                                                            clicked => {
+                                                                root.sheet = sheet-index; root.sheet-chose(55,
+                                                                    root.sheet-numbers[sheet-index * root.sheet-stride + 55] == 1
                                                                         ? 0
                                                                         : 1);
                                                             }
