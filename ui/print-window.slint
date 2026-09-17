@@ -18,6 +18,10 @@ export component PrintView inherits Rectangle {
     in property <bool> vertical;
     /// 拡大の百分率。Ctrl+ホイールで動く。
     in property <int> zoom: 100;
+    /// 掴んで寄せた量。**はみ出したときだけ効く**（書き手の決定 2026-09-17：
+    /// 拡大して大きく見たいことがある）。
+    in-out property <float> pan-x;
+    in-out property <float> pan-y;
     /// 天と地に入れる字、左・中・右。
     in property <[string]> head;
     in property <[string]> foot;
@@ -169,6 +173,34 @@ export component PrintView inherits Rectangle {
             init => { root.room-changed(self.width, self.height); }
 
             property <length> sheet-height: root.sheet-width / max(0.01, root.aspect);
+            // はみ出したぶんだけ寄せられる。**収まっているあいだは動かない。**
+            property <length> loose-x: max(0px, root.sheet-width - self.width + 48px) / 2;
+            property <length> loose-y: max(0px, self.sheet-height - self.height + 48px) / 2;
+
+            // **掴んで動かす**（書き手の決定 2026-09-17）。拡大して紙が場所から
+            // はみ出したときだけ効く——収まっていれば掴んでも動かない。
+            hand := TouchArea {
+                property <length> from-x;
+                property <length> from-y;
+                mouse-cursor: parent.loose-x > 0px || parent.loose-y > 0px
+                    ? MouseCursor.grab : MouseCursor.default;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        self.from-x = root.pan-x * 1px;
+                        self.from-y = root.pan-y * 1px;
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        root.pan-x = clamp(
+                            (self.from-x + self.mouse-x - self.pressed-x) / 1px,
+                            -parent.loose-x / 1px, parent.loose-x / 1px);
+                        root.pan-y = clamp(
+                            (self.from-y + self.mouse-y - self.pressed-y) / 1px,
+                            -parent.loose-y / 1px, parent.loose-y / 1px);
+                    }
+                }
+            }
 
             for sheet[index] in root.sheets: Rectangle {
                 // **並ぶ向きは本文の流れと同じ**（書き手の指摘 2026-09-17）
@@ -176,14 +208,14 @@ export component PrintView inherits Rectangle {
                 property <int> place: root.vertical
                     ? max(0, root.shown - 1) - index
                     : index;
-                x: root.vertical
+                x: (root.vertical
                     ? (parent.width - (root.sheet-width + 16px) * root.shown + 16px) / 2
                         + (root.sheet-width + 16px) * self.place
-                    : (parent.width - root.sheet-width) / 2;
-                y: root.vertical
+                    : (parent.width - root.sheet-width) / 2) + root.pan-x * 1px;
+                y: (root.vertical
                     ? (parent.height - parent.sheet-height) / 2
                     : (parent.height - (parent.sheet-height + 16px) * root.shown + 16px) / 2
-                        + (parent.sheet-height + 16px) * self.place;
+                        + (parent.sheet-height + 16px) * self.place) + root.pan-y * 1px;
                 width: root.sheet-width;
                 height: parent.sheet-height;
                 drop-shadow-blur: 12px;

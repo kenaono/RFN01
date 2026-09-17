@@ -108,6 +108,8 @@ pub fn turn(window: &AppWindow, live: &Live, to: i32) {
         return;
     }
     window.set_print_at(to);
+    window.set_print_pan_x(0.0);
+    window.set_print_pan_y(0.0);
     draw(window, live);
 }
 
@@ -223,10 +225,9 @@ fn least_zoom(window: &AppWindow) -> i32 {
     ((wide / one * 100.0).round() as i32).clamp(10, ZOOM_MOST)
 }
 
-/// 拡大の上限。**1枚が場所いっぱいに入るところまで**——それより大きくしても、
-/// はみ出したところへ行く手立てが無い（紙を動かす仕組みは持たない）。縮めるのは
-/// 並べて見るためで、そちらは[`SHEETS_AT_SMALLEST`]まで開けてある。
-const ZOOM_MOST: i32 = 100;
+/// 拡大の上限。**場所からはみ出してよい**（書き手の決定 2026-09-17：「ルビなど
+/// 大きく見たい場合もあると思うため」）——はみ出したぶんは掴んで動かせる。
+const ZOOM_MOST: i32 = 400;
 
 /// Ctrl+ホイールの拡大。
 pub fn step_zoom(window: &AppWindow, live: &Live, by: i32) {
@@ -235,6 +236,10 @@ pub fn step_zoom(window: &AppWindow, live: &Live, by: i32) {
         return;
     }
     window.set_print_zoom(zoom);
+    // **掴んだ場所は拡大のたびに戻す。**倍率が変われば紙の大きさが変わるので、
+    // 前の倍率で寄せた先は、新しい紙では別の場所である。
+    window.set_print_pan_x(0.0);
+    window.set_print_pan_y(0.0);
     draw(window, live);
 }
 

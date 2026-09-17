@@ -903,6 +903,9 @@ export component AppWindow inherits Window {
     in property <float> print-sheet-width: 100;
     in property <bool> print-vertical;
     in-out property <int> print-zoom: 100;
+    /// 掴んで寄せた量（拡大して紙がはみ出したとき）。
+    in-out property <float> print-pan-x;
+    in-out property <float> print-pan-y;
     in-out property <float> print-room-wide: 800;
     in-out property <float> print-room-tall: 600;
     callback print-room-changed(length, length);
@@ -5482,6 +5485,8 @@ export component AppWindow inherits Window {
             sheets: root.print-sheets;
             sheet-width: root.print-sheet-width * 1px;
             zoom: root.print-zoom;
+            pan-x <=> root.print-pan-x;
+            pan-y <=> root.print-pan-y;
             vertical: root.print-vertical;
             room-changed(wide, tall) => { root.print-room-changed(wide, tall); }
             zoomed(by) => { root.print-zoomed(by); }

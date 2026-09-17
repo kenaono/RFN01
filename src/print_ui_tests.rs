@@ -258,7 +258,7 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     // **縮めれば並ぶ枚数が増える**（書き手の求め 2026-09-17）。6枚まで。
     print_view::turn(&window, &live, 0);
     let close = window.get_print_sheets().row_count();
-    for _ in 0..20 {
+    for _ in 0..12 {
         print_view::step_zoom(&window, &live, -1);
     }
     let far = window.get_print_sheets().row_count();
@@ -270,15 +270,31 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         far <= 8,
         "and the smallest size is the one six sheets fit at: {far}"
     );
-    // 拡大しきれば元の枚数に戻る（上限は「1枚が場所いっぱいに入る大きさ」）。
-    for _ in 0..30 {
+    // 拡大すれば1枚だけになる。**場所からはみ出してよい**（ルビを大きく見る）。
+    for _ in 0..12 {
         print_view::step_zoom(&window, &live, 1);
     }
     assert_eq!(
         window.get_print_sheets().row_count(),
-        close,
-        "and zooming right in leaves what it started with"
+        1,
+        "zooming right in leaves the one sheet"
     );
+    assert!(
+        window.get_print_zoom() > 100,
+        "and it may grow past the room: {}%",
+        window.get_print_zoom()
+    );
+    // 掴んで寄せた量は、繰るたび・拡大のたびに戻る。
+    window.set_print_pan_x(40.0);
+    print_view::step_zoom(&window, &live, -1);
+    assert_eq!(
+        window.get_print_pan_x(),
+        0.0,
+        "a new size starts from the middle again"
+    );
+    for _ in 0..12 {
+        print_view::step_zoom(&window, &live, -1);
+    }
 
     // **天地には字を書く**（書き手の求め 2026-09-17）。決まったものを選ばせるので
     // はなく、「第一稿　3 / 17」のように並べられる。既定は地の真ん中にノンブル。
