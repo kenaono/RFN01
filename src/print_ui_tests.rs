@@ -299,7 +299,8 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     // **前の形（番号3つ）は、いまの言い方へ移す**（書き手の報告 2026-09-17：
     // 「0.0.0, 0.3.0が入っていますが、これは何か意味がありますか」）。そのまま
     // 読むと、その番号が字として紙に出る。
-    print_view::hold_trim(&window, "0,0,0", "0,3,0");
+    // **一度書き戻された形も名残である**（書き手の設定にあったのはこちら）。
+    print_view::hold_trim(&window, "0,0,0\t\t", "0,3,0");
     assert_eq!(
         window
             .get_print_head()

@@ -732,11 +732,21 @@ pub fn write_trim(window: &AppWindow, live: &Live, head: bool, at: i32, said: &s
 /// タブは無い（欄は1行ぶんである）。
 pub fn hold_trim(window: &AppWindow, head: &str, foot: &str) {
     let read = |said: &str| -> ModelRc<SharedString> {
-        let said = moved_from_numbers(said);
-        let mut parts = said.split('\t');
+        let mut fields: Vec<String> = said.split('\t').map(str::to_owned).collect();
+        fields.resize(3, String::new());
+        fields.truncate(3);
+        // 前の形は**区切りがまだ無かった**ので、番号3つは1つ目の欄に丸ごと入る
+        // ——残りが空のときだけ、名残とみなす。
+        if fields[1].is_empty()
+            && fields[2].is_empty()
+            && let Some(moved) = from_numbers(&fields[0])
+        {
+            fields = moved;
+        }
         ModelRc::new(VecModel::from(
-            (0..3)
-                .map(|_| SharedString::from(parts.next().unwrap_or("")))
+            fields
+                .iter()
+                .map(|one| SharedString::from(one.as_str()))
                 .collect::<Vec<_>>(),
         ))
     };
@@ -749,40 +759,22 @@ pub fn hold_trim(window: &AppWindow, head: &str, foot: &str) {
 ///
 /// **一度だけ、押して選ぶ番号だった。**「0,3,0」は「左はなし・中はページ・右はなし」
 /// で、いまは字を書く欄なので、そのまま読むと**その番号が字として紙に出る**。
-/// 番号3つだけの行はその名残とみなして、いまの言い方へ直す。**書き手が打った字は
-/// 触らない**——3つとも1桁の数字で、区切りがカンマのときだけ通る。
-fn moved_from_numbers(said: &str) -> String {
-    if said.contains('\t') {
-        return said.to_owned();
-    }
+/// **書き手が打った字は触らない**——3つとも1桁の数字で、区切りがカンマのときだけ通る。
+fn from_numbers(said: &str) -> Option<Vec<String>> {
     let parts: Vec<&str> = said.split(',').collect();
-    let numbers: Option<Vec<usize>> = (parts.len() == 3)
-        .then(|| {
-            parts
-                .iter()
-                .map(|part| match part.trim() {
-                    "0" => Some(0),
-                    "1" => Some(1),
-                    "2" => Some(2),
-                    "3" => Some(3),
-                    _ => None,
-                })
-                .collect()
-        })
-        .flatten();
-    let Some(numbers) = numbers else {
-        return said.to_owned();
-    };
-    numbers
+    if parts.len() != 3 {
+        return None;
+    }
+    parts
         .iter()
-        .map(|number| match number {
-            1 => "{name}",
-            2 => "{date}",
-            3 => "{page} / {pages}",
-            _ => "",
+        .map(|part| match part.trim() {
+            "0" => Some(String::new()),
+            "1" => Some("{name}".to_owned()),
+            "2" => Some("{date}".to_owned()),
+            "3" => Some("{page} / {pages}".to_owned()),
+            _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\t")
+        .collect()
 }
 
 /// そして設定へ戻すときの1行。
