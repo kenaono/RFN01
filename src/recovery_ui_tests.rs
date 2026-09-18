@@ -228,15 +228,27 @@ fn dropped_file_opens_in_captured_pane_after_focus_changes() {
         &r.window,
         r.window.get_editor_area_x() + screen.x + 30.0,
         r.window.get_editor_area_y() + screen.y + 30.0,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(picked, target);
     r.window.set_focused_pane(0);
     let path = r.directory.join("drop-in-second.txt");
     std::fs::write(&path, "別ペインに開く").unwrap();
     open_dropped_file(&r.window, &r.live, &path, picked);
     let tabs = r.live.tabs.borrow();
-    assert!(tabs.of(target).tabs.iter().any(|t| t.document.file.borrow().path() == Some(path.as_path())));
-    assert!(!tabs.of(r.id).tabs.iter().any(|t| t.document.file.borrow().path() == Some(path.as_path())));
+    assert!(
+        tabs.of(target)
+            .tabs
+            .iter()
+            .any(|t| t.document.file.borrow().path() == Some(path.as_path()))
+    );
+    assert!(
+        !tabs
+            .of(r.id)
+            .tabs
+            .iter()
+            .any(|t| t.document.file.borrow().path() == Some(path.as_path()))
+    );
 }
 
 #[test]
@@ -248,7 +260,10 @@ fn drop_point_selects_the_hit_pane_not_the_focused_pane() {
         (209.0, 0.0, 300.0, 195.0),
         (209.0, 204.0, 300.0, 196.0),
         (0.0, 0.0, 0.0, 0.0),
-    ].into_iter().enumerate() {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         PaneId(index as u32).update_screen(&r.window, |screen| {
             screen.x = x;
             screen.y = y;
@@ -259,9 +274,18 @@ fn drop_point_selects_the_hit_pane_not_the_focused_pane() {
     r.window.set_focused_pane(0);
     let x = r.window.get_editor_area_x();
     let y = r.window.get_editor_area_y();
-    assert_eq!(pane_at_drop_point(&r.window, x + 250.0, y + 50.0), Some(PaneId(1)));
-    assert_eq!(pane_at_drop_point(&r.window, x + 250.0, y + 250.0), Some(PaneId(2)));
-    assert_eq!(pane_at_drop_point(&r.window, x + 20.0, y + 50.0), Some(PaneId(0)));
+    assert_eq!(
+        pane_at_drop_point(&r.window, x + 250.0, y + 50.0),
+        Some(PaneId(1))
+    );
+    assert_eq!(
+        pane_at_drop_point(&r.window, x + 250.0, y + 250.0),
+        Some(PaneId(2))
+    );
+    assert_eq!(
+        pane_at_drop_point(&r.window, x + 20.0, y + 50.0),
+        Some(PaneId(0))
+    );
     assert_eq!(pane_at_drop_point(&r.window, x + 205.0, y + 50.0), None);
     assert_eq!(pane_at_drop_point(&r.window, x + 250.0, y + 200.0), None);
     assert_eq!(pane_at_drop_point(&r.window, x - 1.0, y + 50.0), None);
@@ -326,6 +350,7 @@ impl Recovery {
             states: PaneStates::new(&memo),
             folder: Rc::default(),
             tree_paths: Rc::default(),
+            workspace_ids: Rc::default(),
             results: Rc::default(),
             recent: Rc::default(),
             recent_folders: Rc::default(),

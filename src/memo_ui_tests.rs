@@ -223,6 +223,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
         states: PaneStates::new(&memo),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
@@ -661,7 +662,8 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let added = tree_root.join("added.md");
     std::fs::write(&added, "追加").unwrap();
     let request = tree_watch::Request {
-        root: tree_root.clone(),
+        roots: vec![tree_root.clone()],
+        multi: false,
         expanded: live.folder.borrow().expanded.clone(),
         displayed_paths: live.tree_paths.borrow().clone(),
     };
@@ -1013,6 +1015,7 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
         states: PaneStates::new(&memo),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),

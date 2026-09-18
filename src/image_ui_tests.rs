@@ -477,6 +477,7 @@ fn dragging_the_corner_of_a_picture_writes_its_width() {
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         preview: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),

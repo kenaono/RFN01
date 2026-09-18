@@ -65,6 +65,7 @@ fn word_mode_selection_repaints_existing_text() {
         states: PaneStates::new(&memo),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),

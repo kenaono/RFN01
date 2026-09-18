@@ -67,6 +67,7 @@ fn local_links_open_without_losing_the_source() {
         states: PaneStates::new(&memo),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
@@ -144,5 +145,57 @@ fn local_links_open_without_losing_the_source() {
         *live.states.document(id).text.borrow_mut() = "リンク先の本文".into();
         switch_to_tab(&window, &live, id, 0);
     }
+    // Completion is one history step and cannot act on stale caret/text or IME.
+    wire_workspace_links(&window, &live);
+    let typing = "# 見出し\n[[#";
+    *memo.text.borrow_mut() = typing.into();
+    memo.history.borrow_mut().forget();
+    {
+        let state = live.states.of(id);
+        state.borrow_mut().caret_source_byte = Some(typing.len());
+        state.borrow_mut().selection_anchor_source_byte = Some(typing.len());
+    }
+    workspace_links_tick(&window, &live);
+    assert!(window.get_link_popup_open());
+    assert!(window.invoke_pane_link_popup_key(id.index(), 3));
+    assert_eq!(&*memo.text.borrow(), "# 見出し\n[[#見出し]]");
+    assert!(
+        memo.history
+            .borrow_mut()
+            .undo_into(&mut memo.text.borrow_mut())
+            .is_some()
+    );
+    assert_eq!(&*memo.text.borrow(), typing);
+
+    live.states.of(id).borrow_mut().caret_source_byte = Some(typing.len());
+    workspace_links_tick(&window, &live);
+    assert!(window.get_link_popup_open());
+    assert!(window.invoke_pane_link_popup_key(id.index(), 4));
+    workspace_links_tick(&window, &live);
+    assert!(!window.get_link_popup_open());
+    assert_eq!(&*memo.text.borrow(), typing);
+
+    *memo.text.borrow_mut() = format!("{typing}見");
+    live.states.of(id).borrow_mut().caret_source_byte = Some(memo.text.borrow().len());
+    workspace_links_tick(&window, &live);
+    assert!(window.get_link_popup_open());
+    *memo.text.borrow_mut() = "changed after popup".into();
+    accept_link_completion(&window, &live, id);
+    assert_eq!(&*memo.text.borrow(), "changed after popup");
+    *memo.text.borrow_mut() = typing.into();
+    live.states.of(id).borrow_mut().caret_source_byte = Some(typing.len());
+    live.states.of(id).borrow_mut().preedit = "変換中".into();
+    workspace_links_tick(&window, &live);
+    assert!(!window.get_link_popup_open());
     window.hide().unwrap();
+}
+
+#[test]
+fn completion_rejects_fenced_and_inline_code() {
+    for source in ["```md\n[[", "~~~\n[[", "before `[[", "before ``[["] {
+        assert!(link_trigger_in_code(source, source.len()), "{source}");
+    }
+    for source in ["[[", "`closed` [[", "```\ncode\n```\n[["] {
+        assert!(!link_trigger_in_code(source, source.len()), "{source}");
+    }
 }

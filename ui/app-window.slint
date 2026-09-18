@@ -11,6 +11,8 @@ export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
+import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
+export { UnusedFolderRow, WorkspaceFolderRow, WorkspaceRow } from "workspace-manager.slint";
 
 /// 要件 7.9: 設定画面が出す語群の1行。
 ///
@@ -106,6 +108,15 @@ export struct LeftRow {
     // would land**: pointing at a file means the folder that file is in, and
     // the row cannot ask a path what holds it. The other panels leave it -1.
     parent: int,
+    // Workspace設計.md phase 3: this row stands for one of the active
+    // Workspace's own registered roots, drawn as its own labelled row when
+    // more than one folder is active. **Navigation only** — 仕様 "多重root行は
+    // rename/move/delete不可、管理画面が取り外しを扱う": a root row can be
+    // expanded or collapsed and can receive a drop (it is a folder like any
+    // other), but it is never itself renamed, deleted, or carried, and the
+    // header above the rows is not a valid drop target while any root row is
+    // shown. Only the tree ever sets this; the other panels leave it false.
+    is-root: bool,
 }
 
 export component AppWindow inherits Window {
@@ -158,6 +169,11 @@ export component AppWindow inherits Window {
     // other two things it will show.
     in property <[LeftRow]> left-rows;
     in property <string> work-folder;
+    // Workspace設計.md phase 3: more than one active root is shown, each as
+    // its own row (`LeftRow.is-root`). The heading above the rows no longer
+    // stands for one folder in that case, so it is not a place to drop
+    // anything — 仕様 "Drag target header invalid for multi-root".
+    in property <bool> tree-multi-root;
     in-out property <bool> tree-open: true;
     // 追加要件 2026-09-06: how wide the left pane is, in pixels.
     //
@@ -189,6 +205,42 @@ export component AppWindow inherits Window {
     // 一度のクリックは覗くだけで、次に選んだファイルがそのタブを取る。
     callback left-row-kept(int);
     callback work-folder-requested();
+
+    // Workspace設計.md phase 3: the switcher in the Explorer header and the
+    // management overlay it opens. `workspace-switcher-rows` includes a
+    // leading "なし" entry Rust always puts first — switching to it clears
+    // the active Workspace without touching the registered default (仕様:
+    // "デフォルト解除時は未設定に戻す" is a different operation from this one,
+    // which only changes what is active *this run*).
+    in property <bool> workspace-available;
+    in property <string> workspace-current-label;
+    in property <[string]> workspace-switcher-rows;
+    callback workspace-switcher-chosen(int);
+    callback workspace-manager-requested();
+    callback workspace-manager-closed();
+    in-out property <bool> workspace-manager-open;
+    in property <bool> workspace-read-error;
+    in property <string> workspace-read-error-text;
+    callback workspace-read-error-reset-requested();
+    in property <[WorkspaceRow]> workspace-rows;
+    in property <int> workspace-manager-selected: -1;
+    callback workspace-row-chosen(int);
+    callback workspace-create-requested();
+    callback workspace-duplicate-requested();
+    callback workspace-rename-requested();
+    callback workspace-default-toggled();
+    callback workspace-remove-requested();
+    callback workspace-reset-view-requested();
+    in property <[WorkspaceFolderRow]> workspace-folder-rows;
+    callback workspace-folder-add-requested();
+    callback workspace-folder-mode-toggled(int);
+    callback workspace-folder-move-up-requested(int);
+    callback workspace-folder-move-down-requested(int);
+    callback workspace-folder-detached(int);
+    callback workspace-folder-relocated(int);
+    in property <[UnusedFolderRow]> workspace-unused-folder-rows;
+    callback workspace-unused-folder-removed(int);
+
     /// The work folders opened before this one, newest first (要件 5.1).
     /// Names with the folder that holds them, the way the 履歴 panel names a
     /// file — Rust draws them, and the one already open is not among them.
@@ -418,6 +470,7 @@ export component AppWindow inherits Window {
     // いたので、**横書きで書いている書き手には一言も届いていなかった**——保存が
     // 断られたことさえ画面のどこにも無かった。窓に1つの場所へ移してある。
     in property <string> render-status;
+    in property <string> document-save-mode;
     /// 知らせがどのPaneの操作で出たか（書き手の報告 2026-09-15）。**別のPaneで操作が始まれば畳む**
     /// ——Pane1で保存した「Saved」が、Pane2へ移っても残っていた。
     in-out property <int> render-status-pane: -1;
@@ -504,6 +557,13 @@ export component AppWindow inherits Window {
     // its `index` here instead of a literal (ペイン分割設計 5).
     callback pane-selection-start(int, float, float, bool);
     callback pane-link-open(int, float, float) -> bool;
+    in-out property <bool> link-popup-open: false;
+    in-out property <int> link-popup-pane: -1;
+    in-out property <[string]> link-popup-rows;
+    in-out property <int> link-popup-selected: 0;
+    in-out property <string> link-popup-status;
+    callback pane-link-popup-key(int, int) -> bool;
+    callback pane-link-popup-chosen(int, int);
     /// E3の②: 行そのものを動かす・写す・消す。
     callback pane-line-edit(int, int);
     /// E10: 選んだ行を箇条書きにする、やめる。0=印、1=番号、2=数え直す。
@@ -1363,6 +1423,12 @@ export component AppWindow inherits Window {
                         // row that is shown is the heading.
                         property <bool> under-carry: root.tree-carrying
                             && root.work-folder != ""
+                            // 仕様 "Drag target header invalid for multi-root":
+                            // with more than one active root the heading names
+                            // a Workspace, not a folder, and a root row is
+                            // where "this Workspace's own top level" is dropped
+                            // instead.
+                            && !root.tree-multi-root
                             && root.tree-carry-parent != -1
                             && root.tree-carry-x >= 0px
                             && root.tree-carry-x < self.width
@@ -1406,6 +1472,56 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                                 overflow: elide;
+                            }
+
+                            // Workspace設計.md phase 3: shown even with no
+                            // work folder open — the switcher's own "なし"
+                            // row and the management overlay behind it are
+                            // both reachable before any folder has been
+                            // opened at all.
+                            if root.workspace-available: Rectangle {
+                                width: 26px;
+                                height: 26px;
+
+                                IconButton {
+                                    icon: Icons.sidebar;
+                                    tip: root.workspace-current-label;
+                                    checked: root.workspace-read-error;
+                                    clicked => { workspace-switcher-menu.show(); }
+                                }
+
+                                workspace-switcher-menu := PopupWindow {
+                                    x: 0;
+                                    y: 28px;
+                                    width: 220px;
+                                    close-policy: close-on-click-outside;
+
+                                    MenuFrame {
+                                        width: 220px;
+
+                                        VerticalLayout {
+                                            padding: 6px;
+                                            spacing: 1px;
+
+                                            for name[index] in root.workspace-switcher-rows: MenuRow {
+                                                title: name;
+                                                checked: name == root.workspace-current-label;
+                                                activated => {
+                                                    root.workspace-switcher-chosen(index);
+                                                    workspace-switcher-menu.close();
+                                                }
+                                            }
+                                            MenuSep { }
+                                            MenuRow {
+                                                title: @tr("Manage Workspaces…");
+                                                activated => {
+                                                    root.workspace-manager-requested();
+                                                    workspace-switcher-menu.close();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             // 要件 5.2: **the two commands that have no row to
@@ -1854,7 +1970,12 @@ export component AppWindow inherits Window {
                                         // all (要件 6.5 says the same of tabs).
                                         root.tree-carry-x = entry.mouse-x;
                                         root.tree-carry-y = tree-row.y + entry.mouse-y;
-                                        if (!tree-row.carrying-self
+                                        // 仕様 "root row itself not draggable":
+                                        // a registered root moves only through
+                                        // Workspace management's own reordering,
+                                        // never by being picked up here.
+                                        if (!row.is-root
+                                            && !tree-row.carrying-self
                                             && (entry.mouse-x > tree-row.press-x + 4px
                                                 || entry.mouse-x < tree-row.press-x - 4px
                                                 || entry.mouse-y > tree-row.press-y + 4px
@@ -2159,6 +2280,12 @@ export component AppWindow inherits Window {
                             root.pane-selection-start(pane.id, x, y, extend);
                         }
                         link-open(x, y) => { root.pane-link-open(pane.id, x, y) }
+                        link-popup-open: root.link-popup-open && root.link-popup-pane == pane.id;
+                        link-popup-rows: root.link-popup-rows;
+                        link-popup-selected: root.link-popup-selected;
+                        link-popup-status: root.link-popup-status;
+                        link-popup-key(key) => { root.pane-link-popup-key(pane.id, key) }
+                        link-popup-chosen(index) => { root.pane-link-popup-chosen(pane.id, index); }
                         line-edit(what) => {
                             root.pane-line-edit(pane.id, what);
                         }
@@ -5092,6 +5219,13 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                if root.document-save-mode != "": Text {
+                    text: root.document-save-mode;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
                 // 要件 10: only the source has a line and a column to give.
                 if root.count-caret != "": Text {
                     text: root.count-caret;
@@ -5556,6 +5690,45 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+    // Workspace設計.md phase 3: the management overlay, on top of everything
+    // the same way the colour mixer and the question overlay are.
+    //
+    // **Hidden, not just covered, while a question stands.** Create/Duplicate/
+    // Rename ask for a name and Remove/Reset/reset-after-read-error confirm
+    // through the very same question overlay drawn above (`root.question-open`)
+    // — declared later in this file, so it would otherwise be drawn *under*
+    // this one and never reachable. Destroying this element rather than only
+    // hiding it also means its `FocusScope` runs `init` again when the
+    // question closes and this reappears, taking the keyboard back from
+    // wherever `answer_question`'s `restore_editor_focus` sent it.
+    if root.workspace-manager-open && !root.question-open: WorkspaceManager {
+        read-error: root.workspace-read-error;
+        read-error-text: root.workspace-read-error-text;
+        read-error-reset-requested => { root.workspace-read-error-reset-requested(); }
+        workspaces: root.workspace-rows;
+        selected: root.workspace-manager-selected;
+        row-chosen(index) => { root.workspace-row-chosen(index); }
+        create-requested => { root.workspace-create-requested(); }
+        duplicate-requested => { root.workspace-duplicate-requested(); }
+        rename-requested => { root.workspace-rename-requested(); }
+        default-toggled => { root.workspace-default-toggled(); }
+        remove-requested => { root.workspace-remove-requested(); }
+        reset-view-requested => { root.workspace-reset-view-requested(); }
+        folders: root.workspace-folder-rows;
+        folder-add-requested => { root.workspace-folder-add-requested(); }
+        folder-mode-toggled(index) => { root.workspace-folder-mode-toggled(index); }
+        folder-move-up-requested(index) => { root.workspace-folder-move-up-requested(index); }
+        folder-move-down-requested(index) => { root.workspace-folder-move-down-requested(index); }
+        folder-detached(index) => { root.workspace-folder-detached(index); }
+        folder-relocated(index) => { root.workspace-folder-relocated(index); }
+        unused-folders: root.workspace-unused-folder-rows;
+        unused-folder-removed(index) => { root.workspace-unused-folder-removed(index); }
+        closed => {
+            // Rust defers removal and focus restoration until this callback
+            // has returned; do not destroy its focused scope from inside it.
+            root.workspace-manager-closed();
         }
     }
     // C5: 「その他の色」。問いと同じく窓の一番上に重ねる。

@@ -1,0 +1,21 @@
+import { Tok } from "tokens.slint";
+export component LinkCompletion inherits Rectangle {
+    in property <[string]> rows;
+    in property <int> selected;
+    in property <string> status;
+    callback chosen(int);
+    background: Tok.chrome-raised;
+    border-width: 1px;
+    border-color: Tok.rule-strong;
+    height: min(8, root.rows.length) * 28px + 26px;
+    property <int> first: max(0, root.selected - 7);
+    Text { x: 8px; y: 3px; width: parent.width - 16px; height: 22px; text: root.status; color: Tok.ink-muted; font-size: 11px; overflow: elide; }
+    for row[index] in root.rows: Rectangle {
+        visible: index >= root.first && index < root.first + 8;
+        x: 1px; y: 26px + (index - root.first) * 28px;
+        width: parent.width - 2px; height: 28px;
+        background: index == root.selected ? Tok.accent-soft : Tok.chrome-raised;
+        Text { x: 8px; width: parent.width - 16px; height: parent.height; text: row; color: Tok.ink; vertical-alignment: center; overflow: elide; }
+        TouchArea { clicked => { root.chosen(index); } }
+    }
+}

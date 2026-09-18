@@ -18,6 +18,9 @@ msgstr "アクティブPane: {}"
 msgid "Add"
 msgstr "追加"
 
+msgid "Add Folder…"
+msgstr "フォルダを追加…"
+
 msgid "Add to word set: {}"
 msgstr "単語帳へ追加：{}"
 
@@ -39,6 +42,9 @@ msgstr "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z�
 msgid "Auto Backup"
 msgstr "自動退避"
 
+msgid "Auto-Save"
+msgstr "自動保存"
+
 msgid "BACKGROUND IMAGE"
 msgstr "背景の壁紙"
 
@@ -50,6 +56,9 @@ msgstr "背景"
 
 msgid "Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing."
 msgstr "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
+
+msgid "Backup"
+msgstr "退避"
 
 msgid "Bold"
 msgstr "太字"
@@ -944,3 +953,57 @@ msgstr "数字"
 
 msgid "Marks (!? !!)"
 msgstr "記号（!? !!）"
+
+msgid "Manage Workspaces…"
+msgstr "Workspaceの管理…"
+
+msgid "Workspaces"
+msgstr "Workspace"
+
+msgid "Detach"
+msgstr "取り外す"
+
+msgid "Duplicate…"
+msgstr "複製…"
+
+msgid "Folders"
+msgstr "フォルダ"
+
+msgid "Move Down"
+msgstr "下へ移動"
+
+msgid "Move Up"
+msgstr "上へ移動"
+
+msgid "New…"
+msgstr "新規…"
+
+msgid "No folders in this Workspace yet"
+msgstr "このWorkspaceにはフォルダがありません"
+
+msgid "Relocate…"
+msgstr "場所を変更…"
+
+msgid "Remove…"
+msgstr "登録解除…"
+
+msgid "Reset the Workspace Registry…"
+msgstr "Workspaceの登録をリセット…"
+
+msgid "Reset View…"
+msgstr "表示状態をリセット…"
+
+msgid "Set Default"
+msgstr "既定にする"
+
+msgid "Unset Default"
+msgstr "既定を解除"
+
+msgid "Unused Common Folders"
+msgstr "未使用の共通フォルダ設定"
+
+msgid "Save mode is shared by all Workspaces using this folder."
+msgstr "保存方式は、このフォルダを使うすべてのWorkspaceで共通です。"
+
+msgid "Folder not found"
+msgstr "フォルダが見つかりません"

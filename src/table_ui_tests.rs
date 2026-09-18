@@ -60,6 +60,7 @@ fn a_table_is_edited_as_a_table() {
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
