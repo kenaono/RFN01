@@ -36,6 +36,184 @@ fn dropped_files_keep_dirty_text_reuse_tabs_and_report_invalid_paths() {
     assert_eq!(r.memo.text.borrow().to_string(), original);
 }
 
+#[test]
+fn startup_paths_open_the_last_directory_as_the_work_folder_without_moving_cwd() {
+    let r = Recovery::new();
+    let before_cwd = std::env::current_dir().unwrap();
+    append(&r.memo, "未保存の追記");
+    let original = r.memo.text.borrow().to_string();
+    let first_folder = r.directory.join("最初の フォルダ");
+    let second_folder = r.directory.join("second folder");
+    std::fs::create_dir_all(&first_folder).unwrap();
+    std::fs::create_dir_all(&second_folder).unwrap();
+    open_startup_paths(
+        &r.window,
+        &r.live,
+        r.id,
+        &[first_folder.clone(), second_folder.clone()],
+    );
+    assert_eq!(r.live.folder.borrow().root, Some(second_folder.clone()));
+    assert_eq!(std::env::current_dir().unwrap(), before_cwd);
+    let recent = r.live.recent_folders.borrow();
+    assert_eq!(recent.first(), Some(&second_folder));
+    assert!(recent.contains(&first_folder));
+    drop(recent);
+
+    // Opening a folder must not disturb an already-dirty tab's text (要件 8.1),
+    // and that survives a flush/restore round trip too.
+    assert_eq!(r.memo.text.borrow().to_string(), original);
+    assert!(r.memo.text.edited());
+    r.flush();
+    let restored = saving::restore_tabs(&r.window);
+    let restored_memo = restored
+        .iter()
+        .find(|(document, _)| document.file.borrow().path().is_none())
+        .expect("the dirty untitled tab survives a folder change");
+    assert_eq!(*restored_memo.0.text.borrow(), original);
+
+    // The folder that opening settled on is also what the session persists.
+    let app_dir = app_data::app_directory().unwrap();
+    let session = app_data::read_session(&app_dir).unwrap();
+    assert_eq!(session.folder, Some(second_folder));
+}
+
+#[test]
+fn paths_from_arguments_resolves_relative_paths_and_leaves_the_launch_cwd_alone() {
+    let r = Recovery::new();
+    let before_cwd = std::env::current_dir().unwrap();
+    let args = paths_from_arguments([".".into(), "src".into()]);
+    assert_eq!(
+        std::env::current_dir().unwrap(),
+        before_cwd,
+        "resolving relative arguments must not move the process cwd"
+    );
+    assert_eq!(args.len(), 2);
+    assert!(args.iter().all(|path| path.is_absolute()));
+    assert!(args[1].ends_with("src"));
+    open_startup_paths(&r.window, &r.live, r.id, &args);
+    assert_eq!(std::env::current_dir().unwrap(), before_cwd);
+    assert_eq!(r.live.folder.borrow().root, Some(args[1].clone()));
+}
+
+#[test]
+fn startup_paths_keep_file_tab_order_and_open_a_folder_wherever_it_is_named() {
+    let r = Recovery::new();
+    let folder = r.directory.join("work");
+    std::fs::create_dir_all(&folder).unwrap();
+    let first = r.directory.join("a.md");
+    let second = r.directory.join("b.md");
+    std::fs::write(&first, "A").unwrap();
+    std::fs::write(&second, "B").unwrap();
+    open_startup_paths(
+        &r.window,
+        &r.live,
+        r.id,
+        &[second.clone(), folder.clone(), first.clone()],
+    );
+    assert_eq!(r.live.folder.borrow().root, Some(folder));
+    let tabs = r.live.tabs.borrow();
+    let paths: Vec<_> = tabs
+        .of(r.id)
+        .tabs
+        .iter()
+        .map(|tab| tab.document.file.borrow().path().map(Path::to_path_buf))
+        .collect();
+    // The pane's own untitled tab, then the two files in the order they were
+    // named — the folder in between opened no tab of its own.
+    assert_eq!(paths, vec![None, Some(second), Some(first)]);
+}
+
+#[test]
+fn startup_paths_reuse_a_tab_for_a_repeated_file_without_losing_other_dirty_text() {
+    let r = Recovery::new();
+    append(&r.memo, "未保存の追記");
+    let original = r.memo.text.borrow().to_string();
+    let path = r.directory.join("原稿.md");
+    std::fs::write(&path, "最初の文書").unwrap();
+    open_startup_paths(&r.window, &r.live, r.id, &[path.clone()]);
+    assert_eq!(r.live.tabs.borrow().of(r.id).tabs.len(), 2);
+    assert_eq!(r.memo.text.borrow().to_string(), original);
+    assert!(r.memo.text.edited());
+    let document = open_documents(&r.live)
+        .into_iter()
+        .find(|d| d.file.borrow().path() == Some(path.as_path()))
+        .unwrap();
+    append(&document, "編集中");
+    open_startup_paths(&r.window, &r.live, r.id, &[path.clone()]);
+    let tabs = r.live.tabs.borrow();
+    let strip = tabs.of(r.id);
+    assert_eq!(strip.tabs.len(), 2);
+    assert!(Rc::ptr_eq(&strip.tabs[strip.active].document, &document));
+    assert!(!strip.tabs[strip.active].provisional.get());
+    assert!(document.text.borrow().ends_with("編集中"));
+    assert_eq!(r.memo.text.borrow().to_string(), original);
+}
+
+#[test]
+fn startup_paths_empty_list_is_a_no_op_and_a_missing_path_does_not_block_a_later_valid_one() {
+    let r = Recovery::new();
+    let before_tabs = r.live.tabs.borrow().of(r.id).tabs.len();
+    let before_root = r.live.folder.borrow().root.clone();
+    open_startup_paths(&r.window, &r.live, r.id, &[]);
+    assert_eq!(r.live.tabs.borrow().of(r.id).tabs.len(), before_tabs);
+    assert_eq!(r.live.folder.borrow().root, before_root);
+    assert!(r.window.get_render_status().is_empty());
+
+    let missing = r.directory.join("no-such-file.md");
+    open_startup_paths(&r.window, &r.live, r.id, &[missing.clone()]);
+    assert!(!missing.exists());
+    assert!(
+        !r.window.get_render_status().is_empty(),
+        "a missing path processed alone must report an error immediately"
+    );
+
+    // A later valid file still opens: `open_path_in_pane` clears the previous
+    // notification as it starts on each path in turn, so the error from the
+    // missing one is gone by the time the valid one lands — that is existing,
+    // intended behaviour, not something this test re-checks here.
+    let valid = r.directory.join("valid.md");
+    std::fs::write(&valid, "本文").unwrap();
+    open_startup_paths(&r.window, &r.live, r.id, &[missing.clone(), valid.clone()]);
+    let tabs = r.live.tabs.borrow();
+    let strip = tabs.of(r.id);
+    assert_eq!(strip.tabs.len(), before_tabs + 1);
+    assert!(
+        strip
+            .tabs
+            .iter()
+            .any(|tab| tab.document.file.borrow().path() == Some(valid.as_path()))
+    );
+}
+
+// The `--diagnostics` flags and the `--` terminator themselves are exercised
+// exhaustively in `diag.rs` (`detail_flags_do_not_consume_file_arguments_and_respect_end_of_options`);
+// this only checks that what that parser hands back still opens correctly
+// once diagnostics options and a folder and files are named together.
+#[test]
+fn startup_paths_open_correctly_when_parsed_alongside_diagnostics_options() {
+    let r = Recovery::new();
+    let folder = r.directory.join("フォルダ");
+    std::fs::create_dir_all(&folder).unwrap();
+    let dashed = r.directory.join("-help.md");
+    std::fs::write(&dashed, "本文").unwrap();
+    assert!(diag::Config::from_args(["--diagnostics=render".into()]).is_ok());
+    let args = paths_from_arguments([
+        "--diagnostics=render".into(),
+        folder.clone().into_os_string(),
+        "--".into(),
+        dashed.clone().into_os_string(),
+    ]);
+    open_startup_paths(&r.window, &r.live, r.id, &args);
+    assert_eq!(r.live.folder.borrow().root, Some(folder));
+    let tabs = r.live.tabs.borrow();
+    assert!(
+        tabs.of(r.id)
+            .tabs
+            .iter()
+            .any(|tab| tab.document.file.borrow().path() == Some(dashed.as_path()))
+    );
+}
+
 struct Offscreen(Rc<MinimalSoftwareWindow>);
 
 #[test]
