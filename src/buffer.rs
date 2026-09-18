@@ -19,7 +19,7 @@ pub struct SavedFile {
     /// The shape the file was in, so a save writes it back the same way.
     pub form: TextForm,
     /// What the file was when the editor and it last agreed.
-    pub stamp: FileStamp,
+    pub stamp: Option<FileStamp>,
 }
 
 /// Where a document's text came from.
@@ -74,6 +74,21 @@ impl DocumentFile {
         }
     }
 
+    /// Recover a file's identity even when its original cannot be opened.
+    /// An unknown stamp never counts as agreement with a file that reappears.
+    pub fn unavailable(path: PathBuf, stamp: Option<FileStamp>) -> Self {
+        Self {
+            origin: Origin::Saved(SavedFile {
+                path,
+                form: TextForm::default(),
+                stamp,
+            }),
+            mixed_newlines: false,
+            reported: None,
+            said: None,
+        }
+    }
+
     /// Read a file and take it as the document's own.
     ///
     /// The text comes back separately because it belongs to the editor's
@@ -99,7 +114,7 @@ impl DocumentFile {
         let saved = SavedFile {
             path: path.to_path_buf(),
             form: loaded.form,
-            stamp: loaded.stamp,
+            stamp: Some(loaded.stamp),
         };
         let document = Self {
             origin: Origin::Saved(saved),
@@ -198,7 +213,11 @@ impl DocumentFile {
             mixed_newlines: false,
             ..form
         };
-        self.origin = Origin::Saved(SavedFile { path, form, stamp });
+        self.origin = Origin::Saved(SavedFile {
+            path,
+            form,
+            stamp: Some(stamp),
+        });
         // What the editor just wrote is not an outside change.
         self.reported = None;
         // **書いた形は分かっている**（書き手のレビュー 2026-09-11）。判別に任せて
@@ -216,7 +235,7 @@ impl DocumentFile {
             return ExternalChange::None;
         };
         match FileStamp::read(&saved.path) {
-            Ok(stamp) if stamp == saved.stamp => ExternalChange::None,
+            Ok(stamp) if Some(stamp) == saved.stamp => ExternalChange::None,
             Ok(_) => ExternalChange::Modified,
             Err(_) => ExternalChange::Missing,
         }
@@ -230,7 +249,7 @@ impl DocumentFile {
     /// version I was editing against" (2026-09-08).
     pub fn agreed_stamp(&self) -> Option<FileStamp> {
         match &self.origin {
-            Origin::Saved(saved) => Some(saved.stamp),
+            Origin::Saved(saved) => saved.stamp,
             Origin::Untitled(_) => None,
         }
     }
@@ -242,7 +261,7 @@ impl DocumentFile {
     /// した時点の姿へ戻せば、`external_change`が最初の一度で食い違いを言う。
     pub fn agreed_at(&mut self, stamp: FileStamp) {
         if let Origin::Saved(saved) = &mut self.origin {
-            saved.stamp = stamp;
+            saved.stamp = Some(stamp);
         }
     }
 

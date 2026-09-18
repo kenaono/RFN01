@@ -312,6 +312,26 @@ pub fn wire_colours(
         }
     });
 
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_background_transparency_moved(move |value| {
+        if let Some(window) = weak.upgrade() {
+            let value = (value.round() as i32).clamp(0, 100);
+            let previous = window.get_background_transparency();
+            if value == previous {
+                return;
+            }
+            window.set_background_transparency(value);
+            if (value == 0) != (previous == 0) {
+                // Only crossing zero changes whether tiles paint their paper.
+                crate::show_wallpaper(&window, &held.cache);
+                crate::relayout_panes(&window, &held.states, &held.cache);
+            } else {
+                save_settings(&window, &held.cache);
+            }
+        }
+    });
+
     // 置き方と濃さは面の側（Slint）だけで効くので、組み直さない。
     let weak = window.as_weak();
     let held = doors.clone();
@@ -1343,6 +1363,7 @@ pub fn wire_typography(
                 window.set_wall_kind(crate::wallpaper::NONE);
                 window.set_wall_fit(0);
                 window.set_wall_strength(30);
+                window.set_background_transparency(0);
                 if group < 0 {
                     window.set_wall_path("".into());
                 }

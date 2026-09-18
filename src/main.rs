@@ -40,6 +40,8 @@ mod pty;
 mod quick_draft;
 #[cfg(test)]
 mod read_only_ui_tests;
+#[cfg(test)]
+mod recovery_ui_tests;
 mod saving;
 mod searcher;
 mod session;
@@ -70,8 +72,6 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     collections::BTreeMap,
-    fs::File,
-    io::Write,
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -79,7 +79,7 @@ use std::{
 };
 
 use buffer::DocumentFile;
-use diag::DiagLog;
+use diag::{DiagLog, RollingLog as PerfLog};
 use directwrite_render::{
     CaretGeometry, LineFit, SelectionRect, TextEngine, TileSink, WritingMode, cells,
 };
@@ -498,17 +498,6 @@ const TILE_CACHE_LIMIT: usize = 6;
 /// of the same refresh; what is left over waits for the next one. Each is about
 /// two megabytes, and allocating that costs more than drawing it (技術検証 7.8).
 const SPARE_TILE_BUFFERS: usize = 16;
-/// Every refresh writes one line here — beside the executable, like the trace
-/// (see [`diag::beside_executable`]). The status bar is a single unwrapped line
-/// in a half-width pane, so anything past the first few figures is clipped; this
-/// keeps the full breakdown somewhere it can actually be read afterwards.
-const PERF_LOG_PATH: &str = "perf_log.txt";
-/// The run before this one. See [`PerfLog`].
-const PERF_LOG_PREVIOUS_PATH: &str = "perf_log.prev.txt";
-/// Lines one run may write before the log gives up. A keystroke in Split writes
-/// two, so this is a long session; past it the file holds more than anyone reads
-/// and keeping it open only costs.
-const PERF_LOG_LINE_LIMIT: usize = 20_000;
 
 /// One pane's caret, selection and pending IME text, all in source bytes.
 ///
@@ -1441,69 +1430,6 @@ impl Default for RenderCache {
     }
 }
 
-/// One run's diagnostic log.
-///
-/// The file holds **this run and nothing else**. It used to be appended to for
-/// ever, so reading it meant deleting it first and then reproducing whatever was
-/// being looked at; a log that has to be cleared before it is useful is one more
-/// step between a symptom and its cause.
-///
-/// The previous run is moved aside to `perf_log.prev.txt` rather than discarded,
-/// because the question asked of these numbers is almost always "is this better
-/// than before", and a plain truncation answers it by throwing the before away.
-///
-/// Best effort throughout. The log exists to explain the editor, so it must
-/// never be able to stop it: every failure sets `stopped` and is otherwise
-/// ignored.
-#[derive(Default)]
-struct PerfLog {
-    file: Option<File>,
-    /// Set once nothing more will be written — the file could not be opened, or
-    /// the line limit was reached.
-    stopped: bool,
-    lines: usize,
-}
-
-impl PerfLog {
-    /// Begin this run's log, moving the previous run's file aside.
-    ///
-    /// Called once at startup rather than lazily on the first refresh, so the
-    /// header is at the top of the file even when the run ends before drawing
-    /// anything, and so an empty log distinguishes "never started" from "started
-    /// and measured nothing".
-    fn start(&mut self, header: &str) {
-        let path = diag::beside_executable(PERF_LOG_PATH);
-        let previous = diag::beside_executable(PERF_LOG_PREVIOUS_PATH);
-        let _ = std::fs::rename(&path, &previous);
-        match File::create(&path) {
-            Ok(file) => self.file = Some(file),
-            Err(_) => {
-                self.stopped = true;
-                return;
-            }
-        }
-        self.write(header);
-    }
-
-    fn write(&mut self, line: &str) {
-        if self.stopped {
-            return;
-        }
-        let Some(file) = self.file.as_mut() else {
-            return;
-        };
-        if self.lines >= PERF_LOG_LINE_LIMIT {
-            // Said in the file, not just by the file ending. A log that simply
-            // stops looks like a crash.
-            let _ = writeln!(file, "session stopped=line-limit lines={}", self.lines);
-            self.stopped = true;
-            return;
-        }
-        self.lines += 1;
-        let _ = writeln!(file, "{line}");
-    }
-}
-
 impl RenderCache {
     /// Write one line to the performance log, best effort.
     fn log_perf(&mut self, line: &str) {
@@ -1560,7 +1486,28 @@ fn perf_log_header(window: &AppWindow) -> String {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
-    let window = AppWindow::new()?;
+    let diagnostic_options = diag::Config::from_args(std::env::args_os().skip(1));
+    let diagnostic_config = diagnostic_options.clone().unwrap_or_default();
+    let diagnostic_mode = diagnostic_config.summary();
+    let mut diagnostic_log = DiagLog::default();
+    let diag_started = diagnostic_log.start_with(diagnostic_config.clone());
+    diagnostic_log.catch_panics();
+    diagnostic_log.write(
+        "session",
+        &format!(
+            "starting version={} diagnostics={diagnostic_mode}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    // The Windows software presenter preserves client-area alpha via DirectComposition.
+    // Selecting it before any window is created also keeps native IME and decorations.
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name("software".into())
+        .select()?;
+    let window = AppWindow::new().inspect_err(|error| {
+        diagnostic_log.write("error", &format!("window startup failed: {error}"));
+    })?;
     // 要件 8.5: the arrangement comes back — which pane held which tabs, in
     // what order, in which of the four modes, and how the area was divided.
     // Nothing there is a first run, and something unreadable is a session from
@@ -1707,6 +1654,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // closing the tabs of four panes took the list of states below zero.
     let pane_states = PaneStates::new(&opening);
     let render_cache = Rc::new(RefCell::new(RenderCache::default()));
+    render_cache.borrow_mut().diag = diagnostic_log;
     for _ in 1..PaneId::count(&window) {
         pane_states.add(&opening);
         render_cache.borrow_mut().add_pane(WritingMode::Horizontal);
@@ -1801,15 +1749,13 @@ fn main() -> Result<(), slint::PlatformError> {
         searcher: Rc::new(Searcher::start(wake_for_search)),
         searched: Rc::new(Cell::new(0)),
     };
-    render_cache
-        .borrow_mut()
-        .perf_log
-        .start(&perf_log_header(&window));
-    let diag_started = render_cache.borrow_mut().diag.start();
+    if diagnostic_config.performance() {
+        let mut cache = render_cache.borrow_mut();
+        cache.perf_log = cache.diag.performance_log(&perf_log_header(&window));
+    }
     // **From here on, a panic says so in the log.** The editor has no console
     // to print to, so without this the file simply stopped and the last line
     // before the stop was all there was to go on.
-    render_cache.borrow().diag.catch_panics();
     let diag_path = {
         let cache = render_cache.borrow();
         match cache.diag.path() {
@@ -1821,7 +1767,7 @@ fn main() -> Result<(), slint::PlatformError> {
     render_cache.borrow_mut().log_diag(
         "session",
         &format!(
-            "started={started} profile={profile} file={diag_path} \
+            "started={started} profile={profile} diagnostics={diagnostic_mode} file={diag_path} \
              window={width}x{height} scale={scale:.2} mode={mode} split={split} \
              zoom={zoom} limit={MAX_DOCUMENT_CHARACTERS}",
             started = diag_started.stamp(),
@@ -1848,18 +1794,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // rather than assumed. The tests assert the properties the design needs;
     // these two lines put the actual numbers where the answers to "how much"
     // belong. Two layouts at startup, and nothing is drawn.
-    for (name, vertical) in [("across", false), ("down", true)] {
-        let status = inline_object_status(name, vertical);
-        render_cache.borrow_mut().log_diag("probe", &status);
+    if diagnostic_config.rendering() {
+        for (name, vertical) in [("across", false), ("down", true)] {
+            let status = inline_object_status(name, vertical);
+            render_cache.borrow_mut().log_diag("probe", &status);
+        }
+        // **In the log rather than on the paper.** This used to be a caption above
+        // the vertical pane, from the round that was proving DirectWrite could set
+        // a column at all; it is a measurement, and measurements live where the
+        // rest of them do.
+        let vertical_layout = directwrite_status();
+        render_cache
+            .borrow_mut()
+            .log_diag("probe", &vertical_layout);
     }
-    // **In the log rather than on the paper.** This used to be a caption above
-    // the vertical pane, from the round that was proving DirectWrite could set
-    // a column at all; it is a measurement, and measurements live where the
-    // rest of them do.
-    let vertical_layout = directwrite_status();
-    render_cache
-        .borrow_mut()
-        .log_diag("probe", &vertical_layout);
     if was_restored {
         // The carets went into the panes with their tabs above; this is what
         // came back, for the log.
@@ -1898,21 +1846,22 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Bracket the renderer so the log can separate our own work from what Slint
     // does with the images afterwards.
-    let frames = render_cache.borrow().frames.clone();
-    if let Err(error) =
-        window
+    if diagnostic_config.performance() {
+        let frames = render_cache.borrow().frames.clone();
+        if let Err(error) = window
             .window()
             .set_rendering_notifier(move |state, _graphics| match state {
                 RenderingState::BeforeRendering => frames.borrow_mut().begin(),
                 RenderingState::AfterRendering => frames.borrow_mut().end(),
                 _ => {}
             })
-    {
-        // Only GPU-accelerated renderers report this. Not being able to measure
-        // is worth a line in the log, but nothing here depends on it.
-        render_cache
-            .borrow_mut()
-            .log_perf(&format!("frame probe unavailable: {error:?}"));
+        {
+            // Only GPU-accelerated renderers report this. Not being able to measure
+            // is worth a line in the log, but nothing here depends on it.
+            render_cache
+                .borrow_mut()
+                .log_perf(&format!("frame probe unavailable: {error:?}"));
+        }
     }
 
     for id in PaneId::all(&window) {
@@ -3087,6 +3036,7 @@ fn main() -> Result<(), slint::PlatformError> {
         use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
         let weak = window.as_weak();
         let cache = render_cache.clone();
+        let drop_live = live.clone();
         window.window().on_winit_window_event(move |_, event| {
             match event {
                 WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
@@ -3098,6 +3048,24 @@ fn main() -> Result<(), slint::PlatformError> {
                     if let Some(window) = weak.upgrade() {
                         show_wallpaper(&window, &cache);
                     }
+                }
+                WindowEvent::DroppedFile(path) => {
+                    // Capture the destination before deferring: focus and the
+                    // pointer may change while the file is waiting to open.
+                    let target = weak.upgrade().and_then(|window| drop_pane_under_cursor(&window));
+                    let weak = weak.clone();
+                    let live = drop_live.clone();
+                    let path = path.clone();
+                    // Open after the native event callback has returned. Each
+                    // dropped file gets its own callback, including multi-select.
+                    Timer::single_shot(Duration::ZERO, move || {
+                        if let (Some(window), Some(id)) = (weak.upgrade(), target) {
+                            if id.is_shown(&window) {
+                                open_dropped_file(&window, &live, &path, id);
+                            }
+                        }
+                    });
+                    return EventResult::PreventDefault;
                 }
                 _ => {}
             }
@@ -3501,18 +3469,12 @@ fn main() -> Result<(), slint::PlatformError> {
     // that the file is the tab in front — the session came back above, and what
     // the writer just asked for should not open behind what they left.
     //
-    // The arguments are logged before any of them is judged. A file that would
-    // not open and a shell that named no file look the same from the outside —
-    // the editor comes up on yesterday's session either way — and this line is
-    // what tells them apart.
-    let handed_over: Vec<String> = std::env::args_os()
-        .skip(1)
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect();
-    render_cache.borrow_mut().log_diag(
-        "session",
-        &format!("arguments count={} list={handed_over:?}", handed_over.len()),
-    );
+    // Only count arguments here; future options may contain private values.
+    // File paths are recorded by the opening operation below.
+    let handed_over = std::env::args_os().skip(1).count();
+    render_cache
+        .borrow_mut()
+        .log_diag("session", &format!("arguments count={handed_over}"));
     //
     // Into the pane the window says is focused, rather than through
     // [`focused_pane`]. `place_panes` above has already moved that flag onto a
@@ -3531,6 +3493,13 @@ fn main() -> Result<(), slint::PlatformError> {
             ),
         );
         open_path_in_pane(&window, &live, opening_pane, &path, Opening::Kept);
+    }
+    if let Err(message) = diagnostic_options {
+        live.cache.borrow_mut().log_diag("error", message);
+        window.tell_pane(pick(
+            "診断モードの指定が不明です。通常モードで起動しました。指定例: --diagnostics=render,input",
+            "Unknown diagnostics selection. Started in normal mode. Example: --diagnostics=render,input",
+        ).into());
     }
 
     // 要件 8.1・8.4: **自動退避を切ってあるときだけ、閉じる前に訊く**
@@ -3620,6 +3589,9 @@ fn main() -> Result<(), slint::PlatformError> {
             elapsed_ms(waited)
         ),
     );
+    live.cache
+        .borrow_mut()
+        .log_diag("session", &format!("ended ok={}", outcome.is_ok()));
     outcome
 }
 
@@ -4598,7 +4570,7 @@ fn report_wallpaper_error(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, 
         .into(),
     );
     cache.borrow_mut().log_diag(
-        "wallpaper",
+        "error",
         &format!("failed kind={} error={error}", window.get_wall_kind()),
     );
 }
@@ -5168,7 +5140,7 @@ fn after_layout_change(window: &AppWindow, live: &Live) {
         let engines = live.cache.borrow().panes.len();
         if states != panes || strips != panes || engines != panes {
             live.cache.borrow_mut().log_diag(
-                "layout",
+                "error",
                 &format!(
                     "mismatch panes={panes} states={states} strips={strips} engines={engines}"
                 ),
@@ -6786,6 +6758,50 @@ fn pick_tree_row(live: &Live, index: usize) {
 }
 
 /// Put a file in front of the writer, opening it only if it is not open already.
+fn drop_pane_under_cursor(window: &AppWindow) -> Option<PaneId> {
+    use windows::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::ScreenToClient,
+        UI::WindowsAndMessaging::GetCursorPos,
+    };
+    let hwnd = ime::window_handle(window)?;
+    let mut point = POINT::default();
+    // SAFETY: hwnd belongs to the live main window; point is writable.
+    unsafe {
+        GetCursorPos(&mut point).ok()?;
+        if !ScreenToClient(hwnd, &mut point).as_bool() {
+            return None;
+        }
+    }
+    let scale = window.window().scale_factor();
+    pane_at_drop_point(window, point.x as f32 / scale, point.y as f32 / scale)
+}
+
+fn pane_at_drop_point(window: &AppWindow, client_x: f32, client_y: f32) -> Option<PaneId> {
+    let x = client_x - window.get_editor_area_x();
+    let y = client_y - window.get_editor_area_y();
+    PaneId::all(window).into_iter().find(|id| {
+        let screen = id.screen(window);
+        screen.width > 0.0
+            && screen.height > 0.0
+            && pane_layout::Rect::new(screen.x, screen.y, screen.width, screen.height).holds(x, y)
+    })
+}
+
+fn open_dropped_file(window: &AppWindow, live: &Live, path: &Path, id: PaneId) {
+    if path.is_dir() {
+        window.tell(
+            pick(
+                "ドロップされた項目はフォルダです。ファイルをドロップしてください。",
+                "The dropped item is a folder. Please drop a file instead.",
+            )
+            .into(),
+        );
+        return;
+    }
+    open_path_in_pane(window, live, id, path, Opening::Kept);
+}
+
 fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, opening: Opening) {
     open_path_in_pane(window, live, focused_pane(window), path, opening);
 }
@@ -7041,13 +7057,20 @@ fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, mut ta
 /// would name a different file (the same reason the logs are written beside the
 /// executable — see [`diag::beside_executable`]).
 fn paths_from_command_line() -> Vec<PathBuf> {
-    std::env::args_os()
-        .skip(1)
-        .map(PathBuf::from)
-        .filter(|path| {
-            let name = path.to_string_lossy();
-            !name.is_empty() && !name.starts_with('-')
+    paths_from_arguments(std::env::args_os().skip(1))
+}
+
+fn paths_from_arguments(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut options = true;
+    args.into_iter()
+        .filter(|arg| {
+            if options && arg == "--" {
+                options = false;
+                return false;
+            }
+            !arg.is_empty() && (!options || !arg.to_string_lossy().starts_with('-'))
         })
+        .map(PathBuf::from)
         .map(|path| std::path::absolute(&path).unwrap_or(path))
         .collect()
 }
@@ -8535,6 +8558,29 @@ enum Question {
     LastWorkCopyFailed,
 }
 
+impl Question {
+    /// Never Debug-print this enum: DeleteEdited owns unsaved document text.
+    fn diagnostic_name(&self) -> &'static str {
+        match self {
+            Self::CloseTab { .. } => "CloseTab",
+            Self::CloseMemo { .. } => "CloseMemo",
+            Self::DiscardOnClose { .. } => "DiscardOnClose",
+            Self::SaveConflict { .. } => "SaveConflict",
+            Self::OutsideChanged(..) => "OutsideChanged",
+            Self::SaveOverOpen { .. } => "SaveOverOpen",
+            Self::MissingFile(..) => "MissingFile",
+            Self::RenameEntry(..) => "RenameEntry",
+            Self::DeleteEntry(..) => "DeleteEntry",
+            Self::DeleteEdited(..) => "DeleteEdited",
+            Self::ReplaceOnMove(..) => "ReplaceOnMove",
+            Self::CloseWindow => "CloseWindow",
+            Self::ReopenAs { .. } => "ReopenAs",
+            Self::ResetAll => "ResetAll",
+            Self::LastWorkCopyFailed => "LastWorkCopyFailed",
+        }
+    }
+}
+
 /// Write the last work copy and, if it could not be written, ask what to do
 /// about it (追加要件 2026-09-09、残り2).
 ///
@@ -8624,7 +8670,7 @@ fn ask_question(
 ) {
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
-    let described = format!("{question:?}");
+    let described = question.diagnostic_name();
     *live.pending.borrow_mut() = Some(question);
     let named = choices
         .iter()
@@ -8642,7 +8688,7 @@ fn ask_question(
     window.set_question_danger(danger);
     window.set_question_asks_name(false);
     window.set_question_open(true);
-    live.cache.borrow_mut().log_diag("ask", &described);
+    live.cache.borrow_mut().log_diag("ask", described);
 }
 
 /// Put a question in front of the writer that is answered by typing a name
@@ -8686,9 +8732,10 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     window.set_question_open(false);
     // The question took the keyboard away from the pane to ask (6.14).
     restore_editor_focus(window);
-    live.cache
-        .borrow_mut()
-        .log_diag("answer", &format!("{question:?} choice={choice}"));
+    live.cache.borrow_mut().log_diag(
+        "answer",
+        &format!("{} choice={choice}", question.diagnostic_name()),
+    );
     // 追加要件 2026-09-08: **並びが短いときの番号を、いつもの番号へ直す。**
     // 自動退避が切れているとタブを閉じる問いは3つしか出さない（真ん中の
     // 「作業コピーを残して閉じる」が無い）ので、そのままでは「破棄して
@@ -9767,7 +9814,8 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
         spec.paper = channels(paper);
     }
     // 追加要件 2026-09-15: 壁紙を敷いているあいだ、紙は面が1枚だけ透かして塗る。
-    spec.paper_painted = window.get_wall_kind() == wallpaper::NONE;
+    spec.paper_painted =
+        window.get_wall_kind() == wallpaper::NONE && window.get_background_transparency() == 0;
     spec
 }
 
@@ -10585,6 +10633,7 @@ const PRINT_HEAD_SETTING: &str = "print.head";
 const PRINT_FOOT_SETTING: &str = "print.foot";
 const WALL_FIT_SETTING: &str = "wallpaper.fit";
 const WALL_STRENGTH_SETTING: &str = "wallpaper.strength";
+const BACKGROUND_TRANSPARENCY_SETTING: &str = "background.transparency";
 /// どの記号を箇条書きの印として読むか（書き手の決定 2026-09-11）。
 const LIST_MARKS_SETTING: &str = "list.marks";
 
@@ -11523,6 +11572,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_wall_strength().to_string(),
     ));
     values.push((
+        BACKGROUND_TRANSPARENCY_SETTING.to_owned(),
+        window.get_background_transparency().to_string(),
+    ));
+    values.push((
         TEXT_SHARED_SETTING.to_owned(),
         i32::from(window.get_text_shared()).to_string(),
     ));
@@ -11720,6 +11773,12 @@ fn apply_settings(
         if written == WALL_STRENGTH_SETTING {
             let strength = value.trim().parse::<i32>().unwrap_or(30);
             window.set_wall_strength(strength.clamp(0, 100));
+            continue;
+        }
+        if written == BACKGROUND_TRANSPARENCY_SETTING {
+            window.set_background_transparency(
+                value.trim().parse::<i32>().unwrap_or(0).clamp(0, 100),
+            );
             continue;
         }
         if written == TEXT_SHARED_SETTING {
@@ -14050,9 +14109,10 @@ fn refresh_terminal(
                     height,
                 );
                 if let Err(error) = painted {
-                    cache
-                        .borrow_mut()
-                        .log_diag("terminal", &format!("draw pane={} {error}", id.log_name()));
+                    cache.borrow_mut().log_diag(
+                        "error",
+                        &format!("terminal draw pane={} {error}", id.log_name()),
+                    );
                     return;
                 }
                 // The bitmap holds BGRA and Slint wants RGBA, swapped where it
@@ -14202,7 +14262,7 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
     // ([[editor-diag-log-answers-it-works-questions]]).
     live.cache.borrow_mut().log_diag(
         "tab",
-        &format!("shell asked pane={} {shell:?}", id.log_name()),
+        &format!("shell asked pane={} name={}", id.log_name(), shell.name),
     );
     let running = live
         .tabs
@@ -14230,9 +14290,10 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
     let Some(showing) = live.tabs.borrow().of(id).current().cloned() else {
         return;
     };
-    live.cache
-        .borrow_mut()
-        .log_diag("tab", &format!("shell pane={} to={shell:?}", id.log_name()));
+    live.cache.borrow_mut().log_diag(
+        "tab",
+        &format!("shell pane={} name={}", id.log_name(), shell.name),
+    );
     live.show_tab(window, id, &showing);
     publish_tabs(window, live);
 }
@@ -14313,7 +14374,7 @@ fn start_shell(
                 &format!(
                     "open pane={} {} {columns}x{rows}",
                     id.log_name(),
-                    shell.command
+                    shell.name
                 ),
             );
             Some(session)
@@ -14321,7 +14382,7 @@ fn start_shell(
         Err(error) => {
             live.cache
                 .borrow_mut()
-                .log_diag("terminal", &format!("open {} {error}", shell.command));
+                .log_diag("error", &format!("terminal open failed: {error}"));
             let told = say!(
                 "{}を開けませんでした: {error}",
                 "Could not open {}: {error}",
@@ -14400,9 +14461,8 @@ fn send_terminal_key(
     live.cache.borrow_mut().log_diag(
         "terminal",
         &format!(
-            "key pane={} spot={spot:?} code={code} u={:04x} ctrl={control} alt={alt} shift={shift} app_keys={}",
+            "key pane={} spot={spot:?} ctrl={control} alt={alt} shift={shift} app_keys={}",
             id.log_name(),
-            text.chars().next().map(u32::from).unwrap_or(0),
             sent.application_cursor_keys
         ),
     );

@@ -10,7 +10,7 @@
 //!   設定で切れる（`AUTOSAVE_SETTING`）。
 //! - **8.2 明示的な保存。**`Ctrl+S`は確認なしで上書きし、外部変更と競合した
 //!   ときだけ訊く。作業コピーの破棄は**書き込みと同じ待ち行列**を通る。
-//! - **8.3 外部変更。**未編集なら黙って読み直し、編集中なら知らせるだけ。
+//! - **8.3 外部変更。**未編集の読むだけの面は読み直し、編集モードでは知らせる。
 //!   作業コピーは「どの版に対して書いていたか」を持ち歩くので、閉じている
 //!   あいだの変更も見分けられる。
 //! - **8.4/8.5 の復元。**次の起動で作業コピーを本文へ戻す。**セッション
@@ -215,10 +215,8 @@ pub fn autosave_wanted() -> bool {
 
 /// Write the work copy if either of 要件 8.1's rules says it is time.
 ///
-/// The pending run is cleared whether the write succeeded or not. Left set, a
-/// failing write would be retried at every tick for as long as the editor ran;
-/// cleared, the next keystroke asks again, which is the same answer arrived at
-/// without filling the log.
+/// Jobs clear the pending flag when queued; failed jobs put it back so the
+/// current text (or removal of its stale backup) can be retried.
 pub fn write_work_copy_if_due(window: &AppWindow, live: &Live) {
     // Asked of every open document. Each has its own two clocks, and the one
     // that has stopped being typed in is exactly the one whose two seconds run
@@ -273,6 +271,31 @@ pub fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDoc
     let Some(directory) = app_data::work_directory() else {
         return;
     };
+    // Undo back to the saved text retires the old backup, including a write
+    // still in flight. Do not leave its earlier contents to be restored.
+    if !document.text.edited() && file.borrow().external_change() == ExternalChange::None {
+        let copy = work_identity(&file.borrow());
+        let path = directory.join(app_data::work_file_name(&copy));
+        document.text.work_copy_written();
+        if !live.writer.remove(path.clone()) {
+            let error = app_data::discard_in(&directory, &copy)
+                .err()
+                .map(|e| e.to_string());
+            report_write_results(
+                window,
+                live,
+                vec![writer::WriteResult {
+                    path,
+                    bytes: 0,
+                    ms: 0.0,
+                    removed: true,
+                    superseded: false,
+                    error,
+                }],
+            );
+        }
+        return;
+    }
     // The caret belongs to a pane that is showing *this* document; every pane
     // keeps its own (3.7), and only one of them can be restored into a single
     // position. The focused pane is asked first, because that is where the
@@ -396,10 +419,9 @@ pub fn report_write_results(
         // 2026-09-08: **失敗したら旗を立て直す。**渡した時点で「退避済み」に
         // していたので、書けなかった一回はそのまま忘れられていた——次の打鍵が
         // 無ければ、その文書は二度と退避されない（要件 8.1 が守れていない）。
-        // `mark_pending`は時計を今から数え直すので、**次の試みは2秒後**に
-        // なる：同じ失敗を毎秒繰り返すのではなく、間を置いて一度。
+        // `retry_work_copy`は削除の失敗も再試行の対象にする。
         //
-        // **新しい編集が来ていれば何もしない**（`mark_pending`は待っている
+        // **新しい編集が来ていれば何もしない**（`retry_work_copy`は待っている
         // 旗があれば触らない）。そちらの時計のほうが正しい。
         let named = result.path.file_name().and_then(|name| name.to_str());
         let failed = open_documents(live).into_iter().find(|document| {
@@ -407,7 +429,7 @@ pub fn report_write_results(
             named == Some(app_data::work_file_name(&copy).as_str())
         });
         if let Some(document) = failed {
-            document.text.mark_pending();
+            document.text.retry_work_copy();
         }
         // **画面にも出す。**要件 8.1 は書き手への約束なので、守れていないことは
         // 書き手が知っていなければならない。1件目だけ——同じ理由で失敗した
@@ -677,9 +699,9 @@ fn save_fields(held: file_io::TextForm) -> file_dialog::SaveFields<'static> {
 ///
 /// Each work copy holds the text; the file it belongs to holds the shape to
 /// write it back in, so the original is opened for that and the text it returns
-/// thrown away. When the original has gone, the text is kept as an untitled
-/// buffer rather than lost — not losing what was typed is the point, and the
-/// name is the lesser half of it.
+/// used as the save baseline only when its stamp still matches the backup.
+/// Missing originals keep their paths, so separate documents keep separate
+/// backup identities and the normal missing-file protection still applies.
 pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> {
     // 追加要件 2026-09-08: 自動退避を切ってあれば、戻すものは無い。切った
     // ときに全部消しているので普段はここに何も残っていないが、**設定ファイル
@@ -694,12 +716,16 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
     let mut tabs = Vec::new();
     for copy in app_data::read_all_in(&directory) {
         let untitled = copy.untitled.max(1);
-        let file = match &copy.origin {
+        let (file, saved_text) = match &copy.origin {
             Some(path) => match DocumentFile::open(path, MAX_DOCUMENT_CHARACTERS) {
-                Ok((file, _)) => file,
-                Err(_) => DocumentFile::untitled(untitled),
+                Ok((file, text)) => {
+                    let saved =
+                        (copy.stamp.is_some() && copy.stamp == file.agreed_stamp()).then_some(text);
+                    (file, saved)
+                }
+                Err(_) => (DocumentFile::unavailable(path.clone(), copy.stamp), None),
             },
-            None => DocumentFile::untitled(untitled),
+            None => (DocumentFile::untitled(untitled), Some(String::new())),
         };
         // Rounded here, because the copy was written by another run and nothing
         // guarantees the text is the same length now (6.7's rule, applied
@@ -726,7 +752,10 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
         // Restored from a work copy: the text does not agree with its file, but
         // the copy on disk already holds it, so nothing is waiting to be
         // written.
-        document.text.mark_restored();
+        document.text.mark_restored(saved_text);
+        let change = document.file.borrow().external_change();
+        document.missing.set(change == ExternalChange::Missing);
+        document.outside.set(change != ExternalChange::None);
         tabs.push((document, state));
     }
     tabs
@@ -1016,14 +1045,13 @@ pub fn write_document_in(
         //
         // **1字だけ見せる**のは「どこを直せばいいか」の取っ掛かりで、原稿を
         // 直して済ませたい書き手のためである。
-        Err(file_io::SaveError::Unmappable(character)) => {
+        Err(file_io::SaveError::Unmappable(_)) => {
             // **どの字かは言わない**（書き手の判断 2026-09-10：「一文字に限らない
             // ので」）。1字だけ挙げれば、それを直せば済むように読める——実際には
             // 次の字でまた断られる。書き手が次にすることは**UTF-8で保存する**で
             // あって、字を1つずつ潰していくことではない。
             //
-            // **見つけた字は診断ログに残す**（`first=`）。「なぜ保存できないのか」を
-            // 後から辿る手掛かりは要る——画面に出すかどうかとは別の話である。
+            // 文字そのものは診断時も残さない。文字コードと失敗種別を記録する。
             window.tell_tab(
                 say!(
                     "{}では表せない文字があるため保存できません。UTF-8で保存してください",
@@ -1034,10 +1062,7 @@ pub fn write_document_in(
             );
             cache.borrow_mut().log_diag(
                 "encoding",
-                &format!(
-                    "unmappable as={} first={character} path={shown}",
-                    form.encoding.as_str()
-                ),
+                &format!("unmappable as={} path={shown}", form.encoding.as_str()),
             );
             false
         }
@@ -1065,9 +1090,28 @@ pub fn write_document_in(
 /// document at a time by `Ctrl+S` — silently overwriting it here is exactly what
 /// 要件 8.3 exists to prevent. The status bar says how many were left.
 pub fn save_all(window: &AppWindow, live: &Live) {
+    let owner = ime::window_handle(window);
+    save_all_with_choice(window, live, |document| {
+        let held = document.file.borrow().form();
+        let suggested = document.file.borrow().title();
+        let chosen = file_dialog::save_document_as(owner, &suggested, save_fields(held))?;
+        Some((
+            chosen.path,
+            crate::save_form_of_id(chosen.encoding, chosen.newline, held),
+        ))
+    });
+}
+
+/// Keep the batch rules identical for the native dialog and recovery tests.
+pub(crate) fn save_all_with_choice(
+    window: &AppWindow,
+    live: &Live,
+    mut choose: impl FnMut(&Rc<OpenDocument>) -> Option<(PathBuf, file_io::TextForm)>,
+) {
     let mut saved = 0;
     let mut failed = 0;
     let mut conflicted = 0;
+    let mut occupied = 0;
     let mut unnamed: Vec<Rc<OpenDocument>> = Vec::new();
     for document in open_documents(live) {
         if !document.text.edited() {
@@ -1093,7 +1137,6 @@ pub fn save_all(window: &AppWindow, live: &Live) {
             failed += 1;
         }
     }
-    let owner = ime::window_handle(window);
     let mut left = 0;
     let mut stopped = false;
     for document in unnamed {
@@ -1101,16 +1144,19 @@ pub fn save_all(window: &AppWindow, live: &Live) {
             left += 1;
             continue;
         }
-        let suggested = document.file.borrow().title();
-        let held = document.file.borrow().form();
-        let Some(chosen) = file_dialog::save_document_as(owner, &suggested, save_fields(held))
-        else {
+        let Some((target, form)) = choose(&document) else {
             stopped = true;
             left += 1;
             continue;
         };
-        let form = crate::save_form_of_id(chosen.encoding, chosen.newline, held);
-        if write_document_in(window, live, &document, chosen.path, form) {
+        // A batch cannot ask a second asynchronous question and continue
+        // saving. Defer collisions to the individual Save As flow, which
+        // confirms replacement and merges the documents after success.
+        if crate::document_at(live, &target).is_some_and(|other| !Rc::ptr_eq(&other, &document)) {
+            occupied += 1;
+            continue;
+        }
+        if write_document_in(window, live, &document, target, form) {
             saved += 1;
         } else {
             failed += 1;
@@ -1135,6 +1181,12 @@ pub fn save_all(window: &AppWindow, live: &Live) {
         told.push_str(&say!(
             "／外部変更{conflicted}件は個別に保存してください",
             " / {conflicted} changed outside: save them one by one"
+        ));
+    }
+    if occupied > 0 {
+        told.push_str(&say!(
+            "／{occupied}件は保存先を別のTABで開いているため保留しました。個別に名前を付けて保存してください",
+            " / {occupied} deferred: destination is open in another tab. Use Save As individually"
         ));
     }
     window.tell(told.clone().into());

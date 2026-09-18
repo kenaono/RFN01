@@ -1,5 +1,6 @@
 use super::*;
 use slint::platform::software_renderer::MinimalSoftwareWindow;
+use std::fs::File;
 
 struct Offscreen(Rc<MinimalSoftwareWindow>);
 impl slint::platform::Platform for Offscreen {

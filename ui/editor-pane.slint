@@ -339,6 +339,7 @@ export component EditorPane inherits Rectangle {
     // 画像ファイルの置き方。0 タイル、1 縦に合わせる、2 横に合わせる。
     in property <int> wall-fit: 0;
     in property <int> wall-strength: 30;
+    in property <int> background-transparency: 0;
     // 窓の中の原点の、画面上の位置（Windowsの壁紙を画面に固定するため）。
     in property <length> wall-origin-x;
     in property <length> wall-origin-y;
@@ -1876,6 +1877,8 @@ export component EditorPane inherits Rectangle {
         body-clip := Rectangle {
             vertical-stretch: 1;
             clip: true;
+            background: root.writing && root.background-transparency > 0
+                ? root.page-background.transparentize(root.background-transparency / 100) : transparent;
             // 追加要件 2026-09-15（書き手）: **本文の後ろに壁紙、その上に紙を濃さぶん透かして1枚。**
             // スクロールしても動かない——紙は本文と一緒に流れるが、壁紙は面（Windowsの壁紙なら
             // 画面）に固定されている。メニュー・Terminal・Settingsには敷かない。
@@ -2067,8 +2070,8 @@ export component EditorPane inherits Rectangle {
                     // 越える前後で文書の頭が動かない。
                     x: root.vertical ? max(0px, parent.width - self.width) : max(0px, (parent.width - self.width) / 2);
                     y: root.vertical ? max(0px, (parent.height - self.height) / 2) : 0px;
-                    // 壁紙のあいだは、紙は後ろの幕が塗る。
-                    background: root.wall-kind != 0 ? transparent : root.page-background;
+                    // Paint only the visible part below. A long document can exceed
+                    // the software renderer's coordinate range before clipping.
                     // 書き手の報告 2026-09-08:「設定を開いていると背面がちらつく」
                     // ——ちらついていたのはこの線だった。**Slintの`has-focus`は
                     // popupが開いた瞬間に落ちる**（`WindowInner::show_popup`が
@@ -2083,8 +2086,36 @@ export component EditorPane inherits Rectangle {
                     // が決める値なので、popupが横から取り上げることがない。
                     // タブがアクセントを着る条件とこの枠の条件が同じになった
                     // （同じことを2か所で別々に判じていた、6.15の形）。
-                    border-width: root.focused ? 2px : 0px;
-                    border-color: Tok.accent;
+                    paper-visible := Rectangle {
+                        x: clamp(-scroll.viewport-x - page.x, 0px, page.width);
+                        y: clamp(-scroll.viewport-y - page.y, 0px, page.height);
+                        width: max(0px, min(page.width - self.x,
+                            scroll.visible-width - (page.x + scroll.viewport-x + self.x)));
+                        height: max(0px, min(page.height - self.y,
+                            scroll.visible-height - (page.y + scroll.viewport-y + self.y)));
+                        background: root.wall-kind != 0 || root.background-transparency > 0
+                            ? transparent : root.page-background;
+                        if root.focused && !root.empty && self.width > 0px && self.height > 0px: Rectangle {
+                            x: 0px; y: 0px;
+                            width: parent.width; height: parent.height;
+                            if paper-visible.x == 0px: Rectangle {
+                                x: 0px; y: 0px; height: parent.height;
+                                width: 2px; background: Tok.accent;
+                            }
+                            if paper-visible.y == 0px: Rectangle {
+                                x: 0px; y: 0px; width: parent.width;
+                                height: 2px; background: Tok.accent;
+                            }
+                            if paper-visible.x + paper-visible.width >= page.width: Rectangle {
+                                y: 0px; height: parent.height;
+                                x: parent.width - 2px; width: 2px; background: Tok.accent;
+                            }
+                            if paper-visible.y + paper-visible.height >= page.height: Rectangle {
+                                x: 0px; width: parent.width;
+                                y: parent.height - 2px; height: 2px; background: Tok.accent;
+                            }
+                        }
+                    }
 
                     // Held here rather than watched on the parent: a `changed`
                     // handler belongs to the element whose property it is, and this
@@ -3234,7 +3265,7 @@ export component EditorPane inherits Rectangle {
                     y: 0;
                     width: scroll.visible-width;
                     height: scroll.visible-height;
-                    background: root.page-background;
+                    background: root.background-transparency > 0 ? transparent : root.page-background;
 
                     VerticalLayout {
                         alignment: center;

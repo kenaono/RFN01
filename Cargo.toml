@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-slint = { version = "1.17.1", features = ["raw-window-handle-06", "unstable-winit-030"] }
+slint = { version = "1.17.1", features = ["raw-window-handle-06", "unstable-winit-030", "software-renderer-path"] }
 # Only to reach the window's own handle, which the IME calls need. The version
 # must match the one Slint's `raw-window-handle-06` feature exposes.
 raw-window-handle = "0.6"
@@ -56,6 +56,7 @@ windows = { version = "0.62.2", features = [
     # ここにある——この編集器が独自の秒数を持てば、他のアプリと違う速さで
     # 反応することになる。
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
     # The open and save dialogs. Features of a crate already vendored, so no
     # new package is fetched and `--offline` still resolves.
     "Win32_UI_Shell",
@@ -87,3 +88,7 @@ windows-core = "0.62.2"
 
 [build-dependencies]
 slint-build = "1.17.1"
+
+# Windows client-area alpha presentation; keep native window/IME handling.
+[patch.crates-io]
+i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }

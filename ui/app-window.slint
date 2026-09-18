@@ -129,6 +129,7 @@ export component AppWindow inherits Window {
     preferred-height: 760px;
     min-width: 640px;
     min-height: 400px;
+    background: root.background-transparency > 0 ? transparent : Tok.paper;
 
     // Every pane, in pane-number order: row N is pane N. **One row is one
     // pane's whole view of the document** — its tiles, its caret, its scroll —
@@ -143,6 +144,8 @@ export component AppWindow inherits Window {
     // tree cannot hand out pixels it has not been told about.
     in property <[PaneBoundary]> boundaries;
     in-out property <float> editor-area-width: 0;
+    out property <float> editor-area-x: editor-row.absolute-position.x / 1px;
+    out property <float> editor-area-y: editor-row.absolute-position.y / 1px;
     in-out property <float> editor-area-height: 0;
     /// One boundary was dragged, by this much in each direction. Which of the
     /// two matters is the boundary's own business (要件 6.4).
@@ -803,6 +806,9 @@ export component AppWindow inherits Window {
     in-out property <int> wall-fit: 0;
     /// 壁紙の濃さ（%）。紙はその分だけ透ける。
     in-out property <int> wall-strength: 30;
+    // Global paper transparency. Chrome and text remain opaque.
+    in-out property <int> background-transparency: 0;
+    callback background-transparency-moved(float);
     in property <[WallPiece]> wall-pieces;
     in property <image> wall-image;
     in property <float> wall-image-width;
@@ -1025,6 +1031,14 @@ export component AppWindow inherits Window {
         return false;
     }
 
+    // The outer layout padding belongs to the chrome, not the transparent paper.
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        border-width: 8px;
+        border-color: Tok.paper;
+        background: transparent;
+    }
     VerticalBox {
         spacing: 0px;
 
@@ -2032,14 +2046,16 @@ export component AppWindow inherits Window {
                         swap-right: pane.swap-right;
                         swap-up: pane.swap-up;
                         swap-down: pane.swap-down;
-                        background: pane.vertical ? Tok.paper-alt : Tok.paper;
+                        background: root.background-transparency > 0 && !pane.terminal && !pane.settings
+                            ? transparent : (pane.vertical ? Tok.paper-alt : Tok.paper);
+                        background-transparency: root.background-transparency;
                         // 要件 9: this pane's sheet — the paper and the margin
                         // are that direction's, like everything else on it.
                         // 追加要件 2026-09-15: TAB・Paneの色が付いていればそちら。
                         page-background: pane.vertical && !root.paper-shared
                             ? (pane.paper-v-own ? pane.paper-v : root.palette[22])
                             : (pane.paper-h-own ? pane.paper-h : root.palette[7]);
-                        wall-kind: root.wall-kind;
+                        wall-kind: root.background-transparency > 0 ? 0 : root.wall-kind;
                         wall-pieces: root.wall-pieces;
                         wall-image: root.wall-image;
                         wall-image-width: root.wall-image-width;
@@ -4593,6 +4609,53 @@ export component AppWindow inherits Window {
                                                             root.paper-random-chosen(index);
                                                         }
                                                     }
+                                                }
+                                            }
+                                            if root.shows-any([@tr("TRANSPARENCY"), @tr("Background Transparency")]): VerticalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: root.section-title(@tr("Page"), @tr("TRANSPARENCY"));
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    letter-spacing: 0.9px;
+                                                }
+                                                HorizontalLayout {
+                                                    spacing: 10px;
+                                                    height: 28px;
+                                                    Text {
+                                                        text: @tr("Background Transparency");
+                                                        color: Tok.ink;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+                                                    Slider {
+                                                        width: 220px;
+                                                        y: 3px;
+                                                        minimum: 0;
+                                                        maximum: 100;
+                                                        value: root.background-transparency;
+                                                        moved(value) => { root.background-transparency-moved(value); }
+                                                    }
+                                                    Text {
+                                                        text: root.background-transparency + "%";
+                                                        color: Tok.ink-muted;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        min-width: 40px;
+                                                    }
+                                                }
+                                                Text {
+                                                    text: @tr("0% is opaque. Only the document background becomes transparent; text and menus stay opaque.");
+                                                    color: Tok.ink-muted;
+                                                    font-size: 12px;
+                                                    wrap: word-wrap;
+                                                }
+                                                if root.background-transparency > 0 && root.wall-kind != 0: Text {
+                                                    text: @tr("Background images are hidden while transparency is enabled. Set it to 0% to restore the image.");
+                                                    color: Tok.ink-muted;
+                                                    font-size: 12px;
+                                                    wrap: word-wrap;
                                                 }
                                             }
                                             // 追加要件 2026-09-15（書き手）: 背景の壁紙。全体の設定だけ。

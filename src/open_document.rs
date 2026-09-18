@@ -39,7 +39,8 @@ use crate::document::{DocumentCounts, Reading};
 /// is the same reason a block decides its size from its own measurements
 /// rather than from a running total (技術検証 3.4).
 pub struct SharedText {
-    saved_text: RefCell<String>,
+    // None means recovery could not establish the last saved text.
+    saved_text: RefCell<Option<String>>,
     pub text: RefCell<String>,
     pub edited: Cell<bool>,
     /// When the text last changed, and when the run of changes now waiting for
@@ -55,7 +56,7 @@ pub struct SharedText {
 impl SharedText {
     pub fn new(text: String, window: Weak<AppWindow>) -> Self {
         Self {
-            saved_text: RefCell::new(text.clone()),
+            saved_text: RefCell::new(Some(text.clone())),
             text: RefCell::new(text),
             edited: Cell::new(false),
             changed_at: Cell::new(Instant::now()),
@@ -116,7 +117,14 @@ impl SharedText {
     /// again under the new one. A document that agrees with its file has
     /// nothing waiting either way.
     pub fn mark_pending(&self) {
-        if self.edited.get() && self.pending_since.get().is_none() {
+        if self.edited.get() {
+            self.retry_work_copy();
+        }
+    }
+
+    /// Retry either a backup or removal of a stale backup after Undo.
+    pub fn retry_work_copy(&self) {
+        if self.pending_since.get().is_none() {
             self.pending_since.set(Some(Instant::now()));
         }
     }
@@ -127,14 +135,15 @@ impl SharedText {
 
     /// Restored from a work copy: the text does not agree with its file, but
     /// the copy on disk already holds it, so nothing is waiting to be written.
-    pub fn mark_restored(&self) {
+    pub fn mark_restored(&self, saved_text: Option<String>) {
+        *self.saved_text.borrow_mut() = saved_text;
         self.pending_since.set(None);
         self.set_edited(true);
     }
 
     /// The text now agrees with its file: it was just opened, or just saved.
     pub fn mark_saved(&self) {
-        *self.saved_text.borrow_mut() = self.text.borrow().clone();
+        *self.saved_text.borrow_mut() = Some(self.text.borrow().clone());
         self.pending_since.set(None);
         self.set_edited(false);
     }
@@ -142,10 +151,13 @@ impl SharedText {
     /// Undo/Redo compares exact text with the last successful save, not a hash.
     /// Ordinary keystrokes do not scan or clone the saved document.
     pub fn reconcile_saved(&self) {
-        let edited = *self.text.borrow() != *self.saved_text.borrow();
-        if !edited {
-            self.pending_since.set(None);
-        }
+        let edited = self
+            .saved_text
+            .borrow()
+            .as_ref()
+            .is_none_or(|saved| *self.text.borrow() != *saved);
+        // Keep the pending work: reaching the saved text must retire the old
+        // backup through the same writer queue, even if it is still in flight.
         self.set_edited(edited);
     }
 

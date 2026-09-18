@@ -10,6 +10,172 @@ impl slint::platform::Platform for Offscreen {
     }
 }
 
+#[test]
+fn real_transparency_preserves_text_chrome_and_saved_settings() {
+    use slint::platform::software_renderer::PremultipliedRgbaColor;
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
+    let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
+    let fonts = Rc::new(VecModel::from(vec![
+        SharedString::default();
+        2 * SHEET_FONTS
+    ]));
+    reset_settings(&numbers, &palette, &fonts);
+    window.set_sheet_stride(SHEET_NUMBERS as i32);
+    window.set_sheet_numbers(ModelRc::from(numbers.clone()));
+    window.set_palette(ModelRc::from(palette.clone()));
+    window.set_sheet_fonts(ModelRc::from(fonts.clone()));
+    window.set_tree_open(false);
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let source = "# 透過の確認\n背景だけが透けます。文字は不透明です。\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    let draw = || {
+        window.window().request_redraw();
+        let mut pixels = vec![PremultipliedRgbaColor::default(); 1100 * 760];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1100);
+        });
+        pixels
+    };
+    for vertical in [false, true] {
+        id.update_screen(&window, |s| {
+            s.width = 1050.;
+            s.height = 640.;
+            s.shown_width = 1050.;
+            s.shown_height = 540.;
+            s.preview = true;
+            s.vertical = vertical;
+        });
+        set_pane_direction(&window, &cache, id, vertical);
+        window.set_background_transparency(0);
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+        let plain = draw();
+        assert_eq!(plain[520 * 1100 + 600].alpha, 255);
+        window.set_background_transparency(50);
+        refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+        assert!(!pane_typography(&window, id).paper_painted);
+        let transparent = draw();
+        assert!(
+            (126..=129).contains(&transparent[520 * 1100 + 600].alpha),
+            "paper alone is 50% opaque, vertical={vertical}: {:?}",
+            transparent[520 * 1100 + 600]
+        );
+        assert_eq!(
+            transparent[10 * 1100 + 600].alpha,
+            255,
+            "tab strip is opaque"
+        );
+        let solid_text = (70..500)
+            .flat_map(|y| (80..1050).map(move |x| y * 1100 + x))
+            .filter(|&at| {
+                let (a, b) = (plain[at], transparent[at]);
+                a.alpha == 255
+                    && a.red < 100
+                    && a.green < 100
+                    && a.blue < 100
+                    && b.alpha == 255
+                    && (a.red, a.green, a.blue) == (b.red, b.green, b.blue)
+            })
+            .count();
+        assert!(
+            solid_text > 50,
+            "solid text keeps its color and alpha, vertical={vertical}"
+        );
+        window.set_background_transparency(100);
+        let clear = draw();
+        assert_eq!(clear[520 * 1100 + 600].alpha, 0);
+        assert_eq!(clear[10 * 1100 + 600].alpha, 255);
+        id.update_screen(&window, |s| s.settings = true);
+        assert_eq!(draw()[520 * 1100 + 600].alpha, 255, "settings stay opaque");
+        id.update_screen(&window, |s| {
+            s.settings = false;
+            s.terminal = true;
+        });
+        assert_eq!(draw()[520 * 1100 + 600].alpha, 255, "terminal stays opaque");
+        id.update_screen(&window, |s| s.terminal = false);
+    }
+    // New Tab has no document yet. Focusing it must not reveal paper edges
+    // behind the transparent start-page overlay, in either writing direction.
+    for vertical in [false, true] {
+        id.update_screen(&window, |s| {
+            s.vertical = vertical;
+            s.empty = true;
+            s.content_width = 700;
+            s.content_height = 500;
+            s.tiles = ModelRc::default();
+            s.caret_visible = false;
+        });
+        for transparency in [0, 50, 100] {
+            window.set_background_transparency(transparency);
+            window.set_focused_pane(-1);
+            let unfocused = draw();
+            window.set_focused_pane(0);
+            let focused = draw();
+            for y in 80..600 {
+                for x in 50..1050 {
+                    let at = y * 1100 + x;
+                    let a = unfocused[at];
+                    let b = focused[at];
+                    assert_eq!(
+                        (a.red, a.green, a.blue, a.alpha),
+                        (b.red, b.green, b.blue, b.alpha),
+                        "New Tab must not show focus edges: vertical={vertical}, transparency={transparency}, at=({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+    id.update_screen(&window, |s| s.empty = false);
+    // A long page exceeds i16 coordinates. Its visible paper and focus edges
+    // must be clipped before the software renderer receives rectangles.
+    for vertical in [false, true] {
+        for transparency in [0, 50, 100] {
+            window.set_background_transparency(transparency);
+            for offset in [0., -90_000.] {
+                id.update_screen(&window, |s| {
+                    s.vertical = vertical;
+                    s.content_width = if vertical { 100_000 } else { 1000 };
+                    s.content_height = if vertical { 500 } else { 100_000 };
+                    s.scroll_x = if vertical { offset } else { 0. };
+                    s.scroll_y = if vertical { 0. } else { offset };
+                    s.scroll_generation += 1;
+                    s.tiles = ModelRc::default();
+                });
+                let pixels = draw();
+                assert_eq!(pixels[10 * 1100 + 600].alpha, 255);
+            }
+        }
+    }
+    // Restore the value through the real settings parser; image choice survives.
+    window.set_background_transparency(37);
+    window.set_wall_kind(wallpaper::FILE);
+    window.set_wall_path("missing-image-does-not-need-loading.bmp".into());
+    wallpaper::publish(&window).expect("real transparency does not load the hidden wallpaper");
+    let saved = settings_values(&window);
+    window.set_background_transparency(0);
+    window.set_wall_kind(0);
+    apply_settings(&window, &numbers, &palette, &fonts, &saved);
+    assert_eq!(window.get_background_transparency(), 37);
+    assert_eq!(window.get_wall_kind(), wallpaper::FILE);
+    for (written, expected) in [("-1", 0), ("120", 100), ("broken", 0)] {
+        apply_settings(
+            &window,
+            &numbers,
+            &palette,
+            &fonts,
+            &[(BACKGROUND_TRANSPARENCY_SETTING.into(), written.into())],
+        );
+        assert_eq!(window.get_background_transparency(), expected);
+    }
+}
+
 /// 追加要件 2026-09-14（書き手）: 設定はダイアログではなくTABで開く。
 ///
 /// **窓に1つ**——もう一度頼めば開いているTABへ移り、New Tab はそれになる。

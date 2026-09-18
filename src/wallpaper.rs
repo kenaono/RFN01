@@ -307,9 +307,18 @@ fn piece(
     }
 }
 
+// Preserve the chosen image settings while real window transparency is active.
+fn effective_kind(window: &AppWindow) -> i32 {
+    if window.get_background_transparency() > 0 {
+        NONE
+    } else {
+        window.get_wall_kind()
+    }
+}
+
 /// いまの設定の署名。**読まずに作れるものだけ**（パス・更新時刻・画面の並び）。
 fn signature(window: &AppWindow) -> String {
-    match window.get_wall_kind() {
+    match effective_kind(window) {
         DESKTOP => match desktop() {
             Ok(found) => {
                 let monitors = found
@@ -340,7 +349,7 @@ fn signature(window: &AppWindow) -> String {
 /// 設定どおりの壁紙を窓へ置く。**読めなかったら理由を返す**（面は紙だけになる）。
 pub fn publish(window: &AppWindow) -> Result<(), String> {
     SHOWN.with(|shown| *shown.borrow_mut() = Some(signature(window)));
-    let kind = window.get_wall_kind();
+    let kind = effective_kind(window);
     let mut pieces = Vec::new();
     let mut result = Ok(());
     let mut file_image = Image::default();
@@ -424,7 +433,7 @@ pub fn publish(window: &AppWindow) -> Result<(), String> {
 ///
 /// 返すのは、置き直してうまくいかなかったときの理由。
 pub fn refresh_if_changed(window: &AppWindow) -> Option<String> {
-    if window.get_wall_kind() == NONE {
+    if effective_kind(window) == NONE {
         return None;
     }
     let now = signature(window);
@@ -438,7 +447,7 @@ pub fn refresh_if_changed(window: &AppWindow) -> Option<String> {
 /// 窓の中の原点が、画面のどこにあるか（論理画素）。**窓が動くたびに**呼ぶ——
 /// Windowsの壁紙は画面に固定されているので、窓が動けば敷く位置が逆へ動く。
 pub fn follow_window(window: &AppWindow) {
-    if window.get_wall_kind() != DESKTOP {
+    if effective_kind(window) != DESKTOP {
         return;
     }
     let Some(hwnd) = crate::ime::window_handle(window) else {

@@ -294,6 +294,18 @@ msgstr "画像"
 msgid "Image File"
 msgstr "画像ファイル"
 
+msgid "TRANSPARENCY"
+msgstr "透過"
+
+msgid "Background Transparency"
+msgstr "背景の透過度"
+
+msgid "0% is opaque. Only the document background becomes transparent; text and menus stay opaque."
+msgstr "0%で不透明になります。本文の背景だけが透け、文字やメニューの濃さは変わりません。"
+
+msgid "Background images are hidden while transparency is enabled. Set it to 0% to restore the image."
+msgstr "透過中は背景画像を表示しません。0%に戻すと元の背景画像を表示します。"
+
 msgid "Image Strength"
 msgstr "壁紙の濃さ"
 
