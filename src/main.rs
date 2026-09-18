@@ -3465,12 +3465,13 @@ fn main() -> Result<(), slint::PlatformError> {
     wiring::wire_saving(&window, &live);
 
     // What the shell asked for: a double click on a file associated with the
-    // editor, or a path typed after its name. Last of everything in `main`, so
-    // that the file is the tab in front — the session came back above, and what
-    // the writer just asked for should not open behind what they left.
+    // editor, a folder dropped on the executable, or paths typed after its
+    // name. Last of everything in `main`, so that the file is the tab in
+    // front — the session came back above, and what the writer just asked for
+    // should not open behind what they left.
     //
     // Only count arguments here; future options may contain private values.
-    // File paths are recorded by the opening operation below.
+    // Paths are recorded by the opening operation below.
     let handed_over = std::env::args_os().skip(1).count();
     render_cache
         .borrow_mut()
@@ -3482,18 +3483,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // while the question `focused_pane` asks, whether the pane has been given
     // an area, is answered "no" for both of them until the window is shown.
     let opening_pane = PaneId::from_index(window.get_focused_pane());
-    for path in paths_from_command_line() {
-        live.cache.borrow_mut().log_diag(
-            "file",
-            &format!(
-                "command-line exists={} pane={} path={}",
-                path.is_file(),
-                opening_pane.log_name(),
-                path.display()
-            ),
-        );
-        open_path_in_pane(&window, &live, opening_pane, &path, Opening::Kept);
-    }
+    open_startup_paths(&window, &live, opening_pane, &paths_from_command_line());
     if let Err(message) = diagnostic_options {
         live.cache.borrow_mut().log_diag("error", message);
         window.tell_pane(pick(
@@ -6869,6 +6859,36 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
     true
 }
 
+/// What the startup arguments open: a directory becomes the work folder and
+/// anything else is opened as a file in `pane`, in the order the shell gave
+/// them.
+///
+/// **The last directory wins, and nothing here decides that on purpose.**
+/// [`open_work_folder`] always replaces whatever folder was open; calling it
+/// once per directory, in argument order, leaves the last one standing the
+/// same way opening folders one after another from the tree would.
+fn open_startup_paths(window: &AppWindow, live: &Live, pane: PaneId, paths: &[PathBuf]) {
+    for path in paths {
+        if path.is_dir() {
+            live.cache
+                .borrow_mut()
+                .log_diag("folder", &format!("command-line path={}", path.display()));
+            open_work_folder(window, live, path);
+        } else {
+            live.cache.borrow_mut().log_diag(
+                "file",
+                &format!(
+                    "command-line exists={} pane={} path={}",
+                    path.is_file(),
+                    pane.log_name(),
+                    path.display()
+                ),
+            );
+            open_path_in_pane(window, live, pane, path, Opening::Kept);
+        }
+    }
+}
+
 /// The same, into a pane the caller names.
 ///
 /// Startup is why this is separate: [`focused_pane`] asks whether a pane is on
@@ -7038,13 +7058,15 @@ fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, mut ta
     publish_tabs(window, live);
 }
 
-/// The files named on the command line, in the order they were named.
+/// The paths named on the command line, in the order they were named.
 ///
 /// This is the whole of "double click a `.md` file and it opens here": the
 /// shell runs the editor with the file's path as its argument, so an
 /// association is a matter of reading the arguments at startup and nothing
 /// else. Several are handled because a selection of files can be opened at
-/// once, and they become tabs in the order the shell named them.
+/// once, and they become tabs in the order the shell named them. A directory
+/// among them is not a tab — [`open_startup_paths`] opens it as the work
+/// folder instead.
 ///
 /// **Everything but a flag is taken as a path**, and a path that cannot be read
 /// says so in the status bar. Whether the file exists is deliberately not asked
@@ -7052,10 +7074,11 @@ fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, mut ta
 /// that looks exactly like the shell having handed over nothing, and those two
 /// have to be told apart.
 ///
-/// Made absolute while the current directory is still the one the editor was
-/// started in: opening a folder moves it, and a relative path kept until then
-/// would name a different file (the same reason the logs are written beside the
-/// executable — see [`diag::beside_executable`]).
+/// Made absolute against the directory the editor was started in, before any
+/// of them are opened: a relative path is the writer's launch directory's, not
+/// whichever of these turns out to be a folder and gets opened first (the same
+/// reason the logs are written beside the executable — see
+/// [`diag::beside_executable`]).
 fn paths_from_command_line() -> Vec<PathBuf> {
     paths_from_arguments(std::env::args_os().skip(1))
 }
