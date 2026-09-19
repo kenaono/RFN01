@@ -264,8 +264,8 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
         publish_source(window, live, id);
         return;
     }
-    if action == 13 {
-        stop_source(window, live, id);
+    if action == 13 || action == 14 {
+        stop_source(window, live, id, action == 14);
         return;
     }
     ensure(window, live, id);
@@ -396,15 +396,13 @@ fn import(window: &AppWindow, live: &Live, id: PaneId, action: i32) {
         return;
     };
     if action == 7 {
-        // A session owns one capture cursor. Never silently move an existing target.
-        if source.borrow().file_log_path().is_some()
-            || entries(live).iter().any(|p| {
-                p.borrow()
-                    .capture
-                    .as_ref()
-                    .is_some_and(|s| Rc::ptr_eq(s, &source))
-            })
-        {
+        // Keep the existing Panel destination; file output has an independent cursor.
+        if entries(live).iter().any(|p| {
+            p.borrow()
+                .capture
+                .as_ref()
+                .is_some_and(|s| Rc::ptr_eq(s, &source))
+        }) {
             window.tell(
                 pick(
                     "このTerminalは取り込み中です",
@@ -494,14 +492,7 @@ fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
     let Some(source) = source else {
         return;
     };
-    if source.borrow().file_log_path().is_some()
-        || entries(live).iter().any(|e| {
-            e.borrow()
-                .capture
-                .as_ref()
-                .is_some_and(|s| Rc::ptr_eq(s, &source))
-        })
-    {
+    if source.borrow().file_log_path().is_some() {
         window.tell(
             pick(
                 "現在の取り込みを停止してから開始してください",
@@ -649,7 +640,7 @@ fn report_log_error(window: &AppWindow, session: &mut TerminalSession) {
     }
 }
 
-fn stop_source(window: &AppWindow, live: &Live, id: PaneId) {
+fn stop_source(window: &AppWindow, live: &Live, id: PaneId, file: bool) {
     let source = live
         .tabs
         .borrow()
@@ -657,15 +648,18 @@ fn stop_source(window: &AppWindow, live: &Live, id: PaneId) {
         .current()
         .and_then(|t| t.terminal.clone());
     if let Some(source) = source {
-        stop_file(window, &source);
-        for entry in entries(live) {
-            let matches = entry
-                .borrow()
-                .capture
-                .as_ref()
-                .is_some_and(|s| Rc::ptr_eq(s, &source));
-            if matches {
-                entry.borrow_mut().stop();
+        if file {
+            stop_file(window, &source);
+        } else {
+            for entry in entries(live) {
+                let matches = entry
+                    .borrow()
+                    .capture
+                    .as_ref()
+                    .is_some_and(|s| Rc::ptr_eq(s, &source));
+                if matches {
+                    entry.borrow_mut().stop();
+                }
             }
         }
     }
@@ -679,27 +673,27 @@ pub(crate) fn publish_source(window: &AppWindow, live: &Live, id: PaneId) {
 }
 
 pub(crate) fn publish_source_for_tab(window: &AppWindow, id: PaneId, tab: &PaneTab) {
-    let destination = tab
+    let file_path = tab
         .terminal
         .as_ref()
-        .map(|s| {
-            if let Some(path) = s.borrow().file_log_path() {
-                return path.to_string_lossy().into_owned();
-            }
-            if tab.below.entries.iter().any(|p| {
-                p.borrow()
-                    .capture
-                    .as_ref()
-                    .is_some_and(|other| Rc::ptr_eq(s, other))
-            }) {
-                return "Editor Panel".into();
-            }
-            String::new()
+        .and_then(|s| {
+            s.borrow()
+                .file_log_path()
+                .map(|p| p.to_string_lossy().into_owned())
         })
         .unwrap_or_default();
+    let panel = tab.terminal.as_ref().is_some_and(|s| {
+        tab.below.entries.iter().any(|p| {
+            p.borrow()
+                .capture
+                .as_ref()
+                .is_some_and(|other| Rc::ptr_eq(s, other))
+        })
+    });
     id.update_screen(window, |screen| {
-        screen.terminal_capturing = !destination.is_empty();
-        screen.panel_log_destination = destination.into();
+        screen.terminal_capturing = panel;
+        screen.terminal_file_logging = !file_path.is_empty();
+        screen.panel_log_destination = file_path.into();
     });
 }
 

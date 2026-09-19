@@ -246,6 +246,7 @@ export struct PaneScreen {
     // Rust reads it when it is sent.
     terminal-search-open: bool,
     terminal-capturing: bool,
+    terminal-file-logging: bool,
     panel-file-names: [string],
     panel-file-stems: [int],
     panel-log-destination: string,
@@ -521,6 +522,7 @@ export component EditorPane inherits Rectangle {
     callback panel-action(int, int);
     callback panel-renamed(int, string);
     in property <bool> terminal-capturing;
+    in property <bool> terminal-file-logging;
     in-out property <string> below-draft;
     in property <[DraftLine]> below-draft-lines;
     // What the writer has just typed into the draft, so Rust can cut it into
@@ -1951,12 +1953,20 @@ export component EditorPane inherits Rectangle {
             }
         }
 
+        if root.terminal-file-logging: Rectangle {
+            height: 30px; vertical-stretch: 0; background: Tok.chrome;
+            HorizontalLayout {
+                padding-left: 8px; spacing: 8px;
+                Text { text: @tr("Log file: {}", root.panel-log-destination); overflow: elide; color: Tok.ink; vertical-alignment: center; }
+                TextButton { title: @tr("Stop File Log"); clicked => { root.panel-action(14, 0); } }
+            }
+        }
         if root.terminal-capturing: Rectangle {
             height: 30px; vertical-stretch: 0; background: Tok.chrome;
             HorizontalLayout {
                 padding-left: 8px; spacing: 8px;
-                Text { text: @tr("Capturing: {}", root.panel-log-destination); overflow: elide; color: Tok.ink; vertical-alignment: center; }
-                TextButton { title: @tr("Stop Capture"); clicked => { root.panel-action(13, 0); } }
+                Text { text: @tr("Logging to Editor Panel"); color: Tok.ink; vertical-alignment: center; }
+                TextButton { title: @tr("Stop Panel Log"); clicked => { root.panel-action(13, 0); } }
             }
         }
         if root.terminal: Rectangle {
@@ -3080,12 +3090,10 @@ export component EditorPane inherits Rectangle {
                                             title: @tr("History to Editor Panel");
                                             activated => { root.panel-action(8, 0); context-menu.close(); }
                                         }
-                                        if root.terminal: MenuRow { title: @tr("Capture Log to File…"); enabled: !root.terminal-capturing; activated => { root.panel-action(10, 0); context-menu.close(); } }
-                                        if root.terminal && root.terminal-capturing: MenuRow { title: @tr("Stop Capture"); activated => { root.panel-action(13, 0); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: root.terminal-file-logging ? @tr("Stop File Log") : @tr("Capture Log to File…"); activated => { root.panel-action(root.terminal-file-logging ? 14 : 10, 0); context-menu.close(); } }
                                         if root.terminal: MenuRow {
-                                            title: @tr("Capture Log to Editor Panel");
-                                            enabled: !root.terminal-capturing;
-                                            activated => { root.panel-action(7, 0); context-menu.close(); }
+                                            title: root.terminal-capturing ? @tr("Stop Panel Log") : @tr("Capture Log to Editor Panel");
+                                            activated => { root.panel-action(root.terminal-capturing ? 13 : 7, 0); context-menu.close(); }
                                         }
                                         if root.writing: MenuRow {
                                             title: @tr("Copy Text Only");
@@ -3549,8 +3557,7 @@ export component EditorPane inherits Rectangle {
                                     if root.below-kind == 2: MenuRow { title: @tr("Save"); shortcut: "Ctrl+S"; activated => { root.panel-action(3, 0); panel-menu.close(); } }
                                     if root.below-kind == 2: MenuRow { title: @tr("Save As…"); shortcut: "Ctrl+Shift+S"; activated => { root.panel-action(6, 0); panel-menu.close(); } }
                                     if root.below-kind == 2: MenuRow { title: "ReadOnly"; checked: root.panel-read-only; activated => { root.panel-action(4, 0); panel-menu.close(); } }
-                                    if root.below-kind == 2: MenuRow { title: @tr("Capture Log"); enabled: !root.terminal-capturing; activated => { root.panel-action(7, 0); panel-menu.close(); } }
-                                    if root.panel-capturing: MenuRow { title: @tr("Stop Capture"); activated => { root.panel-action(5, 0); panel-menu.close(); } }
+                                    if root.below-kind == 2: MenuRow { title: root.terminal-capturing ? @tr("Stop Panel Log") : @tr("Capture Log to Editor Panel"); activated => { root.panel-action(root.terminal-capturing ? 13 : 7, 0); panel-menu.close(); } }
                                     if root.below-kind == 1: MenuRow { title: @tr("Latest"); activated => { root.terminal-action(1, 4); panel-menu.close(); } }
                                     MenuRow { title: @tr("Appearance…"); activated => { root.appearance-requested(true); panel-menu.close(); } }
                                     MenuRow { title: @tr("Close Tab"); activated => { root.panel-action(2, 0); panel-menu.close(); } }
@@ -3913,7 +3920,7 @@ export component EditorPane inherits Rectangle {
                             // 動かない（Slintの`TextInput`の注記）ので、キャレットを
                             // 見失わないようこちらが追う。**横は折り返すので要らない。**
                             property <length> pan-y: 0;
-                            property <length> max-pan: max(0px, bands.preferred-height + self.row-height + 12px - self.height);
+                            property <length> max-pan: max(0px, bands.preferred-height + 12px - self.height);
                             property <bool> follow-tail: root.panel-read-only && root.panel-follow;
                             changed follow-tail => { if self.follow-tail { self.pan-y = self.max-pan; } }
                             changed max-pan => {
@@ -3931,60 +3938,17 @@ export component EditorPane inherits Rectangle {
                                 visible: false;
                             }
 
-                            // 書き手の報告 2026-09-07: **どこまで送られるかを見せる。**
-                            // 送られる行に薄い色を敷き、改行のあるところに`↵`を置く。
-                            //
-                            // **折り返しは残す**（書き手の指摘 2026-09-07——折り返さ
-                            // ないのは使いにくい）。折り返す以上「1行＝1段」ではないので、
-                            // 行の高さは**その行を同じ幅・同じ折り返しで組んだ`Text`に
-                            // 訊く**。それを縦に積めば、欄が自分で折り返した段と同じ
-                            // ところに帯が来る——どちらもSlintの同じ組版を通るから。
-                            bands := VerticalLayout {
-                                x: 8px;
-                                y: 6px - sheet.pan-y;
+                            // Measure the complete text with the same wrapping and font.
+                            // Editor Panel has no command-preview bands or newline rules.
+                            bands := Text {
                                 width: sheet.text-width;
-                                alignment: start;
-                                spacing: 0px;
-
-                                for line in root.below-draft-lines: Rectangle {
-                                    // **高さを自分で言う。**帯は矩形で、矩形は中身の
-                                    // 大きさを親へ伝えない（伝えるのはレイアウトだけ）
-                                    // ので、書かなければ高さ0になる。書いた高さは
-                                    // レイアウトが上書きしない。
-                                    height: flow.preferred-height;
-                                    background: line.sent ? Tok.accent-faint : transparent;
-
-                                    flow := Text {
-                                        x: 0;
-                                        y: 0;
-                                        width: sheet.text-width;
-                                        // **空の行にも一字置く。**組む字が無ければ
-                                        // 高さも0で、空行の帯だけ潰れて以降の行が
-                                        // すべて上へずれる。透明なので見えない。
-                                        text: line.text == "" ? " " : line.text;
-                                        wrap: word-wrap;
-                                        font-family: root.panel-style.family;
-                                        font-size: root.panel-style.size * 1px;
-                                        color: transparent;
-                                    }
-
-                                    // 改行は**罫で言う**（書き手の報告 2026-09-07・
-                                    // 3回目）。字としての`¶`はあきらめた——折り返した
-                                    // 行だけ印が無いのは、印が無いことより悪い。
-                                    //
-                                    // **どこで折り返したかを知っているのはSlintだけ**で、
-                                    // こちらは行の段数しか訊けない。だから字の終わりは
-                                    // 指せず、指せない場所に印を置くのもやめた。段の下の
-                                    // 罫なら、折り返した行でも折り返さない行でも、
-                                    // 同じ場所に同じものが出る。
-                                    if line.breaks: Rectangle {
-                                        x: 0;
-                                        y: flow.preferred-height - 1px;
-                                        width: sheet.text-width;
-                                        height: 1px;
-                                        background: Tok.rule;
-                                    }
-                                }
+                                text: root.below-draft == "" ? " " : root.below-draft;
+                                wrap: word-wrap;
+                                font-family: root.panel-style.family;
+                                font-size: root.panel-style.size * 1px;
+                                font-weight: root.panel-style.bold ? 700 : 400;
+                                font-italic: root.panel-style.italic;
+                                visible: false;
                             }
 
                             draft := TextInput {
@@ -3994,7 +3958,7 @@ export component EditorPane inherits Rectangle {
                                 // 溢れた分は`pan-y`が運ぶ。
                                 width: sheet.text-width;
                                 height: max(sheet.height - 12px,
-                                    bands.preferred-height + sheet.row-height);
+                                    bands.preferred-height);
                                 text <=> root.below-draft;
                                 read-only: root.panel-read-only;
                                 font-weight: root.panel-style.bold ? 700 : 400;

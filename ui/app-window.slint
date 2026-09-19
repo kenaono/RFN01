@@ -532,6 +532,7 @@ export component AppWindow inherits Window {
     /// What the picker lists, and what it is picking for. The list is read from
     /// the system the first time it is opened.
     in property <[string]> font-names;
+    callback font-list-requested();
     in-out property <int> font-slot: 0;
     in property <string> font-current;
     // A question with real buttons, drawn over the editor (要件 8.3, 8.4).
@@ -2510,6 +2511,7 @@ export component AppWindow inherits Window {
                         panel-action(action, index) => { root.panel-action(pane.id, action, index); }
                         panel-renamed(index, name) => { root.panel-renamed(pane.id, index, name); }
                         terminal-capturing: pane.terminal-capturing;
+                        terminal-file-logging: pane.terminal-file-logging;
                         panel-file-names: pane.panel-file-names;
                         panel-file-stems: pane.panel-file-stems;
                         panel-log-destination: pane.panel-log-destination;
@@ -3188,171 +3190,6 @@ export component AppWindow inherits Window {
                                             }
                                             if !root.settings-searching: Rectangle { height: 12px; }
 
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
-                                                text: root.section-title(@tr("General"), @tr("FILES"));
-                                                color: Tok.ink-faint;
-                                                font-size: 10px;
-                                                letter-spacing: 0.9px;
-                                            }
-
-                                            // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
-                                            // Offが何を意味するかを、同じ場所で言う**——「切ってある
-                                            // 間は書かない」だけなら、置いてある古い退避が次の起動で
-                                            // 戻ってきて、書き手の言ったこととちょうど逆になる。
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: @tr("Auto Backup");
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                TextButton {
-                                                    title: root.autosave ? @tr("On") : @tr("Off");
-                                                    role: root.autosave ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.autosave-toggled(!root.autosave);
-                                                    }
-                                                }
-                                            }
-
-                                            // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
-                                                text: root.autosave
-                                                    ? @tr("Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing.")
-                                                    : @tr("No backup. Turning it off also deletes the work copies.");
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                                overflow: elide;
-                                            }
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
-                                                text: @tr("Ctrl+S writes to the original file.");
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                                overflow: elide;
-                                            }
-
-                                            // 書き手の報告 2026-09-11: **見出しが中身を言っていなかった。**
-                                            // `FILES`の下にルビの記法も箇条書きの字も並んでいて、どれも
-                                            // ファイルの話ではない——**画面とソースが食い違えば、書き手と
-                                            // 私が別のものを指して話すことになる。**記法の読み書きは
-                                            // ここから下である。
-                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby"), @tr("Ruby markup"), @tr("Bullet marks")]): Text {
-                                                text: root.section-title(@tr("General"), @tr("MARKUP"));
-                                                color: Tok.ink-faint;
-                                                font-size: 10px;
-                                                letter-spacing: 0.9px;
-                                            }
-
-                                            // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。
-                                            // **「正解が二つある」から選ばせる**——投稿サイトへ出す
-                                            // ための字数はルビを含まず、打ち込んだ量を知りたいときは
-                                            // 含む。編集器がどちらかに決めると、もう一方の用事の人が
-                                            // 毎回数え直すことになる。
-                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby")]): HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: @tr("Count ruby");
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                TextButton {
-                                                    title: root.count-ruby ? @tr("On") : @tr("Off");
-                                                    role: root.count-ruby ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.count-ruby-toggled(!root.count-ruby);
-                                                    }
-                                                }
-                                            }
-
-                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby")]): Text {
-                                                text: root.count-ruby
-                                                    ? @tr("Ruby readings 《》 count toward the character count.")
-                                                    : @tr("Ruby readings 《》 do not count toward the character count.");
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                                overflow: elide;
-                                            }
-
-                                            // 要件 E9: ルビと傍点の記法を読むか。**Markdownの標準では
-                                            // ない**ので、切れなければ「この編集器でしか正しく見えない
-                                            // 書き方」を書き手に強いることになる。ルビと傍点を1つの旗で
-                                            // 切るのは、同じ記法の一族だからである。
-                                            if root.shows-any([@tr("MARKUP"), @tr("Ruby markup")]): HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: @tr("Ruby markup");
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                TextButton {
-                                                    title: root.ruby-marks ? @tr("On") : @tr("Off");
-                                                    role: root.ruby-marks ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.ruby-marks-toggled(!root.ruby-marks);
-                                                    }
-                                                }
-                                            }
-
-                                            if root.shows-any([@tr("MARKUP"), @tr("Ruby markup")]): Text {
-                                                text: root.ruby-marks
-                                                    ? @tr("Reads ｜漢字《かんじ》 and 《《傍点》》 as markup.")
-                                                    : @tr("Shows the marks as plain characters.");
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                                overflow: elide;
-                                            }
-
-                                            // 書き手の決定 2026-09-11: **どれを箇条書きの印として読むか。**
-                                            // CommonMarkは`-`・`*`・`+`を同格に認めているので、この編集器も
-                                            // 同格に扱う——**`-`も切れる**（「*も標準ということなら、扱いは
-                                            // 同じであるべき」）。切った記号の行はただの本文になり、記号も
-                                            // そのまま字として出る（原稿のバイト列は変えない）。
-                                            if root.shows-any([@tr("MARKUP"), @tr("Bullet marks")]): HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: @tr("Bullet marks");
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                for mark[index] in ["-", "*", "+"]: TextButton {
-                                                    title: mark;
-                                                    role: root.bullet-marks[index] ? Role.primary : Role.normal;
-                                                    clicked => {
-                                                        root.bullet-mark-toggled(index);
-                                                    }
-                                                }
-                                            }
-
-                                            if root.shows-any([@tr("MARKUP"), @tr("Bullet marks")]): Text {
-                                                text: !root.bullet-marks[0] && !root.bullet-marks[1]
-                                                    && !root.bullet-marks[2]
-                                                    ? @tr("No bullet marks (every mark is plain text).")
-                                                    : @tr("{}are read as bullet marks.",
-                                                        (root.bullet-marks[0] ? "- " : "")
-                                                        + (root.bullet-marks[1] ? "* " : "")
-                                                        + (root.bullet-marks[2] ? "+ " : ""));
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                                overflow: elide;
-                                            }
-
-
                                             // 書き手の求め 2026-09-15: **全部を戻す口は General に1つ。**各面の Reset は
                                             // その面だけを戻す。単語帳とモードは書き手が作ったものなので戻さない。
                                             if !root.settings-searching: Rectangle { height: 1px; background: Tok.rule; }
@@ -3378,15 +3215,17 @@ export component AppWindow inherits Window {
                                         // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
                                         // 無い。
                                         if root.shows-group(1, []): VerticalLayout {
-                                            spacing: 8px;
+                                            spacing: 8px; alignment: start; vertical-stretch: 0;
                                             ComboBox {
+                                                width: 260px; height: 30px; horizontal-stretch: 0; vertical-stretch: 0;
                                                 model: root.shell-profile-names;
                                                 current-index: root.shell-profile-index;
                                                 selected(value) => { root.shell-profile-action(0, self.current-index); }
                                             }
                                             HorizontalLayout {
                                                 Text { text: @tr("Profile name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; }
-                                                Field { placeholder: @tr("Name"); text <=> root.shell-profile-name; }
+                                                spacing: 8px; height: 30px; vertical-stretch: 0;
+                                                Field { width: 260px; horizontal-stretch: 0; placeholder: @tr("Name"); text <=> root.shell-profile-name; }
                                                 CheckBox { text: @tr("Default"); checked <=> root.shell-profile-default; toggled => { root.shell-profile-action(7, 0); } }
                                             }
                                             HorizontalLayout { Text { text: @tr("Executable"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Executable"); text <=> root.shell-profile-executable; } }
@@ -3401,65 +3240,6 @@ export component AppWindow inherits Window {
                                                 TextButton { title: @tr("Remove"); clicked => { root.shell-profile-action(6, 0); } }
                                             }
 
-
-                                            // 追加要件 2026-09-07: **書字方向を持たない設定はここ**。
-                                            // 2026-09-08 からはこの面が丸ごとそれで、シートを選ぶ釦は
-                                            // 隣の3面にある。
-                                            if root.shows-any([@tr("TERMINAL"), @tr("Default")]): Text {
-                                                text: @tr("TERMINAL");
-                                                color: Tok.ink-faint;
-                                                font-size: 10px;
-                                                letter-spacing: 0.9px;
-                                            }
-
-                                            if root.shows-any([@tr("TERMINAL"), @tr("Default")]): PickRow {
-                                                label: @tr("Default");
-                                                value: root.terminal-shells[root.default-shell];
-                                                pressed => {
-                                                    default-shell-menu.show();
-                                                }
-                                            }
-
-                                            // **原点はこの群の左上**（技術検証 6.30：popupを
-                                            // レイアウトに直に置くと、そのレイアウトの左上から
-                                            // 数える）。帯の下に群が入ったので、パネルの上端から
-                                            // 数えていた78pxは、この群の中の78pxになった——
-                                            // 見出し13px＋間8px＋行28pxの、行の下。
-                                            default-shell-menu := PopupWindow {
-                                                x: 60px;
-                                                y: 52px;
-                                                width: 240px;
-                                                close-policy: close-on-click-outside;
-
-                                                MenuFrame {
-                                                    width: 240px;
-
-                                                    VerticalLayout {
-                                                        padding: 6px;
-                                                        spacing: 1px;
-
-                                                        // **頼んでから閉じる**（書き手の報告 2026-09-07:
-                                                        // WSL以外に変えられない）。`close`はこのメニューの
-                                                        // 木を——この行と、行を包む`for`ごと——捨てるので、
-                                                        // その後で`root`へ登ろうとすると生成されたコードは
-                                                        // `parent.upgrade()`に失敗し、**黙って何もしない**。
-                                                        // タブの接続先の一覧で同じことを踏んだ。
-                                                        for shell[index] in root.terminal-shells: MenuRow {
-                                                            title: shell;
-                                                            checked: index == root.default-shell;
-                                                            activated => {
-                                                                root.default-shell-chosen(index);
-                                                                default-shell-menu.close();
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            if !root.settings-searching: Rectangle {
-                                                height: 1px;
-                                                background: Tok.rule;
-                                            }
 
                                             CheckBox {
                                                 text: @tr("Confirm multiline paste");
@@ -3478,10 +3258,8 @@ export component AppWindow inherits Window {
                                                 }
                                                 Rectangle { horizontal-stretch: 1; }
                                             }
-                                            Text { text: "Terminal"; color: Tok.ink; }
-                                            PanelStyleEditor { style: root.panel-defaults[0]; changed style => { root.panel-defaults[0] = self.style; root.terminal-settings-edited(); } defaults: true; }
-                                            Text { text: "Editor Panel"; color: Tok.ink; }
-                                            PanelStyleEditor { style: root.panel-defaults[1]; changed style => { root.panel-defaults[1] = self.style; root.terminal-settings-edited(); } defaults: true; underline-allowed: false; }
+                                            PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Terminal"; style: root.panel-defaults[0]; changed style => { root.panel-defaults[0] = self.style; root.terminal-settings-edited(); } defaults: true; }
+                                            PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Editor Panel"; style: root.panel-defaults[1]; changed style => { root.panel-defaults[1] = self.style; root.terminal-settings-edited(); } defaults: true; underline-allowed: false; }
                                         }
 
                                         if root.shows-group(7, []): VerticalLayout {
@@ -3959,6 +3737,175 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
+                                        if root.shows-group(3, []): VerticalLayout {
+                                            alignment: start; vertical-stretch: 0; spacing: 8px;
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
+                                                text: root.section-title(@tr("Editor"), @tr("FILES"));
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
+                                            // Offが何を意味するかを、同じ場所で言う**——「切ってある
+                                            // 間は書かない」だけなら、置いてある古い退避が次の起動で
+                                            // 戻ってきて、書き手の言ったこととちょうど逆になる。
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: @tr("Auto Backup");
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.autosave ? @tr("On") : @tr("Off");
+                                                    role: root.autosave ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.autosave-toggled(!root.autosave);
+                                                    }
+                                                }
+                                            }
+
+                                            // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
+                                                text: root.autosave
+                                                    ? @tr("Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing.")
+                                                    : @tr("No backup. Turning it off also deletes the work copies.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
+                                                text: @tr("Ctrl+S writes to the original file.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+                                            // 書き手の報告 2026-09-11: **見出しが中身を言っていなかった。**
+                                            // `FILES`の下にルビの記法も箇条書きの字も並んでいて、どれも
+                                            // ファイルの話ではない——**画面とソースが食い違えば、書き手と
+                                            // 私が別のものを指して話すことになる。**記法の読み書きは
+                                            // ここから下である。
+                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby"), @tr("Ruby markup"), @tr("Bullet marks")]): Text {
+                                                text: root.section-title(@tr("Editor"), @tr("MARKUP"));
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            // 要件 7.8（2026-09-09）: ルビを本文の字数に数えるか。
+                                            // **「正解が二つある」から選ばせる**——投稿サイトへ出す
+                                            // ための字数はルビを含まず、打ち込んだ量を知りたいときは
+                                            // 含む。編集器がどちらかに決めると、もう一方の用事の人が
+                                            // 毎回数え直すことになる。
+                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby")]): HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: @tr("Count ruby");
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.count-ruby ? @tr("On") : @tr("Off");
+                                                    role: root.count-ruby ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.count-ruby-toggled(!root.count-ruby);
+                                                    }
+                                                }
+                                            }
+
+                                            if root.shows-any([@tr("MARKUP"), @tr("Count ruby")]): Text {
+                                                text: root.count-ruby
+                                                    ? @tr("Ruby readings 《》 count toward the character count.")
+                                                    : @tr("Ruby readings 《》 do not count toward the character count.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+                                            // 要件 E9: ルビと傍点の記法を読むか。**Markdownの標準では
+                                            // ない**ので、切れなければ「この編集器でしか正しく見えない
+                                            // 書き方」を書き手に強いることになる。ルビと傍点を1つの旗で
+                                            // 切るのは、同じ記法の一族だからである。
+                                            if root.shows-any([@tr("MARKUP"), @tr("Ruby markup")]): HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: @tr("Ruby markup");
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                TextButton {
+                                                    title: root.ruby-marks ? @tr("On") : @tr("Off");
+                                                    role: root.ruby-marks ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.ruby-marks-toggled(!root.ruby-marks);
+                                                    }
+                                                }
+                                            }
+
+                                            if root.shows-any([@tr("MARKUP"), @tr("Ruby markup")]): Text {
+                                                text: root.ruby-marks
+                                                    ? @tr("Reads ｜漢字《かんじ》 and 《《傍点》》 as markup.")
+                                                    : @tr("Shows the marks as plain characters.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+                                            // 書き手の決定 2026-09-11: **どれを箇条書きの印として読むか。**
+                                            // CommonMarkは`-`・`*`・`+`を同格に認めているので、この編集器も
+                                            // 同格に扱う——**`-`も切れる**（「*も標準ということなら、扱いは
+                                            // 同じであるべき」）。切った記号の行はただの本文になり、記号も
+                                            // そのまま字として出る（原稿のバイト列は変えない）。
+                                            if root.shows-any([@tr("MARKUP"), @tr("Bullet marks")]): HorizontalLayout {
+                                                spacing: 2px;
+
+                                                Text {
+                                                    text: @tr("Bullet marks");
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                for mark[index] in ["-", "*", "+"]: TextButton {
+                                                    title: mark;
+                                                    role: root.bullet-marks[index] ? Role.primary : Role.normal;
+                                                    clicked => {
+                                                        root.bullet-mark-toggled(index);
+                                                    }
+                                                }
+                                            }
+
+                                            if root.shows-any([@tr("MARKUP"), @tr("Bullet marks")]): Text {
+                                                text: !root.bullet-marks[0] && !root.bullet-marks[1]
+                                                    && !root.bullet-marks[2]
+                                                    ? @tr("No bullet marks (every mark is plain text).")
+                                                    : @tr("{}are read as bullet marks.",
+                                                        (root.bullet-marks[0] ? "- " : "")
+                                                        + (root.bullet-marks[1] ? "* " : "")
+                                                        + (root.bullet-marks[2] ? "+ " : ""));
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+
+
+                                        }
+
                                         if root.shows-group(4, []): VerticalLayout {
                                             spacing: 20px;
                                             // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
@@ -4278,7 +4225,7 @@ export component AppWindow inherits Window {
                                                         }
 
                                                         if !root.bullet-marks[at]: Text {
-                                                            text: @tr("Turned off in General");
+                                                            text: @tr("Turned off in Editor");
                                                             color: Tok.ink-faint;
                                                             font-size: 11px;
                                                             vertical-alignment: center;
@@ -5088,8 +5035,7 @@ export component AppWindow inherits Window {
                                         // どの面にいても、値はいまのシートのもの——だから帯のすぐ
                                         // 下に在る（要件 9）。
                                         if root.shows-group(3, []): VerticalLayout {
-                                            Text { text: "Terminal Panel"; color: Tok.ink; }
-                                            PanelStyleEditor { style: root.panel-defaults[2]; changed style => { root.panel-defaults[2] = self.style; root.terminal-settings-edited(); } defaults: true; }
+                                            PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Terminal Panel"; style: root.panel-defaults[2]; changed style => { root.panel-defaults[2] = self.style; root.terminal-settings-edited(); } defaults: true; }
                                         }
 
                                         // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
@@ -6073,7 +6019,7 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 16px; spacing: 8px; alignment: start;
                 Text { text: root.appearance-title; color: Tok.ink; height: 28px; vertical-stretch: 0; }
-                PanelStyleEditor { style <=> root.appearance-style; defaults: root.appearance-default; underline-allowed: root.appearance-underline-allowed; }
+                PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; style <=> root.appearance-style; defaults: root.appearance-default; underline-allowed: root.appearance-underline-allowed; }
                 HorizontalLayout {
                     TextButton { title: @tr("Default"); clicked => { root.appearance-reset(); } }
                     Rectangle { horizontal-stretch: 1; }

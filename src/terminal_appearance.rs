@@ -127,6 +127,12 @@ enum Target {
 
 pub(crate) fn install(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
+    window.on_font_list_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            wiring::fill_font_names(&window);
+        }
+    });
+    let weak = window.as_weak();
     let settings_live = live.clone();
     let timer = Timer::default();
     window.on_terminal_settings_edited(move || {

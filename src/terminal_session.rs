@@ -142,7 +142,7 @@ impl TerminalSession {
 
     pub fn start_file_log(&mut self, path: PathBuf, file: std::fs::File) {
         self.drain();
-        self.start_capture();
+        self.terminal.screen.start_file_capture();
         self.file_log = Some(FileLog {
             path,
             writer: BufWriter::new(file),
@@ -154,7 +154,7 @@ impl TerminalSession {
         if self.file_log.is_none() {
             return;
         }
-        let Some((completed, pending)) = self.terminal.screen.capture_update() else {
+        let Some((completed, pending)) = self.terminal.screen.file_capture_update() else {
             return;
         };
         let log = self.file_log.as_mut().unwrap();
@@ -166,7 +166,7 @@ impl TerminalSession {
         {
             self.log_error = Some(format!("{}: {error}", log.path.display()));
             self.file_log = None;
-            self.stop_capture();
+            self.terminal.screen.stop_file_capture();
         }
     }
 
@@ -184,7 +184,7 @@ impl TerminalSession {
             {
                 self.log_error = Some(format!("{}: {error}", log.path.display()));
             }
-            self.stop_capture();
+            self.terminal.screen.stop_file_capture();
         }
     }
 
@@ -344,6 +344,64 @@ impl Drop for TerminalSession {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    #[ignore = "starts a real Windows shell; run explicitly"]
+    fn terminal_simultaneous_file_panel_independent_stop_and_failure() {
+        let path = std::env::temp_dir().join(format!("rfn-both-log-{}.txt", std::process::id()));
+        let mut session = TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap();
+        session.wait(Duration::from_millis(300));
+        session.start_capture();
+        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
+        let collect = |session: &mut TerminalSession, marker: &str| {
+            session.type_text(&format!("echo {marker}\r"));
+            let mut panel = String::new();
+            let until = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < until {
+                session.wait(Duration::from_millis(50));
+                if let Some((done, _)) = session.capture_update() {
+                    panel.push_str(&done);
+                }
+                if panel.contains(marker) {
+                    break;
+                }
+            }
+            assert!(panel.contains(marker), "missing Panel output: {marker}");
+        };
+        collect(&mut session, "RFN_BOTH");
+        session.stop_file_log();
+        let stopped = std::fs::read_to_string(&path).unwrap();
+        assert!(stopped.contains("RFN_BOTH"));
+        collect(&mut session, "RFN_PANEL_CONTINUES");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stopped);
+        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
+        collect(&mut session, "RFN_RESTARTED");
+        session.stop_capture();
+        session.type_text("echo RFN_FILE_CONTINUES\r");
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            session.wait(Duration::from_millis(50));
+            if std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("RFN_FILE_CONTINUES")
+            {
+                break;
+            }
+        }
+        session.stop_file_log();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("RFN_FILE_CONTINUES")
+        );
+        session.start_capture();
+        session.start_file_log(path.clone(), std::fs::File::open(&path).unwrap());
+        collect(&mut session, "RFN_PANEL_AFTER_FILE_FAILURE");
+        assert!(session.file_log_path().is_none());
+        assert!(session.take_log_error().is_some());
+        session.stop_capture();
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     #[ignore = "starts a real Windows shell; run explicitly"]

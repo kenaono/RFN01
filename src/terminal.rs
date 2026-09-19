@@ -232,6 +232,7 @@ pub struct Screen {
     /// Views use this to keep their anchor when the bounded history is full.
     history_origin: u64,
     capture: Option<CapturedOutput>,
+    file_capture: Option<CapturedOutput>,
 }
 
 #[derive(Debug, Default)]
@@ -264,6 +265,7 @@ impl Screen {
             revision: 0,
             history_origin: 0,
             capture: None,
+            file_capture: None,
         }
     }
 
@@ -333,6 +335,28 @@ impl Screen {
 
     pub fn stop_capture(&mut self) {
         self.capture = None;
+    }
+
+    pub fn start_file_capture(&mut self) {
+        self.file_capture = Some(CapturedOutput {
+            initial: self.row_text(self.cursor.row),
+            ..CapturedOutput::default()
+        });
+    }
+
+    pub fn file_capture_update(&mut self) -> Option<(String, String)> {
+        let tail = self.row_text(self.cursor.row);
+        let capture = self.file_capture.as_mut()?;
+        let pending = format!("{}{}", capture.wrapped, tail);
+        let pending = pending
+            .strip_prefix(&capture.initial)
+            .unwrap_or(&pending)
+            .to_owned();
+        Some((std::mem::take(&mut capture.completed), pending))
+    }
+
+    pub fn stop_file_capture(&mut self) {
+        self.file_capture = None;
     }
 
     pub fn set_history_limit(&mut self, limit: usize) {
@@ -591,7 +615,10 @@ impl Screen {
     fn capture_line(&mut self, row: usize) {
         if self.stowed.is_none() {
             let line = &self.lines[row];
-            if let Some(capture) = &mut self.capture {
+            for capture in [&mut self.capture, &mut self.file_capture]
+                .into_iter()
+                .flatten()
+            {
                 capture.wrapped.push_str(&line.logical_text());
                 if !line.wrapped {
                     let written = std::mem::take(&mut capture.wrapped);
@@ -654,7 +681,7 @@ impl Screen {
         let row = row.min(self.rows - 1);
         // ConPTY can finish output with a downward CUP instead of LF
         // before drawing the next prompt. Commit those rows as well.
-        if self.capture.is_some() {
+        if self.capture.is_some() || self.file_capture.is_some() {
             for leaving in self.cursor.row..row {
                 self.capture_line(leaving);
             }
@@ -919,11 +946,13 @@ impl Screen {
         let limit = self.scrollback_limit;
         let origin = self.history_origin;
         let capture = self.capture.take();
+        let file_capture = self.file_capture.take();
         *self = Self::new(columns, rows);
         self.scrollback = scrollback;
         self.scrollback_limit = limit;
         self.history_origin = origin;
         self.capture = capture;
+        self.file_capture = file_capture;
     }
 
     fn select_graphic_rendition(&mut self, params: &[Vec<u16>]) {
@@ -1701,6 +1730,38 @@ mod tests {
         term.feed(b"\r\nf");
         assert!(term.screen.scrollback().is_empty());
         assert_eq!(term.screen.history_origin(), 4);
+    }
+
+    #[test]
+    fn terminal_file_and_panel_capture_have_independent_start_and_stop() {
+        let mut term = Terminal::new(80, 8);
+        term.screen.start_capture();
+        term.feed(b"panel only\r\n");
+        term.screen.start_file_capture();
+        term.feed(b"both\r\npending");
+        assert_eq!(
+            term.screen.file_capture_update(),
+            Some(("both\n".into(), "pending".into()))
+        );
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("panel only\nboth\n".into(), "pending".into()))
+        );
+        term.screen.stop_capture();
+        term.feed(b"\r\nfile only\r\n");
+        assert_eq!(
+            term.screen.file_capture_update(),
+            Some(("pending\nfile only\n".into(), "".into()))
+        );
+        term.screen.start_capture();
+        term.feed(b"again\r\n");
+        term.screen.stop_file_capture();
+        term.feed(b"panel again\r\n");
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("again\npanel again\n".into(), "".into()))
+        );
+        assert!(term.screen.file_capture_update().is_none());
     }
 
     #[test]

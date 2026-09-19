@@ -1093,16 +1093,16 @@ msgid "History to Editor Panel"
 msgstr "保持履歴をEditor Panelへ"
 
 msgid "Capture Log to Editor Panel"
-msgstr "Editor Panelへログ取り込みを開始"
+msgstr "Editor Panelへのログ出力を開始"
 
 msgid "Capture Log to File…"
-msgstr "ファイルへログ出力を開始…"
+msgstr "ファイルへのログ出力を開始…"
 
 msgid "Capture Log"
-msgstr "ログ取り込みを開始"
+msgstr "Editor Panelへのログ出力を開始"
 
 msgid "Stop Capture"
-msgstr "ログ取り込みを停止"
+msgstr "Editor Panelへのログ出力を停止"
 
 msgid "Find in Terminal…"
 msgstr "Terminal内を検索…"
@@ -1183,4 +1183,19 @@ msgid "Writing log to: {}"
 msgstr "ファイルへログを保存中: {}"
 
 msgid "Capturing to Panel — save to keep as a file"
-msgstr "Panelへ取り込み中 — ファイルに残すには保存してください"
+msgstr "Editor Panelへログ出力中 — ファイルに残すには保存してください"
+
+msgid "Stop File Log"
+msgstr "ファイルへのログ出力を停止"
+
+msgid "Stop Panel Log"
+msgstr "Editor Panelへのログ出力を停止"
+
+msgid "Log file: {}"
+msgstr "ログ出力先: {}"
+
+msgid "Logging to Editor Panel"
+msgstr "Editor Panelへログ出力中"
+
+msgid "Turned off in Editor"
+msgstr "Editor設定で無効になっています"

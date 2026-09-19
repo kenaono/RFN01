@@ -1,14 +1,19 @@
-import { CheckBox, ComboBox } from "std-widgets.slint";
+import { CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
 import { PanelStyle } from "editor-pane.slint";
-import { ColorCell, Field, Slider } from "controls.slint";
+import { ColorCell, Field, Slider, TextButton, MenuFrame, MenuRow } from "controls.slint";
 import { Tok } from "tokens.slint";
 
 export component PanelStyleEditor inherits VerticalLayout {
     in-out property <PanelStyle> style;
+    in property <[string]> font-names;
+    callback font-list-requested();
+    in property <string> heading;
     in property <bool> underline-allowed: true;
     in property <bool> defaults: false;
     spacing: 10px;
     vertical-stretch: 0;
+    alignment: start;
+    if root.heading != "": Text { text: root.heading; color: Tok.ink; height: 24px; vertical-stretch: 0; }
     Rectangle {
       height: 108px; vertical-stretch: 0;
       background: Tok.chrome-raised; border-color: Tok.rule; border-width: 1px; border-radius: 6px;
@@ -46,7 +51,29 @@ export component PanelStyleEditor inherits VerticalLayout {
     HorizontalLayout {
         spacing: 8px;
         Text { width: 72px; text: @tr("Font"); color: Tok.ink-muted; vertical-alignment: center; }
-        Field { horizontal-stretch: 1; placeholder: @tr("Font"); text <=> root.style.family; }
+        Rectangle {
+            horizontal-stretch: 1; height: 28px;
+            TextButton { width: parent.width; wide: true; title: root.style.family; clicked => { root.font-list-requested(); font-menu.show(); } }
+            font-menu := PopupWindow {
+                x: 0px; y: 30px; width: 320px; close-policy: close-on-click-outside;
+                MenuFrame {
+                    width: 320px;
+                    VerticalLayout {
+                    padding: 6px;
+                    ScrollView {
+                        height: 300px;
+                        VerticalLayout {
+                            alignment: start; padding: 6px; spacing: 1px;
+                            for family in root.font-names: MenuRow {
+                                title: family; checked: family == root.style.family;
+                                activated => { root.style.family = family; font-menu.close(); }
+                            }
+                        }
+                    }
+                    }
+                }
+            }
+        }
         ColorCell { width: 100px; horizontal-stretch: 0; label: @tr("Text Color"); shown: root.style.ink; chosen(colour) => { root.style.ink = colour; } }
     }
     HorizontalLayout {

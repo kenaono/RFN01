@@ -54,7 +54,8 @@ fn terminal_new_tab_random_and_direct_file_capture() {
         .borrow_mut()
         .start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
     terminal_panels::publish_source(&h.window, &h.live, id);
-    assert!(id.screen(&h.window).terminal_capturing);
+    assert!(id.screen(&h.window).terminal_file_logging);
+    assert!(!id.screen(&h.window).terminal_capturing);
     assert!(
         h.live
             .tabs
@@ -79,8 +80,8 @@ fn terminal_new_tab_random_and_direct_file_capture() {
             break;
         }
     }
-    terminal_panels::action(&h.window, &h.live, id, 13, 0);
-    assert!(!id.screen(&h.window).terminal_capturing);
+    terminal_panels::action(&h.window, &h.live, id, 14, 0);
+    assert!(!id.screen(&h.window).terminal_file_logging);
     assert!(source.borrow().file_log_path().is_none());
     assert!(
         h.live
@@ -212,6 +213,46 @@ impl Drop for Harness {
     fn drop(&mut self) {
         self.live.writer.finish();
         app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+    }
+}
+
+#[test]
+fn terminal_panel_background_survives_typing_and_log_updates() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    h.window.set_tree_open(false);
+    id.update_screen(&h.window, |s| {
+        s.height = 700.0;
+        s.terminal = true;
+        s.empty = false;
+        s.front_style = terminal_appearance::initial_style();
+        s.panel_style = terminal_appearance::initial_style();
+        s.panel_style.paper = Color::from_rgb_u8(30, 55, 70);
+    });
+    id.set_below(&h.window, 2, 240.0);
+    h.window.show().unwrap();
+    for text in [
+        "",
+        "input",
+        "input\nnext",
+        "log 1\nlog 2\nlog 3\nlog 4\nlog 5\n",
+    ] {
+        show_draft(&h.window, id, text);
+        h.window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+        h.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+        // Right of the short text, inside each input/log line: neither the
+        // old command-preview fill nor newline rules may cover the paper.
+        for y in 535..665 {
+            let p = pixels[y * 1000 + 800];
+            assert_eq!(
+                (p.r, p.g, p.b),
+                (30, 55, 70),
+                "paper changed at y={y}, text={text:?}"
+            );
+        }
     }
 }
 
