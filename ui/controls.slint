@@ -443,6 +443,7 @@ export component Tab inherits Rectangle {
     /// writer can change. A buffer that has never been saved has no name on
     /// disk to change, and holding one down does nothing.
     in property <bool> renamable;
+    in property <string> edit-title: root.title;
     /// 追加要件 2026-09-07: this tab is a shell, so holding it down offers
     /// another one. **The same press as a rename** — a tab that cannot be
     /// renamed is a tab whose long press was doing nothing.
@@ -603,7 +604,7 @@ export component Tab inherits Rectangle {
         // (技術検証 6.24), and nothing outside a repeater can name what is in
         // it — which is why the timer above only sets the flag.
         init => {
-            self.text = root.title;
+            self.text = root.edit-title;
             self.take-focus-selecting(root.stem-length);
         }
         accepted => {
@@ -1681,6 +1682,8 @@ export component TextRow inherits Rectangle {
     callback ink-automatic();
     callback ink-more();
     callback chose-font();
+    out property <length> picker-x: font-button.absolute-position.x;
+    out property <length> picker-y: font-button.absolute-position.y + font-button.height;
 
     height: 56px;
 
@@ -1833,7 +1836,7 @@ export component TextRow inherits Rectangle {
             }
         }
 
-        TextButton {
+        font-button := TextButton {
             wide: true;
             title: root.family;
             clicked => {
@@ -1924,6 +1927,8 @@ export component ColorCell inherits Rectangle {
 // A label and what is set, opened by pressing it: a font family (要件 9), and
 // anything else later that is chosen from a list rather than stepped.
 export component PickRow inherits Rectangle {
+    out property <length> picker-x: value-button.absolute-position.x;
+    out property <length> picker-y: value-button.absolute-position.y + value-button.height;
     in property <string> label;
     in property <string> only;
     in property <string> value;
@@ -1948,7 +1953,7 @@ export component PickRow inherits Rectangle {
             horizontal-stretch: 0;
         }
 
-        TextButton {
+        value-button := TextButton {
             wide: true;
             title: root.value;
             clicked => {

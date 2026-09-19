@@ -76,6 +76,7 @@ fn a_new_vertical_tab_opens_at_the_start() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
+            panels: Default::default(),
             panes: vec![PaneTabs::default()],
         })),
         writer: Rc::new(FileWriter::start()),

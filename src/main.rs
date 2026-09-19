@@ -57,7 +57,14 @@ mod tab_position_ui_tests;
 #[cfg(test)]
 mod table_ui_tests;
 mod terminal;
+mod terminal_appearance;
+mod terminal_panels;
+mod panel_source;
 mod terminal_session;
+mod terminal_shells;
+#[cfg(test)]
+mod terminal_ui_tests;
+mod terminal_workflow;
 mod text_blocks;
 mod tree_watch;
 #[cfg(test)]
@@ -144,6 +151,7 @@ struct TerminalShell {
     /// The command line, the program first. Everything after the first word is
     /// handed to the shell as it is written.
     command: String,
+    directory: String,
 }
 
 impl TerminalShell {
@@ -172,6 +180,7 @@ impl TerminalShell {
         .map(|(name, command)| TerminalShell {
             name: name.to_owned(),
             command: command.to_owned(),
+            directory: String::new(),
         })
         .collect()
     }
@@ -182,10 +191,15 @@ impl TerminalShell {
     /// certainly does. A line without one is all command and takes its name
     /// from the program.
     fn written(&self) -> String {
-        format!("{} | {}", self.name, self.command)
+        if self.directory.is_empty() {
+            format!("{} | {}", self.name, self.command)
+        } else {
+            format!("{} | {}\t{}", self.name, self.command, self.directory)
+        }
     }
 
     fn read(written: &str) -> Option<TerminalShell> {
+        let (written, directory) = written.split_once('\t').unwrap_or((written, ""));
         let (name, command) = match written.split_once('|') {
             Some((name, command)) => (name.trim().to_owned(), command.trim().to_owned()),
             None => {
@@ -197,12 +211,16 @@ impl TerminalShell {
         if name.is_empty() || command.is_empty() {
             return None;
         }
-        Some(TerminalShell { name, command })
+        Some(TerminalShell {
+            name,
+            command,
+            directory: directory.to_owned(),
+        })
     }
 
     /// The program this shell is, as a file to look for.
     fn program(&self) -> &str {
-        self.command.split_whitespace().next().unwrap_or("")
+        terminal_shells::command_parts(&self.command).0
     }
 }
 
@@ -581,6 +599,22 @@ struct EditorState {
 }
 
 impl EditorState {
+    /// Shared ReadOnly policy; renderers only adapt selection and scroll coordinates.
+    fn set_read_only(&mut self, viewer: bool, source: bool) {
+        self.viewer = viewer;
+        self.follow = viewer && source;
+        self.preedit.clear();
+    }
+
+    fn follow_at(&mut self, position: f32, end: f32, resized: bool) -> bool {
+        if !self.viewer {
+            return false;
+        }
+        if !(self.follow && resized) {
+            self.follow = position >= end.max(0.0) - READ_ONLY_END_SLACK;
+        }
+        self.follow
+    }
     /// この押下は「2回目」か——ダブルクリックの判定（E3）。
     ///
     /// **速さはWindowsのもの**（`GetDoubleClickTime`）。この編集器が独自の秒数を
@@ -676,6 +710,8 @@ fn double_click_time() -> Duration {
 /// panes each hold an `Rc` rather than the state itself.
 #[derive(Clone, Default)]
 struct PaneStates {
+    next_panel: Rc<Cell<u32>>,
+    panels: Rc<RefCell<std::collections::BTreeMap<u32, PaneSlot>>>,
     /// One slot per pane, indexed by [`PaneId::index`].
     ///
     /// **Shared rather than copied**, so that the clone every callback holds is
@@ -728,6 +764,7 @@ impl PaneStates {
     }
 
     fn of(&self, id: PaneId) -> Rc<RefCell<EditorState>> {
+        if id.is_panel() { return self.panels.borrow().get(&id.0).map(|slot| slot.state.clone()).unwrap_or_default(); }
         let slots = self.slots.borrow();
         match slots.get(id.index() as usize) {
             Some(slot) => slot.state.clone(),
@@ -741,6 +778,7 @@ impl PaneStates {
 
     /// What this pane is showing.
     fn document(&self, id: PaneId) -> Rc<OpenDocument> {
+        if id.is_panel() { return self.panels.borrow().get(&id.0).map(|slot| slot.showing.borrow().clone()).unwrap_or_else(|| OpenDocument::untitled(0, slint::Weak::default())); }
         let slots = self.slots.borrow();
         let slot = slots.get(id.index() as usize).or(slots.first());
         slot.map(|slot| slot.showing.borrow().clone())
@@ -749,6 +787,7 @@ impl PaneStates {
 
     /// Put a document in front of this pane.
     fn show(&self, id: PaneId, document: &Rc<OpenDocument>) {
+        if id.is_panel() { if let Some(slot) = self.panels.borrow().get(&id.0) { *slot.showing.borrow_mut() = document.clone(); } return; }
         let slots = self.slots.borrow();
         if let Some(slot) = slots.get(id.index() as usize) {
             *slot.showing.borrow_mut() = document.clone();
@@ -1153,6 +1192,9 @@ struct TerminalView {
     /// the writer reads pushes rows into the history behind them; counted from
     /// the bottom, the same number would show different lines every time.
     history: usize,
+    history_origin: u64,
+    last_revision: u64,
+    unseen: bool,
     /// What the IME is composing, before it is anything the shell has heard of
     /// (要件 7.2's problem, in a terminal).
     ///
@@ -1181,6 +1223,9 @@ impl TerminalView {
             selection: None,
             looking: 0,
             history: 0,
+            history_origin: session.borrow().screen().history_origin(),
+            last_revision: session.borrow().screen().revision(),
+            unseen: false,
             preedit: String::new(),
             drawn: 0,
             counted_since: None,
@@ -1428,6 +1473,8 @@ const PACE_MAX: Duration = Duration::from_millis(200);
 /// is where a thing goes when it is a fact about the text rather than about
 /// how the text is being shown.
 struct RenderCache {
+    panel_panes: std::collections::BTreeMap<u32, Pane>,
+    panel_pace: std::collections::BTreeMap<u32, EditPace>,
     /// Indexed by [`PaneId::index`], like everything else that has one of
     /// something per pane.
     panes: Vec<Pane>,
@@ -1460,6 +1507,7 @@ impl Default for RenderCache {
             // the tab in front of it says, so the mode it starts in is the
             // tab's business rather than the pane's.
             panes: vec![Pane::new(WritingMode::Horizontal)],
+            panel_panes: Default::default(), panel_pace: Default::default(),
             frames: Rc::default(),
             source_push_ms: None,
             perf_log: PerfLog::default(),
@@ -1796,6 +1844,10 @@ fn main() -> Result<(), slint::PlatformError> {
         searcher: Rc::new(Searcher::start(wake_for_search)),
         searched: Rc::new(Cell::new(0)),
     };
+    terminal_panels::install(&window, &live);
+    terminal_workflow::install(&window, &live);
+    terminal_shells::install(&window, &live);
+    terminal_appearance::install(&window, &live);
     if diagnostic_config.performance() {
         let mut cache = render_cache.borrow_mut();
         cache.perf_log = cache.diag.performance_log(&perf_log_header(&window));
@@ -2180,9 +2232,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let area_layout = layout.clone();
     let area_states = pane_states.clone();
     let area_cache = render_cache.clone();
+    let area_live = live.clone();
     window.on_editor_area_resized(move || {
         if let Some(window) = weak.upgrade() {
             place_panes(&window, &area_layout.borrow());
+            panel_source::sync(&window, &area_live);
             for id in PaneId::all(&window) {
                 if !id.is_shown(&window) {
                     continue;
@@ -2447,7 +2501,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // **A list, grown as panes arrive** (2026-09-06). It was an array of two,
     // which is what a third pane found: the pane number is an index here like
     // everywhere else, and this was the one place still holding a pair.
-    let timers: Rc<RefCell<Vec<Rc<Timer>>>> = Rc::default();
+    let timers: Rc<RefCell<std::collections::BTreeMap<u32, Rc<Timer>>>> = Rc::default();
     let reveal_timer = Rc::new(Timer::default());
     let weak = window.as_weak();
     let states = pane_states.clone();
@@ -2459,13 +2513,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let cache = cache.clone();
         let timer = {
             let mut timers = timers.borrow_mut();
-            while timers.len() <= id.index() as usize {
-                timers.push(Rc::new(Timer::default()));
-            }
-            timers[id.index() as usize].clone()
+            timers.entry(id.0).or_default().clone()
         };
         timer.start(TimerMode::SingleShot, RESIZE_SETTLE, move || {
             if let Some(window) = weak.upgrade() {
+                if id.is_panel() && !states.panels.borrow().contains_key(&id.0) { return; }
                 let started = Instant::now();
                 let showing = states.document(id);
                 let source = showing.text.borrow().clone();
@@ -2626,7 +2678,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 if committed {
                     session.borrow_mut().type_text(text);
                 } else {
-                    session.borrow_mut().paste(text);
+                    terminal_workflow::input(&window, &typed_live, session.clone(), text, None);
                 }
                 {
                     let mut borrowed = cache.borrow_mut();
@@ -2946,9 +2998,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    let viewer_live = live.clone();
     window.on_pane_viewer_toggled(move |pane| {
         if let Some(window) = weak.upgrade() {
-            toggle_viewer(&window, &states, &cache, PaneId::from_index(pane));
+            let id = PaneId::from_index(pane);
+            if id.is_panel() { terminal_panels::action(&window, &viewer_live, PaneId::from_index(id.screen(&window).panel_owner), 4, 0); return; }
+            toggle_viewer(&window, &states, &cache, id);
         }
     });
 
@@ -3168,6 +3223,7 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(window) = weak.upgrade() {
             let most = offered_shells(&window).len().saturating_sub(1) as i32;
             window.set_default_shell(shell.clamp(0, most));
+            window.invoke_shell_profile_action(0, window.get_shell_profile_index());
             save_settings(&window, &default_cache);
         }
     });
@@ -3391,9 +3447,15 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 要件 11.3 の手つきで上下に移る（追加要件 Terminal）。
     let weak = window.as_weak();
+    let focus_live = live.clone();
     window.on_pane_below_focus(move |pane, into| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
+            let owner = if id.is_panel() { PaneId::from_index(id.screen(&window).panel_owner) } else { id };
+            if owner.screen(&window).below_kind == 2 {
+                panel_source::focus(&window, &focus_live, owner, into);
+                return;
+            }
             if into {
                 // **The strip takes the keyboard by being asked for it**, the
                 // same way the panes do: a count the element watches, because
@@ -3448,7 +3510,13 @@ fn main() -> Result<(), slint::PlatformError> {
             if committed {
                 session.borrow_mut().type_text(text.as_str());
             } else {
-                session.borrow_mut().paste(text.as_str());
+                terminal_workflow::input(
+                    &window,
+                    &below_live,
+                    session.clone(),
+                    text.as_str(),
+                    None,
+                );
             }
             {
                 let mut borrowed = below_live.cache.borrow_mut();
@@ -3469,6 +3537,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let weak = window.as_weak();
     let drafted = window.as_weak();
+    let draft_live = live.clone();
     // 書き手の報告 2026-09-07: the strip draws the draft's own lines behind the
     // field, and only this side can cut a string into lines.
     window.on_pane_below_draft_edited(move |pane, text| {
@@ -3484,6 +3553,7 @@ fn main() -> Result<(), slint::PlatformError> {
             screen.below_draft = text.clone();
             screen.below_draft_lines = lines.clone();
         });
+        terminal_panels::edited(&window, &draft_live, id);
     });
 
     let below_live = live.clone();
@@ -3604,6 +3674,13 @@ fn main() -> Result<(), slint::PlatformError> {
         // ときには誰にも言えないまま終わっていた——打った直後に`×`を押した
         // 数秒ぶんが、静かに消える。**成功すれば何も起きない**（普段はここで
         // 一往復、数ミリ秒）。
+        sync_active_tab(&window, live);
+        if live.tabs.borrow().panes.iter().flat_map(|p| &p.tabs).any(|t| terminal_workflow::needs_close(&window, t)) {
+            ask_question(&window, live, Question::CloseWindow,
+                pick("TerminalとPanelを含めて終了しますか？\n\n実行中のシェルとログ取り込みは停止します。未保存のPanelは保存してください。", "Close including terminals and panels?\n\nRunning shells and log capture will stop. Save any unsaved panels.").into(),
+                &[pick("すべて保存して終了", "Save All and Close"), pick("保存せず終了", "Close Without Saving"), cancel()], 1);
+            return CloseRequestResponse::KeepWindowShown;
+        }
         if ask_about_the_last_work_copy(&window, live) {
             return CloseRequestResponse::KeepWindowShown;
         }
@@ -3644,6 +3721,7 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let outcome = window.run();
+    terminal_panels::stop_all(&live);
     // 要件 8.5: the arrangement as the writer left it, including a boundary
     // moved without anything else happening. The views are taken out of the
     // panes first, because a caret and a scroll live there until they are.
@@ -4010,6 +4088,10 @@ fn show_paper(screen: &mut PaneScreen, tab: &Paper, pane: &Paper) {
     screen.paper_h = horizontal.unwrap_or_default();
     screen.paper_v_own = vertical.is_some();
     screen.paper_v = vertical.unwrap_or_default();
+    screen.tab_paper_own = tab[0].is_some();
+    screen.tab_paper = tab[0].unwrap_or_default();
+    screen.pane_paper_own = pane[0].is_some();
+    screen.pane_paper = pane[0].unwrap_or_default();
 }
 
 /// Whether a file being opened gets a tab that stays (書き手の報告 2026-09-07).
@@ -4025,6 +4107,9 @@ enum Opening {
 /// What one tab has along the foot of its pane (追加要件 Terminal).
 #[derive(Clone, Default)]
 struct TabBelow {
+    front_style: Option<PanelStyle>,
+    entries: Vec<Rc<RefCell<terminal_panels::PanelDocument>>>,
+    active: usize,
     open: bool,
     /// The shell down there, when this tab is a document.
     ///
@@ -4234,6 +4319,7 @@ fn close_run_positions(count: usize, active: usize, keep_active: bool) -> Vec<us
 /// they are what the panes are editing, whatever the lists say about anything
 /// else.
 struct Tabs {
+    panels: std::collections::BTreeMap<u32, PaneTabs>,
     /// Indexed by [`PaneId::index`], like everything else that has one of
     /// something per pane. **One entry per pane and no more**: a strip nobody
     /// can see is tabs nobody can reach (要件 6.3).
@@ -4253,10 +4339,12 @@ impl Tabs {
     }
 
     fn of(&self, id: PaneId) -> &PaneTabs {
+        if id.is_panel() { return self.panels.get(&id.0).expect("registered panel"); }
         &self.panes[self.at(id.index() as usize)]
     }
 
     fn of_mut(&mut self, id: PaneId) -> &mut PaneTabs {
+        if id.is_panel() { return self.panels.get_mut(&id.0).expect("registered panel"); }
         let at = self.at(id.index() as usize);
         &mut self.panes[at]
     }
@@ -4458,12 +4546,20 @@ impl Live {
             screen.word_mode = mode_id as i32;
         });
         show_draft(window, id, &tab.below.draft);
+        terminal_panels::publish(window, id, &tab.below);
+        terminal_panels::publish_source_for_tab(window, id, tab);
         id.set_below(window, kind, height);
         // **A strip restored open has no shell in it yet** (要件 8.5 puts the
         // arrangement back, not the processes). The one it needs is started
         // here, when the tab is actually in front of somebody.
         if kind == 1 && self.cache.borrow_mut().pane(id).below.is_none() {
             open_below_shell(window, self, id);
+        }
+        if kind != 0 {
+            terminal_panels::ensure(window, self, id);
+            if let Some(current) = self.tabs.borrow().of(id).current() {
+                terminal_panels::publish(window, id, &current.below);
+            }
         }
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
         id.set_scroll(window, tab.view.scroll);
@@ -4484,6 +4580,7 @@ impl Live {
         if id.reads_only(window) && state.borrow().follow {
             scroll_to_end(window, &self.cache, id);
         }
+        if !id.is_panel() { panel_source::sync(window, self); }
     }
 }
 
@@ -4604,13 +4701,15 @@ impl StatusBar for AppWindow {
 
     fn tell_pane(&self, told: SharedString) {
         self.set_render_status_scope(1);
-        self.set_render_status_pane(self.get_focused_pane());
+        let id = focused_pane(self);
+        self.set_render_status_pane(if id.is_panel() { id.screen(self).panel_owner } else { id.index() });
         self.set_render_status(told);
     }
 
     fn tell_tab(&self, told: SharedString) {
         self.set_render_status_scope(2);
-        self.set_render_status_pane(self.get_focused_pane());
+        let id = focused_pane(self);
+        self.set_render_status_pane(if id.is_panel() { id.screen(self).panel_owner } else { id.index() });
         self.set_render_status(told);
     }
 }
@@ -4940,9 +5039,7 @@ fn toggle_viewer(
     {
         let held = states.of(id);
         let mut state = held.borrow_mut();
-        state.viewer = viewer;
-        state.follow = reading;
-        state.preedit.clear();
+        state.set_read_only(viewer, !id.shows_preview(window));
     }
     id.set_ime_buffer(window, "");
     let source = document.text.borrow().clone();
@@ -5016,11 +5113,7 @@ fn follow_scroll(
     };
     let end = (content - viewport).max(0.0);
     let was = states.of(id).borrow().follow;
-    if was && resized {
-        return true;
-    }
-    let at_end = -offset >= end - READ_ONLY_END_SLACK;
-    states.of(id).borrow_mut().follow = at_end;
+    let at_end = states.of(id).borrow_mut().follow_at(-offset, end, resized);
     if was != at_end {
         window.tell_tab(
             if at_end {
@@ -5090,6 +5183,7 @@ fn set_pane_direction(
     id: PaneId,
     vertical: bool,
 ) {
+    let vertical = vertical && !id.is_panel();
     // The engine's own mode is the truth, and the row mirrors it. Nothing else
     // writes either, so asking the engine to change is the whole test for
     // whether anything has to happen.
@@ -8559,7 +8653,9 @@ fn open_dropped_file(window: &AppWindow, live: &Live, path: &Path, id: PaneId) {
 }
 
 fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, opening: Opening) {
-    open_path_in_pane(window, live, focused_pane(window), path, opening);
+    let id = focused_pane(window);
+    if id.is_panel() { terminal_panels::open_file(window, live, PaneId::from_index(id.screen(window).panel_owner), path); return; }
+    open_path_in_pane(window, live, id, path, opening);
 }
 
 struct WorkspaceLinkUi {
@@ -9536,6 +9632,7 @@ enum TreeCommand {
     /// folder, and the folders are on screen already — sending the writer to a
     /// file dialog to point at one they can see is the long way round.
     SearchIn,
+    TerminalIn,
 }
 
 impl TreeCommand {
@@ -9549,6 +9646,7 @@ impl TreeCommand {
             4 => Some(Self::Delete),
             5 => Some(Self::Reveal),
             6 => Some(Self::SearchIn),
+            7 => Some(Self::TerminalIn),
             _ => None,
         }
     }
@@ -9580,6 +9678,16 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
     // path, and a folder is a folder however the row was drawn.
     let is_folder = selected.as_deref().map(Path::is_dir).unwrap_or(false);
     match command {
+        TreeCommand::TerminalIn => {
+            if let Some(path) = selected {
+                let directory = if is_folder {
+                    path
+                } else {
+                    path.parent().unwrap_or(&path).to_path_buf()
+                };
+                terminal_shells::open_in(window, live, directory);
+            }
+        }
         TreeCommand::NewFile | TreeCommand::NewFolder => {
             // 仕様の実装依頼: "with no selection choose first root only if
             // unambiguous, otherwise request selection" — a selected root row
@@ -10141,11 +10249,10 @@ fn publish_panes(window: &AppWindow, count: usize) {
         window.set_panes(ModelRc::new(VecModel::from(made)));
         return;
     };
-    while rows.row_count() > count {
-        rows.remove(rows.row_count() - 1);
-    }
-    while rows.row_count() < count {
-        rows.push(PaneId(rows.row_count() as u32).initial_screen(false, false));
+    while PaneId::count(window) > count { rows.remove(PaneId::count(window) - 1); }
+    while PaneId::count(window) < count {
+        let at = PaneId::count(window);
+        rows.insert(at, PaneId(at as u32).initial_screen(false, false));
     }
 }
 
@@ -10160,9 +10267,10 @@ fn place_panes(window: &AppWindow, layout: &Layout) {
     // own length says how many panes there are**, and a second opinion about
     // that is exactly what went stale.
     let focused = PaneId::from_index(window.get_focused_pane());
+    let structural_focus = if focused.is_panel() { PaneId::from_index(focused.screen(window).panel_owner) } else { focused };
     let on_screen = placed
         .iter()
-        .any(|(pane, _)| *pane == focused.index() as usize);
+        .any(|(pane, _)| *pane == structural_focus.index() as usize);
     if !on_screen && let Some((first, _)) = placed.first() {
         window.set_focused_pane(*first as i32);
     }
@@ -10304,6 +10412,7 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
             } else {
                 tab.below.shell = shell;
             }
+            terminal_panels::sync_entry(tab);
         }
     }
 }
@@ -10409,6 +10518,9 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
             screen.active_tab = active;
             show_paper(screen, &paper.0, &paper.1);
         });
+        if let Some(tab) = live.tabs.borrow().of(id).current() {
+            terminal_panels::publish(window, id, &tab.below);
+        }
     }
     // The name and the unsaved marker in the status bar are the focused pane's
     // document's, which after a switch is not the one they were last set from.
@@ -10421,6 +10533,7 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
     // where the strips change. A boundary dragged without touching a strip is
     // caught by the write on the way out.
     write_session(window, live);
+    panel_source::sync(window, live);
 }
 
 /// Write down that a pane is standing in front of this tab (書き手の報告 2026-09-07).
@@ -10548,7 +10661,7 @@ fn told_no_way(window: &AppWindow, forward: bool) {
 /// the list of all tabs must not disagree about it.
 fn tab_title(tab: &PaneTab) -> String {
     match &tab.terminal {
-        Some(session) => session.borrow().name().to_owned(),
+        Some(session) => session.borrow().title(),
         None if tab.empty => new_tab_name().to_owned(),
         None if tab.settings => settings_tab_name().to_owned(),
         None => tab
@@ -10648,6 +10761,18 @@ fn drop_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize,
 fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, other: PaneId) {
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
+    let panels = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .get(index)
+        .map(|t| t.below.entries.clone())
+        .unwrap_or_default();
+    if !terminal_panels::stop_entries_for_close(window, live, &panels) {
+        cancel_close_run(live);
+        return;
+    }
     let emptied = {
         let mut tabs = live.tabs.borrow_mut();
         let strip = tabs.of_mut(id);
@@ -10725,6 +10850,12 @@ fn move_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize)
 /// 色を持って来たTAB（同じ文書の別TAB・運ばれたTAB）と、端末・設定のTABには付けない。
 /// 縦書き・横書きの両方に同じ色。
 fn give_random_paper(window: &AppWindow, tab: &mut PaneTab) {
+    if tab.terminal.is_some() {
+        if tab.below.front_style.is_none() {
+            tab.below.front_style = terminal_appearance::random_style(window, 0);
+        }
+        return;
+    }
     let choice = window.get_paper_random();
     if choice == 0 || tab.stands_in() || tab.paper.iter().any(Option::is_some) {
         return;
@@ -10812,6 +10943,7 @@ fn new_file_tab(window: &AppWindow, live: &Live, id: PaneId) {
 }
 
 fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
+    if id.is_panel() { terminal_panels::action(window, live, PaneId::from_index(id.screen(window).panel_owner), 1, 0); return; }
     // **新しい紙に、前の紙の知らせは付いてこない**（書き手の報告 2026-09-10：
     // 「New Tabで新規のファイルを作ったら、『保存しました』が出ているのは違和感が
     // あります。新規のファイルはまだ保存されていないからです」）。
@@ -10827,7 +10959,14 @@ fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
             .panes
             .iter()
             .flat_map(|strip| strip.tabs.iter())
-            .map(|tab| tab.document.file.borrow().untitled_number())
+            .flat_map(|tab| {
+                std::iter::once(tab.document.file.borrow().untitled_number()).chain(
+                    tab.below
+                        .entries
+                        .iter()
+                        .map(|p| p.borrow().document.file.borrow().untitled_number()),
+                )
+            })
             .collect();
         next_untitled_number(&taken)
     };
@@ -10858,6 +10997,17 @@ fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
 /// it** rather than gaining a neighbour, for the reason a shell or a file does
 /// (追加要件 2026-09-07).
 fn open_settings(window: &AppWindow, live: &Live) {
+    if focused_pane(window).is_panel() {
+        window.set_focused_pane(focused_pane(window).screen(window).panel_owner);
+    }
+    window.invoke_shell_profile_action(0, window.get_shell_profile_index());
+    if window.get_panel_defaults().row_count() != 3 {
+        window.set_panel_defaults(ModelRc::new(VecModel::from(
+            (0..3)
+                .map(|k| terminal_appearance::default_style(window, k))
+                .collect::<Vec<_>>(),
+        )));
+    }
     let held = PaneId::all(window).into_iter().find_map(|id| {
         live.tabs
             .borrow()
@@ -10892,7 +11042,8 @@ fn open_settings(window: &AppWindow, live: &Live) {
                 tab.settings = true;
             }
         }
-        if let Some(showing) = live.tabs.borrow().of(id).current().cloned() {
+        let showing = live.tabs.borrow().of(id).current().cloned();
+        if let Some(showing) = showing {
             live.show_tab(window, id, &showing);
         }
         publish_tabs(window, live);
@@ -10903,7 +11054,14 @@ fn open_settings(window: &AppWindow, live: &Live) {
                 .panes
                 .iter()
                 .flat_map(|strip| strip.tabs.iter())
-                .map(|tab| tab.document.file.borrow().untitled_number())
+                .flat_map(|tab| {
+                    std::iter::once(tab.document.file.borrow().untitled_number()).chain(
+                        tab.below
+                            .entries
+                            .iter()
+                            .map(|p| p.borrow().document.file.borrow().untitled_number()),
+                    )
+                })
                 .collect();
             next_untitled_number(&taken)
         };
@@ -10962,6 +11120,7 @@ fn answer_new_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Option<Ter
         tab.empty = false;
         if session.is_some() {
             tab.terminal = session;
+            tab.below.front_style = terminal_appearance::random_style(window, 0);
             tab.view.vertical = false;
             tab.view.preview = false;
         }
@@ -10999,6 +11158,22 @@ struct CloseRun {
 /// returns, and [`answer_question`] picks the work back up.
 #[derive(Clone, Debug)]
 enum Question {
+    TerminalInput(terminal_workflow::Input),
+    TerminalSwitch {
+        identity: Rc<()>,
+        shell: TerminalShell,
+    },
+    TerminalClose(Rc<()>),
+    PanelSwitch {
+        pane: PaneId,
+        entry: Rc<RefCell<terminal_panels::PanelDocument>>,
+        shell: TerminalShell,
+    },
+    PanelClose {
+        pane: PaneId,
+        entry: Rc<RefCell<terminal_panels::PanelDocument>>,
+        save: bool,
+    },
     CloneWorkspaceUrl,
     ChangeWorkspace(Option<workspace::WorkspaceId>),
     DiscardForWorkspace(Option<workspace::WorkspaceId>),
@@ -11108,6 +11283,11 @@ impl Question {
     fn diagnostic_name(&self) -> &'static str {
         match self {
             Self::CloneWorkspaceUrl => "CloneWorkspaceUrl",
+            Self::PanelClose { .. } => "PanelClose",
+            Self::TerminalInput(..) => "TerminalInput",
+            Self::TerminalSwitch { .. } => "TerminalSwitch",
+            Self::PanelSwitch { .. } => "PanelSwitch",
+            Self::TerminalClose(..) => "TerminalClose",
             Self::ChangeWorkspace(..) => "ChangeWorkspace",
             Self::DiscardForWorkspace(..) => "DiscardForWorkspace",
             Self::CloseTab { .. } => "CloseTab",
@@ -11228,6 +11408,7 @@ fn ask_question(
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
+    window.set_question_enter_sends(matches!(&question, Question::TerminalInput(_)));
     window.set_question_is_clone(matches!(&question, Question::CloneWorkspaceUrl));
     *live.pending.borrow_mut() = Some(question);
     let named = choices
@@ -11319,6 +11500,60 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         choice
     };
     match (question, choice) {
+        (Question::PanelSwitch { pane, entry, shell }, 0) => {
+            terminal_panels::switch_confirmed(window, live, pane, &entry, shell)
+        }
+        (Question::TerminalSwitch { identity, shell }, 0) => {
+            let found = live
+                .tabs
+                .borrow()
+                .panes
+                .iter()
+                .enumerate()
+                .find_map(|(p, strip)| {
+                    strip
+                        .tabs
+                        .iter()
+                        .position(|t| Rc::ptr_eq(&t.identity, &identity))
+                        .map(|at| (PaneId::from_index(p as i32), at))
+                });
+            if let Some((id, index)) = found {
+                switch_to_tab(window, live, id, index);
+                switch_shell_confirmed(window, live, id, shell);
+            }
+        }
+        (Question::TerminalInput(input), 0) => terminal_workflow::send(window, live, input),
+        (Question::TerminalClose(identity), choice @ 0..=1) => {
+            terminal_workflow::close(window, live, identity, choice == 0)
+        }
+        (
+            Question::PanelClose {
+                pane,
+                entry,
+                save: true,
+            },
+            0,
+        ) => {
+            if terminal_panels::save_for_close(window, live, &entry) {
+                terminal_panels::close(window, live, pane, &entry);
+            }
+        }
+        (
+            Question::PanelClose {
+                pane,
+                entry,
+                save: true,
+            },
+            1,
+        )
+        | (
+            Question::PanelClose {
+                pane,
+                entry,
+                save: false,
+            },
+            0,
+        ) => terminal_panels::close(window, live, pane, &entry),
         (Question::CloneWorkspaceUrl, _) => {
             live.folder.borrow_mut().clone_url_check.clear();
             window.set_workspace_clone_url_checking(false);
@@ -11444,6 +11679,12 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             advance_close_run(window, live);
         }
         (Question::CloseWindow, 0) => {
+            for entry in terminal_panels::entries(live) {
+                let dirty = entry.borrow().document.text.edited();
+                if dirty && !terminal_panels::save_for_close(window, live, &entry) {
+                    return;
+                }
+            }
             save_all(window, live);
             // **保存が済んでいなければ閉じない。**「名前を付けて保存」を
             // 取り消した文書がまだ編集中のまま残っている——そのまま閉じるのは
@@ -11458,12 +11699,16 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                 );
                 return;
             }
-            window.hide().ok();
+            if terminal_panels::stop_for_close(window, live) {
+                window.hide().ok();
+            }
         }
         (Question::CloseWindow, 1) => {
             // 破棄して閉じる。**退避は切ってあるので、消すものは無い**——
             // 作業コピーはそもそも書かれていない。
-            window.hide().ok();
+            if terminal_panels::stop_for_close(window, live) {
+                window.hide().ok();
+            }
         }
         // 追加要件 2026-09-09（残り2）: 最後の退避が書けなかったときの3つ。
         // **どれも勝手には閉じない**——閉じてよいと決められるのは、書けた
@@ -11586,7 +11831,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         // キャンセル, and every other way out of a question about closing. The
         // run stops here rather than going on to ask about the next tab.
         (
-            Question::CloseTab { .. }
+            Question::TerminalClose(..)
+            | Question::PanelClose { .. }
+            | Question::CloseTab { .. }
             | Question::CloseMemo { .. }
             | Question::DiscardOnClose { .. },
             _,
@@ -11699,6 +11946,24 @@ fn reopen_as_asked(window: &AppWindow, live: &Live, encoding: file_io::Encoding)
 /// **True when a question is now standing**, which is what stops a run of
 /// closes ([`advance_close_run`]) until it has been answered.
 fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool {
+    if id.is_panel() { return panel_source::close(window, live, id); }
+    sync_active_tab(window, live);
+    let target = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .get(index)
+        .filter(|t| terminal_workflow::needs_close(window, t))
+        .map(|t| t.identity.clone());
+    if let Some(identity) = target {
+        terminal_workflow::ask_close(window, live, identity);
+        return true;
+    }
+    close_tab_content(window, live, id, index)
+}
+
+fn close_tab_content(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool {
     // Brought to the front first: a question about a document nobody can see is
     // a question about nothing, and it makes the tab being closed the one in
     // front of the pane, so saving it means the ordinary save.
@@ -12010,6 +12275,28 @@ fn finish_close(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
 fn finish_close_inner(window: &AppWindow, live: &Live, id: PaneId, index: usize, remember: bool) {
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
+    let source = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .get(index)
+        .and_then(|t| t.terminal.clone());
+    if let Some(source) = source {
+        terminal_panels::stop_file(window, &source);
+    }
+    let panels = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .get(index)
+        .map(|t| t.below.entries.clone())
+        .unwrap_or_default();
+    if !terminal_panels::stop_entries_for_close(window, live, &panels) {
+        cancel_close_run(live);
+        return;
+    }
     let emptied = {
         let mut tabs = live.tabs.borrow_mut();
         let strip = tabs.of_mut(id);
@@ -12018,6 +12305,9 @@ fn finish_close_inner(window: &AppWindow, live: &Live, id: PaneId, index: usize,
         }
         let before = strip.tabs.len();
         let mut closing = strip.tabs.remove(index);
+        for entry in &closing.below.entries {
+            entry.borrow_mut().stop();
+        }
         if remember
             && !closing.stands_in()
             && !closing.empty
@@ -12161,6 +12451,7 @@ fn drop_pane_row(window: &AppWindow, id: PaneId) {
 /// two, and every other pane keeps what it had. The new pane opens showing the
 /// same file, which is what 要件 6.4 asks a new pane to start with.
 fn divide_pane(window: &AppWindow, live: &Live, here: PaneId, split: Split) {
+    let here = if here.is_panel() { PaneId::from_index(here.screen(window).panel_owner) } else { here };
     let room = here.screen(window);
     let across = match split {
         Split::SideBySide => room.width,
@@ -12246,6 +12537,7 @@ fn divide_pane(window: &AppWindow, live: &Live, here: PaneId, split: Split) {
 /// is the only way to collapse that keeps that promise. A document already open
 /// here arrives as nothing, because a strip holds one tab per document.
 fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
+    let here = if here.is_panel() { PaneId::from_index(here.screen(window).panel_owner) } else { here };
     // **Every pane to go is named before any of them does** (2026-09-06). The
     // first version asked "which pane is not `here`" once per turn of a loop,
     // and `here` is a number: as soon as a lower-numbered pane went, the
@@ -12381,7 +12673,14 @@ fn refill_strip(window: &AppWindow, live: &Live, id: PaneId) {
         .panes
         .iter()
         .flat_map(|strip| strip.tabs.iter())
-        .map(|tab| tab.document.file.borrow().untitled_number())
+        .flat_map(|tab| {
+            std::iter::once(tab.document.file.borrow().untitled_number()).chain(
+                tab.below
+                    .entries
+                    .iter()
+                    .map(|p| p.borrow().document.file.borrow().untitled_number()),
+            )
+        })
         .collect();
     let number = next_untitled_number(&taken);
     let empty = OpenDocument::untitled(number, window.as_weak());
@@ -12463,10 +12762,25 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
     };
     if own {
         spec.paper = channels(paper);
+        spec.ink = terminal_appearance::readable_ink(spec.ink, spec.paper);
+        for ink in &mut spec.heading_ink {
+            *ink = terminal_appearance::readable_ink(*ink, spec.paper);
+        }
+    }
+    if id.is_panel() {
+        let style = &screen.panel_style;
+        spec.font_size = style.size.max(8) as f32;
+        spec.body_font = style.family.to_string();
+        spec.ink = channels(style.ink);
+        spec.paper = channels(style.paper);
+        spec.line_numbers = false;
+        spec.ruby_room = false;
+        spec.decorations = [u8::from(style.bold) | (u8::from(style.italic) << 1); 7];
     }
     // 追加要件 2026-09-15: 壁紙を敷いているあいだ、紙は面が1枚だけ透かして塗る。
     spec.paper_painted =
         window.get_wall_kind() == wallpaper::NONE && window.get_background_transparency() == 0;
+    if id.is_panel() { spec.paper_painted = screen.panel_style.transparency == 0; }
     spec
 }
 
@@ -14304,6 +14618,24 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         TERMINAL_SIZE_SETTING.to_owned(),
         window.get_terminal_size().to_string(),
     ));
+    for kind in 0..3 {
+        values.push((
+            format!("terminal.appearance.{kind}"),
+            terminal_appearance::encode(&terminal_appearance::default_style(window, kind)),
+        ));
+    }
+    values.push((
+        "terminal.confirm_paste".into(),
+        window.get_terminal_confirm_paste().to_string(),
+    ));
+    values.push((
+        "terminal.confirm_close".into(),
+        window.get_terminal_confirm_close().to_string(),
+    ));
+    values.push((
+        "terminal.history_limit".into(),
+        window.get_terminal_history_limit().to_string(),
+    ));
     let palette = window.get_palette();
     let fonts = window.get_sheet_fonts();
     for sheet in 0..2 {
@@ -14525,6 +14857,34 @@ fn apply_settings(
         if written == TERMINAL_FONT_SETTING {
             if !value.trim().is_empty() {
                 window.set_terminal_font(value.into());
+            }
+            continue;
+        }
+        if let Some(kind) = written
+            .strip_prefix("terminal.appearance.")
+            .and_then(|k| k.parse::<usize>().ok())
+            .filter(|k| *k < 3)
+        {
+            if let Some(style) = terminal_appearance::decode(value) {
+                let mut defaults: Vec<_> = (0..3)
+                    .map(|k| terminal_appearance::default_style(window, k))
+                    .collect();
+                defaults[kind] = style;
+                window.set_panel_defaults(ModelRc::new(VecModel::from(defaults)));
+            }
+            continue;
+        }
+        if written == "terminal.confirm_paste" {
+            window.set_terminal_confirm_paste(value != "false");
+            continue;
+        }
+        if written == "terminal.confirm_close" {
+            window.set_terminal_confirm_close(value != "false");
+            continue;
+        }
+        if written == "terminal.history_limit" {
+            if let Ok(n) = value.parse::<i32>() {
+                window.set_terminal_history_limit(n.clamp(0, 1_000_000));
             }
             continue;
         }
@@ -15008,6 +15368,10 @@ impl PaneId {
     /// the editing area is one or more panes, so there is no arrangement
     /// without this one in it.
     const FIRST: PaneId = PaneId(0);
+    fn is_panel(self) -> bool { self.0 >= 65536 }
+    fn row(self, window: &AppWindow) -> usize {
+        if self.is_panel() { window.get_panes().iter().position(|s| s.id == self.index()).unwrap_or(usize::MAX) } else { self.0 as usize }
+    }
 
     /// Every pane that exists, in order.
     ///
@@ -15016,14 +15380,14 @@ impl PaneId {
     /// opinion about how many there are. Everything with one of something per
     /// pane is built by mapping over this.
     fn all(window: &AppWindow) -> Vec<PaneId> {
-        (0..window.get_panes().row_count() as u32)
-            .map(PaneId)
+        window.get_panes().iter().filter(|s| s.id < 65536)
+            .map(|s| PaneId(s.id as u32))
             .collect()
     }
 
     /// How many panes exist.
     fn count(window: &AppWindow) -> usize {
-        window.get_panes().row_count()
+        Self::all(window).len()
     }
 
     /// Every pane but this one.
@@ -15066,7 +15430,7 @@ impl PaneId {
     fn screen(self, window: &AppWindow) -> PaneScreen {
         window
             .get_panes()
-            .row_data(self.index() as usize)
+            .row_data(self.row(window))
             .unwrap_or_default()
     }
 
@@ -15078,10 +15442,14 @@ impl PaneId {
     /// not the row that is on screen.
     fn update_screen(self, window: &AppWindow, edit: impl FnOnce(&mut PaneScreen)) {
         let panes = window.get_panes();
-        let row = self.index() as usize;
+        let row = self.row(window);
+        if row >= panes.row_count() { return; }
         let mut screen = panes.row_data(row).unwrap_or_default();
+        let previous = screen.clone();
         edit(&mut screen);
-        panes.set_row_data(row, screen);
+        if previous != screen {
+            panes.set_row_data(row, screen);
+        }
     }
 
     /// This pane's row before anything has been laid out.
@@ -15099,6 +15467,8 @@ impl PaneId {
     fn initial_screen(self, vertical: bool, preview: bool) -> PaneScreen {
         PaneScreen {
             id: self.index(),
+            front_style: terminal_appearance::initial_style(),
+            panel_style: terminal_appearance::initial_style(),
             vertical,
             preview,
             zoom: ZOOM_DEFAULT,
@@ -15203,6 +15573,7 @@ impl PaneId {
     /// show is shown by scrolling across it, because a line length that the
     /// pane silently overruled would be a setting nobody could check.
     fn line_fit(self, window: &AppWindow, typography: &Typography) -> LineFit {
+        if self.is_panel() { return LineFit::Extent(usable_horizontal_width(self.shown_across_flow(window))); }
         let vertical = self.vertical(window);
         let sheet = usize::from(vertical);
         match Setting::WrapMode.read(window, sheet) {
@@ -15424,6 +15795,7 @@ impl PaneId {
     }
 
     fn set_shows_preview(self, window: &AppWindow, shows: bool) {
+        if self.is_panel() { return; }
         self.update_screen(window, |screen| screen.preview = shows);
     }
 
@@ -15534,12 +15906,23 @@ impl PaneId {
     }
 
     fn set_tiles(self, window: &AppWindow, tiles: Vec<PreviewTile>) {
+        if self.screen(window).tiles.iter().eq(tiles.iter().cloned()) {
+            return;
+        }
         let model = ModelRc::new(VecModel::from(tiles));
         self.update_screen(window, |screen| screen.tiles = model);
     }
 
     /// The images of the strip along the foot of the pane (追加要件 Terminal).
     fn set_below_tiles(self, window: &AppWindow, tiles: Vec<PreviewTile>) {
+        if self
+            .screen(window)
+            .below_tiles
+            .iter()
+            .eq(tiles.iter().cloned())
+        {
+            return;
+        }
         let model = ModelRc::new(VecModel::from(tiles));
         self.update_screen(window, |screen| screen.below_tiles = model);
     }
@@ -15726,6 +16109,7 @@ impl PaneId {
         self.draw_both(window, states, cache, document, source, caret);
         let took = elapsed_ms(started);
         cache.borrow_mut().pace_of(self).drew(took);
+        if self.is_panel() { let weak = window.as_weak(); let _ = slint::invoke_from_event_loop(move || { if let Some(window) = weak.upgrade() { window.invoke_republish_tabs(); } }); }
     }
 
     /// This pane and, if it is showing the same document, the other one.
@@ -15834,6 +16218,7 @@ impl RenderCache {
     /// The pane an id names. **The only place the two are told apart by
     /// anything other than a [`PaneId`].**
     fn pane(&mut self, id: PaneId) -> &mut Pane {
+        if id.is_panel() { return self.panel_panes.entry(id.0).or_insert_with(|| Pane::new(WritingMode::Horizontal)); }
         let at = (id.index() as usize).min(self.panes.len().saturating_sub(1));
         &mut self.panes[at]
     }
@@ -15844,6 +16229,7 @@ impl RenderCache {
     /// like every other list indexed by pane: a stale number arrives with a
     /// keystroke and must not be able to stop the editor.
     fn pace_of(&mut self, id: PaneId) -> &mut EditPace {
+        if id.is_panel() { return self.panel_pace.entry(id.0).or_default(); }
         let at = (id.index() as usize).min(self.pace.len().saturating_sub(1));
         &mut self.pace[at]
     }
@@ -16589,7 +16975,7 @@ fn refresh_terminal(
     else {
         return;
     };
-    let look = terminal_look(window);
+    let look = terminal_appearance::look(window, id, spot);
     let Ok(cell) = cells::terminal_cell_size(&look) else {
         return;
     };
@@ -16615,14 +17001,47 @@ fn refresh_terminal(
         let Some(shell) = borrowed.pane(id).shell(spot) else {
             return;
         };
-        if shell.looking > 0 {
-            shell.looking += history.saturating_sub(shell.history);
+        let origin = screen.history_origin();
+        if shell.looking == 0 {
+            shell.unseen = false;
+        } else if shell.last_revision != screen.revision() {
+            shell.unseen = true;
         }
+        shell.last_revision = screen.revision();
+        id.update_screen(window, |s| {
+            if spot == TerminalSpot::Front {
+                s.terminal_new_output = shell.unseen;
+            } else {
+                s.below_new_output = shell.unseen;
+            }
+        });
+        let evicted = origin.saturating_sub(shell.history_origin) as usize;
+        if shell.looking > 0 {
+            shell.looking += (origin + history as u64)
+                .saturating_sub(shell.history_origin + shell.history as u64)
+                as usize;
+        }
+        if let Some(selection) = &mut shell.selection {
+            if selection.anchor.0 < evicted || selection.head.0 < evicted {
+                shell.selection = None;
+            } else {
+                selection.anchor.0 -= evicted;
+                selection.head.0 -= evicted;
+            }
+        }
+        shell.history_origin = origin;
         shell.history = history;
         shell.looking = shell.looking.min(history);
         shell.looking
     };
     // Where the view starts in the history, and what the writer has picked out.
+    id.update_screen(window, |s| {
+        if spot == TerminalSpot::Front {
+            s.terminal_behind = looking as i32;
+        } else {
+            s.below_behind = looking as i32;
+        }
+    });
     let top = history.saturating_sub(looking);
     let selection = cache
         .borrow_mut()
@@ -16653,6 +17072,7 @@ fn refresh_terminal(
             channel.to_bits().hash(&mut hasher);
         }
         look.family.hash(&mut hasher);
+        (look.transparent, look.bold, look.italic, look.underline).hash(&mut hasher);
         hasher.finish()
     };
     let shape = (
@@ -16771,7 +17191,7 @@ fn refresh_terminal(
                 for four in pixels.make_mut_bytes().chunks_exact_mut(4) {
                     four.swap(0, 2);
                 }
-                let image = Image::from_rgba8(pixels);
+                let image = Image::from_rgba8_premultiplied(pixels);
                 if let Some(shell) = cache.borrow_mut().pane(id).shell(spot) {
                     shell.bands.bands.insert(band, (signature, image.clone()));
                 }
@@ -16907,6 +17327,32 @@ fn refresh_terminal(
 /// one holds the tab down and picks the right one, rather than closing it and
 /// starting again where it left off in the order.
 fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
+    let current = live.tabs.borrow().of(id).current().cloned();
+    let Some(current) = current else {
+        return;
+    };
+    if current
+        .terminal
+        .as_ref()
+        .is_some_and(|s| s.borrow().name() == shell.name)
+    {
+        return;
+    }
+    if window.get_terminal_confirm_close()
+        && current
+            .terminal
+            .as_ref()
+            .is_some_and(|s| !s.borrow().finished())
+    {
+        ask_question(window, live, Question::TerminalSwitch { identity: current.identity, shell },
+            pick("シェルを切り替えますか？\n\n現在のシェルとログ取り込みは終了します。Panelの文書は残ります。", "Switch shells?\n\nThe current shell and log capture will stop. Panel documents remain.").into(),
+            &[pick("切り替える", "Switch"), cancel()], 0);
+        return;
+    }
+    switch_shell_confirmed(window, live, id, shell);
+}
+
+fn switch_shell_confirmed(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
     // **Logged before anything can turn it down.** The gesture that opens the
     // list is a long press and the list is drawn by the window, so when nothing
     // happens the first question is whether the answer ever arrived here
@@ -16915,18 +17361,26 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
         "tab",
         &format!("shell asked pane={} name={}", id.log_name(), shell.name),
     );
-    let running = live
-        .tabs
-        .borrow()
-        .of(id)
-        .current()
-        .is_some_and(|tab| tab.terminal.is_some());
+    let running = live.tabs.borrow().of(id).current().is_some_and(|tab| {
+        tab.terminal
+            .as_ref()
+            .is_some_and(|s| s.borrow().name() != shell.name)
+    });
     if !running {
         return;
     }
     let Some(session) = start_shell(window, live, id, &shell, id.shown_height(window)) else {
         return;
     };
+    let source = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .and_then(|t| t.terminal.clone());
+    if let Some(source) = source {
+        terminal_panels::stop_file(window, &source);
+    }
     {
         let mut tabs = live.tabs.borrow_mut();
         let strip = tabs.of_mut(id);
@@ -16936,6 +17390,9 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
         };
         // **The old one goes when the last hand lets go of it**, which is here:
         // the pane's copy is put down below by `show_tab`.
+        for entry in &tab.below.entries {
+            entry.borrow_mut().stop();
+        }
         tab.terminal = Some(Rc::new(RefCell::new(session)));
     }
     let Some(showing) = live.tabs.borrow().of(id).current().cloned() else {
@@ -16967,6 +17424,7 @@ fn open_terminal(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShe
 }
 
 fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
+    let id = if id.is_panel() { PaneId::from_index(id.screen(window).panel_owner) } else { id };
     sync_active_tab(window, live);
     let number = {
         let tabs = live.tabs.borrow();
@@ -16974,7 +17432,14 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
             .panes
             .iter()
             .flat_map(|strip| strip.tabs.iter())
-            .map(|tab| tab.document.file.borrow().untitled_number())
+            .flat_map(|tab| {
+                std::iter::once(tab.document.file.borrow().untitled_number()).chain(
+                    tab.below
+                        .entries
+                        .iter()
+                        .map(|p| p.borrow().document.file.borrow().untitled_number()),
+                )
+            })
             .collect();
         next_untitled_number(&taken)
     };
@@ -16982,7 +17447,7 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
         return;
     };
     let document = OpenDocument::untitled(number, window.as_weak());
-    let tab = PaneTab {
+    let mut tab = PaneTab {
         view: TabView {
             vertical: false,
             preview: false,
@@ -16991,6 +17456,7 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
         terminal: Some(Rc::new(RefCell::new(session))),
         ..PaneTab::showing(window, id, document)
     };
+    tab.below.front_style = terminal_appearance::random_style(window, 0);
     add_tab(window, live, id, tab);
 }
 
@@ -17018,8 +17484,17 @@ fn start_shell(
         // any of it (要件 2).
         let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
     };
-    match TerminalSession::start(&shell.name, &shell.command, columns, rows, wake) {
-        Ok(session) => {
+    let (command, directory) = terminal_shells::launch(shell);
+    match TerminalSession::start_in(
+        &shell.name,
+        &command,
+        directory.as_deref(),
+        columns,
+        rows,
+        wake,
+    ) {
+        Ok(mut session) => {
+            session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
             live.cache.borrow_mut().log_diag(
                 "terminal",
                 &format!(
@@ -17081,6 +17556,14 @@ fn send_terminal_key(
     // chord a shell cannot be asked to give up. The pair is what every terminal
     // uses, and pasting comes back the other way: `Ctrl+V` is left to the pane's
     // own field, which fills it and hands the text over as typing.
+    if control && shift && text.eq_ignore_ascii_case("f") {
+        terminal_workflow::action(window, live, id, spot, 0);
+        return;
+    }
+    if shift && matches!(code, 7 | 8) {
+        terminal_workflow::action(window, live, id, spot, if code == 7 { 8 } else { 9 });
+        return;
+    }
     if control && shift && text.eq_ignore_ascii_case("c") {
         copy_terminal_selection(window, live, id, spot);
         return;
@@ -17187,7 +17670,7 @@ fn scroll_terminal(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSp
         return;
     };
     let history = session.borrow().screen().scrollback().len();
-    let look = terminal_look(window);
+    let look = terminal_appearance::look(window, id, spot);
     let line = cells::terminal_cell_size(&look)
         .map(|cell| cell.line)
         .unwrap_or(18.0);
@@ -17250,7 +17733,7 @@ fn select_in_terminal(
     else {
         return;
     };
-    let look = terminal_look(window);
+    let look = terminal_appearance::look(window, id, spot);
     let Ok(cell) = cells::terminal_cell_size(&look) else {
         return;
     };
@@ -17331,7 +17814,7 @@ fn terminal_selection_text(session: &TerminalSession, selection: TerminalSelecti
         }
         // Trailing blanks are the paper the terminal is written on, not spaces
         // anybody typed.
-        while taken.ends_with(' ') {
+        while !line.wrapped && taken.ends_with(' ') {
             taken.pop();
         }
         text.push_str(&taken);
@@ -17378,6 +17861,7 @@ fn below_kind(pane: &mut Pane) -> i32 {
 /// **Closing does not end the shell in it.** A panel put away is not a command
 /// abandoned, and the writer who opens it again expects to find what they left.
 fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
+    let id = if id.is_panel() { PaneId::from_index(id.screen(window).panel_owner) } else { id };
     let (open, needs_shell) = {
         let mut borrowed = live.cache.borrow_mut();
         let pane = borrowed.pane(id);
@@ -17411,9 +17895,15 @@ fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
         &format!("below pane={} kind={kind} open={open}", id.log_name()),
     );
     store_below_on_tab(window, live, id);
+    terminal_panels::ensure(window, live, id);
+    if let Some(tab) = live.tabs.borrow().of(id).current() {
+        terminal_panels::publish(window, id, &tab.below);
+    }
     if kind == 1 {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
     }
+    panel_source::sync(window, live);
+    if kind == 2 { panel_source::focus(window, live, id, open); }
 }
 
 /// Start the shell that stands in a pane's strip (追加要件 Terminal).
@@ -17460,6 +17950,7 @@ fn store_below_on_tab(window: &AppWindow, live: &Live, id: PaneId) {
         } else {
             tab.below.shell = shell;
         }
+        terminal_panels::sync_entry(tab);
     }
 }
 
@@ -17478,6 +17969,7 @@ fn resize_below(window: &AppWindow, live: &Live, id: PaneId, height: f32) {
     };
     id.set_below(window, kind, height);
     store_below_on_tab(window, live, id);
+    panel_source::sync(window, live);
     if kind == 1 {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
     }
@@ -17530,36 +18022,31 @@ fn show_draft(window: &AppWindow, id: PaneId, draft: &str) {
 }
 
 fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
-    let text = id.screen(window).below_draft.to_string();
-    if text.is_empty() {
+    let id = if id.is_panel() { PaneId::from_index(id.screen(window).panel_owner) } else { id };
+    if id.screen(window).panel_read_only {
         return;
     }
-    let Some(session) = live
+    terminal_panels::ensure(window, live, id);
+    store_below_on_tab(window, live, id);
+    let text = terminal_panels::current(live, id)
+        .map(|p| p.borrow().document.text.borrow().clone())
+        .unwrap_or_else(|| id.screen(window).below_draft.to_string());
+    let session = live
         .cache
         .borrow_mut()
         .pane(id)
-        .shell(TerminalSpot::Front)
-        .map(|shell| shell.session.clone())
-    else {
-        return;
-    };
-    // **打ったものが、打ったとおりに行く**（書き手の報告 2026-09-07）。末尾を
-    // 落としていたので、下書きの終わりに置いた改行——上のコマンドを走らせる、
-    // まさにその一打——だけが届かなかった。改行を置くかどうかは書き手が決める。
-    //
-    // **貼り付けではなく打鍵として送る**（同・3回目）。`paste`は括弧付き貼り付け
-    // の印を付けるので、シェルは受け取ったものを読まずに抱える——`ls`と改行を
-    // 送ってもプロンプトが下がるだけで走らなかったのはそれ。
-    session.borrow_mut().send(&terminal::encode_typing(&text));
-    {
-        let mut borrowed = live.cache.borrow_mut();
-        if let Some(shell) = borrowed.pane(id).shell(TerminalSpot::Front) {
-            shell.looking = 0;
-        }
+        .terminal
+        .as_ref()
+        .map(|t| t.session.clone());
+    if let Some(session) = session {
+        terminal_workflow::input(
+            window,
+            live,
+            session,
+            &text,
+            terminal_panels::current(live, id),
+        );
     }
-    show_draft(window, id, "");
-    store_below_on_tab(window, live, id);
-    refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
 }
 
 /// Every shell on screen, drawn again (追加要件 Terminal).
@@ -17569,6 +18056,7 @@ fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
 /// cheaper than carrying an answer across a thread that could be stale by the
 /// time it lands.
 fn refresh_terminal_panes(window: &AppWindow, live: &Live) {
+    terminal_panels::drain(window, live);
     for id in PaneId::all(window) {
         if live.cache.borrow_mut().pane(id).terminal.is_some() {
             refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
@@ -20594,6 +21082,7 @@ fn stepped_tab(count: usize, active: usize, backwards: bool) -> Option<usize> {
 /// takes it says so itself (`focus-taken`), which is what turns the IME the
 /// right way round for the writing it is about to be used for.
 fn move_focus(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, from: PaneId, towards: i32) {
+    let from = if from.is_panel() { PaneId::from_index(from.screen(window).panel_owner) } else { from };
     let Some(towards) = Towards::from_index(towards) else {
         return;
     };
@@ -21803,6 +22292,7 @@ mod tests {
         let shell = TerminalShell {
             name: "PowerShell 7".to_owned(),
             command: "pwsh.exe -NoLogo -WorkingDirectory .".to_owned(),
+            directory: String::new(),
         };
 
         assert_eq!(
