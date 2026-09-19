@@ -3195,6 +3195,7 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(window) = weak.upgrade() {
             let most = offered_shells(&window).len().saturating_sub(1) as i32;
             window.set_default_shell(shell.clamp(0, most));
+            window.invoke_shell_profile_action(0, window.get_shell_profile_index());
             save_settings(&window, &default_cache);
         }
     });
@@ -10956,6 +10957,14 @@ fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
 /// it** rather than gaining a neighbour, for the reason a shell or a file does
 /// (追加要件 2026-09-07).
 fn open_settings(window: &AppWindow, live: &Live) {
+    window.invoke_shell_profile_action(0, window.get_shell_profile_index());
+    if window.get_panel_defaults().row_count() != 3 {
+        window.set_panel_defaults(ModelRc::new(VecModel::from(
+            (0..3)
+                .map(|k| terminal_appearance::default_style(window, k))
+                .collect::<Vec<_>>(),
+        )));
+    }
     let held = PaneId::all(window).into_iter().find_map(|id| {
         live.tabs
             .borrow()
@@ -11067,6 +11076,7 @@ fn answer_new_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Option<Ter
         tab.empty = false;
         if session.is_some() {
             tab.terminal = session;
+            tab.below.front_style = terminal_appearance::random_style(window, 0);
             tab.view.vertical = false;
             tab.view.preview = false;
         }
@@ -11110,6 +11120,11 @@ enum Question {
         shell: TerminalShell,
     },
     TerminalClose(Rc<()>),
+    PanelSwitch {
+        pane: PaneId,
+        entry: Rc<RefCell<terminal_panels::PanelDocument>>,
+        shell: TerminalShell,
+    },
     PanelClose {
         pane: PaneId,
         entry: Rc<RefCell<terminal_panels::PanelDocument>>,
@@ -11227,6 +11242,7 @@ impl Question {
             Self::PanelClose { .. } => "PanelClose",
             Self::TerminalInput(..) => "TerminalInput",
             Self::TerminalSwitch { .. } => "TerminalSwitch",
+            Self::PanelSwitch { .. } => "PanelSwitch",
             Self::TerminalClose(..) => "TerminalClose",
             Self::ChangeWorkspace(..) => "ChangeWorkspace",
             Self::DiscardForWorkspace(..) => "DiscardForWorkspace",
@@ -11348,6 +11364,7 @@ fn ask_question(
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
+    window.set_question_enter_sends(matches!(&question, Question::TerminalInput(_)));
     window.set_question_is_clone(matches!(&question, Question::CloneWorkspaceUrl));
     *live.pending.borrow_mut() = Some(question);
     let named = choices
@@ -11439,6 +11456,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         choice
     };
     match (question, choice) {
+        (Question::PanelSwitch { pane, entry, shell }, 0) => {
+            terminal_panels::switch_confirmed(window, live, pane, &entry, shell)
+        }
         (Question::TerminalSwitch { identity, shell }, 0) => {
             let found = live
                 .tabs
@@ -15348,8 +15368,11 @@ impl PaneId {
         let panes = window.get_panes();
         let row = self.index() as usize;
         let mut screen = panes.row_data(row).unwrap_or_default();
+        let previous = screen.clone();
         edit(&mut screen);
-        panes.set_row_data(row, screen);
+        if previous != screen {
+            panes.set_row_data(row, screen);
+        }
     }
 
     /// This pane's row before anything has been laid out.
@@ -15804,12 +15827,23 @@ impl PaneId {
     }
 
     fn set_tiles(self, window: &AppWindow, tiles: Vec<PreviewTile>) {
+        if self.screen(window).tiles.iter().eq(tiles.iter().cloned()) {
+            return;
+        }
         let model = ModelRc::new(VecModel::from(tiles));
         self.update_screen(window, |screen| screen.tiles = model);
     }
 
     /// The images of the strip along the foot of the pane (追加要件 Terminal).
     fn set_below_tiles(self, window: &AppWindow, tiles: Vec<PreviewTile>) {
+        if self
+            .screen(window)
+            .below_tiles
+            .iter()
+            .eq(tiles.iter().cloned())
+        {
+            return;
+        }
         let model = ModelRc::new(VecModel::from(tiles));
         self.update_screen(window, |screen| screen.below_tiles = model);
     }
@@ -17215,6 +17249,13 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
     let Some(current) = current else {
         return;
     };
+    if current
+        .terminal
+        .as_ref()
+        .is_some_and(|s| s.borrow().name() == shell.name)
+    {
+        return;
+    }
     if window.get_terminal_confirm_close()
         && current
             .terminal
@@ -17238,12 +17279,11 @@ fn switch_shell_confirmed(window: &AppWindow, live: &Live, id: PaneId, shell: Te
         "tab",
         &format!("shell asked pane={} name={}", id.log_name(), shell.name),
     );
-    let running = live
-        .tabs
-        .borrow()
-        .of(id)
-        .current()
-        .is_some_and(|tab| tab.terminal.is_some());
+    let running = live.tabs.borrow().of(id).current().is_some_and(|tab| {
+        tab.terminal
+            .as_ref()
+            .is_some_and(|s| s.borrow().name() != shell.name)
+    });
     if !running {
         return;
     }
@@ -17315,7 +17355,7 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
         return;
     };
     let document = OpenDocument::untitled(number, window.as_weak());
-    let tab = PaneTab {
+    let mut tab = PaneTab {
         view: TabView {
             vertical: false,
             preview: false,
@@ -17324,6 +17364,7 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
         terminal: Some(Rc::new(RefCell::new(session))),
         ..PaneTab::showing(window, id, document)
     };
+    tab.below.front_style = terminal_appearance::random_style(window, 0);
     add_tab(window, live, id, tab);
 }
 

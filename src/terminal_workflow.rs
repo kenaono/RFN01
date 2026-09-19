@@ -102,9 +102,37 @@ pub(crate) fn needs_close(window: &AppWindow, tab: &PaneTab) -> bool {
 }
 
 pub(crate) fn ask_close(window: &AppWindow, live: &Live, identity: Rc<()>) {
-    ask_question(window, live, Question::TerminalClose(identity),
-        pick("TerminalとPanelを閉じますか？\n\nシェルとログ取り込みは終了します。Panelに未保存の内容がある場合は保存してください。", "Close the terminal and its panels?\n\nShells and log capture will stop. Save any panel contents you want to keep.").into(),
-        &[pick("Panelを保存して続行", "Save Panels and Continue"), pick("保存せず続行", "Continue Without Saving"), cancel()], 1);
+    let capturing = live
+        .tabs
+        .borrow()
+        .panes
+        .iter()
+        .flat_map(|p| &p.tabs)
+        .find(|t| Rc::ptr_eq(&t.identity, &identity))
+        .is_some_and(|t| t.below.entries.iter().any(|e| e.borrow().capture.is_some()));
+    let message = if capturing {
+        pick(
+            "このTABと付属のPanelを閉じますか？\n\nこのTABのシェルとログ取り込みが終了します。別のTABの取り込みは継続します。Panelの未保存内容は保存してください。",
+            "Close this tab and its panels?\n\nThis tab's shells and capture will stop. Other tabs keep capturing. Save any unsaved panel contents.",
+        )
+    } else {
+        pick(
+            "このTABと付属のPanelを閉じますか？\n\nこのTABのシェルが終了します。Panelの未保存内容は保存してください。",
+            "Close this tab and its panels?\n\nThis tab's shells will stop. Save any unsaved panel contents.",
+        )
+    };
+    ask_question(
+        window,
+        live,
+        Question::TerminalClose(identity),
+        message.into(),
+        &[
+            pick("Panelを保存して続行", "Save Panels and Continue"),
+            pick("保存せず続行", "Continue Without Saving"),
+            cancel(),
+        ],
+        1,
+    );
 }
 
 pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: bool) {
@@ -154,10 +182,18 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
         return;
     };
     match action {
-        0 => id.update_screen(window, |s| {
-            s.terminal_search_open = true;
-            s.terminal_search_spot = if spot == TerminalSpot::Front { 0 } else { 1 };
-        }),
+        0 => {
+            let target = if spot == TerminalSpot::Front { 0 } else { 1 };
+            let screen = id.screen(window);
+            if screen.terminal_search_open && screen.terminal_search_spot == target {
+                self::action(window, live, id, spot, 3);
+                return;
+            }
+            id.update_screen(window, |s| {
+                s.terminal_search_open = true;
+                s.terminal_search_spot = target;
+            });
+        }
         1 | 2 => {
             let screen = id.screen(window);
             let session = session.borrow();
@@ -195,7 +231,23 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
                 }
             });
         }
-        3 => id.update_screen(window, |s| s.terminal_search_open = false),
+        3 => {
+            if let Some(view) = live.cache.borrow_mut().pane(id).shell(spot) {
+                view.selection = None;
+                view.looking = 0;
+            }
+            id.update_screen(window, |s| {
+                s.terminal_search_open = false;
+                s.terminal_query = "".into();
+                s.terminal_search_status = "".into();
+                if spot == TerminalSpot::Below {
+                    s.below_focus_generation += 1;
+                }
+            });
+            if spot == TerminalSpot::Front {
+                restore_editor_focus(window);
+            }
+        }
         4 => {
             if let Some(view) = live.cache.borrow_mut().pane(id).shell(spot) {
                 view.looking = 0;

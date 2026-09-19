@@ -1,0 +1,43 @@
+import { CheckBox, ComboBox } from "std-widgets.slint";
+import { PanelStyle } from "editor-pane.slint";
+import { ColorCell, Field, Slider } from "controls.slint";
+import { Tok } from "tokens.slint";
+
+export component PanelStyleEditor inherits VerticalLayout {
+    in-out property <PanelStyle> style;
+    in property <bool> underline-allowed: true;
+    in property <bool> defaults: false;
+    spacing: 8px;
+    HorizontalLayout {
+        spacing: 8px;
+        ColorCell { label: @tr("Background"); shown: root.style.paper;
+            chosen(colour) => { root.style.paper = colour; root.style.paper-own = true; }
+            automatic => { root.style.paper-own = false; }
+        }
+        Text { text: @tr("Transparency"); color: Tok.ink; vertical-alignment: center; }
+        Slider { horizontal-stretch: 1; minimum: 0; maximum: 100; value: root.style.transparency;
+            moved(value) => { root.style.transparency = round(value); }
+        }
+        Field { width: 50px; text: root.style.transparency;
+            accepted => { if self.text.is-float() { root.style.transparency = round(clamp(self.text.to-float(), 0, 100)); } }
+            focus-lost => { if self.text.is-float() { root.style.transparency = round(clamp(self.text.to-float(), 0, 100)); } }
+        }
+        Text { text: "%"; color: Tok.ink; vertical-alignment: center; }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        Field { horizontal-stretch: 1; placeholder: @tr("Font"); text <=> root.style.family; }
+        ColorCell { label: @tr("Text Color"); shown: root.style.ink; chosen(colour) => { root.style.ink = colour; } }
+        Field { width: 45px; text: root.style.size;
+            accepted => { if self.text.is-float() { root.style.size = round(clamp(self.text.to-float(), 8, 72)); } }
+            focus-lost => { if self.text.is-float() { root.style.size = round(clamp(self.text.to-float(), 8, 72)); } }
+        }
+        CheckBox { text: @tr("Bold"); checked <=> root.style.bold; }
+        CheckBox { text: @tr("Italic"); checked <=> root.style.italic; }
+        if root.underline-allowed: CheckBox { text: @tr("Underline"); checked <=> root.style.underline; }
+    }
+    if root.defaults: HorizontalLayout {
+        Text { text: "Random"; color: Tok.ink; vertical-alignment: center; }
+        ComboBox { model: [@tr("Off"), @tr("Light"), @tr("Dark")]; current-index <=> root.style.random; }
+    }
+}

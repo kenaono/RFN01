@@ -116,6 +116,33 @@ impl Drop for Harness {
 }
 
 #[test]
+fn terminal_settings_refresh_profiles_loaded_after_install() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    terminal_shells::install(&h.window, &h.live);
+    hold_shells(
+        &h.window,
+        &[TerminalShell {
+            name: "Loaded QA".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        }],
+    );
+    publish_shells(&h.window);
+    h.window.set_default_shell(0);
+    open_settings(&h.window, &h.live);
+    assert_eq!(h.window.get_shell_profile_names().row_count(), 1);
+    assert!(
+        h.window
+            .get_shell_profile_names()
+            .row_data(0)
+            .unwrap()
+            .starts_with("Loaded QA (")
+    );
+    assert_eq!(h.window.get_shell_profile_name(), "Loaded QA");
+    assert!(h.window.get_shell_profile_default());
+}
+
+#[test]
 fn terminal_panel_long_text_click_and_end_render() {
     use slint::platform::{Key, PointerEventButton, WindowEvent};
     let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
@@ -267,6 +294,25 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     }
     let upper = h.live.tabs.borrow().of(id).tabs[0].clone();
     h.live.show_tab(&h.window, id, &upper);
+    // Choosing the current profile is cancellation, including during capture.
+    switch_shell(
+        &h.window,
+        &h.live,
+        id,
+        TerminalShell {
+            name: "QA".into(),
+            command: "invalid-command".into(),
+            directory: String::new(),
+        },
+    );
+    assert!(h.live.pending.borrow().is_none());
+    assert!(Rc::ptr_eq(
+        h.live.tabs.borrow().of(id).tabs[0]
+            .terminal
+            .as_ref()
+            .unwrap(),
+        &session
+    ));
     terminal_panels::ensure(&h.window, &h.live, id);
     show_draft(&h.window, id, "first draft");
     terminal_panels::edited(&h.window, &h.live, id);
@@ -278,6 +324,18 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     terminal_panels::action(&h.window, &h.live, id, 7, 0);
     let target = terminal_panels::current(&h.live, id).unwrap();
     assert!(target.borrow().view.viewer);
+    switch_shell(
+        &h.window,
+        &h.live,
+        id,
+        TerminalShell {
+            name: "QA".into(),
+            command: "invalid-command".into(),
+            directory: String::new(),
+        },
+    );
+    assert!(h.live.pending.borrow().is_none());
+    assert!(target.borrow().capture.is_some());
     terminal_panels::action(&h.window, &h.live, id, 2, 0);
     assert!(h.live.pending.borrow().is_some());
     answer_question(&h.window, &h.live, 2);
@@ -404,4 +462,207 @@ fn terminal_transparency_keeps_glyphs_opaque() {
         pixels.chunks_exact(4).filter(|p| p[3] == 255).count() > 20,
         "text remains solid"
     );
+}
+
+#[test]
+fn terminal_panel_idle_publication_preserves_models_and_saved_title() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    terminal_panels::ensure(&h.window, &h.live, id);
+    terminal_panels::drain(&h.window, &h.live);
+    let before = id.screen(&h.window);
+    for _ in 0..100 {
+        terminal_panels::drain(&h.window, &h.live);
+    }
+    assert_eq!(
+        before,
+        id.screen(&h.window),
+        "idle ticks must not rebuild the UI models"
+    );
+    let panel = terminal_panels::current(&h.live, id).unwrap();
+    let doc = panel.borrow().document.clone();
+    let path = app_data::app_directory().unwrap().join("Panel Title.md");
+    doc.text.borrow_mut().push_str("content");
+    assert!(saving::write_document_to(&h.window, &h.live, &doc, path));
+    terminal_panels::drain(&h.window, &h.live);
+    assert_eq!(
+        id.screen(&h.window).panel_tabs.row_data(0).unwrap(),
+        "Panel Title.md"
+    );
+}
+
+#[test]
+fn terminal_random_override_wins_until_pane_background_changed() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let mut defaults = vec![terminal_appearance::initial_style(); 3];
+    for style in &mut defaults {
+        style.random = 1;
+    }
+    h.window
+        .set_panel_defaults(ModelRc::new(VecModel::from(defaults)));
+    id.update_screen(&h.window, |s| {
+        s.pane_paper_own = true;
+        s.pane_paper = Color::from_rgb_u8(1, 2, 3);
+    });
+    terminal_panels::ensure(&h.window, &h.live, id);
+    let mut tabs = h.live.tabs.borrow_mut();
+    let tab = &mut tabs.of_mut(id).tabs[0];
+    tab.below.front_style = terminal_appearance::random_style(&h.window, 0);
+    terminal_panels::publish(&h.window, id, &tab.below);
+    assert_ne!(
+        id.screen(&h.window).front_style.paper,
+        id.screen(&h.window).pane_paper
+    );
+    assert_ne!(
+        id.screen(&h.window).panel_style.paper,
+        id.screen(&h.window).pane_paper
+    );
+    terminal_appearance::clear_paper(tab);
+    terminal_panels::publish(&h.window, id, &tab.below);
+    assert_eq!(
+        id.screen(&h.window).front_style.paper,
+        id.screen(&h.window).pane_paper
+    );
+    assert_eq!(
+        id.screen(&h.window).panel_style.paper,
+        id.screen(&h.window).pane_paper
+    );
+}
+
+#[test]
+#[ignore = "starts a real ConPTY shell; run explicitly"]
+fn terminal_search_preserves_output_and_toggle_clears_state() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let source = Rc::new(RefCell::new(
+        TerminalSession::start("QA", "cmd.exe /Q /D /K", 80, 25, || {}).unwrap(),
+    ));
+    h.live.tabs.borrow_mut().of_mut(id).tabs[0].terminal = Some(source.clone());
+    let tab = h.live.tabs.borrow().of(id).tabs[0].clone();
+    h.live.show_tab(&h.window, id, &tab);
+    source.borrow_mut().wait(Duration::from_millis(200));
+    source.borrow_mut().type_text("echo editor_spike.exe\r");
+    source.borrow_mut().wait(Duration::from_millis(300));
+    refresh_terminal_panes(&h.window, &h.live);
+    let before = source.borrow().screen().retained_text();
+    assert!(before.contains("editor_spike.exe"));
+    let rows = source.borrow().screen().rows();
+    terminal_workflow::action(&h.window, &h.live, id, TerminalSpot::Front, 0);
+    id.update_screen(&h.window, |s| s.terminal_query = "edit".into());
+    terminal_workflow::action(&h.window, &h.live, id, TerminalSpot::Front, 1);
+    assert_ne!(id.screen(&h.window).terminal_search_status, "0 / 0");
+    assert!(
+        h.live
+            .cache
+            .borrow_mut()
+            .pane(id)
+            .terminal
+            .as_ref()
+            .unwrap()
+            .selection
+            .is_some()
+    );
+    terminal_workflow::action(&h.window, &h.live, id, TerminalSpot::Front, 0);
+    assert!(!id.screen(&h.window).terminal_search_open);
+    assert!(id.screen(&h.window).terminal_query.is_empty());
+    assert!(
+        h.live
+            .cache
+            .borrow_mut()
+            .pane(id)
+            .terminal
+            .as_ref()
+            .unwrap()
+            .selection
+            .is_none()
+    );
+    assert_eq!(source.borrow().screen().rows(), rows);
+    assert_eq!(source.borrow().screen().retained_text(), before);
+    // Opening/renaming a panel file uses the same file move rules without
+    // replacing the upper terminal or placing dirty markers in the filename.
+    let path = app_data::app_directory().unwrap().join("Open Panel.md");
+    std::fs::write(&path, "panel file contents").unwrap();
+    terminal_panels::install(&h.window, &h.live);
+    terminal_panels::open_file(&h.window, &h.live, id, &path);
+    let panel = terminal_panels::current(&h.live, id).unwrap();
+    assert_eq!(
+        &*panel.borrow().document.text.borrow(),
+        "panel file contents"
+    );
+    h.window.invoke_panel_renamed(
+        id.index(),
+        id.screen(&h.window).panel_active,
+        "Renamed Panel.md".into(),
+    );
+    assert!(!path.exists());
+    assert_eq!(
+        panel
+            .borrow()
+            .document
+            .file
+            .borrow()
+            .path()
+            .unwrap()
+            .file_name()
+            .unwrap(),
+        "Renamed Panel.md"
+    );
+    assert!(Rc::ptr_eq(
+        h.live.tabs.borrow().of(id).tabs[0]
+            .terminal
+            .as_ref()
+            .unwrap(),
+        &source
+    ));
+}
+
+#[test]
+#[ignore = "starts a real ConPTY shell; run explicitly"]
+fn terminal_panel_shell_selection_same_cancel_and_replace() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let profiles = vec![
+        TerminalShell {
+            name: "QA A".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        },
+        TerminalShell {
+            name: "QA B".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        },
+    ];
+    hold_shells(&h.window, &profiles);
+    publish_shells(&h.window);
+    let old = Rc::new(RefCell::new(
+        TerminalSession::start("QA A", "cmd.exe /Q /D /K", 80, 12, || {}).unwrap(),
+    ));
+    {
+        let mut tabs = h.live.tabs.borrow_mut();
+        tabs.of_mut(id).tabs[0].below.shell = Some(old.clone());
+        tabs.of_mut(id).tabs[0].below.open = true;
+    }
+    terminal_panels::ensure(&h.window, &h.live, id);
+    let tab = h.live.tabs.borrow().of(id).tabs[0].clone();
+    h.live.show_tab(&h.window, id, &tab);
+    let panel = terminal_panels::current(&h.live, id).unwrap();
+    terminal_panels::action(&h.window, &h.live, id, 12, 0);
+    assert!(h.live.pending.borrow().is_none());
+    assert!(Rc::ptr_eq(panel.borrow().shell.as_ref().unwrap(), &old));
+    terminal_panels::action(&h.window, &h.live, id, 12, 1);
+    assert!(matches!(
+        *h.live.pending.borrow(),
+        Some(Question::PanelSwitch { .. })
+    ));
+    answer_question(&h.window, &h.live, 1);
+    assert!(Rc::ptr_eq(panel.borrow().shell.as_ref().unwrap(), &old));
+    terminal_panels::action(&h.window, &h.live, id, 12, 1);
+    answer_question(&h.window, &h.live, 0);
+    assert_eq!(
+        panel.borrow().shell.as_ref().unwrap().borrow().name(),
+        "QA B"
+    );
+    assert_eq!(h.live.tabs.borrow().of(id).tabs[0].below.active, 0);
 }

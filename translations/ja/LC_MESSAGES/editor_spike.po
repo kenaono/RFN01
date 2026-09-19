@@ -1172,3 +1172,12 @@ msgstr "プロファイル名"
 
 msgid "Underline"
 msgstr "下線"
+
+msgid "Editor"
+msgstr "Editor"
+
+msgid "Writing log to: {}"
+msgstr "ファイルへログを保存中: {}"
+
+msgid "Capturing to Panel — save to keep as a file"
+msgstr "Panelへ取り込み中 — ファイルに残すには保存してください"

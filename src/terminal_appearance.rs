@@ -47,18 +47,12 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         .clone()
         .unwrap_or_else(|| default_style(window, 0));
     let base = default_style(window, 0);
-    front.paper = if screen.tab_paper_own {
-        screen.tab_paper
-    } else if below
-        .front_style
-        .as_ref()
-        .is_some_and(|s| s.paper_own && s.random == 0)
-    {
+    front.paper = if below.front_style.as_ref().is_some_and(|s| s.paper_own) {
         front.paper
+    } else if screen.tab_paper_own {
+        screen.tab_paper
     } else if screen.pane_paper_own {
         screen.pane_paper
-    } else if below.front_style.as_ref().is_some_and(|s| s.paper_own) {
-        front.paper
     } else {
         base.paper
     };
@@ -69,22 +63,19 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         .as_ref()
         .and_then(|p| p.style.clone())
         .unwrap_or_else(|| base.clone());
-    panel.paper = if entry.as_ref().is_some_and(|p| {
-        p.style
-            .as_ref()
-            .is_some_and(|s| s.paper_own && s.random == 0)
-    }) {
-        panel.paper
-    } else if screen.pane_paper_own {
-        screen.pane_paper
-    } else if entry
+    panel.paper = if entry
         .as_ref()
         .is_some_and(|p| p.style.as_ref().is_some_and(|s| s.paper_own))
     {
         panel.paper
+    } else if screen.pane_paper_own {
+        screen.pane_paper
     } else {
         base.paper
     };
+    if screen.front_style == front && screen.panel_style == panel {
+        return;
+    }
     id.update_screen(window, |screen| {
         screen.front_style = front.clone();
         screen.panel_style = panel.clone();
@@ -135,6 +126,29 @@ enum Target {
 }
 
 pub(crate) fn install(window: &AppWindow, live: &Live) {
+    let weak = window.as_weak();
+    let settings_live = live.clone();
+    let timer = Timer::default();
+    window.on_terminal_settings_edited(move || {
+        let weak = weak.clone();
+        let live = settings_live.clone();
+        timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(200),
+            move || {
+                let Some(window) = weak.upgrade() else {
+                    return;
+                };
+                for id in PaneId::all(&window) {
+                    if let Some(tab) = live.tabs.borrow().of(id).current() {
+                        publish(&window, id, &tab.below);
+                    }
+                }
+                refresh_terminal_panes(&window, &live);
+                save_settings(&window, &live.cache);
+            },
+        );
+    });
     let target = Rc::new(RefCell::new(None::<Target>));
     let weak = window.as_weak();
     let opened_live = live.clone();

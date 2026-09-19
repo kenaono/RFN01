@@ -1,4 +1,5 @@
-import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
+import { CheckBox, ComboBox, HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
+import { PanelStyleEditor } from "panel-style-editor.slint";
 import { PanelStyle, EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
@@ -546,6 +547,7 @@ export component AppWindow inherits Window {
     // tab's close button is inside one.
     in property <string> question-text;
     in property <[string]> question-choices;
+    in property <bool> question-enter-sends;
     in property <bool> question-open: false;
     // A question answered by typing a name rather than by pressing one of
     // several buttons (要件 5.2). The same overlay: a name is still a question,
@@ -623,6 +625,7 @@ export component AppWindow inherits Window {
     callback terminal-url(int, int, float, float);
     callback terminal-action(int, int, int);
     callback panel-action(int, int, int);
+    callback panel-renamed(int, int, string);
     callback pane-below-toggled(int);
     callback pane-below-resized(int, length);
     callback pane-below-key(int, string, int, bool, bool, bool);
@@ -758,6 +761,7 @@ export component AppWindow inherits Window {
     in-out property <color> terminal-paper: #fffefa;
     in-out property <color> terminal-ink: #24211e;
     in-out property <[PanelStyle]> panel-defaults;
+    callback terminal-settings-edited();
     in-out property <bool> appearance-open;
     in-out property <bool> appearance-default;
     in-out property <string> appearance-title;
@@ -768,6 +772,7 @@ export component AppWindow inherits Window {
     in-out property <bool> appearance-underline-allowed: true;
     in-out property <[string]> shell-profile-names;
     in-out property <int> shell-profile-index;
+    in-out property <bool> shell-profile-default;
     in-out property <string> shell-profile-name;
     in-out property <string> shell-profile-executable;
     in-out property <string> shell-profile-arguments;
@@ -776,6 +781,9 @@ export component AppWindow inherits Window {
     in-out property <bool> terminal-confirm-paste: true;
     in-out property <bool> terminal-confirm-close: true;
     in-out property <int> terminal-history-limit: 10000;
+    changed terminal-confirm-paste => { root.terminal-settings-edited(); }
+    changed terminal-confirm-close => { root.terminal-settings-edited(); }
+    changed terminal-history-limit => { root.terminal-settings-edited(); }
     in-out property <string> terminal-font: "Consolas";
     in-out property <int> terminal-size: 15;
     callback terminal-font-picked();
@@ -989,7 +997,7 @@ export component AppWindow inherits Window {
     /// 空でなければ、そのどれかに一致するときだけ——中の行を1つずつ分けない群）。
     pure function shows-group(tab: int, labels: [string]) -> bool {
         if (!root.settings-searching) {
-            return root.settings-tab == tab;
+            return root.settings-tab == (tab == 7 ? 0 : (tab == 2 || tab == 4 || tab == 5 ? 3 : tab));
         }
         return labels.length == 0 || root.settings-match(root.settings-query, labels);
     }
@@ -2497,6 +2505,11 @@ export component AppWindow inherits Window {
                         panel-read-only: pane.panel-read-only;
                         panel-capturing: pane.panel-capturing;
                         panel-action(action, index) => { root.panel-action(pane.id, action, index); }
+                        panel-renamed(index, name) => { root.panel-renamed(pane.id, index, name); }
+                        terminal-capturing: pane.terminal-capturing;
+                        panel-file-names: pane.panel-file-names;
+                        panel-file-stems: pane.panel-file-stems;
+                        panel-log-destination: pane.panel-log-destination;
                         below-draft <=> pane.below-draft;
                         below-draft-lines: pane.below-draft-lines;
                         below-draft-edited(text) => {
@@ -2766,7 +2779,7 @@ export component AppWindow inherits Window {
                         }
                         layout-requested => {
                             // **この面の組み方を開く**ので、開く先はそのタブ。
-                            root.settings-tab = 4;
+                            root.settings-tab = 3;
                             root.settings-requested();
                         }
                         // **No `focus-generation` here**: the wheel sends
@@ -2864,12 +2877,8 @@ export component AppWindow inherits Window {
                                     // 追加要件 2026-09-15: Left Pane は後から足した群なので番号は7、並びだけTerminalの次。
                                     for category in [
                                         { id: 0, title: @tr("General") },
+                                        { id: 3, title: @tr("Editor") },
                                         { id: 1, title: @tr("Terminal") },
-                                        { id: 7, title: @tr("Left Pane") },
-                                        { id: 2, title: @tr("Words") },
-                                        { id: 3, title: @tr("Text") },
-                                        { id: 4, title: @tr("Layout") },
-                                        { id: 5, title: @tr("Page") },
                                         { id: 6, title: @tr("Keys") },
                                     ]: SideTab {
                                         title: category.title;
@@ -2904,7 +2913,7 @@ export component AppWindow inherits Window {
                                         VerticalLayout {
                                             // Keys は一覧が主役なので、ペインの幅に合わせて広げる（左の群168px・線1px・
                                             // 両側の余白40px・スクロールバーを除く）。名前とキーが離れすぎない600pxまで。
-                                            width: root.settings-tab == 6 ? min(600px, max(460px, pane.width * 1px - 228px)) : 460px;
+                                            width: min(760px, max(620px, pane.width * 1px - 228px));
                                             spacing: 8px;
                                             alignment: start;
 
@@ -3367,12 +3376,16 @@ export component AppWindow inherits Window {
                                         // 無い。
                                         if root.shows-group(1, []): VerticalLayout {
                                             spacing: 8px;
-                                            for name[index] in root.shell-profile-names: TextButton {
-                                                title: name;
-                                                role: index == root.shell-profile-index ? Role.primary : Role.normal;
-                                                clicked => { root.shell-profile-action(0, index); }
+                                            ComboBox {
+                                                model: root.shell-profile-names;
+                                                current-index: root.shell-profile-index;
+                                                selected(value) => { root.shell-profile-action(0, self.current-index); }
                                             }
-                                            HorizontalLayout { Text { text: @tr("Profile name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Name"); text <=> root.shell-profile-name; } }
+                                            HorizontalLayout {
+                                                Text { text: @tr("Profile name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; }
+                                                Field { placeholder: @tr("Name"); text <=> root.shell-profile-name; }
+                                                CheckBox { text: @tr("Default"); checked <=> root.shell-profile-default; toggled => { root.shell-profile-action(7, 0); } }
+                                            }
                                             HorizontalLayout { Text { text: @tr("Executable"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Executable"); text <=> root.shell-profile-executable; } }
                                             HorizontalLayout { Text { text: @tr("Arguments"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Arguments"); text <=> root.shell-profile-arguments; } }
                                             HorizontalLayout { Text { text: @tr("Start folder"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Start folder"); text <=> root.shell-profile-directory; } }
@@ -3383,7 +3396,6 @@ export component AppWindow inherits Window {
                                                 TextButton { title: "↑"; clicked => { root.shell-profile-action(4, 0); } }
                                                 TextButton { title: "↓"; clicked => { root.shell-profile-action(5, 0); } }
                                                 TextButton { title: @tr("Remove"); clicked => { root.shell-profile-action(6, 0); } }
-                                                TextButton { title: @tr("Default"); clicked => { root.shell-profile-action(7, 0); } }
                                             }
 
 
@@ -3446,21 +3458,25 @@ export component AppWindow inherits Window {
                                                 background: Tok.rule;
                                             }
 
-                                            TextButton {
-                                                title: @tr("Confirm multiline paste") + (root.terminal-confirm-paste ? " ✓" : "");
-                                                clicked => { root.terminal-confirm-paste = !root.terminal-confirm-paste; }
+                                            CheckBox {
+                                                text: @tr("Confirm multiline paste");
+                                                checked <=> root.terminal-confirm-paste;
                                             }
-                                            TextButton {
-                                                title: @tr("Confirm shell termination") + (root.terminal-confirm-close ? " ✓" : "");
-                                                clicked => { root.terminal-confirm-close = !root.terminal-confirm-close; }
+                                            CheckBox {
+                                                text: @tr("Confirm shell termination");
+                                                checked <=> root.terminal-confirm-close;
                                             }
-                                            StepRow {
-                                                label: @tr("History lines"); value: root.terminal-history-limit;
-                                                stepped(by) => { root.terminal-history-limit = max(0, min(1000000, root.terminal-history-limit + by * 1000)); }
+                                            HorizontalLayout {
+                                                Text { text: @tr("History lines"); color: Tok.ink; vertical-alignment: center; }
+                                                Field { text: root.terminal-history-limit;
+                                                    accepted => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
+                                                    focus-lost => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
+                                                }
                                             }
-                                            TextButton { title: @tr("Terminal Appearance…"); clicked => { root.appearance-requested(0, 0); } }
-                                            TextButton { title: @tr("Editor Panel Appearance…"); clicked => { root.appearance-requested(1, 0); } }
-                                            TextButton { title: @tr("Terminal Panel Appearance…"); clicked => { root.appearance-requested(2, 0); } }
+                                            Text { text: "Terminal"; color: Tok.ink; }
+                                            PanelStyleEditor { style: root.panel-defaults[0]; changed style => { root.panel-defaults[0] = self.style; root.terminal-settings-edited(); } defaults: true; }
+                                            Text { text: "Editor Panel"; color: Tok.ink; }
+                                            PanelStyleEditor { style: root.panel-defaults[1]; changed style => { root.panel-defaults[1] = self.style; root.terminal-settings-edited(); } defaults: true; underline-allowed: false; }
                                         }
 
                                         if root.shows-group(7, []): VerticalLayout {
@@ -3537,571 +3553,6 @@ export component AppWindow inherits Window {
                                         //
                                         // **どのモードを使うかはここで決めない。**それは文書ごとの話で、
                                         // ステータスバーから選ぶ（要件 10）。ここは中身を作る場所である。
-                                        if root.shows-group(2, [@tr("Words"), @tr("MODES"), @tr("New Mode"), @tr("New Group"), @tr("Import…"), @tr("Export…"), @tr("Edit…")]): VerticalLayout {
-                                            spacing: 8px;
-
-                                            Text {
-                                                text: root.section-title(@tr("Words"), @tr("MODES"));
-                                                color: Tok.ink-faint;
-                                                font-size: 10px;
-                                                letter-spacing: 0.9px;
-                                            }
-
-                                            for mode[index] in root.word-mode-names: HorizontalLayout {
-                                                spacing: 6px;
-
-                                                // **先頭の「なし」は作ったモードではない**ので出さない。
-                                                if index > 0 && !(root.word-naming == 3
-                                                    && root.word-naming-at == index - 1): TextButton {
-                                                    wide: true;
-                                                    title: mode.name;
-                                                    role: root.word-mode-opened-at == index - 1
-                                                        ? Role.primary
-                                                        : Role.normal;
-                                                    // **開くのはRustに頼む**（書き手の報告 2026-09-08：
-                                                    // モードを選んでも何も出ない）。中身（語群・語・重複）は
-                                                    // Rustが作って窓へ渡すモデルなので、こちら側で数字を
-                                                    // 変えただけでは**誰も作り直さない**——押した先が
-                                                    // 空のままだったのはそれである。
-                                                    clicked => {
-                                                        root.word-mode-opened(
-                                                            root.word-mode-opened-at == index - 1 ? -1 : index - 1);
-                                                    }
-                                                    // **長押しで名前を変える**（書き手の求め 2026-09-08）。
-                                                    // タブの名前と同じ手つきで、**作るときと同じ欄**が
-                                                    // その場に出る（単語チェックモード要件 7.4）。
-                                                    holdable: true;
-                                                    held => {
-                                                        root.word-new-name = mode.name;
-                                                        root.word-naming-trouble = "";
-                                                        root.word-naming-at = index - 1;
-                                                        root.word-naming = 3;
-                                                    }
-                                                }
-                                                // **いまこの文書が使っているモード**（同日追加、書き手の
-                                                // 報告：設定上どちらも同じに見える）。開いて中を見ている
-                                                // ことと、いま色が付いていることは別のことである。
-                                                if index > 0 && mode.id == root.word-mode
-                                                    && !(root.word-naming == 3
-                                                        && root.word-naming-at == index - 1): Text {
-                                                    text: @tr("This document");
-                                                    color: Tok.accent;
-                                                    font-size: 11px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 0;
-                                                }
-                                                if index > 0 && !(root.word-naming == 3
-                                                    && root.word-naming-at == index - 1): TextButton {
-                                                    title: "×";
-                                                    role: Role.quiet;
-                                                    clicked => {
-                                                        root.word-mode-removed(index - 1);
-                                                    }
-                                                }
-
-                                                // 名前を変えているあいだ、この行はその欄になる。
-                                                if root.word-naming == 3 && root.word-naming-at == index - 1: Field {
-                                                    placeholder: @tr("Mode name");
-                                                    text <=> root.word-new-name;
-                                                    init => {
-                                                        self.take-focus();
-                                                    }
-                                                    accepted => {
-                                                        root.word-mode-renamed(index - 1, root.word-new-name);
-                                                    }
-                                                    escaped => {
-                                                        root.word-naming = 0;
-                                                    }
-                                                }
-                                                if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
-                                                    title: @tr("OK");
-                                                    role: Role.primary;
-                                                    clicked => {
-                                                        root.word-mode-renamed(index - 1, root.word-new-name);
-                                                    }
-                                                }
-                                                if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
-                                                    title: @tr("Cancel");
-                                                    role: Role.quiet;
-                                                    clicked => {
-                                                        root.word-naming = 0;
-                                                    }
-                                                }
-                                            }
-
-                                            // 書き手の求め 2026-09-08: **設定は一枚で終える。**
-                                            // 名前は別の問いにしない——問いは窓の中に描くもの（要件
-                                            // 8.3・8.4）で、このパネルはその上に浮いている別の窓だから、
-                                            // **訊くたびにパネルが消えて戻る**ことになる。「決定すると
-                                            // 次の画面」が続くと、何をしているのか分からなくなる。
-                                            // **欄はこの場に出し、この場で終える。**
-                                            if root.word-naming != 1: HorizontalLayout {
-                                                alignment: start;
-
-                                                TextButton {
-                                                    title: @tr("New Mode");
-                                                    role: Role.primary;
-                                                    clicked => {
-                                                        root.word-new-name = "";
-                                                        root.word-naming-trouble = "";
-                                                        root.word-naming = 1;
-                                                    }
-                                                }
-                                            }
-
-                                            if root.word-naming == 1: HorizontalLayout {
-                                                spacing: 6px;
-
-                                                Field {
-                                                    placeholder: @tr("Mode name");
-                                                    text <=> root.word-new-name;
-                                                    // **出たときに鍵盤をここへ。**押した手はもう名前を
-                                                    // 打つつもりでいる。`if`の中の要素はここからしか
-                                                    // 触れないので、外から呼ばずに自分で取る。
-                                                    init => {
-                                                        self.take-focus();
-                                                    }
-                                                    accepted => {
-                                                        root.word-mode-added(root.word-new-name);
-                                                    }
-                                                    escaped => {
-                                                        root.word-naming = 0;
-                                                    }
-                                                }
-                                                TextButton {
-                                                    title: @tr("Add");
-                                                    role: Role.primary;
-                                                    clicked => {
-                                                        root.word-mode-added(root.word-new-name);
-                                                    }
-                                                }
-                                                TextButton {
-                                                    title: @tr("Cancel");
-                                                    role: Role.quiet;
-                                                    clicked => {
-                                                        root.word-naming = 0;
-                                                    }
-                                                }
-                                            }
-
-                                            if root.word-naming != 0 && root.word-naming-trouble != "": Text {
-                                                text: root.word-naming-trouble;
-                                                color: Tok.alert;
-                                                font-size: 11px;
-                                                wrap: word-wrap;
-                                            }
-
-                                            if root.word-mode-names.length <= 1: Text {
-                                                text: @tr("Create a mode, then word groups (people, places, …) inside it.")
-                                                    + @tr("Choose the mode for each document from the status bar below.");
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                                wrap: word-wrap;
-                                            }
-
-                                            if root.word-mode-opened-at >= 0: Rectangle {
-                                                height: 1px;
-                                                background: Tok.rule;
-                                            }
-
-                                            // **開いたモードの名前を出す。**「GROUPS」だけでは、どの
-                                            // モードの中を見ているのか画面に無かった（書き手の報告
-                                            // 2026-09-08）。`+ 1`は先頭の「なし」の分。
-                                            if root.word-mode-opened-at >= 0: Text {
-                                                text: @tr("GROUPS — {}", root.word-mode-names[root.word-mode-opened-at + 1].name);
-                                                color: Tok.ink-faint;
-                                                font-size: 10px;
-                                                letter-spacing: 0.9px;
-                                            }
-
-                                            if root.word-mode-opened-at >= 0: VerticalLayout {
-                                                spacing: 8px;
-
-                                                for row[index] in root.word-group-rows: HorizontalLayout {
-                                                    spacing: 6px;
-
-                                                    // 色見本。押すとWindowsの色ダイアログ（要件 9 と同じ道）。
-                                                    Rectangle {
-                                                        width: 24px;
-                                                        horizontal-stretch: 0;
-
-                                                        Rectangle {
-                                                            y: (parent.height - self.height) / 2;
-                                                            width: 24px;
-                                                            height: 20px;
-                                                            border-radius: 4px;
-                                                            border-width: 1px;
-                                                            border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
-                                                            // **色を持たない語群は、色の無い升目**
-                                                            // （除外語群、2026-09-08）。
-                                                            background: row.paints ? row.shown : Tok.chrome-sunken;
-
-                                                            if !row.paints: Text {
-                                                                width: 100%;
-                                                                height: 100%;
-                                                                text: "—";
-                                                                color: Tok.ink-faint;
-                                                                font-size: 11px;
-                                                                horizontal-alignment: center;
-                                                                vertical-alignment: center;
-                                                            }
-
-                                                            swatch := TouchArea {
-                                                                mouse-cursor: pointer;
-                                                                clicked => {
-                                                                    group-palette.show();
-                                                                }
-                                                            }
-
-                                                            // C5（2026-09-15）: 語群の色もパレットで。
-                                                            group-palette := PopupWindow {
-                                                                y: parent.height + 2px;
-                                                                width: 236px;
-                                                                close-policy: close-on-click-outside;
-                                                                MenuFrame {
-                                                                    width: 236px;
-                                                                    ColourPalette {
-                                                                        current: row.paints ? row.shown : transparent;
-                                                                        chosen(colour) => {
-                                                                            root.colour-set(2, index, colour);
-                                                                            group-palette.close();
-                                                                        }
-                                                                        more => {
-                                                                            root.colour-more(2, index);
-                                                                            group-palette.close();
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // **名前も釦である**（書き手の求め 2026-09-08）。
-                                                    // 押せば語の一覧が開き、**長押しすれば名前を変えられる**
-                                                    // ——モードの行と同じ手つきにする。
-                                                    if !(root.word-naming == 4
-                                                        && root.word-naming-at == index): TextButton {
-                                                        wide: true;
-                                                        // **開いている語群には印を付ける。**下に出ている
-                                                        // `Import…`と`この語群を消す`がどれに効くのかは、
-                                                        // この印だけが言う。
-                                                        role: root.word-group-opened-at == index
-                                                            ? Role.primary
-                                                            : Role.quiet;
-                                                        title: row.name;
-                                                        clicked => {
-                                                            root.word-group-opened(
-                                                                root.word-group-opened-at == index ? -1 : index);
-                                                        }
-                                                        holdable: true;
-                                                        held => {
-                                                            root.word-new-name = row.name;
-                                                            root.word-naming-trouble = "";
-                                                            root.word-naming-at = index;
-                                                            root.word-naming = 4;
-                                                        }
-                                                    }
-
-                                                    // **語数と、色を付けられなかった数。**押すと一覧が開く
-                                                    // ——アプリの中で見て、アプリの中で消せることが、辞書を
-                                                    // 書き手に管理させないということである。
-                                                    if !(root.word-naming == 4
-                                                        && root.word-naming-at == index): TextButton {
-                                                        role: Role.quiet;
-                                                        title: row.conflicts > 0
-                                                            ? @tr("{} words / {} duplicates", row.words, row.conflicts)
-                                                            : (row.repeated > 0
-                                                                ? @tr("{} words ({} doubled)", row.words, row.repeated)
-                                                                : @tr("{} words", row.words));
-                                                        clicked => {
-                                                            root.word-group-opened(
-                                                                root.word-group-opened-at == index ? -1 : index);
-                                                        }
-                                                    }
-
-                                                    // 名前を変えているあいだ、この行はその欄になる
-                                                    // （色見本だけは残す——どの語群かはそれで分かる）。
-                                                    if root.word-naming == 4 && root.word-naming-at == index: Field {
-                                                        placeholder: @tr("Group name");
-                                                        text <=> root.word-new-name;
-                                                        init => {
-                                                            self.take-focus();
-                                                        }
-                                                        accepted => {
-                                                            root.word-group-renamed(index, root.word-new-name);
-                                                        }
-                                                        escaped => {
-                                                            root.word-naming = 0;
-                                                        }
-                                                    }
-                                                    if root.word-naming == 4 && root.word-naming-at == index: TextButton {
-                                                        title: @tr("OK");
-                                                        role: Role.primary;
-                                                        clicked => {
-                                                            root.word-group-renamed(index, root.word-new-name);
-                                                        }
-                                                    }
-                                                    if root.word-naming == 4 && root.word-naming-at == index: TextButton {
-                                                        title: @tr("Cancel");
-                                                        role: Role.quiet;
-                                                        clicked => {
-                                                            root.word-naming = 0;
-                                                        }
-                                                    }
-                                                }
-
-                                                // **語群が1つも無いモード。**作った直後はここに来る——
-                                                // 何も出ないのは「効かなかった」に見える（書き手の報告
-                                                // 2026-09-08）ので、**次にすることを書いておく**。
-                                                if root.word-group-rows.length == 0: Text {
-                                                    text: @tr("This mode has no word groups yet.")
-                                                        + @tr("Use \"New Group\" to create groups such as people or places and pick their colors.");
-                                                    color: Tok.ink-faint;
-                                                    font-size: 11px;
-                                                    wrap: word-wrap;
-                                                }
-
-                                                // 開いている語群の語。**アプリの中で消せる**（要件 7.9）。
-                                                if root.word-group-opened-at >= 0: Rectangle {
-                                                    height: 152px;
-                                                    background: Tok.chrome-raised;
-                                                    border-radius: 6px;
-
-                                                    ScrollView {
-                                                        x: 8px;
-                                                        y: 6px;
-                                                        width: parent.width - 16px;
-                                                        height: parent.height - 12px;
-
-                                                        VerticalLayout {
-                                                            alignment: start;
-                                                            spacing: 1px;
-
-                                                            for word in root.word-group-words: HorizontalLayout {
-                                                                spacing: 6px;
-
-                                                                Text {
-                                                                    text: word.text;
-                                                                    // **覚え書きは薄く。**語の並びの中で
-                                                                    // 見出しとして読めればよく、語と同じ
-                                                                    // 濃さで出ると語の数が分からなくなる。
-                                                                    color: word.note ? Tok.ink-faint : Tok.ink;
-                                                                    font-size: 12px;
-                                                                    vertical-alignment: center;
-                                                                    overflow: elide;
-                                                                    horizontal-stretch: 1;
-                                                                }
-                                                                TextButton {
-                                                                    title: "×";
-                                                                    role: Role.quiet;
-                                                                    clicked => {
-                                                                        root.word-removed(
-                                                                            root.word-group-opened-at, word.text);
-                                                                    }
-                                                                }
-                                                            }
-
-                                                            if root.word-group-words.length == 0: Text {
-                                                                text: @tr("No words yet. Select a word in the text, right-click,")
-                                                                    + @tr("and use \"Add to word set\".")
-                                                                    + @tr("Lines starting with # are notes.");
-                                                                color: Tok.ink-faint;
-                                                                font-size: 11px;
-                                                                wrap: word-wrap;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                // **開いている語群についてすることは、その語群の下に置く**
-                                                // （書き手の報告 2026-09-08：名前が「…」に潰れていた）。
-                                                // 行に釦を5つ並べると、380pxの幅では**いちばん大事な名前が
-                                                // 先に潰れる**——名前は行に、することは開いた先に。
-                                                //
-                                                // **消すのもここである。**語を1万まで入れられるものを、
-                                                // 一覧の行の`×`ひとつで消せてよいはずがない。
-                                                if root.word-group-opened-at >= 0: HorizontalLayout {
-                                                    alignment: start;
-                                                    spacing: 6px;
-
-                                                    TextButton {
-                                                        title: @tr("Import…");
-                                                        clicked => {
-                                                            root.word-group-imported(root.word-group-opened-at);
-                                                        }
-                                                    }
-                                                    TextButton {
-                                                        title: @tr("Export…");
-                                                        clicked => {
-                                                            root.word-group-exported(root.word-group-opened-at);
-                                                        }
-                                                    }
-                                                    // **除外語群にする／やめる**（書き手と決めた 2026-09-08）。
-                                                    // 色を持たない語群は木に積まれて最長一致で勝ち、しかし
-                                                    // 何も塗らない——`カリオン`を入れておくと、その中で
-                                                    // `リオン`が光らなくなる。
-                                                    TextButton {
-                                                        title: root.word-group-rows[root.word-group-opened-at].paints
-                                                            ? @tr("No Color")
-                                                            : @tr("Use Color");
-                                                        clicked => {
-                                                            root.word-group-paint-toggled(root.word-group-opened-at);
-                                                        }
-                                                    }
-                                                    TextButton {
-                                                        title: @tr("Delete This Group");
-                                                        role: Role.danger;
-                                                        clicked => {
-                                                            root.word-group-removed(root.word-group-opened-at);
-                                                        }
-                                                    }
-                                                }
-
-                                                if root.word-naming == 2: HorizontalLayout {
-                                                    spacing: 6px;
-
-                                                    Field {
-                                                        placeholder: @tr("Group name");
-                                                        text <=> root.word-new-name;
-                                                        init => {
-                                                            self.take-focus();
-                                                        }
-                                                        accepted => {
-                                                            root.word-group-added(
-                                                                root.word-mode-opened-at, root.word-new-name);
-                                                        }
-                                                        escaped => {
-                                                            root.word-naming = 0;
-                                                        }
-                                                    }
-                                                    TextButton {
-                                                        title: @tr("Add");
-                                                        role: Role.primary;
-                                                        clicked => {
-                                                            root.word-group-added(
-                                                                root.word-mode-opened-at, root.word-new-name);
-                                                        }
-                                                    }
-                                                    TextButton {
-                                                        title: @tr("Cancel");
-                                                        role: Role.quiet;
-                                                        clicked => {
-                                                            root.word-naming = 0;
-                                                        }
-                                                    }
-                                                }
-
-                                                HorizontalLayout {
-                                                    alignment: start;
-                                                    spacing: 6px;
-
-                                                    if root.word-naming != 2: TextButton {
-                                                        title: @tr("New Group");
-                                                        // **一枚で終える**（`New Mode`の注記）。
-                                                        clicked => {
-                                                            root.word-new-name = "";
-                                                            root.word-naming-trouble = "";
-                                                            root.word-naming = 2;
-                                                        }
-                                                    }
-                                                    // **重複は畳んで置く。**普段は数だけ見えていればよく、
-                                                    // 直すときにだけ開く。
-                                                    if root.word-trouble-count > 0: TextButton {
-                                                        title: root.word-troubles-shown
-                                                            ? @tr("Hide Duplicates")
-                                                            : @tr("{} duplicates", root.word-trouble-count);
-                                                        clicked => {
-                                                            root.word-troubles-shown = !root.word-troubles-shown;
-                                                        }
-                                                    }
-                                                }
-
-                                                // 要件 7.9: **参照画面。**どの語が、どこで、色が付いているのか
-                                                // いないのか。
-                                                if root.word-troubles-shown: Rectangle {
-                                                    height: 152px;
-                                                    background: Tok.chrome-raised;
-                                                    border-radius: 6px;
-
-                                                    ScrollView {
-                                                        x: 8px;
-                                                        y: 6px;
-                                                        width: parent.width - 16px;
-                                                        height: parent.height - 12px;
-
-                                                        VerticalLayout {
-                                                            alignment: start;
-                                                            spacing: 2px;
-
-                                                            for trouble in root.word-troubles: HorizontalLayout {
-                                                                spacing: 6px;
-
-                                                                Text {
-                                                                    text: trouble.conflict ? @tr("No color") : @tr("Doubled");
-                                                                    color: trouble.conflict ? Tok.alert : Tok.ink-faint;
-                                                                    font-size: 11px;
-                                                                    horizontal-stretch: 0;
-                                                                    min-width: 44px;
-                                                                }
-                                                                Text {
-                                                                    text: trouble.word;
-                                                                    color: Tok.ink;
-                                                                    font-size: 12px;
-                                                                    overflow: elide;
-                                                                    horizontal-stretch: 1;
-                                                                }
-                                                                Text {
-                                                                    text: trouble.told;
-                                                                    color: Tok.ink-faint;
-                                                                    font-size: 11px;
-                                                                    overflow: elide;
-                                                                    horizontal-stretch: 1;
-                                                                }
-                                                            }
-
-                                                            if root.word-trouble-count > root.word-troubles.length: Text {
-                                                                text: @tr("{} more", root.word-trouble-count - root.word-troubles.length);
-                                                                color: Tok.ink-faint;
-                                                                font-size: 11px;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                height: 1px;
-                                                background: Tok.rule;
-                                            }
-
-                                            // 単語チェックモード要件 5.4（書き手の求め 2026-09-08）:
-                                            // **辞書そのものを開く。**画面から作った表と同じものを、
-                                            // この編集器で直接直せる——**行に1つの形にしてあるのは、
-                                            // 人が読んで直せるためでもある**（同要件 4.2）。
-                                            HorizontalLayout {
-                                                spacing: 6px;
-
-                                                TextButton {
-                                                    title: @tr("Edit…");
-                                                    // **頼んでから閉じる**（技術検証 6.24）。開く先はタブで、
-                                                    // 書き手はもうこの画面を見ていない。
-                                                    clicked => {
-                                                        root.word-file-edited();
-                                                    }
-                                                }
-                                                Text {
-                                                    text: @tr("Opens the word set file in a tab. Saving it reloads the words.");
-                                                    color: Tok.ink-faint;
-                                                    font-size: 11px;
-                                                    vertical-alignment: center;
-                                                    overflow: elide;
-                                                }
-                                            }
-                                        }
-
-
-                                        // どの面にいても、値はいまのシートのもの——だから帯のすぐ
-                                        // 下に在る（要件 9）。
                                         if root.shows-group(3, []): VerticalLayout {
                                             spacing: 20px;
                                             // 追加要件 2026-09-15: **背景を変えるたびに文字色を1つずつ
@@ -5066,6 +4517,576 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
+                                        if root.shows-group(2, [@tr("Words"), @tr("MODES"), @tr("New Mode"), @tr("New Group"), @tr("Import…"), @tr("Export…"), @tr("Edit…")]): VerticalLayout {
+                                            spacing: 8px;
+
+                                            Text {
+                                                text: root.section-title(@tr("Words"), @tr("MODES"));
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            for mode[index] in root.word-mode-names: HorizontalLayout {
+                                                spacing: 6px;
+
+                                                // **先頭の「なし」は作ったモードではない**ので出さない。
+                                                if index > 0 && !(root.word-naming == 3
+                                                    && root.word-naming-at == index - 1): TextButton {
+                                                    wide: true;
+                                                    title: mode.name;
+                                                    role: root.word-mode-opened-at == index - 1
+                                                        ? Role.primary
+                                                        : Role.normal;
+                                                    // **開くのはRustに頼む**（書き手の報告 2026-09-08：
+                                                    // モードを選んでも何も出ない）。中身（語群・語・重複）は
+                                                    // Rustが作って窓へ渡すモデルなので、こちら側で数字を
+                                                    // 変えただけでは**誰も作り直さない**——押した先が
+                                                    // 空のままだったのはそれである。
+                                                    clicked => {
+                                                        root.word-mode-opened(
+                                                            root.word-mode-opened-at == index - 1 ? -1 : index - 1);
+                                                    }
+                                                    // **長押しで名前を変える**（書き手の求め 2026-09-08）。
+                                                    // タブの名前と同じ手つきで、**作るときと同じ欄**が
+                                                    // その場に出る（単語チェックモード要件 7.4）。
+                                                    holdable: true;
+                                                    held => {
+                                                        root.word-new-name = mode.name;
+                                                        root.word-naming-trouble = "";
+                                                        root.word-naming-at = index - 1;
+                                                        root.word-naming = 3;
+                                                    }
+                                                }
+                                                // **いまこの文書が使っているモード**（同日追加、書き手の
+                                                // 報告：設定上どちらも同じに見える）。開いて中を見ている
+                                                // ことと、いま色が付いていることは別のことである。
+                                                if index > 0 && mode.id == root.word-mode
+                                                    && !(root.word-naming == 3
+                                                        && root.word-naming-at == index - 1): Text {
+                                                    text: @tr("This document");
+                                                    color: Tok.accent;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 0;
+                                                }
+                                                if index > 0 && !(root.word-naming == 3
+                                                    && root.word-naming-at == index - 1): TextButton {
+                                                    title: "×";
+                                                    role: Role.quiet;
+                                                    clicked => {
+                                                        root.word-mode-removed(index - 1);
+                                                    }
+                                                }
+
+                                                // 名前を変えているあいだ、この行はその欄になる。
+                                                if root.word-naming == 3 && root.word-naming-at == index - 1: Field {
+                                                    placeholder: @tr("Mode name");
+                                                    text <=> root.word-new-name;
+                                                    init => {
+                                                        self.take-focus();
+                                                    }
+                                                    accepted => {
+                                                        root.word-mode-renamed(index - 1, root.word-new-name);
+                                                    }
+                                                    escaped => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                                if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
+                                                    title: @tr("OK");
+                                                    role: Role.primary;
+                                                    clicked => {
+                                                        root.word-mode-renamed(index - 1, root.word-new-name);
+                                                    }
+                                                }
+                                                if root.word-naming == 3 && root.word-naming-at == index - 1: TextButton {
+                                                    title: @tr("Cancel");
+                                                    role: Role.quiet;
+                                                    clicked => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                            }
+
+                                            // 書き手の求め 2026-09-08: **設定は一枚で終える。**
+                                            // 名前は別の問いにしない——問いは窓の中に描くもの（要件
+                                            // 8.3・8.4）で、このパネルはその上に浮いている別の窓だから、
+                                            // **訊くたびにパネルが消えて戻る**ことになる。「決定すると
+                                            // 次の画面」が続くと、何をしているのか分からなくなる。
+                                            // **欄はこの場に出し、この場で終える。**
+                                            if root.word-naming != 1: HorizontalLayout {
+                                                alignment: start;
+
+                                                TextButton {
+                                                    title: @tr("New Mode");
+                                                    role: Role.primary;
+                                                    clicked => {
+                                                        root.word-new-name = "";
+                                                        root.word-naming-trouble = "";
+                                                        root.word-naming = 1;
+                                                    }
+                                                }
+                                            }
+
+                                            if root.word-naming == 1: HorizontalLayout {
+                                                spacing: 6px;
+
+                                                Field {
+                                                    placeholder: @tr("Mode name");
+                                                    text <=> root.word-new-name;
+                                                    // **出たときに鍵盤をここへ。**押した手はもう名前を
+                                                    // 打つつもりでいる。`if`の中の要素はここからしか
+                                                    // 触れないので、外から呼ばずに自分で取る。
+                                                    init => {
+                                                        self.take-focus();
+                                                    }
+                                                    accepted => {
+                                                        root.word-mode-added(root.word-new-name);
+                                                    }
+                                                    escaped => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: @tr("Add");
+                                                    role: Role.primary;
+                                                    clicked => {
+                                                        root.word-mode-added(root.word-new-name);
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: @tr("Cancel");
+                                                    role: Role.quiet;
+                                                    clicked => {
+                                                        root.word-naming = 0;
+                                                    }
+                                                }
+                                            }
+
+                                            if root.word-naming != 0 && root.word-naming-trouble != "": Text {
+                                                text: root.word-naming-trouble;
+                                                color: Tok.alert;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+
+                                            if root.word-mode-names.length <= 1: Text {
+                                                text: @tr("Create a mode, then word groups (people, places, …) inside it.")
+                                                    + @tr("Choose the mode for each document from the status bar below.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+
+                                            if root.word-mode-opened-at >= 0: Rectangle {
+                                                height: 1px;
+                                                background: Tok.rule;
+                                            }
+
+                                            // **開いたモードの名前を出す。**「GROUPS」だけでは、どの
+                                            // モードの中を見ているのか画面に無かった（書き手の報告
+                                            // 2026-09-08）。`+ 1`は先頭の「なし」の分。
+                                            if root.word-mode-opened-at >= 0: Text {
+                                                text: @tr("GROUPS — {}", root.word-mode-names[root.word-mode-opened-at + 1].name);
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            if root.word-mode-opened-at >= 0: VerticalLayout {
+                                                spacing: 8px;
+
+                                                for row[index] in root.word-group-rows: HorizontalLayout {
+                                                    spacing: 6px;
+
+                                                    // 色見本。押すとWindowsの色ダイアログ（要件 9 と同じ道）。
+                                                    Rectangle {
+                                                        width: 24px;
+                                                        horizontal-stretch: 0;
+
+                                                        Rectangle {
+                                                            y: (parent.height - self.height) / 2;
+                                                            width: 24px;
+                                                            height: 20px;
+                                                            border-radius: 4px;
+                                                            border-width: 1px;
+                                                            border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
+                                                            // **色を持たない語群は、色の無い升目**
+                                                            // （除外語群、2026-09-08）。
+                                                            background: row.paints ? row.shown : Tok.chrome-sunken;
+
+                                                            if !row.paints: Text {
+                                                                width: 100%;
+                                                                height: 100%;
+                                                                text: "—";
+                                                                color: Tok.ink-faint;
+                                                                font-size: 11px;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+
+                                                            swatch := TouchArea {
+                                                                mouse-cursor: pointer;
+                                                                clicked => {
+                                                                    group-palette.show();
+                                                                }
+                                                            }
+
+                                                            // C5（2026-09-15）: 語群の色もパレットで。
+                                                            group-palette := PopupWindow {
+                                                                y: parent.height + 2px;
+                                                                width: 236px;
+                                                                close-policy: close-on-click-outside;
+                                                                MenuFrame {
+                                                                    width: 236px;
+                                                                    ColourPalette {
+                                                                        current: row.paints ? row.shown : transparent;
+                                                                        chosen(colour) => {
+                                                                            root.colour-set(2, index, colour);
+                                                                            group-palette.close();
+                                                                        }
+                                                                        more => {
+                                                                            root.colour-more(2, index);
+                                                                            group-palette.close();
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // **名前も釦である**（書き手の求め 2026-09-08）。
+                                                    // 押せば語の一覧が開き、**長押しすれば名前を変えられる**
+                                                    // ——モードの行と同じ手つきにする。
+                                                    if !(root.word-naming == 4
+                                                        && root.word-naming-at == index): TextButton {
+                                                        wide: true;
+                                                        // **開いている語群には印を付ける。**下に出ている
+                                                        // `Import…`と`この語群を消す`がどれに効くのかは、
+                                                        // この印だけが言う。
+                                                        role: root.word-group-opened-at == index
+                                                            ? Role.primary
+                                                            : Role.quiet;
+                                                        title: row.name;
+                                                        clicked => {
+                                                            root.word-group-opened(
+                                                                root.word-group-opened-at == index ? -1 : index);
+                                                        }
+                                                        holdable: true;
+                                                        held => {
+                                                            root.word-new-name = row.name;
+                                                            root.word-naming-trouble = "";
+                                                            root.word-naming-at = index;
+                                                            root.word-naming = 4;
+                                                        }
+                                                    }
+
+                                                    // **語数と、色を付けられなかった数。**押すと一覧が開く
+                                                    // ——アプリの中で見て、アプリの中で消せることが、辞書を
+                                                    // 書き手に管理させないということである。
+                                                    if !(root.word-naming == 4
+                                                        && root.word-naming-at == index): TextButton {
+                                                        role: Role.quiet;
+                                                        title: row.conflicts > 0
+                                                            ? @tr("{} words / {} duplicates", row.words, row.conflicts)
+                                                            : (row.repeated > 0
+                                                                ? @tr("{} words ({} doubled)", row.words, row.repeated)
+                                                                : @tr("{} words", row.words));
+                                                        clicked => {
+                                                            root.word-group-opened(
+                                                                root.word-group-opened-at == index ? -1 : index);
+                                                        }
+                                                    }
+
+                                                    // 名前を変えているあいだ、この行はその欄になる
+                                                    // （色見本だけは残す——どの語群かはそれで分かる）。
+                                                    if root.word-naming == 4 && root.word-naming-at == index: Field {
+                                                        placeholder: @tr("Group name");
+                                                        text <=> root.word-new-name;
+                                                        init => {
+                                                            self.take-focus();
+                                                        }
+                                                        accepted => {
+                                                            root.word-group-renamed(index, root.word-new-name);
+                                                        }
+                                                        escaped => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                    if root.word-naming == 4 && root.word-naming-at == index: TextButton {
+                                                        title: @tr("OK");
+                                                        role: Role.primary;
+                                                        clicked => {
+                                                            root.word-group-renamed(index, root.word-new-name);
+                                                        }
+                                                    }
+                                                    if root.word-naming == 4 && root.word-naming-at == index: TextButton {
+                                                        title: @tr("Cancel");
+                                                        role: Role.quiet;
+                                                        clicked => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                }
+
+                                                // **語群が1つも無いモード。**作った直後はここに来る——
+                                                // 何も出ないのは「効かなかった」に見える（書き手の報告
+                                                // 2026-09-08）ので、**次にすることを書いておく**。
+                                                if root.word-group-rows.length == 0: Text {
+                                                    text: @tr("This mode has no word groups yet.")
+                                                        + @tr("Use \"New Group\" to create groups such as people or places and pick their colors.");
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    wrap: word-wrap;
+                                                }
+
+                                                // 開いている語群の語。**アプリの中で消せる**（要件 7.9）。
+                                                if root.word-group-opened-at >= 0: Rectangle {
+                                                    height: 152px;
+                                                    background: Tok.chrome-raised;
+                                                    border-radius: 6px;
+
+                                                    ScrollView {
+                                                        x: 8px;
+                                                        y: 6px;
+                                                        width: parent.width - 16px;
+                                                        height: parent.height - 12px;
+
+                                                        VerticalLayout {
+                                                            alignment: start;
+                                                            spacing: 1px;
+
+                                                            for word in root.word-group-words: HorizontalLayout {
+                                                                spacing: 6px;
+
+                                                                Text {
+                                                                    text: word.text;
+                                                                    // **覚え書きは薄く。**語の並びの中で
+                                                                    // 見出しとして読めればよく、語と同じ
+                                                                    // 濃さで出ると語の数が分からなくなる。
+                                                                    color: word.note ? Tok.ink-faint : Tok.ink;
+                                                                    font-size: 12px;
+                                                                    vertical-alignment: center;
+                                                                    overflow: elide;
+                                                                    horizontal-stretch: 1;
+                                                                }
+                                                                TextButton {
+                                                                    title: "×";
+                                                                    role: Role.quiet;
+                                                                    clicked => {
+                                                                        root.word-removed(
+                                                                            root.word-group-opened-at, word.text);
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            if root.word-group-words.length == 0: Text {
+                                                                text: @tr("No words yet. Select a word in the text, right-click,")
+                                                                    + @tr("and use \"Add to word set\".")
+                                                                    + @tr("Lines starting with # are notes.");
+                                                                color: Tok.ink-faint;
+                                                                font-size: 11px;
+                                                                wrap: word-wrap;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                // **開いている語群についてすることは、その語群の下に置く**
+                                                // （書き手の報告 2026-09-08：名前が「…」に潰れていた）。
+                                                // 行に釦を5つ並べると、380pxの幅では**いちばん大事な名前が
+                                                // 先に潰れる**——名前は行に、することは開いた先に。
+                                                //
+                                                // **消すのもここである。**語を1万まで入れられるものを、
+                                                // 一覧の行の`×`ひとつで消せてよいはずがない。
+                                                if root.word-group-opened-at >= 0: HorizontalLayout {
+                                                    alignment: start;
+                                                    spacing: 6px;
+
+                                                    TextButton {
+                                                        title: @tr("Import…");
+                                                        clicked => {
+                                                            root.word-group-imported(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: @tr("Export…");
+                                                        clicked => {
+                                                            root.word-group-exported(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                    // **除外語群にする／やめる**（書き手と決めた 2026-09-08）。
+                                                    // 色を持たない語群は木に積まれて最長一致で勝ち、しかし
+                                                    // 何も塗らない——`カリオン`を入れておくと、その中で
+                                                    // `リオン`が光らなくなる。
+                                                    TextButton {
+                                                        title: root.word-group-rows[root.word-group-opened-at].paints
+                                                            ? @tr("No Color")
+                                                            : @tr("Use Color");
+                                                        clicked => {
+                                                            root.word-group-paint-toggled(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: @tr("Delete This Group");
+                                                        role: Role.danger;
+                                                        clicked => {
+                                                            root.word-group-removed(root.word-group-opened-at);
+                                                        }
+                                                    }
+                                                }
+
+                                                if root.word-naming == 2: HorizontalLayout {
+                                                    spacing: 6px;
+
+                                                    Field {
+                                                        placeholder: @tr("Group name");
+                                                        text <=> root.word-new-name;
+                                                        init => {
+                                                            self.take-focus();
+                                                        }
+                                                        accepted => {
+                                                            root.word-group-added(
+                                                                root.word-mode-opened-at, root.word-new-name);
+                                                        }
+                                                        escaped => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: @tr("Add");
+                                                        role: Role.primary;
+                                                        clicked => {
+                                                            root.word-group-added(
+                                                                root.word-mode-opened-at, root.word-new-name);
+                                                        }
+                                                    }
+                                                    TextButton {
+                                                        title: @tr("Cancel");
+                                                        role: Role.quiet;
+                                                        clicked => {
+                                                            root.word-naming = 0;
+                                                        }
+                                                    }
+                                                }
+
+                                                HorizontalLayout {
+                                                    alignment: start;
+                                                    spacing: 6px;
+
+                                                    if root.word-naming != 2: TextButton {
+                                                        title: @tr("New Group");
+                                                        // **一枚で終える**（`New Mode`の注記）。
+                                                        clicked => {
+                                                            root.word-new-name = "";
+                                                            root.word-naming-trouble = "";
+                                                            root.word-naming = 2;
+                                                        }
+                                                    }
+                                                    // **重複は畳んで置く。**普段は数だけ見えていればよく、
+                                                    // 直すときにだけ開く。
+                                                    if root.word-trouble-count > 0: TextButton {
+                                                        title: root.word-troubles-shown
+                                                            ? @tr("Hide Duplicates")
+                                                            : @tr("{} duplicates", root.word-trouble-count);
+                                                        clicked => {
+                                                            root.word-troubles-shown = !root.word-troubles-shown;
+                                                        }
+                                                    }
+                                                }
+
+                                                // 要件 7.9: **参照画面。**どの語が、どこで、色が付いているのか
+                                                // いないのか。
+                                                if root.word-troubles-shown: Rectangle {
+                                                    height: 152px;
+                                                    background: Tok.chrome-raised;
+                                                    border-radius: 6px;
+
+                                                    ScrollView {
+                                                        x: 8px;
+                                                        y: 6px;
+                                                        width: parent.width - 16px;
+                                                        height: parent.height - 12px;
+
+                                                        VerticalLayout {
+                                                            alignment: start;
+                                                            spacing: 2px;
+
+                                                            for trouble in root.word-troubles: HorizontalLayout {
+                                                                spacing: 6px;
+
+                                                                Text {
+                                                                    text: trouble.conflict ? @tr("No color") : @tr("Doubled");
+                                                                    color: trouble.conflict ? Tok.alert : Tok.ink-faint;
+                                                                    font-size: 11px;
+                                                                    horizontal-stretch: 0;
+                                                                    min-width: 44px;
+                                                                }
+                                                                Text {
+                                                                    text: trouble.word;
+                                                                    color: Tok.ink;
+                                                                    font-size: 12px;
+                                                                    overflow: elide;
+                                                                    horizontal-stretch: 1;
+                                                                }
+                                                                Text {
+                                                                    text: trouble.told;
+                                                                    color: Tok.ink-faint;
+                                                                    font-size: 11px;
+                                                                    overflow: elide;
+                                                                    horizontal-stretch: 1;
+                                                                }
+                                                            }
+
+                                                            if root.word-trouble-count > root.word-troubles.length: Text {
+                                                                text: @tr("{} more", root.word-trouble-count - root.word-troubles.length);
+                                                                color: Tok.ink-faint;
+                                                                font-size: 11px;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                height: 1px;
+                                                background: Tok.rule;
+                                            }
+
+                                            // 単語チェックモード要件 5.4（書き手の求め 2026-09-08）:
+                                            // **辞書そのものを開く。**画面から作った表と同じものを、
+                                            // この編集器で直接直せる——**行に1つの形にしてあるのは、
+                                            // 人が読んで直せるためでもある**（同要件 4.2）。
+                                            HorizontalLayout {
+                                                spacing: 6px;
+
+                                                TextButton {
+                                                    title: @tr("Edit…");
+                                                    // **頼んでから閉じる**（技術検証 6.24）。開く先はタブで、
+                                                    // 書き手はもうこの画面を見ていない。
+                                                    clicked => {
+                                                        root.word-file-edited();
+                                                    }
+                                                }
+                                                Text {
+                                                    text: @tr("Opens the word set file in a tab. Saving it reloads the words.");
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                        }
+
+
+                                        // どの面にいても、値はいまのシートのもの——だから帯のすぐ
+                                        // 下に在る（要件 9）。
+                                        if root.shows-group(3, []): VerticalLayout {
+                                            Text { text: "Terminal Panel"; color: Tok.ink; }
+                                            PanelStyleEditor { style: root.panel-defaults[2]; changed style => { root.panel-defaults[2] = self.style; root.terminal-settings-edited(); } defaults: true; }
+                                        }
+
                                         // 初期値へ戻すのは**書式の両シート全部**（`typography_reset`）
                                         // なので、書式の面にだけ置く。General の2つはこれで戻らない。
                                         if !root.settings-searching && root.settings-tab > 2 && root.settings-tab < 6: VerticalLayout {
@@ -5082,7 +5103,9 @@ export component AppWindow inherits Window {
                                                 TextButton {
                                                     title: @tr("Reset");
                                                     clicked => {
-                                                        root.typography-reset(root.settings-tab);
+                                                        root.typography-reset(3);
+                                                        root.typography-reset(4);
+                                                        root.typography-reset(5);
                                                     }
                                                 }
                                             }
@@ -5709,6 +5732,9 @@ export component AppWindow inherits Window {
                 if event.text == Key.Escape {
                     root.question-answered(root.question-choices.length - 1);
                     accept
+                } else if event.text == Key.Return && root.question-enter-sends {
+                    root.question-answered(0);
+                    accept
                 } else {
                     reject
                 }
@@ -6035,35 +6061,13 @@ export component AppWindow inherits Window {
         background: #0005;
         TouchArea { }
         Rectangle {
-            width: 440px; height: 420px;
+            width: min(root.width - 40px, 760px); height: 260px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             background: Tok.chrome;
             VerticalLayout {
                 padding: 16px; spacing: 8px; alignment: start;
                 Text { text: root.appearance-title; color: Tok.ink; height: 28px; vertical-stretch: 0; }
-                ColorCell { label: @tr("Background"); shown: root.appearance-style.paper;
-                    chosen(colour) => { root.appearance-style.paper = colour; root.appearance-style.paper-own = true; }
-                    automatic => { root.appearance-style.paper-own = false; }
-                }
-                ColorCell { label: @tr("Text Color"); shown: root.appearance-style.ink;
-                    chosen(colour) => { root.appearance-style.ink = colour; }
-                }
-                Field { placeholder: @tr("Font"); text <=> root.appearance-style.family; }
-                StepRow { label: @tr("Size"); value: root.appearance-style.size + " px";
-                    stepped(by) => { root.appearance-style.size = max(8, min(72, root.appearance-style.size + by)); }
-                }
-                StepRow { label: @tr("Transparency"); value: root.appearance-style.transparency + "%";
-                    stepped(by) => { root.appearance-style.transparency = max(0, min(100, root.appearance-style.transparency + by * 5)); }
-                }
-                HorizontalLayout {
-                    TextButton { title: @tr("Bold") + (root.appearance-style.bold ? " ✓" : ""); clicked => { root.appearance-style.bold = !root.appearance-style.bold; } }
-                    TextButton { title: @tr("Italic") + (root.appearance-style.italic ? " ✓" : ""); clicked => { root.appearance-style.italic = !root.appearance-style.italic; } }
-                    if root.appearance-underline-allowed: TextButton { title: @tr("Underline") + (root.appearance-style.underline ? " ✓" : ""); clicked => { root.appearance-style.underline = !root.appearance-style.underline; } }
-                }
-                if root.appearance-default: TextButton {
-                    title: "Random: " + (root.appearance-style.random == 0 ? @tr("Off") : (root.appearance-style.random == 1 ? @tr("Light") : @tr("Dark")));
-                    clicked => { root.appearance-style.random = mod(root.appearance-style.random + 1, 3); }
-                }
+                PanelStyleEditor { style <=> root.appearance-style; defaults: root.appearance-default; underline-allowed: root.appearance-underline-allowed; }
                 HorizontalLayout {
                     TextButton { title: @tr("Default"); clicked => { root.appearance-reset(); } }
                     TextButton { title: @tr("Apply"); clicked => { root.appearance-applied(); } }

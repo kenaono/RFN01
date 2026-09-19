@@ -172,6 +172,11 @@ pub fn wire_terminal_look(
             cache.borrow_mut().log_diag("spec", "terminal reset");
             // 地と字をひとまとめで戻し、書き出しと描き直しもそこで済む。
             window.invoke_terminal_theme_chosen(false);
+            window.set_panel_defaults(ModelRc::new(VecModel::from(
+                (0..3)
+                    .map(|kind| crate::terminal_appearance::default_style(&window, kind))
+                    .collect::<Vec<_>>(),
+            )));
         }
     });
 

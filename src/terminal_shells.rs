@@ -34,14 +34,22 @@ pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
 
 fn publish(window: &AppWindow, index: usize) {
     let shells = configured_shells(window);
+    let default_name = shell_at(window, window.get_default_shell()).name;
     window.set_shell_profile_names(ModelRc::new(VecModel::from(
         shells
             .iter()
-            .map(|s| SharedString::from(s.name.clone()))
+            .map(|s| {
+                SharedString::from(if s.name == default_name {
+                    format!("{} ({})", s.name, pick("既定", "Default"))
+                } else {
+                    s.name.clone()
+                })
+            })
             .collect::<Vec<_>>(),
     )));
     let index = index.min(shells.len().saturating_sub(1));
     window.set_shell_profile_index(index as i32);
+    window.set_shell_profile_default(shells.get(index).is_some_and(|s| s.name == default_name));
     if let Some(shell) = shells.get(index) {
         let (exe, args) = command_parts(&shell.command);
         window.set_shell_profile_name(shell.name.clone().into());
@@ -143,6 +151,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
         window.set_default_shell(index as i32);
     }
     publish(window, index);
+    save_settings(window, &live.cache);
 }
 
 pub(crate) fn open_in(window: &AppWindow, live: &Live, directory: PathBuf) {

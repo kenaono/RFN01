@@ -178,21 +178,71 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
                 || entry.document.file.borrow().title(),
                 |s| s.borrow().name().to_owned(),
             );
+            if entry.file_log.is_some() {
+                if let Some(name) = entry.file_path.as_ref().and_then(|p| p.file_name()) {
+                    title = name.to_string_lossy().into_owned();
+                }
+            }
             if entry.document.text.edited() {
                 title.push('*');
             }
             if entry.capture.is_some() {
-                title.push_str(" ●");
+                title.push_str(if entry.file_log.is_some() {
+                    " ● File"
+                } else {
+                    " ● Panel"
+                });
             }
             title.into()
         })
         .collect();
     let entry = below.entries.get(below.active).map(|p| p.borrow());
+    let file_names: Vec<SharedString> = below
+        .entries
+        .iter()
+        .map(|e| e.borrow().document.file.borrow().title().into())
+        .collect();
+    let screen = id.screen(window);
+    let read_only = entry.as_ref().is_some_and(|e| e.view.viewer);
+    let capturing = entry.as_ref().is_some_and(|e| e.capture.is_some());
+    let destination: SharedString = entry
+        .as_ref()
+        .filter(|e| e.file_log.is_some())
+        .and_then(|e| e.file_path.as_ref())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .into();
+    let source_capturing = below.entries.iter().any(|e| e.borrow().capture.is_some());
+    let names_changed = screen.panel_tabs.iter().ne(names.iter().cloned())
+        || screen
+            .panel_file_names
+            .iter()
+            .ne(file_names.iter().cloned());
+    if !names_changed
+        && screen.panel_active == below.active as i32
+        && screen.panel_read_only == read_only
+        && screen.panel_capturing == capturing
+        && screen.terminal_capturing == source_capturing
+        && screen.panel_log_destination == destination
+    {
+        return;
+    }
     id.update_screen(window, |screen| {
-        screen.panel_tabs = ModelRc::new(VecModel::from(names));
+        if names_changed {
+            screen.panel_tabs = ModelRc::new(VecModel::from(names));
+            screen.panel_file_stems = ModelRc::new(VecModel::from(
+                file_names
+                    .iter()
+                    .map(|name| stem_length(name))
+                    .collect::<Vec<_>>(),
+            ));
+            screen.panel_file_names = ModelRc::new(VecModel::from(file_names));
+        }
         screen.panel_active = below.active as i32;
-        screen.panel_read_only = entry.as_ref().is_some_and(|e| e.view.viewer);
-        screen.panel_capturing = entry.as_ref().is_some_and(|e| e.capture.is_some());
+        screen.panel_read_only = read_only;
+        screen.panel_capturing = capturing;
+        screen.terminal_capturing = source_capturing;
+        screen.panel_log_destination = destination;
     });
 }
 
@@ -308,6 +358,34 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
         }
         10 => {
             start_file(window, live, id);
+            return;
+        }
+        12 => {
+            let Some(entry) = current(live, id) else {
+                return;
+            };
+            let shell = shell_at(window, index);
+            let old = entry.borrow().shell.clone();
+            let Some(old) = old else {
+                return;
+            };
+            if old.borrow().name() == shell.name {
+                return;
+            }
+            if window.get_terminal_confirm_close() && !old.borrow().finished() {
+                ask_question(window, live, Question::PanelSwitch { pane: id, entry, shell },
+                    pick("このTerminal Panelのシェルを切り替えますか？\n\n現在のセッションは終了します。", "Switch this Terminal Panel shell?\n\nIts current session will end.").into(),
+                    &[pick("切り替える", "Switch"), cancel()], 0);
+            } else {
+                switch_confirmed(window, live, id, &entry, shell);
+            }
+            return;
+        }
+        11 => {
+            let Some(path) = file_dialog::open_document(ime::window_handle(window)) else {
+                return;
+            };
+            open_file(window, live, id, &path);
             return;
         }
         _ => return,
@@ -562,6 +640,143 @@ fn action_new(window: &AppWindow, live: &Live, id: PaneId) {
     action(window, live, id, 1, 0);
 }
 
+pub(crate) fn switch_confirmed(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    entry: &Rc<RefCell<PanelDocument>>,
+    shell: TerminalShell,
+) {
+    if !entries(live).iter().any(|p| Rc::ptr_eq(p, entry)) {
+        return;
+    }
+    if entry
+        .borrow()
+        .shell
+        .as_ref()
+        .is_some_and(|s| s.borrow().name() == shell.name)
+    {
+        return;
+    }
+    let height = live.cache.borrow_mut().pane(id).below_height;
+    let Some(session) = start_shell(window, live, id, &shell, height) else {
+        return;
+    };
+    entry.borrow_mut().shell = Some(Rc::new(RefCell::new(session)));
+    for tab in live
+        .tabs
+        .borrow_mut()
+        .panes
+        .iter_mut()
+        .flat_map(|p| &mut p.tabs)
+    {
+        if tab
+            .below
+            .entries
+            .get(tab.below.active)
+            .is_some_and(|p| Rc::ptr_eq(p, entry))
+        {
+            tab.below.shell = entry.borrow().shell.clone();
+        }
+    }
+    // Only replace the cache if this entry is still visible.
+    if current(live, id).is_some_and(|p| Rc::ptr_eq(&p, entry)) {
+        show(window, live, id);
+    }
+}
+
+pub(crate) fn open_file(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
+    if document_at(live, path).is_some()
+        || entries(live)
+            .iter()
+            .any(|e| e.borrow().document.file.borrow().path() == Some(path))
+    {
+        window.tell(
+            pick(
+                "このファイルは既に開いています",
+                "This file is already open",
+            )
+            .into(),
+        );
+        return;
+    }
+    let (file, text) = match DocumentFile::open(path, MAX_DOCUMENT_CHARACTERS) {
+        Ok(result) => result,
+        Err(error) => {
+            window.tell(format!("{}: {error}", pick("開けません", "Cannot open")).into());
+            return;
+        }
+    };
+    let doc = OpenDocument::new(file, text, slint::Weak::default());
+    {
+        let mut tabs = live.tabs.borrow_mut();
+        let strip = tabs.of_mut(id);
+        let active = strip.active;
+        let Some(tab) = strip.tabs.get_mut(active).filter(|t| t.terminal.is_some()) else {
+            return;
+        };
+        tab.below
+            .entries
+            .push(Rc::new(RefCell::new(PanelDocument::new(window, doc, None))));
+        tab.below.active = tab.below.entries.len() - 1;
+    }
+    show(window, live, id);
+}
+
+fn rename(window: &AppWindow, live: &Live, id: PaneId, index: usize, name: &str) {
+    let entry = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .and_then(|t| t.below.entries.get(index).cloned());
+    let Some(entry) = entry else {
+        return;
+    };
+    if entry.borrow().capture.is_some() {
+        window.tell(
+            pick(
+                "取り込みを停止してから名前を変更してください",
+                "Stop capture before renaming",
+            )
+            .into(),
+        );
+        return;
+    }
+    let doc = entry.borrow().document.clone();
+    let Some(path) = doc.file.borrow().path().map(Path::to_owned) else {
+        window.tell(
+            pick(
+                "名前の変更: 先に保存してください",
+                "Rename: save the document first",
+            )
+            .into(),
+        );
+        return;
+    };
+    let name = match file_tree::check_name(name) {
+        Ok(name) => name,
+        Err(e) => {
+            window.tell(e.message().into());
+            return;
+        }
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let to = parent.join(name);
+    if path == to {
+        return;
+    }
+    if let Err(e) = move_entry(window, live, &path, &to) {
+        window.tell(cannot_rename(&e).into());
+        return;
+    }
+    doc.file.borrow_mut().follow_rename(to);
+    publish_left(window, live);
+    show(window, live, id);
+}
+
 pub(crate) fn entries(live: &Live) -> Vec<Rc<RefCell<PanelDocument>>> {
     live.tabs
         .borrow()
@@ -811,6 +1026,19 @@ pub(crate) fn edited(window: &AppWindow, live: &Live, id: PaneId) {
 }
 
 pub(crate) fn install(window: &AppWindow, live: &Live) {
+    let weak = window.as_weak();
+    let rename_live = live.clone();
+    window.on_panel_renamed(move |pane, index, name| {
+        if let Some(window) = weak.upgrade() {
+            rename(
+                &window,
+                &rename_live,
+                PaneId::from_index(pane),
+                index.max(0) as usize,
+                &name,
+            );
+        }
+    });
     let weak = window.as_weak();
     let live = live.clone();
     window.on_panel_action(move |pane, what, index| {
