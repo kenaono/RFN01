@@ -16,6 +16,7 @@ impl slint::platform::Platform for Offscreen {
 struct Harness {
     window: AppWindow,
     live: Live,
+    surface: Rc<MinimalSoftwareWindow>,
 }
 
 impl Harness {
@@ -96,7 +97,14 @@ impl Harness {
                 publish_tabs(&window, &notified);
             }
         });
-        (Self { window, live }, document)
+        (
+            Self {
+                window,
+                live,
+                surface,
+            },
+            document,
+        )
     }
 }
 
@@ -105,6 +113,85 @@ impl Drop for Harness {
         self.live.writer.finish();
         app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
     }
+}
+
+#[test]
+fn terminal_panel_long_text_click_and_end_render() {
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    id.update_screen(&h.window, |screen| {
+        screen.terminal = true;
+        screen.panel_style = terminal_appearance::initial_style();
+    });
+    let text = (0..3000).map(|i| format!("line {i}\n")).collect::<String>();
+    show_draft(&h.window, id, &text);
+    id.set_below(&h.window, 2, 240.0);
+    h.window.show().unwrap();
+    let render = || {
+        h.window.window().request_redraw();
+        h.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut vec![slint::Rgb8Pixel::default(); 1000 * 740], 1000);
+        });
+    };
+    render();
+    let position = slint::LogicalPosition::new(400.0, 600.0);
+    h.window
+        .window()
+        .dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+    h.window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+    render();
+    h.window.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    h.window.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::End.into(),
+    });
+    h.window.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::End.into(),
+    });
+    h.window.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    render();
+    assert_eq!(id.screen(&h.window).panel_caret as usize, text.len());
+    // Selection rectangles and ReadOnly use the same large scroll coordinates.
+    h.window.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    h.window
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "a".into() });
+    h.window
+        .window()
+        .dispatch_event(WindowEvent::KeyReleased { text: "a".into() });
+    h.window.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    render();
+    id.update_screen(&h.window, |screen| screen.panel_read_only = true);
+    h.window
+        .window()
+        .dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+    h.window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+    render();
+    assert_eq!(id.screen(&h.window).below_draft.as_str(), text);
 }
 
 #[test]
@@ -117,16 +204,35 @@ fn terminal_panel_restored_draft_can_be_saved_and_edited_with_live_notifications
     let document = panel.borrow().document.clone();
     assert_eq!(&*document.text.borrow(), "restored draft");
     let path = app_data::app_directory().unwrap().join("saved-panel.md");
-    assert!(saving::write_document_to(&h.window, &h.live, &document, path.clone()));
+    assert!(saving::write_document_to(
+        &h.window,
+        &h.live,
+        &document,
+        path.clone()
+    ));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "restored draft");
     assert!(!document.text.edited());
     // Capture/edit updates hold the panel while changing its text, as in the UI.
-    panel.borrow_mut().document.text.borrow_mut().push_str(" edited");
+    panel
+        .borrow_mut()
+        .document
+        .text
+        .borrow_mut()
+        .push_str(" edited");
     terminal_panels::edited(&h.window, &h.live, id);
     assert!(document.text.edited());
-    assert!(id.screen(&h.window).panel_tabs.row_data(0).unwrap().ends_with('*'));
+    assert!(
+        id.screen(&h.window)
+            .panel_tabs
+            .row_data(0)
+            .unwrap()
+            .ends_with('*')
+    );
     assert!(terminal_panels::save(&h.window, &h.live, &panel, false));
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "restored draft edited");
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "restored draft edited"
+    );
 }
 
 #[test]
