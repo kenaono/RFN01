@@ -2198,17 +2198,70 @@ fn ruby_reading<'a>(block_text: &'a str, run: &StyleRun) -> &'a str {
         .trim_end_matches('》')
 }
 
+/// Lay out a heading's gutter markup on the body's baseline (RFN01-22).
+/// The caller anchors this layout to the body's hit-test rectangle.
+fn heading_markup_layout(
+    dwrite: &IDWriteFactory,
+    format: &IDWriteTextFormat,
+    text: &[u16],
+    indent: f32,
+    body: &IDWriteTextLayout,
+    position: u32,
+    mode: WritingMode,
+) -> Result<IDWriteTextLayout> {
+    let lines = line_metrics(body)?;
+    let mut end = 0;
+    let mut line_offset = 0.0;
+    let line = lines
+        .iter()
+        .find(|line| {
+            end += line.length;
+            if position < end {
+                true
+            } else {
+                line_offset += line.height;
+                false
+            }
+        })
+        .or_else(|| lines.last());
+    unsafe {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut hit = DWRITE_HIT_TEST_METRICS::default();
+        body.HitTestTextPosition(position, false, &mut x, &mut y, &mut hit)?;
+        if position >= end {
+            line_offset -= line.map_or(0.0, |line| line.height);
+        }
+        let height = mode.to_axes(hit.width, hit.height).0;
+        let (width, height_on_screen) = mode.to_screen(height, indent);
+        let layout =
+            dwrite.CreateTextLayout(text, format, width.max(1.0), height_on_screen.max(1.0))?;
+        if let Some(line) = line {
+            // Hit-test rectangles exclude leading. Translate the line baseline
+            // into that rectangle instead of adding the leading a second time.
+            let leading = match mode {
+                WritingMode::Horizontal => hit.top - line_offset,
+                WritingMode::Vertical => body.GetMaxWidth() - line_offset - hit.left - hit.width,
+            };
+            layout.SetLineSpacing(
+                DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                height,
+                line.baseline - leading,
+            )?;
+        }
+        Ok(layout)
+    }
+}
+
 /// Draw what stands in each of a block's boxes (要件 7.3.2).
 ///
 /// **Here rather than in the box itself.** Direct2D hands an inline object a
 /// renderer, not a render target, so a box that drew its own ink would have to
 /// hold one — and the target is rebuilt on every resize while the layouts
 /// referencing the box are cached across exactly that (技術検証 4.12).
-///
-/// Each ornament goes into the rectangle its own range hit-tests to, in the
-/// coordinates the block was drawn at. **Nothing here asks which way the line
-/// runs**: the rectangle already answers that, and the format is the pane's own.
+/// Each ornament uses its hit-test rectangle and the pane's writing direction.
 fn draw_marker_ink(
+    dwrite: &IDWriteFactory,
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
     format: &IDWriteTextFormat,
@@ -2325,14 +2378,32 @@ fn draw_marker_ink(
         // SAFETY: The buffer, the format and the brush all outlive the call,
         // and the rectangle is read before it returns.
         unsafe {
-            target.DrawText(
-                &utf16,
-                format,
-                &rect,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
+            if heading.is_some() {
+                let marker_layout = heading_markup_layout(
+                    dwrite,
+                    format,
+                    &utf16,
+                    indent,
+                    layout,
+                    run.utf16_start + run.utf16_len,
+                    mode,
+                )?;
+                target.DrawTextLayout(
+                    windows_numerics::Vector2 { X: left, Y: top },
+                    &marker_layout,
+                    brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            } else {
+                target.DrawText(
+                    &utf16,
+                    format,
+                    &rect,
+                    brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
         }
     }
     draw_upright_digits(
@@ -4423,6 +4494,7 @@ fn draw_block(
                 .collect::<Result<Vec<_>>>()?;
             let upright = graphics.upright_formats_for(typography, &task.runs, &task.text)?;
             draw_marker_ink(
+                &graphics.dwrite,
                 &target,
                 &brush,
                 &format,
@@ -6397,7 +6469,8 @@ impl TextEngine {
             // 歩く。**編集中の行の記号は本文の流れの外（溝）に描かれているので、
             // 流れの中の位置をそのまま使うとカーソルは記号の頭で止まったまま動かない
             // ——書き手には「←が効かない」に見える。
-            let (in_flow, in_line) = self.markup_offset(graphics, block_index, local)?;
+            let (in_flow, in_line) =
+                self.markup_offset(graphics, block_index, local, &layout, &mut metrics)?;
             let (x, y) = mode.to_screen(
                 block.to_global_flow(mode.flow_of(&metrics) + cell_flow + in_flow),
                 margin + inset + cell_line + line_point + in_line,
@@ -6428,6 +6501,8 @@ impl TextEngine {
         graphics: &mut Graphics,
         block_index: usize,
         local: u32,
+        body_layout: &IDWriteTextLayout,
+        caret_metrics: &mut DWRITE_HIT_TEST_METRICS,
     ) -> Result<(f32, f32)> {
         if self.source_line.is_none() {
             return Ok((0.0, 0.0));
@@ -6465,11 +6540,50 @@ impl TextEngine {
             )
         };
         // 短い字なので、その場で組んで訊く。**同じ書式で組む**ので、溝に描いた字と
-        // 同じ幅が返る（描くのは`draw_marker_ink`の`DrawText`で、書式はこれである）。
-        let layout = unsafe {
-            graphics
-                .dwrite
-                .CreateTextLayout(&markup, &format, indent.max(1.0), indent.max(1.0))?
+        // 同じ幅が返る。見出しは描画と同じ補正済みレイアウトで測る。
+        let layout = if hashes > 0 {
+            let mut x = 0.0;
+            let mut y = 0.0;
+            let mut body_metrics = DWRITE_HIT_TEST_METRICS::default();
+            unsafe {
+                body_layout.HitTestTextPosition(
+                    run.utf16_start + run.utf16_len,
+                    false,
+                    &mut x,
+                    &mut y,
+                    &mut body_metrics,
+                )?;
+            }
+            // The zero-width inline object has a smaller box than the heading.
+            // Use the same body rectangle that anchors the visible marker.
+            match self.mode {
+                WritingMode::Horizontal => {
+                    caret_metrics.top = body_metrics.top;
+                    caret_metrics.height = body_metrics.height;
+                }
+                WritingMode::Vertical => {
+                    caret_metrics.left = body_metrics.left;
+                    caret_metrics.width = body_metrics.width;
+                }
+            }
+            heading_markup_layout(
+                &graphics.dwrite,
+                &format,
+                &markup,
+                indent,
+                body_layout,
+                run.utf16_start + run.utf16_len,
+                self.mode,
+            )?
+        } else {
+            unsafe {
+                graphics.dwrite.CreateTextLayout(
+                    &markup,
+                    &format,
+                    indent.max(1.0),
+                    indent.max(1.0),
+                )?
+            }
         };
         let mut point_x = 0.0;
         let mut point_y = 0.0;
@@ -6479,6 +6593,11 @@ impl TextEngine {
             layout.HitTestTextPosition(inside, false, &mut point_x, &mut point_y, &mut metrics)?;
         }
         let (flow, line) = self.mode.to_axes(point_x, point_y);
+        let flow = if hashes > 0 {
+            self.mode.flow_of(&metrics)
+        } else {
+            flow
+        };
         // 溝は本文の1段手前から始まる（`draw_marker_ink`が墨を置くのと同じ場所）。
         Ok((flow, line - indent))
     }
@@ -7849,6 +7968,86 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(engine.margin, original);
+        }
+    }
+
+    #[test]
+    fn heading_markup_ink_shares_the_body_cross_axis() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            for level in 1..=6 {
+                for spacing in [1.0, 1.8] {
+                    for ruby_room in [false, true] {
+                        // Identical glyphs in the gutter and body expose a
+                        // baseline shift without depending on font ascenders.
+                        let source = format!("{} #", "#".repeat(level));
+                        let preview =
+                            crate::document::PreviewDocument::from_source_with_active_line(
+                                &source,
+                                Some(0),
+                            );
+                        let styles = crate::document::line_styles(&source);
+                        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                            .with_markers(preview.markers())
+                            .with_source_line(preview.active_line());
+                        let mut typography = plain().with_heading_ramp(2.0);
+                        typography.line_spacing = spacing;
+                        typography.ruby_room = ruby_room;
+                        typography.decorations = [0; 7];
+                        let mut engine = engine_set(mode, styled, &typography);
+                        let body = engine.caret_geometry((level + 1) as u32).unwrap();
+                        let body_start = mode.to_axes(body.x, body.y).1;
+                        let marker = engine.caret_geometry(0).unwrap();
+                        let body_flow = mode.to_axes(body.x, body.y).0;
+                        let marker_flow = mode.to_axes(marker.x, marker.y).0;
+                        assert!(
+                            (body_flow - marker_flow).abs() < 0.5,
+                            "caret {mode:?} H{level} spacing={spacing} ruby={ruby_room}: marker={marker_flow}, body={body_flow}"
+                        );
+                        assert!(
+                            (mode.to_axes(body.width, body.height).0
+                                - mode.to_axes(marker.width, marker.height).0)
+                                .abs()
+                                < 0.5,
+                            "heading caret must have the body's cross-axis size"
+                        );
+                        let tiles = engine.visible_tiles(
+                            -engine.flow_bounds().0,
+                            engine.total_flow_size() as f32,
+                            0,
+                            0.0,
+                            LINE_EXTENT as f32,
+                        );
+                        let mut drawn = DrawnTiles::default();
+                        engine.render_tiles(&tiles, None, &mut drawn).unwrap();
+                        let mut bounds = [(i32::MAX, i32::MIN); 2];
+                        for (span, width, height, bgra) in &drawn.tiles {
+                            for y in 0..*height {
+                                for x in 0..*width {
+                                    let pixel = ((y * width + x) * 4) as usize;
+                                    if bgra[pixel + 2] >= 180 {
+                                        continue;
+                                    }
+                                    let (flow, line) = mode.to_axes(x as f32, y as f32);
+                                    let part =
+                                        usize::from(line + span.cross_start as f32 >= body_start);
+                                    let at = flow as i32 + span.flow_start;
+                                    bounds[part].0 = bounds[part].0.min(at);
+                                    bounds[part].1 = bounds[part].1.max(at);
+                                }
+                            }
+                        }
+                        assert!(
+                            bounds.iter().all(|(a, b)| a <= b),
+                            "missing ink: {bounds:?}"
+                        );
+                        assert!(
+                            (bounds[0].0 - bounds[1].0).abs() <= 1
+                                && (bounds[0].1 - bounds[1].1).abs() <= 1,
+                            "{mode:?} H{level} spacing={spacing} ruby={ruby_room}: {bounds:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
