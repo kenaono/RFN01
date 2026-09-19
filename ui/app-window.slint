@@ -2246,7 +2246,7 @@ export component AppWindow inherits Window {
             // boundaries say the same thing above).
             if root.tree-open: Rectangle {
                 width: 9px;
-                background: transparent;
+                background: Tok.chrome;
 
                 Rectangle {
                     x: tree-grab.has-hover || tree-grab.pressed ? 3px : 4px;
@@ -3467,11 +3467,13 @@ export component AppWindow inherits Window {
                                                 checked <=> root.terminal-confirm-close;
                                             }
                                             HorizontalLayout {
+                                                spacing: 12px;
                                                 Text { text: @tr("History lines"); color: Tok.ink; vertical-alignment: center; }
-                                                Field { text: root.terminal-history-limit;
+                                                Field { width: 100px; horizontal-stretch: 0; text: root.terminal-history-limit;
                                                     accepted => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
                                                     focus-lost => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
                                                 }
+                                                Rectangle { horizontal-stretch: 1; }
                                             }
                                             Text { text: "Terminal"; color: Tok.ink; }
                                             PanelStyleEditor { style: root.panel-defaults[0]; changed style => { root.panel-defaults[0] = self.style; root.terminal-settings-edited(); } defaults: true; }
@@ -5121,6 +5123,7 @@ export component AppWindow inherits Window {
                 // Wider than the line it draws, so there is something to grab. The
                 // line stays 1px until the pointer is on it.
                 for boundary[index] in root.boundaries: Rectangle {
+                    background: Tok.chrome;
                     x: boundary.x * 1px;
                     y: boundary.y * 1px;
                     width: boundary.width * 1px;
@@ -6061,7 +6064,7 @@ export component AppWindow inherits Window {
         background: #0005;
         TouchArea { }
         Rectangle {
-            width: min(root.width - 40px, 760px); height: 260px;
+            width: min(root.width - 40px, 620px); height: 340px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             background: Tok.chrome;
             VerticalLayout {
@@ -6070,6 +6073,7 @@ export component AppWindow inherits Window {
                 PanelStyleEditor { style <=> root.appearance-style; defaults: root.appearance-default; underline-allowed: root.appearance-underline-allowed; }
                 HorizontalLayout {
                     TextButton { title: @tr("Default"); clicked => { root.appearance-reset(); } }
+                    Rectangle { horizontal-stretch: 1; }
                     TextButton { title: @tr("Apply"); clicked => { root.appearance-applied(); } }
                     TextButton { title: @tr("Cancel"); clicked => { root.appearance-open = false; } }
                 }

@@ -1949,7 +1949,7 @@ export component EditorPane inherits Rectangle {
         }
 
         if root.terminal: Rectangle {
-            height: 32px; vertical-stretch: 0;
+            height: 32px; vertical-stretch: 0; background: Tok.chrome;
         if root.terminal-search-open && root.terminal-search-spot == 0: HorizontalLayout {
             spacing: 4px;
             Field {
@@ -3448,6 +3448,20 @@ export component EditorPane inherits Rectangle {
                 }
             }
 
+
+        }
+
+            // 追加要件 2026-09-14（書き手）: **設定の面が立つ場所。**本文と同じ
+            // 大きさで、中身は窓が`EditorPane`の子として渡す——設定は窓のもので、
+            // 何百行もの値をペインへ通すより、場所を貸すほうが短い。何も
+            // 渡されていなければ空の箱で、押しても何も受け取らない。
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                @children
+            }
+        }
+
             // 追加要件 Terminal: **the strip along the foot of the pane.** A
             // shell under a document, or a draft under a shell — which one it
             // is follows from the tab in front, so the pane is told a number
@@ -3536,7 +3550,7 @@ export component EditorPane inherits Rectangle {
             }
 
         if root.below-kind == 1: Rectangle {
-            height: 32px; vertical-stretch: 0;
+            height: 32px; vertical-stretch: 0; background: Tok.chrome;
         if root.terminal-search-open && root.terminal-search-spot == 1: HorizontalLayout {
             spacing: 4px;
             Field {
@@ -3558,9 +3572,11 @@ export component EditorPane inherits Rectangle {
         }
         }
 
-            if root.panel-capturing && root.below-kind == 2: Text {
-                height: 20px; vertical-stretch: 0; color: Tok.ink-faint; font-size: 11px; overflow: elide;
+            if root.panel-capturing && root.below-kind == 2: Rectangle {
+                height: 20px; vertical-stretch: 0; background: Tok.chrome;
+                Text { color: Tok.ink-muted; font-size: 11px; overflow: elide;
                 text: root.panel-log-destination != "" ? @tr("Writing log to: {}", root.panel-log-destination) : @tr("Capturing to Panel — save to keep as a file");
+                }
             }
 
             if root.below-kind != 0: Rectangle {
@@ -4134,18 +4150,6 @@ export component EditorPane inherits Rectangle {
                 }
             }
 
-        }
-
-            // 追加要件 2026-09-14（書き手）: **設定の面が立つ場所。**本文と同じ
-            // 大きさで、中身は窓が`EditorPane`の子として渡す——設定は窓のもので、
-            // 何百行もの値をペインへ通すより、場所を貸すほうが短い。何も
-            // 渡されていなければ空の箱で、押しても何も受け取らない。
-            Rectangle {
-                width: parent.width;
-                height: parent.height;
-                @children
-            }
-        }
     }
 
     // 追加要件 2026-09-15: TAB・Paneの紙の色を選ぶパレット。メニューの行から開くので、

@@ -7,14 +7,26 @@ export component PanelStyleEditor inherits VerticalLayout {
     in-out property <PanelStyle> style;
     in property <bool> underline-allowed: true;
     in property <bool> defaults: false;
-    spacing: 8px;
-    HorizontalLayout {
-        spacing: 8px;
-        ColorCell { label: @tr("Background"); shown: root.style.paper;
+    spacing: 10px;
+    vertical-stretch: 0;
+    Rectangle {
+      height: 108px; vertical-stretch: 0;
+      background: Tok.chrome-raised; border-color: Tok.rule; border-width: 1px; border-radius: 6px;
+      VerticalLayout {
+        padding: 10px; spacing: 8px;
+        HorizontalLayout {
+          spacing: 12px;
+          ColorCell { width: 100px; horizontal-stretch: 0; label: @tr("Background"); shown: root.style.paper;
             chosen(colour) => { root.style.paper = colour; root.style.paper-own = true; }
             automatic => { root.style.paper-own = false; }
+          }
+          if root.defaults: Text { text: "Random"; color: Tok.ink-muted; vertical-alignment: center; }
+          if root.defaults: ComboBox { width: 100px; horizontal-stretch: 0; model: [@tr("Off"), @tr("Light"), @tr("Dark")]; current-index <=> root.style.random; }
+          Rectangle { horizontal-stretch: 1; }
         }
-        Text { text: @tr("Transparency"); color: Tok.ink; vertical-alignment: center; }
+    HorizontalLayout {
+        spacing: 8px;
+        Text { width: 72px; text: @tr("Transparency"); color: Tok.ink-muted; vertical-alignment: center; }
         Slider { horizontal-stretch: 1; minimum: 0; maximum: 100; value: root.style.transparency;
             moved(value) => { root.style.transparency = round(value); }
         }
@@ -24,20 +36,32 @@ export component PanelStyleEditor inherits VerticalLayout {
         }
         Text { text: "%"; color: Tok.ink; vertical-alignment: center; }
     }
+      }
+    }
+    Rectangle {
+      height: 108px; vertical-stretch: 0;
+      background: Tok.chrome-raised; border-color: Tok.rule; border-width: 1px; border-radius: 6px;
+      VerticalLayout {
+        padding: 10px; spacing: 8px;
     HorizontalLayout {
         spacing: 8px;
+        Text { width: 72px; text: @tr("Font"); color: Tok.ink-muted; vertical-alignment: center; }
         Field { horizontal-stretch: 1; placeholder: @tr("Font"); text <=> root.style.family; }
-        ColorCell { label: @tr("Text Color"); shown: root.style.ink; chosen(colour) => { root.style.ink = colour; } }
+        ColorCell { width: 100px; horizontal-stretch: 0; label: @tr("Text Color"); shown: root.style.ink; chosen(colour) => { root.style.ink = colour; } }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        Text { width: 72px; text: @tr("Size"); color: Tok.ink-muted; vertical-alignment: center; }
         Field { width: 45px; text: root.style.size;
             accepted => { if self.text.is-float() { root.style.size = round(clamp(self.text.to-float(), 8, 72)); } }
             focus-lost => { if self.text.is-float() { root.style.size = round(clamp(self.text.to-float(), 8, 72)); } }
         }
+        Text { text: "px"; color: Tok.ink-muted; vertical-alignment: center; }
         CheckBox { text: @tr("Bold"); checked <=> root.style.bold; }
         CheckBox { text: @tr("Italic"); checked <=> root.style.italic; }
         if root.underline-allowed: CheckBox { text: @tr("Underline"); checked <=> root.style.underline; }
+        Rectangle { horizontal-stretch: 1; }
     }
-    if root.defaults: HorizontalLayout {
-        Text { text: "Random"; color: Tok.ink; vertical-alignment: center; }
-        ComboBox { model: [@tr("Off"), @tr("Light"), @tr("Dark")]; current-index <=> root.style.random; }
+      }
     }
 }

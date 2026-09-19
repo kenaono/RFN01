@@ -116,6 +116,63 @@ impl Drop for Harness {
 }
 
 #[test]
+fn terminal_opaque_background_covers_entire_pane() {
+    use slint::platform::software_renderer::PremultipliedRgbaColor;
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    h.window.set_tree_open(false);
+    h.window.set_background_transparency(0);
+    let id = PaneId::FIRST;
+    id.update_screen(&h.window, |s| {
+        s.height = 700.0;
+        s.terminal = true;
+        s.empty = false;
+        s.front_style = terminal_appearance::initial_style();
+        s.panel_style = terminal_appearance::initial_style();
+    });
+    h.window.show().unwrap();
+    for below in [0, 2, 0] {
+        id.set_below(&h.window, below, 200.0);
+        h.window.window().request_redraw();
+        let mut pixels = vec![PremultipliedRgbaColor::default(); 1000 * 740];
+        h.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+        for y in (50..680).step_by(10) {
+            for x in (100..930).step_by(10) {
+                assert_eq!(
+                    pixels[y * 1000 + x].alpha,
+                    255,
+                    "transparent hole at {x},{y}, below={below}"
+                );
+            }
+        }
+    }
+    // Each surface owns its alpha; the upper surface must not shine through
+    // a transparent lower panel (or make it opaque).
+    id.set_below(&h.window, 1, 200.0);
+    for (front, panel) in [(0, 50), (50, 0), (100, 50), (0, 100)] {
+        id.update_screen(&h.window, |s| {
+            s.front_style.transparency = front;
+            s.panel_style.transparency = panel;
+        });
+        h.window.window().request_redraw();
+        let mut pixels = vec![PremultipliedRgbaColor::default(); 1000 * 740];
+        h.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+        for (y, value) in [(120, front), (620, panel)] {
+            let alpha = pixels[y * 1000 + 500].alpha as i32;
+            let expected = (255.0 * (100 - value) as f32 / 100.0).round() as i32;
+            assert!(
+                (alpha - expected).abs() <= 1,
+                "alpha at y={y}: {alpha}, expected {expected}"
+            );
+        }
+        assert_eq!(pixels[50 * 1000 + 500].alpha, 255, "toolbar remains opaque");
+    }
+}
+
+#[test]
 fn terminal_settings_refresh_profiles_loaded_after_install() {
     let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
     terminal_shells::install(&h.window, &h.live);
