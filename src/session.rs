@@ -307,7 +307,7 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
             }
         })
         .collect();
-    let folder = live.folder.borrow();
+    let folder = live.folder.borrow().explorer_location();
     app_data::Session {
         layout: live.layout.borrow().encode(),
         place: window_place(window),
@@ -437,6 +437,24 @@ pub fn write_session(window: &AppWindow, live: &Live) {
         return;
     };
     let session = capture_session(window, live);
+    let (runtime, expanded) = {
+        let folder = live.folder.borrow();
+        (
+            folder.workspace.clone(),
+            if folder.workspace_view {
+                folder.expanded.clone()
+            } else {
+                folder.workspace_location.expanded.clone()
+            },
+        )
+    };
+    if let Some(runtime) = runtime {
+        if let Err(error) = runtime.borrow_mut().persist_active_expanded(expanded) {
+            live.cache
+                .borrow_mut()
+                .log_diag("workspace", &format!("view save failed error={error}"));
+        }
+    }
     if let Err(error) = app_data::write_session(&directory, &session) {
         live.cache
             .borrow_mut()

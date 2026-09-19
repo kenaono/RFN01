@@ -72,6 +72,7 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),

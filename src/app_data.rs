@@ -1077,9 +1077,16 @@ pub fn work_file_name(copy: &WorkCopy) -> String {
 /// the whole of the parsing rule, which is what lets a document contain lines
 /// that look exactly like the header without any escaping.
 pub fn encode(copy: &WorkCopy) -> String {
+    encode_with_protection(copy, false)
+}
+
+pub fn encode_with_protection(copy: &WorkCopy, protected: bool) -> String {
     let mut out = String::with_capacity(copy.text.len() + 128);
     out.push_str(WORK_MAGIC);
     out.push('\n');
+    if protected {
+        out.push_str("protected: 1\n");
+    }
     out.push_str(&format!("untitled: {}\n", copy.untitled));
     if let Some(origin) = &copy.origin {
         out.push_str(&format!("origin: {}\n", origin.display()));
@@ -1141,6 +1148,14 @@ pub fn write_into(directory: &Path, copy: &WorkCopy) -> io::Result<PathBuf> {
 /// Anything unreadable or unrecognised is skipped rather than reported: this
 /// runs at start-up, and one bad file must not stop the others being restored.
 pub fn read_all_in(directory: &Path) -> Vec<WorkCopy> {
+    read_records_in(directory)
+        .into_iter()
+        .map(|(copy, _)| copy)
+        .collect()
+}
+
+/// Read the purpose and body together; old work copies are ordinary backups.
+pub fn read_records_in(directory: &Path) -> Vec<(WorkCopy, bool)> {
     let Ok(entries) = fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -1154,7 +1169,11 @@ pub fn read_all_in(directory: &Path) -> Vec<WorkCopy> {
             continue;
         };
         if let Some(copy) = decode(&raw) {
-            copies.push(copy);
+            let header = raw
+                .split_once("\n\n")
+                .map_or(raw.as_str(), |(header, _)| header);
+            let protected = header.lines().any(|line| line == "protected: 1");
+            copies.push((copy, protected));
         }
     }
     copies

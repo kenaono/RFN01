@@ -1590,7 +1590,21 @@ impl WindowAdapterInternal for WinitWindowAdapter {
     #[cfg(enable_accesskit)]
     fn handle_focus_change(&self, _old: Option<ItemRc>, _new: Option<ItemRc>) {
         let Some(accesskit_adapter_cell) = self.accesskit_adapter() else { return };
-        accesskit_adapter_cell.borrow_mut().handle_focus_item_change();
+        if let Ok(mut adapter) = accesskit_adapter_cell.try_borrow_mut() {
+            adapter.handle_focus_item_change();
+            return;
+        }
+        // Building the accessibility tree can instantiate a lazy component
+        // whose init handler changes focus. That re-enters here while the
+        // AccessKit adapter is still mutably borrowed by reload_tree/focus_node.
+        // Unlike registration, do not discard this notification: the completed
+        // tree must receive the latest focus after the outer traversal returns.
+        let window_weak = self.self_weak.clone();
+        i_slint_core::timers::Timer::single_shot(Default::default(), move || {
+            if let Some(window) = window_weak.upgrade() {
+                window.handle_focus_change(None, None);
+            }
+        });
     }
 
     #[cfg(enable_accesskit)]

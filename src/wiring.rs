@@ -1808,7 +1808,13 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     window.on_search_folder_requested(move || {
         if let Some(window) = weak.upgrade() {
             let owner = ime::window_handle(&window);
-            let from = scope_live.folder.borrow().searched_root();
+            let from = {
+                let folder = scope_live.folder.borrow();
+                folder
+                    .searching
+                    .clone()
+                    .or_else(|| crate::tree_roots(&folder).0.first().cloned())
+            };
             let Some(chosen) = file_dialog::open_folder_at(owner, from.as_deref()) else {
                 return;
             };
@@ -1855,6 +1861,32 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     let picked_live = live.clone();
     window.on_left_row_picked(move |index| {
         pick_tree_row(&picked_live, index.max(0) as usize);
+    });
+
+    let weak = window.as_weak();
+    let context_live = live.clone();
+    window.on_left_context_requested(move |index| {
+        if let Some(window) = weak.upgrade() {
+            crate::workspace_context_requested(&window, &context_live, index);
+        }
+    });
+    let weak = window.as_weak();
+    let filter_live = live.clone();
+    window.on_tree_filter_changed(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::tree_filter_changed(&window, &filter_live);
+        }
+    });
+    let weak = window.as_weak();
+    let context_live = live.clone();
+    window.on_workspace_tree_command(move |command| {
+        let weak = weak.clone();
+        let live = context_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_tree_command(&window, &live, command);
+            }
+        });
     });
 
     // 要件 5.2: a row was picked up. **Answered on the spot** — the answer is
@@ -1912,6 +1944,258 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
         Timer::single_shot(Duration::ZERO, move || {
             if let Some(window) = weak.upgrade() {
                 drop_tree_row(&window, &live, from, onto);
+            }
+        });
+    });
+}
+
+/// Workspace設計.md phase 3: the switcher in the Explorer header and the
+/// management overlay it opens.
+///
+/// **Every one of these is deferred a tick**, the same as the tree's own row
+/// callbacks above: every row here — the switcher's, the Workspace list's,
+/// the folder list's — is drawn by a `for` inside a repeater, and rebuilding
+/// that model from inside the click one of its own rows raised is 6.18 again.
+pub fn wire_workspace(window: &AppWindow, live: &Live) {
+    macro_rules! deferred {
+        ($window:ident, $callback:ident, $live:ident, $body:expr) => {{
+            let weak = $window.as_weak();
+            let live = $live.clone();
+            $window.$callback(move || {
+                let weak = weak.clone();
+                let live = live.clone();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(window) = weak.upgrade() {
+                        $body(&window, &live);
+                    }
+                });
+            });
+        }};
+    }
+
+    // Field validation must observe edits immediately so a queued probe result
+    // cannot publish after the URL was edited or the question was cancelled.
+    {
+        let weak = window.as_weak();
+        let held = live.clone();
+        window.on_workspace_clone_url_edited(move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_clone_url_edited(&window, &held);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let held = live.clone();
+        window.on_workspace_clone_url_check(move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_clone_url_check(&window, &held);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let held = live.clone();
+        window.on_workspace_clone_destination_check(move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_clone_destination_check(&window, &held);
+            }
+        });
+    }
+
+    deferred!(
+        window,
+        on_workspace_clone_requested,
+        live,
+        crate::workspace_clone_requested
+    );
+    deferred!(
+        window,
+        on_workspace_clone_browse,
+        live,
+        crate::workspace_clone_browse
+    );
+    deferred!(
+        window,
+        on_workspace_open_selected,
+        live,
+        crate::workspace_open_selected
+    );
+    deferred!(
+        window,
+        on_workspace_leave_requested,
+        live,
+        crate::workspace_leave_requested
+    );
+    deferred!(
+        window,
+        on_workspace_manager_requested,
+        live,
+        crate::workspace_manager_requested
+    );
+    deferred!(
+        window,
+        on_workspace_manager_closed,
+        live,
+        crate::workspace_manager_closed
+    );
+    deferred!(
+        window,
+        on_workspace_create_requested,
+        live,
+        crate::workspace_create_requested
+    );
+    deferred!(
+        window,
+        on_workspace_duplicate_requested,
+        live,
+        crate::workspace_duplicate_requested
+    );
+    deferred!(
+        window,
+        on_workspace_rename_requested,
+        live,
+        crate::workspace_rename_requested
+    );
+    deferred!(
+        window,
+        on_workspace_default_toggled,
+        live,
+        crate::workspace_default_toggled
+    );
+    deferred!(
+        window,
+        on_workspace_remove_requested,
+        live,
+        crate::workspace_remove_requested
+    );
+    deferred!(
+        window,
+        on_workspace_reset_view_requested,
+        live,
+        crate::workspace_reset_view_requested
+    );
+    deferred!(
+        window,
+        on_workspace_folder_add_requested,
+        live,
+        crate::workspace_folder_add_requested
+    );
+    deferred!(
+        window,
+        on_workspace_read_error_reset_requested,
+        live,
+        crate::workspace_read_error_reset_requested
+    );
+
+    let weak = window.as_weak();
+    let switcher_live = live.clone();
+    window.on_workspace_switcher_chosen(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = switcher_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_switcher_chosen(&window, &live, index);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let context_live = live.clone();
+    window.on_workspace_row_context_chosen(move |index| {
+        if let Some(window) = weak.upgrade() {
+            crate::workspace_row_context_chosen(&window, &context_live, index.max(0) as usize);
+        }
+    });
+
+    let weak = window.as_weak();
+    let row_live = live.clone();
+    window.on_workspace_row_chosen(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = row_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_row_chosen(&window, &live, index);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let mode_live = live.clone();
+    window.on_workspace_folder_mode_toggled(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = mode_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_folder_mode_toggled(&window, &live, index);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let up_live = live.clone();
+    window.on_workspace_folder_move_up_requested(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = up_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_folder_move(&window, &live, index, -1);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let down_live = live.clone();
+    window.on_workspace_folder_move_down_requested(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = down_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_folder_move(&window, &live, index, 1);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let detach_live = live.clone();
+    window.on_workspace_folder_detached(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = detach_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_folder_detached(&window, &live, index);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let relocate_live = live.clone();
+    window.on_workspace_folder_relocated(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = relocate_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_folder_relocated(&window, &live, index);
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let unused_live = live.clone();
+    window.on_workspace_unused_folder_removed(move |index| {
+        let index = index.max(0) as usize;
+        let weak = weak.clone();
+        let live = unused_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_unused_folder_removed_requested(&window, &live, index);
             }
         });
     });

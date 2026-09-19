@@ -1,0 +1,46 @@
+import { Tok } from "tokens.slint";
+export component LinkCompletion inherits Rectangle {
+    in property <[string]> rows;
+    in property <int> selected;
+    in property <string> status;
+    // All coordinates are local to the owning editor pane, not the window.
+    in property <length> caret-x;
+    in property <length> caret-y;
+    in property <length> caret-width;
+    in property <length> caret-height;
+    in property <bool> vertical;
+    in property <length> viewport-left;
+    in property <length> viewport-top;
+    in property <length> viewport-right;
+    in property <length> viewport-bottom;
+    callback chosen(int);
+    property <length> available-width: max(0px, root.viewport-right - root.viewport-left);
+    property <length> available-height: max(0px, root.viewport-bottom - root.viewport-top);
+    property <int> visible-rows: min(8, max(0, floor((root.available-height - 26px) / 28px)));
+    width: min(420px, root.available-width);
+    height: min(root.available-height, min(root.visible-rows, root.rows.length) * 28px + 26px);
+    // Horizontal text: below the line, or above when the bottom is too close.
+    // Vertical text: beside the column on the left, falling back to the right.
+    x: clamp(root.vertical
+        ? (root.caret-x - self.width - 4px >= root.viewport-left
+            ? root.caret-x - self.width - 4px : root.caret-x + root.caret-width + 4px)
+        : root.caret-x, root.viewport-left, root.viewport-right - self.width);
+    y: clamp(root.vertical ? root.caret-y
+        : (root.caret-y + root.caret-height + 4px + self.height <= root.viewport-bottom
+            ? root.caret-y + root.caret-height + 4px : root.caret-y - self.height - 4px),
+        root.viewport-top, root.viewport-bottom - self.height);
+    clip: true;
+    background: Tok.chrome-raised;
+    border-width: 1px;
+    border-color: Tok.rule-strong;
+    property <int> first: max(0, root.selected - root.visible-rows + 1);
+    Text { x: 8px; y: 3px; width: parent.width - 16px; height: 22px; text: root.status; color: Tok.ink-muted; font-size: 11px; overflow: elide; }
+    for row[index] in root.rows: Rectangle {
+        visible: index >= root.first && index < root.first + root.visible-rows;
+        x: 1px; y: 26px + (index - root.first) * 28px;
+        width: parent.width - 2px; height: 28px;
+        background: index == root.selected ? Tok.accent-soft : Tok.chrome-raised;
+        Text { x: 8px; width: parent.width - 16px; height: parent.height; text: row; color: Tok.ink; vertical-alignment: center; overflow: elide; }
+        TouchArea { clicked => { root.chosen(index); } }
+    }
+}

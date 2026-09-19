@@ -39,7 +39,12 @@ use crate::find::{self, Hit};
 /// editor's business and not this thread's.
 pub struct SearchJob {
     pub exclusions: String,
-    pub root: PathBuf,
+    /// The roots to search. **Exactly one** for a scoped search — 仕様
+    /// "explicit selected subtree works" keeps its single-folder meaning
+    /// unchanged — and every one of the active Workspace's own registered
+    /// roots for an unscoped one (仕様 "全登録フォルダが対象"). Never empty:
+    /// a caller with nothing to search does not dispatch a job at all.
+    pub roots: Vec<PathBuf>,
     pub needle: String,
     /// Which search this is, counting up. **The editor's staleness check**: a
     /// person types on while one search runs, so an outcome has to be able to
@@ -96,7 +101,7 @@ impl Superseded for NeverSuperseded {
     }
 }
 
-/// Read every file under `job.root` and report where `job.needle` is
+/// Read every file under `job.roots` and report where `job.needle` is
 /// (要件 7.7).
 ///
 /// `None` when `stop` said a newer search had arrived. **Nothing is reported
@@ -105,8 +110,8 @@ impl Superseded for NeverSuperseded {
 pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcome> {
     let started = Instant::now();
     let patterns = exclusion_patterns(&job.exclusions);
-    let paths = file_tree::files_under(
-        &job.root,
+    let paths = file_tree::files_under_many_cancellable(
+        &job.roots,
         &|folder| {
             file_tree::read_folder(folder)
                 .into_iter()
@@ -118,7 +123,8 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
                 .collect()
         },
         job.files,
-    );
+        &mut || stop.superseded(),
+    )?;
     let mut files: Vec<FileHits> = Vec::new();
     let mut total = 0usize;
     for path in paths {
@@ -131,7 +137,11 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         let Ok(loaded) = file_io::read(&path, job.characters) else {
             continue;
         };
-        let hits = find::hits_in(&loaded.text, &job.needle, job.hits_per_file);
+        let hits = find::hits_in(
+            &loaded.text,
+            &job.needle,
+            job.hits_per_file.min(job.hits_in_all - total),
+        );
         if hits.is_empty() {
             continue;
         }
@@ -290,9 +300,13 @@ mod tests {
     }
 
     fn job(root: &Path, needle: &str) -> SearchJob {
+        multi_root_job(&[root.to_path_buf()], needle)
+    }
+
+    fn multi_root_job(roots: &[PathBuf], needle: &str) -> SearchJob {
         SearchJob {
             exclusions: String::new(),
-            root: root.to_path_buf(),
+            roots: roots.to_vec(),
             needle: needle.to_owned(),
             generation: 1,
             files: 5_000,
@@ -336,6 +350,63 @@ mod tests {
             3
         );
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    /// Workspace設計.md phase 3: an unscoped search covers every registered
+    /// root, not only the first one.
+    #[test]
+    fn a_job_with_several_roots_finds_matches_in_every_one() {
+        let one = scratch_folder("multi-root-one");
+        let two = scratch_folder("multi-root-two");
+        write(&one, "A.md", "needle");
+        write(&two, "B.md", "needle");
+
+        let job = multi_root_job(&[one.clone(), two.clone()], "needle");
+        let found = search(&job, &mut NeverSuperseded).unwrap();
+
+        let mut names: Vec<String> = found
+            .files
+            .iter()
+            .map(|file| {
+                file.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["A.md".to_owned(), "B.md".to_owned()]);
+
+        fs::remove_dir_all(one).unwrap();
+        fs::remove_dir_all(two).unwrap();
+    }
+
+    #[test]
+    fn overlapping_and_aliased_roots_share_unique_file_and_hit_budgets() {
+        let root = scratch_folder("overlap-budgets");
+        let child = root.join("child");
+        fs::create_dir_all(&child).unwrap();
+        write(&child, "A.md", "needle\n".repeat(4).as_str());
+        write(&root, "B.md", "needle\n".repeat(4).as_str());
+        for roots in [
+            vec![root.clone(), child.clone()],
+            vec![child.clone(), child.join("."), root.clone()],
+        ] {
+            let mut request = multi_root_job(&roots, "needle");
+            request.files = 2;
+            request.hits_per_file = 4;
+            request.hits_in_all = 6;
+            let found = search(&request, &mut NeverSuperseded).unwrap();
+            assert_eq!(found.total, 6);
+            assert_eq!(found.files.len(), 2);
+            assert_ne!(
+                found.files[0].path.canonicalize().unwrap(),
+                found.files[1].path.canonicalize().unwrap()
+            );
+            assert_eq!(found.files[1].hits.len(), 2);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -400,12 +471,17 @@ mod tests {
         asked.hits_in_all = 25;
         let found = search(&asked, &mut NeverSuperseded).expect("an outcome");
 
-        // Three files of ten, and then the fourth is never opened: the bound is
-        // read before a file rather than inside it, so the last file to be let
-        // in is reported whole.
-        assert_eq!(found.total, 30);
+        // The last file consumes only the remaining global budget.
+        assert_eq!(found.total, 25);
         assert_eq!(found.files.len(), 3);
-        assert!(found.files.iter().all(|file| file.hits.len() == 10));
+        assert_eq!(
+            found
+                .files
+                .iter()
+                .map(|file| file.hits.len())
+                .collect::<Vec<_>>(),
+            vec![10, 10, 5]
+        );
         let _ = fs::remove_dir_all(&folder);
     }
 

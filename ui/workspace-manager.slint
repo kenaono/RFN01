@@ -1,0 +1,213 @@
+import { ScrollView } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { LinkRow, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
+
+// One row of the Workspace list. `is-default` and `is-active` are two
+// different Workspaces can each be true for at once — the one launched into
+// automatically, and the one the tree is scoped to right now — and both are
+// worth telling apart on screen (Workspace設計.md: "デフォルトWorkspaceを一つ
+// 設定できる…手動で切り替えたWorkspaceをリンクの範囲に使う").
+export struct WorkspaceRow {
+    name: string,
+    is-default: bool,
+    is-active: bool,
+}
+
+// One shared folder, as it applies to the Workspace currently selected in the
+// manager. `mode-auto` is that folder's own save mode — shared by every
+// Workspace referencing it, never per-Workspace (仕様: "保存方式はフォルダ単位の
+// 共通設定"), which is why toggling it here is worth the visual warning this
+// component draws beside it.
+export struct WorkspaceFolderRow {
+    path: string,
+    users: string,
+    mode-auto: bool,
+    // The directory could not be found the last time this was checked —
+    // 仕様 "見つからないフォルダはその状態を示し、場所変更・取り外しで整理できる".
+    missing: bool,
+}
+
+// A folder registered somewhere in the ledger but not referenced by any
+// Workspace any more — 仕様 "未使用設定を整理できる".
+export struct UnusedFolderRow {
+    path: string,
+}
+
+component Banner inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger: false;
+    background: root.danger ? #f8d7da : Tok.accent-faint;
+    border-radius: 6px;
+    height: label.preferred-height + 16px;
+
+    label := Text {
+        x: 10px;
+        width: parent.width - 20px;
+        y: 8px;
+        text: root.text;
+        color: root.danger ? #7a1f27 : Tok.ink;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+}
+
+component WorkspaceListRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> is-default;
+    in property <bool> is-active;
+    in property <bool> selected;
+    callback chosen();
+    callback context-requested();
+
+    height: 32px;
+    border-radius: 6px;
+    background: root.selected
+        ? Tok.accent-soft
+        : (touch.has-hover ? Tok.chrome-sunken : transparent);
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+
+        Text {
+            text: root.name;
+            color: touch.has-hover ? Tok.accent-strong : Tok.accent;
+            font-size: 14px;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.is-active: Text {
+            text: "●";
+            color: Tok.accent;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+        if root.is-default: Text {
+            text: "★";
+            color: Tok.ink-muted;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.context-requested();
+            }
+        }
+    }
+}
+
+export component WorkspaceManager inherits Rectangle {
+    background: Tok.paper;
+
+    in property <bool> read-error;
+    in property <string> read-error-text;
+    callback read-error-reset-requested();
+
+    in property <[WorkspaceRow]> workspaces;
+    in property <int> selected: -1;
+    callback row-chosen(int);
+    callback row-context-chosen(int);
+    property <length> context-y;
+    property <bool> unused-expanded: false;
+    callback create-requested();
+    callback clone-requested();
+    in property <bool> cloning;
+    callback duplicate-requested();
+    callback rename-requested();
+    callback default-toggled();
+    callback remove-requested();
+    callback reset-view-requested();
+
+    in property <[WorkspaceFolderRow]> folders;
+    callback folder-add-requested();
+    callback folder-mode-toggled(int);
+    callback folder-move-up-requested(int);
+    callback folder-move-down-requested(int);
+    callback folder-detached(int);
+    callback folder-relocated(int);
+
+    in property <[UnusedFolderRow]> unused-folders;
+    callback unused-folder-removed(int);
+
+    callback closed();
+    callback open-selected();
+    callback leave-requested();
+    in property <bool> active;
+
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 12px;
+        Text { text: @tr("Workspace"); color: Tok.ink-strong; font-size: 16px; font-weight: 600; vertical-stretch: 0; }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                spacing: 8px;
+                if root.read-error: Banner { danger: true; text: root.read-error-text; }
+                if root.read-error: TextButton {
+                    wide: true; title: @tr("Reset the Workspace Registry…");
+                    role: Role.danger; clicked => { root.read-error-reset-requested(); }
+                }
+                Text { text: @tr("Choose a Workspace"); color: Tok.ink-muted; font-size: 12px; }
+                for row[index] in root.workspaces: workspace-row := WorkspaceListRow {
+                    name: row.name; is-default: row.is-default; selected: false; is-active: false;
+                    chosen => { root.row-chosen(index); }
+                    context-requested => {
+                        root.context-y = workspace-row.absolute-position.y - root.absolute-position.y + 32px;
+                        root.row-context-chosen(index);
+                        folders-menu.show();
+                    }
+                }
+                if root.workspaces.length == 0: Text {
+                    text: @tr("Create a Workspace, then add folders.");
+                    color: Tok.ink-muted; font-size: 12px; wrap: word-wrap;
+                }
+                Rectangle { height: 1px; background: Tok.rule; }
+                if !root.read-error: LinkRow {
+                    title: @tr("New Workspace…"); clicked => { root.create-requested(); }
+                }
+                if !root.read-error && !root.cloning: LinkRow {
+                    title: @tr("Clone Repository…"); clicked => { root.clone-requested(); }
+                }
+                if root.unused-folders.length > 0: TextButton {
+                    wide: true;
+                    title: (root.unused-expanded ? "▾ " : "▸ ") + @tr("Unused Folder Settings");
+                    clicked => { root.unused-expanded = !root.unused-expanded; }
+                }
+                if root.unused-expanded: VerticalLayout {
+                    spacing: 4px;
+                    for folder[index] in root.unused-folders: VerticalLayout {
+                        spacing: 2px;
+                        Text { text: folder.path; color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
+                        TextButton { wide: true; title: @tr("Remove…"); clicked => { root.unused-folder-removed(index); } }
+                    }
+                }
+                if root.cloning: Text { text: @tr("Cloning Repository…"); color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
+            }
+        }
+    }
+    folders-menu := PopupWindow {
+        x: 8px; y: root.context-y; width: 340px; close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 340px;
+            VerticalLayout {
+                padding: 6px; spacing: 1px;
+                if root.folders.length == 0: MenuRow { title: @tr("No folders in this Workspace yet"); enabled: false; }
+                for folder[index] in root.folders: MenuRow {
+                    title: @tr("Relocate…") + "  " + folder.path;
+                    Tooltip { text: @markdown("`\{folder.path}`"); }
+                    activated => { root.folder-relocated(index); folders-menu.close(); }
+                }
+            }
+        }
+    }
+
+}

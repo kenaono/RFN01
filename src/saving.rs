@@ -22,7 +22,7 @@
 //! `Live`のほうを細くするのが先で、それは別の日の仕事である（技術検証 9.3）。
 
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
@@ -33,6 +33,7 @@ use crate::file_io::{self, Encoding, LoadError};
 use crate::i18n::pick;
 use crate::open_document::OpenDocument;
 use crate::say;
+use crate::workspace;
 use crate::{
     AUTOSAVE_SETTING, AppWindow, EditorState, Live, MAX_DOCUMENT_CHARACTERS, Opening, PaneId,
     Question, WORK_COPY_IDLE, WORK_COPY_LONGEST, WORK_COPY_SETTLE, app_data, ask_question,
@@ -70,6 +71,13 @@ pub fn work_identity(file: &DocumentFile) -> app_data::WorkCopy {
 ///
 /// スレッドが無いときはその場で消す——書き込みがその場で走る道と同じ側である。
 pub fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
+    let name = app_data::work_file_name(copy);
+    for document in open_documents(live) {
+        if app_data::work_file_name(&work_identity(&document.file.borrow())) == name {
+            document.protective_recovery.set(false);
+            document.recovery_failed.set(false);
+        }
+    }
     let Some(directory) = app_data::work_directory() else {
         return;
     };
@@ -135,16 +143,28 @@ pub fn discard_all_work_copies(live: &Live) -> usize {
     // 名前を作るのに要るのは`work_file_name`だけで、道は
     // [`discard_work_copy`]がもう一度組み立てる。ここでフォルダを訊くのは
     // **置き場所が無ければ数える対象も無い**からである。
-    let _ = &directory;
+    let records = app_data::read_records_in(&directory);
+    let documents = open_documents(live);
+    let protected: std::collections::HashSet<_> = records
+        .iter()
+        .filter(|(_, protected)| *protected)
+        .map(|(copy, _)| app_data::work_file_name(copy))
+        .chain(
+            documents
+                .iter()
+                .filter(|document| document.protective_recovery.get())
+                .map(|document| app_data::work_file_name(&work_identity(&document.file.borrow()))),
+        )
+        .collect();
     let mut named = Vec::new();
     let mut copies = Vec::new();
-    for copy in app_data::read_all_in(&directory).into_iter().chain(
-        open_documents(live)
+    for copy in records.into_iter().map(|(copy, _)| copy).chain(
+        documents
             .iter()
             .map(|document| work_identity(&document.file.borrow())),
     ) {
         let name = app_data::work_file_name(&copy);
-        if named.contains(&name) {
+        if protected.contains(&name) || named.contains(&name) {
             continue;
         }
         named.push(name);
@@ -257,19 +277,56 @@ pub fn write_work_copy_now(window: &AppWindow, live: &Live) {
 /// 書かれた文字は「まだ退避していない変更」のままで、書き手が入れ直せば
 /// その続きから退避が始まる。
 pub fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) {
-    if document.read_only() {
-        return;
+    write_work_copy_of_impl(window, live, document, false);
+}
+
+/// Same as [`write_work_copy_of`], but **ignores the 要件 8.1 switch**
+/// (`window.get_autosave()`).
+///
+/// Used by [`FolderAutoSave`] while a document under `SaveMode::AutoSave` is
+/// blocked from writing straight to its file: the direct save is not
+/// guaranteed, so the ordinary recovery copy is the fallback of last resort,
+/// and it has to keep working even for a writer who turned 8.1's own recovery
+/// off — they opted a folder into the *stronger* protection, not a weaker one.
+pub(crate) fn force_work_copy_of(
+    window: &AppWindow,
+    live: &Live,
+    document: &Rc<OpenDocument>,
+) -> bool {
+    if document.text.edited() {
+        document.protective_recovery.set(true);
     }
-    if !window.get_autosave() {
-        return;
+    write_work_copy_of_impl(window, live, document, true)
+}
+
+fn write_work_copy_of_impl(
+    window: &AppWindow,
+    live: &Live,
+    document: &Rc<OpenDocument>,
+    force: bool,
+) -> bool {
+    if document.read_only() && !force {
+        return false;
     }
-    if document.text.pending_since().is_none() {
-        return;
+    if !force && !window.get_autosave() && !document.protective_recovery.get() {
+        return false;
+    }
+    if !force && document.text.pending_since().is_none() {
+        return false;
     }
     let cache = &live.cache;
     let file = &document.file;
     let Some(directory) = app_data::work_directory() else {
-        return;
+        if !document.recovery_failed.replace(true) {
+            window.tell(
+                say!(
+                    "作業コピーの保存先を利用できません",
+                    "The work copy location is unavailable"
+                )
+                .into(),
+            );
+        }
+        return false;
     };
     // Undo back to the saved text retires the old backup, including a write
     // still in flight. Do not leave its earlier contents to be restored.
@@ -294,7 +351,8 @@ pub fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDoc
                 }],
             );
         }
-        return;
+        document.protective_recovery.set(false);
+        return true;
     }
     // The caret belongs to a pane that is showing *this* document; every pane
     // keeps its own (3.7), and only one of them can be restored into a single
@@ -320,27 +378,40 @@ pub fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDoc
     // would queue a second copy of the same document behind the first.
     document.text.work_copy_written();
     let path = directory.join(app_data::work_file_name(&copy));
-    let bytes = app_data::encode(&copy).into_bytes();
+    let bytes =
+        app_data::encode_with_protection(&copy, document.protective_recovery.get()).into_bytes();
     let length = bytes.len();
+    document.recovery_failed.set(false);
     if live.writer.write(path.clone(), bytes) {
         cache
             .borrow_mut()
             .log_diag("work", &format!("queued bytes={length}"));
-        return;
+        return true;
     }
     // No writer thread. Written here instead, which is what this did before
     // the thread existed.
     let started = Instant::now();
-    let outcome = app_data::write_into(&directory, &copy);
+    let outcome = std::fs::create_dir_all(&directory).and_then(|_| {
+        crate::file_io::write_atomically(
+            &path,
+            app_data::encode_with_protection(&copy, document.protective_recovery.get()).as_bytes(),
+        )
+    });
     let elapsed = elapsed_ms(started);
-    let message = match outcome {
-        Ok(path) => {
-            let shown = path.display();
-            format!("saved bytes={length} ms={elapsed:.2} path={shown}")
-        }
-        Err(error) => format!("failed bytes={length} error={error}"),
-    };
-    cache.borrow_mut().log_diag("work", &message);
+    let success = outcome.is_ok();
+    report_write_results(
+        window,
+        live,
+        vec![writer::WriteResult {
+            path,
+            bytes: length,
+            ms: elapsed,
+            removed: false,
+            superseded: false,
+            error: outcome.err().map(|error| error.to_string()),
+        }],
+    );
+    success
 }
 
 /// Write the last work copies and **wait to hear whether they landed**
@@ -430,6 +501,7 @@ pub fn report_write_results(
         });
         if let Some(document) = failed {
             document.text.retry_work_copy();
+            document.recovery_failed.set(true);
         }
         // **画面にも出す。**要件 8.1 は書き手への約束なので、守れていないことは
         // 書き手が知っていなければならない。1件目だけ——同じ理由で失敗した
@@ -707,14 +779,15 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
     // ときに全部消しているので普段はここに何も残っていないが、**設定ファイル
     // を手で書き換えた場合は残っている**——そのときも、切ってあると言われた
     // なら戻さない。
-    if !autosave_wanted() {
-        return Vec::new();
-    }
+    let ordinary_recovery = autosave_wanted();
     let Some(directory) = app_data::work_directory() else {
         return Vec::new();
     };
     let mut tabs = Vec::new();
-    for copy in app_data::read_all_in(&directory) {
+    for (copy, protected) in app_data::read_records_in(&directory) {
+        if !ordinary_recovery && !protected {
+            continue;
+        }
         let untitled = copy.untitled.max(1);
         let (file, saved_text) = match &copy.origin {
             Some(path) => match DocumentFile::open(path, MAX_DOCUMENT_CHARACTERS) {
@@ -737,6 +810,7 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
             ..EditorState::default()
         };
         let document = OpenDocument::new(file, copy.text, window.as_weak());
+        document.protective_recovery.set(protected);
         // 要件 8.3（2026-09-08追加）: **退避した時点の姿へ戻す。**`open`は
         // いま読んだファイルの姿を「合意した姿」として持っているので、その
         // ままでは閉じているあいだに別のアプリが書き換えていても
@@ -975,6 +1049,9 @@ pub fn write_document_in(
     target: PathBuf,
     form: file_io::TextForm,
 ) -> bool {
+    if !crate::admit_workspace_path(window, live, &target, true) {
+        return false;
+    }
     if document.read_only() {
         return false;
     }
@@ -1090,8 +1167,16 @@ pub fn write_document_in(
 /// document at a time by `Ctrl+S` — silently overwriting it here is exactly what
 /// 要件 8.3 exists to prevent. The status bar says how many were left.
 pub fn save_all(window: &AppWindow, live: &Live) {
+    save_all_native(window, live, false);
+}
+
+pub(crate) fn save_all_for_workspace(window: &AppWindow, live: &Live) {
+    save_all_native(window, live, true);
+}
+
+fn save_all_native(window: &AppWindow, live: &Live, include_memos: bool) {
     let owner = ime::window_handle(window);
-    save_all_with_choice(window, live, |document| {
+    save_all_including_memos_with_choice(window, live, include_memos, |document| {
         let held = document.file.borrow().form();
         let suggested = document.file.borrow().title();
         let chosen = file_dialog::save_document_as(owner, &suggested, save_fields(held))?;
@@ -1106,6 +1191,15 @@ pub fn save_all(window: &AppWindow, live: &Live) {
 pub(crate) fn save_all_with_choice(
     window: &AppWindow,
     live: &Live,
+    choose: impl FnMut(&Rc<OpenDocument>) -> Option<(PathBuf, file_io::TextForm)>,
+) {
+    save_all_including_memos_with_choice(window, live, false, choose);
+}
+
+pub(crate) fn save_all_including_memos_with_choice(
+    window: &AppWindow,
+    live: &Live,
+    include_memos: bool,
     mut choose: impl FnMut(&Rc<OpenDocument>) -> Option<(PathBuf, file_io::TextForm)>,
 ) {
     let mut saved = 0;
@@ -1114,7 +1208,11 @@ pub(crate) fn save_all_with_choice(
     let mut occupied = 0;
     let mut unnamed: Vec<Rc<OpenDocument>> = Vec::new();
     for document in open_documents(live) {
-        if !document.text.edited() {
+        if !document.text.edited()
+            && !(include_memos
+                && document.file.borrow().path().is_none()
+                && !document.text.borrow().is_empty())
+        {
             continue;
         }
         let path = document.file.borrow().path().map(Path::to_path_buf);
@@ -1244,4 +1342,1200 @@ pub fn conflict_choices() -> [&'static str; 5] {
         pick("外部版と比べる", "Compare with Outside Version"),
         pick("キャンセル", "Cancel"),
     ]
+}
+
+/// Direct-to-disk save for documents under a folder registered with
+/// [`workspace::SaveMode::AutoSave`] (Workspace設計.md フェーズ4).
+///
+/// **Owned by whatever runs the main timer**, one instance for the run — not a
+/// global. It carries its own idea of which documents are enrolled (a `Weak`
+/// per document, so a closed document is never kept alive by this and a
+/// reused pointer never lands on a stale entry), and asks for the
+/// [`workspace::Registry`] fresh on every [`tick`](Self::tick) rather than
+/// holding one, since the active Workspace can change without this being
+/// told and a folder's own mode is shared across every Workspace anyway
+/// (`Registry::save_mode_for`).
+///
+/// **Nothing here decides when a timer fires.** `tick` is meant to be called
+/// from the same clock 要件 8.1 already uses; wiring that call, and exposing
+/// [`status`](Self::status) to the UI, is for whoever builds the timer
+/// closure this lives in.
+///
+/// **Integration must also call [`arm`](Self::arm)** the instant a document
+/// opens under an `AutoSave` folder, or the instant a folder's mode switches
+/// to it — waiting for the next `tick` alone races the writer's very first
+/// keystroke (see `arm`'s own doc). And **must not call `tick` while a modal
+/// question is on screen or while shutting down**: both can be moving a
+/// document's file (a save, a reload) or ending the process out from under a
+/// write this engine would otherwise start.
+pub struct FolderAutoSave {
+    entries: Vec<AutoSaveEntry>,
+}
+
+struct AutoSaveEntry {
+    document: Weak<OpenDocument>,
+    /// The path this was enrolled under. Kept apart from asking the document
+    /// for its path again, because a document whose file has gone missing
+    /// cannot be re-resolved through [`workspace::Registry::save_mode_for`]
+    /// (it canonicalizes the path, which needs the file to exist) — this is
+    /// what tells `tick` "this used to be, and still might be, the same
+    /// enrolled file" during an outage rather than mistaking it for a policy
+    /// change.
+    path: PathBuf,
+    /// Only an edit whose `changed_at` is *later* than this is due to be
+    /// written. Set to `now` whenever a document is newly enrolled, and
+    /// advanced to the attempted text's own `changed_at` on every write
+    /// attempt — success or failure — so a failing save is never retried
+    /// against the same unchanged text on every tick (要件: 直らない失敗を
+    /// 毎回繰り返し試みない; also covers 新規有効化時に既存の未保存内容を
+    /// 無断上書きしない, since arming starts here too).
+    armed_at: Instant,
+    /// The `changed_at` of the text already backed up to the recovery copy
+    /// while blocked. `None` once clean, so a document sitting still while
+    /// blocked is not written to the recovery copy again every tick.
+    protected_at: Option<Instant>,
+    paused: Option<AutoSavePause>,
+}
+
+/// Why a document under `SaveMode::AutoSave` is not being written straight to
+/// its file right now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutoSavePause {
+    /// The file changed underneath, went missing, or its stamp could not be
+    /// read — [`ExternalChange`] folds every read failure into `Missing`, so
+    /// treating anything but `None` as blocking is already failing closed on
+    /// an unreadable stamp, not only a confirmed outside edit.
+    ///
+    /// **Clears only when `external_change` itself reports `None` again** —
+    /// a manual save or an explicit reload moves the agreed stamp — never by
+    /// elapsed time, since this is re-read from scratch on every tick rather
+    /// than latched.
+    Conflict,
+    /// Either the on-disk file carries the readonly attribute, or the
+    /// document itself is a read-only comparison snapshot.
+    ReadOnly,
+    /// The last direct write attempt failed. `write_document_in` has already
+    /// told the writer why (its own status-bar line and diagnostic), so
+    /// nothing is duplicated here — this only says that a retry is what
+    /// happens next, on the next edit or tick.
+    WriteFailed,
+}
+
+/// What [`FolderAutoSave::status`] answers for one document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutoSaveStatus {
+    /// Not enrolled: its file is not under an `AutoSave` folder right now
+    /// (or it has no file yet — an 無題 document can never be, since a
+    /// folder's mode is decided from a path).
+    Off,
+    /// Enrolled, and no edit *since arming* is waiting — either nothing has
+    /// been typed at all, or what is dirty predates arming and needs one
+    /// fresh edit before anything is written (要件: never overwrite
+    /// pre-existing dirty text just because the policy turned on).
+    Idle,
+    /// Enrolled, edited since arming, waiting for the debounce in
+    /// [`work_copy_due`] to say it is time.
+    Pending,
+    Paused(AutoSavePause),
+}
+
+impl FolderAutoSave {
+    /// Observe a newly visible document without rearming existing edits.
+    pub fn observe(
+        &mut self,
+        document: &Rc<OpenDocument>,
+        registry: &workspace::Registry,
+        now: Instant,
+    ) {
+        let path = document.file.borrow().path().map(Path::to_path_buf);
+        if registry.save_mode_for(path.as_deref()) != workspace::SaveMode::AutoSave {
+            let outage = path
+                .as_ref()
+                .is_some_and(|path| path.canonicalize().is_err());
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| matches_document(entry, document))
+            {
+                if !outage || Some(&self.entries[index].path) != path.as_ref() {
+                    self.entries.remove(index);
+                    if document.text.edited() {
+                        document.protective_recovery.set(true);
+                        document.text.mark_pending();
+                    }
+                }
+            }
+            return;
+        }
+        if !self
+            .entries
+            .iter()
+            .any(|entry| matches_document(entry, document) && Some(&entry.path) == path.as_ref())
+        {
+            self.arm(document, now);
+        }
+    }
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Arm protection for one document **immediately**, without waiting for
+    /// the next [`tick`](Self::tick).
+    ///
+    /// Call this the instant a document opens under an `AutoSave` folder, or
+    /// the instant a folder's mode switches to it. `tick` alone would only
+    /// notice at its next pass — if the writer's first keystroke lands before
+    /// that, `tick` would enroll the document with that keystroke already
+    /// `changed_at`-stamped in the past, mistake it for text dirty before
+    /// arming, and never save it (要件: 開いた直後の最初の編集を逃さない).
+    /// Re-arming an already-enrolled document (a repeated call, or the
+    /// document was previously blocked) resets its pause and due clock the
+    /// same way — never a silent overwrite, since only edits **after** this
+    /// call count from here on. A document with no file yet is a no-op.
+    pub fn arm(&mut self, document: &Rc<OpenDocument>, now: Instant) {
+        let Some(path) = document.file.borrow().path().map(Path::to_path_buf) else {
+            return;
+        };
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| matches_document(entry, document))
+        {
+            entry.path = path;
+            entry.armed_at = now;
+            entry.protected_at = None;
+            entry.paused = None;
+            return;
+        }
+        self.entries.push(AutoSaveEntry {
+            document: Rc::downgrade(document),
+            path,
+            armed_at: now,
+            protected_at: None,
+            paused: None,
+        });
+    }
+
+    /// Run one pass: enrol newly-eligible documents, drop ones that no
+    /// longer qualify or have closed, and drive every entry that remains.
+    ///
+    /// `registry` is `None` when no ledger has been loaded yet — nothing can
+    /// be under `AutoSave` without one, so every entry is force-backed-up and
+    /// dropped rather than left to save against a stale idea of the ledger.
+    ///
+    /// **Must not be called while a modal question is on screen, or during
+    /// shutdown** — either can be moving the same file this would write to
+    /// (a save, a reload) or ending the process mid-write. Gating that is the
+    /// caller's job; this only documents the requirement.
+    pub fn tick(
+        &mut self,
+        window: &AppWindow,
+        live: &Live,
+        registry: Option<&workspace::Registry>,
+        now: Instant,
+    ) {
+        let documents = open_documents(live);
+        self.entries.retain(|entry| {
+            documents
+                .iter()
+                .any(|document| matches_document(entry, document))
+        });
+        let Some(registry) = registry else {
+            for entry in &self.entries {
+                if let Some(document) = entry.document.upgrade() {
+                    force_work_copy_of(window, live, &document);
+                }
+            }
+            self.entries.clear();
+            return;
+        };
+        for document in documents {
+            let Some(path) = document.file.borrow().path().map(Path::to_path_buf) else {
+                continue;
+            };
+            let index = self
+                .entries
+                .iter()
+                .position(|entry| matches_document(entry, &document));
+            let wanted = match path.canonicalize() {
+                Ok(_) => registry.save_mode_for(Some(&path)) == workspace::SaveMode::AutoSave,
+                // Unresolvable right now (missing, unmounted, ...):
+                // `save_mode_for` cannot tell this apart from an explicit
+                // `Recovery` folder, so never *newly* enroll here — but an
+                // entry already enrolled at this same path keeps its
+                // protection through the outage rather than being evicted
+                // (要件: 原本が見えない間も退避は続ける).
+                Err(_) => index.is_some_and(|i| self.entries[i].path == path),
+            };
+            match (wanted, index) {
+                (true, None) => self.entries.push(AutoSaveEntry {
+                    document: Rc::downgrade(&document),
+                    path,
+                    armed_at: now,
+                    protected_at: None,
+                    paused: None,
+                }),
+                (false, Some(i)) => {
+                    // Policy moved this document out (folder demoted, or
+                    // 名前を付けて保存 to somewhere else) — back up whatever
+                    // is still unwritten before letting go of it.
+                    force_work_copy_of(window, live, &document);
+                    self.entries.remove(i);
+                }
+                (true, Some(i)) if self.entries[i].path != path => {
+                    self.entries[i].path = path;
+                    self.entries[i].armed_at = now;
+                    self.entries[i].paused = None;
+                    self.entries[i].protected_at = None;
+                }
+                _ => {}
+            }
+        }
+        self.entries
+            .retain(|entry| entry.document.upgrade().is_some());
+        for entry in &mut self.entries {
+            drive_entry(entry, window, live, now);
+        }
+    }
+
+    /// The current mode/paused reason for one document, for the UI to show.
+    pub fn status(&self, document: &Rc<OpenDocument>) -> AutoSaveStatus {
+        let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| matches_document(entry, document))
+        else {
+            return AutoSaveStatus::Off;
+        };
+        if let Some(pause) = &entry.paused {
+            return AutoSaveStatus::Paused(pause.clone());
+        }
+        if document.text.edited() && document.text.changed_at() > entry.armed_at {
+            AutoSaveStatus::Pending
+        } else {
+            AutoSaveStatus::Idle
+        }
+    }
+
+    /// Called right before exit: **keeps 要件 8.1's recovery copy current for
+    /// every enrolled document**, whatever it is currently doing, then waits
+    /// to hear whether the writes landed.
+    ///
+    /// This is the "final flush" 要件 8.1 already has
+    /// ([`flush_work_copies`]) — this covers the documents this engine is
+    /// specifically protecting, on top of whatever the ordinary flush call
+    /// already reaches, and works even with 要件 8.1's own switch off (the
+    /// writer opted a folder into stronger protection, not a weaker one).
+    /// Runs even for a document [`tick`](Self::tick) never got to — one
+    /// [`arm`](Self::arm)ed right before exit is still covered, since this
+    /// walks `self.entries` directly rather than only what a past `tick`
+    /// already drove. Returns the number of copies that did not land, the
+    /// same count [`flush_work_copies`] returns.
+    pub fn force_flush(&self, window: &AppWindow, live: &Live) -> usize {
+        let documents = open_documents(live);
+        for entry in &self.entries {
+            if !documents
+                .iter()
+                .any(|document| matches_document(entry, document))
+            {
+                continue;
+            }
+            if let Some(document) = entry.document.upgrade() {
+                force_work_copy_of(window, live, &document);
+            }
+        }
+        let landed = live.writer.settle(WORK_COPY_SETTLE);
+        report_write_results(window, live, landed);
+        documents
+            .iter()
+            .filter(|document| document.protective_recovery.get() && document.recovery_failed.get())
+            .count()
+    }
+}
+
+impl Default for FolderAutoSave {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn matches_document(entry: &AutoSaveEntry, document: &Rc<OpenDocument>) -> bool {
+    entry
+        .document
+        .upgrade()
+        .is_some_and(|held| Rc::ptr_eq(&held, document))
+}
+
+/// Whether the file at `path` currently carries the OS readonly attribute.
+///
+/// A metadata read that fails is not treated as readonly here — a missing or
+/// unreadable file is already caught by `external_change` (folded into
+/// `ExternalChange::Missing`), which is what puts the entry into
+/// [`AutoSavePause::Conflict`] instead.
+fn disk_read_only(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().readonly())
+        .unwrap_or(false)
+}
+
+/// What, if anything, keeps this document from being written straight to its
+/// file right now — re-derived from scratch every call, never latched, so a
+/// conflict clears itself the moment `external_change` does (a manual save or
+/// reload), never merely because time passed.
+fn blocking_pause(document: &Rc<OpenDocument>, path: &Path) -> Option<AutoSavePause> {
+    if document.read_only() || disk_read_only(path) {
+        return Some(AutoSavePause::ReadOnly);
+    }
+    if document.file.borrow().external_change() != ExternalChange::None {
+        return Some(AutoSavePause::Conflict);
+    }
+    None
+}
+
+/// Back up the current text while blocked, but only once per edit.
+///
+/// `force_work_copy_of` already no-ops once the shared 8.1 pending flag is
+/// clear (someone else already backed up this exact text); `protected_at`
+/// additionally stops *this* engine calling it again for text it has already
+/// asked to be backed up, so a document sitting still while blocked is not
+/// written to the recovery copy on every tick.
+fn protect_while_blocked(
+    window: &AppWindow,
+    live: &Live,
+    entry: &mut AutoSaveEntry,
+    document: &Rc<OpenDocument>,
+) {
+    if !document.text.edited() {
+        entry.protected_at = None;
+        return;
+    }
+    let changed_at = document.text.changed_at();
+    if entry.protected_at == Some(changed_at) && !document.recovery_failed.get() {
+        return;
+    }
+    if force_work_copy_of(window, live, document) {
+        entry.protected_at = Some(changed_at);
+    }
+}
+
+/// Tell the writer once that a document has just become blocked, or that the
+/// reason changed — never again while the same reason holds, since
+/// `blocking_pause` is re-derived (and this called) on every tick.
+fn notify_new_pause(window: &AppWindow, live: &Live, entry: &AutoSaveEntry, pause: &AutoSavePause) {
+    if entry.paused.as_ref() == Some(pause) {
+        return;
+    }
+    let name = entry.path.display();
+    let told = match pause {
+        AutoSavePause::Conflict => say!(
+            "「{}」は外部で変更されたため、直接の保存を止めています。保存または読み直しで再開します",
+            "\"{}\" changed outside, so direct saving is paused. Save or reload to resume",
+            name
+        ),
+        AutoSavePause::ReadOnly => say!(
+            "「{}」は読み取り専用のため、直接の保存を止めています",
+            "\"{}\" is read-only, so direct saving is paused",
+            name
+        ),
+        // `write_document_in` has already told the writer why (its own
+        // status-bar line and diagnostic) at the moment it failed.
+        AutoSavePause::WriteFailed => return,
+    };
+    window.tell_tab(told.into());
+    live.cache.borrow_mut().log_diag(
+        "autosave",
+        &format!("paused reason={pause:?} path={}", entry.path.display()),
+    );
+}
+
+fn drive_entry(entry: &mut AutoSaveEntry, window: &AppWindow, live: &Live, now: Instant) {
+    let Some(document) = entry.document.upgrade() else {
+        return;
+    };
+    if document.file.borrow().path() != Some(entry.path.as_path()) {
+        return;
+    }
+    let pause = if crate::has_reading_view(window, live, &document) {
+        Some(AutoSavePause::ReadOnly)
+    } else {
+        blocking_pause(&document, &entry.path)
+    };
+    if let Some(pause) = pause {
+        notify_new_pause(window, live, entry, &pause);
+        entry.paused = Some(pause);
+        protect_while_blocked(window, live, entry, &document);
+        return;
+    }
+    // Not conflicted or read-only right now. `WriteFailed` is left alone
+    // here — it only clears once cleaned up below or a new attempt is made,
+    // never merely because the file stopped conflicting.
+    if matches!(
+        entry.paused,
+        Some(AutoSavePause::Conflict | AutoSavePause::ReadOnly)
+    ) {
+        entry.paused = None;
+    }
+    if !document.text.edited() {
+        entry.paused = None;
+        entry.protected_at = None;
+        return;
+    }
+    let changed_at = document.text.changed_at();
+    if changed_at <= entry.armed_at {
+        if entry.paused == Some(AutoSavePause::WriteFailed) {
+            protect_while_blocked(window, live, entry, &document);
+        }
+        // Nothing new since the last arm or attempt — covers both text dirty
+        // from before arming and a failed write against unchanged text
+        // (要件: 直らない失敗を毎回繰り返し試みない).
+        return;
+    }
+    // AutoSave's own contract is a plain idle debounce. It does not inherit
+    // 8.1's "at most 5s of continuous typing" escape hatch — that exists only
+    // to bound the recovery copy's own staleness, not this engine's.
+    if now.duration_since(changed_at) < WORK_COPY_IDLE {
+        return;
+    }
+    // This text is being attempted now, pass or fail — advancing the arm
+    // point here, not only on success, is what stops a failing save from
+    // being retried against the same unchanged text on every tick.
+    entry.armed_at = changed_at;
+    let form = document.file.borrow().form();
+    if write_document_in(window, live, &document, entry.path.clone(), form) {
+        entry.paused = None;
+        entry.protected_at = None;
+    } else {
+        entry.paused = Some(AutoSavePause::WriteFailed);
+        protect_while_blocked(window, live, entry, &document);
+    }
+}
+
+#[cfg(test)]
+mod folder_auto_save_tests {
+    use super::*;
+    use slint::platform::software_renderer::MinimalSoftwareWindow;
+    use slint::{ModelRc, SharedString, VecModel};
+    use std::cell::RefCell;
+
+    struct Offscreen(Rc<MinimalSoftwareWindow>);
+
+    impl slint::platform::Platform for Offscreen {
+        fn create_window_adapter(
+            &self,
+        ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A minimal, offscreen `AppWindow`/`Live` pair, the same shape the other
+    /// `*_ui_tests` files build — just enough to hold one document in one
+    /// pane so [`open_documents`] and [`write_document_in`] work normally.
+    struct Harness {
+        window: AppWindow,
+        live: Live,
+    }
+
+    impl Harness {
+        /// Builds the offscreen window and platform first — `make_document`
+        /// is only handed the window's `Weak` afterwards, because
+        /// `AppWindow::new` needs a platform already set, and the document a
+        /// test wants has to be built with this window's own handle.
+        fn new(
+            make_document: impl FnOnce(slint::Weak<AppWindow>) -> Rc<OpenDocument>,
+        ) -> (Self, Rc<OpenDocument>) {
+            let directory = std::env::temp_dir().join(format!(
+                "editor-folder-autosave-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = Some(directory.clone()));
+            let surface = MinimalSoftwareWindow::new(Default::default());
+            slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+            let window = AppWindow::new().unwrap();
+            let numbers = Rc::new(VecModel::from(vec![0; 2 * crate::SHEET_NUMBERS]));
+            let palette = Rc::new(VecModel::from(vec![
+                slint::Color::default();
+                2 * crate::SHEET_COLOURS
+            ]));
+            let fonts = Rc::new(VecModel::from(vec![
+                SharedString::default();
+                2 * crate::SHEET_FONTS
+            ]));
+            crate::reset_settings(&numbers, &palette, &fonts);
+            window.set_sheet_stride(crate::SHEET_NUMBERS as i32);
+            window.set_sheet_numbers(ModelRc::from(numbers));
+            window.set_palette(ModelRc::from(palette));
+            window.set_sheet_fonts(ModelRc::from(fonts));
+            surface.set_size(slint::PhysicalSize::new(1000, 740));
+            crate::publish_panes(&window, 1);
+            let id = PaneId::from_index(0);
+            id.update_screen(&window, |screen| {
+                screen.width = 950.0;
+                screen.height = 620.0;
+            });
+            let document = make_document(window.as_weak());
+            let tab = crate::PaneTab::showing(&window, id, document.clone());
+            let live = Live {
+                preview: Rc::default(),
+                closed_tabs: Rc::default(),
+                states: crate::PaneStates::new(&document),
+                folder: Rc::default(),
+                tree_paths: Rc::default(),
+                workspace_ids: Rc::default(),
+                results: Rc::default(),
+                recent: Rc::default(),
+                recent_folders: Rc::default(),
+                find_terms: Rc::new(RefCell::new(crate::find::Terms::restored(Vec::new()))),
+                replace_terms: Rc::new(RefCell::new(crate::find::Terms::restored(Vec::new()))),
+                layout: Rc::new(RefCell::new(crate::pane_layout::Layout::single(0))),
+                pending: Rc::default(),
+                close_run: Rc::default(),
+                cache: Rc::new(RefCell::new(crate::RenderCache::default())),
+                tabs: Rc::new(RefCell::new(crate::Tabs {
+                    panes: vec![crate::PaneTabs {
+                        history: vec![crate::NavigationPlace::from(&tab)],
+                        tabs: vec![tab],
+                        ..Default::default()
+                    }],
+                })),
+                writer: Rc::new(writer::FileWriter::start()),
+                searcher: Rc::new(crate::searcher::Searcher::start(|| {})),
+                searched: Rc::default(),
+            };
+            (Self { window, live }, document)
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            self.live.writer.finish();
+            app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+        }
+    }
+
+    /// A change recorded through undo, the way real typing is — plain
+    /// mutation of `text` would leave `changed_at`/`pending_since` untouched.
+    fn edit(document: &Rc<OpenDocument>, text: &str) {
+        let at = document.text.borrow().len();
+        document.history.borrow_mut().separate_next = true;
+        document.record(at, String::new(), text.into());
+        document.text.borrow_mut().push_str(text);
+    }
+
+    fn open_under(
+        directory: &Path,
+        name: &str,
+        text: &str,
+        window: slint::Weak<AppWindow>,
+    ) -> Rc<OpenDocument> {
+        let path = directory.join(name);
+        std::fs::write(&path, text).unwrap();
+        let (file, loaded) = DocumentFile::open(&path, MAX_DOCUMENT_CHARACTERS).unwrap();
+        OpenDocument::new(file, loaded, window)
+    }
+
+    fn autosave_registry(root: &Path) -> workspace::Registry {
+        let mut registry = workspace::Registry::new();
+        let workspace_id = registry
+            .create_workspace("試験".to_owned())
+            .expect("creates");
+        let folder = registry.add_root(workspace_id, root).expect("registers");
+        registry
+            .set_folder_mode(folder, workspace::SaveMode::AutoSave)
+            .expect("sets");
+        registry
+    }
+
+    fn scratch_directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "editor-folder-autosave-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn preexisting_dirty_text_is_never_overwritten_by_arming_alone() {
+        let directory = std::env::temp_dir().join(format!(
+            "editor-folder-autosave-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "原稿.md", "元の本文", weak));
+        edit(&document, "未保存の追記");
+        assert!(document.text.edited());
+
+        let mut engine = FolderAutoSave::new();
+        let armed_at = Instant::now();
+        engine.tick(&harness.window, &harness.live, Some(&registry), armed_at);
+
+        assert_eq!(
+            std::fs::read_to_string(directory.join("原稿.md")).unwrap(),
+            "元の本文",
+            "arming must not silently write dirty text that predates it"
+        );
+        assert_eq!(engine.status(&document), AutoSaveStatus::Idle);
+
+        // A fresh edit after arming is what makes it due.
+        edit(&document, "、続き");
+        let due_at = Instant::now() + WORK_COPY_LONGEST + Duration::from_millis(1);
+        engine.tick(&harness.window, &harness.live, Some(&registry), due_at);
+
+        assert_eq!(
+            std::fs::read_to_string(directory.join("原稿.md")).unwrap(),
+            "元の本文未保存の追記、続き"
+        );
+        assert!(!document.text.edited());
+        assert_eq!(engine.status(&document), AutoSaveStatus::Idle);
+    }
+
+    #[test]
+    fn a_newly_opened_clean_document_saves_on_its_first_edit() {
+        let directory = std::env::temp_dir().join(format!(
+            "editor-folder-autosave-clean-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "きれい.md", "本文", weak));
+        assert!(!document.text.edited());
+
+        let mut engine = FolderAutoSave::new();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+        assert_eq!(engine.status(&document), AutoSaveStatus::Idle);
+
+        edit(&document, "追記");
+        let due_at = Instant::now() + WORK_COPY_LONGEST + Duration::from_millis(1);
+        engine.tick(&harness.window, &harness.live, Some(&registry), due_at);
+
+        assert_eq!(
+            std::fs::read_to_string(directory.join("きれい.md")).unwrap(),
+            "本文追記"
+        );
+        assert!(!document.text.edited());
+    }
+
+    #[test]
+    fn a_conflict_pauses_the_direct_write_and_still_updates_the_recovery_copy() {
+        let directory = std::env::temp_dir().join(format!(
+            "editor-folder-autosave-conflict-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "競合.md", "本文", weak));
+        // 要件 8.1 の自動退避そのものは切ってある——それでも、フォルダの
+        // AutoSave 方式が塞がれている間は最新の内容を退避で守る。
+        harness.window.set_autosave(false);
+
+        let mut engine = FolderAutoSave::new();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+
+        // Another program changes the file underneath.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(directory.join("競合.md"), "外部の変更").unwrap();
+
+        edit(&document, "書き手の追記");
+        let due_at = Instant::now() + WORK_COPY_LONGEST + Duration::from_millis(1);
+        engine.tick(&harness.window, &harness.live, Some(&registry), due_at);
+
+        assert_eq!(
+            std::fs::read_to_string(directory.join("競合.md")).unwrap(),
+            "外部の変更",
+            "a conflicted document must not be overwritten"
+        );
+        assert_eq!(
+            engine.status(&document),
+            AutoSaveStatus::Paused(AutoSavePause::Conflict)
+        );
+        assert!(
+            document.text.edited(),
+            "the unsaved edit is kept, not discarded"
+        );
+
+        // The recovery copy still got the latest text, bypassing 8.1's own
+        // switch, and it survives a forced flush.
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        let work_directory = app_data::work_directory().unwrap();
+        let copies = app_data::read_all_in(&work_directory);
+        let copy = copies
+            .iter()
+            .find(|copy| copy.origin.as_deref() == Some(directory.join("競合.md").as_path()))
+            .expect("a recovery copy exists although 8.1's switch is off");
+        assert_eq!(copy.text, "本文書き手の追記");
+
+        let lost = engine.force_flush(&harness.window, &harness.live);
+        assert_eq!(lost, 0);
+    }
+
+    #[test]
+    fn a_missing_original_keeps_protection_without_dropping_the_entry() {
+        let directory = scratch_directory("missing");
+        let registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "消える.md", "本文", weak));
+        harness.window.set_autosave(false);
+
+        let mut engine = FolderAutoSave::new();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+
+        std::fs::remove_file(directory.join("消える.md")).unwrap();
+        edit(&document, "本体が消えている間の追記");
+        let due_at = Instant::now() + WORK_COPY_LONGEST;
+        engine.tick(&harness.window, &harness.live, Some(&registry), due_at);
+
+        // Still enrolled and blocked — `save_mode_for` cannot resolve the
+        // missing path, but that must not be mistaken for the policy having
+        // turned off.
+        assert_eq!(
+            engine.status(&document),
+            AutoSaveStatus::Paused(AutoSavePause::Conflict)
+        );
+        assert!(!directory.join("消える.md").exists());
+
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        let copies = app_data::read_all_in(&app_data::work_directory().unwrap());
+        let copy = copies
+            .iter()
+            .find(|copy| copy.origin.as_deref() == Some(directory.join("消える.md").as_path()))
+            .expect("the recovery copy is kept through the outage");
+        assert_eq!(copy.text, "本文本体が消えている間の追記");
+    }
+
+    #[test]
+    fn demoting_the_folder_backs_up_before_ending_eligibility() {
+        let directory = scratch_directory("demote");
+        let mut registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "降格.md", "本文", weak));
+        harness.window.set_autosave(false);
+
+        let mut engine = FolderAutoSave::new();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+        edit(&document, "追記");
+
+        // Switched back to Recovery before the idle debounce would have
+        // fired the direct write.
+        let folder = registry.folders()[0].id;
+        registry
+            .set_folder_mode(folder, workspace::SaveMode::Recovery)
+            .unwrap();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+
+        assert_eq!(engine.status(&document), AutoSaveStatus::Off);
+        assert_eq!(
+            std::fs::read_to_string(directory.join("降格.md")).unwrap(),
+            "本文",
+            "must never write straight to the file it is leaving"
+        );
+
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        let copies = app_data::read_all_in(&app_data::work_directory().unwrap());
+        let copy = copies
+            .iter()
+            .find(|copy| copy.origin.as_deref() == Some(directory.join("降格.md").as_path()))
+            .expect("outstanding edits are backed up before eligibility ends");
+        assert_eq!(copy.text, "本文追記");
+    }
+
+    #[test]
+    fn a_failed_write_is_not_retried_until_a_new_edit_arrives() {
+        let directory = scratch_directory("write-failed");
+        let registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "失敗.md", "本文", weak));
+        // Fixes the document's own written form to Shift_JIS, so a character
+        // it cannot represent fails the direct write deterministically and
+        // portably — no filesystem permission bits involved.
+        document
+            .file
+            .borrow_mut()
+            .save_to_as(
+                directory.join("失敗.md"),
+                "本文",
+                file_io::TextForm {
+                    encoding: Encoding::Cp932,
+                    ..file_io::TextForm::default()
+                },
+            )
+            .unwrap();
+
+        let mut engine = FolderAutoSave::new();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+
+        edit(&document, "😀"); // unrepresentable in Shift_JIS
+        let due_at = Instant::now() + WORK_COPY_LONGEST;
+        engine.tick(&harness.window, &harness.live, Some(&registry), due_at);
+        assert_eq!(
+            engine.status(&document),
+            AutoSaveStatus::Paused(AutoSavePause::WriteFailed)
+        );
+
+        // Same unchanged failing text: ticking again must not retry.
+        harness.window.set_render_status(SharedString::default());
+        let still_due_at = due_at + Duration::from_secs(1);
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            still_due_at,
+        );
+        assert!(
+            harness.window.get_render_status().is_empty(),
+            "an unchanged failing edit must not be retried every tick"
+        );
+
+        // A genuinely new edit gets a fresh attempt.
+        edit(&document, "、続き");
+        let retry_at = still_due_at + WORK_COPY_LONGEST;
+        engine.tick(&harness.window, &harness.live, Some(&registry), retry_at);
+        assert!(
+            !harness.window.get_render_status().is_empty(),
+            "a new edit is attempted again"
+        );
+    }
+
+    #[test]
+    fn arming_at_open_time_catches_an_edit_made_before_the_first_tick() {
+        let directory = scratch_directory("arm-early");
+        let registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "先取り.md", "本文", weak));
+
+        // Armed the instant the document opens, before any tick — the way
+        // integration must call this for a document opened straight into an
+        // `AutoSave` folder.
+        let mut engine = FolderAutoSave::new();
+        engine.arm(&document, Instant::now());
+        edit(&document, "最初の編集");
+
+        let due_at = Instant::now() + WORK_COPY_LONGEST;
+        engine.tick(&harness.window, &harness.live, Some(&registry), due_at);
+
+        assert_eq!(
+            std::fs::read_to_string(directory.join("先取り.md")).unwrap(),
+            "本文最初の編集",
+            "the very first edit after opening must not be treated as pre-existing"
+        );
+    }
+
+    #[test]
+    fn a_backup_already_written_by_something_else_is_not_written_again() {
+        let directory = scratch_directory("already-backed-up");
+        let registry = autosave_registry(&directory);
+        let doc_directory = directory.clone();
+        let (harness, document) =
+            Harness::new(|weak| open_under(&doc_directory, "既済.md", "本文", weak));
+        edit(&document, "普通の退避で先に書かれる分");
+        // 要件 8.1 の通常の退避が先に走った体で、共有の pending 旗を下ろす。
+        write_work_copy_of(&harness.window, &harness.live, &document);
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+
+        std::fs::write(directory.join("既済.md"), "外部の変更").unwrap();
+        let mut engine = FolderAutoSave::new();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+        assert_eq!(
+            engine.status(&document),
+            AutoSaveStatus::Paused(AutoSavePause::Conflict)
+        );
+
+        let before = app_data::read_all_in(&app_data::work_directory().unwrap());
+        let landed_before = before
+            .iter()
+            .find(|copy| copy.origin.as_deref() == Some(directory.join("既済.md").as_path()))
+            .expect("the ordinary recovery copy already covers this text");
+        assert_eq!(landed_before.text, "本文普通の退避で先に書かれる分");
+
+        // Ticking again without a new edit must not write a second time.
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        let after = app_data::read_all_in(&app_data::work_directory().unwrap());
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn protective_copy_survives_backup_off_and_restores_a_missing_original() {
+        let root = scratch_directory("protected-restart");
+        let (harness, document) =
+            Harness::new(|weak| open_under(&root, "draft.md", "original", weak));
+        let stamp = document.file.borrow().agreed_stamp();
+        edit(&document, " unsaved");
+        // An ordinary copy clearing the pending flag must still be promoted.
+        write_work_copy_of(&harness.window, &harness.live, &document);
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        document.text.work_copy_written();
+        harness.window.set_autosave(false);
+        app_data::write_settings(
+            &app_data::app_directory().unwrap(),
+            &[(AUTOSAVE_SETTING.into(), "0".into())],
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("draft.md")).unwrap();
+        assert!(force_work_copy_of(
+            &harness.window,
+            &harness.live,
+            &document
+        ));
+        // Includes queued protection, before it has necessarily landed.
+        assert_eq!(discard_all_work_copies(&harness.live), 0);
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        let records = app_data::read_records_in(&app_data::work_directory().unwrap());
+        assert_eq!(records.len(), 1);
+        assert!(records[0].1);
+        assert_eq!(records[0].0.stamp, stamp);
+        let restored = restore_tabs(&harness.window);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(&*restored[0].0.text.borrow(), "original unsaved");
+        assert!(restored[0].0.protective_recovery.get());
+        assert!(restored[0].0.missing.get());
+        edit(&document, " later");
+        write_work_copy_of(&harness.window, &harness.live, &document);
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        assert!(app_data::read_records_in(&app_data::work_directory().unwrap())[0].1);
+    }
+
+    #[test]
+    fn backup_off_does_not_restore_ordinary_body_that_mentions_protection() {
+        let root = scratch_directory("ordinary-restart");
+        let (harness, document) =
+            Harness::new(|weak| open_under(&root, "draft.md", "original", weak));
+        edit(&document, "\n\nprotected: 1\n");
+        write_work_copy_of(&harness.window, &harness.live, &document);
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        app_data::write_settings(
+            &app_data::app_directory().unwrap(),
+            &[(AUTOSAVE_SETTING.into(), "0".into())],
+        )
+        .unwrap();
+        assert!(restore_tabs(&harness.window).is_empty());
+        assert!(!app_data::read_records_in(&app_data::work_directory().unwrap())[0].1);
+    }
+
+    #[test]
+    fn changing_target_never_writes_the_previous_path() {
+        let root = scratch_directory("save-as-path");
+        let registry = autosave_registry(&root);
+        let (harness, document) =
+            Harness::new(|weak| open_under(&root, "old.md", "original", weak));
+        let mut engine = FolderAutoSave::new();
+        engine.arm(&document, Instant::now());
+        let form = document.file.borrow().form();
+        document
+            .file
+            .borrow_mut()
+            .save_to_as(root.join("new.md"), "original", form)
+            .unwrap();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now(),
+        );
+        edit(&document, " changed");
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now() + WORK_COPY_LONGEST,
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("old.md")).unwrap(),
+            "original"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("new.md")).unwrap(),
+            "original changed"
+        );
+    }
+
+    #[test]
+    fn closed_document_kept_for_reopen_is_not_saved() {
+        let root = scratch_directory("closed-retained");
+        let registry = autosave_registry(&root);
+        let (harness, document) =
+            Harness::new(|weak| open_under(&root, "draft.md", "original", weak));
+        let mut engine = FolderAutoSave::new();
+        engine.arm(&document, Instant::now());
+        edit(&document, " changed");
+        harness.live.tabs.borrow_mut().panes[0].tabs.clear();
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now() + WORK_COPY_LONGEST,
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("draft.md")).unwrap(),
+            "original"
+        );
+        assert_eq!(engine.status(&document), AutoSaveStatus::Off);
+    }
+
+    #[test]
+    fn failed_protective_copy_retries_unchanged_text_and_successful_save_retires_it() {
+        let root = scratch_directory("protected-retry");
+        let (harness, document) =
+            Harness::new(|weak| open_under(&root, "draft.md", "original", weak));
+        harness.window.set_autosave(false);
+        edit(&document, " unsaved");
+        let directory = app_data::work_directory().unwrap();
+        std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        std::fs::write(&directory, b"not a directory").unwrap();
+        assert!(force_work_copy_of(
+            &harness.window,
+            &harness.live,
+            &document
+        ));
+        let reports = harness.live.writer.settle(WORK_COPY_SETTLE);
+        assert_eq!(
+            report_write_results(&harness.window, &harness.live, reports),
+            1
+        );
+        assert!(document.recovery_failed.get());
+        assert!(document.text.pending_since().is_some());
+        std::fs::remove_file(&directory).unwrap();
+        assert!(force_work_copy_of(
+            &harness.window,
+            &harness.live,
+            &document
+        ));
+        let reports = harness.live.writer.settle(WORK_COPY_SETTLE);
+        assert_eq!(
+            report_write_results(&harness.window, &harness.live, reports),
+            0
+        );
+        assert!(!document.recovery_failed.get());
+        assert_eq!(
+            app_data::read_records_in(&directory)[0].0.text,
+            "original unsaved"
+        );
+        let form = document.file.borrow().form();
+        assert!(write_document_in(
+            &harness.window,
+            &harness.live,
+            &document,
+            root.join("draft.md"),
+            form
+        ));
+        harness.live.writer.settle(WORK_COPY_SETTLE);
+        assert!(!document.protective_recovery.get());
+        assert!(app_data::read_records_in(&directory).is_empty());
+    }
+
+    #[test]
+    fn disabling_and_reenabling_before_a_tick_rearms_existing_dirty_text() {
+        let root = scratch_directory("rapid-policy-toggle");
+        let mut registry = autosave_registry(&root);
+        let folder = registry.folders().first().unwrap().id;
+        let (harness, document) =
+            Harness::new(|weak| open_under(&root, "draft.md", "original", weak));
+        let mut engine = FolderAutoSave::new();
+        engine.observe(&document, &registry, Instant::now());
+        edit(&document, " existing");
+        registry
+            .set_folder_mode(folder, workspace::SaveMode::Recovery)
+            .unwrap();
+        engine.observe(&document, &registry, Instant::now());
+        assert_eq!(engine.status(&document), AutoSaveStatus::Off);
+        assert!(document.protective_recovery.get());
+        registry
+            .set_folder_mode(folder, workspace::SaveMode::AutoSave)
+            .unwrap();
+        engine.observe(&document, &registry, Instant::now());
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now() + WORK_COPY_LONGEST,
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("draft.md")).unwrap(),
+            "original"
+        );
+        edit(&document, " new");
+        engine.tick(
+            &harness.window,
+            &harness.live,
+            Some(&registry),
+            Instant::now() + WORK_COPY_LONGEST,
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("draft.md")).unwrap(),
+            "original existing new"
+        );
+    }
 }

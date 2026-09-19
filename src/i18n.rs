@@ -98,6 +98,7 @@ mod tests {
             include_str!("../ui/controls.slint"),
             include_str!("../ui/diff-window.slint"),
             include_str!("../ui/quick-draft.slint"),
+            include_str!("../ui/workspace-manager.slint"),
         ];
         let mut used = HashSet::new();
         for source in sources {

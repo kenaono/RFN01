@@ -65,6 +65,7 @@ fn a_new_vertical_tab_opens_at_the_start() {
         states: PaneStates::new(&short),
         folder: Rc::default(),
         tree_paths: Rc::default(),
+        workspace_ids: Rc::default(),
         results: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),

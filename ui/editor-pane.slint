@@ -1,5 +1,6 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
+import { LinkCompletion } from "link-completion.slint";
 import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Tab, TextButton, ToggleChip } from "controls.slint";
 
 // One editing pane.
@@ -575,6 +576,12 @@ export component EditorPane inherits Rectangle {
     callback across-scrolled(float);
     callback selection-start(float, float, bool);
     callback link-open(float, float) -> bool;
+    in property <bool> link-popup-open;
+    in property <[string]> link-popup-rows;
+    in property <int> link-popup-selected;
+    in property <string> link-popup-status;
+    callback link-popup-key(int) -> bool;
+    callback link-popup-chosen(int);
     callback selection-update(float, float);
     callback selection-end(float, float);
     // 追加要件 2026-09-16: 絵の角を引く。何枚目の絵か、0押した・1引いている・2離した・3取りやめ、面の座標。
@@ -2318,6 +2325,11 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             key-pressed(event) => {
+                                if root.link-popup-open && !root.terminal && !root.settings && !root.commit-just-finished && self.preedit-text == "" && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift {
+                                    if event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Return || event.text == Key.Escape {
+                                        if root.link-popup-key(event.text == Key.UpArrow ? 1 : event.text == Key.DownArrow ? 2 : event.text == Key.Return ? 3 : 4) { return accept; }
+                                    }
+                                }
                                 if (event.modifiers.control && (event.text == "f" || event.text == "F" || event.text == "\u{6}" || event.text == "h" || event.text == "H" || event.text == "\u{8}")) {
                                     root.focus-trace((event.text == "f" || event.text == "F" || event.text == "\u{6}") ? "body-ctrl-f-received" : "body-ctrl-h-received");
                                     if (self.preedit-text != "") { root.focus-trace("find-key-preedit-active"); }
@@ -4165,4 +4177,24 @@ export component EditorPane inherits Rectangle {
         }
     }
 
+    if root.link-popup-open: LinkCompletion {
+        // page.absolute-position includes paper centring and both scroll axes.
+        // The same conversion works for every split pane and follows scrolling
+        // without waiting for another completion query from Rust.
+        caret-x: page.absolute-position.x - root.absolute-position.x + root.caret-x * 1px;
+        caret-y: page.absolute-position.y - root.absolute-position.y + root.caret-y * 1px;
+        caret-width: root.vertical ? max(root.caret-width * 1px, 1px) : 2px;
+        caret-height: root.vertical ? 2px : max(root.caret-height * 1px, 2px);
+        vertical: root.vertical;
+        viewport-left: max(scroll.absolute-position.x, body-clip.absolute-position.x) - root.absolute-position.x;
+        viewport-top: max(scroll.absolute-position.y, body-clip.absolute-position.y) - root.absolute-position.y;
+        viewport-right: max(self.viewport-left, min(scroll.absolute-position.x + scroll.visible-width,
+            body-clip.absolute-position.x + body-clip.width) - root.absolute-position.x);
+        viewport-bottom: max(self.viewport-top, min(scroll.absolute-position.y + scroll.visible-height,
+            body-clip.absolute-position.y + body-clip.height) - root.absolute-position.y);
+        rows: root.link-popup-rows;
+        selected: root.link-popup-selected;
+        status: root.link-popup-status;
+        chosen(index) => { root.link-popup-chosen(index); }
+    }
 }

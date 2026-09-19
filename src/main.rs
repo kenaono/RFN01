@@ -24,6 +24,9 @@ mod incremental_ui_tests;
 mod kill_ring;
 #[cfg(test)]
 mod layout_snapshot_ui_tests;
+mod link_completion;
+mod link_move;
+mod link_rewrite;
 #[cfg(test)]
 mod link_ui_tests;
 #[cfg(test)]
@@ -66,6 +69,14 @@ mod wiring;
 mod word_marks;
 #[cfg(test)]
 mod word_ui_tests;
+mod workspace;
+mod workspace_boundary;
+mod workspace_clone;
+mod workspace_index;
+mod workspace_links;
+#[cfg(test)]
+mod workspace_manager_ui_tests;
+mod workspace_ui;
 mod writer;
 
 use std::{
@@ -773,6 +784,10 @@ enum SelectionPhase {
 /// must not touch it.
 #[derive(Default)]
 struct PreviewSlot {
+    validity_publication: Option<(usize, Instant, Option<u64>)>,
+    invalid_link_source: String,
+    invalid_link_targets: Vec<Range<usize>>,
+    validity_changed: bool,
     source: String,
     active_line_start: Option<usize>,
     preview: PreviewDocument,
@@ -790,6 +805,22 @@ struct PreviewSlot {
 }
 
 impl PreviewSlot {
+    fn has_link_validity_publication(&self, stamp: (usize, Instant, Option<u64>)) -> bool {
+        self.validity_publication == Some(stamp)
+    }
+    fn set_link_validity(&mut self, source: &str, invalid: Vec<Range<usize>>) -> bool {
+        if self.invalid_link_targets == invalid
+            && (invalid.is_empty() || self.invalid_link_source == source)
+        {
+            return false;
+        }
+        let changed = self.invalid_link_targets != invalid
+            || (!invalid.is_empty() && self.invalid_link_source != source);
+        self.invalid_link_source = source.to_owned();
+        self.invalid_link_targets = invalid;
+        self.validity_changed |= changed;
+        changed
+    }
     /// 追加要件 2026-09-15: 画像の行の箱に大きさを入れ、描く絵を集める。**組み直したとき、
     /// 倍率が変わったとき、文書の置き場所が変わったとき**だけ。読めない絵の行は記法のまま出る。
     fn size_images(&mut self, zoom_percent: i32, folder: Option<&Path>) {
@@ -828,6 +859,15 @@ impl PreviewSlot {
             self.active_line_start = active_line_start;
             self.reading = reading;
             self.started = true;
+        }
+        if stale || self.validity_changed {
+            self.preview
+                .set_invalid_link_targets(if self.invalid_link_source == source {
+                    &self.invalid_link_targets
+                } else {
+                    &[]
+                });
+            self.validity_changed = false;
         }
         if stale
             || self
@@ -1587,6 +1627,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 .search_folder
                 .clone()
                 .filter(|folder| folder.is_dir()),
+            // Set below, once `Live` exists — see `WorkFolder::workspace`'s
+            // own doc for why nothing can hand this a `Runtime` yet.
+            workspace: None,
+            folder_autosave: Rc::default(),
+            links: None,
+            ..Default::default()
         },
         None => WorkFolder::default(),
     };
@@ -1734,6 +1780,7 @@ fn main() -> Result<(), slint::PlatformError> {
         states: pane_states.clone(),
         folder: Rc::new(RefCell::new(work_folder)),
         tree_paths: Rc::new(RefCell::new(Vec::new())),
+        workspace_ids: Rc::new(RefCell::new(WorkspaceManagerIds::default())),
         preview: Rc::default(),
         results: Rc::new(RefCell::new(Vec::new())),
         recent: Rc::new(RefCell::new(remembered)),
@@ -1844,6 +1891,35 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     publish_folder_history(&window, &live);
 
+    // Workspace設計.md: the ledger is opened, and its default (if any) becomes
+    // the active Workspace, **after** the session's own TABs have already
+    // been restored above and **before** `open_startup_paths` below acts on
+    // any command-line argument — a file-only launch must land in the
+    // default Workspace's scope, and an explicit folder argument (handled
+    // inside `open_work_folder`) must not have to guess which Workspace, if
+    // any, it belongs to.
+    //
+    // No AppData directory (`app_data::app_directory` returning `None`, the
+    // same case every other AppData-backed feature already treats as
+    // "quietly do nothing") leaves `folder.workspace` at `None` — Workspaces
+    // are unavailable for this run, not silently reset to empty.
+    if let Some(directory) = app_data::app_directory() {
+        let runtime = workspace_ui::Runtime::open(directory);
+        let default = runtime.registry().default_workspace();
+        live.folder.borrow_mut().workspace = Some(Rc::new(RefCell::new(runtime)));
+        if default.is_some() {
+            // 仕様: 通常起動はデフォルトを使う — `switch_workspace` restores its
+            // persisted tree state (仕様の実装依頼 "Default startup must
+            // restore that state") and points the tree at its roots. Only
+            // when a default is actually registered: with none, this must
+            // leave the legacy single-folder session restored above exactly
+            // as it is (仕様 "Workspaceなしは所属を推測しない").
+            switch_workspace(&window, &live, default);
+        } else {
+            publish_workspace_switcher(&window, &live);
+        }
+    }
+
     // Bracket the renderer so the log can separate our own work from what Slint
     // does with the images afterwards.
     if diagnostic_config.performance() {
@@ -1888,6 +1964,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let timer_live = live.clone();
     work_timer.start(TimerMode::Repeated, WORK_COPY_TICK, move || {
         if let Some(window) = weak.upgrade() {
+            folder_autosave_tick(&window, &timer_live);
+            workspace_links_tick(&window, &timer_live);
             write_work_copy_if_due(&window, &timer_live);
             collect_write_results(&window, &timer_live);
         }
@@ -1927,22 +2005,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 report_wallpaper_error(&window, &watch_live.cache, &error);
             }
             if window.get_tree_open()
-                && window.get_left_tab() == 0
+                && matches!(window.get_left_tab(), 0 | 4)
                 && !window.get_tree_refresh_blocked()
                 && !window.get_question_open()
                 && !window.get_diff_active()
             {
-                let request =
-                    watch_live
-                        .folder
-                        .borrow()
-                        .root
-                        .clone()
-                        .map(|root| tree_watch::Request {
-                            root,
-                            expanded: watch_live.folder.borrow().expanded.clone(),
-                            displayed_paths: watch_live.tree_paths.borrow().clone(),
-                        });
+                let (roots, multi) = tree_roots(&watch_live.folder.borrow());
+                let request = (!roots.is_empty()).then(|| tree_watch::Request {
+                    roots,
+                    multi,
+                    expanded: watch_live.folder.borrow().expanded.clone(),
+                    displayed_paths: watch_live.tree_paths.borrow().clone(),
+                });
                 if let (Some(watcher), Some(request)) = (tree_watcher.as_mut(), request)
                     && let Some(rows) = watcher.poll(&request)
                 {
@@ -2218,6 +2292,7 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     wiring::wire_left_panel(&window, &live);
+    wiring::wire_workspace(&window, &live);
 
     wiring::wire_find(&window, &live);
     window.on_settings_match(|query, labels| settings_match(&query, labels.iter()));
@@ -3052,7 +3127,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 WindowEvent::DroppedFile(path) => {
                     // Capture the destination before deferring: focus and the
                     // pointer may change while the file is waiting to open.
-                    let target = weak.upgrade().and_then(|window| drop_pane_under_cursor(&window));
+                    let target = weak
+                        .upgrade()
+                        .and_then(|window| drop_pane_under_cursor(&window));
                     let weak = weak.clone();
                     let live = drop_live.clone();
                     let path = path.clone();
@@ -3483,7 +3560,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // while the question `focused_pane` asks, whether the pane has been given
     // an area, is answered "no" for both of them until the window is shown.
     let opening_pane = PaneId::from_index(window.get_focused_pane());
+    wire_workspace_links(&window, &live);
     open_startup_paths(&window, &live, opening_pane, &paths_from_command_line());
+    observe_folder_autosave(&window, &live);
     if let Err(message) = diagnostic_options {
         live.cache.borrow_mut().log_diag("error", message);
         window.tell_pane(pick(
@@ -3503,6 +3582,16 @@ fn main() -> Result<(), slint::PlatformError> {
             return CloseRequestResponse::HideWindow;
         };
         let live = &closing_live;
+        if live.folder.borrow().link_move_job.is_some() {
+            window.tell(
+                pick(
+                    "リンク更新中です。完了後に閉じてください",
+                    "Updating links. Please close after it finishes.",
+                )
+                .into(),
+            );
+            return CloseRequestResponse::KeepWindowShown;
+        }
         // **問いが立っているあいだは、もう一度は訊かない。**`×`を続けて
         // 押されても重ねられないのは、`pending`が1つしか持てないからで
         // （`Live::pending`）、ここで返さないと下の`ask_question`が
@@ -3523,7 +3612,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         let unsaved = open_documents(live)
             .iter()
-            .filter(|document| document.text.edited())
+            .filter(|document| {
+                document.text.edited()
+                    && (!document.protective_recovery.get() || document.recovery_failed.get())
+            })
             .count();
         if unsaved == 0 {
             return CloseRequestResponse::HideWindow;
@@ -4206,6 +4298,12 @@ struct Live {
     /// and depths; a click has to name a path, and a path is not something the
     /// window has any use for.
     tree_paths: Rc<RefCell<Vec<PathBuf>>>,
+    /// What each row of the Workspace switcher and manager stand for — the
+    /// window draws names and paths; a click has to name a
+    /// [`workspace::WorkspaceId`] or [`workspace::FolderId`], and those are
+    /// not something the window has any use for. The same reason
+    /// `tree_paths` is held here rather than on the window.
+    workspace_ids: Rc<RefCell<WorkspaceManagerIds>>,
     /// What the last folder-wide search found (要件 7.7). Held here for the
     /// same reason as `tree_paths`: the window draws lines, and a place in a
     /// document is not one.
@@ -6007,6 +6105,15 @@ fn editor_area(window: &AppWindow) -> Rect {
 /// The work folder, and which of its folders the writer has opened.
 #[derive(Default)]
 struct WorkFolder {
+    link_move_job: Option<link_move::Job>,
+    clone_job: Option<workspace_clone::Job>,
+    clone_url_check: workspace_clone::UrlCheck,
+    clone_target: Option<workspace::WorkspaceId>,
+    pending_workspace_cleanup: Option<WorkspaceCleanup>,
+    tree_filter: String,
+    workspace_view: bool,
+    explorer_location: TreeLocation,
+    workspace_location: TreeLocation,
     creating: Option<(PathBuf, bool)>,
     root: Option<PathBuf>,
     /// **Paths, not indices.** A row's position changes whenever anything above
@@ -6024,13 +6131,176 @@ struct WorkFolder {
     /// a writer finds by wondering where their words went. Opening a work
     /// folder clears it for the same reason.
     searching: Option<PathBuf>,
+    /// The Workspace ledger and active-Workspace state (Workspace設計.md
+    /// phase 3), or `None` before it has been loaded.
+    ///
+    /// **Optional and `Rc<RefCell<..>>`, not a plain field**: `WorkFolder`
+    /// derives `Default` for every existing `Live` test fixture, and a
+    /// `workspace_ui::Runtime` needs an explicit AppData directory to open —
+    /// there is no default one of those to hand every fixture that never
+    /// touches Workspaces at all. Only [`open_startup_paths`] initializes
+    /// this, once a `Live` already exists. `Rc<RefCell<..>>` rather than an
+    /// owned value only so a callback closure can hold its own reference
+    /// without borrowing all of `Live` — it never outlives, and never cycles
+    /// back to, the `Live` that owns it.
+    workspace: Option<Rc<RefCell<workspace_ui::Runtime>>>,
+    folder_autosave: Rc<RefCell<saving::FolderAutoSave>>,
+    links: Option<Rc<RefCell<WorkspaceLinkUi>>>,
+}
+
+#[derive(Clone, Default)]
+struct TreeLocation {
+    tree_filter: String,
+    root: Option<PathBuf>,
+    expanded: BTreeSet<PathBuf>,
+    selected: Option<PathBuf>,
+    searching: Option<PathBuf>,
 }
 
 impl WorkFolder {
-    /// Where a folder-wide search starts.
-    fn searched_root(&self) -> Option<PathBuf> {
-        self.searching.clone().or_else(|| self.root.clone())
+    fn location(&self) -> TreeLocation {
+        TreeLocation {
+            tree_filter: self.tree_filter.clone(),
+            root: self.root.clone(),
+            expanded: self.expanded.clone(),
+            selected: self.selected.clone(),
+            searching: self.searching.clone(),
+        }
     }
+    fn set_workspace_view(&mut self, workspace: bool) {
+        if self.workspace_view == workspace {
+            return;
+        }
+        let current = self.location();
+        let next = if workspace {
+            self.explorer_location = current;
+            self.workspace_location.clone()
+        } else {
+            self.workspace_location = current;
+            self.explorer_location.clone()
+        };
+        self.root = next.root;
+        self.tree_filter = next.tree_filter;
+        self.expanded = next.expanded;
+        self.selected = next.selected;
+        self.searching = next.searching;
+        self.creating = None;
+        self.workspace_view = workspace;
+    }
+    fn explorer_location(&self) -> TreeLocation {
+        if self.workspace_view {
+            self.explorer_location.clone()
+        } else {
+            self.location()
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorkspaceCleanup {
+    Remove(workspace::WorkspaceId),
+    Reset(workspace::WorkspaceId),
+    Detach(workspace::WorkspaceId, workspace::FolderId),
+}
+
+fn observe_folder_autosave(window: &AppWindow, live: &Live) {
+    let (runtime, engine) = {
+        let folder = live.folder.borrow();
+        (folder.workspace.clone(), folder.folder_autosave.clone())
+    };
+    let Some(runtime) = runtime else {
+        return;
+    };
+    let registry = runtime.borrow().registry().clone();
+    // Saving publishes tabs too; that nested publication must not borrow the
+    // engine which is currently saving, or rearm the pending edit.
+    if let Ok(mut engine) = engine.try_borrow_mut() {
+        for document in open_documents(live) {
+            engine.observe(&document, &registry, Instant::now());
+        }
+        let mode = match engine.status(&live.active(window)) {
+            saving::AutoSaveStatus::Off => pick("退避", "Recovery"),
+            saving::AutoSaveStatus::Idle => pick("自動保存", "Auto Save"),
+            saving::AutoSaveStatus::Pending => pick("自動保存待ち", "Auto Save pending"),
+            saving::AutoSaveStatus::Paused(_) => {
+                pick("自動保存停止・退避", "Auto Save paused · Recovery")
+            }
+        };
+        window.set_document_save_mode(mode.into());
+    }
+}
+
+fn folder_autosave_tick(window: &AppWindow, live: &Live) {
+    workspace_clone_tick(window, live);
+    if live.pending.borrow().is_some() || window.get_question_open() {
+        return;
+    }
+    if let Some(owner) = ime::window_handle(window) {
+        if !unsafe { windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(owner) }.as_bool()
+        {
+            return;
+        }
+    }
+    link_move::tick(window, live);
+    let (runtime, engine) = {
+        let folder = live.folder.borrow();
+        (folder.workspace.clone(), folder.folder_autosave.clone())
+    };
+    let registry = runtime.map(|runtime| runtime.borrow().registry().clone());
+    engine
+        .borrow_mut()
+        .tick(window, live, registry.as_ref(), Instant::now());
+    observe_folder_autosave(window, live);
+}
+
+/// The roots the tree currently shows, and whether they are drawn as their own
+/// labelled rows or as the classic single folder's own children.
+///
+/// **The one place that decides multi-root vs. classic.** A Workspace is
+/// active exactly when its own registered roots are used and drawn through
+/// [`file_tree::multi_rows`] — even with only one folder registered, so
+/// switching between "one folder" and "two folders" in the same Workspace
+/// never changes which code path draws the tree. Anything else (no Workspace
+/// feature at all, no active Workspace, or an active Workspace with nothing
+/// registered yet) falls back to `folder.root` — 仕様 "Workspaceなしは所属を
+/// 推測しない" — drawn through the classic [`file_tree::rows`], the same as
+/// before Workspaces existed.
+fn tree_roots(folder: &WorkFolder) -> (Vec<PathBuf>, bool) {
+    if let Some(runtime) = folder.workspace.as_ref().filter(|_| folder.workspace_view) {
+        let runtime = runtime.borrow();
+        if runtime.active_workspace().is_some() {
+            let roots = runtime.active_roots();
+            return (roots, true);
+        }
+    }
+    (folder.root.clone().into_iter().collect(), false)
+}
+
+/// Whether `path` names one of the tree's own active roots — 仕様 "多重root行は
+/// rename/move/delete不可": a registered root is navigation only through the
+/// file menu and the drag-drop it drives; only Workspace management may
+/// detach or relocate one.
+fn is_registered_root(live: &Live, path: &Path) -> bool {
+    let (roots, multi) = tree_roots(&live.folder.borrow());
+    multi && roots.iter().any(|root| root == path)
+}
+
+/// What each row of the Workspace switcher and management overlay stand for,
+/// in the same order Rust last drew them. Rebuilt whenever the rows are
+/// republished; a click carries only a row index, which is only ever read
+/// back the same turn of the event loop the rows were drawn in.
+#[derive(Default)]
+struct WorkspaceManagerIds {
+    /// The switcher's rows: `None` for its leading "なし" entry, `Some` for
+    /// each registered Workspace after it, in registry order.
+    switcher: Vec<Option<workspace::WorkspaceId>>,
+    /// The manager's own Workspace list, in registry order.
+    workspaces: Vec<workspace::WorkspaceId>,
+    /// The folders of whichever Workspace the manager has selected, in that
+    /// Workspace's own order.
+    folders: Vec<workspace::FolderId>,
+    /// Registered folders no Workspace references any more.
+    unused: Vec<workspace::FolderId>,
 }
 
 /// Which of the left pane's three things is showing (要件 6.2).
@@ -6040,6 +6310,7 @@ enum LeftTab {
     Search,
     Recent,
     Outline,
+    Workspace,
 }
 
 impl LeftTab {
@@ -6050,6 +6321,7 @@ impl LeftTab {
             Self::Search => 1,
             Self::Recent => 2,
             Self::Outline => 3,
+            Self::Workspace => 4,
         }
     }
 
@@ -6059,6 +6331,7 @@ impl LeftTab {
             1 => Self::Search,
             2 => Self::Recent,
             3 => Self::Outline,
+            4 => Self::Workspace,
             _ => Self::Explorer,
         }
     }
@@ -6083,9 +6356,19 @@ struct ResultRow {
 /// name and how far in it sits — so which panel is showing is the only thing
 /// that decides what a click on one means (`activate_left_row`).
 fn publish_left(window: &AppWindow, live: &Live) {
+    let tab = LeftTab::from_index(window.get_left_tab());
+    if matches!(tab, LeftTab::Explorer | LeftTab::Workspace) {
+        live.folder
+            .borrow_mut()
+            .set_workspace_view(tab == LeftTab::Workspace);
+    }
     show_searched_folder(window, live);
     match LeftTab::from_index(window.get_left_tab()) {
         LeftTab::Explorer => publish_tree(window, live),
+        LeftTab::Workspace => {
+            publish_workspace_manager(window, live);
+            publish_tree(window, live);
+        }
         LeftTab::Search => publish_results(window, live),
         LeftTab::Recent => publish_recent(window, live),
         LeftTab::Outline => publish_outline(window, live),
@@ -6099,18 +6382,36 @@ fn publish_left(window: &AppWindow, live: &Live) {
 /// folders they can see they have narrowed to. The whole path is the tooltip.
 fn show_searched_folder(window: &AppWindow, live: &Live) {
     let folder = live.folder.borrow();
-    let scoped = folder.searching.is_some();
-    let told = match folder.searched_root() {
-        Some(root) => entry_name(&root),
-        None => no_work_folder().to_owned(),
+    // An explicit subtree (要件 7.7、2026-09-07追加) always names itself,
+    // Workspace or not — 仕様の実装依頼 "explicit selected subtree works".
+    if let Some(scoped_root) = folder.searching.clone() {
+        window.set_search_folder(entry_name(&scoped_root).into());
+        window.set_search_folder_path(scoped_root.display().to_string().into());
+        window.set_search_folder_scoped(true);
+        return;
+    }
+    let (roots, multi) = tree_roots(&folder);
+    let (told, path) = if roots.is_empty() {
+        (no_work_folder().to_owned(), String::new())
+    } else if multi && roots.len() > 1 {
+        // 仕様の実装依頼 "don't silently report full-Workspace search while
+        // querying only first root" — said the other way here: an unscoped
+        // search over several roots must not be labelled as if it were one
+        // folder.
+        (
+            say!("{} 個のフォルダ全体", "all {} folders", roots.len()),
+            roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    } else {
+        (entry_name(&roots[0]), roots[0].display().to_string())
     };
-    let path = folder
-        .searched_root()
-        .map(|root| root.display().to_string())
-        .unwrap_or_default();
     window.set_search_folder(told.into());
     window.set_search_folder_path(path.into());
-    window.set_search_folder_scoped(scoped);
+    window.set_search_folder_scoped(false);
 }
 
 /// Narrow the folder-wide search to one folder, or widen it back (要件 7.7).
@@ -6164,6 +6465,7 @@ fn draw_outline(window: &AppWindow, cache: &mut RenderCache, source: &str) {
             folder: false,
             open: false,
             parent: -1,
+            is_root: false,
         })
         .collect::<Vec<_>>();
     cache.outline_drawn = headings;
@@ -6195,6 +6497,7 @@ fn publish_results(window: &AppWindow, live: &Live) {
             folder: false,
             open: false,
             parent: -1,
+            is_root: false,
         })
         .collect::<Vec<_>>();
     // The file commands act on the tree, and nothing here is a row of it.
@@ -6213,6 +6516,7 @@ fn publish_recent(window: &AppWindow, live: &Live) {
             folder: false,
             open: false,
             parent: -1,
+            is_root: false,
         })
         .collect::<Vec<_>>();
     window.set_tree_selected(-1);
@@ -6225,7 +6529,7 @@ fn publish_recent(window: &AppWindow, live: &Live) {
 /// on one is three different things.
 fn activate_left_row(window: &AppWindow, live: &Live, index: usize) {
     match LeftTab::from_index(window.get_left_tab()) {
-        LeftTab::Explorer => activate_tree_row(window, live, index),
+        LeftTab::Explorer | LeftTab::Workspace => activate_tree_row(window, live, index),
         LeftTab::Search => open_result(window, live, index),
         LeftTab::Recent => open_remembered(window, live, index),
         LeftTab::Outline => go_to_heading(window, live, index),
@@ -6384,6 +6688,8 @@ fn publish_folder_history(window: &AppWindow, live: &Live) {
 /// rather than on the way in: nothing here closes a tab, so what it holds is
 /// the arrangement as it stands, now against the folder just opened.
 fn open_work_folder(window: &AppWindow, live: &Live, chosen: &Path) {
+    live.folder.borrow_mut().set_workspace_view(false);
+    window.set_left_tab(0);
     {
         let mut folder = live.folder.borrow_mut();
         folder.root = Some(chosen.to_path_buf());
@@ -6395,6 +6701,13 @@ fn open_work_folder(window: &AppWindow, live: &Live, chosen: &Path) {
         // 「言葉がどこへ行ったのか」を探すことになる。
         folder.searching = None;
     }
+    // Workspace設計.md: **an explicitly opened folder is a temporary,
+    // single-folder view, never inferred as belonging to any Workspace** —
+    // 仕様 "明示的に指定したフォルダは…登録済みのWorkspaceを推測しない". The
+    // registered default itself is untouched; only what is active *this run*
+    // changes, the same distinction `switch_workspace` draws for a manual
+    // switch to "なし".
+    publish_workspace_switcher(window, live);
     remember_folder(live, chosen);
     publish_folder_history(window, live);
     publish_left(window, live);
@@ -6447,10 +6760,20 @@ const HITS_PER_FILE: usize = 50;
 /// differs.
 fn search_work_folder(window: &AppWindow, live: &Live) {
     let needle = window.get_folder_needle().to_string();
-    let Some(root) = live.folder.borrow().searched_root() else {
+    let roots = {
+        let folder = live.folder.borrow();
+        // 仕様の実装依頼 "existing explicit subtree remains sole root" — a
+        // scoped search never widens to the rest of the Workspace, whatever
+        // else is registered.
+        match folder.searching.clone() {
+            Some(scoped) => vec![scoped],
+            None => tree_roots(&folder).0,
+        }
+    };
+    if roots.is_empty() {
         window.set_folder_status(no_work_folder().into());
         return;
-    };
+    }
     if needle.is_empty() {
         // **Nothing to wait for, so nothing is waited for.** The generation
         // still moves, or an answer already in flight would land on the empty
@@ -6465,7 +6788,7 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
     live.searched.set(generation);
     let job = SearchJob {
         exclusions: window.get_search_exclusions().to_string(),
-        root,
+        roots,
         needle,
         generation,
         files: SEARCHED_FILES,
@@ -6569,10 +6892,18 @@ fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
 ///
 /// User actions read immediately; periodic background reads use publish_tree_rows.
 fn reveal_in_tree(window: &AppWindow, live: &Live, path: &Path) {
-    let Some(root) = live.folder.borrow().root.clone() else {
-        return;
-    };
-    if !path.starts_with(&root) {
+    let (roots, _multi) = tree_roots(&live.folder.borrow());
+    // 仕様の実装依頼: "Reveal current file checks all roots using canonical
+    // path equality" — `starts_with` alone cannot tell `/root` from
+    // `/root-sibling` (`workspace::is_within` draws the same distinction for
+    // save mode), and a document only ever names one root truthfully once
+    // symlinks/junctions and case are resolved.
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let containing_root = roots.into_iter().find(|root| {
+        root.canonicalize()
+            .is_ok_and(|canonical_root| canonical_path.starts_with(&canonical_root))
+    });
+    let Some(root) = containing_root else {
         window.tell_tab(
             pick(
                 "現在の文書は作業フォルダの外にあります",
@@ -6581,7 +6912,7 @@ fn reveal_in_tree(window: &AppWindow, live: &Live, path: &Path) {
             .into(),
         );
         return;
-    }
+    };
     if !path.is_file() {
         window.tell_tab(
             pick(
@@ -6594,6 +6925,9 @@ fn reveal_in_tree(window: &AppWindow, live: &Live, path: &Path) {
     }
     {
         let mut folder = live.folder.borrow_mut();
+        // The root's own row must be open too, or a multi-root tree never
+        // descends into it far enough to reach `path` at all.
+        folder.expanded.insert(root.clone());
         for parent in path.ancestors().skip(1).take_while(|p| *p != root) {
             folder.expanded.insert(parent.to_owned());
         }
@@ -6632,29 +6966,70 @@ fn explorer_command(window: &AppWindow, live: &Live, command: i32) {
     }
 }
 
+/// The heading over the tree when it is showing an active Workspace's roots
+/// rather than one classic folder — the Workspace's own name, since there is
+/// no longer one folder for the heading to name.
+fn workspace_heading_label(folder: &WorkFolder) -> String {
+    folder
+        .workspace
+        .as_ref()
+        .and_then(|runtime| {
+            let runtime = runtime.borrow();
+            let id = runtime.active_workspace()?;
+            runtime.registry().workspace(id).map(|w| w.name.clone())
+        })
+        .unwrap_or_default()
+}
+
 fn publish_tree(window: &AppWindow, live: &Live) {
     let folder = live.folder.borrow();
-    let Some(root) = folder.root.clone() else {
+    window.set_tree_filter(folder.tree_filter.clone().into());
+    let (roots, multi) = tree_roots(&folder);
+    if roots.is_empty() {
         window.set_work_folder(SharedString::new());
+        window.set_tree_multi_root(false);
+        window.set_tree_root_row_count(0);
+        window.set_tree_root_labels(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+        window.set_tree_pane_root_indices(ModelRc::new(VecModel::from(Vec::<i32>::new())));
         window.set_left_rows(ModelRc::new(VecModel::from(Vec::<LeftRow>::new())));
         window.set_tree_selected(-1);
+        live.tree_paths.borrow_mut().clear();
         return;
+    }
+    let rows = if multi {
+        file_tree::multi_rows(&roots, &folder.expanded, &file_tree::read_folder)
+    } else {
+        file_tree::rows(&roots[0], &folder.expanded, &file_tree::read_folder)
     };
-    let rows = file_tree::rows(&root, &folder.expanded, &file_tree::read_folder);
     drop(folder);
     publish_tree_rows(window, live, rows);
 }
 
 fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::Row>) {
     let mut folder = live.folder.borrow_mut();
-    let Some(root) = folder.root.clone() else {
+    let filter = folder.tree_filter.trim().to_lowercase();
+    if !filter.is_empty() {
+        // Keep folders as navigation and section boundaries; filter only visible files.
+        rows.retain(|row| row.folder || row.name.to_lowercase().contains(&filter));
+    }
+    let (roots, multi) = tree_roots(&folder);
+    if roots.is_empty() {
         return;
-    };
+    }
     if let Some((parent, is_folder)) = &folder.creating {
         let (at, depth) = rows
             .iter()
             .position(|row| &row.path == parent)
-            .map(|at| (at + 1, rows[at].depth + 1))
+            .map(|at| {
+                (
+                    at + 1,
+                    if rows[at].is_root {
+                        0
+                    } else {
+                        rows[at].depth + 1
+                    },
+                )
+            })
             .unwrap_or((0, 0));
         rows.insert(
             at,
@@ -6664,6 +7039,7 @@ fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::R
                 folder: *is_folder,
                 depth,
                 open: false,
+                is_root: false,
             },
         );
         window.set_tree_new_index(at as i32);
@@ -6692,19 +7068,1336 @@ fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::R
             folder: row.folder,
             open: row.open,
             parent,
+            is_root: row.is_root,
         })
         .collect::<Vec<_>>();
-    let name = root
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| root.display().to_string());
+    let name = if multi {
+        workspace_heading_label(&folder)
+    } else {
+        roots[0]
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| roots[0].display().to_string())
+    };
     window.set_work_folder(name.into());
+    window.set_tree_multi_root(multi);
+    window.set_tree_root_row_count(rows.iter().filter(|row| row.is_root).count() as i32);
+    let labels: Vec<SharedString> = rows
+        .iter()
+        .map(|row| {
+            if row.is_root {
+                row.path
+                    .file_name()
+                    .map_or_else(
+                        || row.path.display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    )
+                    .into()
+            } else {
+                SharedString::default()
+            }
+        })
+        .collect();
+    if !window
+        .get_tree_root_labels()
+        .iter()
+        .eq(labels.iter().cloned())
+    {
+        window.set_tree_root_labels(ModelRc::new(VecModel::from(labels)));
+    }
     if !window.get_left_rows().iter().eq(drawn.iter().cloned()) {
         window.set_left_rows(ModelRc::new(VecModel::from(drawn)));
     }
     // Held beside the rows so a click can name one: the model the window has is
     // only what it draws, and a path is not part of that.
     *live.tree_paths.borrow_mut() = rows.into_iter().map(|row| row.path).collect();
+    drop(folder);
+    publish_workspace_root_highlights(window, live);
+}
+
+/// Root labels follow the document in each pane, never the context-menu selection.
+/// Keeping one index per pane lets Slint change the highlight immediately on focus.
+fn publish_workspace_root_highlights(window: &AppWindow, live: &Live) {
+    let roots: Vec<(usize, PathBuf)> =
+        if window.get_left_tab() == 4 && live.folder.borrow().workspace_view {
+            window
+                .get_left_rows()
+                .iter()
+                .enumerate()
+                .zip(live.tree_paths.borrow().iter())
+                .filter_map(|((index, row), path)| row.is_root.then(|| (index, path.clone())))
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let indices: Vec<i32> = live
+        .tabs
+        .borrow()
+        .panes
+        .iter()
+        .map(|pane| {
+            if roots.is_empty() {
+                return -1;
+            }
+            pane.current()
+                .filter(|tab| !tab.stands_in() && !tab.empty)
+                .and_then(|tab| {
+                    let file = tab.document.file.borrow();
+                    let path = file.path()?;
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                    roots
+                        .iter()
+                        .filter(|(_, root)| canonical.starts_with(root))
+                        .max_by_key(|(_, root)| root.components().count())
+                        .map(|(index, _)| *index as i32)
+                })
+                .unwrap_or(-1)
+        })
+        .collect();
+    if !window
+        .get_tree_pane_root_indices()
+        .iter()
+        .eq(indices.iter().copied())
+    {
+        window.set_tree_pane_root_indices(ModelRc::new(VecModel::from(indices)));
+    }
+}
+
+// --- Workspace設計.md phase 3: the switcher, the management overlay, and ---
+// --- switching the active Workspace itself. ---------------------------------
+
+fn no_workspace_label() -> &'static str {
+    pick("なし", "None")
+}
+
+/// Every human-readable word for one [`workspace_ui::EditError`] — what a
+/// failed create/rename/add-root/etc. tells the writer, rather than the debug
+/// name of a Rust enum variant.
+fn workspace_edit_error_message(error: &workspace_ui::EditError) -> String {
+    match error {
+        workspace_ui::EditError::BlockedByReadError => say!(
+            "Workspaceの登録を読み込めていないため、編集できません。先にリセットしてください。",
+            "The Workspace registry could not be read, so it cannot be edited. Reset it first."
+        ),
+        workspace_ui::EditError::Registry(inner) => inner.to_string(),
+        workspace_ui::EditError::Io(inner) => say!(
+            "Workspaceの登録を保存できませんでした: {inner}",
+            "The Workspace registry could not be saved: {inner}"
+        ),
+    }
+}
+
+/// The switcher's own rows: a leading "なし", then every registered
+/// Workspace. Rebuilt whenever the ledger or the active Workspace could have
+/// changed — every editing function below calls this after it succeeds.
+fn publish_workspace_switcher(window: &AppWindow, live: &Live) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        window.set_workspace_available(false);
+        window.set_workspace_current_label(SharedString::new());
+        window
+            .set_workspace_switcher_rows(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+        return;
+    };
+    window.set_workspace_available(true);
+    let runtime = runtime_rc.borrow();
+    let registry = runtime.registry();
+    let active = runtime.active_workspace();
+    window.set_workspace_active(active.is_some());
+    if active.is_none() {
+        window.set_workspace_manager_open(true);
+    }
+    let mut ids: Vec<Option<workspace::WorkspaceId>> = vec![None];
+    let mut names: Vec<SharedString> = vec![no_workspace_label().into()];
+    for entry in registry.workspaces() {
+        ids.push(Some(entry.id));
+        names.push(entry.name.clone().into());
+    }
+    let current_label = active
+        .and_then(|id| registry.workspace(id))
+        .map(|entry| entry.name.clone())
+        .unwrap_or_else(|| no_workspace_label().to_owned());
+    drop(runtime);
+    live.workspace_ids.borrow_mut().switcher = ids;
+    window.set_workspace_current_label(current_label.into());
+    window.set_workspace_switcher_rows(ModelRc::new(VecModel::from(names)));
+}
+
+/// The management overlay's own rows: the Workspace list, the folders of
+/// whichever one the manager has selected, and every registered folder no
+/// Workspace references any more.
+fn publish_workspace_manager(window: &AppWindow, live: &Live) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let active = runtime_rc.borrow().active_workspace();
+    if active.is_some() {
+        runtime_rc.borrow_mut().select_in_manager(active);
+    }
+    let runtime = runtime_rc.borrow();
+    let read_error = runtime.read_error().cloned();
+    window.set_workspace_read_error(read_error.is_some());
+    let read_error_text = match &read_error {
+        Some(workspace_ui::RegistryReadError::Invalid) => say!(
+            "Workspaceの登録を読み込めませんでした。ファイルが壊れているか、対応していない形式です。\n\n\
+             リセットすると空の登録からやり直せます（原稿や退避本文は削除されません）。",
+            "The Workspace registry could not be read. The file may be damaged or in an unsupported format.\n\n\
+             Resetting starts over with an empty registry (manuscripts and backups are not deleted)."
+        ),
+        Some(workspace_ui::RegistryReadError::Io(kind)) => say!(
+            "Workspaceの登録を読み込めませんでした（{kind:?}）。\n\n\
+             リセットすると空の登録からやり直せます（原稿や退避本文は削除されません）。",
+            "The Workspace registry could not be read ({kind:?}).\n\n\
+             Resetting starts over with an empty registry (manuscripts and backups are not deleted)."
+        ),
+        None => String::new(),
+    };
+    window.set_workspace_read_error_text(read_error_text.into());
+
+    let registry = runtime.registry();
+    let default = registry.default_workspace();
+    let active = runtime.active_workspace();
+    let manager_selection = runtime.manager_selection();
+
+    let mut workspace_ids = Vec::new();
+    let mut rows = Vec::new();
+    for entry in registry.workspaces() {
+        workspace_ids.push(entry.id);
+        rows.push(WorkspaceRow {
+            name: entry.name.clone().into(),
+            is_default: default == Some(entry.id),
+            is_active: active == Some(entry.id),
+        });
+    }
+    let selected_index = manager_selection
+        .and_then(|id| workspace_ids.iter().position(|&x| x == id))
+        .map_or(-1, |at| at as i32);
+
+    let mut folder_ids = Vec::new();
+    let mut folder_rows = Vec::new();
+    if let Some(selected) = manager_selection.and_then(|id| registry.workspace(id)) {
+        for &folder_id in &selected.folders {
+            let Some(folder) = registry.folder(folder_id) else {
+                continue;
+            };
+            folder_ids.push(folder_id);
+            folder_rows.push(WorkspaceFolderRow {
+                path: folder.path.display().to_string().into(),
+                users: registry
+                    .folder_users(folder_id)
+                    .iter()
+                    .filter_map(|id| registry.workspace(*id))
+                    .map(|workspace| workspace.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+                    .into(),
+                mode_auto: folder.mode == workspace::SaveMode::AutoSave,
+                missing: !folder.path.is_dir(),
+            });
+        }
+    }
+
+    let mut unused_ids = Vec::new();
+    let mut unused_rows = Vec::new();
+    for folder in registry.folders() {
+        if registry.folder_users(folder.id).is_empty() {
+            unused_ids.push(folder.id);
+            unused_rows.push(UnusedFolderRow {
+                path: folder.path.display().to_string().into(),
+            });
+        }
+    }
+    drop(runtime);
+
+    {
+        let mut held = live.workspace_ids.borrow_mut();
+        held.workspaces = workspace_ids;
+        held.folders = folder_ids;
+        held.unused = unused_ids;
+    }
+    window.set_workspace_rows(ModelRc::new(VecModel::from(rows)));
+    window.set_workspace_manager_selected(selected_index);
+    window.set_workspace_folder_rows(ModelRc::new(VecModel::from(folder_rows)));
+    window.set_workspace_unused_folder_rows(ModelRc::new(VecModel::from(unused_rows)));
+    observe_folder_autosave(window, live);
+}
+
+/// Switches which Workspace is active — 仕様 "手動で切り替えたWorkspaceをリンクの
+/// 範囲に使う…既存TAB・未保存本文を閉じない". Only the tree's own state moves:
+/// tabs, dirty buffers and everything else `live` holds are untouched because
+/// this never reads them.
+fn switch_workspace(window: &AppWindow, live: &Live, target: Option<workspace::WorkspaceId>) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    live.folder.borrow_mut().set_workspace_view(true);
+    if runtime_rc.borrow().active_workspace() != target {
+        live.folder.borrow_mut().tree_filter.clear();
+    }
+    let current_expanded = live.folder.borrow().expanded.clone();
+    let (restored, save_error) = runtime_rc
+        .borrow_mut()
+        .switch_active(target, current_expanded);
+    if let Some(error) = save_error {
+        live.cache.borrow_mut().log_diag(
+            "workspace",
+            &format!("view state save failed error={error}"),
+        );
+    }
+    let roots = runtime_rc.borrow().active_roots();
+    {
+        let mut folder = live.folder.borrow_mut();
+        // 仕様の実装依頼: "root==first active root may remain compatibility
+        // field but source of truth active_roots helper" — `tree_roots` (what
+        // every tree/search/reveal function actually reads) asks the
+        // Workspace runtime directly and ignores this field whenever a
+        // Workspace is active; this is kept in sync only for the callers that
+        // still read `WorkFolder::root` as a plain compatibility value (the
+        // diagnostic log, session capture).
+        folder.root = roots.first().cloned();
+        folder.expanded = restored;
+        folder.selected = None;
+        folder.creating = None;
+        folder.searching = None;
+    }
+    window.set_tree_new_index(-1);
+    window.set_left_tab(4);
+    window.set_tree_open(true);
+    window.set_workspace_manager_open(target.is_none());
+    workspace_links_scope_changed(window, live, None);
+    publish_tree(window, live);
+    publish_left(window, live);
+    publish_workspace_switcher(window, live);
+    write_session(window, live);
+}
+
+fn workspace_switcher_chosen(window: &AppWindow, live: &Live, index: usize) {
+    let target = live
+        .workspace_ids
+        .borrow()
+        .switcher
+        .get(index)
+        .copied()
+        .flatten();
+    request_workspace_change(window, live, target);
+}
+
+fn workspace_manager_requested(window: &AppWindow, live: &Live) {
+    window.set_left_tab(4);
+    window.set_tree_open(true);
+    publish_left(window, live);
+    publish_workspace_manager(window, live);
+    window.set_workspace_manager_open(!window.get_workspace_active());
+}
+
+fn workspace_manager_closed(window: &AppWindow, _live: &Live) {
+    window.set_workspace_manager_open(false);
+    restore_editor_focus(window);
+}
+
+fn refresh_workspace_tree(window: &AppWindow, live: &Live, id: workspace::WorkspaceId) {
+    let tab = window.get_left_tab();
+    let manager = window.get_workspace_manager_open();
+    switch_workspace(window, live, Some(id));
+    window.set_left_tab(tab);
+    window.set_workspace_manager_open(manager);
+    publish_left(window, live);
+}
+
+fn workspace_open_selected(window: &AppWindow, live: &Live) {
+    if let Some(target) = workspace_selected_in_manager(live) {
+        request_workspace_change(window, live, Some(target));
+    }
+}
+
+fn workspace_clone_requested(window: &AppWindow, live: &Live) {
+    if live.folder.borrow().clone_job.is_some() {
+        return;
+    }
+    live.folder.borrow_mut().clone_url_check.clear();
+    window.set_workspace_clone_url_error("".into());
+    window.set_workspace_clone_destination_error("".into());
+    window.set_workspace_clone_url_checking(false);
+    window.set_question_name("".into());
+    window.set_workspace_clone_destination("".into());
+    ask_question(
+        window,
+        live,
+        Question::CloneWorkspaceUrl,
+        pick("リポジトリを取得", "Clone Repository").into(),
+        &[pick("取得", "Clone"), cancel()],
+        -1,
+    );
+    window.set_question_asks_name(true);
+    window.set_question_generation(window.get_question_generation() + 1);
+}
+
+fn workspace_clone_url_edited(window: &AppWindow, live: &Live) {
+    live.folder.borrow_mut().clone_url_check.clear();
+    window.set_workspace_clone_url_error("".into());
+    window.set_workspace_clone_url_checking(false);
+}
+
+fn workspace_clone_url_check(window: &AppWindow, live: &Live) {
+    if !matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl))
+        || window.get_workspace_cloning()
+    {
+        return;
+    }
+    let url = window.get_question_name().trim().to_owned();
+    let result = live.folder.borrow_mut().clone_url_check.start(&url);
+    window.set_workspace_clone_url_checking(result.is_ok());
+    window.set_workspace_clone_url_error(
+        result
+            .err()
+            .map(|error| {
+                format!(
+                    "{}: {error}",
+                    pick("GitのURLを確認してください", "Check the Git URL")
+                )
+            })
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
+fn workspace_clone_destination_check(window: &AppWindow, live: &Live) {
+    if !matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl))
+        || window.get_workspace_cloning()
+    {
+        return;
+    }
+    let destination = PathBuf::from(window.get_workspace_clone_destination().trim());
+    window.set_workspace_clone_destination_error(
+        workspace_clone::validate_destination(&destination)
+            .err()
+            .map(|error| {
+                format!(
+                    "{}: {error}",
+                    pick("保存先を確認してください", "Check the destination")
+                )
+            })
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
+fn workspace_clone_browse(window: &AppWindow, live: &Live) {
+    if live.folder.borrow().clone_job.is_some() {
+        return;
+    }
+    if let Some(path) = file_dialog::workspace_clone_folder(ime::window_handle(window)) {
+        window.set_workspace_clone_destination(path.display().to_string().into());
+        window.set_question_detail("".into());
+        workspace_clone_destination_check(window, live);
+    }
+}
+
+fn workspace_clone_start(window: &AppWindow, live: &Live, url: String) {
+    if live.folder.borrow().clone_job.is_some() {
+        return;
+    }
+    workspace_clone_destination_check(window, live);
+    if let Err(error) = workspace_clone::validate_url(url.trim()) {
+        window.set_workspace_clone_url_error(
+            format!(
+                "{}: {error}",
+                pick("GitのURLを確認してください", "Check the Git URL")
+            )
+            .into(),
+        );
+        return;
+    }
+    if !window.get_workspace_clone_destination_error().is_empty() {
+        return;
+    }
+    live.folder.borrow_mut().clone_url_check.clear();
+    window.set_workspace_clone_url_checking(false);
+    let destination = PathBuf::from(window.get_workspace_clone_destination().trim());
+    match workspace_clone::Job::start(url.trim().to_owned(), destination) {
+        Ok(job) => {
+            let target = live
+                .folder
+                .borrow()
+                .workspace
+                .as_ref()
+                .and_then(|runtime| runtime.borrow().active_workspace());
+            live.folder.borrow_mut().clone_target = target;
+            live.folder.borrow_mut().clone_job = Some(job);
+            window.set_workspace_cloning(true);
+            window.set_question_detail(
+                pick(
+                    "Gitリポジトリを確認し、取得しています…",
+                    "Checking the Git repository and cloning…",
+                )
+                .into(),
+            );
+            window.tell(
+                pick(
+                    "リポジトリを取得しています。成功後にWorkspaceへ登録します。",
+                    "Cloning the repository. It will be registered after success.",
+                )
+                .into(),
+            );
+        }
+        Err(error) => window.set_question_detail(
+            format!(
+                "{}: {error}",
+                pick("リポジトリを取得できません", "Cannot clone repository")
+            )
+            .into(),
+        ),
+    }
+}
+
+fn workspace_clone_tick(window: &AppWindow, live: &Live) {
+    if matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl)) {
+        let current = window.get_question_name();
+        let result = live
+            .folder
+            .borrow_mut()
+            .clone_url_check
+            .poll(current.trim());
+        if let Some(result) = result {
+            window.set_workspace_clone_url_checking(false);
+            window.set_workspace_clone_url_error(
+                result
+                    .err()
+                    .map(|error| {
+                        format!(
+                            "{}: {error}",
+                            pick(
+                                "Gitリポジトリを確認できません",
+                                "Cannot confirm Git repository"
+                            )
+                        )
+                    })
+                    .unwrap_or_default()
+                    .into(),
+            );
+        }
+    } else {
+        live.folder.borrow_mut().clone_url_check.clear();
+        window.set_workspace_clone_url_checking(false);
+    }
+
+    if live.pending.borrow().is_some()
+        && !matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl))
+    {
+        return;
+    }
+    let result = live
+        .folder
+        .borrow_mut()
+        .clone_job
+        .as_mut()
+        .and_then(|job| job.try_result());
+    let Some(result) = result else {
+        return;
+    };
+    live.folder.borrow_mut().clone_job = None;
+    let target = live.folder.borrow_mut().clone_target.take();
+    window.set_workspace_cloning(false);
+    let path = match result {
+        Ok(path) => path,
+        Err(error) => {
+            window.set_question_detail(
+                format!(
+                    "{}: {error}",
+                    pick(
+                        "URL・アクセス権・保存先を確認してください。Workspaceには登録していません",
+                        "Check the URL, access and destination. No Workspace was registered"
+                    )
+                )
+                .into(),
+            );
+            return;
+        }
+    };
+    if matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl)) {
+        live.pending.borrow_mut().take();
+        window.set_question_open(false);
+        restore_editor_focus(window);
+    }
+    workspace_register_clone(window, live, path, target);
+}
+
+fn workspace_register_clone(
+    window: &AppWindow,
+    live: &Live,
+    path: PathBuf,
+    target: Option<workspace::WorkspaceId>,
+) {
+    let Some(runtime) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let registered = runtime.borrow_mut().edit(|registry| {
+        let id = match target {
+            Some(id) => id,
+            None => registry.create_workspace(name)?,
+        };
+        registry.add_root(id, &path)?;
+        Ok(id)
+    });
+    match registered {
+        Ok(id) => {
+            runtime.borrow_mut().select_in_manager(Some(id));
+            if target.is_none() {
+                publish_workspace_switcher(window, live);
+                request_workspace_change(window, live, Some(id));
+            } else if runtime.borrow().active_workspace() == Some(id) {
+                refresh_workspace_tree(window, live, id);
+            }
+            publish_workspace_manager(window, live);
+            window.tell(pick("リポジトリを取得し、Workspaceに登録しました。", "Repository cloned and registered as a Workspace.").into());
+        }
+        Err(error) => window.tell(format!("{}: {}", pick("取得は成功しましたがWorkspace登録に失敗しました。フォルダを手動で追加してください", "Clone succeeded but registration failed. Add the folder manually"), workspace_edit_error_message(&error)).into()),
+    }
+}
+
+fn workspace_leave_requested(window: &AppWindow, live: &Live) {
+    request_workspace_change(window, live, None);
+}
+
+fn workspace_has_unsaved(live: &Live) -> bool {
+    open_documents(live).iter().any(|doc| {
+        doc.text.edited() || (doc.file.borrow().path().is_none() && !doc.text.borrow().is_empty())
+    })
+}
+
+fn workspace_path_allowed(live: &Live, path: &Path, saving: bool) -> bool {
+    let runtime = live.folder.borrow().workspace.clone();
+    let Some(runtime) = runtime else {
+        return true;
+    };
+    let runtime = runtime.borrow();
+    if runtime.active_workspace().is_none() {
+        return true;
+    }
+    let roots = runtime.active_roots();
+    if saving {
+        workspace_boundary::save_target_allowed(&roots, path)
+    } else {
+        workspace_boundary::existing_file_allowed(&roots, path)
+    }
+}
+
+fn admit_workspace_path(window: &AppWindow, live: &Live, path: &Path, saving: bool) -> bool {
+    if workspace_path_allowed(live, path, saving) {
+        return true;
+    }
+    window.tell(
+        pick(
+            "Workspace外のファイルです。Workspaceを閉じてから開いてください。",
+            "This file is outside the Workspace. Leave the Workspace before opening it.",
+        )
+        .into(),
+    );
+    false
+}
+
+fn request_workspace_change(
+    window: &AppWindow,
+    live: &Live,
+    target: Option<workspace::WorkspaceId>,
+) {
+    request_workspace_change_with_cleanup(window, live, target, None);
+}
+
+fn request_workspace_change_with_cleanup(
+    window: &AppWindow,
+    live: &Live,
+    target: Option<workspace::WorkspaceId>,
+    cleanup: Option<WorkspaceCleanup>,
+) {
+    if live.pending.borrow().is_some() {
+        return;
+    }
+    live.folder.borrow_mut().pending_workspace_cleanup = cleanup;
+    let current = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| runtime.borrow().active_workspace());
+    if current == target {
+        switch_workspace(window, live, target);
+        return;
+    }
+    if live.pending.borrow().is_some() {
+        return;
+    }
+    if workspace_has_unsaved(live) {
+        ask_question(
+            window,
+            live,
+            Question::ChangeWorkspace(target),
+            say!(
+                "Workspaceを切り替えるため、すべてのTABを閉じます。未保存の文書があります。キャンセルすると現在のTABとWorkspaceを維持します。",
+                "Changing Workspace closes all tabs. There are unsaved documents. Cancel keeps the current tabs and Workspace."
+            ),
+            &[
+                pick("すべて保存して切り替える", "Save All and Switch"),
+                pick("破棄して切り替える", "Discard and Switch"),
+                cancel(),
+            ],
+            1,
+        );
+    } else {
+        finish_workspace_change(window, live, target);
+    }
+}
+
+fn finish_workspace_change(
+    window: &AppWindow,
+    live: &Live,
+    target: Option<workspace::WorkspaceId>,
+) {
+    if workspace_has_unsaved(live) {
+        return;
+    }
+    finish_workspace_change_confirmed(window, live, target);
+}
+
+fn finish_workspace_change_confirmed(
+    window: &AppWindow,
+    live: &Live,
+    target: Option<workspace::WorkspaceId>,
+) {
+    // Commit the transition only after every document decision has succeeded.
+    // Hidden panes and navigation history must not reopen an old-scope document.
+    let count = live.tabs.borrow().panes.len();
+    for index in 0..count {
+        let id = PaneId::from_index(index as i32);
+        {
+            let mut tabs = live.tabs.borrow_mut();
+            let strip = tabs.of_mut(id);
+            strip.tabs.clear();
+            strip.history.clear();
+            strip.at = 0;
+        }
+        refill_strip(window, live, id);
+        let tab = live.tabs.borrow().of(id).current().cloned();
+        if let Some(tab) = tab {
+            live.show_tab(window, id, &tab);
+        }
+    }
+    live.closed_tabs.borrow_mut().clear();
+    switch_workspace(window, live, target);
+    let cleanup = live.folder.borrow_mut().pending_workspace_cleanup.take();
+    if let Some(cleanup) = cleanup {
+        match cleanup {
+            WorkspaceCleanup::Remove(id) => workspace_remove(window, live, id),
+            WorkspaceCleanup::Reset(id) => workspace_reset_view(window, live, id),
+            WorkspaceCleanup::Detach(id, folder_id) => {
+                workspace_detach_root(window, live, id, folder_id);
+                switch_workspace(window, live, Some(id));
+            }
+        }
+    }
+    publish_tabs(window, live);
+    publish_workspace_manager(window, live);
+    write_session(window, live);
+}
+
+fn workspace_row_context_chosen(window: &AppWindow, live: &Live, index: usize) {
+    let Some(runtime) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    if runtime.borrow().active_workspace().is_some() {
+        return;
+    }
+    let id = live.workspace_ids.borrow().workspaces.get(index).copied();
+    runtime.borrow_mut().select_in_manager(id);
+    publish_workspace_manager(window, live);
+}
+
+fn workspace_row_chosen(window: &AppWindow, live: &Live, index: usize) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let id = live.workspace_ids.borrow().workspaces.get(index).copied();
+    runtime_rc.borrow_mut().select_in_manager(id);
+    publish_workspace_manager(window, live);
+    if let Some(id) = id {
+        request_workspace_change(window, live, Some(id));
+    }
+}
+
+fn workspace_selected_in_manager(live: &Live) -> Option<workspace::WorkspaceId> {
+    let runtime = live.folder.borrow().workspace.clone()?;
+    let held = runtime.borrow();
+    held.active_workspace().or(held.manager_selection())
+}
+
+fn workspace_create_requested(window: &AppWindow, live: &Live) {
+    if live.folder.borrow().workspace.is_none() {
+        return;
+    }
+    ask_for_name(
+        window,
+        live,
+        Question::CreateWorkspace,
+        say!("新しいWorkspaceの名前", "Name for the new Workspace"),
+        "",
+    );
+}
+
+fn workspace_duplicate_requested(window: &AppWindow, live: &Live) {
+    let Some(source) = workspace_selected_in_manager(live) else {
+        return;
+    };
+    let suggested = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| {
+            runtime
+                .borrow()
+                .registry()
+                .workspace(source)
+                .map(|w| w.name.clone())
+        })
+        .map(|name| say!("{name} コピー", "{name} copy"))
+        .unwrap_or_default();
+    ask_for_name(
+        window,
+        live,
+        Question::DuplicateWorkspace(source),
+        say!(
+            "複製したWorkspaceの名前",
+            "Name for the duplicated Workspace"
+        ),
+        &suggested,
+    );
+}
+
+fn workspace_rename_requested(window: &AppWindow, live: &Live) {
+    let Some(id) = workspace_selected_in_manager(live) else {
+        return;
+    };
+    let current_name = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| {
+            runtime
+                .borrow()
+                .registry()
+                .workspace(id)
+                .map(|w| w.name.clone())
+        })
+        .unwrap_or_default();
+    ask_for_name(
+        window,
+        live,
+        Question::RenameWorkspace(id),
+        say!("Workspaceの新しい名前", "New name for the Workspace"),
+        &current_name,
+    );
+}
+
+fn workspace_create(window: &AppWindow, live: &Live, name: String) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return;
+    }
+    // **Bound to a local before matching, never matched on directly.** A
+    // match's scrutinee keeps its own temporaries — the `RefMut` `borrow_mut`
+    // returns here — alive for every arm (E0502's usual shape, but silent:
+    // this borrows a `RefCell`, so what would be a compile error elsewhere is
+    // a runtime panic here the moment an arm below borrows the same
+    // `Runtime` again). Ending the statement first drops the `RefMut`
+    // immediately, before any arm runs.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.create_workspace(name));
+    match result {
+        Ok(id) => {
+            runtime_rc.borrow_mut().select_in_manager(Some(id));
+            publish_workspace_switcher(window, live);
+            publish_workspace_manager(window, live);
+            request_workspace_change(window, live, Some(id));
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_duplicate(
+    window: &AppWindow,
+    live: &Live,
+    source: workspace::WorkspaceId,
+    name: String,
+) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return;
+    }
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.duplicate_workspace(source, name));
+    match result {
+        Ok(id) => {
+            runtime_rc.borrow_mut().select_in_manager(Some(id));
+            publish_workspace_switcher(window, live);
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_rename(window: &AppWindow, live: &Live, id: workspace::WorkspaceId, name: String) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return;
+    }
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.rename_workspace(id, name));
+    match result {
+        Ok(()) => {
+            publish_workspace_switcher(window, live);
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_default_toggled(window: &AppWindow, live: &Live) {
+    let Some((runtime_rc, id)) = live
+        .folder
+        .borrow()
+        .workspace
+        .clone()
+        .zip(workspace_selected_in_manager(live))
+    else {
+        return;
+    };
+    let currently_default = runtime_rc.borrow().registry().default_workspace() == Some(id);
+    let next = if currently_default { None } else { Some(id) };
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.set_default(next));
+    match result {
+        Ok(()) => {
+            publish_workspace_switcher(window, live);
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_remove_requested(window: &AppWindow, live: &Live) {
+    let Some(id) = workspace_selected_in_manager(live) else {
+        return;
+    };
+    let name = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| {
+            runtime
+                .borrow()
+                .registry()
+                .workspace(id)
+                .map(|w| w.name.clone())
+        })
+        .unwrap_or_default();
+    ask_question(
+        window,
+        live,
+        Question::RemoveWorkspace(id),
+        say!(
+            "「{name}」の登録を解除します。\n\n\
+             このWorkspace専用の表示状態は削除されますが、フォルダの中身や他のWorkspaceの設定は残ります。",
+            "Removing \"{name}\" from the registry.\n\n\
+             This Workspace's own view state is deleted, but its folders' contents and any other Workspace's settings are kept."
+        ),
+        &[pick("解除する", "Remove"), cancel()],
+        0,
+    );
+}
+
+fn workspace_remove(window: &AppWindow, live: &Live, id: workspace::WorkspaceId) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    // Read before `forget_workspace` clears it: **only** switch the tree away
+    // when the Workspace being removed was the one actually active. Checking
+    // afterwards instead would also trigger on a temporary folder view (whose
+    // active Workspace is already `None` by design, see `open_work_folder`)
+    // and clear its root out from under it for an unrelated removal.
+    let was_active = runtime_rc.borrow().active_workspace() == Some(id);
+    if was_active {
+        request_workspace_change_with_cleanup(
+            window,
+            live,
+            None,
+            Some(WorkspaceCleanup::Remove(id)),
+        );
+        return;
+    }
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.remove_workspace(id));
+    match result {
+        Ok(()) => {
+            let cleanup = runtime_rc.borrow_mut().forget_workspace(id);
+            if let Err(error) = cleanup {
+                window.tell(
+                    format!(
+                        "{}: {error}",
+                        pick(
+                            "Workspaceの状態を削除できませんでした",
+                            "Could not remove Workspace state"
+                        )
+                    )
+                    .into(),
+                );
+            }
+            workspace_links_scope_changed(window, live, Some(id));
+            if was_active {
+                switch_workspace(window, live, None);
+            }
+            publish_workspace_switcher(window, live);
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_reset_view_requested(window: &AppWindow, live: &Live) {
+    let Some(id) = workspace_selected_in_manager(live) else {
+        return;
+    };
+    ask_question(
+        window,
+        live,
+        Question::ResetWorkspaceView(id),
+        say!(
+            "このWorkspaceの表示状態を初期化します。\n\n\
+             ツリーの開閉状態と索引の下書きが作り直されます。フォルダ構成と保存方式は変わりません。",
+            "Resetting this Workspace's view state.\n\n\
+             The tree's expanded folders and the index cache are rebuilt. Its folders and save mode are unchanged."
+        ),
+        &[pick("リセットする", "Reset"), cancel()],
+        -1,
+    );
+}
+
+fn workspace_reset_view(window: &AppWindow, live: &Live, id: workspace::WorkspaceId) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    if runtime_rc.borrow().active_workspace() == Some(id) {
+        request_workspace_change_with_cleanup(
+            window,
+            live,
+            None,
+            Some(WorkspaceCleanup::Reset(id)),
+        );
+        return;
+    }
+    let reset = runtime_rc.borrow_mut().reset_view(id);
+    if let Err(error) = reset {
+        window.tell(
+            format!(
+                "{}: {error}",
+                pick(
+                    "Workspaceをリセットできませんでした",
+                    "Could not reset Workspace"
+                )
+            )
+            .into(),
+        );
+        return;
+    }
+    workspace_links_scope_changed(window, live, Some(id));
+    runtime_rc.borrow_mut().select_in_manager(None);
+    if runtime_rc.borrow().active_workspace() == Some(id) {
+        live.folder.borrow_mut().expanded.clear();
+        switch_workspace(window, live, Some(id));
+    }
+    publish_workspace_manager(window, live);
+}
+
+fn workspace_folder_add_requested(window: &AppWindow, live: &Live) {
+    let Some(id) = workspace_selected_in_manager(live) else {
+        return;
+    };
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let owner = ime::window_handle(window);
+    let Some(chosen) = file_dialog::workspace_folder(owner) else {
+        return;
+    };
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.add_root(id, &chosen));
+    match result {
+        Ok(_) => {
+            if runtime_rc.borrow().active_workspace() == Some(id) {
+                refresh_workspace_tree(window, live, id);
+            }
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_folder_mode_toggled(window: &AppWindow, live: &Live, index: usize) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let Some(folder_id) = live.workspace_ids.borrow().folders.get(index).copied() else {
+        return;
+    };
+    let current = runtime_rc
+        .borrow()
+        .registry()
+        .folder(folder_id)
+        .map(|f| f.mode);
+    let Some(current) = current else {
+        return;
+    };
+    let next = match current {
+        workspace::SaveMode::AutoSave => workspace::SaveMode::Recovery,
+        workspace::SaveMode::Recovery => workspace::SaveMode::AutoSave,
+    };
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.set_folder_mode(folder_id, next));
+    match result {
+        Ok(()) => {
+            observe_folder_autosave(window, live);
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_folder_move(window: &AppWindow, live: &Live, index: usize, delta: isize) {
+    let Some(id) = workspace_selected_in_manager(live) else {
+        return;
+    };
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let Some(new_index) = index.checked_add_signed(delta) else {
+        return;
+    };
+    let result = runtime_rc.borrow_mut().edit(|registry| {
+        let Some(workspace) = registry.workspace(id) else {
+            return Err(workspace::RegistryError::UnknownWorkspace);
+        };
+        let mut order = workspace.folders.clone();
+        if index >= order.len() || new_index >= order.len() {
+            return Err(workspace::RegistryError::InvalidReorder);
+        }
+        order.swap(index, new_index);
+        registry.reorder_roots(id, &order)
+    });
+    match result {
+        Ok(()) => {
+            if runtime_rc.borrow().active_workspace() == Some(id) {
+                refresh_workspace_tree(window, live, id);
+            }
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_folder_detached(window: &AppWindow, live: &Live, index: usize) {
+    let Some(id) = workspace_selected_in_manager(live) else {
+        return;
+    };
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let Some(folder_id) = live.workspace_ids.borrow().folders.get(index).copied() else {
+        return;
+    };
+    if runtime_rc.borrow().active_workspace() == Some(id) {
+        request_workspace_change_with_cleanup(
+            window,
+            live,
+            None,
+            Some(WorkspaceCleanup::Detach(id, folder_id)),
+        );
+        return;
+    }
+    workspace_detach_root(window, live, id, folder_id);
+}
+
+fn workspace_detach_root(
+    window: &AppWindow,
+    live: &Live,
+    id: workspace::WorkspaceId,
+    folder_id: workspace::FolderId,
+) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.remove_root(id, folder_id));
+    match result {
+        Ok(()) => {
+            if runtime_rc.borrow().active_workspace() == Some(id) {
+                refresh_workspace_tree(window, live, id);
+            }
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_folder_relocated(window: &AppWindow, live: &Live, index: usize) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let Some(folder_id) = live.workspace_ids.borrow().folders.get(index).copied() else {
+        return;
+    };
+    if runtime_rc.borrow().active_workspace().is_some() {
+        window.tell(
+            pick(
+                "フォルダの場所を変更する前にWorkspaceを閉じてください。",
+                "Leave the Workspace before relocating a folder.",
+            )
+            .into(),
+        );
+        return;
+    }
+    let owner = ime::window_handle(window);
+    let Some(chosen) = file_dialog::workspace_folder(owner) else {
+        return;
+    };
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.relocate_folder(folder_id, &chosen));
+    match result {
+        Ok(()) => {
+            let active = runtime_rc.borrow().active_workspace();
+            if let Some(active) = active {
+                refresh_workspace_tree(window, live, active);
+            }
+            publish_workspace_manager(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_unused_folder_removed_requested(window: &AppWindow, live: &Live, index: usize) {
+    let Some(folder_id) = live.workspace_ids.borrow().unused.get(index).copied() else {
+        return;
+    };
+    let path = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| {
+            runtime
+                .borrow()
+                .registry()
+                .folder(folder_id)
+                .map(|f| f.path.display().to_string())
+        })
+        .unwrap_or_default();
+    ask_question(
+        window,
+        live,
+        Question::RemoveUnusedFolder(folder_id),
+        say!(
+            "「{path}」の登録を解除します。\n\n\
+             どのWorkspaceも参照していない共通フォルダの設定を削除するだけで、フォルダの中身は削除されません。",
+            "Removing the registration for \"{path}\".\n\n\
+             This only deletes the shared folder setting, referenced by no Workspace — the folder's contents are not touched."
+        ),
+        &[pick("解除する", "Remove"), cancel()],
+        0,
+    );
+}
+
+fn workspace_remove_unused_folder(window: &AppWindow, live: &Live, folder: workspace::FolderId) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.remove_unused_folder(folder));
+    match result {
+        Ok(()) => publish_workspace_manager(window, live),
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
+}
+
+fn workspace_read_error_reset_requested(window: &AppWindow, live: &Live) {
+    ask_question(
+        window,
+        live,
+        Question::ResetWorkspaceRegistry,
+        say!(
+            "Workspaceの登録をリセットします。\n\n\
+             読み込めなかった登録は空に戻ります。原稿や退避本文は削除されません。",
+            "Resetting the Workspace registry.\n\n\
+             The registry that could not be read is replaced with an empty one. Manuscripts and backups are not deleted."
+        ),
+        &[pick("リセットする", "Reset"), cancel()],
+        0,
+    );
+}
+
+fn workspace_reset_after_read_error(window: &AppWindow, live: &Live) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let reset = runtime_rc.borrow_mut().reset_after_read_error();
+    if let Err(error) = reset {
+        window.tell(
+            format!(
+                "{}: {error}",
+                pick(
+                    "Workspaceの登録をリセットできませんでした",
+                    "Could not reset Workspace registry"
+                )
+            )
+            .into(),
+        );
+        return;
+    }
+    workspace_links_clear_all_caches(window, live);
+    switch_workspace(window, live, None);
+    publish_workspace_switcher(window, live);
+    publish_workspace_manager(window, live);
 }
 
 /// A row of the tree was clicked (要件 5.2).
@@ -6718,6 +8411,9 @@ fn activate_tree_row(window: &AppWindow, live: &Live, index: usize) {
     };
     // Whatever was clicked is what the file commands act on (要件 5.2).
     live.folder.borrow_mut().selected = Some(path.clone());
+    if is_registered_root(live, &path) {
+        return;
+    }
     if path.is_dir() {
         {
             let mut folder = live.folder.borrow_mut();
@@ -6747,12 +8443,82 @@ fn pick_tree_row(live: &Live, index: usize) {
     live.folder.borrow_mut().selected = Some(path);
 }
 
+fn tree_filter_changed(window: &AppWindow, live: &Live) {
+    live.folder.borrow_mut().tree_filter = window.get_tree_filter().to_string();
+    publish_tree(window, live);
+}
+
+fn workspace_context_folder(
+    live: &Live,
+) -> Option<(usize, workspace::FolderId, workspace::SaveMode)> {
+    let folder = live.folder.borrow();
+    if !folder.workspace_view {
+        return None;
+    }
+    let path = folder.selected.as_ref()?;
+    let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let runtime = folder.workspace.as_ref()?.borrow();
+    let active = runtime.registry().workspace(runtime.active_workspace()?)?;
+    active
+        .folders
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| {
+            let root = runtime.registry().folder(*id)?;
+            path.starts_with(&root.path).then_some((
+                root.path.components().count(),
+                index,
+                *id,
+                root.mode,
+            ))
+        })
+        .max_by_key(|entry| entry.0)
+        .map(|(_, index, id, mode)| (index, id, mode))
+}
+
+fn workspace_context_requested(window: &AppWindow, live: &Live, index: i32) {
+    live.folder.borrow_mut().selected = if index < 0 {
+        None
+    } else {
+        live.tree_paths.borrow().get(index as usize).cloned()
+    };
+    window.set_tree_selected(index);
+    let context = workspace_context_folder(live);
+    window.set_workspace_context_folder(context.is_some());
+    window.set_workspace_context_auto(
+        context.is_some_and(|(_, _, mode)| mode == workspace::SaveMode::AutoSave),
+    );
+}
+
+fn workspace_tree_command(window: &AppWindow, live: &Live, command: i32) {
+    if window.get_left_tab() != 4 || !window.get_workspace_active() {
+        return;
+    }
+    match command {
+        0 => workspace_folder_add_requested(window, live),
+        1 => workspace_clone_requested(window, live),
+        4 => workspace_reset_view_requested(window, live),
+        2 | 3 | 5 | 6 => {
+            let Some((index, _, _)) = workspace_context_folder(live) else {
+                return;
+            };
+            publish_workspace_manager(window, live);
+            match command {
+                2 => workspace_folder_mode_toggled(window, live, index),
+                3 => workspace_folder_detached(window, live, index),
+                5 => workspace_folder_move(window, live, index, -1),
+                6 => workspace_folder_move(window, live, index, 1),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Put a file in front of the writer, opening it only if it is not open already.
 fn drop_pane_under_cursor(window: &AppWindow) -> Option<PaneId> {
     use windows::Win32::{
-        Foundation::POINT,
-        Graphics::Gdi::ScreenToClient,
-        UI::WindowsAndMessaging::GetCursorPos,
+        Foundation::POINT, Graphics::Gdi::ScreenToClient, UI::WindowsAndMessaging::GetCursorPos,
     };
     let hwnd = ime::window_handle(window)?;
     let mut point = POINT::default();
@@ -6796,6 +8562,515 @@ fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, openi
     open_path_in_pane(window, live, focused_pane(window), path, opening);
 }
 
+struct WorkspaceLinkUi {
+    validity: workspace_links::ValidityChecker,
+    validity_requested: Option<(u64, bool, Vec<(usize, Instant, Option<PathBuf>)>)>,
+    validity_generation: Option<u64>,
+    validity_entries: Option<(u64, std::sync::Arc<Vec<workspace_index::Entry>>)>,
+    validity_results: BTreeMap<usize, Vec<Range<usize>>>,
+    validity_applied: BTreeMap<i32, (usize, Instant, Option<u64>)>,
+    index: workspace_links::WorkspaceLinks,
+    completion: workspace_links::Completion,
+    observed: Option<(usize, Instant, usize, u64)>,
+    suppressed: Option<(usize, Instant, usize)>,
+    generation: u64,
+    dirty_headings: BTreeMap<usize, (Instant, Vec<document::Heading>)>,
+    notified_maintenance: Option<String>,
+}
+
+fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
+    live.folder
+        .borrow_mut()
+        .links
+        .get_or_insert_with(|| {
+            Rc::new(RefCell::new(WorkspaceLinkUi {
+                validity: workspace_links::ValidityChecker::new(),
+                validity_requested: None,
+                validity_generation: None,
+                validity_entries: None,
+                validity_results: BTreeMap::new(),
+                validity_applied: BTreeMap::new(),
+                index: workspace_links::WorkspaceLinks::new(app_data::app_directory()),
+                completion: workspace_links::Completion::new(),
+                observed: None,
+                suppressed: None,
+                generation: 0,
+                dirty_headings: BTreeMap::new(),
+                notified_maintenance: None,
+            }))
+        })
+        .clone()
+}
+
+fn workspace_links_scope_changed(
+    window: &AppWindow,
+    live: &Live,
+    clear_id: Option<workspace::WorkspaceId>,
+) {
+    let held = workspace_link_ui(live);
+    if let Some(id) = clear_id {
+        held.borrow_mut().index.clear_cache(id);
+    }
+    held.borrow_mut().observed = None;
+    held.borrow_mut().completion.hide();
+    window.set_link_popup_open(false);
+    workspace_links_tick(window, live);
+}
+
+fn workspace_links_clear_all_caches(window: &AppWindow, live: &Live) {
+    let held = workspace_link_ui(live);
+    let Some(appdata) = app_data::app_directory() else {
+        return;
+    };
+    let path = appdata.join("workspace-index");
+    match std::fs::read_dir(&path) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else { continue };
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let Ok(id) = name.parse::<workspace::WorkspaceId>() else {
+                    continue;
+                };
+                if name != id.to_string()
+                    || !entry
+                        .file_type()
+                        .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                {
+                    continue;
+                }
+                held.borrow_mut().index.clear_cache(id);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => window.tell_tab(
+            format!(
+                "{}: {error}",
+                pick(
+                    "索引キャッシュを確認できません",
+                    "Cannot inspect index caches"
+                )
+            )
+            .into(),
+        ),
+    }
+    workspace_links_scope_changed(window, live, None);
+}
+
+fn publish_link_popup(window: &AppWindow, id: PaneId, ui: &WorkspaceLinkUi) {
+    window.set_link_popup_pane(id.index());
+    window.set_link_popup_open(ui.completion.is_open());
+    window.set_link_popup_selected(ui.completion.selected().unwrap_or(0) as i32);
+    window.set_link_popup_rows(ModelRc::new(VecModel::from(
+        ui.completion
+            .candidates()
+            .iter()
+            .map(|item| SharedString::from(item.display.as_str()))
+            .collect::<Vec<_>>(),
+    )));
+    let status = ui.index.status();
+    let label = if status.busy {
+        pick("索引更新中", "Indexing")
+    } else if status.error.is_some()
+        || status.failed_dirs > 0
+        || status.missing_roots > 0
+        || status.truncated
+        || status.cache_write_failed > 0
+    {
+        pick("索引は一部のみ", "Partial index")
+    } else {
+        pick("リンク候補", "Link suggestions")
+    };
+    window.set_link_popup_status(format!("{label} · {}", ui.index.entries().len()).into());
+}
+
+fn link_completion_allowed(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    doc: &OpenDocument,
+) -> bool {
+    let screen = id.screen(window);
+    !doc.read_only()
+        && !screen.viewer
+        && !screen.settings
+        && !window.get_question_open()
+        && !window.get_diff_active()
+        && live.states.of(id).borrow().preedit.is_empty()
+        && live.cache.borrow_mut().pane(id).terminal.is_none()
+}
+
+fn link_trigger_in_code(source: &str, caret: usize) -> bool {
+    let Some(before) = source.get(..caret) else {
+        return true;
+    };
+    let line = before.bytes().filter(|&b| b == b'\n').count();
+    if document::line_styles_reading(source, document::Reading::all())
+        .get(line)
+        .is_some_and(|style| style.kind.is_code())
+    {
+        return true;
+    }
+    // An unfinished inline code span must not offer links while typing it.
+    let text = before.rsplit('\n').next().unwrap_or_default();
+    let mut delimiter = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            chars.next();
+            continue;
+        }
+        if ch != '`' {
+            continue;
+        }
+        let mut count = 1;
+        while chars.peek() == Some(&'`') {
+            chars.next();
+            count += 1;
+        }
+        if delimiter == 0 {
+            delimiter = count;
+        } else if delimiter == count {
+            delimiter = 0;
+        }
+    }
+    delimiter != 0
+}
+
+fn update_link_validity(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkUi) {
+    let mut documents: Vec<Rc<OpenDocument>> = Vec::new();
+    for tab in live.tabs.borrow().panes.iter().flat_map(|pane| &pane.tabs) {
+        if !documents.iter().any(|doc| Rc::ptr_eq(doc, &tab.document)) {
+            documents.push(tab.document.clone());
+        }
+    }
+    let roots = ui.index.validation_roots().map(<[PathBuf]>::to_vec);
+    let revision = ui.index.revision();
+    let stamp = (
+        revision,
+        roots.is_some(),
+        documents
+            .iter()
+            .map(|doc| {
+                (
+                    Rc::as_ptr(doc) as usize,
+                    doc.text.changed_at(),
+                    doc.file.borrow().path().map(Path::to_path_buf),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    if ui.validity_requested.as_ref() != Some(&stamp) {
+        ui.validity_results.clear();
+        ui.validity_applied.clear();
+        ui.validity_generation = None;
+        if let Some(roots) = roots {
+            if ui
+                .validity_entries
+                .as_ref()
+                .is_none_or(|(known, _)| *known != revision)
+            {
+                ui.validity_entries =
+                    Some((revision, std::sync::Arc::new(ui.index.entries().to_vec())));
+            }
+            let inputs = documents
+                .iter()
+                .map(|doc| workspace_links::ValidityDocument {
+                    id: Rc::as_ptr(doc) as usize,
+                    path: doc.file.borrow().path().map(Path::to_path_buf),
+                    text: doc.text.borrow().clone(),
+                })
+                .collect::<Vec<_>>();
+            if let Some(generation) = ui.validity.submit(
+                roots,
+                ui.validity_entries.as_ref().unwrap().1.clone(),
+                inputs,
+            ) {
+                ui.validity_generation = Some(generation);
+                ui.validity_requested = Some(stamp);
+            }
+        } else {
+            ui.validity.cancel();
+            ui.validity_requested = Some(stamp);
+        }
+    }
+    if let Some((generation, results)) = ui.validity.poll() {
+        if Some(generation) == ui.validity_generation {
+            ui.validity_results = results.into_iter().collect();
+            ui.validity_applied.clear();
+        }
+    }
+    for id in PaneId::all(window) {
+        if !id.is_shown(window) {
+            continue;
+        }
+        let doc = live.states.document(id);
+        let pointer = Rc::as_ptr(&doc) as usize;
+        let applied = (pointer, doc.text.changed_at(), ui.validity_generation);
+        if ui.validity_applied.get(&id.index()) == Some(&applied)
+            && live
+                .cache
+                .borrow_mut()
+                .pane(id)
+                .view
+                .preview_slot
+                .has_link_validity_publication(applied)
+        {
+            continue;
+        }
+        let source = doc.text.borrow();
+        let invalid = ui
+            .validity_results
+            .get(&pointer)
+            .cloned()
+            .unwrap_or_default();
+        let changed = live
+            .cache
+            .borrow_mut()
+            .pane(id)
+            .view
+            .preview_slot
+            .set_link_validity(&source, invalid);
+        live.cache
+            .borrow_mut()
+            .pane(id)
+            .view
+            .preview_slot
+            .validity_publication = Some(applied);
+        ui.validity_applied.insert(id.index(), applied);
+        if changed {
+            refresh_pane_from_state(window, &live.cache, &doc, id, &live.states.of(id), &source);
+        }
+    }
+}
+
+fn workspace_links_tick(window: &AppWindow, live: &Live) {
+    let runtime = live.folder.borrow().workspace.clone();
+    let (active, roots, reset) = runtime
+        .as_ref()
+        .map(|r| {
+            let r = r.borrow();
+            let active = r.active_workspace();
+            (
+                active,
+                r.active_roots(),
+                active.map_or(0, |id| r.reset_generation(id)),
+            )
+        })
+        .unwrap_or_default();
+    let held = workspace_link_ui(live);
+    let mut ui = held.borrow_mut();
+    ui.index.sync_scope(active, roots, reset);
+    ui.index.poll();
+    if let Some(error) = ui.index.last_maintenance_error().map(str::to_owned) {
+        if ui.notified_maintenance.as_ref() != Some(&error) {
+            window.tell_tab(
+                format!(
+                    "{}: {error}",
+                    pick(
+                        "索引キャッシュの削除に失敗しました",
+                        "Could not remove the index cache"
+                    )
+                )
+                .into(),
+            );
+            ui.notified_maintenance = Some(error);
+        }
+    }
+    ui.index
+        .maybe_rescan(Duration::from_secs(30), Instant::now());
+    update_link_validity(window, live, &mut ui);
+    let id = focused_pane(window);
+    let doc = live.states.document(id);
+    if !link_completion_allowed(window, live, id, &doc) {
+        ui.completion.hide();
+        ui.observed = None;
+        window.set_link_popup_open(false);
+        return;
+    }
+    let source = doc.text.borrow();
+    let caret = id.caret_byte(&live.states.of(id), &source);
+    let pointer = Rc::as_ptr(&doc) as usize;
+    let changed = doc.text.changed_at();
+    let key = (pointer, changed, caret, ui.index.revision());
+    if ui.observed == Some(key) && window.get_link_popup_pane() == id.index() {
+        return;
+    }
+    ui.observed = Some(key);
+    ui.generation = ui.generation.wrapping_add(1);
+    if ui.suppressed == Some((pointer, changed, caret))
+        || link_completion::detect(&source, caret).is_none()
+        || link_trigger_in_code(&source, caret)
+    {
+        ui.completion.hide();
+        publish_link_popup(window, id, &ui);
+        return;
+    }
+    let mut entries = ui.index.entries().to_vec();
+    let tabs = live.tabs.borrow();
+    let mut held_pointers = Vec::new();
+    for tab in tabs.panes.iter().flat_map(|pane| &pane.tabs) {
+        let document = &tab.document;
+        let pointer = Rc::as_ptr(document) as usize;
+        if held_pointers.contains(&pointer) {
+            continue;
+        }
+        held_pointers.push(pointer);
+        if !document.text.edited() {
+            continue;
+        }
+        let Some(path) = document.file.borrow().path().map(Path::to_path_buf) else {
+            continue;
+        };
+        let changed = document.text.changed_at();
+        let headings = ui
+            .dirty_headings
+            .entry(pointer)
+            .or_insert_with(|| (changed, document::outline(&document.text.borrow())));
+        if headings.0 != changed {
+            *headings = (changed, document::outline(&document.text.borrow()));
+        }
+        let canonical = path.canonicalize().unwrap_or(path);
+        for entry in entries.iter_mut().filter(|e| e.canonical == canonical) {
+            entry.headings = headings.1.clone();
+            entry.headings_complete = true;
+        }
+    }
+    ui.dirty_headings
+        .retain(|key, _| held_pointers.contains(key));
+    let stamp = workspace_links::CompletionStamp {
+        pane: id.index() as u64,
+        document: pointer as u64,
+        source_generation: ui.generation,
+    };
+    ui.completion.detect(
+        stamp,
+        &source,
+        caret,
+        doc.file.borrow().path(),
+        &entries,
+        100,
+    );
+    publish_link_popup(window, id, &ui);
+}
+
+fn accept_link_completion(window: &AppWindow, live: &Live, id: PaneId) {
+    let held = workspace_link_ui(live);
+    let mut ui = held.borrow_mut();
+    let doc = live.states.document(id);
+    if focused_pane(window) != id || !link_completion_allowed(window, live, id, &doc) {
+        ui.completion.hide();
+        window.set_link_popup_open(false);
+        return;
+    }
+    let source = doc.text.borrow().clone();
+    let caret = id.caret_byte(&live.states.of(id), &source);
+    let pointer = Rc::as_ptr(&doc) as usize;
+    if ui.observed != Some((pointer, doc.text.changed_at(), caret, ui.index.revision())) {
+        ui.completion.hide();
+        window.set_link_popup_open(false);
+        return;
+    }
+    let stamp = workspace_links::CompletionStamp {
+        pane: id.index() as u64,
+        document: pointer as u64,
+        source_generation: ui.generation,
+    };
+    let accepted = ui.completion.accept(stamp, caret);
+    ui.completion.hide();
+    window.set_link_popup_open(false);
+    drop(ui);
+    let Some(accepted) = accepted else { return };
+    if !link_completion::valid_replacement_range(&source, accepted.range.clone()) {
+        return;
+    }
+    let mut next = source.clone();
+    replace_source_range(
+        &mut next,
+        (accepted.range.start, accepted.range.end),
+        &accepted.text,
+    );
+    if next.chars().count() > MAX_DOCUMENT_CHARACTERS {
+        return;
+    }
+    doc.history.borrow_mut().separate_next = true;
+    doc.record(
+        accepted.range.start,
+        source[accepted.range.clone()].to_owned(),
+        accepted.text.clone(),
+    );
+    doc.history.borrow_mut().separate_next = true;
+    *doc.text.borrow_mut() = next.clone();
+    let state = live.states.of(id);
+    {
+        let mut state = state.borrow_mut();
+        state.caret_source_byte = Some(accepted.caret);
+        state.selection_anchor_source_byte = Some(accepted.caret);
+        state.active_line_start = Some(source_line_start(&next, accepted.caret));
+    }
+    id.draw_edit(
+        window,
+        &live.states,
+        &live.cache,
+        &doc,
+        &next,
+        Some(accepted.caret),
+        Change {
+            at: accepted.range.start,
+            removed: accepted.range.len(),
+            inserted: accepted.text.len(),
+        },
+    );
+    let mut ui = held.borrow_mut();
+    ui.suppressed = Some((pointer, doc.text.changed_at(), accepted.caret));
+    ui.observed = None;
+}
+
+fn wire_workspace_links(window: &AppWindow, live: &Live) {
+    let weak = window.as_weak();
+    let linked = live.clone();
+    window.on_pane_link_popup_key(move |pane, key| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let id = PaneId::from_index(pane);
+        if focused_pane(&window) != id {
+            return false;
+        }
+        let held = workspace_link_ui(&linked);
+        if !held.borrow().completion.is_open() {
+            return false;
+        }
+        match key {
+            1 | 2 => {
+                let mut ui = held.borrow_mut();
+                ui.completion.move_selection(if key == 1 { -1 } else { 1 });
+                publish_link_popup(&window, id, &ui);
+            }
+            3 => accept_link_completion(&window, &linked, id),
+            4 => {
+                let mut ui = held.borrow_mut();
+                ui.suppressed = ui.observed.map(|(p, t, c, _)| (p, t, c));
+                ui.completion.hide();
+                window.set_link_popup_open(false);
+            }
+            _ => return false,
+        }
+        true
+    });
+    let weak = window.as_weak();
+    let linked = live.clone();
+    window.on_pane_link_popup_chosen(move |pane, index| {
+        if let Some(window) = weak.upgrade() {
+            workspace_link_ui(&linked)
+                .borrow_mut()
+                .completion
+                .select(index.max(0) as usize);
+            accept_link_completion(&window, &linked, PaneId::from_index(pane));
+        }
+    });
+}
+
 fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> bool {
     if live.cache.borrow_mut().pane(id).terminal.is_some() {
         return false;
@@ -6819,16 +9094,43 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
     let Some((target, wiki)) = document::link_target_at(&source, hit.letter) else {
         return false;
     };
-    let path = document::link_path(target, wiki, document.file.borrow().path());
-    let Some(path) = path else {
-        window.tell_tab(
-            pick(
-                "リンク先を解決できません。通常リンクにはファイルのパス、内部リンクにはフルパスを指定してください。",
-                "Cannot resolve the link. Use a file path for a link, and a full path for an internal link.",
-            )
-            .into(),
-        );
-        return true;
+    let held_index = workspace_link_ui(live);
+    let resolved = workspace_links::resolve_link(
+        target,
+        wiki,
+        document.file.borrow().path(),
+        &source,
+        held_index.borrow().index.entries(),
+    );
+    let (path, heading) = match resolved {
+        Ok(workspace_links::ResolvedLink::SameFileHeading { result }) => {
+            reveal_link_heading(window, live, id, result);
+            return true;
+        }
+        Ok(workspace_links::ResolvedLink::Target { path, heading }) => (path, heading),
+        Err(error) => {
+            let message = match error {
+                workspace_links::ResolveError::Ambiguous(_) => pick(
+                    "同名のリンク先が複数あります。フォルダを含む候補を選んでください。",
+                    "Several files share this name. Choose a qualified path.",
+                ),
+                _ => {
+                    if held_index.borrow().index.status().busy {
+                        pick(
+                            "索引を更新中です。候補が見つかるまで待つか、ファイルのパスを指定してください。",
+                            "The index is updating. Wait for candidates or use a file path.",
+                        )
+                    } else {
+                        pick(
+                            "リンク先を解決できません。ファイルのパスを確認してください。",
+                            "Cannot resolve the link. Check the file path.",
+                        )
+                    }
+                }
+            };
+            window.tell_tab(message.into());
+            return true;
+        }
     };
     match std::fs::canonicalize(&path) {
         Ok(path) if path.is_file() => {
@@ -6846,6 +9148,23 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
                 });
             let path = held.unwrap_or(path);
             open_path_in_pane(window, live, id, &path, Opening::Kept);
+            if let Some(heading) = heading {
+                let target = live.states.document(id);
+                if target
+                    .file
+                    .borrow()
+                    .path()
+                    .and_then(|p| p.canonicalize().ok())
+                    == path.canonicalize().ok()
+                {
+                    let result = workspace_links::find_heading_occurrence(
+                        &target.text.borrow(),
+                        &heading.text,
+                        heading.occurrence,
+                    );
+                    reveal_link_heading(window, live, id, result);
+                }
+            }
         }
         _ => window.tell_tab(
             say!(
@@ -6859,6 +9178,44 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
     true
 }
 
+fn reveal_link_heading(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    result: workspace_links::HeadingLookup,
+) {
+    match result {
+        workspace_links::HeadingLookup::Found(at) => {
+            let doc = live.states.document(id);
+            let source = doc.text.borrow().clone();
+            select_source_range(
+                window,
+                &live.cache,
+                &doc,
+                &live.states.of(id),
+                id,
+                &source,
+                at,
+                at,
+            );
+        }
+        workspace_links::HeadingLookup::Missing => window.tell_tab(
+            pick(
+                "リンク先の見出しが見つかりません。",
+                "The linked heading was not found.",
+            )
+            .into(),
+        ),
+        workspace_links::HeadingLookup::Ambiguous(_) => window.tell_tab(
+            pick(
+                "同じ見出しが複数あります。見出し候補から選び直してください。",
+                "Several headings share this name. Choose a heading candidate.",
+            )
+            .into(),
+        ),
+    }
+}
+
 /// What the startup arguments open: a directory becomes the work folder and
 /// anything else is opened as a file in `pane`, in the order the shell gave
 /// them.
@@ -6868,6 +9225,65 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
 /// once per directory, in argument order, leaves the last one standing the
 /// same way opening folders one after another from the tree would.
 fn open_startup_paths(window: &AppWindow, live: &Live, pane: PaneId, paths: &[PathBuf]) {
+    let recovering_outside = open_documents(live).iter().any(|doc| {
+        doc.text.edited()
+            && doc
+                .file
+                .borrow()
+                .path()
+                .is_some_and(|p| !workspace_path_allowed(live, p, false))
+    });
+    if recovering_outside
+        || paths
+            .iter()
+            .any(|path| path.is_dir() || !workspace_path_allowed(live, path, false))
+    {
+        if let Some(runtime) = live.folder.borrow().workspace.clone() {
+            runtime.borrow_mut().set_active_silently(None);
+        }
+        live.folder.borrow_mut().set_workspace_view(false);
+        window.set_left_tab(0);
+        workspace_links_scope_changed(window, live, None);
+        publish_workspace_switcher(window, live);
+        if recovering_outside {
+            window.tell(pick("Workspace外の未保存文書を復元したため、Workspaceなしで起動しました。", "Started without a Workspace to preserve recovered unsaved documents outside it.").into());
+        }
+    }
+    // Restored clean tabs outside the default scope do not belong to this run.
+    // Unsaved recovery above opts out instead of losing any text.
+    let count = live.tabs.borrow().panes.len();
+    for index in 0..count {
+        let id = PaneId::from_index(index as i32);
+        {
+            let mut tabs = live.tabs.borrow_mut();
+            let strip = tabs.of_mut(id);
+            strip.tabs.retain(|tab| {
+                tab.document
+                    .file
+                    .borrow()
+                    .path()
+                    .is_none_or(|p| workspace_path_allowed(live, p, false))
+            });
+            strip.history.retain(|place| {
+                place
+                    .document
+                    .file
+                    .borrow()
+                    .path()
+                    .is_none_or(|p| workspace_path_allowed(live, p, false))
+            });
+            strip.active = strip.active.min(strip.tabs.len().saturating_sub(1));
+            strip.at = strip.at.min(strip.history.len().saturating_sub(1));
+        }
+        if live.tabs.borrow().of(id).tabs.is_empty() {
+            refill_strip(window, live, id);
+        }
+        let tab = live.tabs.borrow().of(id).current().cloned();
+        if let Some(tab) = tab {
+            live.show_tab(window, id, &tab);
+        }
+    }
+    publish_tabs(window, live);
     for path in paths {
         if path.is_dir() {
             live.cache
@@ -6915,6 +9331,9 @@ fn opening_targets(
 }
 
 fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, opening: Opening) {
+    if !admit_workspace_path(window, live, path, false) {
+        return;
+    }
     // **知らせは、いま前にある文書のものである**（書き手の報告 2026-09-10）。
     // 別のものを開くならその知らせはもう古い——ここで消しておけば、この先で
     // 出す言葉（「改行コードが混在していました」など）だけが残る。
@@ -7152,16 +9571,31 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
     if live.folder.borrow().creating.is_some() {
         return;
     }
-    let Some(root) = live.folder.borrow().root.clone() else {
+    let (roots, multi) = tree_roots(&live.folder.borrow());
+    if roots.is_empty() {
         return;
-    };
+    }
     let selected = live.folder.borrow().selected.clone();
     // Asked of the disk rather than remembered: what the row stands for is a
     // path, and a folder is a folder however the row was drawn.
     let is_folder = selected.as_deref().map(Path::is_dir).unwrap_or(false);
     match command {
         TreeCommand::NewFile | TreeCommand::NewFolder => {
-            let into = file_tree::destination_folder(selected.as_deref(), is_folder, &root);
+            // 仕様の実装依頼: "with no selection choose first root only if
+            // unambiguous, otherwise request selection" — a selected root row
+            // itself is not "no selection", so it still names its own folder
+            // as the destination below.
+            if selected.is_none() && multi && roots.len() > 1 {
+                window.tell(
+                    pick(
+                        "作成先のフォルダを選んでください",
+                        "Select a destination folder first",
+                    )
+                    .into(),
+                );
+                return;
+            }
+            let into = file_tree::destination_folder(selected.as_deref(), is_folder, &roots[0]);
             begin_tree_entry(
                 window,
                 live,
@@ -7173,6 +9607,16 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             let Some(path) = selected else {
                 return;
             };
+            if is_registered_root(live, &path) {
+                window.tell(
+                    pick(
+                        "登録されたフォルダの名前はWorkspace管理から変更してください",
+                        "Rename a registered folder from Workspace management instead",
+                    )
+                    .into(),
+                );
+                return;
+            }
             let now_called = entry_name(&path);
             ask_for_name(
                 window,
@@ -7186,6 +9630,16 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             let Some(path) = selected else {
                 return;
             };
+            if is_registered_root(live, &path) {
+                window.tell(
+                    pick(
+                        "登録されたフォルダは複製できません",
+                        "A registered folder cannot be duplicated",
+                    )
+                    .into(),
+                );
+                return;
+            }
             match file_tree::duplicate(&path) {
                 Ok(copy) => {
                     // The copy is what the writer is now standing on: it is
@@ -7205,6 +9659,16 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             let Some(path) = selected else {
                 return;
             };
+            if is_registered_root(live, &path) {
+                window.tell(
+                    pick(
+                        "登録されたフォルダの削除はWorkspace管理から取り外してください",
+                        "Detach a registered folder from Workspace management instead",
+                    )
+                    .into(),
+                );
+                return;
+            }
             ask_delete_entry(window, live, &path);
         }
         TreeCommand::Reveal => {
@@ -7329,18 +9793,28 @@ fn rename_entry(window: &AppWindow, live: &Live, from: &Path) {
 /// may go — the rules that decided the marks are the rules
 /// (`file_tree::move_target` states the last of them, for the paths).
 fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
-    let Some(root) = live.folder.borrow().root.clone() else {
+    let (roots, multi) = tree_roots(&live.folder.borrow());
+    if roots.is_empty() {
         return;
-    };
+    }
     let (source, into) = {
         let paths = live.tree_paths.borrow();
         let Some(source) = paths.get(from).cloned() else {
             return;
         };
-        // `-1` is the work folder itself, which the panel's heading stands for.
-        // Anything else that is not a row is a hand let go over nothing.
+        // A root row is never draggable (the UI already refuses to start
+        // carrying one), so a `from` naming one is either a stale index or a
+        // client not honouring that — refused here too rather than trusted.
+        if multi && roots.iter().any(|root| root == &source) {
+            return;
+        }
+        // `-1` is the work folder itself, which the panel's heading stands
+        // for — 仕様 "Drag target header invalid for multi-root": with more
+        // than one active root there is no single folder left for it to
+        // stand for, so the header is not a valid target at all.
         let into = match onto {
-            -1 => Some(root),
+            -1 if !multi => Some(roots[0].clone()),
+            -1 => None,
             at if at >= 0 => paths.get(at as usize).cloned(),
             _ => None,
         };
@@ -7422,8 +9896,17 @@ fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 /// not the name. Drawing the tree again is left to the caller, because the one
 /// that carried something into a folder has that folder to open first.
 fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::io::Result<()> {
+    if live.folder.borrow().link_move_job.is_some() {
+        return Err(std::io::Error::other(pick(
+            "リンク更新中です。完了後に移動してください",
+            "Link update in progress. Try moving again after it finishes.",
+        )));
+    }
+    let before = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
     file_tree::rename(from, to)?;
     documents_follow(window, live, from, to);
+    let after = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
+    link_move::start(window, live, before, after);
     let mut open = live.folder.borrow_mut();
     open.selected = Some(to.to_path_buf());
     // A folder that was open stays open where it has gone, and so does every
@@ -7447,7 +9930,13 @@ fn documents_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
         let moved = {
             let file = document.file.borrow();
             let path = file.path();
-            path.and_then(|path| file_tree::moved_path(from, to, path))
+            path.and_then(|path| {
+                file_tree::moved_path(from, to, path).or_else(|| {
+                    let from = PathBuf::from(link_completion::path_to_string(from));
+                    let path = PathBuf::from(link_completion::path_to_string(path));
+                    file_tree::moved_path(&from, to, &path)
+                })
+            })
         };
         let Some(moved) = moved else {
             continue;
@@ -7825,6 +10314,8 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
 /// and it is the focused pane's — the one whose tabs the buttons above would
 /// act on. Moving them inside the panes is the next step (ペイン分割設計 6).
 fn publish_tabs(window: &AppWindow, live: &Live) {
+    publish_workspace_root_highlights(window, live);
+    observe_folder_autosave(window, live);
     // 要件 7.9・10: ステータスバーのモードは、前に出ているタブのもの。
     // **タブが動けばここも動く**ので、publishの入口で一緒に言う。
     publish_word_mode_of(window, live);
@@ -7979,6 +10470,11 @@ fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
     let Some((next, place)) = step else {
         return told_no_way(window, forward);
     };
+    if let Some(path) = place.document.file.borrow().path() {
+        if !admit_workspace_path(window, live, path, false) {
+            return;
+        }
+    }
     let (held, peeked) = {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
@@ -8503,6 +10999,9 @@ struct CloseRun {
 /// returns, and [`answer_question`] picks the work back up.
 #[derive(Clone, Debug)]
 enum Question {
+    CloneWorkspaceUrl,
+    ChangeWorkspace(Option<workspace::WorkspaceId>),
+    DiscardForWorkspace(Option<workspace::WorkspaceId>),
     /// Closing a tab holding work that is not in its file (要件 8.4).
     ///
     /// The pane is carried as well as the position: the answer comes back a
@@ -8579,12 +11078,38 @@ enum Question {
     /// **退避が働いているつもりで閉じようとしている**ときにだけ立つ問いで、
     /// 書けた件数が0のときは何も訊かない——要件 8.1 は静かな約束である。
     LastWorkCopyFailed,
+    /// A new Workspace's name, or a duplicate's, or a rename — the same
+    /// name-asking overlay [`ask_for_name`] already draws for a new file or
+    /// folder in the tree.
+    CreateWorkspace,
+    DuplicateWorkspace(workspace::WorkspaceId),
+    RenameWorkspace(workspace::WorkspaceId),
+    /// 仕様: "登録解除はWorkspace専用データを削除する" — confirmed because it is
+    /// not the shared folders or their documents that would be undone by
+    /// re-adding a folder; it is this Workspace's own view/reset state and
+    /// its place in the ledger.
+    RemoveWorkspace(workspace::WorkspaceId),
+    /// 仕様: "リセットは表示状態を初期化し、索引を再構築する". Confirmed because a
+    /// large Workspace's tree state and index cache are not free to rebuild.
+    ResetWorkspaceView(workspace::WorkspaceId),
+    /// A folder no Workspace references any more, removed from the ledger
+    /// entirely (`Registry::remove_unused_folder`) — distinct from detaching
+    /// it from one Workspace, which needs no confirmation.
+    RemoveUnusedFolder(workspace::FolderId),
+    /// The ledger on disk could not be trusted (`workspace_ui::RegistryReadError`).
+    /// 仕様の実装依頼: "malformed 状態のレジストリを黙って空にしない…別の確認で
+    /// リセット" — a dedicated confirmation, never folded into the ordinary
+    /// per-Workspace reset above.
+    ResetWorkspaceRegistry,
 }
 
 impl Question {
     /// Never Debug-print this enum: DeleteEdited owns unsaved document text.
     fn diagnostic_name(&self) -> &'static str {
         match self {
+            Self::CloneWorkspaceUrl => "CloneWorkspaceUrl",
+            Self::ChangeWorkspace(..) => "ChangeWorkspace",
+            Self::DiscardForWorkspace(..) => "DiscardForWorkspace",
             Self::CloseTab { .. } => "CloseTab",
             Self::CloseMemo { .. } => "CloseMemo",
             Self::DiscardOnClose { .. } => "DiscardOnClose",
@@ -8600,6 +11125,13 @@ impl Question {
             Self::ReopenAs { .. } => "ReopenAs",
             Self::ResetAll => "ResetAll",
             Self::LastWorkCopyFailed => "LastWorkCopyFailed",
+            Self::CreateWorkspace => "CreateWorkspace",
+            Self::DuplicateWorkspace(..) => "DuplicateWorkspace",
+            Self::RenameWorkspace(..) => "RenameWorkspace",
+            Self::RemoveWorkspace(..) => "RemoveWorkspace",
+            Self::ResetWorkspaceView(..) => "ResetWorkspaceView",
+            Self::RemoveUnusedFolder(..) => "RemoveUnusedFolder",
+            Self::ResetWorkspaceRegistry => "ResetWorkspaceRegistry",
         }
     }
 }
@@ -8617,7 +11149,9 @@ impl Question {
 /// 書き手は最後の数秒を失ったことを知らない。ここで訊けば、3つの道がある
 /// ——もう一度試す、本文そのものをファイルへ入れる、閉じるのをやめる。
 fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
-    let lost = flush_work_copies(window, live);
+    observe_folder_autosave(window, live);
+    let engine = live.folder.borrow().folder_autosave.clone();
+    let lost = engine.borrow().force_flush(window, live) + flush_work_copies(window, live);
     if lost == 0 {
         return false;
     }
@@ -8694,6 +11228,7 @@ fn ask_question(
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
+    window.set_question_is_clone(matches!(&question, Question::CloneWorkspaceUrl));
     *live.pending.borrow_mut() = Some(question);
     let named = choices
         .iter()
@@ -8746,12 +11281,21 @@ fn ask_for_name(
 /// An answer that is not one of the ones below changes nothing, which is what
 /// the last choice always is.
 fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
+    if matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl)) && choice == 0 {
+        workspace_clone_start(window, live, window.get_question_name().to_string());
+        return;
+    }
     // Taken before anything else: an answer may ask the next question, and the
     // borrow must not still be open when it does.
     let question = live.pending.borrow_mut().take();
     let Some(question) = question else {
         return;
     };
+    if matches!(&question, Question::ChangeWorkspace(_) if choice >= 2)
+        || matches!(&question, Question::DiscardForWorkspace(_) if choice != 0)
+    {
+        live.folder.borrow_mut().pending_workspace_cleanup = None;
+    }
     window.set_question_open(false);
     // The question took the keyboard away from the pane to ask (6.14).
     restore_editor_focus(window);
@@ -8775,6 +11319,66 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         choice
     };
     match (question, choice) {
+        (Question::CloneWorkspaceUrl, _) => {
+            live.folder.borrow_mut().clone_url_check.clear();
+            window.set_workspace_clone_url_checking(false);
+            live.folder.borrow_mut().clone_job = None;
+            live.folder.borrow_mut().clone_target = None;
+            window.set_workspace_cloning(false);
+        }
+        (Question::ChangeWorkspace(target), 0) => {
+            saving::save_all_for_workspace(window, live);
+            if workspace_has_unsaved(live) {
+                live.folder.borrow_mut().pending_workspace_cleanup = None;
+                window.tell(
+                    pick(
+                        "未保存の文書があるためWorkspaceを切り替えませんでした",
+                        "Workspace unchanged: some documents are unsaved",
+                    )
+                    .into(),
+                );
+            } else {
+                finish_workspace_change(window, live, target);
+            }
+        }
+        (Question::ChangeWorkspace(target), 1) => {
+            ask_question(
+                window,
+                live,
+                Question::DiscardForWorkspace(target),
+                say!(
+                    "未保存の変更をすべて破棄してWorkspaceを切り替えます。元に戻せません。",
+                    "Discard all unsaved changes and switch Workspace? This cannot be undone."
+                ),
+                &[pick("破棄して切り替える", "Discard and Switch"), cancel()],
+                0,
+            );
+        }
+        (Question::DiscardForWorkspace(target), 0) => {
+            for document in open_documents(live) {
+                if document.file.borrow().path().is_none() {
+                    if !saving::discard_memo_copy(window, live, &document) {
+                        live.folder.borrow_mut().pending_workspace_cleanup = None;
+                        for held in open_documents(live) {
+                            if held.text.edited()
+                                || (held.file.borrow().path().is_none()
+                                    && !held.text.borrow().is_empty())
+                            {
+                                held.protective_recovery.set(true);
+                                saving::force_work_copy_of(window, live, &held);
+                            }
+                        }
+                        return;
+                    }
+                } else if document.text.edited() {
+                    discard_work_copy(live, &work_identity(&document.file.borrow()));
+                }
+            }
+            for document in open_documents(live) {
+                document.text.mark_saved();
+            }
+            finish_workspace_change_confirmed(window, live, target);
+        }
         (Question::CloseTab { pane, index } | Question::CloseMemo { pane, index }, 0) => {
             window.set_focused_pane(pane.index());
             switch_to_tab(window, live, pane, index);
@@ -8990,6 +11594,24 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             cancel_close_run(live);
         }
         (Question::ResetAll, 0) => reset_all_settings(window, live),
+        (Question::CreateWorkspace, 0) => {
+            let name = window.get_question_name().to_string();
+            workspace_create(window, live, name);
+        }
+        (Question::DuplicateWorkspace(source), 0) => {
+            let name = window.get_question_name().to_string();
+            workspace_duplicate(window, live, source, name);
+        }
+        (Question::RenameWorkspace(id), 0) => {
+            let name = window.get_question_name().to_string();
+            workspace_rename(window, live, id, name);
+        }
+        (Question::RemoveWorkspace(id), 0) => workspace_remove(window, live, id),
+        (Question::ResetWorkspaceView(id), 0) => workspace_reset_view(window, live, id),
+        (Question::RemoveUnusedFolder(folder), 0) => {
+            workspace_remove_unused_folder(window, live, folder)
+        }
+        (Question::ResetWorkspaceRegistry, 0) => workspace_reset_after_read_error(window, live),
         _ => {}
     }
 }
@@ -9354,6 +11976,12 @@ fn reopen_closed_tab(window: &AppWindow, live: &Live) {
             return;
         };
         let path = tab.document.file.borrow().path().map(Path::to_owned);
+        if path
+            .as_ref()
+            .is_some_and(|p| !workspace_path_allowed(live, p, false))
+        {
+            continue;
+        }
         if path.as_ref().is_some_and(|p| !p.is_file()) {
             continue;
         }
@@ -18772,6 +21400,34 @@ mod tests {
     /// ——本文も活性行も同じなら、枠は`refresh`を呼ばずに前の答えを返す。
     /// 書き手には「設定しただけでは反映されず、縦書き横書きを切り替えると
     /// 反映される」と見えていた（向きを変えたときだけ枠が作り直されていた）。
+    #[test]
+    fn reset_preview_slot_requires_link_validity_republication() {
+        let source = "[[missing.md]]";
+        let targets = vec![document::link_target_ranges(source)[0].0.clone()];
+        let stamp = (1, Instant::now(), Some(7));
+        let mut slot = PreviewSlot::default();
+        slot.set_link_validity(source, targets.clone());
+        slot.validity_publication = Some(stamp);
+        assert!(slot.has_link_validity_publication(stamp));
+        assert!(
+            slot.get(source, None, document::Reading::all(), 100, None)
+                .marks()[0]
+                .iter()
+                .any(|mark| mark.marks.unresolved_link)
+        );
+        // Direction changes rebuild PaneView while the controller's stamp stays unchanged.
+        slot = PreviewSlot::default();
+        assert!(!slot.has_link_validity_publication(stamp));
+        assert!(slot.set_link_validity(source, targets));
+        slot.validity_publication = Some(stamp);
+        assert!(
+            slot.get(source, Some(0), document::Reading::all(), 100, None)
+                .marks()[0]
+                .iter()
+                .any(|mark| mark.marks.unresolved_link)
+        );
+    }
+
     #[test]
     fn the_preview_slot_notices_that_the_notation_is_read_differently() {
         let source = "｜漢字《かんじ》を書く\n";

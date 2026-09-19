@@ -4,7 +4,16 @@ use std::{collections::BTreeSet, path::PathBuf, sync::mpsc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
-    pub root: PathBuf,
+    /// The active roots to walk — one entry for the classic single work
+    /// folder, every registered folder of an active Workspace otherwise.
+    pub roots: Vec<PathBuf>,
+    /// Whether `roots` are drawn as their own labelled rows
+    /// ([`file_tree::multi_rows`]) or as the classic single folder's own
+    /// children ([`file_tree::rows`]) — Workspace設計.md phase 3's
+    /// multi-root tree only exists when a Workspace is active, never for a
+    /// plain "Open Folder" even if it happened to hold more than one root
+    /// worth watching.
+    pub multi: bool,
     pub expanded: BTreeSet<PathBuf>,
     pub displayed_paths: Vec<PathBuf>,
 }
@@ -23,8 +32,21 @@ impl Watcher {
             .name("explorer-refresh".into())
             .spawn(move || {
                 while let Ok(request) = requests.recv() {
-                    let rows =
-                        file_tree::rows(&request.root, &request.expanded, &file_tree::read_folder);
+                    let rows = if request.multi {
+                        file_tree::multi_rows(
+                            &request.roots,
+                            &request.expanded,
+                            &file_tree::read_folder,
+                        )
+                    } else {
+                        request
+                            .roots
+                            .first()
+                            .map(|root| {
+                                file_tree::rows(root, &request.expanded, &file_tree::read_folder)
+                            })
+                            .unwrap_or_default()
+                    };
                     if results.send((request, rows)).is_err() {
                         break;
                     }

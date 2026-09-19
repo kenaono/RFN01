@@ -208,6 +208,9 @@ pub struct OpenDocument {
     /// 下りるのは**読み直したときと、書いたとき**だけ。
     pub outside: Cell<bool>,
     pub missing: Cell<bool>,
+    /// Failure recovery remains available even when ordinary backups are off.
+    pub protective_recovery: Cell<bool>,
+    pub recovery_failed: Cell<bool>,
     /// What has been done to this text and can be taken back (要件 7.1). It
     /// belongs to the document because 要件 7.6 says it does: one file, one
     /// history, however many panes are showing it.
@@ -233,6 +236,8 @@ impl OpenDocument {
             text: SharedText::new(text, window),
             outside: Cell::new(false),
             missing: Cell::new(false),
+            protective_recovery: Cell::new(false),
+            recovery_failed: Cell::new(false),
             history: RefCell::new(History::default()),
             counts: RefCell::new(CountsSlot::default()),
         })

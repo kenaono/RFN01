@@ -33,6 +33,10 @@ pub struct Row {
     pub depth: usize,
     /// Whether this folder's contents are among the rows below it.
     pub open: bool,
+    /// This row stands for one of the active Workspace's own registered
+    /// roots — see [`multi_rows`]. Always `false` from [`rows`], which never
+    /// draws a row for the folder it was itself called on.
+    pub is_root: bool,
 }
 
 /// What one folder holds, in the order it is shown.
@@ -91,6 +95,36 @@ pub fn rows(
     out
 }
 
+/// Workspace roots are separators, followed immediately by their children at
+/// depth zero. The synthetic root row retains the destination for context
+/// actions and empty roots, but is always open and is not a movable entry.
+/// Only nested folders consult `expanded`.
+///
+/// **Never call this for a single classic work folder.** A Workspace with one
+/// root still gets a row standing for that root; a plain "Open Folder" with no
+/// Workspace does not, and must keep going through [`rows`] so the existing
+/// single-folder shape (and everything built on `depth 0` meaning "child of
+/// the work folder") is unchanged.
+pub fn multi_rows(
+    roots: &[PathBuf],
+    expanded: &BTreeSet<PathBuf>,
+    read: &dyn Fn(&Path) -> Vec<Node>,
+) -> Vec<Row> {
+    let mut out = Vec::new();
+    for root in roots {
+        out.push(Row {
+            name: root.display().to_string(),
+            path: root.clone(),
+            folder: true,
+            depth: 0,
+            open: true,
+            is_root: true,
+        });
+        push_rows(root, 0, expanded, read, &mut out);
+    }
+    out
+}
+
 fn push_rows(
     directory: &Path,
     depth: usize,
@@ -109,6 +143,7 @@ fn push_rows(
             folder: node.folder,
             depth,
             open,
+            is_root: false,
         });
         if open {
             push_rows(&node.path, depth + 1, expanded, read, out);
@@ -125,14 +160,23 @@ fn push_rows(
 /// able to say which row that is without asking a path anything, because the
 /// rows are drawn by Slint and Slint cannot ask a path what holds it.
 ///
-/// The rows are a flattened walk, so the folder holding a row is the nearest
-/// row above it that stands one step further out.
+/// Nested rows use the nearest row one step further out. Workspace depth-zero
+/// children instead belong to their preceding synthetic separator; separators
+/// themselves have no holder. Each separator resets the nesting stack so a
+/// drop can never inherit a folder from the previous root.
 pub fn holders(rows: &[Row]) -> Vec<i32> {
     let mut out = Vec::with_capacity(rows.len());
     let mut above: Vec<usize> = Vec::new();
+    let mut root = None;
     for (at, row) in rows.iter().enumerate() {
+        if row.is_root {
+            root = Some(at);
+            above.clear();
+            out.push(-1);
+            continue;
+        }
         above.truncate(row.depth);
-        out.push(above.last().map_or(-1, |&row| row as i32));
+        out.push(above.last().copied().or(root).map_or(-1, |row| row as i32));
         above.push(at);
     }
     out
@@ -437,26 +481,83 @@ pub fn files_under(
     read_nodes: &dyn Fn(&Path) -> Vec<Node>,
     limit: usize,
 ) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    push_files(root, read_nodes, limit, &mut found);
-    found
+    files_under_many(&[root.to_path_buf()], read_nodes, limit)
 }
 
-fn push_files(
-    directory: &Path,
+/// The same as [`files_under`], across every one of `roots` under one shared
+/// `limit` — a whole-Workspace search (Workspace設計.md phase 3), 仕様 "現在の
+/// Workspaceの全登録フォルダが対象".
+///
+/// Files and directories are deduplicated by canonical identity, regardless
+/// of the registration order of overlapping roots.
+pub fn files_under_many(
+    roots: &[PathBuf],
     read_nodes: &dyn Fn(&Path) -> Vec<Node>,
     limit: usize,
-    found: &mut Vec<PathBuf>,
-) {
-    for node in read_nodes(directory) {
-        if found.len() >= limit {
-            return;
+) -> Vec<PathBuf> {
+    files_under_many_cancellable(roots, read_nodes, limit, &mut || false).unwrap_or_default()
+}
+
+/// A bounded, iterative walk which can abandon even a tree of empty folders.
+/// Canonical identities prevent overlapping roots and directory aliases from
+/// consuming the file budget twice. `None` means cancellation, never no matches.
+pub fn files_under_many_cancellable(
+    roots: &[PathBuf],
+    read_nodes: &dyn Fn(&Path) -> Vec<Node>,
+    limit: usize,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Option<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut directories = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    let mut pending: Vec<Node> = roots
+        .iter()
+        .rev()
+        .map(|path| Node {
+            name: String::new(),
+            path: path.clone(),
+            folder: true,
+        })
+        .collect();
+    while found.len() < limit {
+        if cancelled() {
+            return None;
         }
+        let Some(node) = pending.pop() else {
+            break;
+        };
+        let identity = node
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| node.path.clone());
         if node.folder {
-            push_files(&node.path, read_nodes, limit, found);
-        } else if is_searchable(&node.path) {
+            if directories.insert(identity) {
+                pending.extend(
+                    read_nodes(&node.path)
+                        .into_iter()
+                        .rev()
+                        .filter(|child| !child.folder || !is_directory_link(&child.path)),
+                );
+            }
+        } else if is_searchable(&node.path) && files.insert(identity) {
             found.push(node.path);
         }
+    }
+    Some(found)
+}
+
+fn is_directory_link(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
     }
 }
 
@@ -490,6 +591,7 @@ mod tests {
             ],
             "/work/章/下書き" => vec![node("/work/章/下書き/断片.md", false)],
             "/work/資料" => vec![node("/work/資料/年表.txt", false)],
+            "/other" => vec![node("/other/資料.md", false)],
             _ => Vec::new(),
         }
     }
@@ -717,6 +819,96 @@ mod tests {
         assert_eq!(files_under(Path::new("/work"), &imagined, 2).len(), 2);
     }
 
+    /// A whole-Workspace search walks every registered root.
+    #[test]
+    fn files_under_many_walks_every_root() {
+        let roots = [PathBuf::from("/work"), PathBuf::from("/other")];
+        let found = files_under_many(&roots, &imagined, 100);
+
+        let names: Vec<String> = found
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert!(names.contains(&"/work/はじめに.md".to_owned()));
+        assert!(names.contains(&"/other/資料.md".to_owned()));
+    }
+
+    /// A root nested inside one already walked is not walked a second time —
+    /// 仕様 "同じフォルダを複数Workspaceから参照できる" must not double-count it.
+    #[test]
+    fn files_under_many_skips_a_root_nested_inside_an_earlier_one() {
+        let roots = [PathBuf::from("/work"), PathBuf::from("/work/章")];
+        let found = files_under_many(&roots, &imagined, 100);
+
+        let names: Vec<String> = found
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        // `/work/章/第一章.md` appears once, from walking `/work` — not twice
+        // from also walking `/work/章` on its own.
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| *name == "/work/章/第一章.md")
+                .count(),
+            1
+        );
+    }
+
+    /// The shared limit stops the whole walk, not just one root's share of it.
+    #[test]
+    fn files_under_many_shares_one_limit_across_roots() {
+        let roots = [PathBuf::from("/work"), PathBuf::from("/other")];
+        assert_eq!(files_under_many(&roots, &imagined, 2).len(), 2);
+    }
+
+    #[test]
+    fn overlapping_roots_in_either_order_count_unique_files() {
+        for roots in [
+            vec![PathBuf::from("/work"), PathBuf::from("/work/章")],
+            vec![
+                PathBuf::from("/work/章"),
+                PathBuf::from("/work"),
+                PathBuf::from("/work"),
+            ],
+        ] {
+            let found = files_under_many(&roots, &imagined, 4);
+            assert_eq!(found.len(), 4);
+            assert_eq!(found.iter().collect::<BTreeSet<_>>().len(), 4);
+            assert!(found.contains(&PathBuf::from("/work/はじめに.md")));
+        }
+    }
+
+    #[test]
+    fn cyclic_directory_provider_is_walked_once() {
+        let found = files_under_many(
+            &[PathBuf::from("/cycle")],
+            &|_| vec![node("/cycle", true), node("/cycle/note.md", false)],
+            10,
+        );
+        assert_eq!(found, vec![PathBuf::from("/cycle/note.md")]);
+    }
+
+    #[test]
+    fn empty_directory_walk_can_be_cancelled_before_enumeration_finishes() {
+        let reads = std::cell::Cell::new(0);
+        let found = files_under_many_cancellable(
+            &[PathBuf::from("/empty")],
+            &|path| {
+                reads.set(reads.get() + 1);
+                vec![Node {
+                    name: "child".into(),
+                    path: path.join("child"),
+                    folder: true,
+                }]
+            },
+            100,
+            &mut || reads.get() >= 3,
+        );
+        assert!(found.is_none());
+        assert_eq!(reads.get(), 3);
+    }
+
     /// Only the extensions a search reads.
     #[test]
     fn an_attachment_is_not_searched() {
@@ -725,5 +917,106 @@ mod tests {
         assert!(is_searchable(Path::new("/work/年表.txt")));
         assert!(!is_searchable(Path::new("/work/図.png")));
         assert!(!is_searchable(Path::new("/work/なまえだけ")));
+    }
+
+    /// Workspace separators expose their immediate children without a click.
+    #[test]
+    fn multi_rows_always_lists_root_children_at_depth_zero() {
+        let roots = [PathBuf::from("/work"), PathBuf::from("/other")];
+        let rows = multi_rows(&roots, &expanded(&[]), &imagined);
+
+        let shape: Vec<(&str, usize, bool, bool)> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.depth, row.open, row.is_root))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("/work", 0, true, true),
+                ("章", 0, false, false),
+                ("資料", 0, false, false),
+                ("はじめに.md", 0, false, false),
+                ("/other", 0, true, true),
+                ("資料.md", 0, false, false),
+            ],
+        );
+    }
+
+    /// Old persisted root expansion entries do not alter the new shape.
+    #[test]
+    fn multi_rows_ignores_root_expansion_but_preserves_nested_expansion() {
+        let roots = [PathBuf::from("/work"), PathBuf::from("/other")];
+        let rows = multi_rows(&roots, &expanded(&["/work", "/work/章"]), &imagined);
+        assert_eq!(
+            rows,
+            multi_rows(&roots, &expanded(&["/work/章"]), &imagined)
+        );
+
+        let shape: Vec<(&str, usize, bool)> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.depth, row.is_root))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("/work", 0, true),
+                ("章", 0, false),
+                ("第一章.md", 1, false),
+                ("下書き", 1, false),
+                ("資料", 0, false),
+                ("はじめに.md", 0, false),
+                ("/other", 0, true),
+                ("資料.md", 0, false),
+            ],
+        );
+    }
+
+    #[test]
+    fn workspace_holders_keep_root_destinations_without_visual_indentation() {
+        let roots = [
+            PathBuf::from("/work"),
+            PathBuf::from("/other"),
+            PathBuf::from("/empty"),
+        ];
+        let rows = multi_rows(
+            &roots,
+            &expanded(&["/work/章", "/work/章/下書き"]),
+            &imagined,
+        );
+        assert_eq!(holders(&rows), vec![-1, 0, 1, 1, 3, 0, 0, -1, 7, -1]);
+        let empty = rows.last().unwrap();
+        assert!(empty.is_root && empty.open && empty.folder);
+        assert_eq!(empty.path, Path::new("/empty"));
+    }
+
+    #[test]
+    fn workspace_reads_every_root_but_only_expanded_nested_directories() {
+        let roots = [
+            PathBuf::from("/work"),
+            PathBuf::from("/other"),
+            PathBuf::from("/empty"),
+        ];
+        let reads = std::cell::RefCell::new(Vec::new());
+        multi_rows(&roots, &expanded(&["/work/章"]), &|path| {
+            reads.borrow_mut().push(path.to_path_buf());
+            imagined(path)
+        });
+        assert_eq!(
+            *reads.borrow(),
+            vec![
+                PathBuf::from("/work"),
+                PathBuf::from("/work/章"),
+                PathBuf::from("/other"),
+                PathBuf::from("/empty")
+            ]
+        );
+    }
+
+    /// A row from `rows` (the classic single-folder shape) is never a root
+    /// row — only `multi_rows` ever sets that.
+    #[test]
+    fn rows_never_marks_anything_as_a_root() {
+        let rows = rows(Path::new("/work"), &expanded(&["/work/章"]), &imagined);
+        assert!(rows.iter().all(|row| !row.is_root));
     }
 }
