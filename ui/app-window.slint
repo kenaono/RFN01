@@ -3372,7 +3372,7 @@ export component AppWindow inherits Window {
                                                 role: index == root.shell-profile-index ? Role.primary : Role.normal;
                                                 clicked => { root.shell-profile-action(0, index); }
                                             }
-                                            HorizontalLayout { Text { text: @tr("Name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Name"); text <=> root.shell-profile-name; } }
+                                            HorizontalLayout { Text { text: @tr("Profile name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Name"); text <=> root.shell-profile-name; } }
                                             HorizontalLayout { Text { text: @tr("Executable"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Executable"); text <=> root.shell-profile-executable; } }
                                             HorizontalLayout { Text { text: @tr("Arguments"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Arguments"); text <=> root.shell-profile-arguments; } }
                                             HorizontalLayout { Text { text: @tr("Start folder"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Start folder"); text <=> root.shell-profile-directory; } }
@@ -6058,7 +6058,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     TextButton { title: @tr("Bold") + (root.appearance-style.bold ? " ✓" : ""); clicked => { root.appearance-style.bold = !root.appearance-style.bold; } }
                     TextButton { title: @tr("Italic") + (root.appearance-style.italic ? " ✓" : ""); clicked => { root.appearance-style.italic = !root.appearance-style.italic; } }
-                    if root.appearance-underline-allowed: TextButton { title: "Underline" + (root.appearance-style.underline ? " ✓" : ""); clicked => { root.appearance-style.underline = !root.appearance-style.underline; } }
+                    if root.appearance-underline-allowed: TextButton { title: @tr("Underline") + (root.appearance-style.underline ? " ✓" : ""); clicked => { root.appearance-style.underline = !root.appearance-style.underline; } }
                 }
                 if root.appearance-default: TextButton {
                     title: "Random: " + (root.appearance-style.random == 0 ? @tr("Off") : (root.appearance-style.random == 1 ? @tr("Light") : @tr("Dark")));

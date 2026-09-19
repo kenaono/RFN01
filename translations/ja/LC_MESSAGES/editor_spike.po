@@ -1166,3 +1166,9 @@ msgstr "適用"
 
 msgid "Remove"
 msgstr "削除"
+
+msgid "Profile name"
+msgstr "プロファイル名"
+
+msgid "Underline"
+msgstr "下線"
