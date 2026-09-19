@@ -142,16 +142,8 @@ impl PreviewLine {
         for (preview_offset, character) in visible.char_indices() {
             // The preview only ever deletes from the source, so the next
             // preview character is almost always sitting at the cursor already.
-            let source_offset = source[source_cursor..]
-                .char_indices()
-                .map(|(relative, found)| (source_cursor + relative, found))
-                .find(|(offset, found)| {
-                    *found == character
-                        && !hidden_wiki
-                            .get(hidden_wiki.partition_point(|range| range.end <= *offset))
-                            .is_some_and(|range| range.contains(offset))
-                })
-                .map_or(source_cursor, |(offset, _)| offset);
+            let source_offset =
+                next_visible_source_offset(&source, source_cursor, character, &hidden_wiki);
             let source_end = source_offset + character.len_utf8();
             let preview_end = preview_offset + character.len_utf8();
             let utf16_units = character.len_utf16();
@@ -3359,6 +3351,24 @@ fn line_link_ranges(source: &str) -> Vec<(Range<usize>, Range<usize>, bool)> {
     links
 }
 
+fn next_visible_source_offset(
+    source: &str,
+    cursor: usize,
+    character: char,
+    hidden: &[Range<usize>],
+) -> usize {
+    source[cursor..]
+        .char_indices()
+        .map(|(relative, found)| (cursor + relative, found))
+        .find(|(offset, found)| {
+            *found == character
+                && !hidden
+                    .get(hidden.partition_point(|range| range.end <= *offset))
+                    .is_some_and(|range| range.contains(offset))
+        })
+        .map_or(cursor, |(offset, _)| offset)
+}
+
 fn hidden_wiki_display_ranges(source: &str) -> Vec<Range<usize>> {
     let mut hidden = Vec::new();
     for (token, target, wiki) in line_link_ranges(source) {
@@ -4153,13 +4163,14 @@ fn active_marks(
     let mut map = Vec::with_capacity(shown.encode_utf16().count() + 1);
     let mut cursor = 0;
     let mut cursor_utf16 = 0u32;
+    let hidden_wiki = if style.kind.is_code() || !line.contains("[[") {
+        Vec::new()
+    } else {
+        hidden_wiki_display_ranges(line)
+    };
     for character in shown.chars() {
         let remaining = &line[cursor..];
-        let skipped = if remaining.starts_with(character) {
-            0
-        } else {
-            remaining.find(character).unwrap_or(0)
-        };
+        let skipped = next_visible_source_offset(line, cursor, character, &hidden_wiki) - cursor;
         cursor_utf16 += remaining[..skipped].encode_utf16().count() as u32;
         cursor += skipped;
         for unit in 0..character.len_utf16() as u32 {
@@ -4169,7 +4180,7 @@ fn active_marks(
         cursor_utf16 += character.len_utf16() as u32;
     }
     map.push(cursor_utf16);
-    formatted
+    let mut marks: Vec<Emphasis> = formatted
         .into_iter()
         .filter(|emphasis| emphasis.ornament.is_none())
         .filter_map(|emphasis| {
@@ -4187,7 +4198,33 @@ fn active_marks(
                 ..emphasis
             })
         })
-        .collect()
+        .collect();
+    // The active line exposes the source path, not the shortened preview label.
+    // Mark the whole destination from parser spans. Explicit aliases retain
+    // their own mapped formatting; brackets and the alias separator stay plain.
+    if !style.kind.is_code() {
+        for (_, target, wiki) in line_link_ranges(line) {
+            if !wiki {
+                continue;
+            }
+            let start = line[..target.start].encode_utf16().count() as u32;
+            let len = line[target.clone()].encode_utf16().count() as u32;
+            marks.retain(|mark| {
+                !mark.marks.link || !(start..start + len).contains(&mark.utf16_start)
+            });
+            marks.push(Emphasis {
+                utf16_start: start,
+                utf16_len: len,
+                marks: Marks {
+                    link: true,
+                    unresolved_link: !std::path::Path::new(&line[target]).is_absolute(),
+                    ..Marks::default()
+                },
+                ornament: None,
+            });
+        }
+    }
+    marks
 }
 
 /// 編集中の行で、行頭の記号が座る箱（要件 7.3.1、書き手の報告 2026-09-10）。
@@ -7390,6 +7427,67 @@ mod tests {
         assert_eq!(
             PreviewDocument::from_source(alias).source_byte_at_utf16(0),
             alias.rfind("同名").unwrap()
+        );
+    }
+
+    #[test]
+    fn active_wiki_marks_cover_the_entire_source_destination() {
+        for source in [
+            "前😀 [[原稿😀/原稿😀.md#見出し]] 後",
+            "前😀 [[原稿😀/原稿😀.md#見出し|**原稿😀**]] 後",
+            r"前 [[D:\原稿\次.md#節|別名]] 後",
+        ] {
+            let active = PreviewDocument::from_source_with_active_line(source, Some(0));
+            assert_eq!(active.text, source);
+            let (_, target, _) = line_link_ranges(source).into_iter().next().unwrap();
+            let expected_start = source[..target.start].encode_utf16().count() as u32;
+            let expected_len = source[target.clone()].encode_utf16().count() as u32;
+            let path_mark = active.marks()[0]
+                .iter()
+                .find(|mark| {
+                    mark.marks.link
+                        && mark.utf16_start == expected_start
+                        && mark.utf16_len == expected_len
+                })
+                .unwrap();
+            assert_eq!(
+                path_mark.marks.unresolved_link,
+                !std::path::Path::new(&source[target.clone()]).is_absolute()
+            );
+            for mark in active.marks()[0].iter().filter(|mark| mark.marks.link) {
+                assert!(mark.utf16_start >= expected_start);
+                // The opening brackets must never receive link color.
+                assert!(
+                    mark.utf16_start + mark.utf16_len
+                        <= source[..source.rfind("]]").unwrap()].encode_utf16().count() as u32
+                );
+            }
+            assert_eq!(
+                link_target_at(source, target.start),
+                Some((&source[target], true))
+            );
+        }
+    }
+
+    #[test]
+    fn active_wiki_alias_and_following_marks_keep_exact_source_positions() {
+        let source = "😀 [[同名/同名.md|**同名😀**]] **後😀** [表示](next.md)";
+        let active = PreviewDocument::from_source_with_active_line(source, Some(0));
+        for shown in ["同名😀", "後😀"] {
+            let byte = source.find(shown).unwrap();
+            assert!(active.marks()[0].iter().any(|mark| mark.marks.bold
+                && mark.utf16_start == source[..byte].encode_utf16().count() as u32
+                && mark.utf16_len == shown.encode_utf16().count() as u32));
+        }
+        let ordinary = source.find("表示").unwrap();
+        assert!(active.marks()[0].iter().any(|mark| mark.marks.link
+            && mark.utf16_start == source[..ordinary].encode_utf16().count() as u32
+            && mark.utf16_len == 2));
+        let preview = PreviewDocument::from_source(source);
+        assert_eq!(preview.text, "😀 同名😀 後😀 表示");
+        assert_eq!(
+            preview.source_byte_at_utf16(3),
+            source.find("同名😀").unwrap()
         );
     }
 

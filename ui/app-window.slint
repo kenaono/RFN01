@@ -2074,13 +2074,34 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
+                                if (root.left-tab == 0 || root.left-tab == 4) && row.folder && !row.is-root && index != root.tree-new-index: Text {
+                                    x: 8px + row.depth * root.left-size * 7px / 6;
+                                    width: root.left-size * 1px;
+                                    height: parent.height;
+                                    text: row.open ? "▾" : "▸";
+                                    color: root.left-folder-own ? root.left-folder-ink : root.left-ink;
+                                    font-size: root.left-size * 1px;
+                                    vertical-alignment: center;
+                                    opacity: tree-row.label-opacity;
+                                }
+                                if (root.left-tab == 0 || root.left-tab == 4) && row.folder && !row.is-root && index != root.tree-new-index: Icon {
+                                    x: 8px + row.depth * root.left-size * 7px / 6 + root.left-size * 1.2px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: root.left-size * 1.3px;
+                                    height: self.width;
+                                    commands: Icons.folder;
+                                    tint: root.left-folder-own ? root.left-folder-ink : root.left-ink;
+                                    opacity: tree-row.label-opacity;
+                                }
+
                                 Text {
                                     visible: !(root.left-tab == 4 && row.is-root) && ((root.left-tab != 0 && root.left-tab != 4) || index != root.tree-new-index);
                                     // Depth is drawn rather than nested, because
                                     // the rows arrive flat (see `LeftRow`).
-                                    x: 8px + row.depth * root.left-size * 7px / 6;
-                                    text: (row.folder ? (row.open ? "▾ " : "▸ ") : "　")
-                                        + row.name;
+                                    x: 8px + row.depth * root.left-size * 7px / 6
+                                        + ((root.left-tab == 0 || root.left-tab == 4) ? root.left-size * 2.75px : 0px);
+                                    text: (root.left-tab == 0 || root.left-tab == 4) ? row.name
+                                        : ((row.folder ? (row.open ? "▾ " : "▸ ") : "　") + row.name);
                                     opacity: tree-row.label-opacity;
                                     // 追加要件 2026-09-15: フォルダとファイルで色を分けられる（Explorerの面）。
                                     color: row.folder
@@ -2116,7 +2137,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-new-index: Field {
-                                    x: 22px + row.depth * 14px;
+                                    x: 8px + row.depth * root.left-size * 7px / 6 + root.left-size * 2.75px;
                                     width: max(20px, parent.width - self.x - 4px);
                                     height: 24px;
                                     text <=> root.tree-new-name;
@@ -5942,7 +5963,7 @@ export component AppWindow inherits Window {
                     Text { text: @tr("Workspace"); color: Tok.ink-muted; font-size: 11px; }
                     MenuRow { title: @tr("Add Folder…"); activated => { root.workspace-tree-command(0); root.close-tree-menu(); } }
                     MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.workspace-tree-command(1); root.close-tree-menu(); } }
-                    if root.workspace-context-folder: MenuRow { title: @tr("Folder Auto-Save"); checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: root.workspace-context-auto ? "AutoSave ON" : "AutoSave OFF"; checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Up"); activated => { root.workspace-tree-command(5); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Down"); activated => { root.workspace-tree-command(6); root.close-tree-menu(); } }

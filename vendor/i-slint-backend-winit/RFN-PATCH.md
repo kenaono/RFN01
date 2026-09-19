@@ -13,3 +13,21 @@ The original OpenGL renderer is unchanged.
 
 When upgrading Slint, rebase this small presentation patch and re-run native
 transparency, menu, IME, resize/maximize and long-document checks.
+
+## Accessibility focus reentrancy
+
+`winitwindowadapter.rs::handle_focus_change` uses `try_borrow_mut` and schedules
+busy notifications on the next Slint timer turn through a weak window reference.
+AccessKit `reload_tree` / `focus_node` can instantiate a lazy Field whose init
+handler changes focus while the adapter is borrowed. An unconditional mutable
+borrow aborts the native callback in that situation (reproduced from the
+Workspace context menu's Clone command with accessibility active).
+
+The normal unborrowed path remains synchronous. A deferred notification reads
+current focus rather than retaining an obsolete item, retries if still busy, and
+does nothing after the window has been dropped. Accessibility stays enabled;
+focus notifications are deferred rather than silently discarded.
+
+On upgrade, check whether upstream handles this reentrancy and remove this patch
+if superseded. Verify opening, cancelling, and reopening lazy input dialogs from
+menus with accessibility active, plus keyboard focus and screen-reader focus.

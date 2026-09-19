@@ -229,10 +229,21 @@ fn open_folder_from(owner: Owner, start: Option<&Path>, title: &str) -> Option<P
 }
 
 /// Workspace root selection shows files as context, with one confirmation.
-/// The native filename field is a display-folder marker so the ordinary OK
-/// button also works inside an empty folder. OnFileOk captures GetFolder;
-/// the marker and any selected file are never opened, created, or returned.
+/// The native filename field shows the actual displayed folder's name.
+/// OnFileOk captures GetFolder; no filename is opened, created, or returned.
 pub fn workspace_folder(owner: Owner) -> Option<PathBuf> {
+    workspace_folder_with_policy(owner, false)
+}
+
+/// Clone needs an existing empty destination; reject invalid choices while
+/// the content-visible native picker is still open.
+pub fn workspace_clone_folder(owner: Owner) -> Option<PathBuf> {
+    workspace_folder_with_policy(owner, true)
+}
+
+const FOLDER_STATUS: u32 = 1100;
+
+fn workspace_folder_with_policy(owner: Owner, empty_only: bool) -> Option<PathBuf> {
     let selected = Arc::new(Mutex::new(None));
     // SAFETY: as in open_document, COM and the native modal loop belong to the
     // window thread. The event subscription is removed on every return path.
@@ -240,10 +251,17 @@ pub fn workspace_folder(owner: Owner) -> Option<PathBuf> {
         let dialog: IFileDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         dialog
-            .SetTitle(&HSTRING::from(pick(
-                "Workspaceに追加するフォルダの内容を確認",
-                "Choose a Workspace folder",
-            )))
+            .SetTitle(&HSTRING::from(if empty_only {
+                pick(
+                    "Clone先の空フォルダを選択",
+                    "Choose an Empty Clone Destination",
+                )
+            } else {
+                pick(
+                    "Workspaceに追加するフォルダの内容を確認",
+                    "Choose a Workspace folder",
+                )
+            }))
             .ok()?;
         dialog
             .SetOptions(
@@ -265,19 +283,20 @@ pub fn workspace_folder(owner: Owner) -> Option<PathBuf> {
             }])
             .ok()?;
         dialog
-            .SetOkButtonLabel(&HSTRING::from(pick("フォルダを追加", "Add Folder")))
+            .SetOkButtonLabel(&HSTRING::from(if empty_only {
+                pick("このフォルダを選択", "Select Folder")
+            } else {
+                pick("フォルダを追加", "Add Folder")
+            }))
             .ok()?;
         dialog
-            .SetFileNameLabel(&HSTRING::from(pick(
-                "追加対象（表示中のフォルダ）",
-                "Add the displayed folder",
-            )))
+            .SetFileNameLabel(&HSTRING::from(pick("表示中のフォルダ", "Displayed folder")))
             .ok()?;
-        dialog
-            .SetFileName(&HSTRING::from(workspace_folder_marker()))
-            .ok()?;
+        let customize: IFileDialogCustomize = dialog.cast().ok()?;
+        customize.AddText(FOLDER_STATUS, &HSTRING::new()).ok()?;
         let events: IFileDialogEvents = WorkspaceFolderEvents {
             selected: selected.clone(),
+            empty_only,
         }
         .into();
         let cookie = dialog.Advise(&events).ok()?;
@@ -287,18 +306,71 @@ pub fn workspace_folder(owner: Owner) -> Option<PathBuf> {
         };
         dialog.Show(owner).ok()?;
         // Only the validated displayed folder captured by OnFileOk is accepted.
-        // Never inspect GetResult, which can contain the marker or a file.
+        // Never inspect GetResult, which can contain a filename.
         let path = selected.lock().ok()?.take()?;
-        workspace_displayed_folder(&path)
+        validate_workspace_folder(&path, empty_only).ok()
     }
-}
-
-fn workspace_folder_marker() -> &'static str {
-    pick("このフォルダ", "This folder")
 }
 
 fn workspace_displayed_folder(path: &Path) -> Option<PathBuf> {
     path.is_dir().then(|| path.to_path_buf())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderSelectionError {
+    NotDirectory,
+    NotEmpty,
+    Unreadable,
+}
+
+fn validate_workspace_folder(
+    path: &Path,
+    empty_only: bool,
+) -> Result<PathBuf, FolderSelectionError> {
+    let path = workspace_displayed_folder(path).ok_or(FolderSelectionError::NotDirectory)?;
+    if empty_only {
+        let mut entries = std::fs::read_dir(&path).map_err(|_| FolderSelectionError::Unreadable)?;
+        match entries.next() {
+            None => (),
+            Some(Ok(_)) => return Err(FolderSelectionError::NotEmpty),
+            Some(Err(_)) => return Err(FolderSelectionError::Unreadable),
+        }
+    }
+    Ok(path)
+}
+
+fn folder_selection_message(error: Option<FolderSelectionError>, empty_only: bool) -> &'static str {
+    match error {
+        Some(FolderSelectionError::NotEmpty) => pick(
+            "空のフォルダを選択してください。ファイルやサブフォルダが含まれています。",
+            "Choose an empty folder. This folder contains files or subfolders.",
+        ),
+        Some(FolderSelectionError::NotDirectory | FolderSelectionError::Unreadable) => pick(
+            "このフォルダを確認できません。別のフォルダを選択してください。",
+            "This folder cannot be checked. Choose another folder.",
+        ),
+        None if empty_only => pick(
+            "表示中の空フォルダをClone先として選択します。",
+            "Select the displayed empty folder as the clone destination.",
+        ),
+        None => "",
+    }
+}
+
+fn update_folder_status(dialog: &IFileDialog, empty_only: bool) -> Option<PathBuf> {
+    // SAFETY: called only from the dialog's event handler on its COM thread.
+    unsafe {
+        let path = dialog.GetFolder().ok().and_then(|item| chosen_path(&item));
+        let result = path
+            .as_deref()
+            .ok_or(FolderSelectionError::NotDirectory)
+            .and_then(|path| validate_workspace_folder(path, empty_only));
+        let message = folder_selection_message(result.as_ref().err().copied(), empty_only);
+        if let Ok(customize) = dialog.cast::<IFileDialogCustomize>() {
+            let _ = customize.SetControlLabel(FOLDER_STATUS, &HSTRING::from(message));
+        }
+        result.ok()
+    }
 }
 
 struct FileDialogSubscription {
@@ -318,13 +390,13 @@ impl Drop for FileDialogSubscription {
 #[implement(IFileDialogEvents)]
 struct WorkspaceFolderEvents {
     selected: Arc<Mutex<Option<PathBuf>>>,
+    empty_only: bool,
 }
 
 impl IFileDialogEvents_Impl for WorkspaceFolderEvents_Impl {
     fn OnFileOk(&self, dialog: Ref<IFileDialog>) -> windows::core::Result<()> {
         // SAFETY: invoked by the live native dialog on its COM thread.
-        let path = unsafe { chosen_path(&dialog.ok()?.GetFolder()?) }
-            .and_then(|path| workspace_displayed_folder(&path))
+        let path = update_folder_status(dialog.ok()?, self.empty_only)
             .ok_or_else(|| windows::core::Error::from_hresult(HRESULT(1)))?;
         let mut selected = self
             .selected
@@ -341,15 +413,20 @@ impl IFileDialogEvents_Impl for WorkspaceFolderEvents_Impl {
         Ok(())
     }
     fn OnFolderChange(&self, dialog: Ref<IFileDialog>) -> windows::core::Result<()> {
-        // Restore the target marker after navigating, including an empty folder.
-        // This sets dialog text only; no file bearing this name is ever created.
+        // Use the real folder name, including after entering an empty folder.
+        // The filename edit is only display text; GetFolder determines the result.
         unsafe {
-            dialog
-                .ok()?
-                .SetFileName(&HSTRING::from(workspace_folder_marker()))
+            let dialog = dialog.ok()?;
+            if let Some(path) = chosen_path(&dialog.GetFolder()?) {
+                let name = path.file_name().unwrap_or(path.as_os_str());
+                dialog.SetFileName(&HSTRING::from(name))?;
+            }
+            update_folder_status(dialog, self.empty_only);
+            Ok(())
         }
     }
-    fn OnSelectionChange(&self, _: Ref<IFileDialog>) -> windows::core::Result<()> {
+    fn OnSelectionChange(&self, dialog: Ref<IFileDialog>) -> windows::core::Result<()> {
+        update_folder_status(dialog.ok()?, self.empty_only);
         Ok(())
     }
     fn OnShareViolation(
@@ -565,11 +642,47 @@ mod tests {
         ));
         std::fs::create_dir(&root).unwrap();
         assert_eq!(workspace_displayed_folder(&root), Some(root.clone()));
+        assert_eq!(validate_workspace_folder(&root, true), Ok(root.clone()));
         let file = root.join("context.txt");
         std::fs::write(&file, "context").unwrap();
+        assert_eq!(
+            validate_workspace_folder(&root, false),
+            Ok(root.clone()),
+            "Workspace Add accepts existing contents"
+        );
+        assert_eq!(
+            validate_workspace_folder(&root, true),
+            Err(FolderSelectionError::NotEmpty),
+            "Clone rechecks contents at confirmation, not just on navigation"
+        );
         assert_eq!(workspace_displayed_folder(&file), None);
         assert_eq!(workspace_displayed_folder(&root.join("missing")), None);
+        assert_eq!(
+            validate_workspace_folder(&file, true),
+            Err(FolderSelectionError::NotDirectory)
+        );
+        assert_eq!(
+            validate_workspace_folder(&root.join("missing"), true),
+            Err(FolderSelectionError::NotDirectory)
+        );
         std::fs::remove_file(file).unwrap();
+        let subfolder = root.join("only-subfolder");
+        std::fs::create_dir(&subfolder).unwrap();
+        assert_eq!(
+            validate_workspace_folder(&root, true),
+            Err(FolderSelectionError::NotEmpty),
+            "A folder containing only a directory is not empty"
+        );
+        std::fs::remove_dir(subfolder).unwrap();
+        let hidden = root.join(".gitignore");
+        std::fs::write(&hidden, "").unwrap();
+        assert_eq!(
+            validate_workspace_folder(&root, true),
+            Err(FolderSelectionError::NotEmpty),
+            "Dotfiles and zero-byte files still occupy a Clone destination"
+        );
+        std::fs::remove_file(hidden).unwrap();
+        assert_eq!(validate_workspace_folder(&root, true), Ok(root.clone()));
         std::fs::remove_dir(root).unwrap();
     }
 

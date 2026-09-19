@@ -7456,7 +7456,7 @@ fn workspace_clone_browse(window: &AppWindow, live: &Live) {
     if live.folder.borrow().clone_job.is_some() {
         return;
     }
-    if let Some(path) = file_dialog::workspace_folder(ime::window_handle(window)) {
+    if let Some(path) = file_dialog::workspace_clone_folder(ime::window_handle(window)) {
         window.set_workspace_clone_destination(path.display().to_string().into());
         window.set_question_detail("".into());
         workspace_clone_destination_check(window, live);
