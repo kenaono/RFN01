@@ -1176,6 +1176,9 @@ msgstr "下線"
 msgid "Editor"
 msgstr "Editor"
 
+msgid "Capturing: {}"
+msgstr "ログ出力中: {}"
+
 msgid "Writing log to: {}"
 msgstr "ファイルへログを保存中: {}"
 

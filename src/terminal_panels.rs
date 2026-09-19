@@ -1,7 +1,6 @@
 //! RFN01-20: tab-owned lower panels and fixed log destinations.
 use super::*;
 use crate::buffer::ExternalChange;
-use std::io::Write;
 
 impl std::fmt::Debug for PanelDocument {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -18,9 +17,7 @@ pub(crate) struct PanelDocument {
     pub capture: Option<Rc<RefCell<TerminalSession>>>,
     before_read_only: bool,
     pending_tail: usize,
-    file_log: Option<std::io::BufWriter<std::fs::File>>,
-    file_path: Option<PathBuf>,
-    file_error: Option<String>,
+    history_limit: usize,
     log_name: Option<String>,
     save_tail_on_close: bool,
 }
@@ -40,9 +37,7 @@ impl PanelDocument {
             capture: None,
             before_read_only: false,
             pending_tail: 0,
-            file_log: None,
-            file_path: None,
-            file_error: None,
+            history_limit: window.get_terminal_history_limit().max(0) as usize,
             log_name: None,
             save_tail_on_close: false,
         }
@@ -50,16 +45,9 @@ impl PanelDocument {
 
     pub fn stop(&mut self) {
         self.collect();
-        if let Some(mut file) = self.file_log.take() {
-            let text = self.document.text.borrow();
-            let tail = &text[text.len().saturating_sub(self.pending_tail)..];
-            if let Err(error) = file.write_all(tail.as_bytes()).and_then(|_| file.flush()) {
-                self.file_error = Some(error.to_string());
-            }
-        }
         if let Some(session) = self.capture.take() {
             session.borrow_mut().stop_capture();
-            self.view.viewer = self.before_read_only;
+            self.view.set_read_only(self.before_read_only, true);
             self.pending_tail = 0;
         }
     }
@@ -75,7 +63,9 @@ impl PanelDocument {
         };
         let old = self.document.text.borrow();
         let keep = old.len().saturating_sub(self.pending_tail);
-        let changed = !completed.is_empty() || old[keep..] != pending;
+        let changed = !completed.is_empty()
+            || old[keep..] != pending
+            || old.lines().count() > self.history_limit;
         self.pending_tail = pending.len();
         drop(old);
         if changed {
@@ -83,17 +73,25 @@ impl PanelDocument {
             text.truncate(keep);
             text.push_str(&completed);
             text.push_str(&pending);
-        }
-        if let Some(file) = &mut self.file_log {
-            if let Err(error) = file
-                .write_all(completed.as_bytes())
-                .and_then(|_| file.flush())
-            {
-                self.file_error = Some(error.to_string());
-                self.file_log = None;
-            }
+            trim_log(&mut text, self.history_limit);
+            self.pending_tail = self.pending_tail.min(text.len());
         }
         changed
+    }
+}
+
+/// Keep the newest logical lines, including an unfinished last line.
+fn trim_log(text: &mut String, limit: usize) {
+    if limit == 0 {
+        text.clear();
+        return;
+    }
+    let lines = text.bytes().filter(|b| *b == b'\n').count()
+        + usize::from(!text.is_empty() && !text.ends_with('\n'));
+    if let Some(remove) = lines.checked_sub(limit).filter(|n| *n > 0) {
+        if let Some((at, _)) = text.match_indices('\n').nth(remove - 1) {
+            text.drain(..at + 1);
+        }
     }
 }
 
@@ -176,22 +174,13 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
             let entry = entry.borrow();
             let mut title = entry.shell.as_ref().map_or_else(
                 || entry.document.file.borrow().title(),
-                |s| s.borrow().name().to_owned(),
+                |s| s.borrow().title(),
             );
-            if entry.file_log.is_some() {
-                if let Some(name) = entry.file_path.as_ref().and_then(|p| p.file_name()) {
-                    title = name.to_string_lossy().into_owned();
-                }
-            }
             if entry.document.text.edited() {
                 title.push('*');
             }
             if entry.capture.is_some() {
-                title.push_str(if entry.file_log.is_some() {
-                    " ● File"
-                } else {
-                    " ● Panel"
-                });
+                title.push_str(" ● Panel");
             }
             title.into()
         })
@@ -204,15 +193,8 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         .collect();
     let screen = id.screen(window);
     let read_only = entry.as_ref().is_some_and(|e| e.view.viewer);
+    let follow = entry.as_ref().is_some_and(|e| e.view.follow);
     let capturing = entry.as_ref().is_some_and(|e| e.capture.is_some());
-    let destination: SharedString = entry
-        .as_ref()
-        .filter(|e| e.file_log.is_some())
-        .and_then(|e| e.file_path.as_ref())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
-        .into();
-    let source_capturing = below.entries.iter().any(|e| e.borrow().capture.is_some());
     let names_changed = screen.panel_tabs.iter().ne(names.iter().cloned())
         || screen
             .panel_file_names
@@ -221,9 +203,8 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
     if !names_changed
         && screen.panel_active == below.active as i32
         && screen.panel_read_only == read_only
+        && screen.panel_follow == follow
         && screen.panel_capturing == capturing
-        && screen.terminal_capturing == source_capturing
-        && screen.panel_log_destination == destination
     {
         return;
     }
@@ -240,9 +221,8 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         }
         screen.panel_active = below.active as i32;
         screen.panel_read_only = read_only;
+        screen.panel_follow = follow;
         screen.panel_capturing = capturing;
-        screen.terminal_capturing = source_capturing;
-        screen.panel_log_destination = destination;
     });
 }
 
@@ -271,12 +251,23 @@ fn show(window: &AppWindow, live: &Live, id: PaneId) {
     show_draft(window, id, &below.draft);
     id.set_below(window, kind, height);
     publish(window, id, &below);
+    publish_source(window, live, id);
     if kind == 1 {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
     }
 }
 
 pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, index: i32) {
+    // File capture and source Stop must never create or open a Panel.
+    if action == 10 {
+        start_file(window, live, id);
+        publish_source(window, live, id);
+        return;
+    }
+    if action == 13 {
+        stop_source(window, live, id);
+        return;
+    }
     ensure(window, live, id);
     store_below_on_tab(window, live, id);
     match action {
@@ -336,9 +327,10 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
                 let mut entry = entry.borrow_mut();
                 if entry.capture.is_some() {
                     entry.stop();
-                    entry.view.viewer = false;
+                    entry.view.set_read_only(false, true);
                 } else {
-                    entry.view.viewer = !entry.view.viewer;
+                    let next = !entry.view.viewer;
+                    entry.view.set_read_only(next, true);
                 }
             }
         }
@@ -405,12 +397,14 @@ fn import(window: &AppWindow, live: &Live, id: PaneId, action: i32) {
     };
     if action == 7 {
         // A session owns one capture cursor. Never silently move an existing target.
-        if entries(live).iter().any(|p| {
-            p.borrow()
-                .capture
-                .as_ref()
-                .is_some_and(|s| Rc::ptr_eq(s, &source))
-        }) {
+        if source.borrow().file_log_path().is_some()
+            || entries(live).iter().any(|p| {
+                p.borrow()
+                    .capture
+                    .as_ref()
+                    .is_some_and(|s| Rc::ptr_eq(s, &source))
+            })
+        {
             window.tell(
                 pick(
                     "このTerminalは取り込み中です",
@@ -428,7 +422,7 @@ fn import(window: &AppWindow, live: &Live, id: PaneId, action: i32) {
         source.borrow_mut().start_capture();
         let mut target = target.borrow_mut();
         target.before_read_only = target.view.viewer;
-        target.view.viewer = true;
+        target.view.set_read_only(true, true);
         target.capture = Some(source);
         target.pending_tail = 0;
         target.log_name = Some(log_name());
@@ -500,12 +494,14 @@ fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
     let Some(source) = source else {
         return;
     };
-    if entries(live).iter().any(|e| {
-        e.borrow()
-            .capture
-            .as_ref()
-            .is_some_and(|s| Rc::ptr_eq(s, &source))
-    }) {
+    if source.borrow().file_log_path().is_some()
+        || entries(live).iter().any(|e| {
+            e.borrow()
+                .capture
+                .as_ref()
+                .is_some_and(|s| Rc::ptr_eq(s, &source))
+        })
+    {
         window.tell(
             pick(
                 "現在の取り込みを停止してから開始してください",
@@ -559,15 +555,13 @@ fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
             return;
         }
     };
-    import(window, live, id, 7);
-    if let Some(entry) = current(live, id) {
-        let mut entry = entry.borrow_mut();
-        entry.file_log = Some(std::io::BufWriter::new(file));
-        entry.file_path = Some(chosen.path);
-    }
+    source.borrow_mut().start_file_log(chosen.path, file);
 }
 
 pub(crate) fn stop_for_close(window: &AppWindow, live: &Live) -> bool {
+    for session in sessions(live) {
+        stop_file(window, &session);
+    }
     stop_entries_for_close(window, live, &entries(live))
 }
 
@@ -578,19 +572,6 @@ pub(crate) fn stop_entries_for_close(
 ) -> bool {
     for entry in entries {
         entry.borrow_mut().stop();
-        if let Some(error) = entry.borrow_mut().file_error.take() {
-            window.tell(
-                format!(
-                    "{}: {error}",
-                    pick(
-                        "ログ保存に失敗しました。Panelの内容を保存してから閉じてください",
-                        "Log save failed. Save the panel contents before closing"
-                    )
-                )
-                .into(),
-            );
-            return false;
-        }
         let save_tail = {
             let e = entry.borrow();
             e.save_tail_on_close && e.document.text.edited()
@@ -616,24 +597,110 @@ pub(crate) fn save_for_close(
 }
 
 pub(crate) fn stop_all(live: &Live) {
+    for session in sessions(live) {
+        session.borrow_mut().stop_file_log();
+    }
     for entry in entries(live) {
         entry.borrow_mut().stop();
     }
 }
 
 pub(crate) fn logging_to(live: &Live, path: &Path) -> bool {
-    entries(live).iter().any(|e| {
-        let e = e.borrow();
-        e.file_log.is_some()
-            && e.file_path.as_ref().is_some_and(|p| {
-                p.to_string_lossy()
-                    .eq_ignore_ascii_case(&path.to_string_lossy())
-                    || std::fs::canonicalize(p)
-                        .ok()
-                        .zip(std::fs::canonicalize(path).ok())
-                        .is_some_and(|(a, b)| a == b)
-            })
+    sessions(live).iter().any(|session| {
+        session.borrow().file_log_path().is_some_and(|p| {
+            p.to_string_lossy()
+                .eq_ignore_ascii_case(&path.to_string_lossy())
+                || std::fs::canonicalize(p)
+                    .ok()
+                    .zip(std::fs::canonicalize(path).ok())
+                    .is_some_and(|(a, b)| a == b)
+        })
     })
+}
+
+fn sessions(live: &Live) -> Vec<Rc<RefCell<TerminalSession>>> {
+    live.tabs
+        .borrow()
+        .panes
+        .iter()
+        .flat_map(|p| &p.tabs)
+        .flat_map(|t| t.terminal.iter().chain(t.below.shell.iter()).cloned())
+        .collect()
+}
+
+pub(crate) fn stop_file(window: &AppWindow, session: &Rc<RefCell<TerminalSession>>) {
+    let mut session = session.borrow_mut();
+    session.stop_file_log();
+    report_log_error(window, &mut session);
+}
+
+fn report_log_error(window: &AppWindow, session: &mut TerminalSession) {
+    if let Some(error) = session.take_log_error() {
+        window.tell(
+            format!(
+                "{}: {error}",
+                pick(
+                    "ファイル出力を停止しました。ログの保存に失敗しました",
+                    "File capture stopped: could not save the log"
+                )
+            )
+            .into(),
+        );
+    }
+}
+
+fn stop_source(window: &AppWindow, live: &Live, id: PaneId) {
+    let source = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .and_then(|t| t.terminal.clone());
+    if let Some(source) = source {
+        stop_file(window, &source);
+        for entry in entries(live) {
+            let matches = entry
+                .borrow()
+                .capture
+                .as_ref()
+                .is_some_and(|s| Rc::ptr_eq(s, &source));
+            if matches {
+                entry.borrow_mut().stop();
+            }
+        }
+    }
+    drain(window, live);
+}
+
+pub(crate) fn publish_source(window: &AppWindow, live: &Live, id: PaneId) {
+    if let Some(tab) = live.tabs.borrow().of(id).current() {
+        publish_source_for_tab(window, id, tab);
+    }
+}
+
+pub(crate) fn publish_source_for_tab(window: &AppWindow, id: PaneId, tab: &PaneTab) {
+    let destination = tab
+        .terminal
+        .as_ref()
+        .map(|s| {
+            if let Some(path) = s.borrow().file_log_path() {
+                return path.to_string_lossy().into_owned();
+            }
+            if tab.below.entries.iter().any(|p| {
+                p.borrow()
+                    .capture
+                    .as_ref()
+                    .is_some_and(|other| Rc::ptr_eq(s, other))
+            }) {
+                return "Editor Panel".into();
+            }
+            String::new()
+        })
+        .unwrap_or_default();
+    id.update_screen(window, |screen| {
+        screen.terminal_capturing = !destination.is_empty();
+        screen.panel_log_destination = destination.into();
+    });
 }
 
 fn action_new(window: &AppWindow, live: &Live, id: PaneId) {
@@ -800,6 +867,7 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
         let mut session = session.borrow_mut();
         session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
         session.drain();
+        report_log_error(window, &mut session);
     }
     for entry in entries(live) {
         let mut entry = entry.borrow_mut();
@@ -808,6 +876,7 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
             shell.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
             shell.drain();
         }
+        entry.history_limit = window.get_terminal_history_limit().max(0) as usize;
         entry.collect();
         if entry
             .capture
@@ -815,18 +884,6 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
             .is_some_and(|s| s.borrow().finished())
         {
             entry.stop();
-        }
-        if let Some(error) = entry.file_error.take() {
-            window.tell(
-                format!(
-                    "{}: {error}",
-                    pick(
-                        "ログ保存が停止しました。内容はPanelに保持しています",
-                        "File logging stopped; output is retained in the panel"
-                    )
-                )
-                .into(),
-            );
         }
     }
     let mut tabs = live.tabs.borrow_mut();
@@ -850,6 +907,10 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
                 publish(window, id, &tab.below);
             }
         }
+    }
+    drop(tabs);
+    for id in PaneId::all(window) {
+        publish_source(window, live, id);
     }
 }
 
@@ -1027,6 +1088,18 @@ pub(crate) fn edited(window: &AppWindow, live: &Live, id: PaneId) {
 
 pub(crate) fn install(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
+    let scroll_live = live.clone();
+    window.on_panel_scrolled(move |pane, position, end| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let id = PaneId::from_index(pane);
+        if let Some(entry) = current(&scroll_live, id) {
+            let follow = entry.borrow_mut().view.follow_at(position, end, false);
+            id.update_screen(&window, |screen| screen.panel_follow = follow);
+        }
+    });
+    let weak = window.as_weak();
     let rename_live = live.clone();
     window.on_panel_renamed(move |pane, index, name| {
         if let Some(window) = weak.upgrade() {
@@ -1052,60 +1125,18 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "starts a real Windows shell; run explicitly"]
-    fn terminal_log_flushes_tail_and_keeps_text_on_write_failure() {
-        use slint::platform::software_renderer::MinimalSoftwareWindow;
-        struct Offscreen;
-        impl slint::platform::Platform for Offscreen {
-            fn create_window_adapter(
-                &self,
-            ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
-                Ok(MinimalSoftwareWindow::new(Default::default()))
-            }
+    fn panel_log_keeps_only_newest_lines() {
+        for (source, limit, expected) in [
+            ("一\n二\n三\n", 2, "二\n三\n"),
+            ("一\n二\n途中", 2, "二\n途中"),
+            ("一\n", 1, "一\n"),
+            ("途中", 1, "途中"),
+            ("途中", 0, ""),
+            ("", 0, ""),
+        ] {
+            let mut text = source.to_owned();
+            trim_log(&mut text, limit);
+            assert_eq!(text, expected);
         }
-        slint::platform::set_platform(Box::new(Offscreen)).unwrap();
-        let window = AppWindow::new().unwrap();
-        let path = std::env::temp_dir().join(format!("rfn-log-{}.txt", std::process::id()));
-        let source = Rc::new(RefCell::new(
-            TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap(),
-        ));
-        source.borrow_mut().wait(Duration::from_millis(200));
-        source.borrow_mut().start_capture();
-        let mut entry =
-            PanelDocument::new(&window, OpenDocument::untitled(1, window.as_weak()), None);
-        entry.capture = Some(source.clone());
-        entry.view.viewer = true;
-        entry.file_log = Some(std::io::BufWriter::new(
-            std::fs::File::create(&path).unwrap(),
-        ));
-        source.borrow_mut().type_text("echo RFN_FILE_LINE\r");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && !entry.document.text.borrow().contains("RFN_FILE_LINE") {
-            source.borrow_mut().wait(Duration::from_millis(50));
-            entry.collect();
-        }
-        entry.stop();
-        assert!(entry.document.text.borrow().contains("RFN_FILE_LINE"));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            *entry.document.text.borrow()
-        );
-        assert!(!entry.view.viewer);
-        // A read-only handle deterministically exercises a failing write without
-        // changing filesystem permissions or relying on a particular drive.
-        source.borrow_mut().start_capture();
-        entry.capture = Some(source.clone());
-        entry.pending_tail = 0;
-        entry.file_log = Some(std::io::BufWriter::new(std::fs::File::open(&path).unwrap()));
-        source.borrow_mut().type_text("echo RFN_KEEP_ON_FAILURE\r");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && entry.file_error.is_none() {
-            source.borrow_mut().wait(Duration::from_millis(50));
-            entry.collect();
-        }
-        entry.stop();
-        assert!(entry.file_error.is_some());
-        assert!(entry.document.text.borrow().contains("RFN_KEEP_ON_FAILURE"));
-        std::fs::remove_file(path).unwrap();
     }
 }

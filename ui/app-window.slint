@@ -625,6 +625,7 @@ export component AppWindow inherits Window {
     callback terminal-url(int, int, float, float);
     callback terminal-action(int, int, int);
     callback panel-action(int, int, int);
+    callback panel-scrolled(int, float, float);
     callback panel-renamed(int, int, string);
     callback pane-below-toggled(int);
     callback pane-below-resized(int, length);
@@ -2503,6 +2504,8 @@ export component AppWindow inherits Window {
                         panel-tabs: pane.panel-tabs;
                         panel-active: pane.panel-active;
                         panel-read-only: pane.panel-read-only;
+                        panel-follow: pane.panel-follow;
+                        panel-scrolled(position, end) => { root.panel-scrolled(pane.id, position, end); }
                         panel-capturing: pane.panel-capturing;
                         panel-action(action, index) => { root.panel-action(pane.id, action, index); }
                         panel-renamed(index, name) => { root.panel-renamed(pane.id, index, name); }

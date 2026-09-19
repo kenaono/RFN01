@@ -267,6 +267,7 @@ export struct PaneScreen {
     panel-tabs: [string],
     panel-active: int,
     panel-read-only: bool,
+    panel-follow: bool,
     panel-capturing: bool,
     below-draft: string,
     // The same text cut into lines, with what would be sent marked out
@@ -514,6 +515,8 @@ export component EditorPane inherits Rectangle {
     in property <string> panel-log-destination;
     in property <int> panel-active;
     in property <bool> panel-read-only;
+    in property <bool> panel-follow;
+    callback panel-scrolled(float, float);
     in property <bool> panel-capturing;
     callback panel-action(int, int);
     callback panel-renamed(int, string);
@@ -1948,6 +1951,14 @@ export component EditorPane inherits Rectangle {
             }
         }
 
+        if root.terminal-capturing: Rectangle {
+            height: 30px; vertical-stretch: 0; background: Tok.chrome;
+            HorizontalLayout {
+                padding-left: 8px; spacing: 8px;
+                Text { text: @tr("Capturing: {}", root.panel-log-destination); overflow: elide; color: Tok.ink; vertical-alignment: center; }
+                TextButton { title: @tr("Stop Capture"); clicked => { root.panel-action(13, 0); } }
+            }
+        }
         if root.terminal: Rectangle {
             height: 32px; vertical-stretch: 0; background: Tok.chrome;
         if root.terminal-search-open && root.terminal-search-spot == 0: HorizontalLayout {
@@ -3070,6 +3081,7 @@ export component EditorPane inherits Rectangle {
                                             activated => { root.panel-action(8, 0); context-menu.close(); }
                                         }
                                         if root.terminal: MenuRow { title: @tr("Capture Log to File…"); enabled: !root.terminal-capturing; activated => { root.panel-action(10, 0); context-menu.close(); } }
+                                        if root.terminal && root.terminal-capturing: MenuRow { title: @tr("Stop Capture"); activated => { root.panel-action(13, 0); context-menu.close(); } }
                                         if root.terminal: MenuRow {
                                             title: @tr("Capture Log to Editor Panel");
                                             enabled: !root.terminal-capturing;
@@ -3575,7 +3587,7 @@ export component EditorPane inherits Rectangle {
             if root.panel-capturing && root.below-kind == 2: Rectangle {
                 height: 20px; vertical-stretch: 0; background: Tok.chrome;
                 Text { color: Tok.ink-muted; font-size: 11px; overflow: elide;
-                text: root.panel-log-destination != "" ? @tr("Writing log to: {}", root.panel-log-destination) : @tr("Capturing to Panel — save to keep as a file");
+                text: @tr("Capturing to Panel — save to keep as a file");
                 }
             }
 
@@ -3875,7 +3887,7 @@ export component EditorPane inherits Rectangle {
                         mouse-cursor: text;
                         scroll-event(event) => {
                             sheet.pan-y = clamp(sheet.pan-y - event.delta-y, 0px, sheet.max-pan);
-                            sheet.follow-tail = sheet.pan-y >= sheet.max-pan - 2px;
+                            root.panel-scrolled(sheet.pan-y / 1px, sheet.max-pan / 1px);
                             accept
                         }
                         pointer-event(event) => {
@@ -3902,9 +3914,10 @@ export component EditorPane inherits Rectangle {
                             // 見失わないようこちらが追う。**横は折り返すので要らない。**
                             property <length> pan-y: 0;
                             property <length> max-pan: max(0px, bands.preferred-height + self.row-height + 12px - self.height);
-                            property <bool> follow-tail: true;
+                            property <bool> follow-tail: root.panel-read-only && root.panel-follow;
+                            changed follow-tail => { if self.follow-tail { self.pan-y = self.max-pan; } }
                             changed max-pan => {
-                                if root.panel-capturing && self.follow-tail { self.pan-y = self.max-pan; }
+                                if self.follow-tail { self.pan-y = self.max-pan; }
                                 else { self.pan-y = min(self.pan-y, self.max-pan); }
                             }
                             // 字を組む幅。帯も欄も同じこれで組むから、同じところで
@@ -4050,7 +4063,7 @@ export component EditorPane inherits Rectangle {
                                 x: parent.width - 14px; y: 2px; width: 12px; height: parent.height - 4px;
                                 vertical: true; minimum: 0; maximum: sheet.max-pan / 1px;
                                 value: (sheet.max-pan - sheet.pan-y) / 1px;
-                                moved(value) => { sheet.pan-y = sheet.max-pan - value * 1px; sheet.follow-tail = sheet.pan-y >= sheet.max-pan - 2px; }
+                                moved(value) => { sheet.pan-y = sheet.max-pan - value * 1px; root.panel-scrolled(sheet.pan-y / 1px, sheet.max-pan / 1px); }
                             }
                             if root.below-draft == "": Text {
                                 x: 10px;

@@ -1,4 +1,104 @@
 use super::*;
+
+#[test]
+fn read_only_policy_is_shared_by_editor_and_panel() {
+    let mut state = EditorState::default();
+    state.preedit = "composition".into();
+    state.set_read_only(true, true);
+    assert!(state.viewer && state.follow && state.preedit.is_empty());
+    assert!(!state.follow_at(10.0, 100.0, false));
+    assert!(!state.follow_at(10.0, 120.0, true));
+    assert!(state.follow_at(118.0, 120.0, false));
+    assert!(state.follow_at(118.0, 160.0, true));
+    state.set_read_only(false, true);
+    assert!(!state.viewer && !state.follow);
+    state.set_read_only(true, false);
+    assert!(state.viewer && !state.follow);
+}
+
+#[test]
+#[ignore = "starts real ConPTY shells; run explicitly"]
+fn terminal_new_tab_random_and_direct_file_capture() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let mut defaults = vec![terminal_appearance::initial_style(); 3];
+    for style in &mut defaults {
+        style.random = 1;
+    }
+    h.window
+        .set_panel_defaults(ModelRc::new(VecModel::from(defaults)));
+    new_terminal_tab(
+        &h.window,
+        &h.live,
+        id,
+        TerminalShell {
+            name: "QA".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        },
+    );
+    let tab = h.live.tabs.borrow().of(id).current().unwrap().clone();
+    let source = tab.terminal.as_ref().unwrap().clone();
+    let colour = tab.below.front_style.as_ref().unwrap().paper;
+    assert_ne!(colour, terminal_appearance::initial_style().paper);
+    assert_eq!(id.screen(&h.window).front_style.paper, colour);
+    assert_eq!(
+        terminal_appearance::look(&h.window, id, TerminalSpot::Front).paper,
+        channels(colour)
+    );
+    assert!(tab_title(&tab).starts_with("QA:"));
+    assert!(tab.below.entries.is_empty());
+    let path =
+        app_data::TEST_DIRECTORY.with(|p| p.borrow().as_ref().unwrap().join("direct-log.txt"));
+    source
+        .borrow_mut()
+        .start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
+    terminal_panels::publish_source(&h.window, &h.live, id);
+    assert!(id.screen(&h.window).terminal_capturing);
+    assert!(
+        h.live
+            .tabs
+            .borrow()
+            .of(id)
+            .current()
+            .unwrap()
+            .below
+            .entries
+            .is_empty()
+    );
+    assert!(!h.live.cache.borrow_mut().pane(id).below_open);
+    source.borrow_mut().type_text("echo DIRECT_CAPTURE\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        source.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+        if std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("DIRECT_CAPTURE")
+        {
+            break;
+        }
+    }
+    terminal_panels::action(&h.window, &h.live, id, 13, 0);
+    assert!(!id.screen(&h.window).terminal_capturing);
+    assert!(source.borrow().file_log_path().is_none());
+    assert!(
+        h.live
+            .tabs
+            .borrow()
+            .of(id)
+            .current()
+            .unwrap()
+            .below
+            .entries
+            .is_empty()
+    );
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("DIRECT_CAPTURE")
+    );
+}
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 struct Offscreen(Rc<MinimalSoftwareWindow>);
 
@@ -423,7 +523,41 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
             .contains("RFN_CAPTURE_TEST")
     );
     assert!(h.live.active(&h.window).text.borrow().is_empty());
-    target.borrow_mut().stop();
+    h.window.set_terminal_history_limit(3);
+    session
+        .borrow_mut()
+        .type_text("for /L %i in (1,1,20) do @echo RFN_LIMIT_%i\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        session.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+        if target
+            .borrow()
+            .document
+            .text
+            .borrow()
+            .contains("RFN_LIMIT_20")
+        {
+            break;
+        }
+    }
+    assert!(
+        target
+            .borrow()
+            .document
+            .text
+            .borrow()
+            .contains("RFN_LIMIT_20"),
+        "panel={:?}, screen={:?}",
+        target.borrow().document.text.borrow().as_str(),
+        session.borrow().screen().retained_text()
+    );
+    assert!(target.borrow().document.text.borrow().lines().count() <= 3);
+    assert!(target.borrow().document.file.borrow().path().is_none());
+    // Stop at the source even while a different Panel is selected.
+    switch_to_tab(&h.window, &h.live, id, 0);
+    terminal_panels::action(&h.window, &h.live, id, 0, 0);
+    terminal_panels::action(&h.window, &h.live, id, 13, 0);
     assert!(!target.borrow().view.viewer);
     assert!(target.borrow().capture.is_none());
 }

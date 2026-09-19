@@ -598,6 +598,22 @@ struct EditorState {
 }
 
 impl EditorState {
+    /// Shared ReadOnly policy; renderers only adapt selection and scroll coordinates.
+    fn set_read_only(&mut self, viewer: bool, source: bool) {
+        self.viewer = viewer;
+        self.follow = viewer && source;
+        self.preedit.clear();
+    }
+
+    fn follow_at(&mut self, position: f32, end: f32, resized: bool) -> bool {
+        if !self.viewer {
+            return false;
+        }
+        if !(self.follow && resized) {
+            self.follow = position >= end.max(0.0) - READ_ONLY_END_SLACK;
+        }
+        self.follow
+    }
     /// この押下は「2回目」か——ダブルクリックの判定（E3）。
     ///
     /// **速さはWindowsのもの**（`GetDoubleClickTime`）。この編集器が独自の秒数を
@@ -4510,6 +4526,7 @@ impl Live {
         });
         show_draft(window, id, &tab.below.draft);
         terminal_panels::publish(window, id, &tab.below);
+        terminal_panels::publish_source_for_tab(window, id, tab);
         id.set_below(window, kind, height);
         // **A strip restored open has no shell in it yet** (要件 8.5 puts the
         // arrangement back, not the processes). The one it needs is started
@@ -4998,9 +5015,7 @@ fn toggle_viewer(
     {
         let held = states.of(id);
         let mut state = held.borrow_mut();
-        state.viewer = viewer;
-        state.follow = reading;
-        state.preedit.clear();
+        state.set_read_only(viewer, !id.shows_preview(window));
     }
     id.set_ime_buffer(window, "");
     let source = document.text.borrow().clone();
@@ -5074,11 +5089,7 @@ fn follow_scroll(
     };
     let end = (content - viewport).max(0.0);
     let was = states.of(id).borrow().follow;
-    if was && resized {
-        return true;
-    }
-    let at_end = -offset >= end - READ_ONLY_END_SLACK;
-    states.of(id).borrow_mut().follow = at_end;
+    let at_end = states.of(id).borrow_mut().follow_at(-offset, end, resized);
     if was != at_end {
         window.tell_tab(
             if at_end {
@@ -10622,7 +10633,7 @@ fn told_no_way(window: &AppWindow, forward: bool) {
 /// the list of all tabs must not disagree about it.
 fn tab_title(tab: &PaneTab) -> String {
     match &tab.terminal {
-        Some(session) => session.borrow().name().to_owned(),
+        Some(session) => session.borrow().title(),
         None if tab.empty => new_tab_name().to_owned(),
         None if tab.settings => settings_tab_name().to_owned(),
         None => tab
@@ -12230,6 +12241,16 @@ fn finish_close(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
 fn finish_close_inner(window: &AppWindow, live: &Live, id: PaneId, index: usize, remember: bool) {
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
+    let source = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .get(index)
+        .and_then(|t| t.terminal.clone());
+    if let Some(source) = source {
+        terminal_panels::stop_file(window, &source);
+    }
     let panels = live
         .tabs
         .borrow()
@@ -17290,6 +17311,15 @@ fn switch_shell_confirmed(window: &AppWindow, live: &Live, id: PaneId, shell: Te
     let Some(session) = start_shell(window, live, id, &shell, id.shown_height(window)) else {
         return;
     };
+    let source = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .and_then(|t| t.terminal.clone());
+    if let Some(source) = source {
+        terminal_panels::stop_file(window, &source);
+    }
     {
         let mut tabs = live.tabs.borrow_mut();
         let strip = tabs.of_mut(id);

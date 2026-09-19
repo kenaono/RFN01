@@ -93,7 +93,9 @@ pub(crate) fn needs_close(window: &AppWindow, tab: &PaneTab) -> bool {
     let shell = |s: &Rc<RefCell<TerminalSession>>| {
         window.get_terminal_confirm_close() && !s.borrow().finished()
     };
-    tab.terminal.as_ref().is_some_and(shell)
+    tab.terminal
+        .as_ref()
+        .is_some_and(|s| shell(s) || s.borrow().file_log_path().is_some())
         || tab.below.shell.as_ref().is_some_and(shell)
         || tab.below.entries.iter().any(|p| {
             let p = p.borrow();
@@ -109,7 +111,12 @@ pub(crate) fn ask_close(window: &AppWindow, live: &Live, identity: Rc<()>) {
         .iter()
         .flat_map(|p| &p.tabs)
         .find(|t| Rc::ptr_eq(&t.identity, &identity))
-        .is_some_and(|t| t.below.entries.iter().any(|e| e.borrow().capture.is_some()));
+        .is_some_and(|t| {
+            t.terminal
+                .as_ref()
+                .is_some_and(|s| s.borrow().file_log_path().is_some())
+                || t.below.entries.iter().any(|e| e.borrow().capture.is_some())
+        });
     let message = if capturing {
         pick(
             "このTABと付属のPanelを閉じますか？\n\nこのTABのシェルとログ取り込みが終了します。別のTABの取り込みは継続します。Panelの未保存内容は保存してください。",

@@ -588,9 +588,9 @@ impl Screen {
         self.line_feed();
     }
 
-    fn line_feed(&mut self) {
+    fn capture_line(&mut self, row: usize) {
         if self.stowed.is_none() {
-            let line = &self.lines[self.cursor.row];
+            let line = &self.lines[row];
             if let Some(capture) = &mut self.capture {
                 capture.wrapped.push_str(&line.logical_text());
                 if !line.wrapped {
@@ -603,6 +603,10 @@ impl Screen {
                 }
             }
         }
+    }
+
+    fn line_feed(&mut self) {
+        self.capture_line(self.cursor.row);
         if self.cursor.row == self.region.1 {
             self.scroll_up(1);
         } else if self.cursor.row + 1 < self.rows {
@@ -647,7 +651,15 @@ impl Screen {
     }
 
     fn move_to(&mut self, row: usize, column: usize) {
-        self.cursor.row = row.min(self.rows - 1);
+        let row = row.min(self.rows - 1);
+        // ConPTY can finish output with a downward CUP instead of LF
+        // before drawing the next prompt. Commit those rows as well.
+        if self.capture.is_some() {
+            for leaving in self.cursor.row..row {
+                self.capture_line(leaving);
+            }
+        }
+        self.cursor.row = row;
         self.cursor.column = column.min(self.columns - 1);
         self.cursor.pending_wrap = false;
         self.touch();
@@ -1689,6 +1701,17 @@ mod tests {
         term.feed(b"\r\nf");
         assert!(term.screen.scrollback().is_empty());
         assert_eq!(term.screen.history_origin(), 4);
+    }
+
+    #[test]
+    fn capture_finishes_line_when_conpty_positions_next_prompt() {
+        let mut term = Terminal::new(80, 8);
+        term.screen.start_capture();
+        term.feed(b"one\r\nlast\x1b[4;1Hprompt");
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("one\nlast\n\n".into(), "prompt".into()))
+        );
     }
 
     #[test]
