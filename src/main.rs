@@ -1,3 +1,14 @@
+mod input_platform;
+use input_platform::{double_click_time, shift_really_held};
+mod editor_host;
+mod editor_session;
+mod appearance;
+use appearance::luminance;
+mod editor_state;
+use editor_state::{
+    EditorState, READ_ONLY_END_SLACK, normalize_typed_input, release_selection,
+    selection_source_range, source_line_start, update_selection_after_move,
+};
 mod app_data;
 mod buffer;
 mod clipboard;
@@ -10,6 +21,7 @@ mod diff_view;
 mod directwrite_probe;
 mod directwrite_render;
 mod document;
+mod document_ui;
 mod file_dialog;
 mod file_io;
 mod file_tree;
@@ -495,8 +507,6 @@ const EXTERNAL_CHECK_TICK: Duration = Duration::from_secs(2);
 /// ログが流れるのを2秒おきに見るのは遅い。ほかの文書は今までどおり
 /// `EXTERNAL_CHECK_TICK`ごとで、見回りの回数は増やさない。
 const READ_ONLY_CHECK_TICK: Duration = Duration::from_millis(500);
-/// 最下行に「いる」とみなす余り（px）。ホイールの止まり方で1px足りないことがある。
-const READ_ONLY_END_SLACK: f32 = 2.0;
 /// ReadOnlyのあいだは縦書き・プレビューへ切り替えない（追加要件 2026-09-15）。
 fn read_only_stays() -> &'static str {
     pick(
@@ -527,137 +537,6 @@ const TILE_CACHE_LIMIT: usize = 6;
 /// of the same refresh; what is left over waits for the next one. Each is about
 /// two megabytes, and allocating that costs more than drawing it (技術検証 7.8).
 const SPARE_TILE_BUFFERS: usize = 16;
-
-/// One pane's caret, selection and pending IME text, all in source bytes.
-///
-/// Both panes keep one of these. Everything here is about the document, not
-/// about how a pane draws it, so the same struct serves either writing
-/// direction: `preferred_line` is the coordinate on the *line* axis to hold on
-/// to when stepping between lines, which is a y in the vertical pane and an x in
-/// the horizontal one. `active_line_start` is only read back by the vertical
-/// pane: it decides which line shows its Markdown and lags the caret on
-/// purpose, while the horizontal pane works the same answer out from its own
-/// caret ([`PaneId::revealed_line`]).
-#[derive(Clone, Debug, Default)]
-struct EditorState {
-    viewer: bool,
-    /// 追加要件 2026-09-15（書き手）: **ReadOnlyで最下行を追っているか。**
-    ///
-    /// ReadOnly（Viewerをソース表示で開いた形）だけが読む。入った時点で立ち、
-    /// 書き手が上へスクロールすると下り、最下行まで戻すとまた立つ——ログを
-    /// 読む人が`tail -f`でしていることを、スクロールだけで言えるようにする。
-    /// **TABが持つ**のは、同じ文書を別のTABで止めて読めるように。
-    follow: bool,
-    caret_source_byte: Option<usize>,
-    selection_anchor_source_byte: Option<usize>,
-    active_line_start: Option<usize>,
-    preedit: String,
-    preferred_line: Option<f32>,
-    /// Whether the selection is a rectangle rather than a run (要件 7.1).
-    ///
-    /// **The two ends are the same two bytes either way** — what changes is
-    /// what is read out of them: a rectangle takes the lines they sit on and
-    /// the columns they sit at, and covers every line between (`selection_ranges`).
-    rectangular: bool,
-    /// Whether `Ctrl+Space` has been pressed and not yet answered (要件 11.4).
-    ///
-    /// **A held Shift that the writer does not have to hold.** While it is on,
-    /// every move extends the selection the way Shift does; it goes off when
-    /// the writer does anything but move — an edit, or a click — and when
-    /// `Ctrl+Space` is pressed again.
-    mark: bool,
-    /// 検索が置いた選択（E1、書き手の指摘 2026-09-09）。
-    ///
-    /// **「その範囲は書き手が選んだものか」を答えるためだけにある。**範囲内検索
-    /// （`[ ]`）は書き手が選んだ範囲を覚えているが、選び直したら新しい範囲に
-    /// なってほしい——ところが検索そのものも選択を動かす（一致を選ぶ）ので、
-    /// 「選択が変わったら取り直す」では**2回目の検索で範囲が一致そのものに
-    /// 潰れる**。ここに置いた最後の一致と今の選択を比べれば、書き手の手が
-    /// 入ったかどうかが分かる。
-    search_selection: Option<(usize, usize)>,
-    /// 行番号から始まった選択（E3）。**押した行の頭のバイト。**
-    ///
-    /// **これがあるあいだ、引くと行ごと選ばれる。**番号を押すことは行を指す
-    /// ことなので、そのまま引いた書き手が指しているのも行である——1画素の
-    /// ぶれで行の選択が字の選択へ変わってしまうと、押しただけのつもりが
-    /// 選び直しになる。ボタンを離すと消える。
-    line_drag: Option<usize>,
-    /// ダブルクリックが選んだ語（E3、書き手の報告 2026-09-10）。
-    ///
-    /// **2回目を離した合図から、選んだ語を守る。**離した合図はカーソルを押した
-    /// 点へ置くので、そのままでは語の途中までしか残らない——「不安定に感じました」
-    /// 「英語では単語選択にならない感じ」の半分はこれである。**引けば語ごと
-    /// 伸びる**のも同じ印で、押し直すまで残る。
-    word_drag: Option<(usize, usize)>,
-    /// 直前の押下——いつ、どこを（E3）。**2回目かどうかを数えるためだけにある。**
-    ///
-    /// 2回目を数えたら空に戻す：**3回目は普通の押下**である。窓の
-    /// `double-clicked`に任せていたときは3回目・4回目にも来ていて、
-    /// 押すたびに語が選び直されるので選択が外れなくなった（書き手の報告
-    /// 2026-09-10：「契機がわからないのですが、選択がはずれなくなります」）。
-    last_click: Option<(Instant, f32, f32)>,
-}
-
-impl EditorState {
-    /// Shared ReadOnly policy; renderers only adapt selection and scroll coordinates.
-    fn set_read_only(&mut self, viewer: bool, source: bool) {
-        self.viewer = viewer;
-        self.follow = viewer && source;
-        self.preedit.clear();
-    }
-
-    fn follow_at(&mut self, position: f32, end: f32, resized: bool) -> bool {
-        if !self.viewer {
-            return false;
-        }
-        if !(self.follow && resized) {
-            self.follow = position >= end.max(0.0) - READ_ONLY_END_SLACK;
-        }
-        self.follow
-    }
-    /// この押下は「2回目」か——ダブルクリックの判定（E3）。
-    ///
-    /// **速さはWindowsのもの**（`GetDoubleClickTime`）。この編集器が独自の秒数を
-    /// 持てば、書き手が他のアプリで慣れた速さと違う反応をすることになる。
-    ///
-    /// **場所も見る。**離れたところを2回押したのは、同じものを2回押したのではない。
-    fn double_click(&mut self, x: f32, y: f32) -> bool {
-        let now = Instant::now();
-        let doubled = self.last_click.is_some_and(|(when, at_x, at_y)| {
-            now.duration_since(when) <= double_click_time()
-                && (x - at_x).abs() <= DOUBLE_CLICK_SLACK
-                && (y - at_y).abs() <= DOUBLE_CLICK_SLACK
-        });
-        // 2回目で区切る。3回目は、次の1回目である。
-        self.last_click = (!doubled).then_some((now, x, y));
-        doubled
-    }
-}
-
-/// 2回目とみなす、押した場所のずれ（画素、E3）。**手は完全には止まらない。**
-const DOUBLE_CLICK_SLACK: f32 = 4.0;
-
-/// Shiftが本当に押されていたか、Windowsに訊く（書き手の報告 2026-09-12）。
-///
-/// **窓が持っている修飾の旗は、変換をまたぐと古くなることがある。**IMEが
-/// 受け取った打鍵はSlintの手前で消えるので、**Shiftを離した合図を見落とすと
-/// 旗は押されたままになる**——そのあとのクリックが「Shiftを押したクリック」と
-/// して届き、押した場所までがいきなり選ばれる。書き手の「突然選択になりました」は
-/// この形で記録に残った（`pointer.p0 phase=Extend`が、押していないのに続けて出た）。
-///
-/// **`GetKeyState`は、いま処理している合図の時点の答え**である——「たったいまの指」を
-/// 返す`GetAsyncKeyState`ではないので、打鍵が溜まっていても、その打鍵のときの
-/// Shiftを答える。Shiftを押したまま矢印で選んでいる途中に、溜まったぶんだけ
-/// 選択が伸びなくなる、ということが起きない。
-fn shift_really_held() -> (bool, bool) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_SHIFT};
-
-    // SAFETY: どちらも仮想キーの番号を1つ渡すだけの呼び出しで、返るのは状態の
-    // 語である。最上位のビットが立っていれば押されている＝符号付きで見れば負。
-    let by_message = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
-    let by_hand = unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } < 0;
-    (by_message, by_hand)
-}
 
 /// 届いたShiftを、Windowsの答えと突き合わせる（書き手の報告 2026-09-12）。
 ///
@@ -692,15 +571,6 @@ fn shift_as_windows_sees_it(cache: &Rc<RefCell<RenderCache>>, said: bool, what: 
     false
 }
 
-/// Windowsで決められたダブルクリックの間隔（E3）。
-fn double_click_time() -> Duration {
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
-
-    // SAFETY: 引数の無い呼び出しで、返るのはミリ秒の数である。失敗しない。
-    let ms = unsafe { GetDoubleClickTime() };
-    Duration::from_millis(u64::from(ms.max(1)))
-}
-
 /// Both panes' states, so that a callback carrying a pane number can reach the
 /// one it names.
 ///
@@ -720,14 +590,7 @@ struct PaneStates {
     slots: Rc<RefCell<Vec<PaneSlot>>>,
 }
 
-/// One pane's own state, and the document it has in front of it.
-#[derive(Clone)]
-struct PaneSlot {
-    state: Rc<RefCell<EditorState>>,
-    /// **Asked at the moment it is needed, never held**: a pane can be showing
-    /// a different document by the time a timer fires.
-    showing: Rc<RefCell<Rc<OpenDocument>>>,
-}
+type PaneSlot = editor_session::EditorSession;
 
 impl PaneStates {
     /// The editor's first pane, on the document it opened with (要件 6.3).
@@ -740,10 +603,7 @@ impl PaneStates {
     /// Make room for a pane. **The new pane is the last**, which is the number
     /// a split hands out.
     fn add(&self, document: &Rc<OpenDocument>) {
-        self.slots.borrow_mut().push(PaneSlot {
-            state: Rc::new(RefCell::new(EditorState::default())),
-            showing: Rc::new(RefCell::new(document.clone())),
-        });
+        self.slots.borrow_mut().push(PaneSlot::new(document.clone()));
     }
 
     /// Take a pane out, and **close the numbering behind it**.
@@ -4059,11 +3919,6 @@ fn random_paper(light: bool, seed: u64) -> [f32; 3] {
         (0.25 + 0.30 * part(20), 0.14 + 0.12 * part(40))
     };
     channels(Color::from_hsva(hue, saturation, value, 1.0))
-}
-
-/// 色の明るさ（0〜1）。TABの名前を明るい字にするかを決める。
-fn luminance(rgb: [f32; 3]) -> f32 {
-    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
 /// 乱数の種。**標準ライブラリだけで**——ハッシュの鍵は起動ごと・呼ぶごとに違う。
@@ -12768,9 +12623,9 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
     };
     if own {
         spec.paper = channels(paper);
-        spec.ink = terminal_appearance::readable_ink(spec.ink, spec.paper);
+        spec.ink = appearance::readable_ink(spec.ink, spec.paper);
         for ink in &mut spec.heading_ink {
-            *ink = terminal_appearance::readable_ink(*ink, spec.paper);
+            *ink = appearance::readable_ink(*ink, spec.paper);
         }
     }
     if id.is_panel() {
@@ -15374,7 +15229,8 @@ impl PaneId {
     /// the editing area is one or more panes, so there is no arrangement
     /// without this one in it.
     const FIRST: PaneId = PaneId(0);
-    fn is_panel(self) -> bool { self.0 >= 65536 }
+    const EMBEDDED_START: u32 = 65536;
+    fn is_panel(self) -> bool { self.0 >= Self::EMBEDDED_START }
     fn row(self, window: &AppWindow) -> usize {
         if self.is_panel() { window.get_panes().iter().position(|s| s.id == self.index()).unwrap_or(usize::MAX) } else { self.0 as usize }
     }
@@ -15386,7 +15242,7 @@ impl PaneId {
     /// opinion about how many there are. Everything with one of something per
     /// pane is built by mapping over this.
     fn all(window: &AppWindow) -> Vec<PaneId> {
-        window.get_panes().iter().filter(|s| s.id < 65536)
+        window.get_panes().iter().filter(|s| !s.embedded_panel)
             .map(|s| PaneId(s.id as u32))
             .collect()
     }
@@ -19331,31 +19187,6 @@ impl PaneSelection {
     }
 }
 
-fn selection_source_range(state: &EditorState) -> Option<(usize, usize)> {
-    let anchor = state.selection_anchor_source_byte?;
-    let focus = state.caret_source_byte?;
-    (anchor != focus).then_some((anchor.min(focus), anchor.max(focus)))
-}
-
-fn update_selection_after_move(
-    state: &mut EditorState,
-    source_byte: usize,
-    next_source_byte: usize,
-    extend_selection: bool,
-) -> Option<(usize, usize)> {
-    // **The mark is a Shift nobody is holding** (要件 11.4), so it is read in
-    // the one place a move decides what the selection becomes.
-    if extend_selection || state.mark {
-        if state.selection_anchor_source_byte.is_none() {
-            state.selection_anchor_source_byte = Some(source_byte);
-        }
-    } else {
-        state.selection_anchor_source_byte = Some(next_source_byte);
-    }
-    state.caret_source_byte = Some(next_source_byte);
-    selection_source_range(state)
-}
-
 /// Where in the document a point on a pane is.
 ///
 /// The pane is laid out again first. The text it shows can have changed since
@@ -20707,31 +20538,9 @@ fn undo_in_pane(
         return;
     }
     let state = states.of(id);
-    let mut source = document.text.borrow().clone();
-    let moved = {
-        let mut history = document.history.borrow_mut();
-        if forwards {
-            history.redo_into(&mut source)
-        } else {
-            history.undo_into(&mut source)
-        }
-    };
-    let Some((caret, change)) = moved else {
-        return;
-    };
-    // A composition that is still open belongs to the text that was there
-    // before this took it back.
+    let session = editor_session::EditorSession::with_state(document.clone(), state);
+    let Some((source, caret, change)) = session.undo(forwards) else { return; };
     id.set_ime_buffer(window, "");
-    {
-        let mut state = state.borrow_mut();
-        state.caret_source_byte = Some(caret);
-        state.selection_anchor_source_byte = Some(caret);
-        state.active_line_start = Some(source_line_start(&source, caret));
-        state.preedit.clear();
-        state.preferred_line = None;
-    }
-    *document.text.borrow_mut() = source.clone();
-    document.text.reconcile_saved();
     id.draw_edit(
         window,
         states,
@@ -20811,36 +20620,6 @@ fn toggle_mark(
     };
     window.tell_pane(told.into());
     refresh_pane_from_state(window, cache, document, id, &state, &source);
-}
-
-/// 選んでいる途中を畳んで、畳むものがあったかを返す（書き手の報告 2026-09-12）。
-///
-/// **選び始める道はいくつもあり、降りる道は1つでよい。**`Ctrl+Space`の印
-/// （要件 11.4）は同じ鍵をもう一度押せば下りるが、**押した覚えのない書き手に
-/// その鍵は無い**——「打鍵中に、選択が始まり戻れなくなり」は、始めたつもりが
-/// 無いからこそ終わらせ方も分からない、という形である。だから見るのは
-/// 「どうやって始まったか」ではなく「いま選んでいる途中か」だけにする。
-///
-/// **カーソルは動かさない。**畳むのは選択のほうで、書き手が字を打つ場所は
-/// 打つ前と同じところにある。
-fn release_selection(state: &mut EditorState) -> bool {
-    let selecting = state.mark
-        || state.line_drag.is_some()
-        || state.word_drag.is_some()
-        || !state.preedit.is_empty()
-        || selection_source_range(state).is_some();
-    if !selecting {
-        return false;
-    }
-    state.mark = false;
-    state.rectangular = false;
-    state.line_drag = None;
-    state.word_drag = None;
-    // 選択はカーソルのところへ畳む。**本文は動かさない**——打った字が選択を
-    // 置き換えるのは`insert_pane_text`のほうで、ここは何も消さない。
-    state.selection_anchor_source_byte = state.caret_source_byte;
-    state.preedit.clear();
-    true
 }
 
 /// Escapeで、選んでいる途中から戻る（書き手の報告 2026-09-12）。
@@ -21285,30 +21064,8 @@ fn splice_source(
         window.tell_tab(viewer_cannot_edit().into());
         return;
     }
-    if start >= end {
-        return;
-    }
-    let state = states.of(id);
-    let mut source = document.text.borrow().clone();
-    let removed = source[start..end].to_owned();
-    replace_source_range(&mut source, (start, end), text);
-    let caret = caret.min(source.len());
-    {
-        let mut state = state.borrow_mut();
-        state.caret_source_byte = Some(caret);
-        state.selection_anchor_source_byte = Some(caret);
-        state.active_line_start = Some(source_line_start(&source, caret));
-        state.preferred_line = None;
-        state.mark = false;
-        state.rectangular = false;
-    }
-    let change = Change {
-        at: start,
-        removed: removed.len(),
-        inserted: text.len(),
-    };
-    document.record(start, removed, text.to_owned());
-    *document.text.borrow_mut() = source.clone();
+    let session = editor_session::EditorSession::with_state(document.clone(), states.of(id));
+    let Some((source, caret, change)) = session.splice(start, end, text, caret) else { return; };
     id.draw_edit(
         window,
         states,
@@ -21657,41 +21414,6 @@ fn carry_state_across(state: &Rc<RefCell<EditorState>>, change: Change, source: 
     // is in bytes and the position it lands on has to be one a slice can start
     // at (6.7).
     clamp_state_into(state, source);
-}
-
-fn source_line_start(source: &str, source_byte: usize) -> usize {
-    let source_byte = source_byte.min(source.len());
-    source[..source_byte]
-        .rfind('\n')
-        .map(|newline| newline + 1)
-        .unwrap_or(0)
-}
-
-/// Drop what a text field hands over that a document should not hold: control
-/// characters and the private-use codepoints some IMEs emit. Both panes type
-/// through this.
-fn normalize_typed_input(input: &str) -> String {
-    // A Windows clipboard hands over CRLF, and mapping each half of it to a line
-    // break would double every one. Typed input never contains a carriage
-    // return, so the common path allocates nothing.
-    let input = if input.contains('\r') {
-        Cow::Owned(input.replace("\r\n", "\n"))
-    } else {
-        Cow::Borrowed(input)
-    };
-    input
-        .chars()
-        .filter_map(|character| match character {
-            '\r' => Some('\n'),
-            '\n' | '\t' => Some(character),
-            character
-                if !character.is_control() && !('\u{e000}'..='\u{f8ff}').contains(&character) =>
-            {
-                Some(character)
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 /// What to say when text is turned away for being over the limit.

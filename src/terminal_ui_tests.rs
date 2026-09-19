@@ -36,17 +36,22 @@ fn editor_panel_uses_source_engine_document_and_selection() {
     assert!(!id.screen(&h.window).preview && !id.vertical(&h.window));
     assert!(Rc::ptr_eq(&h.live.states.document(id), &document));
     let state = h.live.states.of(id);
+    assert!(Rc::ptr_eq(&state, &entry.borrow().view));
     state.borrow_mut().caret_source_byte = Some(document.text.borrow().len());
     insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "追記", false);
     assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
     assert!(original.text.borrow().is_empty());
+    undo_in_pane(&h.window, id, &document, &h.live.states, &h.live.cache, false);
+    assert_eq!(&*document.text.borrow(), "# source\n日本語");
+    undo_in_pane(&h.window, id, &document, &h.live.states, &h.live.cache, true);
+    assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
     state.borrow_mut().selection_anchor_source_byte = Some(0);
     assert!(release_selection(&mut state.borrow_mut()));
     assert!(selection_source_range(&state.borrow()).is_none());
     panel_source::sync(&h.window, &h.live);
     assert_eq!(entry.borrow().source_id, Some(id));
     assert!(Rc::ptr_eq(&h.live.states.of(id), &state));
-    entry.borrow_mut().view.set_read_only(true, true);
+    entry.borrow_mut().view.borrow_mut().set_read_only(true, true);
     panel_source::sync(&h.window, &h.live);
     insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "blocked", false);
     assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
@@ -59,6 +64,34 @@ fn editor_panel_uses_source_engine_document_and_selection() {
     assert!(h.live.states.panels.borrow().is_empty());
     assert!(h.live.tabs.borrow().panels.is_empty());
     assert!(h.live.cache.borrow().panel_panes.is_empty());
+}
+
+#[test]
+fn embedded_editor_host_releases_all_resources_without_reusing_ids() {
+    let (h, original) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let host = editor_host::EditorHost::new(&h.window, &h.live);
+    let document = OpenDocument::with_events(DocumentFile::untitled(2), "独立した面".into(), Default::default());
+    let session = editor_session::EditorSession::new(document.clone());
+    let held_state = Rc::downgrade(&session.state);
+    let id = host.attach(PaneId::FIRST, session).unwrap();
+    assert!(Rc::ptr_eq(&h.live.states.document(id), &document));
+    assert!(Rc::ptr_eq(&h.live.states.document(PaneId::FIRST), &original));
+    id.update_screen(&h.window, |screen| screen.width = 200.);
+    h.live.cache.borrow_mut().pane(id);
+    h.live.cache.borrow_mut().pace_of(id);
+    host.hide_except(&[]);
+    assert_eq!(id.screen(&h.window).width, 0.);
+    host.retain(&[]);
+    assert!(held_state.upgrade().is_none());
+    assert!(!h.live.states.panels.borrow().contains_key(&id.0));
+    assert!(!h.live.tabs.borrow().panels.contains_key(&id.0));
+    assert!(!h.live.cache.borrow().panel_panes.contains_key(&id.0));
+    assert!(!h.live.cache.borrow().panel_pace.contains_key(&id.0));
+    assert!(!h.window.get_panes().iter().any(|screen| screen.id == id.index()));
+    let next = host.attach(PaneId::FIRST, editor_session::EditorSession::new(document)).unwrap();
+    assert_ne!(id, next);
+    host.retain(&[next]);
+    assert!(h.live.states.panels.borrow().contains_key(&next.0));
 }
 
 #[test]
@@ -480,7 +513,7 @@ fn terminal_panel_long_text_click_and_end_render() {
         text: Key::Control.into(),
     });
     render();
-    entry.borrow_mut().view.set_read_only(true, true);
+    entry.borrow_mut().view.borrow_mut().set_read_only(true, true);
     panel_source::sync(&h.window, &h.live);
     h.window
         .window()
@@ -600,7 +633,7 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     assert_eq!(id.screen(&h.window).below_draft.as_str(), "first draft");
     terminal_panels::action(&h.window, &h.live, id, 7, 0);
     let target = terminal_panels::current(&h.live, id).unwrap();
-    assert!(target.borrow().view.viewer);
+    assert!(target.borrow().view.borrow().viewer);
     switch_shell(
         &h.window,
         &h.live,
@@ -678,7 +711,7 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     switch_to_tab(&h.window, &h.live, id, 0);
     terminal_panels::action(&h.window, &h.live, id, 0, 0);
     terminal_panels::action(&h.window, &h.live, id, 13, 0);
-    assert!(!target.borrow().view.viewer);
+    assert!(!target.borrow().view.borrow().viewer);
     assert!(target.borrow().capture.is_none());
 }
 

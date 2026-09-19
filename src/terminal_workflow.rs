@@ -71,7 +71,7 @@ pub(crate) fn send(window: &AppWindow, live: &Live, input: Input) {
     }
     if let Some(entry) = input.draft {
         let entry = entry.borrow();
-        if entry.view.viewer {
+        if entry.view.borrow().viewer {
             return;
         }
         input

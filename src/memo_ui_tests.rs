@@ -44,11 +44,11 @@ fn quick_draft_recovers_from_missed_shift_release() {
                 .dispatch_event(WindowEvent::KeyPressed { text: shift.into() });
             press(Key::RightArrow.into());
             // No Shift release event: reproduce the state left behind by IME.
-            crate::quick_draft::repair_shift_state(window.window(), message, hand);
+            crate::input_platform::repair_shift_state(window.window(), message, hand);
             press(Key::RightArrow.into());
             press("X".into());
             assert_eq!(window.get_text().as_str(), expected);
-            crate::quick_draft::repair_shift_state(window.window(), false, false);
+            crate::input_platform::repair_shift_state(window.window(), false, false);
         }
         window.set_text("abcdef".into());
         window.invoke_set_caret(0);
@@ -56,7 +56,7 @@ fn quick_draft_recovers_from_missed_shift_release() {
         window
             .window()
             .dispatch_event(WindowEvent::KeyPressed { text: shift.into() });
-        crate::quick_draft::repair_shift_state(window.window(), false, false);
+        crate::input_platform::repair_shift_state(window.window(), false, false);
         let position = slint::LogicalPosition::new(55.0, 27.0);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
