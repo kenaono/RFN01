@@ -10447,15 +10447,21 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                 // 追加要件 2026-09-15: TABの色＝個別の色、なければそのTABの向きの紙（TAB > Pane）。
                 // 全体の紙のままなら色を持たない（今までの見た目）。
                 let direction = usize::from(tab.view.vertical && !shared);
-                // 設定・端末のTABは紙を持たないので、紙の色は映さない（書き手の報告
-                // 2026-09-15：「SettingのTABまで色つきになりました」）。
-                let paper = (!tab.stands_in())
+                // Settings stays neutral. Terminal chips retain their own paper
+                // even while another tab is active, with the same contrast rule.
+                let paper = if tab.terminal.is_some() {
+                    Some(tab.below.front_style.as_ref().filter(|style| style.paper_own)
+                        .map(|style| style.paper)
+                        .or(tab.paper[direction])
+                        .or(strip.paper[direction])
+                        .unwrap_or_else(|| terminal_appearance::default_style(window, 0).paper))
+                } else { (!tab.stands_in())
                     .then(|| {
                         tab.paper[direction]
                             .or(strip.paper[direction])
                             .or(global[direction])
                     })
-                    .flatten();
+                    .flatten() };
                 let chip = tab.tab_colour.or(paper);
                 // **編集の始まったタブは、もう覗いているだけではない**
                 // （書き手の報告 2026-09-07）。ここが不変の借りしか持たないので

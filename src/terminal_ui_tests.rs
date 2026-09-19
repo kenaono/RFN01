@@ -85,6 +85,12 @@ fn terminal_new_tab_random_and_direct_file_capture() {
     let tab = h.live.tabs.borrow().of(id).current().unwrap().clone();
     let source = tab.terminal.as_ref().unwrap().clone();
     let colour = tab.below.front_style.as_ref().unwrap().paper;
+    publish_tabs(&h.window, &h.live);
+    let screen = id.screen(&h.window);
+    let info = screen.tabs.row_data(screen.active_tab as usize).unwrap();
+    assert!(info.colour_own);
+    assert_eq!(info.colour, colour);
+    assert_eq!(info.dark, luminance(channels(colour)) < 0.45);
     assert_ne!(colour, terminal_appearance::initial_style().paper);
     assert_eq!(id.screen(&h.window).front_style.paper, colour);
     assert_eq!(

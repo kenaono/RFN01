@@ -60,7 +60,10 @@ pub(crate) fn sync(window: &AppWindow, live: &Live) {
         if id.screen(window).width > 0. {
             let follow = state.borrow().viewer && state.borrow().follow;
             refresh_pane_from_state(window, &live.cache, &document, id, &state, &source);
-            if follow { scroll_to_end(window, &live.cache, id); }
+            if follow {
+                scroll_to_end(window, &live.cache, id);
+                refresh_after_scroll(window, &live.cache, id, id.scroll(window));
+            }
         }
     }
     for row in 0..rows.row_count() {

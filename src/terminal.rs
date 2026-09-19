@@ -237,6 +237,7 @@ pub struct Screen {
 
 #[derive(Debug, Default)]
 struct CapturedOutput {
+    repainting: bool,
     first_row: usize,
     touched: std::collections::BTreeSet<usize>,
     completed: String,
@@ -633,6 +634,10 @@ impl Screen {
                 .flatten()
             {
                 if row < capture.first_row || (changed_only && !capture.touched.contains(&row)) { continue; }
+                if capture.repainting && line.logical_text().is_empty() {
+                    capture.touched.remove(&row);
+                    continue;
+                }
                 capture.first_row = row + 1;
                 capture.touched.remove(&row);
                 capture.wrapped.push_str(&line.logical_text());
@@ -642,6 +647,7 @@ impl Screen {
                     if !fresh.is_empty() || capture.initial.is_empty() {
                         capture.completed.push_str(fresh);
                         capture.completed.push('\n');
+                        capture.repainting = false;
                     }
                     capture.initial.clear();
                 }
@@ -699,6 +705,9 @@ impl Screen {
         // ConPTY can finish output with a downward CUP instead of LF
         // before drawing the next prompt. Commit those rows as well.
         if self.capture.is_some() || self.file_capture.is_some() {
+            for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+                if row < capture.first_row { capture.repainting = true; }
+            }
             for leaving in self.cursor.row..row {
                 let changed = [&self.capture, &self.file_capture].into_iter().flatten()
                     .any(|capture| capture.touched.contains(&leaving));
@@ -929,6 +938,9 @@ impl Screen {
         if columns == self.columns && rows == self.rows {
             return;
         }
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            capture.repainting = true;
+        }
         for line in &mut self.lines {
             line.cells.resize(columns, Cell::blank(Attrs::default()));
         }
@@ -984,6 +996,7 @@ impl Screen {
         self.capture = capture;
         self.file_capture = file_capture;
         for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            capture.repainting = false;
             capture.first_row = 0;
             capture.touched.clear();
             capture.initial.clear();
@@ -1775,6 +1788,20 @@ mod tests {
         term.screen.start_capture();
         term.feed(b"\x1b[1;1Hold prompt\x1b[3;9Hcommand\r\n\r\nresult\r\n");
         assert_eq!(term.screen.capture_update(), Some(("command\n\nresult\n".into(), "".into())));
+    }
+
+    #[test]
+    fn capture_ignores_resize_blank_repaint_but_keeps_output_blank_lines() {
+        let mut term = Terminal::new(40, 8);
+        term.feed(b"old\r\nprompt> ");
+        term.screen.start_capture();
+        term.screen.resize(40, 6);
+        term.feed(b"\x1b[H\r\n\r\n\r\n\r\n\r\nfirst\r\n\r\nsecond\r\n");
+        assert_eq!(term.screen.capture_update(), Some(("first\n\nsecond\n".into(), "".into())));
+        let mut plain = Terminal::new(40, 8);
+        plain.screen.start_capture();
+        plain.feed(b"\r\nfirst\r\n");
+        assert_eq!(plain.screen.capture_update(), Some(("\nfirst\n".into(), "".into())));
     }
 
     #[test]
