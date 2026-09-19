@@ -12,6 +12,7 @@ fn quick_draft_recovers_from_missed_shift_release() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
     surface.set_size(slint::PhysicalSize::new(690, 340));
     window.show().unwrap();
     let draw = || {
@@ -234,7 +235,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
-            panels: Default::default(),
+            no_tabs: Default::default(),
             panes: vec![{
                 let tab = PaneTab::showing(&window, id, memo.clone());
                 PaneTabs {
@@ -262,7 +263,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert!(!close_tab(&window, &live, id, 1));
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let strip = tabs.of_mut(id).unwrap();
         strip.history.truncate(1);
         strip.at = 0;
     }
@@ -340,7 +341,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     // Removing one of two views does not ask to discard the shared document.
     live.tabs
         .borrow_mut()
-        .of_mut(id)
+        .of_mut(id).unwrap()
         .tabs
         .push(PaneTab::showing(&window, id, memo.clone()));
     assert!(!close_tab(&window, &live, id, 1));
@@ -739,7 +740,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let deleting = live.active(&window);
     let deleting_path = deleting.file.borrow().path().unwrap().to_owned();
     let duplicate = live.tabs.borrow().of(id).current().unwrap().clone();
-    live.tabs.borrow_mut().of_mut(id).tabs.push(duplicate);
+    live.tabs.borrow_mut().of_mut(id).unwrap().tabs.push(duplicate);
     live.closed_tabs.borrow_mut().clear();
     let closed_at = live.tabs.borrow().of(id).tabs.len() - 1;
     finish_close(&window, &live, id, closed_at);
@@ -1027,7 +1028,7 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
-            panels: Default::default(),
+            no_tabs: Default::default(),
             panes: vec![{
                 let tab = PaneTab::showing(&window, id, memo.clone());
                 PaneTabs {
@@ -1211,4 +1212,86 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
             );
         }
     }
+}
+
+
+/// The real standalone window uses the shared document/history/layout, without
+/// constructing an AppWindow, pane registry or a TAB.
+#[test]
+fn standalone_draft_edits_japanese_and_keeps_composition_out_of_saved_text() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
+    surface.set_size(slint::PhysicalSize::new(690, 340));
+    window.show().unwrap();
+    let edits = Rc::new(Cell::new(0));
+    let count = edits.clone();
+    window.on_edited(move || count.set(count.get() + 1));
+    window.set_text("猫と犬\n次の行".into());
+    window.invoke_set_caret(3);
+    window.invoke_editor_move(1, true);
+    window.invoke_editor_preedit("にほん".into());
+    assert_eq!(window.get_text().as_str(), "猫と犬\n次の行");
+    assert_eq!(edits.get(), 0);
+    window.invoke_editor_text("や".into());
+    assert_eq!(window.get_text().as_str(), "猫や犬\n次の行");
+    assert_eq!(edits.get(), 1);
+    window.invoke_editor_undo(false);
+    assert_eq!(window.get_text().as_str(), "猫と犬\n次の行");
+    window.invoke_editor_undo(true);
+    assert_eq!(window.get_text().as_str(), "猫や犬\n次の行");
+    window.invoke_editor_select_all();
+    assert!(window.get_editor_selected());
+    assert!(window.invoke_editor_escape());
+    assert!(!window.get_editor_selected());
+    window.invoke_editor_preedit("取り消す".into());
+    assert!(window.invoke_editor_escape());
+    assert_eq!(window.get_text().as_str(), "猫や犬\n次の行");
+    window.set_text("復元した下書き".into());
+    window.invoke_set_caret(3);
+    window.invoke_editor_undo(false);
+    assert_eq!(window.get_text().as_str(), "復元した下書き");
+    assert_eq!(window.get_caret(), 3);
+    assert!(!window.get_editor_screen().can_undo);
+    drop(window);
+    slint::platform::update_timers_and_animations();
+}
+
+#[test]
+fn standalone_draft_keeps_end_visible_after_long_text_and_resize() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
+    surface.set_size(slint::PhysicalSize::new(690, 340));
+    window.show().unwrap();
+    let draw = |width: usize, height: usize| {
+        slint::platform::update_timers_and_animations();
+        surface.draw_if_needed(|renderer| {
+            let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+            renderer.render(&mut pixels, width);
+        });
+    };
+    draw(690, 340);
+    let text = "日本語の本文と English text\n".repeat(80);
+    window.set_text(text.clone().into());
+    window.invoke_set_caret(text.len() as i32);
+    window.invoke_editor_text("末尾".into());
+    draw(690, 340);
+    let screen = window.get_editor_screen();
+    assert!(screen.scroll_y < 0.0);
+    assert!(screen.caret_y + screen.scroll_y >= -1.0);
+    assert!(screen.caret_y + screen.scroll_y < screen.shown_height);
+    assert!(screen.tiles.row_count() > 0);
+    surface.set_size(slint::PhysicalSize::new(400, 240));
+    draw(400, 240);
+    window.invoke_set_caret(window.get_text().len() as i32);
+    draw(400, 240);
+    assert_eq!(window.get_text().as_str(), format!("{text}末尾"));
+    assert!(window.get_editor_screen().shown_width < screen.shown_width);
+    window.invoke_editor_delete(true);
+    assert!(window.get_text().ends_with("末"));
+    window.invoke_editor_undo(false);
+    assert!(window.get_text().ends_with("末尾"));
 }

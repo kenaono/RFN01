@@ -25,6 +25,41 @@ impl EditorSession {
         self.showing.borrow().clone()
     }
 
+    /// Commit typed text into the source snapshot used by the synchronous hit /
+    /// preview resolver. The host must not retain this snapshot across events.
+    pub(crate) fn insert_at(
+        &self,
+        mut source: String,
+        start: usize,
+        end: usize,
+        input: String,
+    ) -> Option<(String, usize, Change)> {
+        let document = self.document();
+        if document.read_only() || self.state.borrow().viewer {
+            return None;
+        }
+        let removed = source.get(start..end)?.to_owned();
+        source.replace_range(start..end, &input);
+        let next = start + input.len();
+        {
+            let mut state = self.state.borrow_mut();
+            state.caret_source_byte = Some(next);
+            state.selection_anchor_source_byte = Some(next);
+            state.active_line_start = Some(source_line_start(&source, next));
+            state.preedit.clear();
+            state.preferred_line = None;
+            state.mark = false;
+        }
+        let change = Change {
+            at: start,
+            removed: removed.len(),
+            inserted: input.len(),
+        };
+        document.record(start, removed, input);
+        *document.text.borrow_mut() = source.clone();
+        Some((source, next, change))
+    }
+
     /// Replace an already resolved source span. Hit testing and preview mapping
     /// belong to the view; history and editing state belong to this session.
     pub(crate) fn splice(

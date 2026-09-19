@@ -1037,7 +1037,7 @@ Explorerを表示している間は、外部での追加・削除・名前変更
 | `ui/tokens.slint` | 画面が使ってよい色の全部（`global Tok`）。**ここ以外に色を書かない。**UIは紫（色相295）、紙はアイボリー（色相92）で、この2つの色相を混ぜない。本文の墨`doc-ink`だけは紫を含まない |
 | `ui/controls.slint` | 画面の部品。アイコンの形（`Icons`＝SVGのパス文字列）、`IconButton`（ホバー・入・ツールチップ）、`StepRow`、メニューの行と枠 |
 | `ui/app-window.slint` | 画面構成。編集ペインは`panes`モデルに対する繰り返し1つで、行が1ペイン。トップバーのメニュー、表示設定のパネル、作業を失いうる質問（要件 8.3・8.4）もここに描く |
-| `ui/quick-draft.slint` | クイック下書きの窓（要件 12）。本文はSlintの`TextInput`そのもの——カーソル・選択・Undo・切り貼りは全部あちらのもの |
+| `ui/quick-draft.slint` | クイック下書きの窓（要件 12）。本文は通常Editorと同じ`EditorSurface`を使用し、履歴・復元・コピー・TAB送信はQuick Draft側が担当 |
 | `ui/editor-pane.slint` | 1つの編集ペイン（`EditorPane`）と、その1行ぶんの状態（`PaneScreen`）。縦横の違いは`vertical`1つに集約している。タブ列とそのメニュー（要件 6.7）もここ |
 
 要件 §7.2 の4つの表示モード（横書き・縦書き × ソース編集・ライブプレビュー編集）は同じengineの上で動きます。違いは**engineへ渡す文字列と書字方向、そして位置の対応表が恒等写像かどうかだけ**で、その対応は`PaneText`が持ちます（技術検証 3.12）。
@@ -1349,3 +1349,17 @@ Terminalの右クリックから、履歴検索（Ctrl+Shift+F）、最新位置
 設定 → Terminalではシェルプロファイル（名前・実行ファイル・引数・開始フォルダ）を編集できます。編集欄の変更は「適用」で確定します。Explorerや文書Paneのメニューから、そのフォルダを開始場所として新しいTerminalを開けます。WSLの開始フォルダにはWindowsパスまたはLinuxの絶対パス／`~`を指定できます。
 
 Terminal・Editor Panel・Terminal Panelの外観既定は設定 → Terminalにあります。Editorの既定は既存のText／Page設定です。各TABの右クリックでは個別外観を指定できます。Pane背景変更は上段・下段へ一括適用し、個別の背景指定だけを解除します。文字書式と透過度は維持します。ログ本文のタイムスタンプ付与は、プロンプト識別の確認後に別途検討します。
+
+
+### Editor部品の再利用（RFN01-7）
+
+通常Editor、Editor Panel、Quick Draftは同じ本文表示・IME・選択・組版・タイル描画を使います。`EditorSession`が文書と表示ごとの編集状態を結び、入力確定・範囲置換・Undo/Redoを担当します。保存・Workspace・TAB、Panelのログ取り込み、Quick Draftの履歴と送信はそれぞれの利用先に残しています。
+
+- 表示：`ui/editor-surface.slint`。TAB・検索欄・フッターは`editor-pane.slint`側。
+- 組版と描画：`src/editor_render.rs`。書式と表示範囲を値で渡します。
+- 選択と移動：`src/editor_interaction.rs`。表示先のWindowを参照しません。
+- 文書と編集状態：`src/editor_session.rs`、`src/editor_state.rs`。同じ文書でも表示ごとの選択位置は独立します。
+- 別Windowへの接続例：`src/draft_editor.rs`。AppWindowや代理TABを作らず、共有部品をQuick Draftへ接続します。
+- 主Windowへの埋込み：`src/editor_host.rs`。状態・表示行・描画キャッシュの登録と解放をまとめます。Panelの代理TABは不要です。
+
+設計の境界・維持する動作・検証条件は[Editor部品化_実装計画.md](Editor部品化_実装計画.md)を参照してください。

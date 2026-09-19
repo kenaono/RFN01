@@ -1,5 +1,5 @@
 //! Main-window embedding adapter. Registration and cleanup stay together so callers
-//! cannot forget a state, model row, render cache or compatibility TAB entry.
+//! cannot forget a state, model row, render cache.
 use super::*;
 use crate::editor_session::EditorSession;
 
@@ -27,17 +27,7 @@ impl<'a> EditorHost<'a> {
         }
         self.live.states.next_panel.set(next + 1);
         let id = PaneId(next);
-        let tab = PaneTab::showing(self.window, owner, session.document());
         self.live.states.panels.borrow_mut().insert(next, session);
-        // Transitional adapter for existing main-window callbacks. The embedding
-        // caller does not manufacture a TAB; standalone hosts must not need this.
-        self.live.tabs.borrow_mut().panels.insert(
-            next,
-            PaneTabs {
-                tabs: vec![tab],
-                ..Default::default()
-            },
-        );
         let mut screen = id.initial_screen(false, false);
         screen.embedded_panel = true;
         screen.panel_owner = owner.index();
@@ -80,7 +70,6 @@ impl<'a> EditorHost<'a> {
             .panels
             .borrow_mut()
             .retain(|id, _| keep(id));
-        self.live.tabs.borrow_mut().panels.retain(|id, _| keep(id));
         let mut cache = self.live.cache.borrow_mut();
         cache.panel_panes.retain(|id, _| keep(id));
         cache.panel_pace.retain(|id, _| keep(id));

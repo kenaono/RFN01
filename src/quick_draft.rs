@@ -3,8 +3,8 @@
 //! **A second window, and almost none of the editor in it.** What 要件 12 asks
 //! for is a place to write a short message bound for somewhere else, where
 //! `Enter` cannot send it — so there is no Markdown, no preview, no vertical
-//! writing and no file. The text is Slint's own `TextInput` (`ui/quick-draft`),
-//! and what is here is the part that outlives the window: where it was, whether
+//! writing and no file. The body uses the shared source editor (`draft_editor`);
+//! what is here is the part that outlives the window: where it was, whether
 //! it stays on top, and the draft itself.
 //!
 //! **Opening it is a function, not a click** (要件 12.2). The menu calls
@@ -150,6 +150,7 @@ impl QuickDraftWindow {
 }
 
 pub(crate) fn wire_shortcuts(owner: &AppWindow, window: &QuickDraft) {
+    crate::draft_editor::install(window);
     let owner_weak = owner.as_weak();
     let draft_weak = window.as_weak();
     window.on_shortcut_key(move |text, control, alt, shift| {

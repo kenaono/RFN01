@@ -1,3 +1,5 @@
+import { EditorSurface } from "editor-surface.slint";
+import { PaneScreen } from "editor-types.slint";
 import { Tok } from "tokens.slint";
 import { MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 
@@ -8,11 +10,7 @@ import { MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 // send it by accident. So `Enter` is a newline and nothing here sends anything;
 // the way out is the clipboard.
 //
-// **Plain text, and Slint's own editing.** The main window's panes exist
-// because Markdown has to be laid out two ways (要件 7.2); a draft has none of
-// that, and the built-in `TextInput` already carries the cursor, the selection,
-// undo, cut, copy, paste and select-all that 要件 12.2 asks for. Writing a
-// second editor for this would be writing one to be worse.
+// The body uses the same source editor surface as the main editor.
 export component QuickDraft inherits Window {
     title: @tr("Quick Draft");
     // preferred-*, not width/height, for the reason the main window gives: a
@@ -24,14 +22,15 @@ export component QuickDraft inherits Window {
     background: Tok.chrome;
     always-on-top <=> root.on-top;
 
-    in-out property <string> text <=> input.text;
+    in-out property <string> text;
+    changed text => { root.editor-replaced(); }
     in-out property <bool> on-top: false;
     /// What just happened, shown small and taken away again by whoever set it
     /// (要件 12.3: "非侵襲的な表示").
     in property <string> notice;
     /// Where the caret is, so the next run opens where this one was left
     /// (要件 12.4).
-    out property <int> caret <=> input.cursor-position-byte-offset;
+    in-out property <int> caret;
 
     /// The drafts kept behind this one, newest first — a line each, for the
     /// list to show (要件 12.4).
@@ -62,6 +61,27 @@ export component QuickDraft inherits Window {
     /// Where the list sits above the button, in the button's own coordinates.
     property <length> menu-top: -6px - root.menu-height;
 
+    in-out property <PaneScreen> editor-screen;
+    in property <color> editor-paper: Tok.paper;
+    in property <color> editor-ink: Tok.doc-ink;
+    in property <int> editor-focus-generation;
+    in property <bool> editor-selected;
+    callback editor-replaced();
+    callback editor-caret(int);
+    callback editor-copy-all();
+    callback editor-resized();
+    callback editor-scrolled(float, bool);
+    callback editor-text(string);
+    callback editor-preedit(string);
+    callback editor-delete(bool);
+    callback editor-move(int, bool);
+    callback editor-edge(bool, bool, bool);
+    callback editor-pointer(float, float, int);
+    callback editor-select-all();
+    callback editor-undo(bool);
+    callback editor-copy(bool);
+    callback editor-escape() -> bool;
+    callback editor-mark(bool);
     callback edited();
     callback shortcut-key(string, bool, bool, bool) -> bool;
     callback copied();
@@ -91,19 +111,16 @@ export component QuickDraft inherits Window {
     /// must not look like one; a caret that jumped to the end would be the
     /// writer's place lost to a button.
     public function copy-all() {
-        input.select-all();
-        input.copy();
-        input.set-selection-offsets(root.caret, root.caret);
-        root.copied();
+        root.editor-copy-all();
     }
 
     public function take-focus() {
-        input.focus();
+        source-view.take-focus();
     }
 
     /// Put the caret back where the last run left it (要件 12.4).
     public function set-caret(at: int) {
-        input.set-selection-offsets(at, at);
+        root.editor-caret(at);
     }
 
     VerticalLayout {
@@ -117,52 +134,67 @@ export component QuickDraft inherits Window {
             background: Tok.paper;
             border-radius: 6px;
             border-width: 1px;
-            border-color: input.has-focus ? Tok.accent : Tok.rule;
+            border-color: source-view.input-focused ? Tok.accent : Tok.rule;
             clip: true;
-
-            // **The enclosing element scrolls the text**, which is what
-            // `cursor-position-changed` is for: `TextInput` reports where the
-            // cursor went and expects whoever holds it to bring it into view.
-            paper := Flickable {
-                x: 10px;
-                y: 8px;
-                width: parent.width - 20px;
-                height: parent.height - 16px;
-                viewport-width: self.width;
-                viewport-height: max(input.preferred-height, self.height);
-                interactive: true;
-
-                input := TextInput {
-                    width: parent.width;
-                    height: max(self.preferred-height, paper.height);
-                    font-size: 14px;
-                    color: Tok.doc-ink;
-                    selection-background-color: Tok.accent-soft;
-                    selection-foreground-color: Tok.ink-strong;
-                    // 要件 12.2: horizontal plain text, and `Enter` is always a
-                    // newline. Both are this one line.
-                    single-line: false;
-                    wrap: word-wrap;
-
-                    edited => {
-                        root.edited();
-                    }
-                    cursor-position-changed(position) => {
-                        // Keep the caret on screen, top and bottom alike. The
-                        // viewport's y is negative as it scrolls down, which is
-                        // why the two comparisons look the way they do.
-                        if (position.y + 24px > -paper.viewport-y + paper.height) {
-                            paper.viewport-y = paper.height - position.y - 24px;
-                        }
-                        if (position.y < -paper.viewport-y) {
-                            paper.viewport-y = -position.y;
-                        }
-                    }
-                    key-pressed(event) => {
-                        if self.preedit-text == "" && root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
-                        return reject;
-                    }
-                }
+            source-view := EditorSurface {
+                width: parent.width;
+                height: parent.height;
+                standalone: true;
+                writing: true;
+                focused: source-view.input-focused;
+                takes-focus: true;
+                focus-generation: root.editor-focus-generation;
+                page-background: Tok.paper;
+                side-padding: 10px;
+                page-margin: 8px;
+                has-selection: root.editor-selected;
+                tiles: root.editor-screen.tiles;
+                selection-rects: root.editor-screen.selection-rects;
+                content-width: root.editor-screen.content-width;
+                content-height: root.editor-screen.content-height;
+                caret-visible: root.editor-screen.caret-visible;
+                caret-x: root.editor-screen.caret-x;
+                caret-y: root.editor-screen.caret-y;
+                caret-width: root.editor-screen.caret-width;
+                caret-height: root.editor-screen.caret-height;
+                ime-anchor-x: root.editor-screen.ime-anchor-x;
+                ime-anchor-y: root.editor-screen.ime-anchor-y;
+                ime-anchor-width: root.editor-screen.ime-anchor-width;
+                ime-anchor-height: root.editor-screen.ime-anchor-height;
+                can-undo: root.editor-screen.can-undo;
+                can-redo: root.editor-screen.can-redo;
+                ime-buffer <=> root.editor-screen.ime-buffer;
+                scroll-x <=> root.editor-screen.scroll-x;
+                scroll-y <=> root.editor-screen.scroll-y;
+                shown-width <=> root.editor-screen.shown-width;
+                shown-height <=> root.editor-screen.shown-height;
+                wrap-height <=> root.editor-screen.wrap-height;
+                scroll-to-x: root.editor-screen.scroll-x;
+                scroll-to-y: root.editor-screen.scroll-y;
+                scroll-generation: root.editor-screen.scroll-generation;
+                resized => { root.editor-resized(); }
+                scrolled(value) => { root.editor-scrolled(value, false); }
+                across-scrolled(value) => { root.editor-scrolled(value, true); }
+                text-input(text, converted) => { root.editor-text(text); }
+                preedit-changed(text) => { root.editor-preedit(text); }
+                backspace-pressed => { root.editor-delete(true); }
+                delete-pressed => { root.editor-delete(false); }
+                move-caret(direction, extend) => { root.editor-move(direction, extend); }
+                home-end(to-end, whole, extend) => { root.editor-edge(to-end, whole, extend); }
+                selection-start(x, y, extend) => { root.editor-pointer(x, y, extend ? 3 : 0); }
+                selection-update(x, y) => { root.editor-pointer(x, y, 1); }
+                selection-end(x, y) => { root.editor-pointer(x, y, 2); }
+                select-all => { root.editor-select-all(); }
+                undo-requested(forwards) => { root.editor-undo(forwards); }
+                copy-requested(cut) => { root.editor-copy(cut); }
+                copy-body-requested => { root.editor-copy(false); }
+                shortcut-key(text, control, alt, shift) => { root.shortcut-key(text, control, alt, shift); }
+                shift-held(said) => { said }
+                selection-escaped => { root.editor-escape() }
+                mark-toggled(rectangle) => { root.editor-mark(rectangle); }
+                tab-pressed(backwards) => { if !backwards { root.editor-text("\u{9}"); } }
+                enter-pressed(shift) => { root.editor-text("\n"); }
+                margin-pressed => { source-view.take-focus(); }
             }
         }
 

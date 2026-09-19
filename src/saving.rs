@@ -1917,7 +1917,7 @@ mod folder_auto_save_tests {
                 close_run: Rc::default(),
                 cache: Rc::new(RefCell::new(crate::RenderCache::default())),
                 tabs: Rc::new(RefCell::new(crate::Tabs {
-                    panels: Default::default(),
+                    no_tabs: Default::default(),
                     panes: vec![crate::PaneTabs {
                         history: vec![crate::NavigationPlace::from(&tab)],
                         tabs: vec![tab],

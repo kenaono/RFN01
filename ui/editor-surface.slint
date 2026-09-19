@@ -1,0 +1,1677 @@
+import { ScrollView, VerticalBox } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { LinkCompletion } from "link-completion.slint";
+import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Role, Slider, Tab, TextButton, ToggleChip } from "controls.slint";
+import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
+
+// The shared text surface: tiles, selection, IME, scrolling and body actions.
+// TAB strips and auxiliary panels are supplied by the host.
+export component EditorSurface inherits Rectangle {
+    in property <bool> standalone: false;
+    out property <bool> input-focused: ime-input.has-focus;
+    in property <bool> embedded-panel;
+    callback key-number(string) -> int;
+    in property <bool> vertical;
+    in property <bool> focused;
+    in property <color> page-background;
+    in property <int> wall-kind;
+    in property <[WallPiece]> wall-pieces;
+    in property <image> wall-image;
+    in property <float> wall-image-width;
+    in property <float> wall-image-height;
+    in property <int> wall-fit;
+    in property <int> wall-strength;
+    in property <int> background-transparency;
+    in property <length> wall-origin-x;
+    in property <length> wall-origin-y;
+    callback paper-chosen(int, color);
+    callback paper-default(int);
+    callback paper-more(int);
+    in-out property <int> paper-target;
+    in property <string> status;
+    in property <length> text-indent;
+    in property <length> side-padding;
+    in property <length> page-margin;
+    in property <length> find-bar-height;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    in property <bool> terminal;
+    in property <bool> empty;
+    in property <bool> settings;
+    in property <bool> writing;
+    in property <[string]> word-sets;
+    in property <bool> has-selection;
+    callback word-add-requested(int);
+    in property <[string]> terminal-shells;
+    in property <int> default-shell;
+    callback new-file-requested();
+    callback new-terminal-requested(int);
+    in property <int> below-kind;
+    callback terminal-action(int, int);
+    callback terminal-url(int, float, float);
+    in property <PanelStyle> front-style;
+    callback appearance-requested(bool);
+    callback panel-action(int, int);
+    in property <bool> terminal-capturing;
+    in property <bool> terminal-file-logging;
+    callback below-toggled();
+    callback navigate-requested(bool);
+    callback below-sent();
+    callback below-entered();
+    callback below-left();
+    in property <[PreviewTile]> tiles;
+    in property <[PreviewSelectionRect]> selection-rects;
+    in property <[PreviewSelectionRect]> difference-rects;
+    in property <[PreviewSelectionRect]> match-rects;
+    in property <[PreviewSelectionRect]> scope-rects;
+    in property <[PreviewSelectionRect]> picture-rects;
+    in property <PreviewSelectionRect> picture-outline;
+    in property <bool> picture-outline-shown;
+    in property <int> content-width;
+    in property <int> content-height;
+    in property <bool> caret-visible;
+    in property <float> caret-x;
+    in property <float> caret-y;
+    in property <float> caret-width;
+    in property <float> caret-height;
+    in property <float> ime-anchor-x;
+    in property <float> ime-anchor-y;
+    in property <float> ime-anchor-width;
+    in property <float> ime-anchor-height;
+    in-out property <string> ime-buffer;
+    in-out property <length> scroll-x;
+    in-out property <length> scroll-y;
+    in property <length> scroll-to-x;
+    in property <length> scroll-to-y;
+    in property <int> scroll-generation;
+    callback scroll-applied(float, float);
+    in-out property <length> shown-width;
+    in-out property <length> shown-height;
+    in-out property <length> wrap-height;
+    in property <bool> takes-focus;
+    in property <int> focus-generation;
+    callback resized();
+    callback scrolled(float);
+    callback across-scrolled(float);
+    callback selection-start(float, float, bool);
+    callback link-open(float, float) -> bool;
+    in property <bool> link-popup-open;
+    in property <[string]> link-popup-rows;
+    in property <int> link-popup-selected;
+    in property <string> link-popup-status;
+    callback link-popup-key(int) -> bool;
+    callback link-popup-chosen(int);
+    callback selection-update(float, float);
+    callback selection-end(float, float);
+    callback picture-resize(int, int, float, float);
+    callback select-all();
+    callback text-input(string, bool);
+    callback terminal-key(string, int, bool, bool, bool);
+    callback terminal-scrolled(float);
+    in property <[bool]> bullet-marks;
+    private property <bool> bullet-rows-open;
+    callback tab-pressed(bool);
+    callback enter-pressed(bool);
+    callback line-edit(int);
+    callback list-edit(int, int);
+    callback preedit-changed(string);
+    callback backspace-pressed();
+    callback delete-pressed();
+    callback move-caret(int, bool);
+    callback home-end(bool, bool, bool);
+    callback focus-taken();
+    callback margin-pressed();
+    callback focus-trace(string);
+    callback save-requested();
+    callback menu-opened();
+    callback save-as-requested();
+    callback zoom-stepped(int);
+    callback zoom-reset-requested();
+    callback close-active-tab();
+    callback find-requested(bool);
+    callback goto-requested(bool);
+    callback reopen-closed-requested();
+    in property <[string]> shortcut-keys;
+    callback shortcut-key(string, bool, bool, bool) -> bool;
+    callback undo-requested(bool);
+    callback copy-requested(bool);
+    callback copy-body-requested();
+    callback tab-stepped(bool);
+    callback focus-moved(int);
+    callback kill-requested(int);
+    callback mark-toggled(bool);
+    callback quick-draft-requested();
+    private property <length> context-x;
+    private property <length> context-y;
+    callback open-file-requested();
+    callback escaped() -> bool;
+    callback selection-escaped() -> bool;
+    callback shift-held(bool) -> bool;
+    callback dismiss-menus() -> bool;
+    callback find-again(bool);
+    private property <bool> had-preedit;
+    private property <bool> commit-just-finished;
+    private property <bool> dragging;
+    function take-scroll() {
+        scroll.viewport-x = root.scroll-to-x;
+        scroll.viewport-y = root.scroll-to-y;
+        root.scroll-applied(root.scroll-to-y / 1px, scroll.viewport-y / 1px);
+    }
+    changed scroll-generation => { root.take-scroll(); }
+    public function take-focus() { ime-input.focus(); }
+    commit-reset := Timer {
+        interval: 50ms;
+        running: false;
+        triggered => {
+            root.commit-just-finished = false;
+            self.stop();
+        }
+    }
+    body-clip := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            background: root.terminal ? root.front-style.paper.transparentize(root.front-style.transparency / 100)
+                : (root.writing ? root.page-background.transparentize(root.background-transparency / 100) : transparent);
+            // 追加要件 2026-09-15（書き手）: **本文の後ろに壁紙、その上に紙を濃さぶん透かして1枚。**
+            // スクロールしても動かない——紙は本文と一緒に流れるが、壁紙は面（Windowsの壁紙なら
+            // 画面）に固定されている。メニュー・Terminal・Settingsには敷かない。
+            if root.wall-kind != 0 && root.writing: wall := Rectangle {
+                width: parent.width;
+                height: parent.height;
+
+                if root.wall-kind == 1: Rectangle {
+                    for piece in root.wall-pieces: Rectangle {
+                        x: piece.x - root.wall-origin-x - wall.absolute-position.x;
+                        y: piece.y - root.wall-origin-y - wall.absolute-position.y;
+                        width: piece.width;
+                        height: piece.height;
+                        clip: true;
+                        background: piece.colour;
+
+                        if piece.has-image: Image {
+                            x: piece.image-x;
+                            y: piece.image-y;
+                            width: piece.image-width;
+                            height: piece.image-height;
+                            source: piece.source;
+                            image-fit: fill;
+                            horizontal-tiling: piece.tiled ? ImageTiling.repeat : ImageTiling.none;
+                            vertical-tiling: piece.tiled ? ImageTiling.repeat : ImageTiling.none;
+                        }
+                    }
+                }
+
+                if root.wall-kind == 2: Image {
+                    property <float> aspect: root.wall-image-height > 0
+                        ? root.wall-image-width / root.wall-image-height
+                        : 1;
+                    width: root.wall-fit == 1 ? parent.height * self.aspect : parent.width;
+                    height: root.wall-fit == 2 ? parent.width / self.aspect : parent.height;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: root.wall-image;
+                    image-fit: fill;
+                    horizontal-tiling: root.wall-fit == 0 ? ImageTiling.repeat : ImageTiling.none;
+                    vertical-tiling: root.wall-fit == 0 ? ImageTiling.repeat : ImageTiling.none;
+                }
+
+                Rectangle {
+                    background: root.page-background.transparentize(root.wall-strength / 100);
+                }
+            }
+
+            // The bar occupies layout space, but the document keeps its
+            // original origin and height. Only its covered top is clipped.
+        // 書き手の報告 2026-09-15: **余白をクリックしてもActive Paneが動かない。**本文の押下は
+        // 入力欄が鍵盤を取ることでPaneを替えるが、紙の周りの余白には受け手が無かった。
+        // 紙より後ろに敷くので、本文の押下はこれまでどおり本文が受ける。
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            pointer-event(event) => {
+                // 追加要件 2026-09-16: **戻る／進むは面のどこでも効く。**紙は面いっぱいとは限らず
+                // （縦書きの短い文書は右端に寄る、行の長さを決めた横書きは真ん中に立つ）、紙の外で
+                // 押したときに何も起きないのは、鍵盤の戻る／進むとの食い違いになる。
+                if event.button == PointerEventButton.back
+                    || event.button == PointerEventButton.forward {
+                    if event.kind == PointerEventKind.down {
+                        root.navigate-requested(event.button == PointerEventButton.forward);
+                    }
+                    return;
+                }
+                if event.kind == PointerEventKind.down {
+                    root.margin-pressed();
+                }
+            }
+        }
+
+        VerticalBox {
+            y: -root.find-bar-height;
+            width: parent.width;
+            height: parent.height + root.find-bar-height;
+            padding-top: root.page-margin;
+            padding-bottom: root.page-margin;
+            padding-left: root.side-padding;
+            padding-right: root.side-padding;
+            spacing: 8px;
+
+            // **Nothing above the paper unless something went wrong.** The two
+            // captions that used to sit here were from the verification days —
+            // a fixed one naming the mode, which stopped being true once a pane
+            // could switch, and the DirectWrite probe's measurements, which are
+            // in `diag/Diag_*.log` where the rest of them are.
+            //
+            // Deliberately not wrapped: a width taken from the parent closes a
+            // binding loop through VerticalBox's own sizing. The message puts
+            // what matters first instead, so clipping the tail costs nothing
+            // worth reading.
+            if root.status != "": Text {
+                text: root.status;
+                color: Tok.ink-muted;
+                font-size: 12px;
+                x: root.text-indent;
+            }
+
+            scroll := ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: as-needed;
+                vertical-scrollbar-policy: as-needed;
+                viewport-x <=> root.scroll-x;
+                viewport-y <=> root.scroll-y;
+                viewport-width: max(self.visible-width, root.content-width * 1px);
+                viewport-height: max(self.visible-height, root.content-height * 1px);
+
+                // Reported at `init` as well as on change, for the reason 6.7 and
+                // 6.11 both record: a pane is created when it becomes visible, so a
+                // size that is right from birth never fires a change event and the
+                // default is kept instead. Split creates it at half width, which is
+                // exactly that case.
+                init => {
+                    root.shown-width = self.visible-width;
+                    root.shown-height = self.visible-height;
+                    root.wrap-height = self.visible-height;
+                    root.resized();
+                }
+                changed viewport-x => {
+                    if (root.vertical) {
+                        root.scrolled(self.viewport-x / 1px);
+                    } else {
+                        root.across-scrolled(self.viewport-x / 1px);
+                    }
+                }
+                changed viewport-y => {
+                    if (!root.vertical) {
+                        root.scrolled(self.viewport-y / 1px);
+                    } else {
+                        root.across-scrolled(self.viewport-y / 1px);
+                    }
+                }
+                // One of these two is the flow axis and re-lays out the document;
+                // the other only changes how much of it is on screen.
+                changed visible-width => {
+                    root.shown-width = self.visible-width;
+                    if (root.vertical) {
+                        root.scrolled(self.viewport-x / 1px);
+                    } else {
+                        root.resized();
+                    }
+                }
+                changed visible-height => {
+                    root.shown-height = self.visible-height;
+                    root.wrap-height = self.visible-height;
+                    if (root.vertical) {
+                        root.resized();
+                    } else {
+                        root.scrolled(self.viewport-y / 1px);
+                    }
+                }
+
+                // 紙の外側（行の長さを決めて紙が真ん中に立っているとき、縦書きの短い文書の左など）。
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    pointer-event(event) => {
+                        // 戻る／進むは面のどこでも効く（下の余白と同じ扱い）。
+                        if event.button == PointerEventButton.back
+                            || event.button == PointerEventButton.forward {
+                            if event.kind == PointerEventKind.down {
+                                root.navigate-requested(event.button == PointerEventButton.forward);
+                            }
+                            return;
+                        }
+                        if event.kind == PointerEventKind.down {
+                            root.margin-pressed();
+                        }
+                    }
+                }
+
+                page := Rectangle {
+                    width: root.content-width * 1px;
+                    height: root.content-height * 1px;
+                    // 要件 9: when the line is shorter than the pane — the
+                    // writer set a line length — the sheet stands in the middle
+                    // of it rather than against one edge. **The whole of
+                    // centring is here**: the tiles, the selection, the caret,
+                    // the IME's anchor and the pointer that reports back are all
+                    // inside this rectangle, so they are in the document's own
+                    // coordinates whatever this one is. Moving the sheet instead
+                    // of each of them is why none of them had to learn about it.
+                    //
+                    // 書き手の報告 2026-09-16: **縦書きは右から始まる。**Paneより短い文書も
+                    // 右端に寄せる（左に寄っていた）。長い文書は右端を保つスクロール
+                    // （`scroll_after_content_resize`）が同じ位置へ置くので、Paneの幅を
+                    // 越える前後で文書の頭が動かない。
+                    x: root.vertical ? max(0px, parent.width - self.width) : max(0px, (parent.width - self.width) / 2);
+                    y: root.vertical ? max(0px, (parent.height - self.height) / 2) : 0px;
+                    // Paint only the visible part below. A long document can exceed
+                    // the software renderer's coordinate range before clipping.
+                    // 書き手の報告 2026-09-08:「設定を開いていると背面がちらつく」
+                    // ——ちらついていたのはこの線だった。**Slintの`has-focus`は
+                    // popupが開いた瞬間に落ちる**（`WindowInner::show_popup`が
+                    // `FocusReason::PopupActivation`で焦点の要素を取り上げ、
+                    // 閉じるときに返す）ので、メニューを開くたびに枠が消えて
+                    // 戻っていた。指定幅で折り返しているときは、この枠が幅の
+                    // 境界線そのものとして見えている（要件 9）ので、いちばん
+                    // 目につく場所で点滅していたことになる。
+                    //
+                    // **要件 6.3 と同じ旗で言う**：アクセントは「キーボードは
+                    // ここ」の色で、それを持っているのは`focused-pane`——Rust
+                    // が決める値なので、popupが横から取り上げることがない。
+                    // タブがアクセントを着る条件とこの枠の条件が同じになった
+                    // （同じことを2か所で別々に判じていた、6.15の形）。
+                    paper-visible := Rectangle {
+                        x: clamp(-scroll.viewport-x - page.x, 0px, page.width);
+                        y: clamp(-scroll.viewport-y - page.y, 0px, page.height);
+                        width: max(0px, min(page.width - self.x,
+                            scroll.visible-width - (page.x + scroll.viewport-x + self.x)));
+                        height: max(0px, min(page.height - self.y,
+                            scroll.visible-height - (page.y + scroll.viewport-y + self.y)));
+                        background: root.terminal || root.wall-kind != 0 || root.background-transparency > 0
+                            ? transparent : root.page-background;
+                        if root.focused && !root.empty && self.width > 0px && self.height > 0px: Rectangle {
+                            x: 0px; y: 0px;
+                            width: parent.width; height: parent.height;
+                            if paper-visible.x == 0px: Rectangle {
+                                x: 0px; y: 0px; height: parent.height;
+                                width: 2px; background: Tok.accent;
+                            }
+                            if paper-visible.y == 0px: Rectangle {
+                                x: 0px; y: 0px; width: parent.width;
+                                height: 2px; background: Tok.accent;
+                            }
+                            if paper-visible.x + paper-visible.width >= page.width: Rectangle {
+                                y: 0px; height: parent.height;
+                                x: parent.width - 2px; width: 2px; background: Tok.accent;
+                            }
+                            if paper-visible.y + paper-visible.height >= page.height: Rectangle {
+                                x: 0px; width: parent.width;
+                                y: parent.height - 2px; height: 2px; background: Tok.accent;
+                            }
+                        }
+                    }
+
+                    // Held here rather than watched on the parent: a `changed`
+                    // handler belongs to the element whose property it is, and this
+                    // element only exists while the pane does. `init` as well, for
+                    // 6.11's reason — switching mode creates this pane, so the bump
+                    // that asked for the focus has already happened by the time it
+                    // exists. Alone, either one leaves a case where the keyboard
+                    // goes nowhere.
+                    property <int> generation: root.focus-generation;
+                    changed generation => {
+                        root.focus-trace(root.takes-focus ? "request-generation" : "skip-generation");
+                        if (root.takes-focus) {
+                            // Reissue focus even if Slint still records this field
+                            // as focused after a tab/direction change.
+                            ime-input.clear-focus();
+                            ime-input.focus();
+                        }
+                    }
+                    init => {
+                        if (root.takes-focus) {
+                            root.focus-trace("request-init");
+                            ime-input.clear-focus();
+                            ime-input.focus();
+                        }
+                    }
+
+                    editor := FocusScope {
+                        width: parent.width;
+                        height: parent.height;
+                        focus-on-click: false;
+
+                        for tile in root.tiles: Image {
+                            x: tile.x * 1px;
+                            y: tile.y * 1px;
+                            width: tile.width * 1px;
+                            height: tile.height * 1px;
+                            source: tile.source;
+                            image-fit: fill;
+                            visible: root.vertical
+                                ? (self.x + self.width + scroll.viewport-x >= 0px
+                                    && self.x + scroll.viewport-x <= scroll.visible-width)
+                                : (self.y + self.height + scroll.viewport-y >= 0px
+                                    && self.y + scroll.viewport-y <= scroll.visible-height);
+                        }
+
+                        // E1: 範囲はいちばん下、いちばん薄く（書き手の求め
+                        // 2026-09-09：「範囲を薄くハイライトしておいた方がいい」）
+                        // ——検索が選択を動かすので、**範囲は選択では見えない**。
+                        for scope in root.scope-rects: Rectangle {
+                            x: scope.x * 1px;
+                            y: scope.y * 1px;
+                            width: scope.width * 1px;
+                            height: scope.height * 1px;
+                            background: Tok.accent-soft.transparentize(0.86);
+                        }
+
+                        // E1: 一致は薄く、下に。**同じ色の弱いほう**なので、
+                        // 選択が重なれば自然に濃くなる——別の色を足すと、
+                        // 「選ばれている」と「見つかっている」が別のことに
+                        // 見えてしまう。
+                        for difference in root.difference-rects: Rectangle {
+                            x: difference.x * 1px;
+                            y: difference.y * 1px;
+                            width: difference.width * 1px;
+                            height: difference.height * 1px;
+                            background: Tok.accent-soft.transparentize(0.65);
+                            border-color: Tok.accent.transparentize(0.4);
+                            border-width: 1px;
+                        }
+                        for found in root.match-rects: Rectangle {
+                            x: found.x * 1px;
+                            y: found.y * 1px;
+                            width: found.width * 1px;
+                            height: found.height * 1px;
+                            // **`opacity`ではなく色そのものを薄くする。**
+                            // `opacity`は要素ごとに層を作るので、`の`のような
+                            // 語では画面に何百枚も重なる——それが「色の変わり方が
+                            // 壊れている」の正体である（書き手の報告 2026-09-09）。
+                            // 透けた色を1枚置くのは、ただの塗りである。
+                            background: Tok.accent-soft.transparentize(0.7);
+                        }
+
+                        for selection in root.selection-rects: Rectangle {
+                            x: selection.x * 1px;
+                            y: selection.y * 1px;
+                            width: selection.width * 1px;
+                            height: selection.height * 1px;
+                            background: Tok.accent-soft;
+                            opacity: 0.48;
+                        }
+
+                        // The caret lies across the writing direction: a bar down
+                        // the line in horizontal text, a bar across the column in
+                        // vertical text.
+                        // **何でもないタブには文字を置く場所が無い**ので、
+                        // 点滅する棒も出さない（追加要件 2026-09-07）。
+                        if root.caret-visible && !root.empty: Rectangle {
+                            x: root.caret-x * 1px;
+                            y: root.caret-y * 1px;
+                            width: root.vertical ? max(root.caret-width * 1px, 1px) : 2px;
+                            height: root.vertical ? 2px : max(root.caret-height * 1px, 2px);
+                            background: Tok.accent;
+                        }
+
+                        // The IME bridge. The characters are drawn by DirectWrite,
+                        // so everything here is transparent; what this field is for
+                        // is telling Windows where the composition is.
+                        ime-input := TextInput {
+                            // Moving the field is what tells Windows where the
+                            // composition is, but moving it is not enough on its
+                            // own: the position is reported when the field's own
+                            // cursor changes, so the first conversion after a click
+                            // opened where the caret used to be (技術検証 7.2).
+                            // Touching the cursor here asks for it to be sent again.
+                            // **Never while a conversion is up.** Over a
+                            // document the caret moves when the writer moves
+                            // it; over a shell it moves with every line the
+                            // shell prints, and re-reporting the position
+                            // starts the conversion over each time.
+                            changed x => {
+                                if (self.preedit-text == "") {
+                                    self.set-selection-offsets(0, 0);
+                                }
+                            }
+                            changed y => {
+                                if (self.preedit-text == "") {
+                                    self.set-selection-offsets(0, 0);
+                                }
+                            }
+                            changed has-focus => {
+                                root.focus-trace(self.has-focus ? "gained" : "lost");
+                                if self.has-focus {
+                                    root.focus-taken();
+                                }
+                            }
+                            // Slint drops keyboard focus before dispatching a key
+                            // when this item is fully clipped. Layout completion,
+                            // tab changes and manual scrolling can leave the caret
+                            // outside the viewport. Keep the invisible input inside
+                            // it, without moving the document caret or scroll.
+                            x: max(-scroll.viewport-x - page.x,
+                                min(root.ime-anchor-x * 1px,
+                                    -scroll.viewport-x - page.x + scroll.visible-width - self.width));
+                            y: max(-scroll.viewport-y - page.y + max(0px, root.find-bar-height - scroll.y),
+                                min(root.ime-anchor-y * 1px,
+                                    -scroll.viewport-y - page.y + scroll.visible-height - self.height));
+                            width: max(root.ime-anchor-width * 1px, 1px);
+                            height: max(root.ime-anchor-height * 1px, 1px);
+                            text <=> root.ime-buffer;
+                            font-family: "Yu Gothic UI";
+                            font-size: 1px;
+                            color: transparent;
+                            selection-foreground-color: transparent;
+                            selection-background-color: transparent;
+                            text-cursor-width: 0px;
+                            // Not single-line: a single-line TextInput strips the
+                            // newlines out of pasted text, and everything typed or
+                            // pasted into this pane passes through here.
+                            single-line: false;
+
+                            edited => {
+                                // 追加要件 2026-09-14: **設定の面に字は入らない。**
+                                // 下の文書は代役で、打った字を受け取る先ではない。
+                                if root.settings {
+                                    root.had-preedit = false;
+                                    self.text = "";
+                                } else if root.had-preedit {
+                                    root.had-preedit = false;
+                                    root.commit-just-finished = true;
+                                    commit-reset.start();
+                                    root.text-input(self.text, true);
+                                } else if root.commit-just-finished && self.text == "\n" {
+                                    // The Enter that ended a conversion, arriving as
+                                    // a line break now that the field accepts them.
+                                    // The result itself came through the edit before
+                                    // this one, so swallow it once.
+                                    root.commit-just-finished = false;
+                                    commit-reset.stop();
+                                    self.text = "";
+                                } else {
+                                    root.text-input(self.text, false);
+                                }
+                            }
+                            accepted => {
+                                if root.settings {
+                                    self.text = "";
+                                } else if root.commit-just-finished {
+                                    root.commit-just-finished = false;
+                                    commit-reset.stop();
+                                } else {
+                                    root.text-input("\n", false);
+                                }
+                            }
+                            changed preedit-text => {
+                                if !root.settings {
+                                    if self.preedit-text != "" {
+                                        root.had-preedit = true;
+                                    }
+                                    root.preedit-changed(self.preedit-text);
+                                }
+                            }
+                            key-pressed(event) => {
+                                if root.embedded-panel && event.modifiers.control && event.text == Key.Return { root.below-sent(); return accept; }
+                                if root.embedded-panel && event.modifiers.control && event.modifiers.alt && event.text == Key.UpArrow { root.below-left(); return accept; }
+                                if root.link-popup-open && !root.terminal && !root.settings && !root.commit-just-finished && self.preedit-text == "" && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift {
+                                    if event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Return || event.text == Key.Escape {
+                                        if root.link-popup-key(event.text == Key.UpArrow ? 1 : event.text == Key.DownArrow ? 2 : event.text == Key.Return ? 3 : 4) { return accept; }
+                                    }
+                                }
+                                if (event.modifiers.control && (event.text == "f" || event.text == "F" || event.text == "\u{6}" || event.text == "h" || event.text == "H" || event.text == "\u{8}")) {
+                                    root.focus-trace((event.text == "f" || event.text == "F" || event.text == "\u{6}") ? "body-ctrl-f-received" : "body-ctrl-h-received");
+                                    if (self.preedit-text != "") { root.focus-trace("find-key-preedit-active"); }
+                                    if (root.terminal) { root.focus-trace("find-key-terminal"); }
+                                }
+                                if (event.modifiers.control && (event.text == "w" || event.text == "W" || event.text == "\u{17}")) {
+                                    root.focus-trace("ctrl-w-received");
+                                    if (root.terminal) { root.focus-trace("ctrl-w-terminal"); }
+                                    if (self.preedit-text != "") { root.focus-trace("ctrl-w-preedit-active"); }
+                                    if (self.text != "") { root.focus-trace("ctrl-w-input-pending"); }
+                                }
+                                // 追加要件 2026-09-14: **設定の面が通すのは窓の
+                                // 鍵だけ。**TABを閉じる・移る、ペインを移る、
+                                // ファイルを開く——どれを通すかはRustが1か所で
+                                // 決める（`shortcuts::wire`）。残りの鍵は、ここで
+                                // 飲む：本文へ落ちれば代役の文書に字が入る。
+                                if (root.settings) {
+                                    if (self.preedit-text == "") {
+                                        root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
+                                    }
+                                    return accept;
+                                }
+                                // **A shell takes every key.** Nothing below
+                                // applies to it: those rows are the editor's
+                                // shortcuts, and the same chords mean other
+                                // things on the other side of the pipe.
+                                if (root.terminal && event.modifiers.control
+                                    && event.text == "`") {
+                                    root.below-toggled();
+                                    return accept;
+                                }
+                                // 要件 11.3 と追加要件 Terminal: **フォーカスの
+                                // 移動はシェルより先。**Ctrl+Altの矢印は
+                                // どのペインで押しても同じ意味でなければならず、
+                                // シェルに渡してしまうと端末のタブだけ効かない。
+                                if (root.terminal && event.modifiers.control
+                                    && event.modifiers.alt) {
+                                    if (event.text == Key.DownArrow && root.below-kind != 0) {
+                                        root.below-entered();
+                                        return accept;
+                                    }
+                                    if (event.text == Key.LeftArrow) {
+                                        root.focus-moved(0);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.RightArrow) {
+                                        root.focus-moved(1);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.UpArrow) {
+                                        root.focus-moved(2);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.DownArrow) {
+                                        root.focus-moved(3);
+                                        return accept;
+                                    }
+                                }
+                                if (root.terminal) {
+                                    if (event.modifiers.control && event.modifiers.shift && (event.text == "v" || event.text == "V")) { self.paste(); return accept; }
+                                    if (event.modifiers.control && event.modifiers.shift && (event.text == "f" || event.text == "F" || event.text == "\u{6}")) { root.terminal-action(0, 0); return accept; }
+                                    // 要件 11.2: **`Ctrl+V` is left to the
+                                    // field.** It fills itself from the
+                                    // clipboard and hands the text over as
+                                    // typing, which is exactly what a paste
+                                    // into a shell is — and it is the one way
+                                    // this side can read the clipboard at all.
+                                    if (event.modifiers.control
+                                        && (event.text == "v" || event.text == "V")) {
+                                        return reject;
+                                    }
+                                    root.terminal-key(
+                                        event.text,
+                                        root.key-number(event.text),
+                                        event.modifiers.control,
+                                        event.modifiers.alt,
+                                        root.shift-held(event.modifiers.shift));
+                                    return accept;
+                                }
+                                if self.preedit-text == "" && event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift
+                                    && (event.text == "v" || event.text == "V" || event.text == "\u{16}") {
+                                    self.text = "";
+                                    self.paste();
+                                    return accept;
+                                }
+                                if self.preedit-text == "" && root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
+                                // The way out of a menu (要件 6.7).
+                                // **Handled here rather than inside the
+                                // menus**: a `FocusScope` in a popup takes the
+                                // keyboard, and a popup that is dismissed by a
+                                // click outside never runs any of our code to
+                                // give it back (6.14). The keyboard stays where
+                                // it is, and the key travels instead.
+                                //
+                                // 書き手の報告 2026-09-12:「選択になって戻れなく
+                                // なる」。**下の`if`の前で受ける**——欄に字が
+                                // 残っているあいだ下の行はどれも動かないので、
+                                // 戻る道まで一緒に塞がっていた。残っている字は
+                                // ここで落とす：本文へはもう入っており、次の
+                                // `edited`でもう一度渡されるだけのものである。
+                                // **変換の途中は渡さない**：そのEscapeは変換を
+                                // 取り消すWindowsのものである。
+                                if (event.text == Key.Escape && self.preedit-text == "") {
+                                    if (self.text != "") {
+                                        self.text = "";
+                                    }
+                                    if (root.escaped() || root.dismiss-menus()
+                                        || root.selection-escaped()) {
+                                        return accept;
+                                    }
+                                    return reject;
+                                }
+                                if self.preedit-text == "" && self.text == "" {
+                                    // 追加要件 Terminal: the strip along the
+                                    // foot, on the key every terminal uses for
+                                    // it.
+                                    if (event.modifiers.control && event.text == "`") {
+                                        root.below-toggled();
+                                        return accept;
+                                    }
+                                    // **下段があるなら、下はそちら。**無ければ
+                                    // 下の行が隣のペインへ運ぶ（要件 11.3）。
+                                    if (event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.DownArrow
+                                        && root.below-kind != 0) {
+                                        root.below-entered();
+                                        return accept;
+                                    }
+                                    // Enter is handled here rather than left to the
+                                    // field, so a line break is inserted exactly
+                                    // once whatever a multi-line TextInput would do
+                                    // with the key itself.
+                                    if event.modifiers.control && event.modifiers.shift && !event.modifiers.alt
+                                        && (event.text == "t" || event.text == "T" || event.text == "\u{14}") {
+                                        root.reopen-closed-requested(); return accept;
+                                    }
+                                    if event.modifiers.control && !event.modifiers.alt
+                                        && (event.text == "o" || event.text == "O" || event.text == "\u{f}") {
+                                        root.open-file-requested();
+                                        return accept;
+                                    }
+                                    if event.modifiers.control
+                                        && (event.text == "s" || event.text == "S" || event.text == "\u{13}") {
+                                        // **Shiftは別の用事**（書き手の報告
+                                        // 2026-09-10：「Ctrl+Shift+Sが効いて
+                                        // いないと思います。Ctrl+Sと同じ動き」）。
+                                        // Shiftを押した`s`は大文字の`S`で届く
+                                        // ので、修飾を見ずに`S`まで拾っていた
+                                        // この行が、名前を付けて保存を飲み込んで
+                                        // いた——**メニューが`Ctrl+Shift+S`と
+                                        // 出しているのに受ける行が無い**のは、
+                                        // 2026-09-09の`Ctrl+W`と同じ穴である。
+                                        if (root.shift-held(event.modifiers.shift)) {
+                                            root.save-as-requested();
+                                        } else {
+                                            root.save-requested();
+                                        }
+                                        accept
+                                    // 追加要件 2026-09-09: **メニューが言って
+                                    // いたことを、いま受ける。**ペインの`⋮`も
+                                    // タブのメニューも「Close Tab / Ctrl+W」と
+                                    // 出していたのに、その鍵を受ける行がどこにも
+                                    // 無かった——書いてあるのに効かないのは、
+                                    // 働いていない状態が画面に出ていないのと
+                                    // 同じことである（単語チェックモード要件
+                                    // 2.1.1）。**端末は上で先に返している**ので
+                                    // ここには来ない：Ctrl+Wはシェルでは
+                                    // 「直前の語を消す」で、そちらの意味を
+                                    // 奪ってはいけない。
+                                    } else if event.modifiers.control
+                                        && (event.text == "w" || event.text == "W" || event.text == "\u{17}") {
+                                        root.focus-trace("ctrl-w-dispatch");
+                                        root.close-active-tab();
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "f" || event.text == "F" || event.text == "\u{6}") {
+                                        root.find-requested(false);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "h" || event.text == "H" || event.text == "\u{8}") {
+                                        root.find-requested(true);
+                                        accept
+                                    // E4: 指定の行へ（要件 11.2）。**端末は上で
+                                    // 先に返している**ので、ここには来ない。
+                                    } else if event.modifiers.control
+                                        && (event.text == "g" || event.text == "G" || event.text == "\u{7}") {
+                                        root.goto-requested(false);
+                                        accept
+                                    // E3の②: 行を消す（要件 11.2）。**Shiftも
+                                    // 見る**——`Ctrl+K`だけならEmacsの「行末まで
+                                    // 消す」と読める鍵で、そちらは要件 11.4 の
+                                    // ものである。
+                                    } else if event.modifiers.control && root.shift-held(event.modifiers.shift)
+                                        && (event.text == "k" || event.text == "K" || event.text == "\u{b}") {
+                                        root.line-edit(4);
+                                        accept
+                                    // E10: 選んだ行を箇条書きにする（要件 11.2）。
+                                    // **Shiftを押した8と7が何の字で届くかは
+                                    // 鍵盤で違う**——JISでは`(`と`'`、USでは
+                                    // `*`と`&`である。`Ctrl+Shift`を押しながら
+                                    // 打った字が本文へ入ることはないので、
+                                    // どれで届いても同じ意味に取る（`Ctrl+=`が
+                                    // `+`でも来るのと同じ）。
+                                    } else if event.modifiers.control && root.shift-held(event.modifiers.shift)
+                                        && (event.text == "8" || event.text == "*" || event.text == "(") {
+                                        root.list-edit(0, -1);
+                                        accept
+                                    } else if event.modifiers.control && root.shift-held(event.modifiers.shift)
+                                        && (event.text == "7" || event.text == "&" || event.text == "'") {
+                                        root.list-edit(1, -1);
+                                        accept
+                                    // E1: **本文に戻ってもF3で次／前へ。**帯は
+                                    // 開いていなくてよい——最後に探した語は
+                                    // `find-needle`に残っている。
+                                    } else if event.text == Key.F3 {
+                                        root.find-again(!root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "z" || event.text == "Z" || event.text == "\u{1a}") {
+                                        root.undo-requested(false);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "y" || event.text == "Y" || event.text == "\u{19}") {
+                                        root.undo-requested(true);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "a" || event.text == "A" || event.text == "\u{1}") {
+                                        root.select-all();
+                                        accept
+                                    // 要件 11.2. **Taken here rather than left
+                                    // to the field**: the field is empty — it
+                                    // carries a conversion, not the document —
+                                    // so its own copy would hand over nothing.
+                                    // Paste needs no row: Ctrl+V fills the
+                                    // field, and `edited` carries it in.
+                                    } else if event.modifiers.control
+                                        && (event.text == "c" || event.text == "C" || event.text == "\u{3}") {
+                                        root.copy-requested(false);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "x" || event.text == "X" || event.text == "\u{18}") {
+                                        root.copy-requested(true);
+                                        accept
+                                    // 要件 11.5, and what the pane's own menu
+                                    // has been advertising. Both shapes of
+                                    // each key: the row the writer presses
+                                    // sends "=" or "+" depending on Shift, and
+                                    // "-" or "_".
+                                    } else if event.modifiers.control
+                                        && (event.text == "=" || event.text == "+") {
+                                        root.zoom-stepped(1);
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "-" || event.text == "_") {
+                                        root.zoom-stepped(-1);
+                                        accept
+                                    } else if event.modifiers.control && event.text == "0" {
+                                        root.zoom-reset-requested();
+                                        accept
+                                    // 要件 11.3. **Before the plain Tab row
+                                    // below**, which indents: the modifier is
+                                    // what tells the two apart, and the chain
+                                    // is read in order.
+                                    // 要件 11.4. **Ctrl+D is the Delete key**,
+                                    // so it goes through the same callback:
+                                    // the requirement asks for the same act,
+                                    // not for a second way of doing it.
+                                    } else if event.modifiers.control
+                                        && (event.text == "d" || event.text == "D" || event.text == "\u{4}") {
+                                        root.delete-pressed();
+                                        accept
+                                    } else if event.modifiers.control
+                                        && (event.text == "k" || event.text == "K" || event.text == "\u{b}") {
+                                        root.kill-requested(0);
+                                        accept
+                                    // **Alt without Ctrl** for the three that
+                                    // Emacs puts on Meta: Windows reads Ctrl
+                                    // held with Alt as AltGr, and a row that
+                                    // did not say so would answer a writer
+                                    // typing a character on a European layout.
+                                    // 要件 11.4. **The same ±3 in both panes**:
+                                    // a word later in the text is later in the
+                                    // text whichever way the pane runs, where
+                                    // the arrows' ±1/±2 are the flow's.
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == "f" || event.text == "F") {
+                                        root.move-caret(3, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == "b" || event.text == "B") {
+                                        root.move-caret(-3, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    // 要件 11.4 と 要件 7.1: **Shift is what
+                                    // makes it a rectangle.** The two are one
+                                    // key with one answer, because starting a
+                                    // selection and choosing its shape are the
+                                    // same act.
+                                    } else if event.modifiers.control && event.text == " " {
+                                        root.mark-toggled(root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == "w" || event.text == "W") {
+                                        root.kill-requested(1);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == "x" || event.text == "X") {
+                                        root.kill-requested(2);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && !root.shift-held(event.modifiers.shift)
+                                        && (event.text == "y" || event.text == "Y") {
+                                        root.kill-requested(3);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && root.shift-held(event.modifiers.shift)
+                                        && (event.text == "y" || event.text == "Y") {
+                                        root.kill-requested(4);
+                                        accept
+                                    } else if event.modifiers.control && event.text == Key.Tab {
+                                        root.tab-stepped(root.shift-held(event.modifiers.shift));
+                                        accept
+                                    // 要件 11.3, and **before the arrow rows**
+                                    // for the same reason. Held together with
+                                    // Alt so that Ctrl+arrow stays free for the
+                                    // word-wise moves 要件 11.4 will want.
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.LeftArrow {
+                                        root.focus-moved(0);
+                                        accept
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.RightArrow {
+                                        root.focus-moved(1);
+                                        accept
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.UpArrow {
+                                        root.focus-moved(2);
+                                        accept
+                                    } else if event.modifiers.control && event.modifiers.alt
+                                        && event.text == Key.DownArrow {
+                                        root.focus-moved(3);
+                                        accept
+                                    // 書き手の報告 2026-09-07: 戻ると進む。
+                                    // **矢印の行より前**——下の行は修飾キーを
+                                    // 見ないので、ここを通さないとキャレットが
+                                    // 動くだけになる。
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && event.text == Key.LeftArrow {
+                                        root.navigate-requested(false);
+                                        accept
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && event.text == Key.RightArrow {
+                                        root.navigate-requested(true);
+                                        accept
+                                    } else if event.text == Key.Return {
+                                        root.enter-pressed(root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.text == Key.Backspace {
+                                        root.backspace-pressed();
+                                        accept
+                                    } else if event.text == Key.Tab {
+                                        root.tab-pressed(root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.text == Key.Delete {
+                                        root.delete-pressed();
+                                        accept
+                                    // E3の②（要件 11.2）: 行そのものを動かす。
+                                    // **Ctrlは付けない**——`Ctrl+Alt+矢印`は隣の
+                                    // ペインへ移る鍵である（要件 11.3）。
+                                    } else if event.modifiers.alt && !event.modifiers.control
+                                        && (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                                        // 0=前へ 1=後へ 2=前へ写す 3=後へ写す
+                                        root.line-edit(
+                                            (root.shift-held(event.modifiers.shift) ? 2 : 0)
+                                            + (event.text == Key.DownArrow ? 1 : 0));
+                                        accept
+                                    } else if event.text == Key.UpArrow {
+                                        // A step along the line in vertical text,
+                                        // a step between lines in horizontal text.
+                                        root.move-caret(root.vertical ? -1 : -2, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.text == Key.DownArrow {
+                                        root.move-caret(root.vertical ? 1 : 2, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.text == Key.LeftArrow {
+                                        root.move-caret(root.vertical ? -2 : -1, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.text == Key.RightArrow {
+                                        root.move-caret(root.vertical ? 2 : 1, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.text == Key.Home {
+                                        root.home-end(false, event.modifiers.control, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else if event.text == Key.End {
+                                        root.home-end(true, event.modifiers.control, root.shift-held(event.modifiers.shift));
+                                        accept
+                                    } else {
+                                        reject
+                                    }
+                                } else {
+                                    reject
+                                }
+                            }
+                        }
+
+                        pointer := TouchArea {
+                            // Vertical writing draws its own pointer below, so the
+                            // system one is taken away there.
+                            mouse-cursor: root.vertical ? none : text;
+                            scroll-event(event) => {
+                                // 要件 9, 11.5: with Control down the wheel
+                                // magnifies this pane instead of moving it.
+                                // **Whichever axis the wheel reports** — a
+                                // wheel that only says y is the usual one, and
+                                // a pane writing vertically still gets a
+                                // notch out of it.
+                                if (event.modifiers.control) {
+                                    let notch = event.delta-y != 0px
+                                        ? event.delta-y
+                                        : event.delta-x;
+                                    if (notch != 0px) {
+                                        root.zoom-stepped(notch > 0px ? 1 : -1);
+                                    }
+                                    return accept;
+                                }
+                                // **A shell has its own history to move
+                                // through** (追加要件 Terminal), and it is not
+                                // the pane's scroll: what is on the screen is
+                                // everything the pane holds, and the rest has
+                                // already gone by.
+                                if (root.terminal) {
+                                    root.terminal-scrolled(
+                                        event.delta-y != 0px
+                                            ? event.delta-y / 1px
+                                            : event.delta-x / 1px);
+                                    return accept;
+                                }
+                                if (root.vertical) {
+                                    // 要件 7.5: the wheel moves the document
+                                    // sideways. A wheel that only reports y still
+                                    // has to work, so it is turned.
+                                    let delta = event.delta-x != 0px ? event.delta-x : -event.delta-y;
+                                    let minimum-x = min(0px, scroll.visible-width - scroll.viewport-width);
+                                    scroll.viewport-x = max(minimum-x, min(0px, scroll.viewport-x + delta));
+                                } else {
+                                    let delta = event.delta-y != 0px ? event.delta-y : event.delta-x;
+                                    let minimum-y = min(0px, scroll.visible-height - scroll.viewport-height);
+                                    scroll.viewport-y = max(minimum-y, min(0px, scroll.viewport-y + delta));
+                                }
+                                accept
+                            }
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.back
+                                    || event.button == PointerEventButton.forward) {
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.navigate-requested(event.button == PointerEventButton.forward);
+                                    }
+                                    return;
+                                }
+                                // 追加要件 2026-09-06: **the right button opens
+                                // the pane's own menu where the pointer is.**
+                                // The rows are the ⋮ menu's plus the ones a
+                                // hand on the text wants: what is selected, and
+                                // what is beside the pane.
+                                if event.button == PointerEventButton.right
+                                    && event.kind == PointerEventKind.down {
+                                    root.context-x = self.mouse-x;
+                                    root.context-y = self.mouse-y;
+                                    root.menu-opened();
+                                    // **開くたびに畳んでおく**——前に開いた形が
+                                    // 残っていると、右クリックの長さが回ごとに違う。
+                                    root.bullet-rows-open = false;
+                                    context-menu.show();
+                                    return;
+                                }
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                    if root.terminal && event.modifiers.control { root.terminal-url(0, self.mouse-x / 1px, self.mouse-y / 1px); return; }
+                                    if event.modifiers.control && root.link-open(self.mouse-x / 1px, self.mouse-y / 1px) {
+                                        root.dragging = false;
+                                        return;
+                                    }
+                                    root.dragging = true;
+                                    root.selection-start(
+                                        self.mouse-x / 1px,
+                                        self.mouse-y / 1px,
+                                        event.modifiers.shift,
+                                    );
+                                } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                    if root.dragging {
+                                        root.selection-end(self.mouse-x / 1px, self.mouse-y / 1px);
+                                    }
+                                    root.dragging = false;
+                                    ime-input.focus();
+                                }
+                            }
+                            // `pressed` rather than the flag alone: the flag only
+                            // clears on a pointer-up this area actually receives,
+                            // and a drag that ends anywhere else leaves it set.
+                            // Every mouse move over the pane then moved the caret,
+                            // which looked like the two panes being wired together.
+                            moved => {
+                                if root.dragging && self.pressed {
+                                    root.selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
+                                }
+                            }
+                        }
+
+                        // 追加要件 2026-09-06: the right button's menu. Declared
+                        // here so that `ime-input` is already in scope — Slint
+                        // has no forward references, and Paste is the field's
+                        // own doing (it is the one thing on this side that can
+                        // read the clipboard).
+                        // 追加要件 2026-09-15: 本文の右クリックから開く、このTABの紙の色。
+                        // 右クリックのメニューと同じ場所に出す（同じ座標の中に置く）。
+                        body-palette := PopupWindow {
+                            x: root.context-x;
+                            y: root.context-y;
+                            width: 236px;
+                            close-policy: close-on-click-outside;
+
+                            MenuFrame {
+                                width: 236px;
+
+                                ColourPalette {
+                                    automatic: @tr("Default Color");
+                                    current: root.page-background;
+                                    chosen(colour) => {
+                                        root.paper-chosen(0, colour);
+                                        body-palette.close();
+                                    }
+                                    automatic-chosen => {
+                                        root.paper-default(0);
+                                        body-palette.close();
+                                    }
+                                    more => {
+                                        root.paper-more(0);
+                                        body-palette.close();
+                                    }
+                                }
+                            }
+                        }
+
+                        context-menu := PopupWindow {
+                            x: root.context-x;
+                            y: root.context-y;
+                            // **右に開くぶんの場所を、開いているあいだだけ取る**
+                            // （書き手の求め 2026-09-11）。popupは自分の大きさの
+                            // 外を描かないので、広げておかないと右の面が切れる。
+                            width: root.bullet-rows-open ? 408px : 264px;
+                            close-policy: close-on-click-outside;
+
+                            // **左端に寄せる**（書き手の報告 2026-09-11：「元の
+                            // メニューも右に動きます」「メニューが透明になりました」）。
+                            // popupの中の子は**真ん中に寄る**ので、右に開くぶんを
+                            // 広げた幅の半分だけメニューが動いていた。**`x`で釘を
+                            // 打つと、その子はpopupの並べ方から外れて枠の高さを
+                            // 失う**（透明になったのはそれ）——寄せ方そのものを
+                            // 言うほうが正しい。
+                            HorizontalLayout {
+                                alignment: start;
+
+                                MenuFrame {
+                                    width: 264px;
+
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        spacing: 1px;
+
+                                        // 追加要件 2026-09-08: **押しても何も
+                                        // 起きない行は出さない。**シェルが前に
+                                        // 出ているとき、この面の下にある文書は
+                                        // 見えていない——`Cut`はその見えない文書
+                                        // から切り取り、`Ctrl+Space`はその中に印を
+                                        // 置いていた。
+                                        //
+                                        // **`if`の中の行は頼んでから閉じる**
+                                        // （技術検証 6.24・6.30）。`close`はこの木を
+                                        // 捨て、捨てられた木から`root`へ登ろうと
+                                        // した生成コードは黙って何もしない。
+                                        if root.writing: MenuRow {
+                                            title: @tr("Undo");
+                                            shortcut: root.shortcut-keys[8];
+                                            enabled: root.can-undo;
+                                            activated => {
+                                                root.undo-requested(false);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if root.writing: MenuRow {
+                                            title: @tr("Redo");
+                                            shortcut: root.shortcut-keys[9];
+                                            enabled: root.can-redo;
+                                            activated => {
+                                                root.undo-requested(true);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if root.writing: MenuSep { }
+                                        if root.writing: MenuRow {
+                                            title: @tr("Cut");
+                                            shortcut: "Ctrl+X";
+                                            activated => {
+                                                root.copy-requested(true);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        // **Copyは両方にある。**シェルにも選択は
+                                        // あり（要件 11.2）、選ばれているものを
+                                        // 写すのがこの行の意味——どちらから写すかは
+                                        // Rustが前に出ているものを見て決める。
+                                        // 綴じ目だけが違うので、そこは文言で言う。
+                                        MenuRow {
+                                            title: @tr("Copy");
+                                            shortcut: root.terminal ? "Ctrl+Shift+C" : "Ctrl+C";
+                                            activated => {
+                                                context-menu.close();
+                                                root.copy-requested(false);
+                                            }
+                                        }
+                                        MenuRow {
+                                            title: @tr("Paste");
+                                            shortcut: "Ctrl+V";
+                                            activated => {
+                                                context-menu.close();
+                                                // **The field pastes, and what it
+                                                // takes comes in as typing** — the
+                                                // same road every paste travels,
+                                                // shell included.
+                                                ime-input.focus();
+                                                ime-input.paste();
+                                            }
+                                        }
+                                        if root.terminal || root.embedded-panel: MenuRow { title: @tr("Appearance…"); activated => { root.appearance-requested(false); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Find in Terminal…"); activated => { root.terminal-action(0, 0); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Latest"); activated => { root.terminal-action(0, 4); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Save Output…"); activated => { root.terminal-action(0, 7); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Clear Screen"); activated => { root.terminal-action(0, 5); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Clear History"); activated => { root.terminal-action(0, 6); context-menu.close(); } }
+                                        if root.terminal: MenuRow {
+                                            title: @tr("Selection to Editor Panel");
+                                            activated => { root.panel-action(9, 0); context-menu.close(); }
+                                        }
+                                        if root.terminal: MenuRow {
+                                            title: @tr("History to Editor Panel");
+                                            activated => { root.panel-action(8, 0); context-menu.close(); }
+                                        }
+                                        if root.terminal: MenuRow { title: root.terminal-file-logging ? @tr("Stop File Log") : @tr("Capture Log to File…"); activated => { root.panel-action(root.terminal-file-logging ? 14 : 10, 0); context-menu.close(); } }
+                                        if root.terminal: MenuRow {
+                                            title: root.terminal-capturing ? @tr("Stop Panel Log") : @tr("Capture Log to Editor Panel");
+                                            activated => { root.panel-action(root.terminal-capturing ? 13 : 7, 0); context-menu.close(); }
+                                        }
+                                        if root.writing: MenuRow {
+                                            title: @tr("Copy Text Only");
+                                            activated => {
+                                                root.copy-body-requested();
+                                                context-menu.close();
+                                            }
+                                        }
+                                        // E10（2026-09-11）: 選んだ行を後から
+                                        // 箇条書きにする。**もう一度押せば外れる**
+                                        // ので、行は2つで足りる（書き手の選択）。
+                                        //
+                                        // **選択が無くても出す。**カーソルの行1行が
+                                        // そのまま選ばれているものである（E3の②の
+                                        // `selected_lines`と同じ見方）——押せない行を
+                                        // 出さないのと、機能の入口を隠すのは違う。
+                                        if root.writing && !root.standalone: VerticalLayout {
+                                            spacing: 1px;
+
+                                            MenuSep { }
+
+                                            // 書き手の選択 2026-09-11（案C）:
+                                            // **読む記号ぶんの行を出す。**記号ごとに
+                                            // 画面の印が違うので、どれで書くかは
+                                            // 書き手が選ぶ——**鍵はいちばん前の記号**
+                                            // で、その行にだけ鍵を書く。
+                                            //
+                                            // **`for`の中に`if`は書けない**ので
+                                            // 3つ並べてある（技術検証の段階2b）。
+                                            // 記号が3つしかないうちは、これが読める。
+                                            // 書き手の求め 2026-09-11: **右に開く階層に
+                                            // する。**記号ぶんの行を並べると右クリックが
+                                            // 長い——**この行だけが出ていて、乗せれば
+                                            // 右に開く**（Windowsのメニューの普通）。
+                                            // 読む記号が1つも無ければ、開いても空である
+                                            // （書き手の言葉：「何も選ばれていなければ、空」）。
+                                            //
+                                            // **入れ子のpopupにはしない。**popupを閉じると
+                                            // その木ごと消え、消えた木から`root`へ登った
+                                            // 生成コードは黙って何もしない（6.24・6.30）
+                                            // ——同じ木の中で右へ出せば、その罠の外にいる。
+                                            Rectangle {
+                                                height: 28px;
+
+                                                bullet-row := MenuRow {
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    title: @tr("Bullet List");
+                                                    shortcut: "▸";
+                                                    // **乗せれば開く。**押しても開く
+                                                    // ——押した書き手を待たせない。
+                                                    changed hovered => {
+                                                        if (self.hovered) {
+                                                            root.bullet-rows-open = true;
+                                                        }
+                                                    }
+                                                    activated => {
+                                                        root.bullet-rows-open
+                                                            = !root.bullet-rows-open;
+                                                    }
+                                                }
+
+                                                if root.bullet-rows-open: MenuFrame {
+                                                    x: parent.width - 8px;
+                                                    y: -6px;
+                                                    width: 136px;
+                                                    height: bullet-rows.preferred-height;
+
+                                                    bullet-rows := VerticalLayout {
+                                                        padding: 6px;
+                                                        spacing: 1px;
+
+                                                        if root.bullet-marks[0]: MenuRow {
+                                                            title: "-";
+                                                            shortcut: "Ctrl+Shift+8";
+                                                            // **頼んでから閉じる**（6.24）。
+                                                            activated => {
+                                                                root.list-edit(0, 0);
+                                                                context-menu.close();
+                                                            }
+                                                        }
+                                                        if root.bullet-marks[1]: MenuRow {
+                                                            title: "*";
+                                                            shortcut: root.bullet-marks[0]
+                                                                ? ""
+                                                                : "Ctrl+Shift+8";
+                                                            activated => {
+                                                                root.list-edit(0, 1);
+                                                                context-menu.close();
+                                                            }
+                                                        }
+                                                        if root.bullet-marks[2]: MenuRow {
+                                                            title: "+";
+                                                            shortcut: root.bullet-marks[0]
+                                                                || root.bullet-marks[1]
+                                                                ? ""
+                                                                : "Ctrl+Shift+8";
+                                                            activated => {
+                                                                root.list-edit(0, 2);
+                                                                context-menu.close();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            MenuRow {
+                                                title: @tr("Numbered List");
+                                                shortcut: "Ctrl+Shift+7";
+                                                // **別の行へ移ったら畳む**（Windowsの
+                                                // メニューと同じ）。
+                                                changed hovered => {
+                                                    if (self.hovered) {
+                                                        root.bullet-rows-open = false;
+                                                    }
+                                                }
+                                                activated => {
+                                                    root.list-edit(1, -1);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                            // E10の②: **開始番号は打ち直して
+                                            // 揃える**（書き手の選択 2026-09-11）。
+                                            // 先頭を`5.`に直してここを押せば、下が
+                                            // `6. 7. …`になる——数を訊く画面は無い。
+                                            MenuRow {
+                                                title: @tr("Renumber");
+                                                changed hovered => {
+                                                    if (self.hovered) {
+                                                        root.bullet-rows-open = false;
+                                                    }
+                                                }
+                                                activated => {
+                                                    root.list-edit(2, -1);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                        }
+                                        // 要件 7.9（2026-09-08）: **書きながら語を
+                                        // 足す、いちばん普通の道。**選んだものを
+                                        // そのままセットへ入れる——一覧を開いて
+                                        // 打ち込むのは、その次である（要件 3）。
+                                        //
+                                        // **選択があるときだけ**出す。セットが1冊
+                                        // なら行は1つ、複数なら名前が並ぶ。
+                                        if root.writing && root.has-selection
+                                            && root.word-sets.length > 0: VerticalLayout {
+                                            spacing: 1px;
+
+                                            MenuSep { }
+
+                                            for name[index] in root.word-sets: MenuRow {
+                                                title: @tr("Add to word set: {}", name);
+                                                // **頼んでから閉じる**（6.24）。
+                                                activated => {
+                                                    root.word-add-requested(index);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                        }
+
+                                        if root.writing: VerticalLayout {
+                                            spacing: 1px;
+
+                                            MenuSep { }
+
+                                            MenuRow {
+                                                title: @tr("Start Selection");
+                                                shortcut: root.shortcut-keys[25];
+                                                activated => {
+                                                    root.mark-toggled(false);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                            MenuRow {
+                                                title: @tr("Start Rectangle Selection");
+                                                shortcut: root.shortcut-keys[26];
+                                                activated => {
+                                                    root.mark-toggled(true);
+                                                    context-menu.close();
+                                                }
+                                            }
+
+                                            if !root.standalone: MenuSep { }
+
+                                            // 追加要件 2026-09-15（書き手）: **本文の紙の上の右クリックで背景。**
+                                            // このTABの紙の色（見えている向き）。
+                                            if !root.standalone: MenuRow {
+                                                title: @tr("Background") + "…";
+                                                activated => {
+                                                    root.paper-target = 0;
+                                                    body-palette.show();
+                                                    context-menu.close();
+                                                }
+                                            }
+                                        }
+                                        if !root.standalone: MenuSep { }
+                                        if !root.standalone: MenuRow {
+                                            title: root.terminal ? @tr("Editor Panel") : @tr("Terminal Panel");
+                                            shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
+                                            activated => {
+                                                root.below-toggled();
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if !root.standalone: MenuRow {
+                                            title: @tr("Quick Draft…");
+                                            shortcut: root.shortcut-keys[10];
+                                            activated => {
+                                                root.quick-draft-requested();
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if !root.standalone: MenuSep { }
+                                        if !root.standalone: MenuRow {
+                                            title: @tr("Back");
+                                            shortcut: root.shortcut-keys[19];
+                                            activated => {
+                                                root.navigate-requested(false);
+                                                context-menu.close();
+                                            }
+                                        }
+                                        if !root.standalone: MenuRow {
+                                            title: @tr("Forward");
+                                            shortcut: root.shortcut-keys[20];
+                                            activated => {
+                                                root.navigate-requested(true);
+                                                context-menu.close();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 追加要件 2026-09-16（書き手）: **絵の大きさはマウスで変える。**絵の上にポインタが
+                        // あると、止まっている角の対角（横書きは右下、縦書きは左下）につまみが出る。
+                        // 引いているあいだは枠だけを描き、離したら記法の幅（`|300`）を書き換える
+                        // ——組み直すのは離したときの1回。
+                        for picture[index] in root.picture-rects: TouchArea {
+                            x: (root.vertical ? picture.x : picture.x + picture.width) * 1px - 8px;
+                            y: (picture.y + picture.height) * 1px - 8px;
+                            width: 16px;
+                            height: 16px;
+                            mouse-cursor: root.vertical ? nesw-resize : nwse-resize;
+                            pointer-event(event) => {
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                    root.picture-resize(index, 0, (self.x + self.mouse-x) / 1px, (self.y + self.mouse-y) / 1px);
+                                } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                    root.picture-resize(index, 2, (self.x + self.mouse-x) / 1px, (self.y + self.mouse-y) / 1px);
+                                } else if event.kind == PointerEventKind.cancel {
+                                    root.picture-resize(index, 3, 0, 0);
+                                }
+                            }
+                            moved => {
+                                if self.pressed {
+                                    root.picture-resize(index, 1, (self.x + self.mouse-x) / 1px, (self.y + self.mouse-y) / 1px);
+                                }
+                            }
+
+                            Rectangle {
+                                x: 4px;
+                                y: 4px;
+                                width: 8px;
+                                height: 8px;
+                                background: Tok.accent;
+                                border-color: root.page-background;
+                                border-width: 1px;
+                                visible: parent.has-hover || parent.pressed
+                                    || (pointer.has-hover
+                                        && pointer.mouse-x >= picture.x * 1px
+                                        && pointer.mouse-x <= (picture.x + picture.width) * 1px
+                                        && pointer.mouse-y >= picture.y * 1px
+                                        && pointer.mouse-y <= (picture.y + picture.height) * 1px);
+                            }
+                        }
+
+                        if root.picture-outline-shown: Rectangle {
+                            x: root.picture-outline.x * 1px;
+                            y: root.picture-outline.y * 1px;
+                            width: root.picture-outline.width * 1px;
+                            height: root.picture-outline.height * 1px;
+                            background: Tok.accent-soft.transparentize(0.8);
+                            border-color: Tok.accent;
+                            border-width: 1px;
+                        }
+
+                        // The vertical pane's own pointer, lying across the column
+                        // the way the caret does.
+                        if root.vertical && pointer.has-hover: Rectangle {
+                            x: pointer.mouse-x - 8px;
+                            y: pointer.mouse-y - 1px;
+                            width: 16px;
+                            height: 2px;
+                            background: Tok.ink-strong;
+
+                            Rectangle {
+                                x: 0px;
+                                y: -3px;
+                                width: 2px;
+                                height: 8px;
+                                background: Tok.ink-strong;
+                            }
+
+                            Rectangle {
+                                x: 14px;
+                                y: -3px;
+                                width: 2px;
+                                height: 8px;
+                                background: Tok.ink-strong;
+                            }
+                        }
+                    }
+                }
+
+                // 追加要件 2026-09-07: **まだ何でもないタブの面。**中央に三つの
+                // 言葉が立っているだけで、そのどれもがこのタブをそれに変える。
+                // 文書は下にちゃんとあり（空の無題）、Explorerでファイルを選んでも
+                // 開いた先はこのタブになる。
+                //
+                // スクロール面の中に置くのは、そこが「本文の場所」だから
+                // ——中身が空なので視野と viewport は同じ大きさで、動かない。
+                if root.empty: Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: scroll.visible-width;
+                    height: scroll.visible-height;
+                    background: root.background-transparency > 0 ? transparent : root.page-background;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        HorizontalLayout {
+                            alignment: center;
+
+                            VerticalLayout {
+                                width: 260px;
+                                spacing: 2px;
+
+                                LinkRow {
+                                    title: @tr("New File");
+                                    clicked => {
+                                        root.new-file-requested();
+                                    }
+                                }
+                                LinkRow {
+                                    title: @tr("New Terminal");
+                                    hint: root.terminal-shells[root.default-shell];
+                                    clicked => {
+                                        root.new-terminal-requested(root.default-shell);
+                                    }
+                                }
+                                LinkRow {
+                                    title: @tr("Open File…");
+                                    hint: "Ctrl+O";
+                                    clicked => {
+                                        root.open-file-requested();
+                                    }
+                                }
+
+                                // **四つ目の道は言葉で言う。**左のExplorerで
+                                // ファイルを選べばこのタブが開き先になる、という
+                                // のは押せる行ではないが、知らなければ使えない。
+                                Text {
+                                    text: @tr("or pick a file in the Explorer");
+                                    color: Tok.ink-faint;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+
+        }
+
+            // 追加要件 2026-09-14（書き手）: **設定の面が立つ場所。**本文と同じ
+            // 大きさで、中身は窓が`EditorPane`の子として渡す——設定は窓のもので、
+            // 何百行もの値をペインへ通すより、場所を貸すほうが短い。何も
+            // 渡されていなければ空の箱で、押しても何も受け取らない。
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                @children
+            }
+        }
+    if root.link-popup-open: LinkCompletion {
+        // page.absolute-position includes paper centring and both scroll axes.
+        // The same conversion works for every split pane and follows scrolling
+        // without waiting for another completion query from Rust.
+        caret-x: page.absolute-position.x - root.absolute-position.x + root.caret-x * 1px;
+        caret-y: page.absolute-position.y - root.absolute-position.y + root.caret-y * 1px;
+        caret-width: root.vertical ? max(root.caret-width * 1px, 1px) : 2px;
+        caret-height: root.vertical ? 2px : max(root.caret-height * 1px, 2px);
+        vertical: root.vertical;
+        viewport-left: max(scroll.absolute-position.x, body-clip.absolute-position.x) - root.absolute-position.x;
+        viewport-top: max(scroll.absolute-position.y, body-clip.absolute-position.y) - root.absolute-position.y;
+        viewport-right: max(self.viewport-left, min(scroll.absolute-position.x + scroll.visible-width,
+            body-clip.absolute-position.x + body-clip.width) - root.absolute-position.x);
+        viewport-bottom: max(self.viewport-top, min(scroll.absolute-position.y + scroll.visible-height,
+            body-clip.absolute-position.y + body-clip.height) - root.absolute-position.y);
+        rows: root.link-popup-rows;
+        selected: root.link-popup-selected;
+        status: root.link-popup-status;
+        chosen(index) => { root.link-popup-chosen(index); }
+    }
+}

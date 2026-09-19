@@ -129,7 +129,7 @@ pub(crate) fn ensure(window: &AppWindow, live: &Live, id: PaneId) {
     }
     let doc = new_document(live);
     let mut tabs = live.tabs.borrow_mut();
-    let strip = tabs.of_mut(id);
+    let Some(strip) = tabs.of_mut(id) else { return; };
     let active = strip.active;
     if let Some(tab) = strip.tabs.get_mut(active) {
         if !tab.below.draft.is_empty() {
@@ -231,7 +231,7 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
 fn show(window: &AppWindow, live: &Live, id: PaneId) {
     let below = {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active) else {
             return;
@@ -276,7 +276,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
     match action {
         0 => {
             let mut tabs = live.tabs.borrow_mut();
-            let strip = tabs.of_mut(id);
+            let Some(strip) = tabs.of_mut(id) else { return; };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 if index >= 0 && (index as usize) < tab.below.entries.len() {
@@ -309,7 +309,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
             let doc = new_document(live);
             let entry = Rc::new(RefCell::new(PanelDocument::new(window, doc, shell)));
             let mut tabs = live.tabs.borrow_mut();
-            let strip = tabs.of_mut(id);
+            let Some(strip) = tabs.of_mut(id) else { return; };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 tab.below.entries.push(entry);
@@ -772,10 +772,10 @@ pub(crate) fn open_file(window: &AppWindow, live: &Live, id: PaneId, path: &Path
             return;
         }
     };
-    let doc = OpenDocument::new(file, text, slint::Weak::default());
+    let doc = OpenDocument::with_events(file, text, Default::default());
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active).filter(|t| t.terminal.is_some()) else {
             return;
@@ -886,7 +886,7 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
     }
     let mut tabs = live.tabs.borrow_mut();
     for id in PaneId::all(window) {
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         for (index, tab) in strip.tabs.iter_mut().enumerate() {
             let Some(entry) = tab.below.entries.get(tab.below.active) else {
                 continue;
@@ -1046,7 +1046,7 @@ pub(crate) fn close(
     let mut visible = false;
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         for (index, tab) in strip.tabs.iter_mut().enumerate() {
             if !tab.below.entries.iter().any(|p| Rc::ptr_eq(p, entry)) {
                 continue;
