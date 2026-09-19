@@ -784,6 +784,10 @@ enum SelectionPhase {
 /// must not touch it.
 #[derive(Default)]
 struct PreviewSlot {
+    validity_publication: Option<(usize, Instant, Option<u64>)>,
+    invalid_link_source: String,
+    invalid_link_targets: Vec<Range<usize>>,
+    validity_changed: bool,
     source: String,
     active_line_start: Option<usize>,
     preview: PreviewDocument,
@@ -801,6 +805,22 @@ struct PreviewSlot {
 }
 
 impl PreviewSlot {
+    fn has_link_validity_publication(&self, stamp: (usize, Instant, Option<u64>)) -> bool {
+        self.validity_publication == Some(stamp)
+    }
+    fn set_link_validity(&mut self, source: &str, invalid: Vec<Range<usize>>) -> bool {
+        if self.invalid_link_targets == invalid
+            && (invalid.is_empty() || self.invalid_link_source == source)
+        {
+            return false;
+        }
+        let changed = self.invalid_link_targets != invalid
+            || (!invalid.is_empty() && self.invalid_link_source != source);
+        self.invalid_link_source = source.to_owned();
+        self.invalid_link_targets = invalid;
+        self.validity_changed |= changed;
+        changed
+    }
     /// 追加要件 2026-09-15: 画像の行の箱に大きさを入れ、描く絵を集める。**組み直したとき、
     /// 倍率が変わったとき、文書の置き場所が変わったとき**だけ。読めない絵の行は記法のまま出る。
     fn size_images(&mut self, zoom_percent: i32, folder: Option<&Path>) {
@@ -839,6 +859,15 @@ impl PreviewSlot {
             self.active_line_start = active_line_start;
             self.reading = reading;
             self.started = true;
+        }
+        if stale || self.validity_changed {
+            self.preview
+                .set_invalid_link_targets(if self.invalid_link_source == source {
+                    &self.invalid_link_targets
+                } else {
+                    &[]
+                });
+            self.validity_changed = false;
         }
         if stale
             || self
@@ -8534,6 +8563,12 @@ fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, openi
 }
 
 struct WorkspaceLinkUi {
+    validity: workspace_links::ValidityChecker,
+    validity_requested: Option<(u64, bool, Vec<(usize, Instant, Option<PathBuf>)>)>,
+    validity_generation: Option<u64>,
+    validity_entries: Option<(u64, std::sync::Arc<Vec<workspace_index::Entry>>)>,
+    validity_results: BTreeMap<usize, Vec<Range<usize>>>,
+    validity_applied: BTreeMap<i32, (usize, Instant, Option<u64>)>,
     index: workspace_links::WorkspaceLinks,
     completion: workspace_links::Completion,
     observed: Option<(usize, Instant, usize, u64)>,
@@ -8549,6 +8584,12 @@ fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
         .links
         .get_or_insert_with(|| {
             Rc::new(RefCell::new(WorkspaceLinkUi {
+                validity: workspace_links::ValidityChecker::new(),
+                validity_requested: None,
+                validity_generation: None,
+                validity_entries: None,
+                validity_results: BTreeMap::new(),
+                validity_applied: BTreeMap::new(),
                 index: workspace_links::WorkspaceLinks::new(app_data::app_directory()),
                 completion: workspace_links::Completion::new(),
                 observed: None,
@@ -8696,6 +8737,113 @@ fn link_trigger_in_code(source: &str, caret: usize) -> bool {
     delimiter != 0
 }
 
+fn update_link_validity(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkUi) {
+    let mut documents: Vec<Rc<OpenDocument>> = Vec::new();
+    for tab in live.tabs.borrow().panes.iter().flat_map(|pane| &pane.tabs) {
+        if !documents.iter().any(|doc| Rc::ptr_eq(doc, &tab.document)) {
+            documents.push(tab.document.clone());
+        }
+    }
+    let roots = ui.index.validation_roots().map(<[PathBuf]>::to_vec);
+    let revision = ui.index.revision();
+    let stamp = (
+        revision,
+        roots.is_some(),
+        documents
+            .iter()
+            .map(|doc| {
+                (
+                    Rc::as_ptr(doc) as usize,
+                    doc.text.changed_at(),
+                    doc.file.borrow().path().map(Path::to_path_buf),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    if ui.validity_requested.as_ref() != Some(&stamp) {
+        ui.validity_results.clear();
+        ui.validity_applied.clear();
+        ui.validity_generation = None;
+        if let Some(roots) = roots {
+            if ui
+                .validity_entries
+                .as_ref()
+                .is_none_or(|(known, _)| *known != revision)
+            {
+                ui.validity_entries =
+                    Some((revision, std::sync::Arc::new(ui.index.entries().to_vec())));
+            }
+            let inputs = documents
+                .iter()
+                .map(|doc| workspace_links::ValidityDocument {
+                    id: Rc::as_ptr(doc) as usize,
+                    path: doc.file.borrow().path().map(Path::to_path_buf),
+                    text: doc.text.borrow().clone(),
+                })
+                .collect::<Vec<_>>();
+            if let Some(generation) = ui.validity.submit(
+                roots,
+                ui.validity_entries.as_ref().unwrap().1.clone(),
+                inputs,
+            ) {
+                ui.validity_generation = Some(generation);
+                ui.validity_requested = Some(stamp);
+            }
+        } else {
+            ui.validity.cancel();
+            ui.validity_requested = Some(stamp);
+        }
+    }
+    if let Some((generation, results)) = ui.validity.poll() {
+        if Some(generation) == ui.validity_generation {
+            ui.validity_results = results.into_iter().collect();
+            ui.validity_applied.clear();
+        }
+    }
+    for id in PaneId::all(window) {
+        if !id.is_shown(window) {
+            continue;
+        }
+        let doc = live.states.document(id);
+        let pointer = Rc::as_ptr(&doc) as usize;
+        let applied = (pointer, doc.text.changed_at(), ui.validity_generation);
+        if ui.validity_applied.get(&id.index()) == Some(&applied)
+            && live
+                .cache
+                .borrow_mut()
+                .pane(id)
+                .view
+                .preview_slot
+                .has_link_validity_publication(applied)
+        {
+            continue;
+        }
+        let source = doc.text.borrow();
+        let invalid = ui
+            .validity_results
+            .get(&pointer)
+            .cloned()
+            .unwrap_or_default();
+        let changed = live
+            .cache
+            .borrow_mut()
+            .pane(id)
+            .view
+            .preview_slot
+            .set_link_validity(&source, invalid);
+        live.cache
+            .borrow_mut()
+            .pane(id)
+            .view
+            .preview_slot
+            .validity_publication = Some(applied);
+        ui.validity_applied.insert(id.index(), applied);
+        if changed {
+            refresh_pane_from_state(window, &live.cache, &doc, id, &live.states.of(id), &source);
+        }
+    }
+}
+
 fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let runtime = live.folder.borrow().workspace.clone();
     let (active, roots, reset) = runtime
@@ -8731,6 +8879,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     }
     ui.index
         .maybe_rescan(Duration::from_secs(30), Instant::now());
+    update_link_validity(window, live, &mut ui);
     let id = focused_pane(window);
     let doc = live.states.document(id);
     if !link_completion_allowed(window, live, id, &doc) {
@@ -21251,6 +21400,34 @@ mod tests {
     /// ——本文も活性行も同じなら、枠は`refresh`を呼ばずに前の答えを返す。
     /// 書き手には「設定しただけでは反映されず、縦書き横書きを切り替えると
     /// 反映される」と見えていた（向きを変えたときだけ枠が作り直されていた）。
+    #[test]
+    fn reset_preview_slot_requires_link_validity_republication() {
+        let source = "[[missing.md]]";
+        let targets = vec![document::link_target_ranges(source)[0].0.clone()];
+        let stamp = (1, Instant::now(), Some(7));
+        let mut slot = PreviewSlot::default();
+        slot.set_link_validity(source, targets.clone());
+        slot.validity_publication = Some(stamp);
+        assert!(slot.has_link_validity_publication(stamp));
+        assert!(
+            slot.get(source, None, document::Reading::all(), 100, None)
+                .marks()[0]
+                .iter()
+                .any(|mark| mark.marks.unresolved_link)
+        );
+        // Direction changes rebuild PaneView while the controller's stamp stays unchanged.
+        slot = PreviewSlot::default();
+        assert!(!slot.has_link_validity_publication(stamp));
+        assert!(slot.set_link_validity(source, targets));
+        slot.validity_publication = Some(stamp);
+        assert!(
+            slot.get(source, Some(0), document::Reading::all(), 100, None)
+                .marks()[0]
+                .iter()
+                .any(|mark| mark.marks.unresolved_link)
+        );
+    }
+
     #[test]
     fn the_preview_slot_notices_that_the_notation_is_read_differently() {
         let source = "｜漢字《かんじ》を書く\n";

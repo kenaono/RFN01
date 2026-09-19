@@ -450,6 +450,27 @@ impl PreviewDocument {
         &self.marks
     }
 
+    /// Apply verified source destinations to both active paths and inactive labels.
+    pub fn set_invalid_link_targets(&mut self, invalid: &[Range<usize>]) {
+        for (index, (line, marks)) in self.lines.iter().zip(self.marks.iter_mut()).enumerate() {
+            let offset = self.source_starts[index];
+            let tokens = line_link_ranges(&line.source);
+            for mark in marks.iter_mut().filter(|mark| mark.marks.link) {
+                let source_at = line
+                    .source_byte
+                    .get(mark.utf16_start as usize)
+                    .copied()
+                    .unwrap_or(0) as usize;
+                mark.marks.unresolved_link = tokens.iter().any(|(token, target, _)| {
+                    token.contains(&source_at)
+                        && invalid
+                            .iter()
+                            .any(|bad| *bad == (offset + target.start..offset + target.end))
+                });
+            }
+        }
+    }
+
     /// The marker standing at the head of each line (要件 7.3.2).
     pub fn markers(&self) -> &[Option<LineMarker>] {
         &self.markers
@@ -2612,8 +2633,7 @@ fn push_marked_recording(
             let start = *at;
             // Retain the original destination for resolution; shortening the
             // implicit display name never rewrites the source target.
-            let unresolved_link =
-                rest.starts_with("[[") && !std::path::Path::new(target).is_absolute();
+            let unresolved_link = false;
             // Emphasis inside the shown text is still emphasis: `[**太字**](x)`
             // is a bold link, and this is the same recursion that nests one
             // marker inside another.
@@ -4203,10 +4223,7 @@ fn active_marks(
     // Mark the whole destination from parser spans. Explicit aliases retain
     // their own mapped formatting; brackets and the alias separator stay plain.
     if !style.kind.is_code() {
-        for (_, target, wiki) in line_link_ranges(line) {
-            if !wiki {
-                continue;
-            }
+        for (_, target, _) in line_link_ranges(line) {
             let start = line[..target.start].encode_utf16().count() as u32;
             let len = line[target.clone()].encode_utf16().count() as u32;
             marks.retain(|mark| {
@@ -4217,7 +4234,7 @@ fn active_marks(
                 utf16_len: len,
                 marks: Marks {
                     link: true,
-                    unresolved_link: !std::path::Path::new(&line[target]).is_absolute(),
+                    unresolved_link: false,
                     ..Marks::default()
                 },
                 ornament: None,
@@ -7431,11 +7448,12 @@ mod tests {
     }
 
     #[test]
-    fn active_wiki_marks_cover_the_entire_source_destination() {
+    fn active_link_marks_cover_the_entire_source_destination() {
         for source in [
             "前😀 [[原稿😀/原稿😀.md#見出し]] 後",
             "前😀 [[原稿😀/原稿😀.md#見出し|**原稿😀**]] 後",
             r"前 [[D:\原稿\次.md#節|別名]] 後",
+            "前 [表示](dir/target.md#heading) 後",
         ] {
             let active = PreviewDocument::from_source_with_active_line(source, Some(0));
             assert_eq!(active.text, source);
@@ -7450,11 +7468,14 @@ mod tests {
                         && mark.utf16_len == expected_len
                 })
                 .unwrap();
-            assert_eq!(
-                path_mark.marks.unresolved_link,
-                !std::path::Path::new(&source[target.clone()]).is_absolute()
+            assert!(
+                !path_mark.marks.unresolved_link,
+                "unknown paths use normal link color"
             );
             for mark in active.marks()[0].iter().filter(|mark| mark.marks.link) {
+                if !source.contains("[[") {
+                    continue;
+                }
                 assert!(mark.utf16_start >= expected_start);
                 // The opening brackets must never receive link color.
                 assert!(
@@ -7464,7 +7485,7 @@ mod tests {
             }
             assert_eq!(
                 link_target_at(source, target.start),
-                Some((&source[target], true))
+                Some((&source[target], source.contains("[[")))
             );
         }
     }
@@ -7509,9 +7530,15 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_wiki_links_are_distinct_from_links_footnotes_and_code() {
+    fn verified_invalid_wiki_links_are_distinct_from_links_footnotes_and_code() {
         let source = "[[不明|**表示名😀**]] [通常](章.md) [^注] `[[コード]]` ![[画像]]";
-        let preview = PreviewDocument::from_source(source);
+        let mut preview = PreviewDocument::from_source(source);
+        assert!(
+            !preview.marks()[0]
+                .iter()
+                .any(|span| span.marks.unresolved_link)
+        );
+        preview.set_invalid_link_targets(&[link_target_ranges(source)[0].0.clone()]);
         let marks = &preview.marks()[0];
         let unresolved: Vec<_> = marks
             .iter()
@@ -7535,6 +7562,36 @@ mod tests {
                 .iter()
                 .any(|span| span.marks.unresolved_link)
         );
+    }
+
+    #[test]
+    fn link_validity_applies_to_active_paths_and_inactive_aliases_without_changing_text() {
+        for source in [
+            "😀 [[dir/target.md]] [other](other.md)",
+            "😀 [[dir/target.md|**表示😀**]] [other](other.md)",
+            "😀 [表示](dir/target.md#heading) [other](other.md)",
+        ] {
+            let bad = link_target_ranges(source)[0].0.clone();
+            for active in [None, Some(0)] {
+                let mut preview = PreviewDocument::from_source_with_active_line(source, active);
+                let visible = preview.text.clone();
+                assert!(preview.marks()[0].iter().all(|m| !m.marks.unresolved_link));
+                preview.set_invalid_link_targets(std::slice::from_ref(&bad));
+                assert!(preview.marks()[0].iter().any(|m| m.marks.unresolved_link));
+                assert!(
+                    preview.marks()[0]
+                        .iter()
+                        .any(|m| m.marks.link && !m.marks.unresolved_link)
+                );
+                assert_eq!(preview.text, visible);
+                preview.refresh(source, active, Reading::all());
+                preview.set_invalid_link_targets(std::slice::from_ref(&bad));
+                assert!(preview.marks()[0].iter().any(|m| m.marks.unresolved_link));
+                preview.set_invalid_link_targets(&[]);
+                assert!(preview.marks()[0].iter().all(|m| !m.marks.unresolved_link));
+                assert_eq!(preview.text, visible);
+            }
+        }
     }
 
     #[test]

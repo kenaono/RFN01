@@ -3,15 +3,8 @@
 //! lifecycle, link completion as a small state machine, and pure link
 //! resolution.
 //!
-//! **No Slint, no document writes, no disk reads beyond what [`Indexer`]
-//! itself already does.** [`WorkspaceLinks::sync_scope`] is the only thing
-//! here that starts or cancels a scan; everything else either folds already-
-//! published events or works on data a caller hands in.
-//!
-//! Not yet reachable from the binary: nothing here is `mod`-declared from
-//! `main.rs` — see this module's own doc at the bottom of Workspace設計.md's
-//! phase 5 plan for why, and the final report for what a later UI worker
-//! still has to wire up.
+//! No Slint or document writes. Index scans and link-validity presence checks
+//! run on cancellable background workers; presentation consumes snapshots.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -22,6 +15,617 @@ use crate::workspace::WorkspaceId;
 use crate::workspace_index::{
     Entry, Event, EventKind, Indexer, MAINTENANCE_GENERATION, ScanOptions, Snapshot,
 };
+
+#[derive(Clone)]
+pub struct ValidityDocument {
+    pub id: usize,
+    pub path: Option<PathBuf>,
+    pub text: String,
+}
+
+type InvalidTargets = Vec<(usize, Vec<std::ops::Range<usize>>)>;
+struct ValidityRequest {
+    generation: u64,
+    roots: Vec<PathBuf>,
+    entries: std::sync::Arc<Vec<Entry>>,
+    documents: Vec<ValidityDocument>,
+}
+
+/// One bounded worker. Missing-path probes never run during layout or on the UI thread.
+pub struct ValidityChecker {
+    sender: std::sync::mpsc::SyncSender<ValidityRequest>,
+    receiver: std::sync::mpsc::Receiver<(u64, InvalidTargets)>,
+    current: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    next: u64,
+}
+
+impl ValidityChecker {
+    pub fn new() -> Self {
+        let (sender, requests) = std::sync::mpsc::sync_channel::<ValidityRequest>(1);
+        let (results, receiver) = std::sync::mpsc::channel();
+        let current = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let running = current.clone();
+        let _ = std::thread::Builder::new()
+            .name("link-validity".into())
+            .spawn(move || {
+                while let Ok(request) = requests.recv() {
+                    let matches =
+                        || running.load(std::sync::atomic::Ordering::Relaxed) == request.generation;
+                    if !matches() {
+                        continue;
+                    }
+                    let mut invalid = Vec::new();
+                    let healthy = request.roots.iter().all(|root| readable_root(root));
+                    for doc in &request.documents {
+                        if !matches() {
+                            break;
+                        }
+                        let ranges = if healthy {
+                            invalid_destinations(
+                                doc,
+                                &request.roots,
+                                &request.entries,
+                                &request.documents,
+                                &|path| {
+                                    if matches() {
+                                        probe_local(path, &request.roots)
+                                    } else {
+                                        Presence::Unknown
+                                    }
+                                },
+                                &matches,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+                        invalid.push((doc.id, ranges));
+                    }
+                    if matches() {
+                        let _ = results.send((request.generation, invalid));
+                    }
+                }
+            });
+        Self {
+            sender,
+            receiver,
+            current,
+            next: 0,
+        }
+    }
+
+    pub fn cancel(&mut self) {
+        self.next = self.next.wrapping_add(1);
+        self.current
+            .store(self.next, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn submit(
+        &mut self,
+        roots: Vec<PathBuf>,
+        entries: std::sync::Arc<Vec<Entry>>,
+        documents: Vec<ValidityDocument>,
+    ) -> Option<u64> {
+        self.cancel();
+        let generation = self.next;
+        self.sender
+            .try_send(ValidityRequest {
+                generation,
+                roots,
+                entries,
+                documents,
+            })
+            .ok()
+            .map(|_| generation)
+    }
+
+    pub fn poll(&self) -> Option<(u64, InvalidTargets)> {
+        self.receiver
+            .try_iter()
+            .filter(|(generation, _)| {
+                *generation == self.current.load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .last()
+    }
+}
+
+impl Drop for ValidityChecker {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Presence {
+    File(crate::file_io::FileStamp),
+    Missing,
+    Unknown,
+}
+
+fn lexical_path(path: &Path) -> PathBuf {
+    let mut spelling = link_completion::path_to_string(path);
+    #[cfg(windows)]
+    if spelling.as_bytes().get(1) == Some(&b':') {
+        spelling.replace_range(..1, &spelling[..1].to_ascii_uppercase());
+    }
+    let mut result = PathBuf::new();
+    for component in Path::new(&spelling).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+                if result.file_name().is_some_and(|name| name != "..") =>
+            {
+                result.pop();
+            }
+            _ => result.push(component.as_os_str()),
+        }
+    }
+    result
+}
+
+fn contained(path: &Path, roots: &[PathBuf]) -> bool {
+    let path = lexical_path(path);
+    roots
+        .iter()
+        .any(|root| path.starts_with(lexical_path(root)))
+}
+
+fn readable_root(root: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || std::fs::read_dir(root).is_err() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn uncertain_traversal(path: &Path, roots: &[PathBuf], inspect: &impl Fn(&Path) -> bool) -> bool {
+    let spelling = link_completion::path_to_string(path);
+    let mut prefix = PathBuf::new();
+    for part in Path::new(&spelling).components() {
+        prefix.push(part);
+        if contained(&prefix, roots) && inspect(&prefix) {
+            return true;
+        }
+    }
+    false
+}
+
+fn unsafe_metadata(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 {
+                    return true;
+                }
+            }
+            metadata.file_type().is_symlink()
+        }
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+fn probe_local(path: &Path, roots: &[PathBuf]) -> Presence {
+    // Inspect the original walk first: collapsing junction/.. would erase the
+    // evidence that the filesystem traversal leaves the indexed tree.
+    if uncertain_traversal(path, roots, &unsafe_metadata) {
+        return Presence::Unknown;
+    }
+    let path = lexical_path(path);
+    let Some(root) = roots
+        .iter()
+        .map(|root| lexical_path(root))
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+    else {
+        return Presence::Unknown;
+    };
+    if !readable_root(&root) {
+        return Presence::Unknown;
+    }
+    let mut checked = root.clone();
+    // Even a cache-complete index intentionally skips excluded/reparse trees.
+    for part in path.strip_prefix(&root).unwrap().components() {
+        if matches!(part.as_os_str().to_str(), Some(".git" | "target")) {
+            return Presence::Unknown;
+        }
+        checked.push(part);
+        match std::fs::symlink_metadata(&checked) {
+            Ok(meta) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if meta.file_attributes() & 0x400 != 0 {
+                        return Presence::Unknown;
+                    }
+                }
+                if meta.file_type().is_symlink() {
+                    return Presence::Unknown;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Presence::Missing,
+            Err(_) => return Presence::Unknown,
+        }
+    }
+    if !path.is_file() {
+        return Presence::Unknown;
+    }
+    crate::file_io::FileStamp::read(&path)
+        .map(Presence::File)
+        .unwrap_or(Presence::Unknown)
+}
+
+fn invalid_destinations(
+    doc: &ValidityDocument,
+    roots: &[PathBuf],
+    entries: &[Entry],
+    overlays: &[ValidityDocument],
+    probe: &impl Fn(&Path) -> Presence,
+    current: &impl Fn() -> bool,
+) -> Vec<std::ops::Range<usize>> {
+    let Some(source_file) = doc.path.as_deref().filter(|path| contained(path, roots)) else {
+        return Vec::new();
+    };
+    let mut bad = Vec::new();
+    for (range, wiki) in document::link_target_ranges(&doc.text) {
+        if !current() {
+            break;
+        }
+        let target = &doc.text[range.clone()];
+        let trimmed = target.trim().trim_start_matches('<').trim_end_matches('>');
+        let (file, _) = link_completion::split_target_heading(trimmed);
+        let decoded = link_completion::percent_decode(file);
+        if decoded.contains(':') && !Path::new(&decoded).is_absolute() {
+            continue;
+        }
+        let invalid = match resolve_link(target, wiki, Some(source_file), &doc.text, entries) {
+            Err(ResolveError::NotFound)
+                if wiki && !decoded.is_empty() && !decoded.contains(['/', '\\', ':']) =>
+            {
+                true
+            }
+            Err(ResolveError::Ambiguous(paths)) => paths
+                .iter()
+                .all(|path| contained(path, roots) && matches!(probe(path), Presence::File(_))),
+            Ok(ResolvedLink::SameFileHeading { result }) => {
+                matches!(result, HeadingLookup::Missing | HeadingLookup::Ambiguous(_))
+            }
+            Ok(ResolvedLink::Target { path, heading }) if contained(&path, roots) => {
+                match probe(&path) {
+                    Presence::Missing => true,
+                    Presence::Unknown => false,
+                    Presence::File(stamp) => {
+                        if let Some(heading) = heading {
+                            if let Some(live) = overlays.iter().find(|other| {
+                                other
+                                    .path
+                                    .as_ref()
+                                    .is_some_and(|p| lexical_path(p) == lexical_path(&path))
+                            }) {
+                                matches!(
+                                    find_heading_occurrence(
+                                        &live.text,
+                                        &heading.text,
+                                        heading.occurrence
+                                    ),
+                                    HeadingLookup::Missing | HeadingLookup::Ambiguous(_)
+                                )
+                            } else if let Some(entry) = entries.iter().find(|entry| {
+                                lexical_path(&entry.canonical) == lexical_path(&path)
+                                    && entry.fingerprint == stamp
+                                    && entry.headings_complete
+                            }) {
+                                let count = entry
+                                    .headings
+                                    .iter()
+                                    .filter(|found| found.text == heading.text)
+                                    .count();
+                                heading
+                                    .occurrence
+                                    .map_or(count != 1, |n| n == 0 || n > count)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+            _ => false,
+        };
+        if invalid {
+            bad.push(range);
+        }
+    }
+    bad
+}
+
+#[cfg(test)]
+mod validity_tests {
+    use super::*;
+    fn path(name: &str) -> PathBuf {
+        Path::new(if cfg!(windows) {
+            "C:/active"
+        } else {
+            "/active"
+        })
+        .join(name)
+    }
+    fn doc(text: &str) -> ValidityDocument {
+        ValidityDocument {
+            id: 1,
+            path: Some(path("source.md")),
+            text: text.into(),
+        }
+    }
+    fn stamp() -> crate::file_io::FileStamp {
+        crate::file_io::FileStamp {
+            modified: None,
+            length: 1,
+        }
+    }
+    fn entry(name: &str) -> Entry {
+        Entry {
+            root: path(""),
+            relative: name.into(),
+            canonical: path(name),
+            fingerprint: stamp(),
+            headings: Vec::new(),
+            headings_complete: true,
+        }
+    }
+    #[test]
+    fn validation_requires_a_healthy_completed_active_scope() {
+        let mut index = WorkspaceLinks::new(None);
+        index.identity = Some(ScopeIdentity {
+            workspace: Some(1),
+            roots: vec![path("")],
+            reset_generation: 0,
+        });
+        assert!(index.validation_roots().is_none());
+        index.completed = true;
+        assert!(index.validation_roots().is_some());
+        for status in [
+            Status {
+                busy: true,
+                ..Default::default()
+            },
+            Status {
+                failed_dirs: 1,
+                ..Default::default()
+            },
+            Status {
+                missing_roots: 1,
+                ..Default::default()
+            },
+            Status {
+                truncated: true,
+                ..Default::default()
+            },
+            Status {
+                cache_write_failed: 1,
+                ..Default::default()
+            },
+            Status {
+                error: Some("denied".into()),
+                ..Default::default()
+            },
+        ] {
+            index.status = status;
+            assert!(index.validation_roots().is_none());
+        }
+        index.status = Status::default();
+        index.identity.as_mut().unwrap().workspace = None;
+        assert!(
+            index.validation_roots().is_none(),
+            "another Workspace's cache does not establish current scope"
+        );
+    }
+    #[test]
+    fn invalid_only_when_missing_or_ambiguous_inside_active_roots() {
+        let input = doc("[[./missing.md|alias]] [[exists.md]] [[duplicate.md]] [[unknown.md]]");
+        let entries = [
+            entry("exists.md"),
+            entry("a/duplicate.md"),
+            entry("b/duplicate.md"),
+        ];
+        let ranges = invalid_destinations(
+            &input,
+            &[path("")],
+            &entries,
+            &[],
+            &|p| {
+                if p.ends_with("missing.md") {
+                    Presence::Missing
+                } else {
+                    Presence::File(stamp())
+                }
+            },
+            &|| true,
+        );
+        let targets: Vec<_> = ranges.iter().map(|r| &input.text[r.clone()]).collect();
+        assert_eq!(targets, ["./missing.md", "duplicate.md", "unknown.md"]);
+        let uncertain = doc("[[./missing.md]]");
+        assert!(
+            invalid_destinations(
+                &uncertain,
+                &[path("")],
+                &[],
+                &[],
+                &|_| Presence::Unknown,
+                &|| true
+            )
+            .is_empty()
+        );
+        assert!(
+            invalid_destinations(
+                &uncertain,
+                &[path("")],
+                &[],
+                &[],
+                &|_| Presence::Missing,
+                &|| false
+            )
+            .is_empty()
+        );
+    }
+    #[test]
+    fn other_workspace_and_outside_targets_remain_unknown_without_probes() {
+        let outside = Path::new(if cfg!(windows) { "D:/other" } else { "/other" });
+        let mut input = doc(&format!(
+            "[[{}/missing.md]] [web](https://example.com)",
+            outside.display()
+        ));
+        assert!(
+            invalid_destinations(
+                &input,
+                &[path("")],
+                &[],
+                &[],
+                &|_| panic!("must not probe outside roots"),
+                &|| true
+            )
+            .is_empty()
+        );
+        input.path = Some(outside.join("source.md"));
+        input.text = "[[unknown.md]]".into();
+        assert!(
+            invalid_destinations(
+                &input,
+                &[path("")],
+                &[entry("known.md")],
+                &[],
+                &|_| panic!("source outside scope"),
+                &|| true
+            )
+            .is_empty()
+        );
+    }
+    #[test]
+    fn heading_validation_uses_live_overlay_and_does_not_trust_stale_index_text() {
+        let input = doc("[[./target.md#heading]]");
+        let stale = entry("target.md");
+        let live = ValidityDocument {
+            id: 2,
+            path: Some(path("target.md")),
+            text: "# heading\n".into(),
+        };
+        assert!(
+            invalid_destinations(
+                &input,
+                &[path("")],
+                &[stale.clone()],
+                &[live],
+                &|_| Presence::File(stamp()),
+                &|| true
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            invalid_destinations(
+                &input,
+                &[path("")],
+                &[stale.clone()],
+                &[],
+                &|_| Presence::File(stamp()),
+                &|| true
+            )
+            .len(),
+            1
+        );
+        let changed = crate::file_io::FileStamp {
+            modified: None,
+            length: 2,
+        };
+        assert!(
+            invalid_destinations(
+                &input,
+                &[path("")],
+                &[stale],
+                &[],
+                &|_| Presence::File(changed),
+                &|| true
+            )
+            .is_empty()
+        );
+    }
+    #[test]
+    fn original_parent_traversal_cannot_hide_a_junction() {
+        let roots = [path("")];
+        let traversal = path("junction/../missing.md");
+        assert!(uncertain_traversal(&traversal, &roots, &|p| p == path("junction")));
+        let siblings = [path("one"), path("two")];
+        assert!(!uncertain_traversal(
+            &path("one/../two/file.md"),
+            &siblings,
+            &|_| false
+        ));
+    }
+    #[test]
+    fn worker_discards_superseded_results_and_missing_roots_are_unknown() {
+        let root = std::env::temp_dir().join(format!(
+            "rfn-validity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut worker = ValidityChecker::new();
+        let documents = vec![ValidityDocument {
+            id: 1,
+            path: Some(root.join("source.md")),
+            text: "[[missing.md]]".repeat(2000),
+        }];
+        worker.submit(
+            vec![root.clone()],
+            std::sync::Arc::new(Vec::new()),
+            documents,
+        );
+        worker.cancel();
+        let until = Instant::now() + Duration::from_secs(3);
+        let newest = loop {
+            if let Some(id) = worker.submit(
+                vec![root.clone()],
+                std::sync::Arc::new(Vec::new()),
+                vec![ValidityDocument {
+                    id: 2,
+                    path: Some(root.join("source.md")),
+                    text: "plain".into(),
+                }],
+            ) {
+                break id;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        loop {
+            if let Some((generation, values)) = worker.poll() {
+                assert_eq!(generation, newest);
+                assert_eq!(values, vec![(2, Vec::new())]);
+                break;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::fs::remove_dir(&root).unwrap();
+        assert!(matches!(
+            probe_local(&root.join("missing.md"), &[root]),
+            Presence::Unknown
+        ));
+    }
+}
 
 // --- Scope lifecycle --------------------------------------------------------
 
@@ -61,6 +665,7 @@ pub struct Status {
 /// to whichever Workspace (or none) is currently active. A caller polls this
 /// on a timer; nothing here blocks.
 pub struct WorkspaceLinks {
+    completed: bool,
     revision: u64,
     appdata_dir: Option<PathBuf>,
     indexer: Indexer,
@@ -87,6 +692,7 @@ impl WorkspaceLinks {
     /// memory-only indexing, no temp cache under manuscript cwd").
     pub fn new(appdata_dir: Option<PathBuf>) -> Self {
         Self {
+            completed: false,
             revision: 0,
             appdata_dir,
             indexer: Indexer::new(),
@@ -105,6 +711,21 @@ impl WorkspaceLinks {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub fn validation_roots(&self) -> Option<&[PathBuf]> {
+        let status = &self.status;
+        let scope = self.identity.as_ref()?;
+        (scope.workspace.is_some()
+            && !scope.roots.is_empty()
+            && self.completed
+            && !status.busy
+            && status.error.is_none()
+            && status.failed_dirs == 0
+            && status.missing_roots == 0
+            && !status.truncated
+            && status.cache_write_failed == 0)
+            .then_some(scope.roots.as_slice())
     }
 
     pub fn status(&self) -> &Status {
@@ -146,6 +767,7 @@ impl WorkspaceLinks {
             return;
         }
         self.indexer.cancel();
+        self.completed = false;
         self.revision = self.revision.wrapping_add(1);
         self.snapshot = Snapshot::new();
         self.status = Status::default();
@@ -159,6 +781,7 @@ impl WorkspaceLinks {
     }
 
     fn start_scan(&mut self) {
+        self.completed = false;
         let identity = self
             .identity
             .clone()
@@ -241,6 +864,7 @@ impl WorkspaceLinks {
                 missing_roots,
                 truncated,
             } => {
+                self.completed = true;
                 self.status.busy = false;
                 self.status.failed_dirs = failed.len();
                 self.status.missing_roots = missing_roots.len();

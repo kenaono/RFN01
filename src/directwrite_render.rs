@@ -4292,6 +4292,26 @@ fn draw_block(
                 };
                 layout.SetDrawingEffect(heading_brush, range)?;
             }
+            // Unknown and valid links share ordinary link ink. Only a confirmed
+            // invalid destination gets the red overlay below.
+            if task.runs.iter().any(|run| run.marks.link) {
+                let [r, g, b] = typography.paper;
+                let ink = if 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5 {
+                    [0.60, 0.72, 1.0]
+                } else {
+                    [0.22, 0.32, 0.70]
+                };
+                let link_brush = target.CreateSolidColorBrush(&colour(ink), None)?;
+                for run in task.runs.iter().filter(|run| run.marks.link) {
+                    layout.SetDrawingEffect(
+                        &link_brush,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: run.utf16_start,
+                            length: run.utf16_len,
+                        },
+                    )?;
+                }
+            }
             // E12: unresolved destinations are red. This is a display state,
             // not a filesystem lookup; explicit word-check colours still win.
             if task.runs.iter().any(|run| run.marks.unresolved_link) {
@@ -10837,6 +10857,59 @@ mod tests {
             .count();
 
         assert!(ink > 100, "expected visible glyph pixels");
+    }
+
+    #[test]
+    fn links_draw_normal_or_invalid_ink_in_both_directions() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            for (invalid, dark) in [(false, false), (true, false), (false, true)] {
+                let (preview, styles) = preview_of("[[./target.md|Linkリンク]]");
+                let mut marks = preview.marks().to_vec();
+                for mark in marks.iter_mut().flatten().filter(|mark| mark.marks.link) {
+                    mark.marks.unresolved_link = invalid;
+                }
+                let mut typography = plain();
+                if dark {
+                    typography.paper = [0.05, 0.05, 0.05];
+                    typography.ink = [0.95, 0.95, 0.95];
+                }
+                let styled = StyledText::marked(&preview.text, &styles, &marks)
+                    .with_markers(preview.markers());
+                let mut engine = engine_set(mode, styled, &typography);
+                let tiles = engine.visible_tiles(
+                    -engine.flow_bounds().0,
+                    engine.total_flow_size() as f32,
+                    0,
+                    0.0,
+                    LINE_EXTENT as f32,
+                );
+                let mut drawn = DrawnTiles::default();
+                engine
+                    .render_tiles(&tiles, None, &mut drawn)
+                    .expect("link pixels");
+                let wanted: [f32; 3] = if invalid {
+                    [0.8, 0.12, 0.18]
+                } else if dark {
+                    [0.60, 0.72, 1.0]
+                } else {
+                    [0.22, 0.32, 0.70]
+                };
+                let count = drawn
+                    .tiles
+                    .iter()
+                    .flat_map(|(_, _, _, pixels)| pixels.chunks_exact(4))
+                    .filter(|pixel| {
+                        (0..3).all(|i| {
+                            (pixel[2 - i] as i32 - (wanted[i] * 255.0).round() as i32).abs() <= 3
+                        })
+                    })
+                    .count();
+                assert!(
+                    count > 5,
+                    "link ink missing: invalid={invalid}, dark={dark}"
+                );
+            }
+        }
     }
 
     /// 要件 7.3.2: **and the comment's ink reaches the pixels.**
