@@ -388,7 +388,7 @@ export component EditorSurface inherits Rectangle {
                             scroll.visible-height - (page.y + scroll.viewport-y + self.y)));
                         background: root.terminal || root.wall-kind != 0 || root.background-transparency > 0
                             ? transparent : root.page-background;
-                        if root.focused && !root.empty && self.width > 0px && self.height > 0px: Rectangle {
+                        if !root.standalone && root.focused && !root.empty && self.width > 0px && self.height > 0px: Rectangle {
                             x: 0px; y: 0px;
                             width: parent.width; height: parent.height;
                             if paper-visible.x == 0px: Rectangle {

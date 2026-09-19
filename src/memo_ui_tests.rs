@@ -1274,6 +1274,8 @@ fn standalone_draft_keeps_end_visible_after_long_text_and_resize() {
         });
     };
     draw(690, 340);
+    let initial = window.get_editor_screen();
+    assert!(initial.caret_x < 20.0 && initial.caret_y < 20.0, "draft text starts at the host padding, not the main editor page margin");
     let text = "日本語の本文と English text\n".repeat(80);
     window.set_text(text.clone().into());
     window.invoke_set_caret(text.len() as i32);

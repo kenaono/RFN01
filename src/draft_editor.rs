@@ -50,6 +50,10 @@ impl Editor {
             font_size: 14.0,
             // Slint 1.17 on Windows resolves the old default SansSerif to Arial.
             body_font: "Arial".into(),
+            heading_font: std::array::from_fn(|_| "Arial".into()),
+            code_font: "Arial".into(),
+            page_margin: Some(0.0),
+            ruby_room: false,
             paper: channels(window.get_editor_paper()),
             ink: channels(window.get_editor_ink()),
             ..Default::default()

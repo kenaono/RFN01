@@ -137,8 +137,10 @@ export component QuickDraft inherits Window {
             border-color: source-view.input-focused ? Tok.accent : Tok.rule;
             clip: true;
             source-view := EditorSurface {
-                width: parent.width;
-                height: parent.height;
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
                 standalone: true;
                 writing: true;
                 focused: source-view.input-focused;
