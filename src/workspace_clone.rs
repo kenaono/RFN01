@@ -40,6 +40,29 @@ impl Job {
         })
     }
 
+    fn probe(url: String) -> Result<Self, String> {
+        validate_url(&url)?;
+        let (sender, result) = mpsc::channel();
+        let child = Arc::new(Mutex::new(None));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_child = child.clone();
+        let worker_cancelled = cancelled.clone();
+        std::thread::Builder::new()
+            .name("workspace-url-check".into())
+            .spawn(move || {
+                let result =
+                    run_git(&url, None, &worker_child, &worker_cancelled).map(|()| PathBuf::new());
+                let _ = sender.send(result);
+            })
+            .map_err(|_| "Could not start repository validation.".to_string())?;
+        Ok(Self {
+            result,
+            finished: false,
+            child,
+            cancelled,
+        })
+    }
+
     pub fn try_result(&mut self) -> Option<Result<PathBuf, String>> {
         if self.finished {
             return None;
@@ -72,7 +95,37 @@ impl Drop for Job {
     }
 }
 
-fn validate_url(url: &str) -> Result<(), String> {
+/// One field's validation request. Editing/cancelling drops the old Git job;
+/// comparing the URL on delivery prevents a queued stale result from publishing.
+#[derive(Default)]
+pub struct UrlCheck {
+    pending: Option<(String, Job)>,
+}
+impl UrlCheck {
+    pub fn clear(&mut self) {
+        self.pending = None;
+    }
+    pub fn start(&mut self, url: &str) -> Result<(), String> {
+        self.clear();
+        self.pending = Some((url.to_owned(), Job::probe(url.to_owned())?));
+        Ok(())
+    }
+    pub fn poll(&mut self, current_url: &str) -> Option<Result<(), String>> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(url, _)| url != current_url)
+        {
+            self.clear();
+            return None;
+        }
+        let result = self.pending.as_mut()?.1.try_result()?;
+        self.clear();
+        Some(result.map(|_| ()))
+    }
+}
+
+pub fn validate_url(url: &str) -> Result<(), String> {
     let invalid =
         || "Enter an HTTPS or SSH repository URL without passwords or access tokens.".to_string();
     if url.is_empty()
@@ -160,7 +213,7 @@ fn valid_port(port: &str) -> bool {
     port.parse::<u16>().is_ok_and(|port| port > 0)
 }
 
-fn validate_destination(destination: &Path) -> Result<(), String> {
+pub fn validate_destination(destination: &Path) -> Result<(), String> {
     let metadata = std::fs::symlink_metadata(destination)
         .map_err(|_| "Choose an existing empty folder.".to_string())?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
@@ -304,6 +357,33 @@ fn run_git(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_validation_discards_stale_and_cancelled_results() {
+        let queued = || {
+            let (sender, result) = mpsc::channel();
+            sender.send(Ok(PathBuf::new())).unwrap();
+            UrlCheck {
+                pending: Some((
+                    "https://host/old".into(),
+                    Job {
+                        result,
+                        finished: false,
+                        child: Arc::new(Mutex::new(None)),
+                        cancelled: Arc::new(AtomicBool::new(false)),
+                    },
+                )),
+            }
+        };
+        let mut stale = queued();
+        assert!(stale.poll("https://host/new").is_none());
+        assert!(stale.pending.is_none());
+        let mut cancelled = queued();
+        cancelled.clear();
+        assert!(cancelled.poll("https://host/old").is_none());
+        let mut current = queued();
+        assert_eq!(current.poll("https://host/old"), Some(Ok(())));
+    }
 
     #[test]
     fn accepts_repository_network_addresses() {

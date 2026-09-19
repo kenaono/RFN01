@@ -1973,6 +1973,36 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
         }};
     }
 
+    // Field validation must observe edits immediately so a queued probe result
+    // cannot publish after the URL was edited or the question was cancelled.
+    {
+        let weak = window.as_weak();
+        let held = live.clone();
+        window.on_workspace_clone_url_edited(move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_clone_url_edited(&window, &held);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let held = live.clone();
+        window.on_workspace_clone_url_check(move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_clone_url_check(&window, &held);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let held = live.clone();
+        window.on_workspace_clone_destination_check(move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_clone_destination_check(&window, &held);
+            }
+        });
+    }
+
     deferred!(
         window,
         on_workspace_clone_requested,

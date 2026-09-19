@@ -186,11 +186,13 @@ export component Field inherits Rectangle {
     changed has-focus => {
         if (!self.has-focus) {
             settle.running = false;
+            root.focus-lost();
         }
         Ime.field-focus(self.has-focus);
     }
     callback accepted();
     callback edited();
+    callback focus-lost();
     /// Escape, which a field has to pass on rather than swallow: the bar it
     /// sits in is what closes (要件 6.7).
     callback escaped();

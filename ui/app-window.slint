@@ -555,6 +555,12 @@ export component AppWindow inherits Window {
     in property <bool> question-is-clone: false;
     in-out property <string> workspace-clone-destination;
     callback workspace-clone-browse();
+    callback workspace-clone-url-edited();
+    callback workspace-clone-url-check();
+    callback workspace-clone-destination-check();
+    in property <string> workspace-clone-url-error;
+    in-out property <string> workspace-clone-destination-error;
+    in property <bool> workspace-clone-url-checking;
     in-out property <string> question-name;
     // Bumped when a name is asked for, so the field takes the keyboard. Same
     // shape as `find-generation`, and for the same reason: an id does not cross
@@ -1581,7 +1587,11 @@ export component AppWindow inherits Window {
                             padding-bottom: 4px;
                             spacing: 2px;
 
-                            Text {
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
                                 text: root.work-folder == ""
                                     ? @tr("No folder open")
                                     : root.work-folder;
@@ -1590,6 +1600,12 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                                 overflow: elide;
+                            }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.work-folder-requested(); }
+                                }
                             }
 
                             // 要件 5.2: **the two commands that have no row to
@@ -1614,14 +1630,7 @@ export component AppWindow inherits Window {
                                 tip: @tr("Refresh");
                                 clicked => { root.explorer-command(2); }
                             }
-                            if root.work-folder == "": IconButton {
-                                icon: Icons.folder;
-                                tip: @tr("Open Folder");
-                                clicked => {
-                                    root.work-folder-requested();
-                                    root.focus-generation += 1;
-                                }
-                            }
+
                             // 追加要件 2026-09-06: **the `+` asks what kind**,
                             // the same three-way question the tab strip's `+`
                             // asks — a file, a shell, or a folder.
@@ -1696,14 +1705,7 @@ export component AppWindow inherits Window {
                             // beside it, where the other two "new" rows are; a
                             // button that made one and a button that opened one
                             // wore the same icon and did opposite things.
-                            if root.work-folder != "": IconButton {
-                                icon: Icons.folder;
-                                tip: @tr("Open Folder");
-                                clicked => {
-                                    root.work-folder-requested();
-                                    root.focus-generation += 1;
-                                }
-                            }
+
                         }
                     }
 
@@ -5753,6 +5755,8 @@ export component AppWindow inherits Window {
                                 enabled: !root.question-is-clone || !root.workspace-cloning;
                                 property <int> asked: root.question-generation;
                                 text <=> root.question-name;
+                                edited => { if root.question-is-clone { root.workspace-clone-url-edited(); } }
+                                focus-lost => { if root.question-is-clone { root.workspace-clone-url-check(); } }
                                 init => {
                                     self.take-focus();
                                 }
@@ -5775,16 +5779,31 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            if root.question-is-clone && root.workspace-clone-url-error != "": Text {
+                                text: root.workspace-clone-url-error; color: Tok.alert; wrap: word-wrap; font-size: 12px;
+                            }
+                            if root.question-is-clone && root.workspace-clone-url-checking: Text {
+                                text: "…"; color: Tok.ink-muted; font-size: 12px;
+                            }
                             if root.question-is-clone: VerticalLayout {
                                 spacing: 6px;
                                 Text { text: @tr("Destination folder (empty)"); color: Tok.ink; }
+                                HorizontalLayout {
+                                spacing: 6px;
                                 Field {
+                                    horizontal-stretch: 1;
                                     text <=> root.workspace-clone-destination;
+                                    focus-lost => { root.workspace-clone-destination-check(); }
+                                    edited => { root.workspace-clone-destination-error = ""; }
                                     enabled: !root.workspace-cloning;
                                     accepted => { root.question-answered(0); }
                                     escaped => { root.question-answered(root.question-choices.length - 1); }
                                 }
                                 TextButton { title: @tr("Browse…"); enabled: !root.workspace-cloning; clicked => { root.workspace-clone-browse(); } }
+                                }
+                                if root.workspace-clone-destination-error != "": Text {
+                                    text: root.workspace-clone-destination-error; color: Tok.alert; wrap: word-wrap; font-size: 12px;
+                                }
                             }
 
                             // **One to a line, in the order Rust names them**:

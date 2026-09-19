@@ -25,6 +25,8 @@ mod kill_ring;
 #[cfg(test)]
 mod layout_snapshot_ui_tests;
 mod link_completion;
+mod link_move;
+mod link_rewrite;
 #[cfg(test)]
 mod link_ui_tests;
 #[cfg(test)]
@@ -3551,6 +3553,16 @@ fn main() -> Result<(), slint::PlatformError> {
             return CloseRequestResponse::HideWindow;
         };
         let live = &closing_live;
+        if live.folder.borrow().link_move_job.is_some() {
+            window.tell(
+                pick(
+                    "リンク更新中です。完了後に閉じてください",
+                    "Updating links. Please close after it finishes.",
+                )
+                .into(),
+            );
+            return CloseRequestResponse::KeepWindowShown;
+        }
         // **問いが立っているあいだは、もう一度は訊かない。**`×`を続けて
         // 押されても重ねられないのは、`pending`が1つしか持てないからで
         // （`Live::pending`）、ここで返さないと下の`ask_question`が
@@ -6064,7 +6076,9 @@ fn editor_area(window: &AppWindow) -> Rect {
 /// The work folder, and which of its folders the writer has opened.
 #[derive(Default)]
 struct WorkFolder {
+    link_move_job: Option<link_move::Job>,
     clone_job: Option<workspace_clone::Job>,
+    clone_url_check: workspace_clone::UrlCheck,
     clone_target: Option<workspace::WorkspaceId>,
     pending_workspace_cleanup: Option<WorkspaceCleanup>,
     tree_filter: String,
@@ -6198,6 +6212,7 @@ fn folder_autosave_tick(window: &AppWindow, live: &Live) {
             return;
         }
     }
+    link_move::tick(window, live);
     let (runtime, engine) = {
         let folder = live.folder.borrow();
         (folder.workspace.clone(), folder.folder_autosave.clone())
@@ -7369,6 +7384,10 @@ fn workspace_clone_requested(window: &AppWindow, live: &Live) {
     if live.folder.borrow().clone_job.is_some() {
         return;
     }
+    live.folder.borrow_mut().clone_url_check.clear();
+    window.set_workspace_clone_url_error("".into());
+    window.set_workspace_clone_destination_error("".into());
+    window.set_workspace_clone_url_checking(false);
     window.set_question_name("".into());
     window.set_workspace_clone_destination("".into());
     ask_question(
@@ -7383,6 +7402,56 @@ fn workspace_clone_requested(window: &AppWindow, live: &Live) {
     window.set_question_generation(window.get_question_generation() + 1);
 }
 
+fn workspace_clone_url_edited(window: &AppWindow, live: &Live) {
+    live.folder.borrow_mut().clone_url_check.clear();
+    window.set_workspace_clone_url_error("".into());
+    window.set_workspace_clone_url_checking(false);
+}
+
+fn workspace_clone_url_check(window: &AppWindow, live: &Live) {
+    if !matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl))
+        || window.get_workspace_cloning()
+    {
+        return;
+    }
+    let url = window.get_question_name().trim().to_owned();
+    let result = live.folder.borrow_mut().clone_url_check.start(&url);
+    window.set_workspace_clone_url_checking(result.is_ok());
+    window.set_workspace_clone_url_error(
+        result
+            .err()
+            .map(|error| {
+                format!(
+                    "{}: {error}",
+                    pick("GitのURLを確認してください", "Check the Git URL")
+                )
+            })
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
+fn workspace_clone_destination_check(window: &AppWindow, live: &Live) {
+    if !matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl))
+        || window.get_workspace_cloning()
+    {
+        return;
+    }
+    let destination = PathBuf::from(window.get_workspace_clone_destination().trim());
+    window.set_workspace_clone_destination_error(
+        workspace_clone::validate_destination(&destination)
+            .err()
+            .map(|error| {
+                format!(
+                    "{}: {error}",
+                    pick("保存先を確認してください", "Check the destination")
+                )
+            })
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
 fn workspace_clone_browse(window: &AppWindow, live: &Live) {
     if live.folder.borrow().clone_job.is_some() {
         return;
@@ -7390,6 +7459,7 @@ fn workspace_clone_browse(window: &AppWindow, live: &Live) {
     if let Some(path) = file_dialog::workspace_folder(ime::window_handle(window)) {
         window.set_workspace_clone_destination(path.display().to_string().into());
         window.set_question_detail("".into());
+        workspace_clone_destination_check(window, live);
     }
 }
 
@@ -7397,6 +7467,22 @@ fn workspace_clone_start(window: &AppWindow, live: &Live, url: String) {
     if live.folder.borrow().clone_job.is_some() {
         return;
     }
+    workspace_clone_destination_check(window, live);
+    if let Err(error) = workspace_clone::validate_url(url.trim()) {
+        window.set_workspace_clone_url_error(
+            format!(
+                "{}: {error}",
+                pick("GitのURLを確認してください", "Check the Git URL")
+            )
+            .into(),
+        );
+        return;
+    }
+    if !window.get_workspace_clone_destination_error().is_empty() {
+        return;
+    }
+    live.folder.borrow_mut().clone_url_check.clear();
+    window.set_workspace_clone_url_checking(false);
     let destination = PathBuf::from(window.get_workspace_clone_destination().trim());
     match workspace_clone::Job::start(url.trim().to_owned(), destination) {
         Ok(job) => {
@@ -7435,6 +7521,36 @@ fn workspace_clone_start(window: &AppWindow, live: &Live, url: String) {
 }
 
 fn workspace_clone_tick(window: &AppWindow, live: &Live) {
+    if matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl)) {
+        let current = window.get_question_name();
+        let result = live
+            .folder
+            .borrow_mut()
+            .clone_url_check
+            .poll(current.trim());
+        if let Some(result) = result {
+            window.set_workspace_clone_url_checking(false);
+            window.set_workspace_clone_url_error(
+                result
+                    .err()
+                    .map(|error| {
+                        format!(
+                            "{}: {error}",
+                            pick(
+                                "Gitリポジトリを確認できません",
+                                "Cannot confirm Git repository"
+                            )
+                        )
+                    })
+                    .unwrap_or_default()
+                    .into(),
+            );
+        }
+    } else {
+        live.folder.borrow_mut().clone_url_check.clear();
+        window.set_workspace_clone_url_checking(false);
+    }
+
     if live.pending.borrow().is_some()
         && !matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl))
     {
@@ -9631,8 +9747,17 @@ fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 /// not the name. Drawing the tree again is left to the caller, because the one
 /// that carried something into a folder has that folder to open first.
 fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::io::Result<()> {
+    if live.folder.borrow().link_move_job.is_some() {
+        return Err(std::io::Error::other(pick(
+            "リンク更新中です。完了後に移動してください",
+            "Link update in progress. Try moving again after it finishes.",
+        )));
+    }
+    let before = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
     file_tree::rename(from, to)?;
     documents_follow(window, live, from, to);
+    let after = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
+    link_move::start(window, live, before, after);
     let mut open = live.folder.borrow_mut();
     open.selected = Some(to.to_path_buf());
     // A folder that was open stays open where it has gone, and so does every
@@ -9656,7 +9781,13 @@ fn documents_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
         let moved = {
             let file = document.file.borrow();
             let path = file.path();
-            path.and_then(|path| file_tree::moved_path(from, to, path))
+            path.and_then(|path| {
+                file_tree::moved_path(from, to, path).or_else(|| {
+                    let from = PathBuf::from(link_completion::path_to_string(from));
+                    let path = PathBuf::from(link_completion::path_to_string(path));
+                    file_tree::moved_path(&from, to, &path)
+                })
+            })
         };
         let Some(moved) = moved else {
             continue;
@@ -11040,6 +11171,8 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     };
     match (question, choice) {
         (Question::CloneWorkspaceUrl, _) => {
+            live.folder.borrow_mut().clone_url_check.clear();
+            window.set_workspace_clone_url_checking(false);
             live.folder.borrow_mut().clone_job = None;
             live.folder.borrow_mut().clone_target = None;
             window.set_workspace_cloning(false);

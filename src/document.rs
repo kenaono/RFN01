@@ -133,19 +133,25 @@ impl PreviewLine {
         let mut preview_byte = vec![visible.len() as u32; units + 1];
         let mut source_cursor = 0;
         let mut utf16_cursor = 0;
+        let hidden_wiki = if active || style.kind.is_code() || !source.contains("[[") {
+            Vec::new()
+        } else {
+            hidden_wiki_display_ranges(&source)
+        };
 
         for (preview_offset, character) in visible.char_indices() {
             // The preview only ever deletes from the source, so the next
             // preview character is almost always sitting at the cursor already.
-            let remaining = &source[source_cursor..];
-            let source_offset = if remaining.starts_with(character) {
-                source_cursor
-            } else {
-                remaining
-                    .find(character)
-                    .map(|relative| source_cursor + relative)
-                    .unwrap_or(source_cursor)
-            };
+            let source_offset = source[source_cursor..]
+                .char_indices()
+                .map(|(relative, found)| (source_cursor + relative, found))
+                .find(|(offset, found)| {
+                    *found == character
+                        && !hidden_wiki
+                            .get(hidden_wiki.partition_point(|range| range.end <= *offset))
+                            .is_some_and(|range| range.contains(offset))
+                })
+                .map_or(source_cursor, |(offset, _)| offset);
             let source_end = source_offset + character.len_utf8();
             let preview_end = preview_offset + character.len_utf8();
             let utf16_units = character.len_utf16();
@@ -2612,14 +2618,22 @@ fn push_marked_recording(
         }
         if let Some((shown, target, after)) = link_here(rest, previous) {
             let start = *at;
-            // E12 first step: wiki names have no defined namespace here.
-            // Keep their spelling and distinguish unresolved destinations.
+            // Retain the original destination for resolution; shortening the
+            // implicit display name never rewrites the source target.
             let unresolved_link =
                 rest.starts_with("[[") && !std::path::Path::new(target).is_absolute();
             // Emphasis inside the shown text is still emphasis: `[**太字**](x)`
             // is a bold link, and this is the same recursion that nests one
             // marker inside another.
-            push_marked(shown, visible, marks, at, reading);
+            if rest.starts_with("[[") && !rest[..rest.len() - after.len()].contains('|') {
+                // An implicit filename is literal text, not emphasis markup.
+                let (name, fragment) = wiki_display_parts(target);
+                visible.push_str(name);
+                visible.push_str(fragment);
+                *at += (name.encode_utf16().count() + fragment.encode_utf16().count()) as u32;
+            } else {
+                push_marked(shown, visible, marks, at, reading);
+            }
             marks.push(Emphasis {
                 utf16_start: start,
                 utf16_len: *at - start,
@@ -3286,21 +3300,111 @@ fn footnote_here(rest: &str) -> Option<(&str, &str)> {
     named.then_some((name, after))
 }
 
-/// The link `rest` begins with: the text it shows, and what follows it.
-///
-/// Two shapes, and one rule they share with every other marker — **a link that
-/// does not close is not a link**, so an unmatched `[` is a bracket and stays
-/// one.
-///
-/// - `[shown](where)`, the ordinary link. 要件 7.3.2 formats it; where it
-///   points is 要件 7.3.1's business (`Ctrl+click`) and not shown.
-/// - `[[note]]` and `[[note|shown]]`, the internal link. **Kept and formatted
-///   even though going to one is out of scope** (要件定義 §14): not breaking a
-///   notation and being able to decide where it points are different things.
-///
-/// **An image is not a link.** `![説明](画像.png)` keeps its markup, because
-/// 要件 7.3.3 asks for the image to be shown as a name — and a link that read
-/// as ordinary text would hide the one thing that says it is a picture.
+/// Default Wiki display: a filename stem and its unchanged heading fragment.
+fn wiki_display_parts(target: &str) -> (&str, &str) {
+    let (path, fragment) = target
+        .find('#')
+        .map_or((target, ""), |at| (&target[..at], &target[at..]));
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    // Keep dotfiles and extensionless names intact; remove only the last suffix.
+    let stem = name
+        .rfind('.')
+        .filter(|&at| at > 0)
+        .map_or(name, |at| &name[..at]);
+    (stem, fragment)
+}
+
+/// Link tokens on one logical line, excluding code, escaped syntax and images.
+fn line_link_ranges(source: &str) -> Vec<(Range<usize>, Range<usize>, bool)> {
+    let mut links = Vec::new();
+    let mut rest = source;
+    let mut previous = None;
+    while !rest.is_empty() {
+        if let Some((_, _, after)) = rest.strip_prefix('!').and_then(|s| link_here(s, None)) {
+            rest = after;
+            previous = Some(']');
+            continue;
+        }
+        if let Some((_, _, after)) = opens_here(rest, previous).filter(|(marks, _, _)| marks.code) {
+            rest = after;
+            previous = Some('`');
+            continue;
+        }
+        if let Some((_, target, after)) = link_here(rest, previous) {
+            let start = source.len() - rest.len();
+            let end = source.len() - after.len();
+            let target_start = target.as_ptr() as usize - source.as_ptr() as usize;
+            links.push((
+                start..end,
+                target_start..target_start + target.len(),
+                rest.starts_with("[["),
+            ));
+            rest = after;
+            previous = Some(']');
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        let len = ch.len_utf8()
+            + if ch == '\\' {
+                rest[ch.len_utf8()..]
+                    .chars()
+                    .next()
+                    .map_or(0, char::len_utf8)
+            } else {
+                0
+            };
+        rest = &rest[len..];
+        previous = Some(ch);
+    }
+    links
+}
+
+fn hidden_wiki_display_ranges(source: &str) -> Vec<Range<usize>> {
+    let mut hidden = Vec::new();
+    for (token, target, wiki) in line_link_ranges(source) {
+        if !wiki {
+            continue;
+        }
+        if source.as_bytes().get(target.end) == Some(&b'|') {
+            hidden.push(token.start..target.end + 1);
+        } else {
+            let (name, fragment) = wiki_display_parts(&source[target.clone()]);
+            let name_start = name.as_ptr() as usize - source.as_ptr() as usize;
+            hidden.push(token.start..name_start);
+            let fragment_start = if fragment.is_empty() {
+                target.end
+            } else {
+                target.end - fragment.len()
+            };
+            hidden.push(name_start + name.len()..fragment_start);
+        }
+        hidden.push(token.end - 2..token.end);
+    }
+    hidden
+}
+
+/// Source ranges of link destinations, preserving their original spelling.
+/// Consumers decide whether a target is local; parsing never resolves or reads files.
+pub fn link_target_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
+    let styles = line_styles_as(source, BulletMarks::default());
+    let mut offset = 0;
+    let mut result = Vec::new();
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        if !styles.get(index).is_some_and(|style| style.kind.is_code()) {
+            result.extend(
+                line_link_ranges(line)
+                    .into_iter()
+                    .map(|(_, target, wiki)| (offset + target.start..offset + target.end, wiki)),
+            );
+        }
+        offset += line.len();
+    }
+    result
+}
+
+/// Parse a complete ordinary or Wiki link without rewriting its destination.
+/// Explicit labels are returned verbatim; implicit Wiki display is shortened
+/// only when rendering. Images and unmatched opening brackets are not links.
 fn link_here<'a>(rest: &'a str, previous: Option<char>) -> Option<(&'a str, &'a str, &'a str)> {
     if previous == Some('!') {
         return None;
@@ -7215,6 +7319,95 @@ mod tests {
 
         assert!(marks.iter().any(|span| span.marks.link && !span.marks.bold));
         assert!(marks.iter().any(|span| span.marks.bold && !span.marks.link));
+    }
+
+    #[test]
+    fn wiki_preview_uses_filename_but_preserves_aliases_targets_and_source() {
+        for (source, expected, target) in [
+            ("[[folder/Note.md]]", "Note", "folder/Note.md"),
+            (
+                r"[[folder\原稿😀.txt#見出し]]",
+                "原稿😀#見出し",
+                r"folder\原稿😀.txt#見出し",
+            ),
+            (
+                "[[../chapter/Name.part.md]]",
+                "Name.part",
+                "../chapter/Name.part.md",
+            ),
+            (
+                "[[folder/NoExtension]]",
+                "NoExtension",
+                "folder/NoExtension",
+            ),
+            ("[[folder/.hidden]]", ".hidden", "folder/.hidden"),
+            ("[[#Heading]]", "#Heading", "#Heading"),
+            (
+                "[[folder/my_note_file.md]]",
+                "my_note_file",
+                "folder/my_note_file.md",
+            ),
+            ("[[folder/Note.md|表示.md]]", "表示.md", "folder/Note.md"),
+            ("[[folder/Note.md|**別名**]]", "別名", "folder/Note.md"),
+        ] {
+            let preview = PreviewDocument::from_source(source);
+            assert_eq!(preview.text, expected, "{source}");
+            assert_eq!(preview.lines[0].source, source);
+            assert_eq!(
+                link_target_at(source, preview.source_byte_at_utf16(0)),
+                Some((target, true))
+            );
+            assert_eq!(
+                PreviewDocument::from_source_with_active_line(source, Some(0)).text,
+                source
+            );
+        }
+        assert_eq!(
+            visible_markdown_text("[folder/Note.md](folder/Note.md)"),
+            "folder/Note.md"
+        );
+        assert_eq!(
+            visible_markdown_text("`[[folder/Note.md]]`"),
+            "[[folder/Note.md]]"
+        );
+    }
+
+    #[test]
+    fn shortened_wiki_mapping_skips_matching_directory_and_extension_characters() {
+        let source = "前 [[原稿😀/原稿😀.md#md見出し]] 後";
+        let preview = PreviewDocument::from_source(source);
+        assert_eq!(preview.text, "前 原稿😀#md見出し 後");
+        let filename = source.rfind("原稿😀").unwrap();
+        assert_eq!(preview.source_byte_at_utf16(2), filename);
+        let hash = source.find('#').unwrap();
+        assert_eq!(preview.source_byte_at_utf16(6), hash);
+        assert_eq!(preview.source_byte_at_utf16(7), hash + 1);
+        assert_eq!(preview.utf16_at_source_byte(filename), 2);
+        for at in 0..=preview.utf16_len() {
+            assert!(source.is_char_boundary(preview.source_byte_at_utf16(at)));
+        }
+        let alias = "[[同名/同名.md|同名]]";
+        assert_eq!(
+            PreviewDocument::from_source(alias).source_byte_at_utf16(0),
+            alias.rfind("同名").unwrap()
+        );
+    }
+
+    #[test]
+    fn target_ranges_exclude_code_images_and_escapes_and_keep_original_targets() {
+        let source = "[[dir/原稿.md#節|表示]] [text](dir/Other.md) `[[code]]` ![[image.png]] \\[[escaped]]\n```\n[[fenced]]\n```\n[[last.md]]";
+        let found: Vec<_> = link_target_ranges(source)
+            .into_iter()
+            .map(|(range, wiki)| (&source[range], wiki))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("dir/原稿.md#節", true),
+                ("dir/Other.md", false),
+                ("last.md", true)
+            ]
+        );
     }
 
     #[test]

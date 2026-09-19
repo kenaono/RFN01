@@ -513,6 +513,51 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         Some(a_root as i32)
     );
 
+    // Renaming a target updates only Auto Save reference sources, including
+    // the current unsaved buffer without losing its independent draft text.
+    let auto_reference = clone_a.join("auto-reference.md");
+    let manual_reference = clone_b.join("manual-reference.md");
+    std::fs::write(&auto_reference, "[label](../clone-b/same.md)\r\n").unwrap();
+    std::fs::write(&manual_reference, "[label](./same.md)\n").unwrap();
+    let reading_reference = clone_a.join("reading-reference.md");
+    std::fs::write(&reading_reference, "[read](../clone-b/same.md)").unwrap();
+    open_path_in_pane(&window, &live, id, &reading_reference, Opening::Kept);
+    let reading_document = live.states.document(id);
+    live.states.of(id).borrow_mut().viewer = true;
+    switch_to_tab(&window, &live, id, a_tab);
+    live.states
+        .document(id)
+        .text
+        .borrow_mut()
+        .push_str("\n[ref](../clone-b/same.md)\nUnfinished draft");
+    let renamed = b_file.parent().unwrap().join("renamed.md");
+    move_entry(&window, &live, &b_file, &renamed).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while live.folder.borrow().link_move_job.is_some() && Instant::now() < deadline {
+        link_move::tick(&window, &live);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(live.folder.borrow().link_move_job.is_none());
+    assert_eq!(
+        std::fs::read_to_string(&auto_reference).unwrap(),
+        "[label](../clone-b/renamed.md)\r\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manual_reference).unwrap(),
+        "[label](./same.md)\n"
+    );
+    let updated = live.states.document(id).text.borrow().clone();
+    assert!(updated.contains("[ref](../clone-b/renamed.md)"));
+    assert!(updated.ends_with("Unfinished draft"));
+    assert_eq!(
+        std::fs::read_to_string(&reading_reference).unwrap(),
+        "[read](../clone-b/same.md)"
+    );
+    assert_eq!(
+        reading_document.text.borrow().as_str(),
+        "[read](../clone-b/same.md)"
+    );
+
     // Detaching a root from a file context is transactional with dirty tabs.
     let dirty_clone = live.states.document(id);
     dirty_clone
@@ -563,9 +608,14 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     assert!(window.get_question_is_clone());
     window.set_question_name("not-a-repository-url".into());
     window.set_workspace_clone_destination(clone_new.display().to_string().into());
+    workspace_clone_url_check(&window, &live);
+    workspace_clone_destination_check(&window, &live);
+    assert!(!window.get_workspace_clone_url_error().is_empty());
+    assert!(!window.get_workspace_clone_destination_error().is_empty());
+    assert!(live.folder.borrow().clone_job.is_none());
     answer_question(&window, &live, 0);
     assert!(window.get_question_open());
-    assert!(!window.get_question_detail().is_empty());
+    assert!(!window.get_workspace_clone_url_error().is_empty());
     assert_eq!(window.get_question_name(), "not-a-repository-url");
     assert!(live.folder.borrow().clone_job.is_none());
     window.set_question_name("https://example.invalid/repo".into());

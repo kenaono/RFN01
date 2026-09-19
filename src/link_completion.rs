@@ -489,7 +489,7 @@ fn root_label(entry: &Entry) -> String {
 /// `//server/share` exactly as it already did (Additional reviewed
 /// integration decisions, 2026-09-18: "Normalize Windows verbatim prefix").
 #[cfg(windows)]
-fn path_to_string(path: &Path) -> String {
+pub(crate) fn path_to_string(path: &Path) -> String {
     use std::path::{Component, Prefix};
     let mut out = String::new();
     for component in path.components() {
@@ -536,7 +536,7 @@ fn path_to_string(path: &Path) -> String {
 
 /// A path as it is written into a document: forward slashes always.
 #[cfg(not(windows))]
-fn path_to_string(path: &Path) -> String {
+pub(crate) fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
@@ -554,6 +554,22 @@ fn wiki_or_markdown_path(entry: &Entry, source_file: Option<&Path>, wiki: bool) 
         &MARKDOWN_RESERVED
     };
     percent_encode_reserved(&path_to_string(&display_path(entry, source_file)), reserved)
+}
+
+/// Encode a known target using the same qualified relative spelling as completion.
+pub(crate) fn target_path_text(target: &Path, source_file: Option<&Path>, wiki: bool) -> String {
+    let relative = source_file
+        .and_then(Path::parent)
+        .and_then(|parent| relative_between(parent, target));
+    let path = relative.as_deref().unwrap_or(target);
+    percent_encode_reserved(
+        &path_to_string(path),
+        if wiki {
+            &WIKI_RESERVED
+        } else {
+            &MARKDOWN_RESERVED
+        },
+    )
 }
 
 fn display_path(entry: &Entry, source_file: Option<&Path>) -> PathBuf {
