@@ -8,7 +8,7 @@
 
 単なるファイル分割ではなく、利用先がアプリ全体の状態を操作せずに編集面を生成・表示・破棄できることを目指す。既存のTextEngine、EditorState、編集処理を移し、別の編集エンジンは作らない。
 
-## 現状の依存
+## 調査開始時の依存
 
 - src/main.rs: EditorState、PaneStates、RenderCache、入力・描画処理がAppWindowとPaneIdを通して接続されている。
 - src/panel_source.rs: 共通EditorPaneを使うため、利用先が状態、TAB代理、キャッシュ、画面モデルを直接登録し、65536以上のIDを特別扱いする。
@@ -68,7 +68,7 @@ Editor以外の機能も、再利用性が低い部分と冗長な部分を調�
 
 ## 進捗
 
-### 実装済みの基盤（2026-09-20、作業中）
+### 実装済みの基盤（2026-09-20）
 
 - `editor_state.rs`: 通常Editorが使っていた編集状態と選択・ReadOnly・追従・入力正規化を移動。Editor Panelの状態のコピーを廃止し、同じ状態への参照を使う。
 - `editor_session.rs`: 文書と各表示の編集状態を保持する。通常Editor／PanelのUndo・Redo、範囲削除・置換がここを通る。文書履歴は共有し、別表示の選択位置は独立させる。不正なUTF-8範囲の置換は拒否する。
@@ -103,9 +103,18 @@ Editor以外の機能も、再利用性が低い部分と冗長な部分を調�
 4. ホストは本文変更・選択・スクロールを画面へ反映する。Quick Draftの最小接続例は`draft_editor::install`、主Window内の埋込み例は`EditorHost`と`panel_source`を参照する。
 5. 非同期通知は弱参照し、面を閉じたらタイマー・状態・描画キャッシュを解放する。主Window内の埋込みIDは再利用しない。
 
-### 残る検証
+### 最終検証（2026-09-20）
 
-追加のQuick Draft回帰試験、最終全体テストと実ConPTY試験、実画面確認、確認版・PR・ユーザーAccept。実行結果は確定後に更新する。
+実装コミット: `d61821e7bf0fc8f928cdeeae321d758bb490f271`。確認用実行ファイルは`../review-builds/editor-components-d61821e/editor_spike.exe`。
+
+- 全体テスト: 1,050件成功、失敗0、通常は省略する24件。
+- 実ConPTY: Panel統合5件、Terminal Session5件、計10件成功。非表示中の出力、取り込み先維持、独立停止、ファイル出力失敗、シェル切替と終了を含む。
+- 単独Quick Draft: 日本語選択置換・削除・Undo/Redo、IME未確定文字の非保存、キャンセル、復元後の履歴リセット、長文・末尾追従・縮小時の再配置をテスト。本文の開始位置に通常Editorの広い紙面余白が入らないことも確認。
+- 実Windows操作: 通常Editorの横書き／縦書き、Live Preview、ReadOnlyの切替。Panelのクリック、日本語入力、Undo/Redo、終了確認と保存終了。Quick DraftのIME入力・変換・確定・キャンセル、Shift選択とEscape、Enter改行、全文コピーを確認。
+- 最終実行版: Quick Draftの紙面枠と余白を再確認。履歴復元・常時手前の復元、最大化と通常サイズ、長文貼り付け・末尾表示・ホイール、TAB送信と受取側Undo、アプリ終了を確認。
+- 実画面で見つかったQuick Draftへの紙面枠・広い余白の混入は修正済み。ホストが紙面余白を指定できるようにし、通常Editor／Panelは従来の既定値を維持。
+
+確認版とAccept手順は`Editor部品化_確認手順.md`。自動テストと上記の実操作確認を完了し、ユーザーAcceptを待つ。全IME製品・全DPI・長時間連続利用の網羅検証をしたという意味ではない。
 
 ### 周辺の調査結果と扱い
 
