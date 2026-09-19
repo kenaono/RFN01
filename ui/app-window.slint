@@ -140,6 +140,11 @@ export component AppWindow inherits Window {
     preferred-height: 760px;
     min-width: 640px;
     min-height: 400px;
+    // Switching side-panel contents must not impose their inferred maximum
+    // height on the native window. Winit clamps the current window size when
+    // those constraints change (for example when the Workspace tree hides).
+    // Keep the user-selected height, while retaining normal window resizing.
+    max-height: 100000px;
     background: root.background-transparency > 0 ? transparent : Tok.paper;
 
     // Every pane, in pane-number order: row N is pane N. **One row is one
@@ -198,6 +203,11 @@ export component AppWindow inherits Window {
     /// right click moves it here first, because the row a menu is opening from
     /// has to look chosen before Rust has drawn anything.
     in-out property <int> tree-selected: -1;
+    in property <[string]> tree-root-labels;
+    in property <[int]> tree-pane-root-indices;
+    property <int> tree-active-root-index: root.focused-pane >= 0 && root.focused-pane < root.tree-pane-root-indices.length
+        ? root.tree-pane-root-indices[root.focused-pane] : -1;
+    property <length> tree-root-row-height: max(24px, root.left-size * 2px);
     /// A row was clicked. What that does belongs to the panel showing:
     /// a folder opens or closes, a file is opened, a search result is gone to.
     callback left-row-activated(int);
@@ -542,6 +552,9 @@ export component AppWindow inherits Window {
     // and a second way of asking one would be a second thing to keep clear of
     // 6.18.
     in property <bool> question-asks-name: false;
+    in property <bool> question-is-clone: false;
+    in-out property <string> workspace-clone-destination;
+    callback workspace-clone-browse();
     in-out property <string> question-name;
     // Bumped when a name is asked for, so the field takes the keyboard. Same
     // shape as `find-generation`, and for the same reason: an id does not cross
@@ -1843,7 +1856,7 @@ export component AppWindow inherits Window {
 
                             for row[index] in root.left-rows: tree-row := Rectangle {
                                 // 追加要件 2026-09-15: 行の高さは字の大きさに合わせる（12pxで24px）。
-                                height: root.left-tab == 4 && row.is-root ? 12px : max(24px, root.left-size * 2px);
+                                height: root.left-tab == 4 && row.is-root ? root.tree-root-row-height : max(24px, root.left-size * 2px);
                                 property <int> reveal-generation: root.tree-reveal-generation;
                                 changed reveal-generation => {
                                     if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-selected {
@@ -1912,9 +1925,11 @@ export component AppWindow inherits Window {
                                 // which one it is.
                                 background: self.receiving || self.pointed
                                     ? Tok.accent-faint
+                                    : (root.left-tab == 4 && row.is-root
+                                        ? (index == root.tree-active-root-index ? Tok.accent-soft : transparent)
                                     : (index == root.tree-selected
                                         ? Tok.accent-soft
-                                        : (entry.has-hover ? Tok.accent-faint : transparent));
+                                        : (entry.has-hover ? Tok.accent-faint : transparent)));
 
                                 // Whether the button went down on this row,
                                 // where it went down, and whether it has since
@@ -2081,8 +2096,18 @@ export component AppWindow inherits Window {
                                 }
 
                                 if root.left-tab == 4 && row.is-root: Rectangle {
-                                    x: 8px; y: 5px; height: 1px; width: parent.width - 16px;
+                                    x: 8px; y: 0px; height: 1px; width: parent.width - 16px;
                                     background: Tok.rule-strong;
+                                }
+                                if root.left-tab == 4 && row.is-root: Text {
+                                    x: 8px; y: 1px;
+                                    width: parent.width - 16px; height: parent.height - 1px;
+                                    text: root.tree-root-labels[index];
+                                    font-size: root.left-size * 1px;
+                                    font-weight: index == root.tree-active-root-index ? 600 : 400;
+                                    color: index == root.tree-active-root-index ? Tok.accent-strong : root.left-ink;
+                                    vertical-alignment: center;
+                                    overflow: elide;
                                 }
                                 if root.left-tab == 1 || (root.left-tab == 4 && row.is-root): Tooltip {
                                     text: @markdown("`\{row.name}`");
@@ -2135,7 +2160,7 @@ export component AppWindow inherits Window {
                                 // fill the visible space remaining from that position.
                                 height: max(48px, tree-view.visible-height
                                     - (root.left-rows.length - root.tree-root-row-count) * max(24px, root.left-size * 2px)
-                                    - root.tree-root-row-count * 12px);
+                                    - root.tree-root-row-count * root.tree-root-row-height);
                                 vertical-stretch: 0;
                                 TouchArea {
                                     pointer-event(event) => {
@@ -5723,7 +5748,9 @@ export component AppWindow inherits Window {
                             // `init`; the generation is for a name asked for
                             // while one is already up, which the overlay does
                             // not allow but costs nothing to survive.
+                            if root.question-is-clone: Text { text: @tr("Repository URL (HTTPS / SSH)"); color: Tok.ink; }
                             if root.question-asks-name: Field {
+                                enabled: !root.question-is-clone || !root.workspace-cloning;
                                 property <int> asked: root.question-generation;
                                 text <=> root.question-name;
                                 init => {
@@ -5748,6 +5775,18 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            if root.question-is-clone: VerticalLayout {
+                                spacing: 6px;
+                                Text { text: @tr("Destination folder (empty)"); color: Tok.ink; }
+                                Field {
+                                    text <=> root.workspace-clone-destination;
+                                    enabled: !root.workspace-cloning;
+                                    accepted => { root.question-answered(0); }
+                                    escaped => { root.question-answered(root.question-choices.length - 1); }
+                                }
+                                TextButton { title: @tr("Browse…"); enabled: !root.workspace-cloning; clicked => { root.workspace-clone-browse(); } }
+                            }
+
                             // **One to a line, in the order Rust names them**:
                             // the first does the thing, the last changes
                             // nothing and is what Esc answers with (要件 8.4).
@@ -5763,6 +5802,7 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
 
                                 for choice[index] in root.question-choices: TextButton {
+                                    enabled: !root.question-is-clone || !root.workspace-cloning || index != 0;
                                     title: choice;
                                     wide: true;
                                     role: index == 0

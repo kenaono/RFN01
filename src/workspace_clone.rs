@@ -195,6 +195,23 @@ fn clone_repository(
     // Recheck immediately before spawning; a failed clone is never cleaned up
     // automatically, because newly created files may already belong to a user.
     validate_destination(destination)?;
+    run_git(url, None, child, cancelled)?;
+    validate_destination(destination)?;
+    run_git(url, Some(destination), child, cancelled)?;
+    if !destination.is_dir() || !destination.join(".git").is_dir() {
+        return Err("Git finished, but the downloaded repository could not be confirmed.".into());
+    }
+    Ok(destination.to_path_buf())
+}
+
+// Probe with Git itself: .git suffixes and provider-specific URL shapes are
+// neither necessary nor sufficient evidence that a URL is a repository.
+fn run_git(
+    url: &str,
+    destination: Option<&Path>,
+    child: &Arc<Mutex<Option<Child>>>,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
     let mut command = Command::new("git");
     command
         .args([
@@ -206,17 +223,23 @@ fn clone_repository(
             "core.hooksPath=NUL",
             "-c",
             "init.templateDir=",
-            "clone",
+            if destination.is_some() {
+                "clone"
+            } else {
+                "ls-remote"
+            },
             "--",
         ])
         .arg(url)
-        .arg(destination)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
         .env("SSH_ASKPASS_REQUIRE", "never")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(destination) = destination {
+        command.arg(destination);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -270,12 +293,12 @@ fn clone_repository(
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     if !status.success() {
+        if destination.is_none() {
+            return Err("Could not confirm a Git repository. Check the repository URL and access permissions.".into());
+        }
         return Err("Repository download failed. Check the URL, access permission, and connection. Any partial files were left in the destination.".into());
     }
-    if !destination.is_dir() || !destination.join(".git").is_dir() {
-        return Err("Git finished, but the downloaded repository could not be confirmed.".into());
-    }
-    Ok(destination.to_path_buf())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -414,6 +437,15 @@ mod tests {
         .unwrap_err();
         assert!(!error.contains("private-url-token"));
         assert!(failure.exists());
+        assert!(
+            validate_destination(&failure).is_ok(),
+            "failed repository probe must not write the destination"
+        );
+        assert!(
+            clone_repository(failure.to_str().unwrap(), &failure, &child, &cancelled).is_err(),
+            "an ordinary folder is not a Git repository"
+        );
+        assert!(validate_destination(&failure).is_ok());
         assert!(child.lock().unwrap().is_none());
         // Resolve the generated test root before recursively removing only it.
         assert!(

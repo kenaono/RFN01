@@ -4178,7 +4178,20 @@ export component EditorPane inherits Rectangle {
     }
 
     if root.link-popup-open: LinkCompletion {
-        x: 8px; y: 64px; width: min(420px, root.width - 16px);
+        // page.absolute-position includes paper centring and both scroll axes.
+        // The same conversion works for every split pane and follows scrolling
+        // without waiting for another completion query from Rust.
+        caret-x: page.absolute-position.x - root.absolute-position.x + root.caret-x * 1px;
+        caret-y: page.absolute-position.y - root.absolute-position.y + root.caret-y * 1px;
+        caret-width: root.vertical ? max(root.caret-width * 1px, 1px) : 2px;
+        caret-height: root.vertical ? 2px : max(root.caret-height * 1px, 2px);
+        vertical: root.vertical;
+        viewport-left: max(scroll.absolute-position.x, body-clip.absolute-position.x) - root.absolute-position.x;
+        viewport-top: max(scroll.absolute-position.y, body-clip.absolute-position.y) - root.absolute-position.y;
+        viewport-right: max(self.viewport-left, min(scroll.absolute-position.x + scroll.visible-width,
+            body-clip.absolute-position.x + body-clip.width) - root.absolute-position.x);
+        viewport-bottom: max(self.viewport-top, min(scroll.absolute-position.y + scroll.visible-height,
+            body-clip.absolute-position.y + body-clip.height) - root.absolute-position.y);
         rows: root.link-popup-rows;
         selected: root.link-popup-selected;
         status: root.link-popup-status;

@@ -176,6 +176,7 @@ export global Selection {
 // selection and every editing key are Slint's — inside a box drawn in `Tok`,
 // for the same reason `TextButton` exists.
 export component Field inherits Rectangle {
+    in property <bool> enabled: true;
     in property <string> placeholder;
     in-out property <string> text <=> input.text;
     // A one-way binding, not `<=>`: the input's own `has-focus` is read-only,
@@ -312,6 +313,7 @@ export component Field inherits Rectangle {
     }
 
     input := TextInput {
+        enabled: root.enabled;
         x: 8px;
         width: parent.width - 16px;
         height: parent.height;
@@ -2093,4 +2095,3 @@ export component Slider inherits Rectangle {
             1.0 - (y - root.grip / 2) / max(1px, root.height - root.grip), 0.0, 1.0);
     }
 }
-

@@ -1064,3 +1064,12 @@ msgstr "このフォルダを自動保存"
 
 msgid "Detach Workspace Folder…"
 msgstr "Workspaceからフォルダを外す…"
+
+msgid "Repository URL (HTTPS / SSH)"
+msgstr "リポジトリURL（HTTPS / SSH）"
+
+msgid "Destination folder (empty)"
+msgstr "保存先フォルダ（空のフォルダ）"
+
+msgid "Browse…"
+msgstr "参照…"

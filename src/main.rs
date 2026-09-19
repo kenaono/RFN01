@@ -6945,6 +6945,8 @@ fn publish_tree(window: &AppWindow, live: &Live) {
         window.set_work_folder(SharedString::new());
         window.set_tree_multi_root(false);
         window.set_tree_root_row_count(0);
+        window.set_tree_root_labels(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+        window.set_tree_pane_root_indices(ModelRc::new(VecModel::from(Vec::<i32>::new())));
         window.set_left_rows(ModelRc::new(VecModel::from(Vec::<LeftRow>::new())));
         window.set_tree_selected(-1);
         live.tree_paths.borrow_mut().clear();
@@ -7036,12 +7038,85 @@ fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::R
     window.set_work_folder(name.into());
     window.set_tree_multi_root(multi);
     window.set_tree_root_row_count(rows.iter().filter(|row| row.is_root).count() as i32);
+    let labels: Vec<SharedString> = rows
+        .iter()
+        .map(|row| {
+            if row.is_root {
+                row.path
+                    .file_name()
+                    .map_or_else(
+                        || row.path.display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    )
+                    .into()
+            } else {
+                SharedString::default()
+            }
+        })
+        .collect();
+    if !window
+        .get_tree_root_labels()
+        .iter()
+        .eq(labels.iter().cloned())
+    {
+        window.set_tree_root_labels(ModelRc::new(VecModel::from(labels)));
+    }
     if !window.get_left_rows().iter().eq(drawn.iter().cloned()) {
         window.set_left_rows(ModelRc::new(VecModel::from(drawn)));
     }
     // Held beside the rows so a click can name one: the model the window has is
     // only what it draws, and a path is not part of that.
     *live.tree_paths.borrow_mut() = rows.into_iter().map(|row| row.path).collect();
+    drop(folder);
+    publish_workspace_root_highlights(window, live);
+}
+
+/// Root labels follow the document in each pane, never the context-menu selection.
+/// Keeping one index per pane lets Slint change the highlight immediately on focus.
+fn publish_workspace_root_highlights(window: &AppWindow, live: &Live) {
+    let roots: Vec<(usize, PathBuf)> =
+        if window.get_left_tab() == 4 && live.folder.borrow().workspace_view {
+            window
+                .get_left_rows()
+                .iter()
+                .enumerate()
+                .zip(live.tree_paths.borrow().iter())
+                .filter_map(|((index, row), path)| row.is_root.then(|| (index, path.clone())))
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let indices: Vec<i32> = live
+        .tabs
+        .borrow()
+        .panes
+        .iter()
+        .map(|pane| {
+            if roots.is_empty() {
+                return -1;
+            }
+            pane.current()
+                .filter(|tab| !tab.stands_in() && !tab.empty)
+                .and_then(|tab| {
+                    let file = tab.document.file.borrow();
+                    let path = file.path()?;
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                    roots
+                        .iter()
+                        .filter(|(_, root)| canonical.starts_with(root))
+                        .max_by_key(|(_, root)| root.components().count())
+                        .map(|(index, _)| *index as i32)
+                })
+                .unwrap_or(-1)
+        })
+        .collect();
+    if !window
+        .get_tree_pane_root_indices()
+        .iter()
+        .eq(indices.iter().copied())
+    {
+        window.set_tree_pane_root_indices(ModelRc::new(VecModel::from(indices)));
+    }
 }
 
 // --- Workspace設計.md phase 3: the switcher, the management overlay, and ---
@@ -7294,25 +7369,35 @@ fn workspace_clone_requested(window: &AppWindow, live: &Live) {
     if live.folder.borrow().clone_job.is_some() {
         return;
     }
-    ask_for_name(
+    window.set_question_name("".into());
+    window.set_workspace_clone_destination("".into());
+    ask_question(
         window,
         live,
         Question::CloneWorkspaceUrl,
-        say!(
-            "取得元のリポジトリURL（HTTPSまたはSSH）",
-            "Repository URL (HTTPS or SSH)"
-        ),
-        "",
+        pick("リポジトリを取得", "Clone Repository").into(),
+        &[pick("取得", "Clone"), cancel()],
+        -1,
     );
+    window.set_question_asks_name(true);
+    window.set_question_generation(window.get_question_generation() + 1);
+}
+
+fn workspace_clone_browse(window: &AppWindow, live: &Live) {
+    if live.folder.borrow().clone_job.is_some() {
+        return;
+    }
+    if let Some(path) = file_dialog::workspace_folder(ime::window_handle(window)) {
+        window.set_workspace_clone_destination(path.display().to_string().into());
+        window.set_question_detail("".into());
+    }
 }
 
 fn workspace_clone_start(window: &AppWindow, live: &Live, url: String) {
     if live.folder.borrow().clone_job.is_some() {
         return;
     }
-    let Some(destination) = file_dialog::workspace_folder(ime::window_handle(window)) else {
-        return;
-    };
+    let destination = PathBuf::from(window.get_workspace_clone_destination().trim());
     match workspace_clone::Job::start(url.trim().to_owned(), destination) {
         Ok(job) => {
             let target = live
@@ -7324,6 +7409,13 @@ fn workspace_clone_start(window: &AppWindow, live: &Live, url: String) {
             live.folder.borrow_mut().clone_target = target;
             live.folder.borrow_mut().clone_job = Some(job);
             window.set_workspace_cloning(true);
+            window.set_question_detail(
+                pick(
+                    "Gitリポジトリを確認し、取得しています…",
+                    "Checking the Git repository and cloning…",
+                )
+                .into(),
+            );
             window.tell(
                 pick(
                     "リポジトリを取得しています。成功後にWorkspaceへ登録します。",
@@ -7332,7 +7424,7 @@ fn workspace_clone_start(window: &AppWindow, live: &Live, url: String) {
                 .into(),
             );
         }
-        Err(error) => window.tell(
+        Err(error) => window.set_question_detail(
             format!(
                 "{}: {error}",
                 pick("リポジトリを取得できません", "Cannot clone repository")
@@ -7343,7 +7435,9 @@ fn workspace_clone_start(window: &AppWindow, live: &Live, url: String) {
 }
 
 fn workspace_clone_tick(window: &AppWindow, live: &Live) {
-    if live.pending.borrow().is_some() || window.get_question_open() {
+    if live.pending.borrow().is_some()
+        && !matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl))
+    {
         return;
     }
     let result = live
@@ -7361,10 +7455,24 @@ fn workspace_clone_tick(window: &AppWindow, live: &Live) {
     let path = match result {
         Ok(path) => path,
         Err(error) => {
-            window.tell(format!("{}: {error}", pick("取得に失敗しました。Workspaceには登録していません。保存先を確認してください", "Clone failed. No Workspace was registered; check the destination")).into());
+            window.set_question_detail(
+                format!(
+                    "{}: {error}",
+                    pick(
+                        "URL・アクセス権・保存先を確認してください。Workspaceには登録していません",
+                        "Check the URL, access and destination. No Workspace was registered"
+                    )
+                )
+                .into(),
+            );
             return;
         }
     };
+    if matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl)) {
+        live.pending.borrow_mut().take();
+        window.set_question_open(false);
+        restore_editor_focus(window);
+    }
     workspace_register_clone(window, live, path, target);
 }
 
@@ -9926,6 +10034,7 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
 /// and it is the focused pane's — the one whose tabs the buttons above would
 /// act on. Moving them inside the panes is the next step (ペイン分割設計 6).
 fn publish_tabs(window: &AppWindow, live: &Live) {
+    publish_workspace_root_highlights(window, live);
     observe_folder_autosave(window, live);
     // 要件 7.9・10: ステータスバーのモードは、前に出ているタブのもの。
     // **タブが動けばここも動く**ので、publishの入口で一緒に言う。
@@ -10839,6 +10948,7 @@ fn ask_question(
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
+    window.set_question_is_clone(matches!(&question, Question::CloneWorkspaceUrl));
     *live.pending.borrow_mut() = Some(question);
     let named = choices
         .iter()
@@ -10891,6 +11001,10 @@ fn ask_for_name(
 /// An answer that is not one of the ones below changes nothing, which is what
 /// the last choice always is.
 fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
+    if matches!(*live.pending.borrow(), Some(Question::CloneWorkspaceUrl)) && choice == 0 {
+        workspace_clone_start(window, live, window.get_question_name().to_string());
+        return;
+    }
     // Taken before anything else: an answer may ask the next question, and the
     // borrow must not still be open when it does.
     let question = live.pending.borrow_mut().take();
@@ -10925,8 +11039,10 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         choice
     };
     match (question, choice) {
-        (Question::CloneWorkspaceUrl, 0) => {
-            workspace_clone_start(window, live, window.get_question_name().to_string());
+        (Question::CloneWorkspaceUrl, _) => {
+            live.folder.borrow_mut().clone_job = None;
+            live.folder.borrow_mut().clone_target = None;
+            window.set_workspace_cloning(false);
         }
         (Question::ChangeWorkspace(target), 0) => {
             saving::save_all_for_workspace(window, live);

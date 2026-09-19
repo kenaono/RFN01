@@ -400,6 +400,30 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         a_row, b_row,
         "same basenames retain distinct root ownership"
     );
+    let a_root = paths
+        .iter()
+        .position(|path| path == a_file.parent().unwrap())
+        .unwrap();
+    let b_root = paths
+        .iter()
+        .position(|path| path == b_file.parent().unwrap())
+        .unwrap();
+    for (root_row, label, full_path) in [
+        (a_root, "clone-a", a_file.parent().unwrap()),
+        (b_root, "clone-b", b_file.parent().unwrap()),
+    ] {
+        assert_eq!(
+            window.get_tree_root_labels().row_data(root_row).unwrap(),
+            label
+        );
+        let row = drawn.row_data(root_row).unwrap();
+        assert!(row.is_root);
+        assert_eq!(
+            row.name.as_str(),
+            full_path.to_string_lossy().as_ref(),
+            "tooltip retains full root path"
+        );
+    }
     window.set_tree_filter("no-matching-file".into());
     tree_filter_changed(&window, &live);
     assert!(window.get_left_rows().iter().all(|row| row.folder));
@@ -440,8 +464,56 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         workspace::SaveMode::AutoSave
     );
 
-    // Detaching a root from a file context is transactional with dirty tabs.
+    // The section highlight follows the edited document, not a selected file
+    // or a right-clicked root, even when both files have the same basename.
     open_path_in_pane(&window, &live, id, &a_file, Opening::Kept);
+    assert_eq!(
+        window
+            .get_tree_pane_root_indices()
+            .row_data(id.index() as usize),
+        Some(a_root as i32)
+    );
+    workspace_context_requested(&window, &live, b_row as i32);
+    publish_tabs(&window, &live);
+    assert_eq!(
+        window
+            .get_tree_pane_root_indices()
+            .row_data(id.index() as usize),
+        Some(a_root as i32)
+    );
+    workspace_context_requested(&window, &live, b_root as i32);
+    publish_tabs(&window, &live);
+    assert_eq!(
+        window
+            .get_tree_pane_root_indices()
+            .row_data(id.index() as usize),
+        Some(a_root as i32)
+    );
+    open_path_in_pane(&window, &live, id, &b_file, Opening::Kept);
+    assert_eq!(
+        window
+            .get_tree_pane_root_indices()
+            .row_data(id.index() as usize),
+        Some(b_root as i32)
+    );
+    // Returning to an already open tab must update without a tree refresh.
+    let a_tab = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .iter()
+        .position(|tab| tab.document.file.borrow().path() == Some(a_file.as_path()))
+        .unwrap();
+    switch_to_tab(&window, &live, id, a_tab);
+    assert_eq!(
+        window
+            .get_tree_pane_root_indices()
+            .row_data(id.index() as usize),
+        Some(a_root as i32)
+    );
+
+    // Detaching a root from a file context is transactional with dirty tabs.
     let dirty_clone = live.states.document(id);
     dirty_clone
         .text
@@ -469,6 +541,13 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     let created = runtime.borrow().active_workspace().unwrap();
     assert!(window.get_tree_filter().is_empty());
     assert_ne!(created, first);
+    assert!(
+        window
+            .get_tree_pane_root_indices()
+            .iter()
+            .all(|index| index == -1),
+        "empty tabs in the newly opened Workspace must not retain a previous root highlight"
+    );
     assert_eq!(
         runtime.borrow().active_roots(),
         vec![clone_new.canonicalize().unwrap()]
@@ -479,4 +558,24 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
             .ends_with(" unsaved clone edit")
     );
     assert!(!window.get_workspace_manager_open());
+    // Invalid Clone input stays in the same form, preserving both fields.
+    workspace_clone_requested(&window, &live);
+    assert!(window.get_question_is_clone());
+    window.set_question_name("not-a-repository-url".into());
+    window.set_workspace_clone_destination(clone_new.display().to_string().into());
+    answer_question(&window, &live, 0);
+    assert!(window.get_question_open());
+    assert!(!window.get_question_detail().is_empty());
+    assert_eq!(window.get_question_name(), "not-a-repository-url");
+    assert!(live.folder.borrow().clone_job.is_none());
+    window.set_question_name("https://example.invalid/repo".into());
+    answer_question(&window, &live, 0);
+    assert!(window.get_question_open());
+    assert!(
+        live.folder.borrow().clone_job.is_none(),
+        "nonempty folder is rejected before network access"
+    );
+    answer_question(&window, &live, 1);
+    assert!(!window.get_question_open());
+    assert!(live.pending.borrow().is_none());
 }

@@ -1981,6 +1981,12 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
     );
     deferred!(
         window,
+        on_workspace_clone_browse,
+        live,
+        crate::workspace_clone_browse
+    );
+    deferred!(
+        window,
         on_workspace_open_selected,
         live,
         crate::workspace_open_selected
