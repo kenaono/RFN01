@@ -57,7 +57,18 @@ impl TerminalSession {
         rows: usize,
         wake: impl Fn() + Send + 'static,
     ) -> windows::core::Result<Self> {
-        let mut pty = Pty::open(command, columns as u16, rows as u16)?;
+        Self::start_in(name, command, None, columns, rows, wake)
+    }
+
+    pub fn start_in(
+        name: &str,
+        command: &str,
+        directory: Option<&std::path::Path>,
+        columns: usize,
+        rows: usize,
+        wake: impl Fn() + Send + 'static,
+    ) -> windows::core::Result<Self> {
+        let mut pty = Pty::open_in(command, directory, columns as u16, rows as u16)?;
         let reader = pty
             .take_reader()
             .expect("a freshly opened pty still has its reader");
@@ -98,6 +109,25 @@ impl TerminalSession {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn start_capture(&mut self) {
+        self.terminal.screen.start_capture();
+    }
+    pub fn stop_capture(&mut self) {
+        self.terminal.screen.stop_capture();
+    }
+    pub fn capture_update(&mut self) -> Option<(String, String)> {
+        self.terminal.screen.capture_update()
+    }
+    pub fn set_history_limit(&mut self, limit: usize) {
+        self.terminal.screen.set_history_limit(limit);
+    }
+    pub fn clear_history(&mut self) {
+        self.terminal.screen.clear_history();
+    }
+    pub fn clear_screen(&mut self) {
+        self.terminal.screen.clear_screen();
     }
 
     pub fn screen(&self) -> &Screen {

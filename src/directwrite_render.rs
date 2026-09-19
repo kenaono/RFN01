@@ -451,7 +451,7 @@ struct Graphics {
     /// writing mode to speak of and no line spacing — a cell grid decides its
     /// own line advance — so it shares nothing with the ones above but the
     /// factory that made them.
-    cell_formats: HashMap<(u32, String, bool), IDWriteTextFormat>,
+    cell_formats: HashMap<(u32, String, bool, bool), IDWriteTextFormat>,
     /// The terminal's cell size, and what it was measured for (追加要件
     /// Terminal). **Every wheel notch and every chunk of output asks for it**,
     /// and building a layout to answer is the same work each time.
@@ -11773,6 +11773,10 @@ pub mod cells {
     pub struct TerminalLook {
         /// A monospaced family. Anything else lays out fine and lines up wrong.
         pub family: String,
+        pub transparent: bool,
+        pub bold: bool,
+        pub italic: bool,
+        pub underline: bool,
         pub font_size: f32,
         /// Multiplier on the font's own line height. **Terminals are set tight** —
         /// the grid is the reading aid, not the leading.
@@ -11834,6 +11838,7 @@ pub mod cells {
         fn default() -> Self {
             Self {
                 family: crate::text_blocks::DEFAULT_CODE_FONT.to_owned(),
+                transparent: false, bold: false, italic: false, underline: false,
                 font_size: 15.0,
                 line_spacing: 1.0,
                 paper: crate::text_blocks::DEFAULT_PAPER,
@@ -11898,7 +11903,7 @@ pub mod cells {
                     return Ok(*size);
                 }
             }
-            let format = graphics.cell_format(look, false)?;
+            let format = graphics.cell_format(look, look.bold)?;
             let utf16 = "0000000000".encode_utf16().collect::<Vec<u16>>();
             // SAFETY: the buffer and the format outlive the call.
             let layout = unsafe {
@@ -11933,7 +11938,7 @@ pub mod cells {
     impl Graphics {
         fn cell_format(&mut self, look: &TerminalLook, bold: bool) -> Result<IDWriteTextFormat> {
             let size = look.font_size.max(1.0);
-            let key = (size.to_bits(), look.family.clone(), bold);
+            let key = (size.to_bits(), look.family.clone(), bold, look.italic);
             if let Some(format) = self.cell_formats.get(&key) {
                 return Ok(format.clone());
             }
@@ -11949,7 +11954,7 @@ pub mod cells {
                     &family,
                     None,
                     weight,
-                    DWRITE_FONT_STYLE_NORMAL,
+                    if look.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL },
                     DWRITE_FONT_STRETCH_NORMAL,
                     size,
                     w!("ja-JP"),
@@ -12078,7 +12083,7 @@ pub mod cells {
         height: u32,
     ) -> Result<()> {
         with_graphics(|graphics| {
-            let plain = graphics.cell_format(look, false)?;
+            let plain = graphics.cell_format(look, look.bold)?;
             let bold = graphics.cell_format(look, true)?;
             let (target, brush, bitmap) = {
                 let cache = graphics.render_target(width, height)?;
@@ -12092,7 +12097,7 @@ pub mod cells {
             // and BeginDraw/EndDraw are paired below.
             unsafe {
                 target.BeginDraw();
-                target.Clear(Some(&colour(look.paper)));
+                target.Clear(Some(&if look.transparent { D2D1_COLOR_F { r:0.0, g:0.0, b:0.0, a:0.0 } } else { colour(look.paper) }));
             }
             for (row, line) in lines.iter().enumerate() {
                 let top = row as f32 * cell.line;
@@ -12132,7 +12137,7 @@ pub mod cells {
                             target.FillRectangle(&rect, &brush);
                         }
                         if run.attrs.hidden || run.text.trim().is_empty() {
-                            if run.attrs.underline {
+                            if run.attrs.underline || look.underline {
                                 brush.SetColor(&colour(foreground));
                                 let line_rect = D2D_RECT_F {
                                     top: top + cell.line - 2.0,
@@ -12157,7 +12162,7 @@ pub mod cells {
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
                             DWRITE_MEASURING_MODE_NATURAL,
                         );
-                        if run.attrs.underline {
+                        if run.attrs.underline || look.underline {
                             let line_rect = D2D_RECT_F {
                                 top: top + cell.line - 2.0,
                                 bottom: top + cell.line - 1.0,

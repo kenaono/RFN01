@@ -1073,3 +1073,96 @@ msgstr "保存先フォルダ（空のフォルダ）"
 
 msgid "Browse…"
 msgstr "参照…"
+
+msgid "Terminal Panel"
+msgstr "Terminal Panel"
+
+msgid "Editor Panel"
+msgstr "Editor Panel"
+
+msgid "Hide Terminal Panel"
+msgstr "Terminal Panelを隠す"
+
+msgid "Hide Editor Panel"
+msgstr "Editor Panelを隠す"
+
+msgid "Selection to Editor Panel"
+msgstr "選択範囲をEditor Panelへ"
+
+msgid "History to Editor Panel"
+msgstr "保持履歴をEditor Panelへ"
+
+msgid "Capture Log to Editor Panel"
+msgstr "Editor Panelへログ取り込みを開始"
+
+msgid "Capture Log to File…"
+msgstr "ファイルへログ出力を開始…"
+
+msgid "Capture Log"
+msgstr "ログ取り込みを開始"
+
+msgid "Stop Capture"
+msgstr "ログ取り込みを停止"
+
+msgid "Find in Terminal…"
+msgstr "Terminal内を検索…"
+
+msgid "Search terminal history"
+msgstr "保持履歴を検索"
+
+msgid "Latest"
+msgstr "最新の出力へ"
+
+msgid "Save Output…"
+msgstr "保持出力を保存…"
+
+msgid "Clear Screen"
+msgstr "画面を消去"
+
+msgid "Clear History"
+msgstr "保持履歴を消去"
+
+msgid "Appearance…"
+msgstr "外観…"
+
+msgid "Terminal Appearance…"
+msgstr "Terminalの既定の外観…"
+
+msgid "Editor Panel Appearance…"
+msgstr "Editor Panelの既定の外観…"
+
+msgid "Terminal Panel Appearance…"
+msgstr "Terminal Panelの既定の外観…"
+
+msgid "Confirm multiline paste"
+msgstr "改行を含む送信を確認"
+
+msgid "Confirm shell termination"
+msgstr "シェルの終了を確認"
+
+msgid "History lines"
+msgstr "履歴の保持行数"
+
+msgid "Executable"
+msgstr "実行ファイル"
+
+msgid "Arguments"
+msgstr "引数"
+
+msgid "Start folder"
+msgstr "開始フォルダ"
+
+msgid "Terminal in This Folder"
+msgstr "このフォルダでTerminalを開く"
+
+msgid "Terminal in Document Folder"
+msgstr "文書のフォルダでTerminalを開く"
+
+msgid "Transparency"
+msgstr "透過率"
+
+msgid "Apply"
+msgstr "適用"
+
+msgid "Remove"
+msgstr "削除"

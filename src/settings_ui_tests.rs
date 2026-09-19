@@ -988,14 +988,28 @@ fn terminal_below_rows_reach_the_pane() {
             .dispatch_event(WindowEvent::PointerReleased { position, button });
         slint::platform::update_timers_and_animations();
     };
-    // ⋮ → Terminal Below
+    // ⋮ → Terminal Panel
     click(1077.0, 25.0, PointerEventButton::Left);
-    click(900.0, 357.0, PointerEventButton::Left);
+    click(900.0, 382.0, PointerEventButton::Left);
     assert_eq!(calls.get(), 1, "the pane menu row");
-    // 本文の右クリック → Terminal Below
+    // 本文の右クリック → Terminal Panel
     click(160.0, 150.0, PointerEventButton::Right);
     click(218.0, 578.0, PointerEventButton::Left);
     assert_eq!(calls.get(), 2, "the body menu row");
+    let folder_calls = Rc::new(std::cell::Cell::new(0));
+    let seen = folder_calls.clone();
+    window.on_shell_profile_action(move |action, _| {
+        if action == 8 {
+            seen.set(seen.get() + 1);
+        }
+    });
+    click(1077.0, 25.0, PointerEventButton::Left);
+    click(900.0, 115.0, PointerEventButton::Left);
+    assert_eq!(
+        folder_calls.get(),
+        1,
+        "document-folder action survives popup closing"
+    );
 }
 
 /// 小さなBMP（24bit、上から下）。WICが読める一番簡単な画像。

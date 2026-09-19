@@ -1049,6 +1049,16 @@ pub fn write_document_in(
     target: PathBuf,
     form: file_io::TextForm,
 ) -> bool {
+    if crate::terminal_panels::logging_to(live, &target) {
+        window.tell(
+            pick(
+                "ログ出力中のファイルです。停止してから保存してください",
+                "This file is being logged; stop capture before saving",
+            )
+            .into(),
+        );
+        return false;
+    }
     if !crate::admit_workspace_path(window, live, &target, true) {
         return false;
     }

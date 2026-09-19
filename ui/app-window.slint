@@ -1,5 +1,5 @@
 import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
-import { EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
+import { PanelStyle, EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
 import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
@@ -145,7 +145,7 @@ export component AppWindow inherits Window {
     // those constraints change (for example when the Workspace tree hides).
     // Keep the user-selected height, while retaining normal window resizing.
     max-height: 100000px;
-    background: root.background-transparency > 0 ? transparent : Tok.paper;
+    background: transparent;
 
     // Every pane, in pane-number order: row N is pane N. **One row is one
     // pane's whole view of the document** — its tiles, its caret, its scroll —
@@ -620,6 +620,9 @@ export component AppWindow inherits Window {
     /// The wheel over a shell (追加要件 Terminal).
     callback pane-terminal-scrolled(int, float);
     /// The strip along the foot of a pane (追加要件 Terminal).
+    callback terminal-url(int, int, float, float);
+    callback terminal-action(int, int, int);
+    callback panel-action(int, int, int);
     callback pane-below-toggled(int);
     callback pane-below-resized(int, length);
     callback pane-below-key(int, string, int, bool, bool, bool);
@@ -754,6 +757,25 @@ export component AppWindow inherits Window {
     callback left-reset();
     in-out property <color> terminal-paper: #fffefa;
     in-out property <color> terminal-ink: #24211e;
+    in-out property <[PanelStyle]> panel-defaults;
+    in-out property <bool> appearance-open;
+    in-out property <bool> appearance-default;
+    in-out property <string> appearance-title;
+    in-out property <PanelStyle> appearance-style;
+    callback appearance-requested(int, int);
+    callback appearance-applied();
+    callback appearance-reset();
+    in-out property <bool> appearance-underline-allowed: true;
+    in-out property <[string]> shell-profile-names;
+    in-out property <int> shell-profile-index;
+    in-out property <string> shell-profile-name;
+    in-out property <string> shell-profile-executable;
+    in-out property <string> shell-profile-arguments;
+    in-out property <string> shell-profile-directory;
+    callback shell-profile-action(int, int);
+    in-out property <bool> terminal-confirm-paste: true;
+    in-out property <bool> terminal-confirm-close: true;
+    in-out property <int> terminal-history-limit: 10000;
     in-out property <string> terminal-font: "Consolas";
     in-out property <int> terminal-size: 15;
     callback terminal-font-picked();
@@ -2306,7 +2328,7 @@ export component AppWindow inherits Window {
                         swap-right: pane.swap-right;
                         swap-up: pane.swap-up;
                         swap-down: pane.swap-down;
-                        background: root.background-transparency > 0 && !pane.terminal && !pane.settings
+                        background: pane.terminal || pane.below-kind != 0 || (root.background-transparency > 0 && !pane.settings)
                             ? transparent : (pane.vertical ? Tok.paper-alt : Tok.paper);
                         background-transparency: root.background-transparency;
                         // 要件 9: this pane's sheet — the paper and the margin
@@ -2454,6 +2476,27 @@ export component AppWindow inherits Window {
                         below-kind: pane.below-kind;
                         below-height: pane.below-height;
                         below-tiles: pane.below-tiles;
+                        terminal-search-open <=> pane.terminal-search-open;
+                        terminal-search-spot <=> pane.terminal-search-spot;
+                        terminal-query <=> pane.terminal-query;
+                        terminal-match-case <=> pane.terminal-match-case;
+                        terminal-search-status <=> pane.terminal-search-status;
+                        terminal-behind <=> pane.terminal-behind;
+                        below-behind <=> pane.below-behind;
+                        terminal-in-folder => { root.shell-profile-action(8, 0); }
+                        terminal-url(spot, x, y) => { root.terminal-url(pane.id, spot, x, y); }
+                        terminal-action(spot, action) => { root.terminal-action(pane.id, spot, action); }
+                        terminal-new-output: pane.terminal-new-output;
+                        below-new-output: pane.below-new-output;
+                        front-style: pane.front-style;
+                        panel-style: pane.panel-style;
+                        appearance-requested(panel) => { root.appearance-requested(pane.id, panel ? 2 : 1); }
+                        panel-caret <=> pane.panel-caret;
+                        panel-tabs: pane.panel-tabs;
+                        panel-active: pane.panel-active;
+                        panel-read-only: pane.panel-read-only;
+                        panel-capturing: pane.panel-capturing;
+                        panel-action(action, index) => { root.panel-action(pane.id, action, index); }
                         below-draft <=> pane.below-draft;
                         below-draft-lines: pane.below-draft-lines;
                         below-draft-edited(text) => {
@@ -3324,6 +3367,25 @@ export component AppWindow inherits Window {
                                         // 無い。
                                         if root.shows-group(1, []): VerticalLayout {
                                             spacing: 8px;
+                                            for name[index] in root.shell-profile-names: TextButton {
+                                                title: name;
+                                                role: index == root.shell-profile-index ? Role.primary : Role.normal;
+                                                clicked => { root.shell-profile-action(0, index); }
+                                            }
+                                            HorizontalLayout { Text { text: @tr("Name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Name"); text <=> root.shell-profile-name; } }
+                                            HorizontalLayout { Text { text: @tr("Executable"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Executable"); text <=> root.shell-profile-executable; } }
+                                            HorizontalLayout { Text { text: @tr("Arguments"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Arguments"); text <=> root.shell-profile-arguments; } }
+                                            HorizontalLayout { Text { text: @tr("Start folder"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Start folder"); text <=> root.shell-profile-directory; } }
+                                            HorizontalLayout {
+                                                TextButton { title: @tr("Apply"); clicked => { root.shell-profile-action(1, 0); } }
+                                                TextButton { title: @tr("Add"); clicked => { root.shell-profile-action(2, 0); } }
+                                                TextButton { title: @tr("Duplicate"); clicked => { root.shell-profile-action(3, 0); } }
+                                                TextButton { title: "↑"; clicked => { root.shell-profile-action(4, 0); } }
+                                                TextButton { title: "↓"; clicked => { root.shell-profile-action(5, 0); } }
+                                                TextButton { title: @tr("Remove"); clicked => { root.shell-profile-action(6, 0); } }
+                                                TextButton { title: @tr("Default"); clicked => { root.shell-profile-action(7, 0); } }
+                                            }
+
 
                                             // 追加要件 2026-09-07: **書字方向を持たない設定はここ**。
                                             // 2026-09-08 からはこの面が丸ごとそれで、シートを選ぶ釦は
@@ -3384,97 +3446,23 @@ export component AppWindow inherits Window {
                                                 background: Tok.rule;
                                             }
 
-                                            if root.shows-any([@tr("APPEARANCE"), @tr("Theme"), @tr("Background"), @tr("Text Color"), @tr("Font"), @tr("Size")]): Text {
-                                                text: root.section-title(@tr("Terminal"), @tr("APPEARANCE"));
-                                                color: Tok.ink-faint;
-                                                font-size: 10px;
-                                                letter-spacing: 0.9px;
+                                            TextButton {
+                                                title: @tr("Confirm multiline paste") + (root.terminal-confirm-paste ? " ✓" : "");
+                                                clicked => { root.terminal-confirm-paste = !root.terminal-confirm-paste; }
                                             }
-
-                                            // **黒地と紙を、ひとまとめで置く。**背景だけ黒くして文字が
-                                            // 黒のままの画面は読めない——そこを通らせないために、2つを
-                                            // 一度に決める道を先に出す。細かく決めたい人のために、下に
-                                            // 1色ずつの行も残してある。
-                                            if root.shows-any([@tr("APPEARANCE"), @tr("Theme")]): HorizontalLayout {
-                                                spacing: 2px;
-
-                                                Text {
-                                                    text: @tr("Theme");
-                                                    color: Tok.ink;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                TextButton {
-                                                    title: @tr("Paper");
-                                                    clicked => {
-                                                        root.terminal-theme-chosen(false);
-                                                    }
-                                                }
-                                                TextButton {
-                                                    title: @tr("Dark");
-                                                    clicked => {
-                                                        root.terminal-theme-chosen(true);
-                                                    }
-                                                }
+                                            TextButton {
+                                                title: @tr("Confirm shell termination") + (root.terminal-confirm-close ? " ✓" : "");
+                                                clicked => { root.terminal-confirm-close = !root.terminal-confirm-close; }
                                             }
-
-                                            if root.shows-any([@tr("APPEARANCE"), @tr("Background")]): ColorCell {
-                                                label: @tr("Background");
-                                                shown: root.terminal-paper;
-                                                chosen(colour) => { root.colour-set(1, 0, colour); }
-                                                automatic => { root.colour-default(1, 0); }
-                                                more => { root.colour-more(1, 0); }
+                                            StepRow {
+                                                label: @tr("History lines"); value: root.terminal-history-limit;
+                                                stepped(by) => { root.terminal-history-limit = max(0, min(1000000, root.terminal-history-limit + by * 1000)); }
                                             }
-
-                                            if root.shows-any([@tr("APPEARANCE"), @tr("Text Color")]): ColorCell {
-                                                label: @tr("Text Color");
-                                                shown: root.terminal-ink;
-                                                chosen(colour) => { root.colour-set(1, 1, colour); }
-                                                automatic => { root.colour-default(1, 1); }
-                                                more => { root.colour-more(1, 1); }
-                                            }
-
-                                            if root.shows-any([@tr("APPEARANCE"), @tr("Font")]): PickRow {
-                                                label: @tr("Font");
-                                                value: root.terminal-font;
-                                                pressed => {
-                                                    root.terminal-font-picked();
-                                                    font-menu.show();
-                                                }
-                                            }
-
-                                            if root.shows-any([@tr("APPEARANCE"), @tr("Size")]): StepRow {
-                                                label: @tr("Size");
-                                                value: root.terminal-size + " px";
-                                                stepped(by) => {
-                                                    root.terminal-size-stepped(by);
-                                                }
-                                            }
-
-                                            // **16色は選ばせない**（要件 6.8）。選ばせれば16回選ぶことに
-                                            // なり、しかも選び終えるまで読めない。
-                                            if root.shows-any([@tr("APPEARANCE"), @tr("Theme"), @tr("Background"), @tr("Text Color")]): Text {
-                                                text: @tr("The 16 SGR colors are chosen from the background brightness.");
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                                overflow: elide;
-                                            }
-
-                                            // 書き手の求め 2026-09-15: **この面のResetは、この面だけを戻す。**
-                                            if !root.settings-searching: Rectangle { height: 1px; background: Tok.rule; }
-                                            if !root.settings-searching: HorizontalLayout {
-                                                alignment: start;
-                                                TextButton {
-                                                    title: @tr("Reset");
-                                                    clicked => { root.terminal-reset(); }
-                                                }
-                                            }
+                                            TextButton { title: @tr("Terminal Appearance…"); clicked => { root.appearance-requested(0, 0); } }
+                                            TextButton { title: @tr("Editor Panel Appearance…"); clicked => { root.appearance-requested(1, 0); } }
+                                            TextButton { title: @tr("Terminal Panel Appearance…"); clicked => { root.appearance-requested(2, 0); } }
                                         }
 
-                                        // 追加要件 2026-09-15（書き手）: **Left Pane の書式。**Explorer・検索結果・最近使ったファイル・
-                                        // 見出しの4つの面に効く。フォルダとファイルの色は、付けなければ文字色のまま。
                                         if root.shows-group(7, []): VerticalLayout {
                                             spacing: 8px;
 
@@ -6006,6 +5994,11 @@ export component AppWindow inherits Window {
                 }
                 MenuRow {
                     enabled: root.tree-selected >= 0;
+                    title: @tr("Terminal in This Folder");
+                    activated => { root.tree-command(7); root.close-tree-menu(); }
+                }
+                MenuRow {
+                    enabled: root.tree-selected >= 0;
                     title: @tr("Reveal in Explorer");
                     activated => {
                         root.close-tree-menu();
@@ -6037,5 +6030,47 @@ export component AppWindow inherits Window {
         }
     }
 
+
+    if root.appearance-open: Rectangle {
+        background: #0005;
+        TouchArea { }
+        Rectangle {
+            width: 440px; height: 420px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            background: Tok.chrome;
+            VerticalLayout {
+                padding: 16px; spacing: 8px; alignment: start;
+                Text { text: root.appearance-title; color: Tok.ink; height: 28px; vertical-stretch: 0; }
+                ColorCell { label: @tr("Background"); shown: root.appearance-style.paper;
+                    chosen(colour) => { root.appearance-style.paper = colour; root.appearance-style.paper-own = true; }
+                    automatic => { root.appearance-style.paper-own = false; }
+                }
+                ColorCell { label: @tr("Text Color"); shown: root.appearance-style.ink;
+                    chosen(colour) => { root.appearance-style.ink = colour; }
+                }
+                Field { placeholder: @tr("Font"); text <=> root.appearance-style.family; }
+                StepRow { label: @tr("Size"); value: root.appearance-style.size + " px";
+                    stepped(by) => { root.appearance-style.size = max(8, min(72, root.appearance-style.size + by)); }
+                }
+                StepRow { label: @tr("Transparency"); value: root.appearance-style.transparency + "%";
+                    stepped(by) => { root.appearance-style.transparency = max(0, min(100, root.appearance-style.transparency + by * 5)); }
+                }
+                HorizontalLayout {
+                    TextButton { title: @tr("Bold") + (root.appearance-style.bold ? " ✓" : ""); clicked => { root.appearance-style.bold = !root.appearance-style.bold; } }
+                    TextButton { title: @tr("Italic") + (root.appearance-style.italic ? " ✓" : ""); clicked => { root.appearance-style.italic = !root.appearance-style.italic; } }
+                    if root.appearance-underline-allowed: TextButton { title: "Underline" + (root.appearance-style.underline ? " ✓" : ""); clicked => { root.appearance-style.underline = !root.appearance-style.underline; } }
+                }
+                if root.appearance-default: TextButton {
+                    title: "Random: " + (root.appearance-style.random == 0 ? @tr("Off") : (root.appearance-style.random == 1 ? @tr("Light") : @tr("Dark")));
+                    clicked => { root.appearance-style.random = mod(root.appearance-style.random + 1, 3); }
+                }
+                HorizontalLayout {
+                    TextButton { title: @tr("Default"); clicked => { root.appearance-reset(); } }
+                    TextButton { title: @tr("Apply"); clicked => { root.appearance-applied(); } }
+                    TextButton { title: @tr("Cancel"); clicked => { root.appearance-open = false; } }
+                }
+            }
+        }
+    }
 
 }

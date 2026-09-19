@@ -99,6 +99,15 @@ impl Pty {
     /// console host, and a copy left open here would keep the pipe alive after
     /// the shell had gone, so nothing would ever read end-of-file.
     pub fn open(command: &str, columns: u16, rows: u16) -> windows::core::Result<Self> {
+        Self::open_in(command, None, columns, rows)
+    }
+
+    pub fn open_in(
+        command: &str,
+        directory: Option<&std::path::Path>,
+        columns: u16,
+        rows: u16,
+    ) -> windows::core::Result<Self> {
         unsafe {
             let (input_read, input_write) = pipe()?;
             let (output_read, output_write) = pipe()?;
@@ -153,6 +162,8 @@ impl Pty {
                 },
                 lpAttributeList: list,
             };
+            let directory: Option<Vec<u16>> =
+                directory.map(|p| p.as_os_str().encode_wide().chain(Some(0)).collect());
             let mut line = wide(command);
             let mut spawned = PROCESS_INFORMATION::default();
             let started = CreateProcessW(
@@ -163,7 +174,11 @@ impl Pty {
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
-                None,
+                directory
+                    .as_ref()
+                    .map_or(windows::core::PCWSTR::null(), |p| {
+                        windows::core::PCWSTR(p.as_ptr())
+                    }),
                 &startup.StartupInfo,
                 &mut spawned,
             );
