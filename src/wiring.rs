@@ -1863,6 +1863,32 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
         pick_tree_row(&picked_live, index.max(0) as usize);
     });
 
+    let weak = window.as_weak();
+    let context_live = live.clone();
+    window.on_left_context_requested(move |index| {
+        if let Some(window) = weak.upgrade() {
+            crate::workspace_context_requested(&window, &context_live, index);
+        }
+    });
+    let weak = window.as_weak();
+    let filter_live = live.clone();
+    window.on_tree_filter_changed(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::tree_filter_changed(&window, &filter_live);
+        }
+    });
+    let weak = window.as_weak();
+    let context_live = live.clone();
+    window.on_workspace_tree_command(move |command| {
+        let weak = weak.clone();
+        let live = context_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_tree_command(&window, &live, command);
+            }
+        });
+    });
+
     // 要件 5.2: a row was picked up. **Answered on the spot** — the answer is
     // one number and setting it draws nothing, which is what makes it safe to
     // ask Rust in the middle of a drag at all (drawing the rows again would
@@ -2037,6 +2063,14 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
                 crate::workspace_switcher_chosen(&window, &live, index);
             }
         });
+    });
+
+    let weak = window.as_weak();
+    let context_live = live.clone();
+    window.on_workspace_row_context_chosen(move |index| {
+        if let Some(window) = weak.upgrade() {
+            crate::workspace_row_context_chosen(&window, &context_live, index.max(0) as usize);
+        }
     });
 
     let weak = window.as_weak();

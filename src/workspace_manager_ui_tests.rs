@@ -108,6 +108,12 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     assert!(window.get_workspace_manager_open());
     workspace_create(&window, &live, "First".into());
     let first = runtime.borrow().manager_selection().unwrap();
+    assert!(
+        matches!(*live.pending.borrow(), Some(Question::ChangeWorkspace(Some(value))) if value == first)
+    );
+    answer_question(&window, &live, 2);
+    assert_eq!(runtime.borrow().active_workspace(), None);
+    assert!(Rc::ptr_eq(&live.states.document(id), &document));
     workspace_duplicate(&window, &live, first, "Second".into());
     let second = runtime.borrow().manager_selection().unwrap();
     workspace_rename(&window, &live, second, "Renamed".into());
@@ -117,6 +123,12 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         Some(second)
     );
     assert_eq!(window.get_workspace_rows().row_count(), 2);
+    workspace_row_context_chosen(&window, &live, 0);
+    assert_eq!(runtime.borrow().active_workspace(), None);
+    assert_eq!(runtime.borrow().manager_selection(), Some(first));
+    assert!(live.pending.borrow().is_none());
+    workspace_row_context_chosen(&window, &live, 1);
+    assert_eq!(runtime.borrow().manager_selection(), Some(second));
     let folder = runtime
         .borrow_mut()
         .edit(|registry| registry.add_root(second, &workspace_root))
@@ -128,6 +140,8 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         workspace::SaveMode::AutoSave
     );
     switch_workspace(&window, &live, Some(second));
+    workspace_manager_requested(&window, &live);
+    assert!(!window.get_workspace_manager_open());
     let hidden = PaneId::from_index(1);
     let readonly = OpenDocument::snapshot(
         "Outside version".into(),
@@ -144,7 +158,7 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     });
 
     // Cancel is transactional, including hidden/read-only tabs and history.
-    request_workspace_change(&window, &live, Some(first));
+    workspace_row_chosen(&window, &live, 0);
     assert!(
         matches!(*live.pending.borrow(), Some(Question::ChangeWorkspace(Some(value))) if value == first)
     );
@@ -341,6 +355,7 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     request_workspace_change(&window, &live, None);
     workspace_manager_requested(&window, &live);
     workspace_row_chosen(&window, &live, 1);
+    assert_eq!(runtime.borrow().active_workspace(), Some(second));
     workspace_folder_detached(&window, &live, 0);
     assert_eq!(window.get_workspace_unused_folder_rows().row_count(), 1);
     workspace_remove_unused_folder(&window, &live, folder);
@@ -352,5 +367,116 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         "registry cleanup must retain the document"
     );
     workspace_manager_closed(&window, &live);
+    assert!(!window.get_workspace_manager_open());
+
+    // Clone completion registers contents in the chosen scope. Use local
+    // completed-clone fixtures: network/authentication belongs to the worker.
+    request_workspace_change(&window, &live, Some(first));
+    let clone_a = directory.join("clone-a");
+    let clone_b = directory.join("clone-b");
+    let clone_new = directory.join("clone-new");
+    for path in [&clone_a, &clone_b, &clone_new] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("same.md"), "clone contents").unwrap();
+    }
+    workspace_register_clone(&window, &live, clone_a.clone(), Some(first));
+    workspace_register_clone(&window, &live, clone_b.clone(), Some(first));
+    assert_eq!(runtime.borrow().active_workspace(), Some(first));
+    assert_eq!(runtime.borrow().registry().workspaces().len(), 1);
+    assert_eq!(runtime.borrow().active_roots().len(), 2);
+    let paths = live.tree_paths.borrow().clone();
+    let drawn = window.get_left_rows();
+    let a_file = clone_a.canonicalize().unwrap().join("same.md");
+    let b_file = clone_b.canonicalize().unwrap().join("same.md");
+    let a_row = paths.iter().position(|path| path == &a_file).unwrap();
+    let b_row = paths.iter().position(|path| path == &b_file).unwrap();
+    for row in [a_row, b_row] {
+        let entry = drawn.row_data(row).unwrap();
+        assert_eq!(entry.name, "same.md");
+        assert_eq!(entry.depth, 0);
+        assert!(!entry.is_root);
+    }
+    assert_ne!(
+        a_row, b_row,
+        "same basenames retain distinct root ownership"
+    );
+    window.set_tree_filter("no-matching-file".into());
+    tree_filter_changed(&window, &live);
+    assert!(window.get_left_rows().iter().all(|row| row.folder));
+    window.set_tree_filter("SAME".into());
+    tree_filter_changed(&window, &live);
+    assert_eq!(
+        window
+            .get_left_rows()
+            .iter()
+            .filter(|row| !row.folder)
+            .count(),
+        2
+    );
+    window.set_tree_filter("".into());
+    tree_filter_changed(&window, &live);
+    let folders = runtime
+        .borrow()
+        .registry()
+        .workspace(first)
+        .unwrap()
+        .folders
+        .clone();
+    workspace_context_requested(&window, &live, a_row as i32);
+    workspace_tree_command(&window, &live, 2);
+    assert_eq!(
+        runtime.borrow().registry().folder(folders[0]).unwrap().mode,
+        workspace::SaveMode::AutoSave
+    );
+    assert_eq!(
+        runtime.borrow().registry().folder(folders[1]).unwrap().mode,
+        workspace::SaveMode::Recovery
+    );
+    workspace_context_requested(&window, &live, -1);
+    assert!(live.folder.borrow().selected.is_none());
+    workspace_tree_command(&window, &live, 2);
+    assert_eq!(
+        runtime.borrow().registry().folder(folders[0]).unwrap().mode,
+        workspace::SaveMode::AutoSave
+    );
+
+    // Detaching a root from a file context is transactional with dirty tabs.
+    open_path_in_pane(&window, &live, id, &a_file, Opening::Kept);
+    let dirty_clone = live.states.document(id);
+    dirty_clone
+        .text
+        .borrow_mut()
+        .push_str(" unsaved clone edit");
+    dirty_clone.text.set_edited(true);
+    workspace_context_requested(&window, &live, a_row as i32);
+    workspace_tree_command(&window, &live, 3);
+    assert!(live.pending.borrow().is_some());
+    answer_question(&window, &live, 2);
+    assert_eq!(runtime.borrow().active_workspace(), Some(first));
+    assert_eq!(runtime.borrow().active_roots().len(), 2);
+    assert!(Rc::ptr_eq(&live.states.document(id), &dirty_clone));
+    assert!(dirty_clone.text.edited());
+
+    // A clone from the initial view creates its own Workspace, and opening
+    // it must still honor Save All / cancel rather than discard current text.
+    window.set_tree_filter("SAME".into());
+    tree_filter_changed(&window, &live);
+    workspace_register_clone(&window, &live, clone_new.clone(), None);
+    assert_eq!(runtime.borrow().registry().workspaces().len(), 2);
+    assert_eq!(runtime.borrow().active_workspace(), Some(first));
+    assert!(live.pending.borrow().is_some());
+    answer_question(&window, &live, 0);
+    let created = runtime.borrow().active_workspace().unwrap();
+    assert!(window.get_tree_filter().is_empty());
+    assert_ne!(created, first);
+    assert_eq!(
+        runtime.borrow().active_roots(),
+        vec![clone_new.canonicalize().unwrap()]
+    );
+    assert!(
+        std::fs::read_to_string(&a_file)
+            .unwrap()
+            .ends_with(" unsaved clone edit")
+    );
     assert!(!window.get_workspace_manager_open());
 }

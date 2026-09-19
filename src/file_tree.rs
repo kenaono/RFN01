@@ -95,11 +95,10 @@ pub fn rows(
     out
 }
 
-/// The rows to draw for a Workspace with more than one registered root
-/// (Workspace設計.md phase 3) — each root gets its own row, at depth 0, naming
-/// the folder itself rather than starting directly with its contents the way
-/// [`rows`] does. A root's own row is open exactly when the root's own path is
-/// in `expanded`, the same rule every other folder row follows.
+/// Workspace roots are separators, followed immediately by their children at
+/// depth zero. The synthetic root row retains the destination for context
+/// actions and empty roots, but is always open and is not a movable entry.
+/// Only nested folders consult `expanded`.
 ///
 /// **Never call this for a single classic work folder.** A Workspace with one
 /// root still gets a row standing for that root; a plain "Open Folder" with no
@@ -113,22 +112,15 @@ pub fn multi_rows(
 ) -> Vec<Row> {
     let mut out = Vec::new();
     for root in roots {
-        let name = root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string());
-        let open = expanded.contains(root);
         out.push(Row {
-            name,
+            name: root.display().to_string(),
             path: root.clone(),
             folder: true,
             depth: 0,
-            open,
+            open: true,
             is_root: true,
         });
-        if open {
-            push_rows(root, 1, expanded, read, &mut out);
-        }
+        push_rows(root, 0, expanded, read, &mut out);
     }
     out
 }
@@ -168,14 +160,23 @@ fn push_rows(
 /// able to say which row that is without asking a path anything, because the
 /// rows are drawn by Slint and Slint cannot ask a path what holds it.
 ///
-/// The rows are a flattened walk, so the folder holding a row is the nearest
-/// row above it that stands one step further out.
+/// Nested rows use the nearest row one step further out. Workspace depth-zero
+/// children instead belong to their preceding synthetic separator; separators
+/// themselves have no holder. Each separator resets the nesting stack so a
+/// drop can never inherit a folder from the previous root.
 pub fn holders(rows: &[Row]) -> Vec<i32> {
     let mut out = Vec::with_capacity(rows.len());
     let mut above: Vec<usize> = Vec::new();
+    let mut root = None;
     for (at, row) in rows.iter().enumerate() {
+        if row.is_root {
+            root = Some(at);
+            above.clear();
+            out.push(-1);
+            continue;
+        }
         above.truncate(row.depth);
-        out.push(above.last().map_or(-1, |&row| row as i32));
+        out.push(above.last().copied().or(root).map_or(-1, |row| row as i32));
         above.push(at);
     }
     out
@@ -918,11 +919,9 @@ mod tests {
         assert!(!is_searchable(Path::new("/work/なまえだけ")));
     }
 
-    /// Workspace設計.md phase 3: each active root gets its own row, closed by
-    /// default, unlike `rows` which never draws a row for the folder it was
-    /// itself called on.
+    /// Workspace separators expose their immediate children without a click.
     #[test]
-    fn multi_rows_gives_each_root_its_own_closed_row() {
+    fn multi_rows_always_lists_root_children_at_depth_zero() {
         let roots = [PathBuf::from("/work"), PathBuf::from("/other")];
         let rows = multi_rows(&roots, &expanded(&[]), &imagined);
 
@@ -932,16 +931,26 @@ mod tests {
             .collect();
         assert_eq!(
             shape,
-            vec![("work", 0, false, true), ("other", 0, false, true)],
+            vec![
+                ("/work", 0, true, true),
+                ("章", 0, false, false),
+                ("資料", 0, false, false),
+                ("はじめに.md", 0, false, false),
+                ("/other", 0, true, true),
+                ("資料.md", 0, false, false),
+            ],
         );
     }
 
-    /// Opening one root's row reads only that root, at depth 1 — the other
-    /// root stays a single closed row of its own.
+    /// Old persisted root expansion entries do not alter the new shape.
     #[test]
-    fn multi_rows_opens_only_the_expanded_root() {
+    fn multi_rows_ignores_root_expansion_but_preserves_nested_expansion() {
         let roots = [PathBuf::from("/work"), PathBuf::from("/other")];
-        let rows = multi_rows(&roots, &expanded(&["/work"]), &imagined);
+        let rows = multi_rows(&roots, &expanded(&["/work", "/work/章"]), &imagined);
+        assert_eq!(
+            rows,
+            multi_rows(&roots, &expanded(&["/work/章"]), &imagined)
+        );
 
         let shape: Vec<(&str, usize, bool)> = rows
             .iter()
@@ -950,12 +959,56 @@ mod tests {
         assert_eq!(
             shape,
             vec![
-                ("work", 0, true),
-                ("章", 1, false),
-                ("資料", 1, false),
-                ("はじめに.md", 1, false),
-                ("other", 0, true),
+                ("/work", 0, true),
+                ("章", 0, false),
+                ("第一章.md", 1, false),
+                ("下書き", 1, false),
+                ("資料", 0, false),
+                ("はじめに.md", 0, false),
+                ("/other", 0, true),
+                ("資料.md", 0, false),
             ],
+        );
+    }
+
+    #[test]
+    fn workspace_holders_keep_root_destinations_without_visual_indentation() {
+        let roots = [
+            PathBuf::from("/work"),
+            PathBuf::from("/other"),
+            PathBuf::from("/empty"),
+        ];
+        let rows = multi_rows(
+            &roots,
+            &expanded(&["/work/章", "/work/章/下書き"]),
+            &imagined,
+        );
+        assert_eq!(holders(&rows), vec![-1, 0, 1, 1, 3, 0, 0, -1, 7, -1]);
+        let empty = rows.last().unwrap();
+        assert!(empty.is_root && empty.open && empty.folder);
+        assert_eq!(empty.path, Path::new("/empty"));
+    }
+
+    #[test]
+    fn workspace_reads_every_root_but_only_expanded_nested_directories() {
+        let roots = [
+            PathBuf::from("/work"),
+            PathBuf::from("/other"),
+            PathBuf::from("/empty"),
+        ];
+        let reads = std::cell::RefCell::new(Vec::new());
+        multi_rows(&roots, &expanded(&["/work/章"]), &|path| {
+            reads.borrow_mut().push(path.to_path_buf());
+            imagined(path)
+        });
+        assert_eq!(
+            *reads.borrow(),
+            vec![
+                PathBuf::from("/work"),
+                PathBuf::from("/work/章"),
+                PathBuf::from("/other"),
+                PathBuf::from("/empty")
+            ]
         );
     }
 

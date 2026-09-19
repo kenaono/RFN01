@@ -1049,3 +1049,18 @@ msgstr "未使用のフォルダ設定"
 
 msgid "Leave…"
 msgstr "解除…"
+
+msgid "Choose a Workspace"
+msgstr "Workspaceを選択"
+
+msgid "Filter files…"
+msgstr "ファイルを絞り込み…"
+
+msgid "Close Workspace"
+msgstr "Workspaceを閉じる"
+
+msgid "Folder Auto-Save"
+msgstr "このフォルダを自動保存"
+
+msgid "Detach Workspace Folder…"
+msgstr "Workspaceからフォルダを外す…"

@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
-import { Role, TextButton } from "controls.slint";
+import { LinkRow, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 
 // One row of the Workspace list. `is-default` and `is-active` are two
 // different Workspaces can each be true for at once — the one launched into
@@ -51,112 +51,13 @@ component Banner inherits Rectangle {
     }
 }
 
-component SectionTitle inherits Text {
-    color: Tok.ink-muted;
-    font-size: 12px;
-    font-weight: 600;
-}
-
-// One folder row under the selected Workspace: its path, a save-mode toggle,
-// reordering, and detaching it from this Workspace (not deleting its shared
-// registration — see `Registry::remove_root` vs. `remove_unused_folder`).
-component FolderRow inherits Rectangle {
-    in property <string> path;
-    in property <string> users;
-    in property <bool> mode-auto;
-    in property <bool> missing;
-    in property <bool> can-move-up;
-    in property <bool> can-move-down;
-    callback mode-toggled();
-    callback move-up();
-    callback move-down();
-    callback detached();
-    callback relocated();
-
-    height: root.missing ? 182px : 162px;
-    border-radius: 6px;
-    background: touch.has-hover ? Tok.chrome-sunken : transparent;
-    touch := TouchArea { }
-
-    VerticalLayout {
-        padding: 6px;
-        spacing: 2px;
-
-        HorizontalLayout {
-            spacing: 6px;
-
-            Text {
-                text: root.path;
-                color: root.missing ? Tok.alert : Tok.ink;
-                font-size: 12px;
-                overflow: elide;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                Tooltip { text: @markdown("\{root.path}"); }
-            }
-
-            if root.missing: TextButton {
-                wide: true;
-                title: @tr("Relocate…");
-                clicked => { root.relocated(); }
-            }
-        }
-
-        if root.missing: Text {
-            text: @tr("Folder not found");
-            color: Tok.alert;
-            font-size: 12px;
-        }
-
-        Text {
-            text: @tr("Used by: ") + root.users;
-            color: Tok.ink-muted;
-            font-size: 12px;
-            overflow: elide;
-        }
-
-        HorizontalLayout {
-            spacing: 4px;
-
-            TextButton {
-                wide: true;
-                title: root.mode-auto ? @tr("Auto-Save") : @tr("Backup");
-                role: root.mode-auto ? Role.primary : Role.normal;
-                clicked => { root.mode-toggled(); }
-            }
-
-        }
-        HorizontalLayout {
-            spacing: 4px;
-            TextButton {
-                wide: true;
-                title: @tr("Move Up");
-                enabled: root.can-move-up;
-                clicked => { root.move-up(); }
-            }
-            TextButton {
-                wide: true;
-                title: @tr("Move Down");
-                enabled: root.can-move-down;
-                clicked => { root.move-down(); }
-            }
-        }
-        HorizontalLayout {
-            TextButton {
-                wide: true;
-                title: @tr("Detach");
-                clicked => { root.detached(); }
-            }
-        }
-    }
-}
-
 component WorkspaceListRow inherits Rectangle {
     in property <string> name;
     in property <bool> is-default;
     in property <bool> is-active;
     in property <bool> selected;
     callback chosen();
+    callback context-requested();
 
     height: 32px;
     border-radius: 6px;
@@ -171,8 +72,8 @@ component WorkspaceListRow inherits Rectangle {
 
         Text {
             text: root.name;
-            color: root.selected ? Tok.ink-strong : Tok.ink;
-            font-size: 13px;
+            color: touch.has-hover ? Tok.accent-strong : Tok.accent;
+            font-size: 14px;
             overflow: elide;
             vertical-alignment: center;
             horizontal-stretch: 1;
@@ -192,7 +93,13 @@ component WorkspaceListRow inherits Rectangle {
     }
 
     touch := TouchArea {
+        mouse-cursor: pointer;
         clicked => { root.chosen(); }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.context-requested();
+            }
+        }
     }
 }
 
@@ -206,6 +113,9 @@ export component WorkspaceManager inherits Rectangle {
     in property <[WorkspaceRow]> workspaces;
     in property <int> selected: -1;
     callback row-chosen(int);
+    callback row-context-chosen(int);
+    property <length> context-y;
+    property <bool> unused-expanded: false;
     callback create-requested();
     callback clone-requested();
     in property <bool> cloning;
@@ -233,77 +143,71 @@ export component WorkspaceManager inherits Rectangle {
 
 
     VerticalLayout {
-        padding: 8px; spacing: 8px;
-        VerticalLayout {
-            vertical-stretch: 0;
-            Text { text: @tr("Workspaces"); color: Tok.ink-strong; font-size: 15px; font-weight: 600; horizontal-stretch: 1; }
-            if root.active: TextButton {
-                wide: true; title: @tr("Back to Files"); clicked => { root.closed(); } }
-        }
+        padding: 12px;
+        spacing: 12px;
+        Text { text: @tr("Workspace"); color: Tok.ink-strong; font-size: 16px; font-weight: 600; vertical-stretch: 0; }
         ScrollView {
-            horizontal-stretch: 1; vertical-stretch: 1;
+            vertical-stretch: 1;
             VerticalLayout {
-                alignment: start; spacing: 8px;
+                alignment: start;
+                spacing: 8px;
                 if root.read-error: Banner { danger: true; text: root.read-error-text; }
                 if root.read-error: TextButton {
-                wide: true; title: @tr("Reset the Workspace Registry…"); role: Role.danger; clicked => { root.read-error-reset-requested(); } }
-                TextButton {
-                wide: true; title: @tr("New Workspace…"); clicked => { root.create-requested(); } }
-                TextButton {
-                    wide: true; title: root.cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…");
-                    enabled: !root.cloning && !root.read-error;
-                    clicked => { root.clone-requested(); }
+                    wide: true; title: @tr("Reset the Workspace Registry…");
+                    role: Role.danger; clicked => { root.read-error-reset-requested(); }
                 }
-                if root.workspaces.length == 0: Text { text: @tr("Create a Workspace, then add folders."); color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
-                for row[index] in root.workspaces: WorkspaceListRow {
-                    name: row.name; is-default: row.is-default; is-active: row.is-active;
-                    selected: index == root.selected;
+                Text { text: @tr("Choose a Workspace"); color: Tok.ink-muted; font-size: 12px; }
+                for row[index] in root.workspaces: workspace-row := WorkspaceListRow {
+                    name: row.name; is-default: row.is-default; selected: false; is-active: false;
                     chosen => { root.row-chosen(index); }
-                }
-                Text { text: @tr("● Active   ★ Default at startup"); color: Tok.ink-muted; font-size: 11px; wrap: word-wrap; }
-                if root.selected >= 0: VerticalLayout {
-                    spacing: 8px;
-                    SectionTitle { text: root.workspaces[root.selected].name; overflow: elide; }
-                    TextButton {
-                wide: true; title: @tr("Open Workspace"); role: Role.primary; clicked => { root.open-selected(); } }
-                    HorizontalLayout {
-                        spacing: 4px;
-                        TextButton {
-                wide: true; title: @tr("Rename…"); clicked => { root.rename-requested(); } }
-                        TextButton {
-                wide: true; title: @tr("Duplicate…"); clicked => { root.duplicate-requested(); } }
+                    context-requested => {
+                        root.context-y = workspace-row.absolute-position.y - root.absolute-position.y + 32px;
+                        root.row-context-chosen(index);
+                        folders-menu.show();
                     }
-                    TextButton {
-                wide: true; title: root.workspaces[root.selected].is-default ? @tr("Unset Default") : @tr("Set Default"); clicked => { root.default-toggled(); } }
-                    SectionTitle { text: @tr("Folders"); }
-                    TextButton {
-                wide: true; title: @tr("Add Folder…"); clicked => { root.folder-add-requested(); } }
-                    Text { text: @tr("Save mode applies to this folder in every Workspace that uses it."); color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
-                    for row[index] in root.folders: FolderRow {
-                        path: row.path; users: row.users; mode-auto: row.mode-auto; missing: row.missing;
-                        can-move-up: index > 0; can-move-down: index < root.folders.length - 1;
-                        mode-toggled => { root.folder-mode-toggled(index); }
-                        move-up => { root.folder-move-up-requested(index); }
-                        move-down => { root.folder-move-down-requested(index); }
-                        detached => { root.folder-detached(index); }
-                        relocated => { root.folder-relocated(index); }
-                    }
-                    if root.folders.length == 0: Text { text: @tr("No folders in this Workspace yet"); color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
-                    TextButton {
-                wide: true; title: @tr("Reset View…"); clicked => { root.reset-view-requested(); } }
-                    TextButton {
-                wide: true; title: @tr("Remove…"); role: Role.danger; clicked => { root.remove-requested(); } }
                 }
-                if root.active: TextButton {
-                wide: true; title: @tr("Leave Workspace…"); clicked => { root.leave-requested(); } }
-                if root.unused-folders.length > 0: SectionTitle { text: @tr("Unused Folder Settings"); }
-                for row[index] in root.unused-folders: VerticalLayout {
+                if root.workspaces.length == 0: Text {
+                    text: @tr("Create a Workspace, then add folders.");
+                    color: Tok.ink-muted; font-size: 12px; wrap: word-wrap;
+                }
+                Rectangle { height: 1px; background: Tok.rule; }
+                if !root.read-error: LinkRow {
+                    title: @tr("New Workspace…"); clicked => { root.create-requested(); }
+                }
+                if !root.read-error && !root.cloning: LinkRow {
+                    title: @tr("Clone Repository…"); clicked => { root.clone-requested(); }
+                }
+                if root.unused-folders.length > 0: TextButton {
+                    wide: true;
+                    title: (root.unused-expanded ? "▾ " : "▸ ") + @tr("Unused Folder Settings");
+                    clicked => { root.unused-expanded = !root.unused-expanded; }
+                }
+                if root.unused-expanded: VerticalLayout {
                     spacing: 4px;
-                    Text { text: row.path; color: Tok.ink-muted; font-size: 12px; overflow: elide; }
-                    TextButton {
-                wide: true; title: @tr("Remove…"); clicked => { root.unused-folder-removed(index); } }
+                    for folder[index] in root.unused-folders: VerticalLayout {
+                        spacing: 2px;
+                        Text { text: folder.path; color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
+                        TextButton { wide: true; title: @tr("Remove…"); clicked => { root.unused-folder-removed(index); } }
+                    }
+                }
+                if root.cloning: Text { text: @tr("Cloning Repository…"); color: Tok.ink-muted; font-size: 12px; wrap: word-wrap; }
+            }
+        }
+    }
+    folders-menu := PopupWindow {
+        x: 8px; y: root.context-y; width: 340px; close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 340px;
+            VerticalLayout {
+                padding: 6px; spacing: 1px;
+                if root.folders.length == 0: MenuRow { title: @tr("No folders in this Workspace yet"); enabled: false; }
+                for folder[index] in root.folders: MenuRow {
+                    title: @tr("Relocate…") + "  " + folder.path;
+                    Tooltip { text: @markdown("`\{folder.path}`"); }
+                    activated => { root.folder-relocated(index); folders-menu.close(); }
                 }
             }
         }
     }
+
 }

@@ -215,6 +215,9 @@ export component AppWindow inherits Window {
     callback workspace-manager-closed();
     callback workspace-open-selected();
     callback workspace-leave-requested();
+    callback workspace-tree-command(int);
+    in property <bool> workspace-context-folder;
+    in property <bool> workspace-context-auto;
     in property <bool> workspace-active;
     in-out property <bool> workspace-manager-open;
     in property <bool> workspace-read-error;
@@ -223,6 +226,7 @@ export component AppWindow inherits Window {
     in property <[WorkspaceRow]> workspace-rows;
     in property <int> workspace-manager-selected: -1;
     callback workspace-row-chosen(int);
+    callback workspace-row-context-chosen(int);
     callback workspace-create-requested();
     callback workspace-clone-requested();
     in property <bool> workspace-cloning;
@@ -283,6 +287,11 @@ export component AppWindow inherits Window {
     /// that a left click must not: the commands act on what is chosen, and
     /// opening the file or folding the folder is not what was asked for.
     callback left-row-picked(int);
+    callback left-context-requested(int);
+    in-out property <string> tree-filter;
+    in property <int> tree-root-row-count;
+    property <bool> workspace-filter-visible: true;
+    callback tree-filter-changed();
 
     /// 要件 5.2: the row being carried through the tree, and where the hand is.
     ///
@@ -1427,7 +1436,7 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 0px;
 
-                    if root.left-tab == 4 && root.workspace-manager-open: WorkspaceManager {
+                    if root.left-tab == 4 && !root.workspace-active: WorkspaceManager {
                         active: root.workspace-active;
                         open-selected => { root.workspace-open-selected(); }
                         leave-requested => { root.workspace-leave-requested(); }
@@ -1437,6 +1446,7 @@ export component AppWindow inherits Window {
                         workspaces: root.workspace-rows;
                         selected: root.workspace-manager-selected;
                         row-chosen(index) => { root.workspace-row-chosen(index); }
+                        row-context-chosen(index) => { root.workspace-row-context-chosen(index); }
                         create-requested => { root.workspace-create-requested(); }
                         clone-requested => { root.workspace-clone-requested(); }
                         cloning: root.workspace-cloning;
@@ -1459,14 +1469,50 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.left-tab == 4 && !root.workspace-manager-open: VerticalLayout {
-                        vertical-stretch: 0;
-                        padding: 6px; spacing: 4px;
-                        Text { text: root.workspace-current-label; color: Tok.ink-strong; font-size: 14px; overflow: elide; }
-                        VerticalLayout {
-                            spacing: 4px;
-                            TextButton { wide: true; title: @tr("Manage Workspaces…"); clicked => { root.workspace-manager-requested(); } }
-                            TextButton { wide: true; title: @tr("Leave Workspace…"); clicked => { root.workspace-leave-requested(); } }
+                    if root.left-tab == 4 && root.workspace-active: VerticalLayout {
+                        padding: 6px; spacing: 4px; vertical-stretch: 0;
+                        HorizontalLayout {
+                            spacing: 2px;
+                        Rectangle {
+                            height: 30px;
+                            min-width: 44px;
+                            horizontal-stretch: 1;
+                            TextButton {
+                                width: parent.width; wide: true;
+                                title: root.workspace-current-label + " ▾";
+                                clicked => { workspace-name-menu.show(); }
+                            }
+                            workspace-name-menu := PopupWindow {
+                                x: 0px; y: 30px; width: 248px; close-policy: close-on-click-outside;
+                                MenuFrame {
+                                    width: 248px;
+                                    VerticalLayout {
+                                        padding: 6px; spacing: 1px;
+                                        for name[index] in root.workspace-switcher-rows: MenuRow {
+                                            title: name; checked: name == root.workspace-current-label;
+                                            activated => { root.workspace-switcher-chosen(index); workspace-name-menu.close(); }
+                                        }
+                                        MenuSep { }
+                                        MenuRow { title: @tr("New Workspace…"); activated => { root.workspace-create-requested(); workspace-name-menu.close(); } }
+                                        MenuRow { title: @tr("Rename…"); activated => { root.workspace-rename-requested(); workspace-name-menu.close(); } }
+                                        MenuRow { title: @tr("Duplicate…"); activated => { root.workspace-duplicate-requested(); workspace-name-menu.close(); } }
+                                        MenuRow {
+                                            title: root.workspace-manager-selected >= 0 && root.workspace-rows[root.workspace-manager-selected].is-default ? @tr("Unset Default") : @tr("Set Default");
+                                            activated => { root.workspace-default-toggled(); workspace-name-menu.close(); }
+                                        }
+                                        MenuRow { title: @tr("Reset View…"); activated => { root.workspace-reset-view-requested(); workspace-name-menu.close(); } }
+                                        MenuRow { title: @tr("Remove…"); activated => { root.workspace-remove-requested(); workspace-name-menu.close(); } }
+                                        MenuSep { }
+                                        MenuRow { title: @tr("Show Current Document in Tree"); activated => { root.explorer-command(0); workspace-name-menu.close(); } }
+                                        MenuRow { title: @tr("Collapse All"); activated => { root.explorer-command(1); workspace-name-menu.close(); } }
+                                        MenuRow { title: @tr("Refresh"); activated => { root.explorer-command(2); workspace-name-menu.close(); } }
+                                    }
+                                }
+                            }
+                        }
+                            IconButton { icon: Icons.plus; tip: @tr("Add Folder…"); clicked => { root.workspace-tree-command(0); } }
+                            IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
+                            IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
                     }
                     if root.left-tab == 0: tree-head := Rectangle {
@@ -1648,6 +1694,12 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    if root.left-tab == 0 || (root.left-tab == 4 && root.workspace-active && root.workspace-filter-visible): Field {
+                        height: 28px;
+                        placeholder: @tr("Filter files…");
+                        text <=> root.tree-filter;
+                        edited => { root.tree-filter-changed(); }
+                    }
                     // 要件 7.7: the question this panel asks is about the
                     // work folder, so it has its own field. The find bar above
                     // the editor asks about one document; the two are different
@@ -1769,15 +1821,9 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
-                        visible: root.left-tab != 4 || !root.workspace-manager-open;
+                        visible: root.left-tab != 4 || root.workspace-active;
                         vertical-stretch: self.visible ? 1 : 0;
                         max-height: self.visible ? 100000px : 0px;
-                        property <int> reveal-generation: root.tree-reveal-generation;
-                        changed reveal-generation => {
-                            if (root.left-tab == 0 || root.left-tab == 4) {
-                                self.viewport-y = -min(max(0, root.tree-selected) * max(24px, root.left-size * 2px), max(0px, self.viewport-height - self.visible-height));
-                            }
-                        }
                         // 要件 5.2: the point being carried, but only while it
                         // is over the rows the writer can see. **A row scrolled
                         // out of sight still has a place in the list**, and the
@@ -1797,7 +1843,13 @@ export component AppWindow inherits Window {
 
                             for row[index] in root.left-rows: tree-row := Rectangle {
                                 // 追加要件 2026-09-15: 行の高さは字の大きさに合わせる（12pxで24px）。
-                                height: max(24px, root.left-size * 2px);
+                                height: root.left-tab == 4 && row.is-root ? 12px : max(24px, root.left-size * 2px);
+                                property <int> reveal-generation: root.tree-reveal-generation;
+                                changed reveal-generation => {
+                                    if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-selected {
+                                        tree-view.viewport-y = -min(self.y, max(0px, tree-view.viewport-height - tree-view.visible-height));
+                                    }
+                                }
                                 // 要件 5.2: what this row can be given. A file
                                 // is not a place to put anything, the folder
                                 // it is already in cannot be given what it
@@ -1911,7 +1963,7 @@ export component AppWindow inherits Window {
                                             && event.button == PointerEventButton.right
                                             && event.kind == PointerEventKind.down) {
                                             root.tree-selected = index;
-                                            root.left-row-picked(index);
+                                            root.left-context-requested(index);
                                             root.show-tree-menu(tree-row.absolute-position.x + 8px, tree-row.absolute-position.y + 24px);
                                         }
                                         if (event.button != PointerEventButton.left) {
@@ -1943,7 +1995,7 @@ export component AppWindow inherits Window {
                                                 root.tree-carried-from = -1;
                                                 root.tree-drop-hand = -2;
                                                 root.tree-drop-into = -2;
-                                            } else if (tree-row.pressing) {
+                                            } else if (tree-row.pressing && !(root.left-tab == 4 && row.is-root)) {
                                                 root.left-row-activated(index);
                                                 root.focus-generation += 1;
                                             }
@@ -1968,7 +2020,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     double-clicked => {
-                                        root.left-row-kept(index);
+                                        if !(root.left-tab == 4 && row.is-root) { root.left-row-kept(index); }
                                     }
                                     moved => {
                                         tree-row.moves += 1;
@@ -2006,7 +2058,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 Text {
-                                    visible: (root.left-tab != 0 && root.left-tab != 4) || index != root.tree-new-index;
+                                    visible: !(root.left-tab == 4 && row.is-root) && ((root.left-tab != 0 && root.left-tab != 4) || index != root.tree-new-index);
                                     // Depth is drawn rather than nested, because
                                     // the rows arrive flat (see `LeftRow`).
                                     x: 8px + row.depth * root.left-size * 7px / 6;
@@ -2028,8 +2080,12 @@ export component AppWindow inherits Window {
                                         - ((root.left-tab == 0 || root.left-tab == 4) ? 28px : 8px);
                                 }
 
-                                if root.left-tab == 1: Tooltip {
-                                    text: @markdown("\{row.name}");
+                                if root.left-tab == 4 && row.is-root: Rectangle {
+                                    x: 8px; y: 5px; height: 1px; width: parent.width - 16px;
+                                    background: Tok.rule-strong;
+                                }
+                                if root.left-tab == 1 || (root.left-tab == 4 && row.is-root): Tooltip {
+                                    text: @markdown("`\{row.name}`");
                                 }
 
                                 if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-new-index: Field {
@@ -2046,7 +2102,7 @@ export component AppWindow inherits Window {
                                 // pointer that is already on the row. Only the
                                 // tree has one: a search hit and a heading are
                                 // not files to be renamed.
-                                if ((root.left-tab == 0 || root.left-tab == 4) && root.tree-new-index < 0
+                                if (!(root.left-tab == 4 && row.is-root) && (root.left-tab == 0 || root.left-tab == 4) && root.tree-new-index < 0
                                     && (index == root.tree-selected || entry.has-hover)): IconButton {
                                     x: parent.width - self.width - 3px;
                                     y: (parent.height - self.height) / 2;
@@ -2054,7 +2110,7 @@ export component AppWindow inherits Window {
                                     icon: Icons.dots;
                                     clicked => {
                                         root.tree-selected = index;
-                                        root.left-row-picked(index);
+                                        root.left-context-requested(index);
                                         root.show-tree-menu(tree-row.absolute-position.x + 8px, tree-row.absolute-position.y + 24px);
                                     }
                                 }
@@ -2072,7 +2128,30 @@ export component AppWindow inherits Window {
                                 // tree again, which does take the row away.
 
                             }
+                            if root.left-tab == 4 && root.workspace-active: Rectangle {
+                                // A ScrollView sizes an alignment:start layout to its
+                                // content, so stretch alone leaves only the minimum.
+                                // This row starts immediately after the file rows;
+                                // fill the visible space remaining from that position.
+                                height: max(48px, tree-view.visible-height
+                                    - (root.left-rows.length - root.tree-root-row-count) * max(24px, root.left-size * 2px)
+                                    - root.tree-root-row-count * 12px);
+                                vertical-stretch: 0;
+                                TouchArea {
+                                    pointer-event(event) => {
+                                        if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                                            root.tree-selected = -1;
+                                            root.left-context-requested(-1);
+                                            root.show-tree-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                        }
+                                    }
+                                }
+                            }
                         }
+                    }
+                    if root.left-tab == 4 && root.workspace-active: TextButton {
+                        wide: true; title: @tr("Close Workspace");
+                        clicked => { root.workspace-leave-requested(); }
                     }
                 }
             }
@@ -5799,7 +5878,20 @@ export component AppWindow inherits Window {
                 padding: 6px;
                 spacing: 1px;
 
+                if root.left-tab == 4: VerticalLayout {
+                    spacing: 1px;
+                    Text { text: @tr("Workspace"); color: Tok.ink-muted; font-size: 11px; }
+                    MenuRow { title: @tr("Add Folder…"); activated => { root.workspace-tree-command(0); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.workspace-tree-command(1); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: @tr("Folder Auto-Save"); checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: @tr("Move Up"); activated => { root.workspace-tree-command(5); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: @tr("Move Down"); activated => { root.workspace-tree-command(6); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Reset View…"); activated => { root.workspace-tree-command(4); root.close-tree-menu(); } }
+                    MenuSep { }
+                }
                 MenuRow {
+                    enabled: root.tree-selected >= 0;
                     title: @tr("New File…");
                     activated => {
                         root.close-tree-menu();
@@ -5807,6 +5899,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 MenuRow {
+                    enabled: root.tree-selected >= 0;
                     title: @tr("New Folder…");
                     activated => {
                         root.close-tree-menu();
@@ -5815,6 +5908,7 @@ export component AppWindow inherits Window {
                 }
                 MenuSep { }
                 MenuRow {
+                    enabled: root.tree-selected >= 0 && !root.left-rows[root.tree-selected].is-root;
                     title: @tr("Rename…");
                     activated => {
                         root.close-tree-menu();
@@ -5822,6 +5916,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 MenuRow {
+                    enabled: root.tree-selected >= 0 && !root.left-rows[root.tree-selected].is-root;
                     title: @tr("Duplicate");
                     activated => {
                         root.close-tree-menu();
@@ -5830,6 +5925,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 MenuRow {
+                    enabled: root.tree-selected >= 0;
                     title: @tr("Reveal in Explorer");
                     activated => {
                         root.close-tree-menu();
@@ -5841,6 +5937,7 @@ export component AppWindow inherits Window {
                 // 要件 7.7（2026-09-07追加）: 見えて
                 // いるフォルダを指して絞る。
                 MenuRow {
+                    enabled: root.tree-selected >= 0;
                     title: @tr("Search in This Folder");
                     activated => {
                         root.close-tree-menu();
@@ -5849,6 +5946,7 @@ export component AppWindow inherits Window {
                 }
                 MenuSep { }
                 MenuRow {
+                    enabled: root.tree-selected >= 0 && !root.left-rows[root.tree-selected].is-root;
                     title: @tr("Delete…");
                     activated => {
                         root.close-tree-menu();
