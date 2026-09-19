@@ -127,7 +127,7 @@ pub(crate) fn ensure(window: &AppWindow, live: &Live, id: PaneId) {
     if !needs {
         return;
     }
-    let doc = OpenDocument::untitled(next_number(live), window.as_weak());
+    let doc = new_document(live);
     let mut tabs = live.tabs.borrow_mut();
     let strip = tabs.of_mut(id);
     let active = strip.active;
@@ -144,6 +144,14 @@ pub(crate) fn ensure(window: &AppWindow, live: &Live, id: PaneId) {
             ))));
         tab.below.active = 0;
     }
+}
+
+fn new_document(live: &Live) -> Rc<OpenDocument> {
+    // Panel state is published by edited/show/drain. SharedText's window
+    // callback belongs to upper documents: firing it during a panel edit
+    // re-enters Tabs (sync_entry) or the captured terminal (collect).
+    // Keep dirty tracking, but do not change the upper document's UI state.
+    OpenDocument::untitled(next_number(live), slint::Weak::default())
 }
 
 pub(crate) fn sync_entry(tab: &mut PaneTab) {
@@ -254,7 +262,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
                 };
                 Some(Rc::new(RefCell::new(s)))
             };
-            let doc = OpenDocument::untitled(next_number(live), window.as_weak());
+            let doc = new_document(live);
             let entry = Rc::new(RefCell::new(PanelDocument::new(window, doc, shell)));
             let mut tabs = live.tabs.borrow_mut();
             let strip = tabs.of_mut(id);

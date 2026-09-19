@@ -89,6 +89,13 @@ impl Harness {
             searcher: Rc::new(crate::searcher::Searcher::start(|| {})),
             searched: Rc::default(),
         };
+        let weak = window.as_weak();
+        let notified = live.clone();
+        window.on_republish_tabs(move || {
+            if let Some(window) = weak.upgrade() {
+                publish_tabs(&window, &notified);
+            }
+        });
         (Self { window, live }, document)
     }
 }
@@ -98,6 +105,28 @@ impl Drop for Harness {
         self.live.writer.finish();
         app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
     }
+}
+
+#[test]
+fn terminal_panel_restored_draft_can_be_saved_and_edited_with_live_notifications() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    h.live.tabs.borrow_mut().of_mut(id).tabs[0].below.draft = "restored draft".into();
+    terminal_panels::ensure(&h.window, &h.live, id);
+    let panel = terminal_panels::current(&h.live, id).unwrap();
+    let document = panel.borrow().document.clone();
+    assert_eq!(&*document.text.borrow(), "restored draft");
+    let path = app_data::app_directory().unwrap().join("saved-panel.md");
+    assert!(saving::write_document_to(&h.window, &h.live, &document, path.clone()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "restored draft");
+    assert!(!document.text.edited());
+    // Capture/edit updates hold the panel while changing its text, as in the UI.
+    panel.borrow_mut().document.text.borrow_mut().push_str(" edited");
+    terminal_panels::edited(&h.window, &h.live, id);
+    assert!(document.text.edited());
+    assert!(id.screen(&h.window).panel_tabs.row_data(0).unwrap().ends_with('*'));
+    assert!(terminal_panels::save(&h.window, &h.live, &panel, false));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "restored draft edited");
 }
 
 #[test]
