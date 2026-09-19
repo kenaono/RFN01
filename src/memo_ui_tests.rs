@@ -234,6 +234,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
+            panels: Default::default(),
             panes: vec![{
                 let tab = PaneTab::showing(&window, id, memo.clone());
                 PaneTabs {
@@ -1026,6 +1027,7 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
+            panels: Default::default(),
             panes: vec![{
                 let tab = PaneTab::showing(&window, id, memo.clone());
                 PaneTabs {

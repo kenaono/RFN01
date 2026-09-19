@@ -92,3 +92,4 @@ slint-build = "1.17.1"
 # Windows client-area alpha presentation; keep native window/IME handling.
 [patch.crates-io]
 i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
+i-slint-renderer-software = { path = "vendor/i-slint-renderer-software" }

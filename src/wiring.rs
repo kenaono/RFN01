@@ -165,9 +165,18 @@ pub fn wire_terminal_look(
             window.set_default_shell(0);
             window.set_terminal_font(crate::TERMINAL_FONT_DEFAULT.into());
             window.set_terminal_size(crate::TERMINAL_SIZE_DEFAULT);
+            window.set_terminal_confirm_paste(true);
+            window.set_terminal_confirm_close(true);
+            window.set_terminal_history_limit(10_000);
+            window.set_panel_defaults(Default::default());
             cache.borrow_mut().log_diag("spec", "terminal reset");
             // 地と字をひとまとめで戻し、書き出しと描き直しもそこで済む。
             window.invoke_terminal_theme_chosen(false);
+            window.set_panel_defaults(ModelRc::new(VecModel::from(
+                (0..3)
+                    .map(|kind| crate::terminal_appearance::default_style(&window, kind))
+                    .collect::<Vec<_>>(),
+            )));
         }
     });
 
@@ -614,6 +623,7 @@ impl ColourDoors {
                         // 個別に色を付けたTABだけが追随しないように見えた。
                         for tab in &mut strip.tabs {
                             tab.paper = [None; 2];
+                            crate::terminal_appearance::clear_paper(tab);
                             tab.tab_colour = None;
                         }
                         &mut strip.paper

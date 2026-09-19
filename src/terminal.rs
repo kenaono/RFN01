@@ -112,6 +112,17 @@ pub struct Line {
 }
 
 impl Line {
+    pub fn logical_text(&self) -> String {
+        if self.wrapped {
+            self.cells
+                .iter()
+                .filter(|cell| !cell.trailing)
+                .map(|cell| cell.text)
+                .collect()
+        } else {
+            self.text()
+        }
+    }
     fn blank(columns: usize, attrs: Attrs) -> Self {
         Self {
             cells: vec![Cell::blank(attrs); columns],
@@ -217,6 +228,21 @@ pub struct Screen {
     /// comparison whether it has to draw. **Cheaper than diffing the grid** and
     /// exactly as accurate for the question "is what I drew still current".
     revision: u64,
+    /// Total rows discarded from scrollback, including explicit history clear.
+    /// Views use this to keep their anchor when the bounded history is full.
+    history_origin: u64,
+    capture: Option<CapturedOutput>,
+    file_capture: Option<CapturedOutput>,
+}
+
+#[derive(Debug, Default)]
+struct CapturedOutput {
+    repainting: bool,
+    first_row: usize,
+    touched: std::collections::BTreeSet<usize>,
+    completed: String,
+    wrapped: String,
+    initial: String,
 }
 
 impl Screen {
@@ -240,6 +266,9 @@ impl Screen {
             replies: Vec::new(),
             unhandled: Vec::new(),
             revision: 0,
+            history_origin: 0,
+            capture: None,
+            file_capture: None,
         }
     }
 
@@ -281,6 +310,200 @@ impl Screen {
     /// window must not push anything into the history of the shell session.
     pub fn scrollback(&self) -> &VecDeque<Line> {
         &self.scrollback
+    }
+
+    pub fn history_origin(&self) -> u64 {
+        self.history_origin
+    }
+
+    pub fn start_capture(&mut self) {
+        self.capture = Some(CapturedOutput {
+            first_row: self.cursor.row,
+            initial: self.row_text(self.cursor.row),
+            ..CapturedOutput::default()
+        });
+    }
+
+    /// Completed logical lines and the current, still editable terminal line.
+    /// Consumers replace the previous tail, avoiding duplicate prompt redraws.
+    pub fn capture_update(&mut self) -> Option<(String, String)> {
+        let tail = self.row_text(self.cursor.row);
+        let capture = self.capture.as_mut()?;
+        if self.cursor.row < capture.first_row || (capture.wrapped.is_empty() && !capture.touched.contains(&self.cursor.row)) {
+            return Some((std::mem::take(&mut capture.completed), String::new()));
+        }
+        let pending = format!("{}{}", capture.wrapped, tail);
+        let pending = pending
+            .strip_prefix(&capture.initial)
+            .unwrap_or(&pending)
+            .to_owned();
+        Some((std::mem::take(&mut capture.completed), pending))
+    }
+
+    pub fn stop_capture(&mut self) {
+        self.capture = None;
+    }
+
+    pub fn start_file_capture(&mut self) {
+        self.file_capture = Some(CapturedOutput {
+            first_row: self.cursor.row,
+            initial: self.row_text(self.cursor.row),
+            ..CapturedOutput::default()
+        });
+    }
+
+    pub fn file_capture_update(&mut self) -> Option<(String, String)> {
+        let tail = self.row_text(self.cursor.row);
+        let capture = self.file_capture.as_mut()?;
+        if self.cursor.row < capture.first_row || (capture.wrapped.is_empty() && !capture.touched.contains(&self.cursor.row)) {
+            return Some((std::mem::take(&mut capture.completed), String::new()));
+        }
+        let pending = format!("{}{}", capture.wrapped, tail);
+        let pending = pending
+            .strip_prefix(&capture.initial)
+            .unwrap_or(&pending)
+            .to_owned();
+        Some((std::mem::take(&mut capture.completed), pending))
+    }
+
+    pub fn stop_file_capture(&mut self) {
+        self.file_capture = None;
+    }
+
+    pub fn set_history_limit(&mut self, limit: usize) {
+        let limit = limit.min(1_000_000);
+        if self.scrollback_limit == limit {
+            return;
+        }
+        self.scrollback_limit = limit;
+        while self.scrollback.len() > self.scrollback_limit {
+            self.scrollback.pop_front();
+            self.history_origin = self.history_origin.saturating_add(1);
+        }
+        self.touch();
+    }
+
+    pub fn clear_history(&mut self) {
+        self.history_origin = self
+            .history_origin
+            .saturating_add(self.scrollback.len() as u64);
+        self.scrollback.clear();
+        self.touch();
+    }
+
+    /// Clear only the visible grid; keep the running process and its history.
+    pub fn clear_screen(&mut self) {
+        self.erase_in_display(2);
+    }
+
+    /// Retained output, with automatic wrapping joined and real line breaks kept.
+    pub fn retained_text(&self) -> String {
+        let mut text = String::new();
+        let last = self
+            .lines
+            .iter()
+            .rposition(|line| !line.text().is_empty())
+            .map_or(self.cursor.row, |last| last.max(self.cursor.row));
+        for line in self.scrollback.iter().chain(self.lines[..=last].iter()) {
+            text.push_str(&line.logical_text());
+            if !line.wrapped {
+                text.push('\n');
+            }
+        }
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        text
+    }
+
+    /// Search logical lines and map UTF-8 matches back to terminal cells.
+    pub fn search(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Vec<((usize, usize), (usize, usize))> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let Ok(pattern) = regex::RegexBuilder::new(&regex::escape(query))
+            .case_insensitive(!case_sensitive)
+            .build()
+        else {
+            return Vec::new();
+        };
+        let mut matches = Vec::new();
+        let mut text = String::new();
+        let mut positions = Vec::new();
+        let mut end = (0, 0);
+        for (row, line) in self.scrollback.iter().chain(self.lines.iter()).enumerate() {
+            for (column, cell) in line.cells.iter().enumerate() {
+                if cell.trailing {
+                    continue;
+                }
+                positions.push((text.len(), (row, column)));
+                text.push(cell.text);
+                end = (
+                    row,
+                    column
+                        + if line.cells.get(column + 1).is_some_and(|c| c.trailing) {
+                            2
+                        } else {
+                            1
+                        },
+                );
+            }
+            if !line.wrapped {
+                for found in pattern.find_iter(&text) {
+                    let from = positions
+                        .iter()
+                        .find(|(byte, _)| *byte == found.start())
+                        .map(|p| p.1);
+                    let to = positions
+                        .iter()
+                        .find(|(byte, _)| *byte == found.end())
+                        .map_or(end, |p| p.1);
+                    if let Some(from) = from {
+                        matches.push((from, to));
+                    }
+                }
+                text.clear();
+                positions.clear();
+            }
+        }
+        matches
+    }
+
+    pub fn url_at(&self, row: usize, column: usize) -> Option<String> {
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let mut first = row.min(lines.len().saturating_sub(1));
+        while first > 0 && lines[first - 1].wrapped {
+            first -= 1;
+        }
+        let mut text = String::new();
+        let mut byte = None;
+        for (at, line) in lines.iter().enumerate().skip(first) {
+            for (col, cell) in line.cells.iter().enumerate() {
+                if at == row && col == column {
+                    byte = Some(text.len());
+                }
+                if !cell.trailing {
+                    text.push(cell.text);
+                }
+            }
+            if !line.wrapped {
+                break;
+            }
+        }
+        let byte = byte?;
+        let pattern = regex::Regex::new(r#"https?://[^\s<>\"']+"#).ok()?;
+        pattern
+            .find_iter(&text)
+            .find(|m| m.start() <= byte && byte < m.end())
+            .map(|m| {
+                m.as_str()
+                    .trim_end_matches(['.', ',', ';', ')', ']', '}'])
+                    .to_owned()
+            })
     }
 
     /// What the shell asked for and has not been told yet. Send it up the pty.
@@ -345,6 +568,9 @@ impl Screen {
         if self.cursor.pending_wrap || self.cursor.column + width > self.columns {
             self.wrap_line();
         }
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            capture.touched.insert(self.cursor.row);
+        }
         // **The pen itself here**: this is the cell being written, not one
         // being cleared.
         let attrs = self.pen;
@@ -400,7 +626,37 @@ impl Screen {
         self.line_feed();
     }
 
+    fn capture_line(&mut self, row: usize, changed_only: bool) {
+        if self.stowed.is_none() {
+            let line = &self.lines[row];
+            for capture in [&mut self.capture, &mut self.file_capture]
+                .into_iter()
+                .flatten()
+            {
+                if row < capture.first_row || (changed_only && !capture.touched.contains(&row)) { continue; }
+                if capture.repainting && line.logical_text().is_empty() {
+                    capture.touched.remove(&row);
+                    continue;
+                }
+                capture.first_row = row + 1;
+                capture.touched.remove(&row);
+                capture.wrapped.push_str(&line.logical_text());
+                if !line.wrapped {
+                    let written = std::mem::take(&mut capture.wrapped);
+                    let fresh = written.strip_prefix(&capture.initial).unwrap_or(&written);
+                    if !fresh.is_empty() || capture.initial.is_empty() {
+                        capture.completed.push_str(fresh);
+                        capture.completed.push('\n');
+                        capture.repainting = false;
+                    }
+                    capture.initial.clear();
+                }
+            }
+        }
+    }
+
     fn line_feed(&mut self) {
+        self.capture_line(self.cursor.row, false);
         if self.cursor.row == self.region.1 {
             self.scroll_up(1);
         } else if self.cursor.row + 1 < self.rows {
@@ -445,7 +701,20 @@ impl Screen {
     }
 
     fn move_to(&mut self, row: usize, column: usize) {
-        self.cursor.row = row.min(self.rows - 1);
+        let row = row.min(self.rows - 1);
+        // ConPTY can finish output with a downward CUP instead of LF
+        // before drawing the next prompt. Commit those rows as well.
+        if self.capture.is_some() || self.file_capture.is_some() {
+            for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+                if row < capture.first_row { capture.repainting = true; }
+            }
+            for leaving in self.cursor.row..row {
+                let changed = [&self.capture, &self.file_capture].into_iter().flatten()
+                    .any(|capture| capture.touched.contains(&leaving));
+                if changed { self.capture_line(leaving, true); }
+            }
+        }
+        self.cursor.row = row;
         self.cursor.column = column.min(self.columns - 1);
         self.cursor.pending_wrap = false;
         self.touch();
@@ -465,12 +734,20 @@ impl Screen {
     fn scroll_up(&mut self, count: usize) {
         let (top, bottom) = self.region;
         let count = count.min(bottom - top + 1);
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            if top == 0 { capture.first_row = capture.first_row.saturating_sub(count); }
+            capture.touched = capture.touched.iter().filter_map(|&row| {
+                if row < top || row > bottom { Some(row) }
+                else if row >= top + count { Some(row - count) } else { None }
+            }).collect();
+        }
         for _ in 0..count {
             let leaving = self.lines.remove(top);
             if top == 0 && self.stowed.is_none() {
                 self.scrollback.push_back(leaving);
                 while self.scrollback.len() > self.scrollback_limit {
                     self.scrollback.pop_front();
+                    self.history_origin = self.history_origin.saturating_add(1);
                 }
             }
             self.lines
@@ -511,7 +788,7 @@ impl Screen {
                     *line = Line::blank(self.columns, attrs);
                 }
             }
-            3 => self.scrollback.clear(),
+            3 => self.clear_history(),
             _ => {}
         }
         // **The cursor does not move.** `ESC[2J` clears the screen and leaves
@@ -661,6 +938,9 @@ impl Screen {
         if columns == self.columns && rows == self.rows {
             return;
         }
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            capture.repainting = true;
+        }
         for line in &mut self.lines {
             line.cells.resize(columns, Cell::blank(Attrs::default()));
         }
@@ -671,6 +951,10 @@ impl Screen {
                     self.scrollback.push_back(leaving);
                 }
                 self.cursor.row = self.cursor.row.saturating_sub(1);
+                for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+                    capture.first_row = capture.first_row.saturating_sub(1);
+                    capture.touched = capture.touched.iter().filter_map(|row| row.checked_sub(1)).collect();
+                }
             } else {
                 self.lines.pop();
             }
@@ -693,6 +977,7 @@ impl Screen {
         self.cursor.pending_wrap = false;
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
+            self.history_origin = self.history_origin.saturating_add(1);
         }
         self.touch();
     }
@@ -701,9 +986,22 @@ impl Screen {
         let (columns, rows) = (self.columns, self.rows);
         let scrollback = std::mem::take(&mut self.scrollback);
         let limit = self.scrollback_limit;
+        let origin = self.history_origin;
+        let capture = self.capture.take();
+        let file_capture = self.file_capture.take();
         *self = Self::new(columns, rows);
         self.scrollback = scrollback;
         self.scrollback_limit = limit;
+        self.history_origin = origin;
+        self.capture = capture;
+        self.file_capture = file_capture;
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            capture.repainting = false;
+            capture.first_row = 0;
+            capture.touched.clear();
+            capture.initial.clear();
+            capture.wrapped.clear();
+        }
     }
 
     fn select_graphic_rendition(&mut self, params: &[Vec<u16>]) {
@@ -1438,6 +1736,148 @@ fn returns_only(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_and_urls_follow_wrapped_cells_and_unicode() {
+        let mut terminal = Terminal::new(4, 5);
+        terminal.feed("ABCDEF\r\n日本".as_bytes());
+        assert_eq!(terminal.screen.search("CDEF", true), vec![((0, 2), (1, 2))]);
+        assert_eq!(terminal.screen.search("日本", true), vec![((2, 0), (2, 4))]);
+        assert_eq!(
+            terminal.screen.search("cdef", false),
+            vec![((0, 2), (1, 2))]
+        );
+        assert!(terminal.screen.search("cdef", true).is_empty());
+        let mut terminal = Terminal::new(12, 5);
+        terminal.feed(b"https://example.com/path.");
+        assert_eq!(
+            terminal.screen.url_at(1, 3).as_deref(),
+            Some("https://example.com/path")
+        );
+        terminal.screen.clear_screen();
+        assert!(terminal.screen.search("example", false).is_empty());
+    }
+
+    #[test]
+    fn retained_output_joins_wrapping_without_losing_spaces() {
+        let mut term = Terminal::new(5, 3);
+        term.feed(b"abcd ef\r\nnext");
+        assert_eq!(term.screen.retained_text(), "abcd ef\nnext");
+    }
+
+    #[test]
+    fn history_limit_tracks_evictions_and_clear_keeps_screen() {
+        let mut term = Terminal::new(10, 2);
+        term.screen.set_history_limit(2);
+        term.feed(b"a\r\nb\r\nc\r\nd\r\ne");
+        assert_eq!(term.screen.scrollback().len(), 2);
+        assert_eq!(term.screen.history_origin(), 1);
+        term.screen.clear_history();
+        assert_eq!(term.screen.history_origin(), 3);
+        assert_eq!(term.screen.retained_text(), "d\ne");
+        term.screen.set_history_limit(0);
+        term.feed(b"\r\nf");
+        assert!(term.screen.scrollback().is_empty());
+        assert_eq!(term.screen.history_origin(), 4);
+    }
+
+    #[test]
+    fn capture_excludes_old_screen_redraw_and_keeps_real_blank_lines() {
+        let mut term = Terminal::new(30, 6);
+        term.feed(b"old prompt\r\n\r\ncurrent> ");
+        term.screen.start_capture();
+        term.feed(b"\x1b[1;1Hold prompt\x1b[3;9Hcommand\r\n\r\nresult\r\n");
+        assert_eq!(term.screen.capture_update(), Some(("command\n\nresult\n".into(), "".into())));
+    }
+
+    #[test]
+    fn capture_ignores_resize_blank_repaint_but_keeps_output_blank_lines() {
+        let mut term = Terminal::new(40, 8);
+        term.feed(b"old\r\nprompt> ");
+        term.screen.start_capture();
+        term.screen.resize(40, 6);
+        term.feed(b"\x1b[H\r\n\r\n\r\n\r\n\r\nfirst\r\n\r\nsecond\r\n");
+        assert_eq!(term.screen.capture_update(), Some(("first\n\nsecond\n".into(), "".into())));
+        let mut plain = Terminal::new(40, 8);
+        plain.screen.start_capture();
+        plain.feed(b"\r\nfirst\r\n");
+        assert_eq!(plain.screen.capture_update(), Some(("\nfirst\n".into(), "".into())));
+    }
+
+    #[test]
+    fn capture_continues_after_terminal_reset() {
+        let mut term = Terminal::new(30, 6);
+        term.feed(b"old\r\nprompt> ");
+        term.screen.start_capture();
+        term.feed(b"\x1bcnew\r\n");
+        assert_eq!(term.screen.capture_update(), Some(("new\n".into(), "".into())));
+    }
+
+    #[test]
+    fn terminal_file_and_panel_capture_have_independent_start_and_stop() {
+        let mut term = Terminal::new(80, 8);
+        term.screen.start_capture();
+        term.feed(b"panel only\r\n");
+        term.screen.start_file_capture();
+        term.feed(b"both\r\npending");
+        assert_eq!(
+            term.screen.file_capture_update(),
+            Some(("both\n".into(), "pending".into()))
+        );
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("panel only\nboth\n".into(), "pending".into()))
+        );
+        term.screen.stop_capture();
+        term.feed(b"\r\nfile only\r\n");
+        assert_eq!(
+            term.screen.file_capture_update(),
+            Some(("pending\nfile only\n".into(), "".into()))
+        );
+        term.screen.start_capture();
+        term.feed(b"again\r\n");
+        term.screen.stop_file_capture();
+        term.feed(b"panel again\r\n");
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("again\npanel again\n".into(), "".into()))
+        );
+        assert!(term.screen.file_capture_update().is_none());
+    }
+
+    #[test]
+    fn capture_finishes_line_when_conpty_positions_next_prompt() {
+        let mut term = Terminal::new(80, 8);
+        term.screen.start_capture();
+        term.feed(b"one\r\nlast\x1b[4;1Hprompt");
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("one\nlast\n".into(), "prompt".into()))
+        );
+    }
+
+    #[test]
+    fn capture_handles_wrapping_partial_utf8_and_prompt_redraw() {
+        let mut term = Terminal::new(8, 4);
+        term.feed(b"old> ");
+        term.screen.start_capture();
+        term.feed(b"\r\x1b[2Knew> ab\r\x1b[2Knew> ac");
+        assert_eq!(
+            term.screen.capture_update(),
+            Some((String::new(), "new> ac".into()))
+        );
+        term.feed(b"\r\n\x1b[31m12345678x\x1b[0m\r\n");
+        for byte in "日本語".as_bytes() {
+            term.feed(&[*byte]);
+        }
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("new> ac\n12345678x\n".into(), "日本語".into()))
+        );
+        term.screen.stop_capture();
+        term.feed(b"\r\nmore");
+        assert!(term.screen.capture_update().is_none());
+    }
 
     /// The prompt `wsl.exe` sent through `pty.rs`, byte for byte (技術検証9.4).
     const WSL_PROMPT: &[u8] = b"\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[32m\x1b[1m\

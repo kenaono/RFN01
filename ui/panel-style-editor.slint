@@ -1,0 +1,94 @@
+import { CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
+import { PanelStyle } from "editor-pane.slint";
+import { ColorCell, Field, Slider, TextButton, MenuFrame, MenuRow } from "controls.slint";
+import { Tok } from "tokens.slint";
+
+export component PanelStyleEditor inherits VerticalLayout {
+    in-out property <PanelStyle> style;
+    in property <[string]> font-names;
+    callback font-list-requested();
+    in property <string> heading;
+    in property <bool> underline-allowed: true;
+    in property <bool> defaults: false;
+    spacing: 10px;
+    vertical-stretch: 0;
+    alignment: start;
+    if root.heading != "": Text { text: root.heading; color: Tok.ink; height: 24px; vertical-stretch: 0; }
+    Rectangle {
+      height: 108px; vertical-stretch: 0;
+      background: Tok.chrome-raised; border-color: Tok.rule; border-width: 1px; border-radius: 6px;
+      VerticalLayout {
+        padding: 10px; spacing: 8px;
+        HorizontalLayout {
+          spacing: 12px;
+          ColorCell { width: 100px; horizontal-stretch: 0; label: @tr("Background"); shown: root.style.paper;
+            chosen(colour) => { root.style.paper = colour; root.style.paper-own = true; }
+            automatic => { root.style.paper-own = false; }
+          }
+          if root.defaults: Text { text: "Random"; color: Tok.ink-muted; vertical-alignment: center; }
+          if root.defaults: ComboBox { width: 100px; horizontal-stretch: 0; model: [@tr("Off"), @tr("Light"), @tr("Dark")]; current-index <=> root.style.random; }
+          Rectangle { horizontal-stretch: 1; }
+        }
+    HorizontalLayout {
+        spacing: 8px;
+        Text { width: 72px; text: @tr("Transparency"); color: Tok.ink-muted; vertical-alignment: center; }
+        Slider { horizontal-stretch: 1; minimum: 0; maximum: 100; value: root.style.transparency;
+            moved(value) => { root.style.transparency = round(value); }
+        }
+        Field { width: 50px; text: root.style.transparency;
+            accepted => { if self.text.is-float() { root.style.transparency = round(clamp(self.text.to-float(), 0, 100)); } }
+            focus-lost => { if self.text.is-float() { root.style.transparency = round(clamp(self.text.to-float(), 0, 100)); } }
+        }
+        Text { text: "%"; color: Tok.ink; vertical-alignment: center; }
+    }
+      }
+    }
+    Rectangle {
+      height: 108px; vertical-stretch: 0;
+      background: Tok.chrome-raised; border-color: Tok.rule; border-width: 1px; border-radius: 6px;
+      VerticalLayout {
+        padding: 10px; spacing: 8px;
+    HorizontalLayout {
+        spacing: 8px;
+        Text { width: 72px; text: @tr("Font"); color: Tok.ink-muted; vertical-alignment: center; }
+        Rectangle {
+            horizontal-stretch: 1; height: 28px;
+            TextButton { width: parent.width; wide: true; title: root.style.family; clicked => { root.font-list-requested(); font-menu.show(); } }
+            font-menu := PopupWindow {
+                x: 0px; y: 30px; width: 320px; close-policy: close-on-click-outside;
+                MenuFrame {
+                    width: 320px;
+                    VerticalLayout {
+                    padding: 6px;
+                    ScrollView {
+                        height: 300px;
+                        VerticalLayout {
+                            alignment: start; padding: 6px; spacing: 1px;
+                            for family in root.font-names: MenuRow {
+                                title: family; checked: family == root.style.family;
+                                activated => { root.style.family = family; font-menu.close(); }
+                            }
+                        }
+                    }
+                    }
+                }
+            }
+        }
+        ColorCell { width: 100px; horizontal-stretch: 0; label: @tr("Text Color"); shown: root.style.ink; chosen(colour) => { root.style.ink = colour; } }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        Text { width: 72px; text: @tr("Size"); color: Tok.ink-muted; vertical-alignment: center; }
+        Field { width: 45px; text: root.style.size;
+            accepted => { if self.text.is-float() { root.style.size = round(clamp(self.text.to-float(), 8, 72)); } }
+            focus-lost => { if self.text.is-float() { root.style.size = round(clamp(self.text.to-float(), 8, 72)); } }
+        }
+        Text { text: "px"; color: Tok.ink-muted; vertical-alignment: center; }
+        CheckBox { text: @tr("Bold"); checked <=> root.style.bold; }
+        CheckBox { text: @tr("Italic"); checked <=> root.style.italic; }
+        if root.underline-allowed: CheckBox { text: @tr("Underline"); checked <=> root.style.underline; }
+        Rectangle { horizontal-stretch: 1; }
+    }
+      }
+    }
+}
