@@ -17,6 +17,51 @@ fn read_only_policy_is_shared_by_editor_and_panel() {
 }
 
 #[test]
+fn editor_panel_uses_source_engine_document_and_selection() {
+    let (h, original) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let owner = PaneId::FIRST;
+    owner.update_screen(&h.window, |screen| {
+        screen.terminal = true;
+        screen.below_kind = 2;
+        screen.below_height = 240.;
+        screen.panel_style = terminal_appearance::initial_style();
+    });
+    terminal_panels::ensure(&h.window, &h.live, owner);
+    let entry = terminal_panels::current(&h.live, owner).unwrap();
+    let document = entry.borrow().document.clone();
+    *document.text.borrow_mut() = "# source\n日本語".into();
+    panel_source::sync(&h.window, &h.live);
+    let id = entry.borrow().source_id.unwrap();
+    assert!(id.screen(&h.window).embedded_panel);
+    assert!(!id.screen(&h.window).preview && !id.vertical(&h.window));
+    assert!(Rc::ptr_eq(&h.live.states.document(id), &document));
+    let state = h.live.states.of(id);
+    state.borrow_mut().caret_source_byte = Some(document.text.borrow().len());
+    insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "追記", false);
+    assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
+    assert!(original.text.borrow().is_empty());
+    state.borrow_mut().selection_anchor_source_byte = Some(0);
+    assert!(release_selection(&mut state.borrow_mut()));
+    assert!(selection_source_range(&state.borrow()).is_none());
+    panel_source::sync(&h.window, &h.live);
+    assert_eq!(entry.borrow().source_id, Some(id));
+    assert!(Rc::ptr_eq(&h.live.states.of(id), &state));
+    entry.borrow_mut().view.set_read_only(true, true);
+    panel_source::sync(&h.window, &h.live);
+    insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "blocked", false);
+    assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
+    panel_source::focus(&h.window, &h.live, owner, true);
+    assert_eq!(focused_pane(&h.window), id);
+    panel_source::focus(&h.window, &h.live, owner, false);
+    assert_eq!(focused_pane(&h.window), owner);
+    h.live.tabs.borrow_mut().of_mut(owner).tabs[0].below.entries.clear();
+    panel_source::sync(&h.window, &h.live);
+    assert!(h.live.states.panels.borrow().is_empty());
+    assert!(h.live.tabs.borrow().panels.is_empty());
+    assert!(h.live.cache.borrow().panel_panes.is_empty());
+}
+
+#[test]
 #[ignore = "starts real ConPTY shells; run explicitly"]
 fn terminal_new_tab_random_and_direct_file_capture() {
     let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
@@ -181,6 +226,7 @@ impl Harness {
             close_run: Rc::default(),
             cache: Rc::new(RefCell::new(crate::RenderCache::default())),
             tabs: Rc::new(RefCell::new(crate::Tabs {
+                panels: Default::default(),
                 panes: vec![crate::PaneTabs {
                     history: vec![crate::NavigationPlace::from(&tab)],
                     tabs: vec![tab],
@@ -230,6 +276,9 @@ fn terminal_panel_background_survives_typing_and_log_updates() {
         s.panel_style.paper = Color::from_rgb_u8(30, 55, 70);
     });
     id.set_below(&h.window, 2, 240.0);
+    terminal_panels::ensure(&h.window, &h.live, id);
+    let entry = terminal_panels::current(&h.live, id).unwrap();
+    entry.borrow_mut().style = Some(id.screen(&h.window).panel_style.clone());
     h.window.show().unwrap();
     for text in [
         "",
@@ -237,7 +286,8 @@ fn terminal_panel_background_survives_typing_and_log_updates() {
         "input\nnext",
         "log 1\nlog 2\nlog 3\nlog 4\nlog 5\n",
     ] {
-        show_draft(&h.window, id, text);
+        *entry.borrow().document.text.borrow_mut() = text.into();
+        panel_source::sync(&h.window, &h.live);
         h.window.window().request_redraw();
         let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
         h.surface.draw_if_needed(|renderer| {
@@ -352,6 +402,28 @@ fn terminal_panel_long_text_click_and_end_render() {
     let text = (0..3000).map(|i| format!("line {i}\n")).collect::<String>();
     show_draft(&h.window, id, &text);
     id.set_below(&h.window, 2, 240.0);
+    terminal_panels::ensure(&h.window, &h.live, id);
+    let entry = terminal_panels::current(&h.live, id).unwrap();
+    *entry.borrow().document.text.borrow_mut() = text.clone();
+    panel_source::sync(&h.window, &h.live);
+    let source_id = entry.borrow().source_id.unwrap();
+    let weak = h.window.as_weak();
+    let live = h.live.clone();
+    h.window.on_pane_home_end(move |pane, end, edge, extend| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            move_pane_to_line_edge(&window, id, &live.states.document(id), &live.states.of(id),
+                &live.cache, &Rc::new(Timer::default()), end, edge, extend);
+        }
+    });
+    let weak = h.window.as_weak(); let live = h.live.clone();
+    h.window.on_pane_selection_start(move |pane, x, y, extend| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            update_pane_selection(&window, &live.states.document(id), &live.states.of(id), &live.cache,
+                id, id.flow_x(&window, x), y, if extend { SelectionPhase::Extend } else { SelectionPhase::Begin });
+        }
+    });
     h.window.show().unwrap();
     let render = || {
         h.window.window().request_redraw();
@@ -387,7 +459,7 @@ fn terminal_panel_long_text_click_and_end_render() {
         text: Key::Control.into(),
     });
     render();
-    assert_eq!(id.screen(&h.window).panel_caret as usize, text.len());
+    assert_eq!(h.live.states.of(source_id).borrow().caret_source_byte, Some(text.len()));
     // Selection rectangles and ReadOnly use the same large scroll coordinates.
     h.window.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Control.into(),
@@ -402,7 +474,8 @@ fn terminal_panel_long_text_click_and_end_render() {
         text: Key::Control.into(),
     });
     render();
-    id.update_screen(&h.window, |screen| screen.panel_read_only = true);
+    entry.borrow_mut().view.set_read_only(true, true);
+    panel_source::sync(&h.window, &h.live);
     h.window
         .window()
         .dispatch_event(WindowEvent::PointerPressed {
@@ -775,7 +848,12 @@ fn terminal_search_preserves_output_and_toggle_clears_state() {
     h.live.show_tab(&h.window, id, &tab);
     source.borrow_mut().wait(Duration::from_millis(200));
     source.borrow_mut().type_text("echo editor_spike.exe\r");
-    source.borrow_mut().wait(Duration::from_millis(300));
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        source.borrow_mut().wait(Duration::from_millis(50));
+        if source.borrow().screen().retained_text().contains("\neditor_spike.exe\n") { break; }
+    }
+    source.borrow_mut().wait(Duration::from_millis(200));
     refresh_terminal_panes(&h.window, &h.live);
     let before = source.borrow().screen().retained_text();
     assert!(before.contains("editor_spike.exe"));

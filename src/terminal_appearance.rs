@@ -36,8 +36,18 @@ pub(crate) fn random_style(window: &AppWindow, kind: usize) -> Option<PanelStyle
         return None;
     }
     style.paper = slint_colour(random_paper(style.random == 1, random_seed()));
+    style.ink = slint_colour(readable_ink(channels(style.ink), channels(style.paper)));
     style.paper_own = true;
     Some(style)
+}
+
+/// Preserve the chosen ink when legible; invert it when paper and ink are alike.
+pub(crate) fn readable_ink(ink: [f32; 3], paper: [f32; 3]) -> [f32; 3] {
+    if (luminance(ink) - luminance(paper)).abs() >= 0.45 { return ink; }
+    let inverted = ink.map(|channel| 1.0 - channel);
+    if (luminance(inverted) - luminance(paper)).abs() > (luminance(ink) - luminance(paper)).abs() {
+        inverted
+    } else { ink }
 }
 
 pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {

@@ -156,6 +156,8 @@ export component AppWindow inherits Window {
     // in-out because some of the fields are written by the pane itself; the
     // rest are written from Rust.
     in-out property <[PaneScreen]> panes;
+    in-out property <int> focused-pane-row;
+    property <int> current-pane-row: root.focused-pane < 65536 ? root.focused-pane : root.focused-pane-row;
     // The boundaries between them, and the size of the area they were placed
     // in. The area is reported back because only the window knows it, and the
     // tree cannot hand out pixels it has not been told about.
@@ -986,7 +988,7 @@ export component AppWindow inherits Window {
     /// 設定を探す語（書き手の求め 2026-09-15：「Settingで検索欄が開いていても検索が効きません。可能なら、
     /// 検索した文字の含まれる設定のみがリストされると良い」）。**設定のTABで開いたCtrl+Fの欄の語**で、
     /// 空なら今までどおり群ごとに出す。探しているあいだは全部の群から、名前か見出しに語を含む行だけを出す。
-    out property <string> settings-query: root.find-open && root.panes[root.find-pane].settings
+    out property <string> settings-query: root.find-open && root.find-pane < 65536 && root.panes[root.find-pane].settings
         ? root.panes[root.find-pane].find-needle : "";
     property <bool> settings-searching: root.settings-query != "";
     /// 語が名前のどれかに含まれるか（大文字小文字・全角半角を問わない）。Rustが答える。
@@ -1371,7 +1373,7 @@ export component AppWindow inherits Window {
                             // ——押せて、開いて、何も見つからない。
                             //
                             // **`if`の中の行は頼んでから閉じる**（6.24）。
-                            if !root.panes[root.focused-pane].terminal: MenuRow {
+                            if !root.panes[root.current-pane-row].terminal: MenuRow {
                                 title: @tr("Find in File…");
                                 shortcut: root.shortcut-keys[4]; activated => {
                                     root.find-pane = root.focused-pane;
@@ -2304,6 +2306,7 @@ export component AppWindow inherits Window {
                     // and takes the keyboard at `init` as well as on change,
                     // because it is built when it becomes visible.
                     if pane.width > 0: EditorPane {
+                        embedded-panel: pane.embedded-panel;
                         // 書き手の決定 2026-09-11: 読む記号ぶんの行を右クリックに
                         // 出すために、窓の言っていることをそのまま渡す。
                         bullet-marks: root.bullet-marks;
@@ -2340,14 +2343,14 @@ export component AppWindow inherits Window {
                         swap-down: pane.swap-down;
                         background: pane.terminal || pane.below-kind != 0 || (root.background-transparency > 0 && !pane.settings)
                             ? transparent : (pane.vertical ? Tok.paper-alt : Tok.paper);
-                        background-transparency: root.background-transparency;
+                        background-transparency: pane.embedded-panel ? pane.panel-style.transparency : root.background-transparency;
                         // 要件 9: this pane's sheet — the paper and the margin
                         // are that direction's, like everything else on it.
                         // 追加要件 2026-09-15: TAB・Paneの色が付いていればそちら。
                         page-background: pane.vertical && !root.paper-shared
                             ? (pane.paper-v-own ? pane.paper-v : root.palette[22])
                             : (pane.paper-h-own ? pane.paper-h : root.palette[7]);
-                        wall-kind: root.background-transparency > 0 ? 0 : root.wall-kind;
+                        wall-kind: pane.embedded-panel || root.background-transparency > 0 ? 0 : root.wall-kind;
                         wall-pieces: root.wall-pieces;
                         wall-image: root.wall-image;
                         wall-image-width: root.wall-image-width;
@@ -2357,21 +2360,21 @@ export component AppWindow inherits Window {
                         wall-origin-x: root.wall-origin-x;
                         wall-origin-y: root.wall-origin-y;
                         paper-chosen(which, colour) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.colour-set(3 + which, pane.id, colour);
                         }
                         paper-default(which) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.colour-default(3 + which, pane.id);
                         }
                         paper-more(which) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.colour-more(3 + which, pane.id);
                         }
 
                         // **The pane picks the sheet, not the panel**: this is
                         // the margin of the direction this pane is writing in.
-                        page-margin: root.sheet-numbers[
+                        page-margin: pane.embedded-panel ? 6px : root.sheet-numbers[
                             (pane.vertical ? 1 : 0) * root.sheet-stride + 3] * 1px;
                         // **One pane says it, not both.** A failure is about the
                         // document rather than about a direction, and saying it
@@ -2386,7 +2389,7 @@ export component AppWindow inherits Window {
                         // A vertical pane keeps nothing on its left and right:
                         // that is the axis its text runs along, and the margin
                         // there belongs to the engine rather than to the box.
-                        side-padding: pane.vertical ? 0px : root.sheet-numbers[3] * 1px;
+                        side-padding: pane.embedded-panel ? 8px : (pane.vertical ? 0px : root.sheet-numbers[3] * 1px);
                         horizontal-stretch: 1;
                         min-width: 0px;
                         preferred-width: 0px;
@@ -2500,7 +2503,7 @@ export component AppWindow inherits Window {
                         below-new-output: pane.below-new-output;
                         front-style: pane.front-style;
                         panel-style: pane.panel-style;
-                        appearance-requested(panel) => { root.appearance-requested(pane.id, panel ? 2 : 1); }
+                        appearance-requested(panel) => { root.appearance-requested(pane.embedded-panel ? pane.panel-owner : pane.id, pane.embedded-panel || panel ? 2 : 1); }
                         panel-caret <=> pane.panel-caret;
                         panel-tabs: pane.panel-tabs;
                         panel-active: pane.panel-active;
@@ -2585,26 +2588,26 @@ export component AppWindow inherits Window {
                         // E4: 出すのはRust——**開いた瞬間に「1〜128行」と言う**
                         // には、その文書に何行あるかを知っていなければならない。
                         shortcut-keys: root.shortcut-keys;
-                        shortcut-key(text, control, alt, shift) => { root.focused-pane = pane.id; return root.shortcut-key(text, control, alt, shift); }
-                        reopen-closed-requested => { root.focused-pane = pane.id; root.reopen-closed-requested(); }
+                        shortcut-key(text, control, alt, shift) => { root.focused-pane = pane.id; root.focused-pane-row = index; return root.shortcut-key(text, control, alt, shift); }
+                        reopen-closed-requested => { root.focused-pane = pane.id; root.focused-pane-row = index; root.reopen-closed-requested(); }
                         compare-saved-requested => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.compare-saved-requested();
                         }
                         compare-head-requested => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.compare-head-requested();
                         }
                         compare-requested => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.compare-files-requested();
                         }
                         print-requested => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.print-requested();
                         }
                         goto-requested(taking) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.goto-requested(taking);
                         }
                         goto-typed => {
@@ -2649,19 +2652,19 @@ export component AppWindow inherits Window {
                         tab-selected(index) => {
                             // The strip and its buttons belong to this pane, so
                             // using them is being in it.
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-tab-selected(pane.id, index);
                             root.focus-generation += 1;
                         }
                         tab-closed(index) => {
                             // The strip and its buttons belong to this pane, so
                             // using them is being in it.
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-tab-closed(pane.id, index);
                             root.focus-generation += 1;
                         }
                         tab-renamed(index, name) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-tab-renamed(pane.id, index, name);
                             // **No focus generation.** The question that opens
                             // takes the keyboard for its name field, and
@@ -2691,7 +2694,7 @@ export component AppWindow inherits Window {
                             // The strip and its buttons belong to this pane, so
                             // using them is being in it. Where the tab lands may
                             // move the keyboard on again; that is Rust's to say.
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-tab-dropped(
                                 pane.id,
                                 from,
@@ -2703,41 +2706,41 @@ export component AppWindow inherits Window {
                         new-tab-requested => {
                             // The strip and its buttons belong to this pane, so
                             // using them is being in it.
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-new-tab(pane.id);
                             root.focus-generation += 1;
                         }
                         new-file-requested => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-new-file(pane.id);
                             root.focus-generation += 1;
                         }
                         new-terminal-requested(shell) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-new-terminal(pane.id, shell);
                             root.focus-generation += 1;
                         }
                         tab-shell-chosen(shell) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-switch-shell(pane.id, shell);
                             root.focus-generation += 1;
                         }
                         preview-toggled => {
                             // The strip and its buttons belong to this pane, so
                             // using them is being in it.
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-preview-toggled(pane.id);
                             root.focus-generation += 1;
                         }
                         viewer-toggled => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-viewer-toggled(pane.id);
                             root.focus-generation += 1;
                         }
                         direction-toggled => {
                             // The strip and its buttons belong to this pane, so
                             // using them is being in it.
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-direction-toggled(pane.id);
                             root.focus-generation += 1;
                         }
@@ -2747,14 +2750,14 @@ export component AppWindow inherits Window {
                         // the two "left pane / right pane" buttons used to
                         // have to ask.
                         menu-opened => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                         }
                         split-requested(right) => {
                             root.divide-requested(right);
                             root.focus-generation += 1;
                         }
                         swap-requested(towards) => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.swap-requested(towards);
                             root.focus-generation += 1;
                         }
@@ -2831,11 +2834,11 @@ export component AppWindow inherits Window {
                         }
                         focus-taken => {
                             root.ime-vertical-requested(pane.vertical);
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                         }
                         // 余白の押下：このPaneを前にし、鍵盤を渡す（入力欄が取れば`focus-taken`が来る）。
                         margin-pressed => {
-                            root.focused-pane = pane.id;
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.focus-generation += 1;
                         }
                         focus-trace(event) => { root.pane-focus-trace(pane.id, event); }
@@ -2853,7 +2856,7 @@ export component AppWindow inherits Window {
                             // 押したペインがキーボードのあるペインになる。
                             TouchArea {
                                 clicked => {
-                                    root.focused-pane = pane.id;
+                                    root.focused-pane = pane.id; root.focused-pane-row = index;
                                     root.focus-generation += 1;
                                 }
                             }
@@ -3527,6 +3530,8 @@ export component AppWindow inherits Window {
                                                         ink-more => { root.sheet = sheet-index; root.colour-more(0, 0); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(0);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -3559,6 +3564,8 @@ export component AppWindow inherits Window {
                                                         ink-more => { root.sheet = sheet-index; root.colour-more(0, 1); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(1);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -3591,6 +3598,8 @@ export component AppWindow inherits Window {
                                                         ink-more => { root.sheet = sheet-index; root.colour-more(0, 2); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(2);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -3623,6 +3632,8 @@ export component AppWindow inherits Window {
                                                         ink-more => { root.sheet = sheet-index; root.colour-more(0, 3); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(3);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -3655,6 +3666,8 @@ export component AppWindow inherits Window {
                                                         ink-more => { root.sheet = sheet-index; root.colour-more(0, 4); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(4);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -3687,6 +3700,8 @@ export component AppWindow inherits Window {
                                                         ink-more => { root.sheet = sheet-index; root.colour-more(0, 5); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(5);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -3719,6 +3734,8 @@ export component AppWindow inherits Window {
                                                         ink-more => { root.sheet = sheet-index; root.colour-more(0, 6); }
                                                         chose-font => {
                                                             root.sheet = sheet-index; root.font-picked(6);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -3730,6 +3747,8 @@ export component AppWindow inherits Window {
                                                         value: root.sheet-fonts[sheet-index * 8 + 7];
                                                         pressed => {
                                                             root.sheet = sheet-index; root.font-picked(7);
+                                                            root.font-menu-x = self.picker-x;
+                                                            root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
                                                     }
@@ -5477,7 +5496,7 @@ export component AppWindow inherits Window {
                     zoom-text := Text {
                         x: 6px;
                         y: (parent.height - self.height) / 2;
-                        text: root.panes[root.focused-pane].zoom + "%";
+                        text: root.panes[root.current-pane-row].zoom + "%";
                         color: Tok.ink-muted;
                         font-size: 12px;
                     }
@@ -5517,7 +5536,7 @@ export component AppWindow inherits Window {
                                 spacing: 6px;
 
                                 Text {
-                                    text: root.panes[root.focused-pane].zoom + "%";
+                                    text: root.panes[root.current-pane-row].zoom + "%";
                                     color: Tok.ink;
                                     font-size: 12px;
                                     horizontal-alignment: center;
@@ -5527,7 +5546,7 @@ export component AppWindow inherits Window {
                                     vertical: true;
                                     minimum: 50;
                                     maximum: 240;
-                                    value: root.panes[root.focused-pane].zoom;
+                                    value: root.panes[root.current-pane-row].zoom;
                                     // **Ten at a time**, the step the keys and
                                     // the wheel already move by (要件 11.5):
                                     // the same number should be reachable
@@ -5606,7 +5625,7 @@ export component AppWindow inherits Window {
                     arrangement := Text {
                         x: 21px;
                         y: (parent.height - self.height) / 2;
-                        text: @tr("Active Pane: {}", root.focused-pane + 1);
+                        text: @tr("Active Pane: {}", (root.focused-pane < 65536 ? root.focused-pane : root.panes[root.current-pane-row].panel-owner) + 1);
                         color: Tok.ink-muted;
                         font-size: 12px;
                     }
@@ -5628,9 +5647,11 @@ export component AppWindow inherits Window {
     // Chosen first, closed second — these rows are a repeater inside a popup,
     // and closing first takes the element running the handler with it
     // (技術検証 6.22).
+    property <length> font-menu-x;
+    property <length> font-menu-y;
     font-menu := PopupWindow {
-        x: (root.width - 320px) / 2;
-        y: 90px;
+        x: clamp(root.font-menu-x, 0px, max(0px, root.width - 320px));
+        y: clamp(root.font-menu-y, 0px, max(0px, root.height - 352px));
         width: 320px;
         close-policy: close-on-click-outside;
 

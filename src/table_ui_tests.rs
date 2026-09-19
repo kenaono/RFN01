@@ -71,6 +71,7 @@ fn a_table_is_edited_as_a_table() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
+            panels: Default::default(),
             panes: vec![{
                 let tab = PaneTab::showing(&window, id, document.clone());
                 PaneTabs {

@@ -237,6 +237,8 @@ pub struct Screen {
 
 #[derive(Debug, Default)]
 struct CapturedOutput {
+    first_row: usize,
+    touched: std::collections::BTreeSet<usize>,
     completed: String,
     wrapped: String,
     initial: String,
@@ -315,6 +317,7 @@ impl Screen {
 
     pub fn start_capture(&mut self) {
         self.capture = Some(CapturedOutput {
+            first_row: self.cursor.row,
             initial: self.row_text(self.cursor.row),
             ..CapturedOutput::default()
         });
@@ -325,6 +328,9 @@ impl Screen {
     pub fn capture_update(&mut self) -> Option<(String, String)> {
         let tail = self.row_text(self.cursor.row);
         let capture = self.capture.as_mut()?;
+        if self.cursor.row < capture.first_row || (capture.wrapped.is_empty() && !capture.touched.contains(&self.cursor.row)) {
+            return Some((std::mem::take(&mut capture.completed), String::new()));
+        }
         let pending = format!("{}{}", capture.wrapped, tail);
         let pending = pending
             .strip_prefix(&capture.initial)
@@ -339,6 +345,7 @@ impl Screen {
 
     pub fn start_file_capture(&mut self) {
         self.file_capture = Some(CapturedOutput {
+            first_row: self.cursor.row,
             initial: self.row_text(self.cursor.row),
             ..CapturedOutput::default()
         });
@@ -347,6 +354,9 @@ impl Screen {
     pub fn file_capture_update(&mut self) -> Option<(String, String)> {
         let tail = self.row_text(self.cursor.row);
         let capture = self.file_capture.as_mut()?;
+        if self.cursor.row < capture.first_row || (capture.wrapped.is_empty() && !capture.touched.contains(&self.cursor.row)) {
+            return Some((std::mem::take(&mut capture.completed), String::new()));
+        }
         let pending = format!("{}{}", capture.wrapped, tail);
         let pending = pending
             .strip_prefix(&capture.initial)
@@ -557,6 +567,9 @@ impl Screen {
         if self.cursor.pending_wrap || self.cursor.column + width > self.columns {
             self.wrap_line();
         }
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            capture.touched.insert(self.cursor.row);
+        }
         // **The pen itself here**: this is the cell being written, not one
         // being cleared.
         let attrs = self.pen;
@@ -612,20 +625,24 @@ impl Screen {
         self.line_feed();
     }
 
-    fn capture_line(&mut self, row: usize) {
+    fn capture_line(&mut self, row: usize, changed_only: bool) {
         if self.stowed.is_none() {
             let line = &self.lines[row];
             for capture in [&mut self.capture, &mut self.file_capture]
                 .into_iter()
                 .flatten()
             {
+                if row < capture.first_row || (changed_only && !capture.touched.contains(&row)) { continue; }
+                capture.first_row = row + 1;
+                capture.touched.remove(&row);
                 capture.wrapped.push_str(&line.logical_text());
                 if !line.wrapped {
                     let written = std::mem::take(&mut capture.wrapped);
-                    capture
-                        .completed
-                        .push_str(written.strip_prefix(&capture.initial).unwrap_or(&written));
-                    capture.completed.push('\n');
+                    let fresh = written.strip_prefix(&capture.initial).unwrap_or(&written);
+                    if !fresh.is_empty() || capture.initial.is_empty() {
+                        capture.completed.push_str(fresh);
+                        capture.completed.push('\n');
+                    }
                     capture.initial.clear();
                 }
             }
@@ -633,7 +650,7 @@ impl Screen {
     }
 
     fn line_feed(&mut self) {
-        self.capture_line(self.cursor.row);
+        self.capture_line(self.cursor.row, false);
         if self.cursor.row == self.region.1 {
             self.scroll_up(1);
         } else if self.cursor.row + 1 < self.rows {
@@ -683,7 +700,9 @@ impl Screen {
         // before drawing the next prompt. Commit those rows as well.
         if self.capture.is_some() || self.file_capture.is_some() {
             for leaving in self.cursor.row..row {
-                self.capture_line(leaving);
+                let changed = [&self.capture, &self.file_capture].into_iter().flatten()
+                    .any(|capture| capture.touched.contains(&leaving));
+                if changed { self.capture_line(leaving, true); }
             }
         }
         self.cursor.row = row;
@@ -706,6 +725,13 @@ impl Screen {
     fn scroll_up(&mut self, count: usize) {
         let (top, bottom) = self.region;
         let count = count.min(bottom - top + 1);
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            if top == 0 { capture.first_row = capture.first_row.saturating_sub(count); }
+            capture.touched = capture.touched.iter().filter_map(|&row| {
+                if row < top || row > bottom { Some(row) }
+                else if row >= top + count { Some(row - count) } else { None }
+            }).collect();
+        }
         for _ in 0..count {
             let leaving = self.lines.remove(top);
             if top == 0 && self.stowed.is_none() {
@@ -913,6 +939,10 @@ impl Screen {
                     self.scrollback.push_back(leaving);
                 }
                 self.cursor.row = self.cursor.row.saturating_sub(1);
+                for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+                    capture.first_row = capture.first_row.saturating_sub(1);
+                    capture.touched = capture.touched.iter().filter_map(|row| row.checked_sub(1)).collect();
+                }
             } else {
                 self.lines.pop();
             }
@@ -953,6 +983,12 @@ impl Screen {
         self.history_origin = origin;
         self.capture = capture;
         self.file_capture = file_capture;
+        for capture in [&mut self.capture, &mut self.file_capture].into_iter().flatten() {
+            capture.first_row = 0;
+            capture.touched.clear();
+            capture.initial.clear();
+            capture.wrapped.clear();
+        }
     }
 
     fn select_graphic_rendition(&mut self, params: &[Vec<u16>]) {
@@ -1733,6 +1769,24 @@ mod tests {
     }
 
     #[test]
+    fn capture_excludes_old_screen_redraw_and_keeps_real_blank_lines() {
+        let mut term = Terminal::new(30, 6);
+        term.feed(b"old prompt\r\n\r\ncurrent> ");
+        term.screen.start_capture();
+        term.feed(b"\x1b[1;1Hold prompt\x1b[3;9Hcommand\r\n\r\nresult\r\n");
+        assert_eq!(term.screen.capture_update(), Some(("command\n\nresult\n".into(), "".into())));
+    }
+
+    #[test]
+    fn capture_continues_after_terminal_reset() {
+        let mut term = Terminal::new(30, 6);
+        term.feed(b"old\r\nprompt> ");
+        term.screen.start_capture();
+        term.feed(b"\x1bcnew\r\n");
+        assert_eq!(term.screen.capture_update(), Some(("new\n".into(), "".into())));
+    }
+
+    #[test]
     fn terminal_file_and_panel_capture_have_independent_start_and_stop() {
         let mut term = Terminal::new(80, 8);
         term.screen.start_capture();
@@ -1771,7 +1825,7 @@ mod tests {
         term.feed(b"one\r\nlast\x1b[4;1Hprompt");
         assert_eq!(
             term.screen.capture_update(),
-            Some(("one\nlast\n\n".into(), "prompt".into()))
+            Some(("one\nlast\n".into(), "prompt".into()))
         );
     }
 

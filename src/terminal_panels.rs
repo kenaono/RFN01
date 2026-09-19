@@ -9,6 +9,7 @@ impl std::fmt::Debug for PanelDocument {
 }
 
 pub(crate) struct PanelDocument {
+    pub source_id: Option<PaneId>,
     pub document: Rc<OpenDocument>,
     pub shell: Option<Rc<RefCell<TerminalSession>>>,
     /// Same source-view ReadOnly state as EditorState::viewer.
@@ -30,6 +31,7 @@ impl PanelDocument {
     ) -> Self {
         let style = terminal_appearance::random_style(window, if shell.is_some() { 2 } else { 1 });
         Self {
+            source_id: None,
             document,
             shell,
             style,
@@ -156,7 +158,7 @@ pub(crate) fn sync_entry(tab: &mut PaneTab) {
     if let Some(entry) = tab.below.entries.get(tab.below.active) {
         let mut entry = entry.borrow_mut();
         entry.shell = tab.below.shell.clone();
-        if tab.terminal.is_some()
+        if entry.source_id.is_none() && tab.terminal.is_some()
             && !entry.view.viewer
             && *entry.document.text.borrow() != tab.below.draft
         {
@@ -255,6 +257,7 @@ fn show(window: &AppWindow, live: &Live, id: PaneId) {
     if kind == 1 {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
     }
+    panel_source::sync(window, live);
 }
 
 pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, index: i32) {
@@ -906,6 +909,7 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
     for id in PaneId::all(window) {
         publish_source(window, live, id);
     }
+    panel_source::sync(window, live);
 }
 
 pub(crate) fn save(
@@ -988,6 +992,8 @@ fn request_close(window: &AppWindow, live: &Live, id: PaneId) {
             && held.shell.as_ref().is_some_and(|s| !s.borrow().finished()))
     {
         let save = held.document.text.edited() || held.capture.is_some();
+        let capturing = held.capture.is_some();
+        let shell_running = held.shell.as_ref().is_some_and(|s| !s.borrow().finished());
         drop(held);
         let choices = if save {
             vec![
@@ -998,8 +1004,14 @@ fn request_close(window: &AppWindow, live: &Live, id: PaneId) {
         } else {
             vec![pick("閉じる", "Close"), cancel()]
         };
+        let message = match (capturing, shell_running) {
+            (true, true) => pick("PanelのTABを閉じますか？\n\nこのPanelへのログ出力とシェルは停止します。", "Close this panel tab?\n\nIts log output and shell will stop."),
+            (true, false) => pick("PanelのTABを閉じますか？\n\nこのPanelへのログ出力は停止します。", "Close this panel tab?\n\nLog output to this panel will stop."),
+            (false, true) => pick("PanelのTABを閉じますか？\n\nこのシェルは終了します。", "Close this panel tab?\n\nIts shell will exit."),
+            (false, false) => pick("変更を保存してPanelのTABを閉じますか？", "Save changes before closing this panel tab?"),
+        };
         ask_question(window, live, Question::PanelClose { pane: id, entry, save },
-            pick("PanelのTABを閉じますか？\n\nログ取り込みとシェルは閉じると停止します。キャンセルでは継続します。", "Close this panel tab?\n\nClosing stops its log capture and shell. Cancel keeps them running.").into(),
+            message.into(),
             &choices, if save { 1 } else { 0 });
     } else {
         drop(held);
@@ -1070,6 +1082,7 @@ pub(crate) fn close(
             }
         }
     }
+    panel_source::sync(window, live);
 }
 
 pub(crate) fn edited(window: &AppWindow, live: &Live, id: PaneId) {

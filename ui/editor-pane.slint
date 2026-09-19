@@ -137,6 +137,8 @@ export struct PanelStyle {
 }
 
 export struct PaneScreen {
+    embedded-panel: bool,
+    panel-owner: int,
     // Which pane this is: its row of the window's pane model, counted from 0
     // vertical. **The callbacks carry this rather than the row's position**, so
     // that a model holding only the panes on screen still names them the same.
@@ -312,6 +314,7 @@ export struct PaneScreen {
 }
 
 export component EditorPane inherits Rectangle {
+    in property <bool> embedded-panel: false;
     /// Which key this is, as a number `terminal.rs` knows (追加要件 Terminal).
     /// 0 is "an ordinary character", and then the text is what matters.
     pure function key-number(text: string) -> int {
@@ -1039,7 +1042,8 @@ export component EditorPane inherits Rectangle {
     VerticalLayout {
         // The strip (要件 6.5), inside the pane it belongs to.
         Rectangle {
-            height: 34px;
+            height: root.embedded-panel ? 0px : 34px;
+            visible: !root.embedded-panel;
             // 要件 6.5: the whole band answers when a tab is being carried over
             // this pane. **The mark at the end of the tabs is not enough on its
             // own** — a strip with more tabs than fit has its end outside the
@@ -1531,7 +1535,7 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         // 追加要件 2026-09-15: このPaneの紙の色（TABの色が付いていればそちらが勝つ）。
-                        if root.writing: MenuRow {
+                        if !root.settings: MenuRow {
                             title: @tr("Pane Background") + "…";
                             activated => {
                                 root.open-paper-palette(1, root.width - 256px, 32px);
@@ -2000,7 +2004,7 @@ export component EditorPane inherits Rectangle {
             vertical-stretch: 1;
             clip: true;
             background: root.terminal ? root.front-style.paper.transparentize(root.front-style.transparency / 100)
-                : (root.writing && root.background-transparency > 0 ? root.page-background.transparentize(root.background-transparency / 100) : (root.writing ? Tok.paper : transparent));
+                : (root.writing ? root.page-background.transparentize(root.background-transparency / 100) : transparent);
             // 追加要件 2026-09-15（書き手）: **本文の後ろに壁紙、その上に紙を濃さぶん透かして1枚。**
             // スクロールしても動かない——紙は本文と一緒に流れるが、壁紙は面（Windowsの壁紙なら
             // 画面）に固定されている。メニュー・Terminal・Settingsには敷かない。
@@ -2440,6 +2444,8 @@ export component EditorPane inherits Rectangle {
                                 }
                             }
                             key-pressed(event) => {
+                                if root.embedded-panel && event.modifiers.control && event.text == Key.Return { root.below-sent(); return accept; }
+                                if root.embedded-panel && event.modifiers.control && event.modifiers.alt && event.text == Key.UpArrow { root.below-left(); return accept; }
                                 if root.link-popup-open && !root.terminal && !root.settings && !root.commit-just-finished && self.preedit-text == "" && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift {
                                     if event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Return || event.text == Key.Escape {
                                         if root.link-popup-key(event.text == Key.UpArrow ? 1 : event.text == Key.DownArrow ? 2 : event.text == Key.Return ? 3 : 4) { return accept; }
@@ -3076,7 +3082,7 @@ export component EditorPane inherits Rectangle {
                                                 ime-input.paste();
                                             }
                                         }
-                                        if root.terminal: MenuRow { title: @tr("Appearance…"); activated => { root.appearance-requested(false); context-menu.close(); } }
+                                        if root.terminal || root.embedded-panel: MenuRow { title: @tr("Appearance…"); activated => { root.appearance-requested(false); context-menu.close(); } }
                                         if root.terminal: MenuRow { title: @tr("Find in Terminal…"); activated => { root.terminal-action(0, 0); context-menu.close(); } }
                                         if root.terminal: MenuRow { title: @tr("Latest"); activated => { root.terminal-action(0, 4); context-menu.close(); } }
                                         if root.terminal: MenuRow { title: @tr("Save Output…"); activated => { root.terminal-action(0, 7); context-menu.close(); } }
@@ -3868,263 +3874,8 @@ export component EditorPane inherits Rectangle {
                 // **A plain field, like Quick Draft's own** — what is wanted
                 // here is somewhere to compose a command, not a second copy of
                 // the editor.
-                if root.below-kind == 2: Rectangle {
-                    width: parent.width;
-                    height: parent.height;
-                    // **切り取るのはここだけ。**行数が帯の高さを越えたとき、
-                    // 下書きは上へ動いて見えている外へ出る。焦点の規則
-                    // （上の箱の注記）に触れないのは、欄そのものが必ず帯と
-                    // 重なっているから——`is_visible`は切り取り矩形と要素の
-                    // 矩形が交わるかを見る。
-                    clip: true;
+                // Editor Panel is an embedded instance of the ordinary EditorPane.
 
-                    // 書き手の報告 2026-09-08: 下段の下書きにも右ボタンの
-                    // メニューを。
-                    //
-                    // **欄を包む`TouchArea`である**（横に並べるのではなく）。
-                    // Slintの`TouchArea`は`ForwardAndInterceptGrab`——中の
-                    // 要素へ先に渡し、中が拾わなかったものだけを自分で受ける
-                    // ——なので、左ボタンは今までどおり`TextInput`のもの
-                    // （キャレット・語の選択・ドラッグの掴み）で、`TextInput`が
-                    // 見ない右ボタンだけがここへ落ちてくる。横に置くと、後から
-                    // 書いた要素が上に来て左ボタンごと奪ってしまう。
-                    draft-pointer := TouchArea {
-                        width: parent.width;
-                        height: parent.height;
-                        mouse-cursor: text;
-                        scroll-event(event) => {
-                            sheet.pan-y = clamp(sheet.pan-y - event.delta-y, 0px, sheet.max-pan);
-                            root.panel-scrolled(sheet.pan-y / 1px, sheet.max-pan / 1px);
-                            accept
-                        }
-                        pointer-event(event) => {
-                            if event.button == PointerEventButton.right
-                                && event.kind == PointerEventKind.down {
-                                root.below-menu-x = self.mouse-x;
-                                root.below-menu-y = self.mouse-y;
-                                draft-menu.show();
-                            }
-                        }
-
-                        sheet := Rectangle {
-                            x: 0;
-                            y: 0;
-                            width: parent.width;
-                            height: parent.height;
-
-                            // 一行の送り。**測って出す**——行の帯は欄の行に乗って
-                            // いなければ嘘になるので、二行ぶんの高さの半分を字体
-                            // 自身から取る。
-                            property <length> row-height: ruler-probe.preferred-height / 2;
-                            // 内容をどれだけ上へ押しやっているか。欄は自分では
-                            // 動かない（Slintの`TextInput`の注記）ので、キャレットを
-                            // 見失わないようこちらが追う。**横は折り返すので要らない。**
-                            property <length> pan-y: 0;
-                            property <length> max-pan: max(0px, bands.preferred-height + 12px - self.height);
-                            property <bool> follow-tail: root.panel-read-only && root.panel-follow;
-                            changed follow-tail => { if self.follow-tail { self.pan-y = self.max-pan; } }
-                            changed max-pan => {
-                                if self.follow-tail { self.pan-y = self.max-pan; }
-                                else { self.pan-y = min(self.pan-y, self.max-pan); }
-                            }
-                            // 字を組む幅。帯も欄も同じこれで組むから、同じところで
-                            // 折り返す。
-                            property <length> text-width: max(sheet.width - 30px, 40px);
-
-                            ruler-probe := Text {
-                                text: "M\nM";
-                                font-family: root.panel-style.family;
-                                font-size: root.panel-style.size * 1px;
-                                visible: false;
-                            }
-
-                            // Measure the complete text with the same wrapping and font.
-                            // Editor Panel has no command-preview bands or newline rules.
-                            bands := Text {
-                                width: sheet.text-width;
-                                text: root.below-draft == "" ? " " : root.below-draft;
-                                wrap: word-wrap;
-                                font-family: root.panel-style.family;
-                                font-size: root.panel-style.size * 1px;
-                                font-weight: root.panel-style.bold ? 700 : 400;
-                                font-italic: root.panel-style.italic;
-                                visible: false;
-                            }
-
-                            draft := TextInput {
-                                x: 8px;
-                                y: 6px - sheet.pan-y;
-                                // **帯と同じ幅で組む。**高さは行が増えれば伸び、
-                                // 溢れた分は`pan-y`が運ぶ。
-                                width: sheet.text-width;
-                                height: max(sheet.height - 12px,
-                                    bands.preferred-height);
-                                text <=> root.below-draft;
-                                read-only: root.panel-read-only;
-                                font-weight: root.panel-style.bold ? 700 : 400;
-                                font-italic: root.panel-style.italic;
-                                font-family: root.panel-style.family;
-                                font-size: root.panel-style.size * 1px;
-                                color: root.panel-style.ink;
-                                single-line: false;
-                                wrap: word-wrap;
-                                edited => {
-                                    root.below-draft-edited(self.text);
-                                }
-                                // キャレットを窓の中に留める。「見えている端から
-                                // 一行ぶん内側」。
-                                cursor-position-changed(at) => {
-                                    root.panel-caret = self.cursor-position_byte-offset;
-                                    if !root.panel-capturing && (at.y + sheet.row-height - sheet.pan-y > sheet.height - 12px) {
-                                        sheet.pan-y = at.y + sheet.row-height - sheet.height + 12px;
-                                    }
-                                    if !root.panel-capturing && (at.y < sheet.pan-y) {
-                                        sheet.pan-y = at.y;
-                                    }
-                                }
-
-                                property <int> generation: root.below-focus-generation;
-                                changed generation => {
-                                    self.focus();
-                                }
-                                init => {
-                                    self.focus();
-                                }
-
-                                key-pressed(event) => {
-                                    if (root.terminal && event.modifiers.control && event.modifiers.shift && (event.text == "v" || event.text == "V")) {
-                                        self.paste(); return accept;
-                                    }
-                                    if self.preedit-text == "" && event.text == Key.Escape {
-                                        self.set-selection-offsets(self.cursor-position_byte-offset, self.cursor-position_byte-offset);
-                                        return accept;
-                                    }
-                                    if (event.modifiers.control && event.text == "`") {
-                                        root.below-toggled();
-                                        return accept;
-                                    }
-                                    // **Ctrl+Enter sends it.** Enter alone is a line
-                                    // break: a draft is where a command is composed
-                                    // over several lines before it is run.
-                                    if (event.modifiers.control && (event.text == "s" || event.text == "S")) {
-                                        root.panel-action(event.modifiers.shift ? 6 : 3, 0);
-                                        return accept;
-                                    }
-                                    if (event.modifiers.control && event.text == Key.Return) {
-                                        root.below-sent();
-                                        return accept;
-                                    }
-                                    if (event.modifiers.control && event.modifiers.alt
-                                        && event.text == Key.UpArrow) {
-                                        root.below-left();
-                                        return accept;
-                                    }
-                                    reject
-                                }
-                            }
-
-                            if sheet.max-pan > 0px: Slider {
-                                x: parent.width - 14px; y: 2px; width: 12px; height: parent.height - 4px;
-                                vertical: true; minimum: 0; maximum: sheet.max-pan / 1px;
-                                value: (sheet.max-pan - sheet.pan-y) / 1px;
-                                moved(value) => { sheet.pan-y = sheet.max-pan - value * 1px; root.panel-scrolled(sheet.pan-y / 1px, sheet.max-pan / 1px); }
-                            }
-                            if root.below-draft == "": Text {
-                                x: 10px;
-                                y: 8px;
-                                text: @tr("Ctrl+Enter sends to the terminal above");
-                                color: Tok.ink-faint;
-                                font-size: 12px;
-                            }
-                        }
-                    }
-
-                    // 書き手の報告 2026-09-08: 下書きの右ボタン。
-                    //
-                    // **この帯は編集器のほう**なので、行はシェルの帯とは別も
-                    // のになる：切り取りがあり、送る行があり、倍率は無い
-                    // （下書きは組版ではなく等幅の一枚である）。切り貼りは
-                    // `TextInput`自身に頼む——選んでいるのがどこかを知って
-                    // いるのはあの欄だけで、Rustは字を持っていない。
-                    draft-menu := PopupWindow {
-                        x: root.below-menu-x;
-                        y: root.below-menu-y;
-                        width: 264px;
-                        close-policy: close-on-click-outside;
-
-                        MenuFrame {
-                            width: 264px;
-
-                            VerticalLayout {
-                                padding: 6px;
-                                spacing: 1px;
-
-                                MenuRow { title: @tr("Appearance…"); activated => { root.appearance-requested(true); draft-menu.close(); } }
-                                MenuRow {
-                                    title: @tr("Cut");
-                                    shortcut: "Ctrl+X";
-                                    activated => {
-                                        draft-menu.close();
-                                        draft.focus();
-                                        draft.cut();
-                                    }
-                                }
-                                MenuRow {
-                                    title: @tr("Copy");
-                                    shortcut: "Ctrl+C";
-                                    activated => {
-                                        draft-menu.close();
-                                        draft.copy();
-                                    }
-                                }
-                                MenuRow {
-                                    title: @tr("Paste");
-                                    shortcut: "Ctrl+V";
-                                    activated => {
-                                        draft-menu.close();
-                                        draft.focus();
-                                        draft.paste();
-                                    }
-                                }
-                                MenuRow {
-                                    title: @tr("Select All");
-                                    shortcut: "Ctrl+A";
-                                    activated => {
-                                        draft-menu.close();
-                                        draft.focus();
-                                        draft.select-all();
-                                    }
-                                }
-                                MenuSep { }
-                                MenuRow {
-                                    title: @tr("Send to Terminal");
-                                    shortcut: "Ctrl+Enter";
-                                    activated => {
-                                        draft-menu.close();
-                                        root.below-sent();
-                                    }
-                                }
-                                MenuRow {
-                                    title: @tr("Terminal Above");
-                                    shortcut: "Ctrl+Alt+↑";
-                                    activated => {
-                                        draft-menu.close();
-                                        root.below-left();
-                                    }
-                                }
-                                MenuSep { }
-                                MenuRow {
-                                    title: @tr("Hide Editor Panel");
-                                    shortcut: "Ctrl+`";
-                                    activated => {
-                                        draft-menu.close();
-                                        root.below-toggled();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
     }
