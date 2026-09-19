@@ -288,7 +288,11 @@ pub fn write_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDoc
 /// guaranteed, so the ordinary recovery copy is the fallback of last resort,
 /// and it has to keep working even for a writer who turned 8.1's own recovery
 /// off — they opted a folder into the *stronger* protection, not a weaker one.
-fn force_work_copy_of(window: &AppWindow, live: &Live, document: &Rc<OpenDocument>) -> bool {
+pub(crate) fn force_work_copy_of(
+    window: &AppWindow,
+    live: &Live,
+    document: &Rc<OpenDocument>,
+) -> bool {
     if document.text.edited() {
         document.protective_recovery.set(true);
     }
@@ -1045,6 +1049,9 @@ pub fn write_document_in(
     target: PathBuf,
     form: file_io::TextForm,
 ) -> bool {
+    if !crate::admit_workspace_path(window, live, &target, true) {
+        return false;
+    }
     if document.read_only() {
         return false;
     }
@@ -1160,8 +1167,16 @@ pub fn write_document_in(
 /// document at a time by `Ctrl+S` — silently overwriting it here is exactly what
 /// 要件 8.3 exists to prevent. The status bar says how many were left.
 pub fn save_all(window: &AppWindow, live: &Live) {
+    save_all_native(window, live, false);
+}
+
+pub(crate) fn save_all_for_workspace(window: &AppWindow, live: &Live) {
+    save_all_native(window, live, true);
+}
+
+fn save_all_native(window: &AppWindow, live: &Live, include_memos: bool) {
     let owner = ime::window_handle(window);
-    save_all_with_choice(window, live, |document| {
+    save_all_including_memos_with_choice(window, live, include_memos, |document| {
         let held = document.file.borrow().form();
         let suggested = document.file.borrow().title();
         let chosen = file_dialog::save_document_as(owner, &suggested, save_fields(held))?;
@@ -1176,6 +1191,15 @@ pub fn save_all(window: &AppWindow, live: &Live) {
 pub(crate) fn save_all_with_choice(
     window: &AppWindow,
     live: &Live,
+    choose: impl FnMut(&Rc<OpenDocument>) -> Option<(PathBuf, file_io::TextForm)>,
+) {
+    save_all_including_memos_with_choice(window, live, false, choose);
+}
+
+pub(crate) fn save_all_including_memos_with_choice(
+    window: &AppWindow,
+    live: &Live,
+    include_memos: bool,
     mut choose: impl FnMut(&Rc<OpenDocument>) -> Option<(PathBuf, file_io::TextForm)>,
 ) {
     let mut saved = 0;
@@ -1184,7 +1208,11 @@ pub(crate) fn save_all_with_choice(
     let mut occupied = 0;
     let mut unnamed: Vec<Rc<OpenDocument>> = Vec::new();
     for document in open_documents(live) {
-        if !document.text.edited() {
+        if !document.text.edited()
+            && !(include_memos
+                && document.file.borrow().path().is_none()
+                && !document.text.borrow().is_empty())
+        {
             continue;
         }
         let path = document.file.borrow().path().map(Path::to_path_buf);

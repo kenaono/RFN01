@@ -206,18 +206,16 @@ export component AppWindow inherits Window {
     callback left-row-kept(int);
     callback work-folder-requested();
 
-    // Workspace設計.md phase 3: the switcher in the Explorer header and the
-    // management overlay it opens. `workspace-switcher-rows` includes a
-    // leading "なし" entry Rust always puts first — switching to it clears
-    // the active Workspace without touching the registered default (仕様:
-    // "デフォルト解除時は未設定に戻す" is a different operation from this one,
-    // which only changes what is active *this run*).
+    // Workspace pane state. Legacy switcher callbacks remain for callers/tests.
     in property <bool> workspace-available;
     in property <string> workspace-current-label;
     in property <[string]> workspace-switcher-rows;
     callback workspace-switcher-chosen(int);
     callback workspace-manager-requested();
     callback workspace-manager-closed();
+    callback workspace-open-selected();
+    callback workspace-leave-requested();
+    in property <bool> workspace-active;
     in-out property <bool> workspace-manager-open;
     in property <bool> workspace-read-error;
     in property <string> workspace-read-error-text;
@@ -226,6 +224,8 @@ export component AppWindow inherits Window {
     in property <int> workspace-manager-selected: -1;
     callback workspace-row-chosen(int);
     callback workspace-create-requested();
+    callback workspace-clone-requested();
+    in property <bool> workspace-cloning;
     callback workspace-duplicate-requested();
     callback workspace-rename-requested();
     callback workspace-default-toggled();
@@ -1139,13 +1139,26 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                IconButton {
+                    x: 7px; y: 40px;
+                    icon: "M1 1h5v5H1zM10 1h5v5h-5zM1 10h5v5H1zM10 10h5v5h-5z";
+                    tip: @tr("Workspace");
+                    checked: root.tree-open && root.left-tab == 4;
+                    clicked => {
+                        root.tree-open = !(root.tree-open && root.left-tab == 4);
+                        root.left-tab = 4;
+                        root.left-tab-chosen(4);
+                        root.focus-generation += 1;
+                    }
+                }
+
                 // **Pressing the panel already showing puts it away**, which is
                 // what the sidebar button used to be for. Nothing is lost by
                 // closing it: the rail stays, and which of the four the writer
                 // was in stays with it.
                 IconButton {
                     x: 7px;
-                    y: 40px;
+                    y: 70px;
                     icon: Icons.folder;
                     tip: @tr("Explorer");
                     checked: root.tree-open && root.left-tab == 0;
@@ -1159,7 +1172,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 70px;
+                    y: 100px;
                     icon: Icons.search;
                     tip: @tr("Search");
                     checked: root.tree-open && root.left-tab == 1;
@@ -1173,7 +1186,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 100px;
+                    y: 130px;
                     icon: Icons.history;
                     tip: @tr("History");
                     checked: root.tree-open && root.left-tab == 2;
@@ -1187,7 +1200,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 130px;
+                    y: 160px;
                     icon: Icons.outline;
                     tip: @tr("Outline");
                     checked: root.tree-open && root.left-tab == 3;
@@ -1236,6 +1249,10 @@ export component AppWindow inherits Window {
                                     root.work-folder-requested();
                                     root.focus-generation += 1;
                                 }
+                            }
+                            MenuRow {
+                                title: @tr("Workspaces…");
+                                activated => { app-menu.close(); root.workspace-manager-requested(); }
                             }
                             // Nothing to go back to on a first run, and a row that
                             // opens an empty menu is a row that lies.
@@ -1410,6 +1427,48 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 0px;
 
+                    if root.left-tab == 4 && root.workspace-manager-open: WorkspaceManager {
+                        active: root.workspace-active;
+                        open-selected => { root.workspace-open-selected(); }
+                        leave-requested => { root.workspace-leave-requested(); }
+                        read-error: root.workspace-read-error;
+                        read-error-text: root.workspace-read-error-text;
+                        read-error-reset-requested => { root.workspace-read-error-reset-requested(); }
+                        workspaces: root.workspace-rows;
+                        selected: root.workspace-manager-selected;
+                        row-chosen(index) => { root.workspace-row-chosen(index); }
+                        create-requested => { root.workspace-create-requested(); }
+                        clone-requested => { root.workspace-clone-requested(); }
+                        cloning: root.workspace-cloning;
+                        duplicate-requested => { root.workspace-duplicate-requested(); }
+                        rename-requested => { root.workspace-rename-requested(); }
+                        default-toggled => { root.workspace-default-toggled(); }
+                        remove-requested => { root.workspace-remove-requested(); }
+                        reset-view-requested => { root.workspace-reset-view-requested(); }
+                        folders: root.workspace-folder-rows;
+                        folder-add-requested => { root.workspace-folder-add-requested(); }
+                        folder-mode-toggled(index) => { root.workspace-folder-mode-toggled(index); }
+                        folder-move-up-requested(index) => { root.workspace-folder-move-up-requested(index); }
+                        folder-move-down-requested(index) => { root.workspace-folder-move-down-requested(index); }
+                        folder-detached(index) => { root.workspace-folder-detached(index); }
+                        folder-relocated(index) => { root.workspace-folder-relocated(index); }
+                        unused-folders: root.workspace-unused-folder-rows;
+                        unused-folder-removed(index) => { root.workspace-unused-folder-removed(index); }
+                        closed => {
+                                            root.workspace-manager-closed();
+                        }
+                    }
+
+                    if root.left-tab == 4 && !root.workspace-manager-open: VerticalLayout {
+                        vertical-stretch: 0;
+                        padding: 6px; spacing: 4px;
+                        Text { text: root.workspace-current-label; color: Tok.ink-strong; font-size: 14px; overflow: elide; }
+                        VerticalLayout {
+                            spacing: 4px;
+                            TextButton { wide: true; title: @tr("Manage Workspaces…"); clicked => { root.workspace-manager-requested(); } }
+                            TextButton { wide: true; title: @tr("Leave Workspace…"); clicked => { root.workspace-leave-requested(); } }
+                        }
+                    }
                     if root.left-tab == 0: tree-head := Rectangle {
                         height: 34px;
                         // 要件 5.2: the work folder itself is a place to let a
@@ -1472,56 +1531,6 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                                 overflow: elide;
-                            }
-
-                            // Workspace設計.md phase 3: shown even with no
-                            // work folder open — the switcher's own "なし"
-                            // row and the management overlay behind it are
-                            // both reachable before any folder has been
-                            // opened at all.
-                            if root.workspace-available: Rectangle {
-                                width: 26px;
-                                height: 26px;
-
-                                IconButton {
-                                    icon: Icons.sidebar;
-                                    tip: root.workspace-current-label;
-                                    checked: root.workspace-read-error;
-                                    clicked => { workspace-switcher-menu.show(); }
-                                }
-
-                                workspace-switcher-menu := PopupWindow {
-                                    x: 0;
-                                    y: 28px;
-                                    width: 220px;
-                                    close-policy: close-on-click-outside;
-
-                                    MenuFrame {
-                                        width: 220px;
-
-                                        VerticalLayout {
-                                            padding: 6px;
-                                            spacing: 1px;
-
-                                            for name[index] in root.workspace-switcher-rows: MenuRow {
-                                                title: name;
-                                                checked: name == root.workspace-current-label;
-                                                activated => {
-                                                    root.workspace-switcher-chosen(index);
-                                                    workspace-switcher-menu.close();
-                                                }
-                                            }
-                                            MenuSep { }
-                                            MenuRow {
-                                                title: @tr("Manage Workspaces…");
-                                                activated => {
-                                                    root.workspace-manager-requested();
-                                                    workspace-switcher-menu.close();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
                             }
 
                             // 要件 5.2: **the two commands that have no row to
@@ -1753,16 +1762,19 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.left-tab == 0 && root.tree-new-index >= 0 && root.tree-new-error != "": Text {
+                    if (root.left-tab == 0 || root.left-tab == 4) && root.tree-new-index >= 0 && root.tree-new-error != "": Text {
                         text: root.tree-new-error;
                         color: Tok.ink;
                         font-size: 12px;
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
+                        visible: root.left-tab != 4 || !root.workspace-manager-open;
+                        vertical-stretch: self.visible ? 1 : 0;
+                        max-height: self.visible ? 100000px : 0px;
                         property <int> reveal-generation: root.tree-reveal-generation;
                         changed reveal-generation => {
-                            if root.left-tab == 0 {
+                            if (root.left-tab == 0 || root.left-tab == 4) {
                                 self.viewport-y = -min(max(0, root.tree-selected) * max(24px, root.left-size * 2px), max(0px, self.viewport-height - self.visible-height));
                             }
                         }
@@ -1804,7 +1816,7 @@ export component AppWindow inherits Window {
                                     ? index
                                     : row.parent;
                                 property <bool> takes-carry: root.tree-carrying
-                                    && root.left-tab == 0
+                                    && (root.left-tab == 0 || root.left-tab == 4)
                                     && self.destination != root.tree-carry-parent
                                     && (self.destination < root.tree-carried-from
                                         || self.destination >= root.tree-carry-end);
@@ -1870,7 +1882,7 @@ export component AppWindow inherits Window {
                                 property <int> moves: 0;
 
                                 entry := TouchArea {
-                                    enabled: root.tree-new-index < 0 || root.left-tab != 0;
+                                    enabled: root.tree-new-index < 0 || (root.left-tab != 0 && root.left-tab != 4);
                                     // The hand is closed while a row is in it.
                                     mouse-cursor: tree-row.carrying-self
                                         ? MouseCursor.grabbing
@@ -1895,7 +1907,7 @@ export component AppWindow inherits Window {
                                     // row, and the menu hanging from it, away
                                     // in the middle of opening it.
                                     pointer-event(event) => {
-                                        if (root.left-tab == 0
+                                        if ((root.left-tab == 0 || root.left-tab == 4)
                                             && event.button == PointerEventButton.right
                                             && event.kind == PointerEventKind.down) {
                                             root.tree-selected = index;
@@ -1960,7 +1972,7 @@ export component AppWindow inherits Window {
                                     }
                                     moved => {
                                         tree-row.moves += 1;
-                                        if (!tree-row.pressing || root.left-tab != 0) {
+                                        if (!tree-row.pressing || (root.left-tab != 0 && root.left-tab != 4)) {
                                             return;
                                         }
                                         // **The point before the carry.** Every
@@ -1994,7 +2006,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 Text {
-                                    visible: root.left-tab != 0 || index != root.tree-new-index;
+                                    visible: (root.left-tab != 0 && root.left-tab != 4) || index != root.tree-new-index;
                                     // Depth is drawn rather than nested, because
                                     // the rows arrive flat (see `LeftRow`).
                                     x: 8px + row.depth * root.left-size * 7px / 6;
@@ -2004,7 +2016,7 @@ export component AppWindow inherits Window {
                                     // 追加要件 2026-09-15: フォルダとファイルで色を分けられる（Explorerの面）。
                                     color: row.folder
                                         ? (root.left-folder-own ? root.left-folder-ink : root.left-ink)
-                                        : (root.left-tab == 0 && root.left-file-own ? root.left-file-ink : root.left-ink);
+                                        : ((root.left-tab == 0 || root.left-tab == 4) && root.left-file-own ? root.left-file-ink : root.left-ink);
                                     font-size: root.left-size * 1px;
                                     vertical-alignment: center;
                                     overflow: elide;
@@ -2013,14 +2025,14 @@ export component AppWindow inherits Window {
                                     // after the area that opens the row to take
                                     // a click at all.
                                     width: parent.width - self.x
-                                        - (root.left-tab == 0 ? 28px : 8px);
+                                        - ((root.left-tab == 0 || root.left-tab == 4) ? 28px : 8px);
                                 }
 
                                 if root.left-tab == 1: Tooltip {
                                     text: @markdown("\{row.name}");
                                 }
 
-                                if root.left-tab == 0 && index == root.tree-new-index: Field {
+                                if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-new-index: Field {
                                     x: 22px + row.depth * 14px;
                                     width: max(20px, parent.width - self.x - 4px);
                                     height: 24px;
@@ -2034,7 +2046,7 @@ export component AppWindow inherits Window {
                                 // pointer that is already on the row. Only the
                                 // tree has one: a search hit and a heading are
                                 // not files to be renamed.
-                                if (root.left-tab == 0 && root.tree-new-index < 0
+                                if ((root.left-tab == 0 || root.left-tab == 4) && root.tree-new-index < 0
                                     && (index == root.tree-selected || entry.has-hover)): IconButton {
                                     x: parent.width - self.width - 3px;
                                     y: (parent.height - self.height) / 2;
@@ -5690,45 +5702,6 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-        }
-    }
-    // Workspace設計.md phase 3: the management overlay, on top of everything
-    // the same way the colour mixer and the question overlay are.
-    //
-    // **Hidden, not just covered, while a question stands.** Create/Duplicate/
-    // Rename ask for a name and Remove/Reset/reset-after-read-error confirm
-    // through the very same question overlay drawn above (`root.question-open`)
-    // — declared later in this file, so it would otherwise be drawn *under*
-    // this one and never reachable. Destroying this element rather than only
-    // hiding it also means its `FocusScope` runs `init` again when the
-    // question closes and this reappears, taking the keyboard back from
-    // wherever `answer_question`'s `restore_editor_focus` sent it.
-    if root.workspace-manager-open && !root.question-open: WorkspaceManager {
-        read-error: root.workspace-read-error;
-        read-error-text: root.workspace-read-error-text;
-        read-error-reset-requested => { root.workspace-read-error-reset-requested(); }
-        workspaces: root.workspace-rows;
-        selected: root.workspace-manager-selected;
-        row-chosen(index) => { root.workspace-row-chosen(index); }
-        create-requested => { root.workspace-create-requested(); }
-        duplicate-requested => { root.workspace-duplicate-requested(); }
-        rename-requested => { root.workspace-rename-requested(); }
-        default-toggled => { root.workspace-default-toggled(); }
-        remove-requested => { root.workspace-remove-requested(); }
-        reset-view-requested => { root.workspace-reset-view-requested(); }
-        folders: root.workspace-folder-rows;
-        folder-add-requested => { root.workspace-folder-add-requested(); }
-        folder-mode-toggled(index) => { root.workspace-folder-mode-toggled(index); }
-        folder-move-up-requested(index) => { root.workspace-folder-move-up-requested(index); }
-        folder-move-down-requested(index) => { root.workspace-folder-move-down-requested(index); }
-        folder-detached(index) => { root.workspace-folder-detached(index); }
-        folder-relocated(index) => { root.workspace-folder-relocated(index); }
-        unused-folders: root.workspace-unused-folder-rows;
-        unused-folder-removed(index) => { root.workspace-unused-folder-removed(index); }
-        closed => {
-            // Rust defers removal and focus restoration until this callback
-            // has returned; do not destroy its focused scope from inside it.
-            root.workspace-manager-closed();
         }
     }
     // C5: 「その他の色」。問いと同じく窓の一番上に重ねる。

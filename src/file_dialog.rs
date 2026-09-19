@@ -17,16 +17,20 @@
 //! also keeps them clear of 6.18.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::i18n::pick;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
+    FDE_OVERWRITE_RESPONSE, FDE_SHAREVIOLATION_RESPONSE, FDEOR_DEFAULT, FDESVR_DEFAULT,
     FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
-    IFileDialog, IFileDialogCustomize, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+    IFileDialog, IFileDialogControlEvents, IFileDialogControlEvents_Impl, IFileDialogCustomize,
+    IFileDialogEvents, IFileDialogEvents_Impl, IShellItem, SHCreateItemFromParsingName,
+    SIGDN_FILESYSPATH,
 };
-use windows::core::{HSTRING, Interface, PCWSTR, w};
+use windows::core::{BOOL, HRESULT, HSTRING, Interface, PCWSTR, Ref, implement, w};
 
 /// The window a dialog is modal to.
 pub type Owner = Option<HWND>;
@@ -224,6 +228,187 @@ fn open_folder_from(owner: Owner, start: Option<&Path>, title: &str) -> Option<P
     }
 }
 
+/// Workspace root selection shows files as context as well as folders.
+/// The extra button chooses the displayed folder, including an empty folder;
+/// the ordinary button explicitly chooses the folder containing a selected file.
+/// Neither action opens a document or returns a file to the caller.
+pub fn workspace_folder(owner: Owner) -> Option<PathBuf> {
+    let selected = Arc::new(Mutex::new(None));
+    // SAFETY: as in open_document, COM and the native modal loop belong to the
+    // window thread. The event subscription is removed on every return path.
+    unsafe {
+        let dialog: IFileDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        dialog
+            .SetTitle(&HSTRING::from(pick(
+                "Workspaceに追加するフォルダの内容を確認",
+                "Choose a Workspace folder",
+            )))
+            .ok()?;
+        dialog
+            .SetOptions(dialog.GetOptions().ok()? | FOS_FORCEFILESYSTEM)
+            .ok()?;
+        let name = HSTRING::from(all_files());
+        dialog
+            .SetFileTypes(&[COMDLG_FILTERSPEC {
+                pszName: PCWSTR(name.as_ptr()),
+                pszSpec: w!("*.*"),
+            }])
+            .ok()?;
+        dialog
+            .SetOkButtonLabel(&HSTRING::from(pick(
+                "選択ファイルのフォルダを追加",
+                "Add Selected File’s Folder",
+            )))
+            .ok()?;
+        let customize: IFileDialogCustomize = dialog.cast().ok()?;
+        customize
+            .AddPushButton(
+                WORKSPACE_CURRENT_FOLDER,
+                &HSTRING::from(pick("このフォルダを追加", "Add This Folder")),
+            )
+            .ok()?;
+        let events: IFileDialogEvents = WorkspaceFolderEvents {
+            selected: selected.clone(),
+        }
+        .into();
+        let cookie = dialog.Advise(&events).ok()?;
+        let _subscription = FileDialogSubscription {
+            dialog: dialog.clone(),
+            cookie,
+        };
+        dialog.Show(owner).ok()?;
+        // Close(S_OK) does not populate GetResult, so prefer the callback's
+        // captured current folder. Cancellation never reaches this branch.
+        if let Some(path) = selected.lock().ok()?.take() {
+            return path.is_dir().then_some(path);
+        }
+        let path = chosen_path(&dialog.GetResult().ok()?)?;
+        workspace_folder_for_selection(&path)
+    }
+}
+
+const WORKSPACE_CURRENT_FOLDER: u32 = 2000;
+
+fn workspace_folder_for_selection(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() {
+        Some(path.to_path_buf())
+    } else if path.is_file() {
+        path.parent()
+            .filter(|parent| parent.is_dir())
+            .map(Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
+struct FileDialogSubscription {
+    dialog: IFileDialog,
+    cookie: u32,
+}
+
+impl Drop for FileDialogSubscription {
+    fn drop(&mut self) {
+        // SAFETY: the dialog and subscription live on the same COM thread.
+        unsafe {
+            let _ = self.dialog.Unadvise(self.cookie);
+        }
+    }
+}
+
+#[implement(IFileDialogEvents, IFileDialogControlEvents)]
+struct WorkspaceFolderEvents {
+    selected: Arc<Mutex<Option<PathBuf>>>,
+}
+
+impl IFileDialogControlEvents_Impl for WorkspaceFolderEvents_Impl {
+    fn OnButtonClicked(
+        &self,
+        customize: Ref<IFileDialogCustomize>,
+        control: u32,
+    ) -> windows::core::Result<()> {
+        if control != WORKSPACE_CURRENT_FOLDER {
+            return Ok(());
+        }
+        // SAFETY: shell invokes this while the subscribed dialog is alive.
+        unsafe {
+            let dialog: IFileDialog = customize.ok()?.cast()?;
+            let Some(path) = chosen_path(&dialog.GetFolder()?).filter(|path| path.is_dir()) else {
+                return Ok(());
+            };
+            if let Ok(mut selected) = self.selected.lock() {
+                *selected = Some(path);
+            }
+            if let Err(error) = dialog.Close(HRESULT(0)) {
+                if let Ok(mut selected) = self.selected.lock() {
+                    *selected = None;
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    fn OnItemSelected(
+        &self,
+        _: Ref<IFileDialogCustomize>,
+        _: u32,
+        _: u32,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnCheckButtonToggled(
+        &self,
+        _: Ref<IFileDialogCustomize>,
+        _: u32,
+        _: BOOL,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnControlActivating(
+        &self,
+        _: Ref<IFileDialogCustomize>,
+        _: u32,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+impl IFileDialogEvents_Impl for WorkspaceFolderEvents_Impl {
+    fn OnFileOk(&self, _: Ref<IFileDialog>) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnFolderChanging(
+        &self,
+        _: Ref<IFileDialog>,
+        _: Ref<IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnFolderChange(&self, _: Ref<IFileDialog>) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnSelectionChange(&self, _: Ref<IFileDialog>) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnShareViolation(
+        &self,
+        _: Ref<IFileDialog>,
+        _: Ref<IShellItem>,
+    ) -> windows::core::Result<FDE_SHAREVIOLATION_RESPONSE> {
+        Ok(FDESVR_DEFAULT)
+    }
+    fn OnTypeChange(&self, _: Ref<IFileDialog>) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnOverwrite(
+        &self,
+        _: Ref<IFileDialog>,
+        _: Ref<IShellItem>,
+    ) -> windows::core::Result<FDE_OVERWRITE_RESPONSE> {
+        Ok(FDEOR_DEFAULT)
+    }
+}
+
 /// 欄に付ける番号（要件 E2 の③⑤）。
 ///
 /// **1つのダイアログの中でしか意味を持たない**ので、外へは出さない。
@@ -405,6 +590,26 @@ fn default_extension(suggested_name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_selection_returns_only_existing_folders() {
+        let root = std::env::temp_dir().join(format!(
+            "rfn-workspace-picker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(workspace_folder_for_selection(&root), Some(root.clone()));
+        let file = root.join("context.txt");
+        std::fs::write(&file, "context").unwrap();
+        assert_eq!(workspace_folder_for_selection(&file), Some(root.clone()));
+        assert_eq!(workspace_folder_for_selection(&root.join("missing")), None);
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 
     /// **名前が持っている拡張子を尊ぶ**（書き手の報告 2026-09-10）。
     #[test]

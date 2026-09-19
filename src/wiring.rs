@@ -1949,6 +1949,24 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
 
     deferred!(
         window,
+        on_workspace_clone_requested,
+        live,
+        crate::workspace_clone_requested
+    );
+    deferred!(
+        window,
+        on_workspace_open_selected,
+        live,
+        crate::workspace_open_selected
+    );
+    deferred!(
+        window,
+        on_workspace_leave_requested,
+        live,
+        crate::workspace_leave_requested
+    );
+    deferred!(
+        window,
         on_workspace_manager_requested,
         live,
         crate::workspace_manager_requested

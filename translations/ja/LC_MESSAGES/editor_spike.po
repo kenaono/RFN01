@@ -1007,3 +1007,45 @@ msgstr "保存方式は、このフォルダを使うすべてのWorkspaceで共
 
 msgid "Folder not found"
 msgstr "フォルダが見つかりません"
+
+msgid "Workspace"
+msgstr "Workspace"
+
+msgid "Workspaces…"
+msgstr "Workspace…"
+
+msgid "New Workspace…"
+msgstr "新規Workspace…"
+
+msgid "Clone Repository…"
+msgstr "リポジトリを取得…"
+
+msgid "Cloning Repository…"
+msgstr "リポジトリを取得中…"
+
+msgid "Back to Files"
+msgstr "ファイル一覧へ"
+
+msgid "Create a Workspace, then add folders."
+msgstr "Workspaceを作成して、フォルダを追加してください。"
+
+msgid "● Active   ★ Default at startup"
+msgstr "● 使用中   ★ 起動時の既定"
+
+msgid "Open Workspace"
+msgstr "Workspaceを開く"
+
+msgid "Save mode applies to this folder in every Workspace that uses it."
+msgstr "同じフォルダを別のWorkspaceに登録している場合も、この保存方式が適用されます。"
+
+msgid "Used by: "
+msgstr "登録先: "
+
+msgid "Leave Workspace…"
+msgstr "Workspaceを閉じる…"
+
+msgid "Unused Folder Settings"
+msgstr "未使用のフォルダ設定"
+
+msgid "Leave…"
+msgstr "解除…"
