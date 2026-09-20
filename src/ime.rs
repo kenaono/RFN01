@@ -34,11 +34,15 @@ const HORIZONTAL_FACE: &str = "Yu Mincho";
 /// leaves the IME laying its windows out as it did, which is the behaviour this
 /// improves on rather than depends on.
 pub fn set_vertical(window: &AppWindow, vertical: bool) {
-    let Some(hwnd) = window_handle(window) else {
+    set_composition_font(window.window(), vertical, 22.0);
+}
+
+fn set_composition_font(window: &slint::Window, vertical: bool, size: f32) {
+    let Some(hwnd) = native_handle(window) else {
         return;
     };
     let mut font = LOGFONTW {
-        lfHeight: -22,
+        lfHeight: -(size * window.scale_factor()).round().max(1.0) as i32,
         lfCharSet: if vertical {
             SHIFTJIS_CHARSET
         } else {
@@ -77,14 +81,43 @@ pub fn set_vertical(window: &AppWindow, vertical: bool) {
 ///
 /// Shared with the file dialogs, which need an owner to be modal to.
 pub fn window_handle(window: &AppWindow) -> Option<HWND> {
+    native_handle(window.window())
+}
+
+fn native_handle(window: &slint::Window) -> Option<HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     // Slint hands back its own handle type; the trait method on it is what
     // reaches the platform one.
-    let slint_handle = window.window().window_handle();
+    let slint_handle = window.window_handle();
     let handle = slint_handle.window_handle().ok()?;
     match handle.as_raw() {
         RawWindowHandle::Win32(win32) => Some(HWND(win32.hwnd.get() as *mut core::ffi::c_void)),
         _ => None,
     }
+}
+
+/// Exclude the rendered cell, not the invisible 1px TextInput cursor. Keeping
+/// this in the host adapter also works for a standalone Quick Draft window.
+pub(crate) fn candidate_area(
+    window: &slint::Window,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    vertical: bool,
+) {
+    use slint::winit_030::{
+        WinitWindowAccessor,
+        winit::dpi::{LogicalPosition, LogicalSize},
+    };
+    if ![x, y, width, height].iter().all(|v| v.is_finite()) {
+        return;
+    }
+    let width = width.max(1.0);
+    let height = height.max(1.0);
+    set_composition_font(window, vertical, if vertical { width } else { height });
+    window.with_winit_window(|native| {
+        native.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(width, height));
+    });
 }

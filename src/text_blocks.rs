@@ -74,6 +74,8 @@ pub const MAX_HEADING_LEVEL: usize = 6;
 pub struct Typography {
     /// Body size in pixels.
     pub font_size: f32,
+    /// Host-supplied page margin in pixels; None keeps the editor heading margin.
+    pub page_margin: Option<f32>,
     /// Extra advance per character along the line axis, as a fraction of that
     /// character's own size. `0.0` leaves DirectWrite's own advance.
     pub character_spacing: f32,
@@ -226,6 +228,7 @@ impl Typography {
     pub fn new(font_size: f32) -> Self {
         Self {
             font_size: font_size.max(1.0),
+            page_margin: None,
             character_spacing: 0.0,
             line_spacing: 1.0,
             // 要件 7.8: 半分が日本語の組版の当たり前。位置は行の箱の端のまま。

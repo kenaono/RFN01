@@ -361,7 +361,7 @@ impl Recovery {
             close_run: Rc::default(),
             cache: Rc::new(RefCell::new(RenderCache::default())),
             tabs: Rc::new(RefCell::new(Tabs {
-                panels: Default::default(),
+                no_tabs: Default::default(),
                 panes: vec![PaneTabs {
                     history: vec![NavigationPlace::from(&tab)],
                     tabs: vec![tab],

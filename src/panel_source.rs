@@ -10,38 +10,18 @@ pub(crate) fn sync(window: &AppWindow, live: &Live) {
         let entry = tab.below.entries.get(tab.below.active)?.clone();
         Some((owner, entry, owner.screen(window).below_kind == 2))
     }).collect();
-    let model = window.get_panes();
-    let Some(rows) = model.as_any().downcast_ref::<VecModel<PaneScreen>>() else { return; };
+    let host = editor_host::EditorHost::new(window, live);
     let mut visible = Vec::new();
     for (owner, entry, open) in showing {
         let mut panel = entry.borrow_mut();
         let id = if let Some(id) = panel.source_id { id } else {
-            let next = live.states.next_panel.get().max(65536);
-            live.states.next_panel.set(next + 1);
-            let id = PaneId(next);
-            live.states.panels.borrow_mut().insert(next, PaneSlot {
-                state: Rc::new(RefCell::new(panel.view.clone())),
-                showing: Rc::new(RefCell::new(panel.document.clone())),
-            });
-            let tab = PaneTab::showing(window, owner, panel.document.clone());
-            live.tabs.borrow_mut().panels.insert(next, PaneTabs { tabs: vec![tab], ..Default::default() });
-            let mut screen = id.initial_screen(false, false);
-            screen.embedded_panel = true;
-            screen.panel_owner = owner.index();
-            rows.push(screen);
+            let session = editor_session::EditorSession::with_state(panel.document.clone(), panel.view.clone());
+            let Some(id) = host.attach(owner, session) else { continue; };
             panel.source_id = Some(id);
             id
         };
         let state = live.states.of(id);
-        visible.push(id.index());
-        {
-            let mut state = state.borrow_mut();
-            if state.viewer != panel.view.viewer {
-                state.set_read_only(panel.view.viewer, true);
-            }
-            // Scroll policy lives in EditorState; the log controller only changes ReadOnly.
-            panel.view.follow = state.follow;
-        }
+        visible.push(id);
         let source = panel.document.text.borrow().clone();
         let document = panel.document.clone();
         drop(panel);
@@ -66,28 +46,15 @@ pub(crate) fn sync(window: &AppWindow, live: &Live) {
             }
         }
     }
-    for row in 0..rows.row_count() {
-        let mut screen = rows.row_data(row).unwrap();
-        if screen.id >= 65536 && !visible.contains(&screen.id) && screen.width != 0. {
-            screen.width = 0.; rows.set_row_data(row, screen);
-        }
-    }
+    host.hide_except(&visible);
     let retained: Vec<_> = terminal_panels::entries(live).iter()
-        .filter_map(|entry| entry.borrow().source_id.map(|id| id.0)).collect();
+        .filter_map(|entry| entry.borrow().source_id).collect();
     let focused = focused_pane(window);
-    if focused.is_panel() && (!visible.contains(&focused.index()) || focused.screen(window).width <= 0.) {
+    if focused.is_panel() && (!visible.contains(&focused) || focused.screen(window).width <= 0.) {
         let owner = PaneId::from_index(focused.screen(window).panel_owner);
         focus(window, live, owner, owner.screen(window).below_kind == 2);
     }
-    for row in (0..rows.row_count()).rev() {
-        let screen = rows.row_data(row).unwrap();
-        if screen.id >= 65536 && !retained.contains(&(screen.id as u32)) { rows.remove(row); }
-    }
-    live.states.panels.borrow_mut().retain(|id, _| retained.contains(id));
-    live.tabs.borrow_mut().panels.retain(|id, _| retained.contains(id));
-    let mut cache = live.cache.borrow_mut();
-    cache.panel_panes.retain(|id, _| retained.contains(id));
-    cache.panel_pace.retain(|id, _| retained.contains(id));
+    host.retain(&retained);
 }
 
 pub(crate) fn close(window: &AppWindow, live: &Live, id: PaneId) -> bool {

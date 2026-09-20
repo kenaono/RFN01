@@ -12,6 +12,7 @@ fn quick_draft_recovers_from_missed_shift_release() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
     surface.set_size(slint::PhysicalSize::new(690, 340));
     window.show().unwrap();
     let draw = || {
@@ -44,11 +45,11 @@ fn quick_draft_recovers_from_missed_shift_release() {
                 .dispatch_event(WindowEvent::KeyPressed { text: shift.into() });
             press(Key::RightArrow.into());
             // No Shift release event: reproduce the state left behind by IME.
-            crate::quick_draft::repair_shift_state(window.window(), message, hand);
+            crate::input_platform::repair_shift_state(window.window(), message, hand);
             press(Key::RightArrow.into());
             press("X".into());
             assert_eq!(window.get_text().as_str(), expected);
-            crate::quick_draft::repair_shift_state(window.window(), false, false);
+            crate::input_platform::repair_shift_state(window.window(), false, false);
         }
         window.set_text("abcdef".into());
         window.invoke_set_caret(0);
@@ -56,7 +57,7 @@ fn quick_draft_recovers_from_missed_shift_release() {
         window
             .window()
             .dispatch_event(WindowEvent::KeyPressed { text: shift.into() });
-        crate::quick_draft::repair_shift_state(window.window(), false, false);
+        crate::input_platform::repair_shift_state(window.window(), false, false);
         let position = slint::LogicalPosition::new(55.0, 27.0);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
@@ -234,7 +235,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
-            panels: Default::default(),
+            no_tabs: Default::default(),
             panes: vec![{
                 let tab = PaneTab::showing(&window, id, memo.clone());
                 PaneTabs {
@@ -262,7 +263,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert!(!close_tab(&window, &live, id, 1));
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let strip = tabs.of_mut(id).unwrap();
         strip.history.truncate(1);
         strip.at = 0;
     }
@@ -340,7 +341,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     // Removing one of two views does not ask to discard the shared document.
     live.tabs
         .borrow_mut()
-        .of_mut(id)
+        .of_mut(id).unwrap()
         .tabs
         .push(PaneTab::showing(&window, id, memo.clone()));
     assert!(!close_tab(&window, &live, id, 1));
@@ -739,7 +740,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let deleting = live.active(&window);
     let deleting_path = deleting.file.borrow().path().unwrap().to_owned();
     let duplicate = live.tabs.borrow().of(id).current().unwrap().clone();
-    live.tabs.borrow_mut().of_mut(id).tabs.push(duplicate);
+    live.tabs.borrow_mut().of_mut(id).unwrap().tabs.push(duplicate);
     live.closed_tabs.borrow_mut().clear();
     let closed_at = live.tabs.borrow().of(id).tabs.len() - 1;
     finish_close(&window, &live, id, closed_at);
@@ -1027,7 +1028,7 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
         close_run: Rc::default(),
         cache: Rc::new(RefCell::new(RenderCache::default())),
         tabs: Rc::new(RefCell::new(Tabs {
-            panels: Default::default(),
+            no_tabs: Default::default(),
             panes: vec![{
                 let tab = PaneTab::showing(&window, id, memo.clone());
                 PaneTabs {
@@ -1210,5 +1211,175 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
                 "bar must not move document pixels: vertical={vertical}, replacing={replacing}"
             );
         }
+    }
+}
+
+
+/// The real standalone window uses the shared document/history/layout, without
+/// constructing an AppWindow, pane registry or a TAB.
+#[test]
+fn standalone_draft_edits_japanese_and_keeps_composition_out_of_saved_text() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
+    surface.set_size(slint::PhysicalSize::new(690, 340));
+    window.show().unwrap();
+    let edits = Rc::new(Cell::new(0));
+    let count = edits.clone();
+    window.on_edited(move || count.set(count.get() + 1));
+    window.set_text("猫と犬\n次の行".into());
+    window.invoke_set_caret(3);
+    window.invoke_editor_move(1, true);
+    window.invoke_editor_preedit("にほん".into());
+    assert_eq!(window.get_text().as_str(), "猫と犬\n次の行");
+    assert_eq!(edits.get(), 0);
+    window.invoke_editor_text("や".into());
+    assert_eq!(window.get_text().as_str(), "猫や犬\n次の行");
+    assert_eq!(edits.get(), 1);
+    window.invoke_editor_undo(false);
+    assert_eq!(window.get_text().as_str(), "猫と犬\n次の行");
+    window.invoke_editor_undo(true);
+    assert_eq!(window.get_text().as_str(), "猫や犬\n次の行");
+    window.invoke_editor_select_all();
+    assert!(window.get_editor_selected());
+    assert!(window.invoke_editor_escape());
+    assert!(!window.get_editor_selected());
+    window.invoke_editor_preedit("取り消す".into());
+    assert!(window.invoke_editor_escape());
+    assert_eq!(window.get_text().as_str(), "猫や犬\n次の行");
+    window.set_text("復元した下書き".into());
+    window.invoke_set_caret(3);
+    window.invoke_editor_undo(false);
+    assert_eq!(window.get_text().as_str(), "復元した下書き");
+    assert_eq!(window.get_caret(), 3);
+    assert!(!window.get_editor_screen().can_undo);
+    drop(window);
+    slint::platform::update_timers_and_animations();
+}
+
+#[test]
+fn standalone_draft_keeps_end_visible_after_long_text_and_resize() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
+    surface.set_size(slint::PhysicalSize::new(690, 340));
+    window.show().unwrap();
+    let draw = |width: usize, height: usize| {
+        slint::platform::update_timers_and_animations();
+        surface.draw_if_needed(|renderer| {
+            let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+            renderer.render(&mut pixels, width);
+        });
+    };
+    draw(690, 340);
+    let initial = window.get_editor_screen();
+    assert!(initial.caret_x < 20.0 && initial.caret_y < 20.0, "draft text starts at the host padding, not the main editor page margin");
+    let text = "日本語の本文と English text\n".repeat(80);
+    window.set_text(text.clone().into());
+    window.invoke_set_caret(text.len() as i32);
+    window.invoke_editor_text("末尾".into());
+    draw(690, 340);
+    let screen = window.get_editor_screen();
+    assert!(screen.scroll_y < 0.0);
+    assert!(screen.caret_y + screen.scroll_y >= -1.0);
+    assert!(screen.caret_y + screen.scroll_y < screen.shown_height);
+    assert!(screen.tiles.row_count() > 0);
+    surface.set_size(slint::PhysicalSize::new(400, 240));
+    draw(400, 240);
+    window.invoke_set_caret(window.get_text().len() as i32);
+    draw(400, 240);
+    assert_eq!(window.get_text().as_str(), format!("{text}末尾"));
+    assert!(window.get_editor_screen().shown_width < screen.shown_width);
+    window.invoke_editor_delete(true);
+    assert!(window.get_text().ends_with("末"));
+    window.invoke_editor_undo(false);
+    assert!(window.get_text().ends_with("末尾"));
+}
+
+#[test]
+fn standalone_draft_reports_real_ime_cell_at_bottom_after_scroll_and_resize() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
+    let areas = Rc::new(RefCell::new(Vec::new()));
+    let reported = areas.clone();
+    window.on_editor_ime_area(move |x, y, w, h, vertical| reported.borrow_mut().push((x, y, w, h, vertical)));
+    surface.set_size(slint::PhysicalSize::new(690, 340));
+    window.show().unwrap();
+    window.invoke_take_focus();
+    for (width, height) in [(690, 340), (400, 240)] {
+        surface.set_size(slint::PhysicalSize::new(width, height));
+        slint::platform::update_timers_and_animations();
+        surface.draw_if_needed(|renderer| {
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (width * height) as usize];
+            renderer.render(&mut pixels, width as usize);
+        });
+        window.set_text("日本語の行\n".repeat(80).into());
+        window.invoke_set_caret(window.get_text().len() as i32);
+        window.invoke_editor_text("末尾".into());
+        areas.borrow_mut().clear();
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(5));
+            slint::platform::update_timers_and_animations();
+            surface.draw_if_needed(|renderer| {
+                let mut pixels = vec![slint::Rgb8Pixel::default(); (width * height) as usize];
+                renderer.render(&mut pixels, width as usize);
+            });
+        }
+        let screen = window.get_editor_screen();
+        let &(x, y, w, h, vertical) = areas.borrow().last().expect("focused shared editor reports its native IME area");
+        assert!(!vertical);
+        assert_eq!((w, h), (screen.caret_width, screen.caret_height));
+        assert!(h > 10.0, "IME exclusion must not use the hidden 1px font");
+        assert!(x >= 0.0 && y >= 0.0 && y + h <= height as f32,
+            "native area=({x},{y},{w},{h}), window={width}x{height}, caret_y={}, scroll={}, viewport={}",
+            screen.caret_y, screen.scroll_y, screen.shown_height);
+        assert!(screen.scroll_y < 0.0);
+    }
+}
+
+#[test]
+fn editor_ime_exclusion_tracks_vertical_heading_size_without_moving_input_focus() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    surface.set_size(slint::PhysicalSize::new(1000, 740));
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let areas = Rc::new(RefCell::new(Vec::new()));
+    let reported = areas.clone();
+    window.on_editor_ime_area(move |x, y, w, h, vertical| reported.borrow_mut().push((x, y, w, h, vertical)));
+    id.update_screen(&window, |s| {
+        s.empty = false;
+        s.width = 950.0;
+        s.height = 620.0;
+        s.content_width = 1000;
+        s.content_height = 2000;
+        s.caret_visible = true;
+        s.caret_x = 300.0;
+        s.caret_y = 300.0;
+        s.ime_anchor_x = 15000.0;
+        s.ime_anchor_y = 15000.0;
+    });
+    window.show().unwrap();
+    for (vertical, w, h) in [(false, 2.0, 22.0), (true, 22.0, 2.0), (true, 52.0, 2.0)] {
+        areas.borrow_mut().clear();
+        id.update_screen(&window, |s| { s.vertical = vertical; s.caret_width = w; s.caret_height = h; });
+        window.set_focus_generation(window.get_focus_generation() + 1);
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(5));
+            slint::platform::update_timers_and_animations();
+            surface.draw_if_needed(|renderer| {
+                let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+                renderer.render(&mut pixels, 1000);
+            });
+        }
+        let &(x, y, actual_w, actual_h, actual_vertical) = areas.borrow().last().expect("main editor reports its native IME area");
+        assert_eq!((actual_w, actual_h, actual_vertical), (w, h, vertical));
+        assert!(x > 0.0 && x < 1000.0 && y > 0.0 && y < 740.0,
+            "candidate position follows the real cell, not the clamped/offscreen input anchor");
     }
 }

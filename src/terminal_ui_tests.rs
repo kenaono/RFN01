@@ -36,17 +36,22 @@ fn editor_panel_uses_source_engine_document_and_selection() {
     assert!(!id.screen(&h.window).preview && !id.vertical(&h.window));
     assert!(Rc::ptr_eq(&h.live.states.document(id), &document));
     let state = h.live.states.of(id);
+    assert!(Rc::ptr_eq(&state, &entry.borrow().view));
     state.borrow_mut().caret_source_byte = Some(document.text.borrow().len());
     insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "追記", false);
     assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
     assert!(original.text.borrow().is_empty());
+    undo_in_pane(&h.window, id, &document, &h.live.states, &h.live.cache, false);
+    assert_eq!(&*document.text.borrow(), "# source\n日本語");
+    undo_in_pane(&h.window, id, &document, &h.live.states, &h.live.cache, true);
+    assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
     state.borrow_mut().selection_anchor_source_byte = Some(0);
     assert!(release_selection(&mut state.borrow_mut()));
     assert!(selection_source_range(&state.borrow()).is_none());
     panel_source::sync(&h.window, &h.live);
     assert_eq!(entry.borrow().source_id, Some(id));
     assert!(Rc::ptr_eq(&h.live.states.of(id), &state));
-    entry.borrow_mut().view.set_read_only(true, true);
+    entry.borrow_mut().view.borrow_mut().set_read_only(true, true);
     panel_source::sync(&h.window, &h.live);
     insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "blocked", false);
     assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
@@ -54,11 +59,43 @@ fn editor_panel_uses_source_engine_document_and_selection() {
     assert_eq!(focused_pane(&h.window), id);
     panel_source::focus(&h.window, &h.live, owner, false);
     assert_eq!(focused_pane(&h.window), owner);
-    h.live.tabs.borrow_mut().of_mut(owner).tabs[0].below.entries.clear();
+    h.live.tabs.borrow_mut().of_mut(owner).unwrap().tabs[0].below.entries.clear();
     panel_source::sync(&h.window, &h.live);
     assert!(h.live.states.panels.borrow().is_empty());
-    assert!(h.live.tabs.borrow().panels.is_empty());
+    assert_eq!(h.live.tabs.borrow().of(owner).tabs.len(), 1);
     assert!(h.live.cache.borrow().panel_panes.is_empty());
+}
+
+#[test]
+fn embedded_editor_host_releases_all_resources_without_reusing_ids() {
+    let (h, original) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let host = editor_host::EditorHost::new(&h.window, &h.live);
+    let document = OpenDocument::with_events(DocumentFile::untitled(2), "独立した面".into(), Default::default());
+    let session = editor_session::EditorSession::new(document.clone());
+    let held_state = Rc::downgrade(&session.state);
+    let id = host.attach(PaneId::FIRST, session).unwrap();
+    assert!(h.live.tabs.borrow().of(id).tabs.is_empty());
+    assert!(h.live.tabs.borrow_mut().of_mut(id).is_none());
+    assert_eq!(h.live.tabs.borrow().of(PaneId::FIRST).tabs.len(), 1);
+    assert!(Rc::ptr_eq(&h.live.states.document(id), &document));
+    assert!(Rc::ptr_eq(&h.live.states.document(PaneId::FIRST), &original));
+    id.update_screen(&h.window, |screen| screen.width = 200.);
+    h.live.cache.borrow_mut().pane(id);
+    h.live.cache.borrow_mut().pace_of(id);
+    host.hide_except(&[]);
+    assert_eq!(id.screen(&h.window).width, 0.);
+    host.retain(&[]);
+    assert!(held_state.upgrade().is_none());
+    assert!(!h.live.states.panels.borrow().contains_key(&id.0));
+    assert!(h.live.tabs.borrow().of(id).tabs.is_empty());
+    assert!(h.live.tabs.borrow_mut().of_mut(id).is_none());
+    assert!(!h.live.cache.borrow().panel_panes.contains_key(&id.0));
+    assert!(!h.live.cache.borrow().panel_pace.contains_key(&id.0));
+    assert!(!h.window.get_panes().iter().any(|screen| screen.id == id.index()));
+    let next = host.attach(PaneId::FIRST, editor_session::EditorSession::new(document)).unwrap();
+    assert_ne!(id, next);
+    host.retain(&[next]);
+    assert!(h.live.states.panels.borrow().contains_key(&next.0));
 }
 
 #[test]
@@ -232,7 +269,7 @@ impl Harness {
             close_run: Rc::default(),
             cache: Rc::new(RefCell::new(crate::RenderCache::default())),
             tabs: Rc::new(RefCell::new(crate::Tabs {
-                panels: Default::default(),
+                no_tabs: Default::default(),
                 panes: vec![crate::PaneTabs {
                     history: vec![crate::NavigationPlace::from(&tab)],
                     tabs: vec![tab],
@@ -480,7 +517,7 @@ fn terminal_panel_long_text_click_and_end_render() {
         text: Key::Control.into(),
     });
     render();
-    entry.borrow_mut().view.set_read_only(true, true);
+    entry.borrow_mut().view.borrow_mut().set_read_only(true, true);
     panel_source::sync(&h.window, &h.live);
     h.window
         .window()
@@ -502,7 +539,7 @@ fn terminal_panel_long_text_click_and_end_render() {
 fn terminal_panel_restored_draft_can_be_saved_and_edited_with_live_notifications() {
     let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
     let id = PaneId::FIRST;
-    h.live.tabs.borrow_mut().of_mut(id).tabs[0].below.draft = "restored draft".into();
+    h.live.tabs.borrow_mut().of_mut(id).unwrap().tabs[0].below.draft = "restored draft".into();
     terminal_panels::ensure(&h.window, &h.live, id);
     let panel = terminal_panels::current(&h.live, id).unwrap();
     let document = panel.borrow().document.clone();
@@ -567,7 +604,7 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     );
     {
         let mut tabs = h.live.tabs.borrow_mut();
-        tabs.of_mut(id).tabs[0].terminal = Some(session.clone());
+        tabs.of_mut(id).unwrap().tabs[0].terminal = Some(session.clone());
     }
     let upper = h.live.tabs.borrow().of(id).tabs[0].clone();
     h.live.show_tab(&h.window, id, &upper);
@@ -600,7 +637,7 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     assert_eq!(id.screen(&h.window).below_draft.as_str(), "first draft");
     terminal_panels::action(&h.window, &h.live, id, 7, 0);
     let target = terminal_panels::current(&h.live, id).unwrap();
-    assert!(target.borrow().view.viewer);
+    assert!(target.borrow().view.borrow().viewer);
     switch_shell(
         &h.window,
         &h.live,
@@ -678,7 +715,7 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     switch_to_tab(&h.window, &h.live, id, 0);
     terminal_panels::action(&h.window, &h.live, id, 0, 0);
     terminal_panels::action(&h.window, &h.live, id, 13, 0);
-    assert!(!target.borrow().view.viewer);
+    assert!(!target.borrow().view.borrow().viewer);
     assert!(target.borrow().capture.is_none());
 }
 
@@ -701,7 +738,7 @@ fn terminal_appearance_roundtrip_and_pane_reset_preserve_formatting() {
     entry.borrow_mut().style = Some(style.clone());
     {
         let mut tabs = h.live.tabs.borrow_mut();
-        let tab = &mut tabs.of_mut(id).tabs[0];
+        let tab = &mut tabs.of_mut(id).unwrap().tabs[0];
         tab.below.front_style = Some(style);
         terminal_appearance::clear_paper(tab);
         assert!(!tab.below.front_style.as_ref().unwrap().paper_own);
@@ -818,7 +855,7 @@ fn terminal_random_override_wins_until_pane_background_changed() {
     });
     terminal_panels::ensure(&h.window, &h.live, id);
     let mut tabs = h.live.tabs.borrow_mut();
-    let tab = &mut tabs.of_mut(id).tabs[0];
+    let tab = &mut tabs.of_mut(id).unwrap().tabs[0];
     tab.below.front_style = terminal_appearance::random_style(&h.window, 0);
     terminal_panels::publish(&h.window, id, &tab.below);
     assert_ne!(
@@ -849,7 +886,7 @@ fn terminal_search_preserves_output_and_toggle_clears_state() {
     let source = Rc::new(RefCell::new(
         TerminalSession::start("QA", "cmd.exe /Q /D /K", 80, 25, || {}).unwrap(),
     ));
-    h.live.tabs.borrow_mut().of_mut(id).tabs[0].terminal = Some(source.clone());
+    h.live.tabs.borrow_mut().of_mut(id).unwrap().tabs[0].terminal = Some(source.clone());
     let tab = h.live.tabs.borrow().of(id).tabs[0].clone();
     h.live.show_tab(&h.window, id, &tab);
     source.borrow_mut().wait(Duration::from_millis(200));
@@ -957,8 +994,8 @@ fn terminal_panel_shell_selection_same_cancel_and_replace() {
     ));
     {
         let mut tabs = h.live.tabs.borrow_mut();
-        tabs.of_mut(id).tabs[0].below.shell = Some(old.clone());
-        tabs.of_mut(id).tabs[0].below.open = true;
+        tabs.of_mut(id).unwrap().tabs[0].below.shell = Some(old.clone());
+        tabs.of_mut(id).unwrap().tabs[0].below.open = true;
     }
     terminal_panels::ensure(&h.window, &h.live, id);
     let tab = h.live.tabs.borrow().of(id).tabs[0].clone();

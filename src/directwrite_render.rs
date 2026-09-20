@@ -4952,6 +4952,7 @@ pub mod print;
 /// hashing all six here would rebuild every layout in the document when a level
 /// nobody used changed size.
 fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
+    typography.page_margin.map(f32::to_bits).hash(hasher);
     typography.font_size.to_bits().hash(hasher);
     typography.character_spacing.to_bits().hash(hasher);
     typography.line_spacing.to_bits().hash(hasher);
@@ -5164,6 +5165,9 @@ fn heading_margin_in(
     typography: &Typography,
     mode: WritingMode,
 ) -> Result<f32> {
+    if let Some(margin) = typography.page_margin.filter(|value| value.is_finite()) {
+        return Ok(margin.max(0.0));
+    }
     let mut margin = 16.0_f32;
     for level in 1..=6 {
         margin = margin.max(graphics.heading_marker(typography, mode, level)?.1);

@@ -1,5 +1,6 @@
 //! Kind defaults and tab overrides. Pane changes only reset paper overrides.
 use super::*;
+use crate::appearance::readable_ink;
 
 pub(crate) fn initial_style() -> PanelStyle {
     PanelStyle {
@@ -39,15 +40,6 @@ pub(crate) fn random_style(window: &AppWindow, kind: usize) -> Option<PanelStyle
     style.ink = slint_colour(readable_ink(channels(style.ink), channels(style.paper)));
     style.paper_own = true;
     Some(style)
-}
-
-/// Preserve the chosen ink when legible; invert it when paper and ink are alike.
-pub(crate) fn readable_ink(ink: [f32; 3], paper: [f32; 3]) -> [f32; 3] {
-    if (luminance(ink) - luminance(paper)).abs() >= 0.45 { return ink; }
-    let inverted = ink.map(|channel| 1.0 - channel);
-    if (luminance(inverted) - luminance(paper)).abs() > (luminance(ink) - luminance(paper)).abs() {
-        inverted
-    } else { ink }
 }
 
 pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {

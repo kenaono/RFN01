@@ -13,7 +13,7 @@ pub(crate) struct PanelDocument {
     pub document: Rc<OpenDocument>,
     pub shell: Option<Rc<RefCell<TerminalSession>>>,
     /// Same source-view ReadOnly state as EditorState::viewer.
-    pub view: EditorState,
+    pub view: Rc<RefCell<EditorState>>,
     pub style: Option<PanelStyle>,
     pub capture: Option<Rc<RefCell<TerminalSession>>>,
     before_read_only: bool,
@@ -35,7 +35,7 @@ impl PanelDocument {
             document,
             shell,
             style,
-            view: EditorState::default(),
+            view: Rc::new(RefCell::new(EditorState::default())),
             capture: None,
             before_read_only: false,
             pending_tail: 0,
@@ -49,7 +49,7 @@ impl PanelDocument {
         self.collect();
         if let Some(session) = self.capture.take() {
             session.borrow_mut().stop_capture();
-            self.view.set_read_only(self.before_read_only, true);
+            self.view.borrow_mut().set_read_only(self.before_read_only, true);
             self.pending_tail = 0;
         }
     }
@@ -129,7 +129,7 @@ pub(crate) fn ensure(window: &AppWindow, live: &Live, id: PaneId) {
     }
     let doc = new_document(live);
     let mut tabs = live.tabs.borrow_mut();
-    let strip = tabs.of_mut(id);
+    let Some(strip) = tabs.of_mut(id) else { return; };
     let active = strip.active;
     if let Some(tab) = strip.tabs.get_mut(active) {
         if !tab.below.draft.is_empty() {
@@ -151,7 +151,7 @@ fn new_document(live: &Live) -> Rc<OpenDocument> {
     // callback belongs to upper documents: firing it during a panel edit
     // re-enters Tabs (sync_entry) or the captured terminal (collect).
     // Keep dirty tracking, but do not change the upper document's UI state.
-    OpenDocument::untitled(next_number(live), slint::Weak::default())
+    OpenDocument::with_events(DocumentFile::untitled(next_number(live)), String::new(), Default::default())
 }
 
 pub(crate) fn sync_entry(tab: &mut PaneTab) {
@@ -159,7 +159,7 @@ pub(crate) fn sync_entry(tab: &mut PaneTab) {
         let mut entry = entry.borrow_mut();
         entry.shell = tab.below.shell.clone();
         if entry.source_id.is_none() && tab.terminal.is_some()
-            && !entry.view.viewer
+            && !entry.view.borrow().viewer
             && *entry.document.text.borrow() != tab.below.draft
         {
             *entry.document.text.borrow_mut() = tab.below.draft.clone();
@@ -194,8 +194,8 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         .map(|e| e.borrow().document.file.borrow().title().into())
         .collect();
     let screen = id.screen(window);
-    let read_only = entry.as_ref().is_some_and(|e| e.view.viewer);
-    let follow = entry.as_ref().is_some_and(|e| e.view.follow);
+    let read_only = entry.as_ref().is_some_and(|e| e.view.borrow().viewer);
+    let follow = entry.as_ref().is_some_and(|e| e.view.borrow().follow);
     let capturing = entry.as_ref().is_some_and(|e| e.capture.is_some());
     let names_changed = screen.panel_tabs.iter().ne(names.iter().cloned())
         || screen
@@ -231,7 +231,7 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
 fn show(window: &AppWindow, live: &Live, id: PaneId) {
     let below = {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active) else {
             return;
@@ -276,7 +276,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
     match action {
         0 => {
             let mut tabs = live.tabs.borrow_mut();
-            let strip = tabs.of_mut(id);
+            let Some(strip) = tabs.of_mut(id) else { return; };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 if index >= 0 && (index as usize) < tab.below.entries.len() {
@@ -309,7 +309,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
             let doc = new_document(live);
             let entry = Rc::new(RefCell::new(PanelDocument::new(window, doc, shell)));
             let mut tabs = live.tabs.borrow_mut();
-            let strip = tabs.of_mut(id);
+            let Some(strip) = tabs.of_mut(id) else { return; };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 tab.below.entries.push(entry);
@@ -330,10 +330,10 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
                 let mut entry = entry.borrow_mut();
                 if entry.capture.is_some() {
                     entry.stop();
-                    entry.view.set_read_only(false, true);
+                    entry.view.borrow_mut().set_read_only(false, true);
                 } else {
-                    let next = !entry.view.viewer;
-                    entry.view.set_read_only(next, true);
+                    let next = !entry.view.borrow().viewer;
+                    entry.view.borrow_mut().set_read_only(next, true);
                 }
             }
         }
@@ -422,8 +422,9 @@ fn import(window: &AppWindow, live: &Live, id: PaneId, action: i32) {
         source.borrow_mut().drain();
         source.borrow_mut().start_capture();
         let mut target = target.borrow_mut();
-        target.before_read_only = target.view.viewer;
-        target.view.set_read_only(true, true);
+        let before_read_only = target.view.borrow().viewer;
+        target.before_read_only = before_read_only;
+        target.view.borrow_mut().set_read_only(true, true);
         target.capture = Some(source);
         target.pending_tail = 0;
         target.log_name = Some(log_name());
@@ -452,7 +453,7 @@ fn import(window: &AppWindow, live: &Live, id: PaneId, action: i32) {
             return;
         };
         let target = target.borrow();
-        if target.view.viewer {
+        if target.view.borrow().viewer {
             window.tell(
                 pick(
                     "ReadOnlyです。別のTABを選んでください",
@@ -771,10 +772,10 @@ pub(crate) fn open_file(window: &AppWindow, live: &Live, id: PaneId, path: &Path
             return;
         }
     };
-    let doc = OpenDocument::new(file, text, slint::Weak::default());
+    let doc = OpenDocument::with_events(file, text, Default::default());
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active).filter(|t| t.terminal.is_some()) else {
             return;
@@ -885,7 +886,7 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
     }
     let mut tabs = live.tabs.borrow_mut();
     for id in PaneId::all(window) {
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         for (index, tab) in strip.tabs.iter_mut().enumerate() {
             let Some(entry) = tab.below.entries.get(tab.below.active) else {
                 continue;
@@ -1045,7 +1046,7 @@ pub(crate) fn close(
     let mut visible = false;
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         for (index, tab) in strip.tabs.iter_mut().enumerate() {
             if !tab.below.entries.iter().any(|p| Rc::ptr_eq(p, entry)) {
                 continue;
@@ -1102,7 +1103,7 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
         };
         let id = PaneId::from_index(pane);
         if let Some(entry) = current(&scroll_live, id) {
-            let follow = entry.borrow_mut().view.follow_at(position, end, false);
+            let follow = entry.borrow_mut().view.borrow_mut().follow_at(position, end, false);
             id.update_screen(&window, |screen| screen.panel_follow = follow);
         }
     });

@@ -3,8 +3,8 @@
 //! **A second window, and almost none of the editor in it.** What 要件 12 asks
 //! for is a place to write a short message bound for somewhere else, where
 //! `Enter` cannot send it — so there is no Markdown, no preview, no vertical
-//! writing and no file. The text is Slint's own `TextInput` (`ui/quick-draft`),
-//! and what is here is the part that outlives the window: where it was, whether
+//! writing and no file. The body uses the shared source editor (`draft_editor`);
+//! what is here is the part that outlives the window: where it was, whether
 //! it stays on top, and the draft itself.
 //!
 //! **Opening it is a function, not a click** (要件 12.2). The menu calls
@@ -34,33 +34,6 @@ const SAVE_SETTLE: Duration = Duration::from_secs(2);
 
 /// How long "Copied" stays on screen (要件 12.3, "非侵襲的な表示").
 const NOTICE_SETTLE: Duration = Duration::from_secs(2);
-
-/// IME can swallow Shift release. Repair Slint's state before its built-in
-/// TextInput processes selection, not merely in our shortcut callback.
-fn install_shift_repair(window: &QuickDraft) {
-    use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
-    window.window().on_winit_window_event(|window, event| {
-        if matches!(
-            event,
-            WindowEvent::MouseInput { .. } | WindowEvent::KeyboardInput { .. }
-        ) {
-            let (by_message, by_hand) = crate::shift_really_held();
-            repair_shift_state(window, by_message, by_hand);
-        }
-        EventResult::Propagate
-    });
-}
-
-pub(crate) fn repair_shift_state(window: &slint::Window, by_message: bool, by_hand: bool) {
-    if by_message || by_hand {
-        return;
-    }
-    // Release both sides, then let the original event run. No text editing or
-    // selection operation is synthesized.
-    for key in [slint::platform::Key::Shift, slint::platform::Key::ShiftR] {
-        window.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: key.into() });
-    }
-}
 
 /// The quick draft window, while it is open.
 ///
@@ -109,7 +82,7 @@ impl QuickDraftWindow {
             return;
         };
         wire_shortcuts(owner, &window);
-        install_shift_repair(&window);
+        crate::input_platform::install_shift_repair(window.window());
         let draft = directory()
             .and_then(|directory| app_data::read_draft(&directory))
             .unwrap_or_default();
@@ -177,6 +150,7 @@ impl QuickDraftWindow {
 }
 
 pub(crate) fn wire_shortcuts(owner: &AppWindow, window: &QuickDraft) {
+    crate::draft_editor::install(window);
     let owner_weak = owner.as_weak();
     let draft_weak = window.as_weak();
     window.on_shortcut_key(move |text, control, alt, shift| {

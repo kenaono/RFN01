@@ -853,6 +853,7 @@ export component AppWindow inherits Window {
     /// rectangles the panes were placed in, and sets `focused-pane` itself.
     callback pane-focus-moved(int, int);
     callback pane-focus-trace(int, string);
+    callback editor-ime-area(float, float, float, float, bool);
     /// Ask the Kill Ring for something, in a pane (要件 11.4・11.6).
     callback pane-kill(int, int);
     /// Start selecting in a pane, or stop (要件 11.4 の`Ctrl+Space`).
@@ -2842,6 +2843,7 @@ export component AppWindow inherits Window {
                             root.focus-generation += 1;
                         }
                         focus-trace(event) => { root.pane-focus-trace(pane.id, event); }
+                        ime-area(x, y, w, h, vertical) => { root.editor-ime-area(x, y, w, h, vertical); }
 
                         // 追加要件 2026-09-14（書き手）: **設定はTABで開く。**
                         // 「設定を押すと、新たなダイアログを出さずに設定Paneと

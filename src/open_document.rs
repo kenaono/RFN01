@@ -17,18 +17,21 @@
 //!   is what a tab actually points at. **The `Rc` is the registry**: a document
 //!   lives while a tab holds it and goes when the last one lets go.
 //!
-//! Slint is here only as a `Weak<AppWindow>` that [`SharedText`] rings when the
-//! unsaved marker moves; nothing here draws or lays anything out.
+//! Hosts supply notifications; documents do not own or address a window.
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use slint::Weak;
-
-use crate::AppWindow;
 use crate::buffer::DocumentFile;
 use crate::document::{DocumentCounts, Reading};
+
+/// Notifications supplied by the embedding host. Empty hooks support headless documents.
+#[derive(Clone, Default)]
+pub struct DocumentEvents {
+    pub edited: Option<Rc<dyn Fn(bool)>>,
+    pub editing: Option<Rc<dyn Fn()>>,
+}
 
 /// The document's text, and whether it has changed since it last agreed with
 /// its file.
@@ -50,18 +53,18 @@ pub struct SharedText {
     pub pending_since: Cell<Option<Instant>>,
     /// Told as soon as the flag moves, so the title marker does not depend on
     /// remembering to refresh it at each of the places an edit can begin.
-    pub window: Weak<AppWindow>,
+    events: DocumentEvents,
 }
 
 impl SharedText {
-    pub fn new(text: String, window: Weak<AppWindow>) -> Self {
+    pub fn with_events(text: String, events: DocumentEvents) -> Self {
         Self {
             saved_text: RefCell::new(Some(text.clone())),
             text: RefCell::new(text),
             edited: Cell::new(false),
             changed_at: Cell::new(Instant::now()),
             pending_since: Cell::new(None),
-            window,
+            events,
         }
     }
 
@@ -91,11 +94,7 @@ impl SharedText {
     /// あとに出す言葉（「CP932で開き直しました」）は消えない：先に畳んで、
     /// それから言う、の順になる。
     fn forget_status(&self) {
-        if let Some(window) = self.window.upgrade()
-            && !window.get_render_status().is_empty()
-        {
-            window.set_render_status(Default::default());
-        }
+        if let Some(notify) = &self.events.editing { notify(); }
     }
 
     /// When the changes now waiting for a work copy began, if any are.
@@ -172,10 +171,7 @@ impl SharedText {
         if self.edited.replace(edited) == edited {
             return;
         }
-        if let Some(window) = self.window.upgrade() {
-            window.set_document_edited(edited);
-            window.invoke_republish_tabs();
-        }
+        if let Some(notify) = &self.events.edited { notify(edited); }
     }
 }
 
@@ -227,13 +223,13 @@ pub struct OpenDocument {
 }
 
 impl OpenDocument {
-    pub fn new(file: DocumentFile, text: String, window: Weak<AppWindow>) -> Rc<Self> {
+    pub fn with_events(file: DocumentFile, text: String, events: DocumentEvents) -> Rc<Self> {
         Rc::new(Self {
             comparison_peer: RefCell::new(std::rc::Weak::new()),
             comparison_cache: RefCell::new(None),
             external_snapshot: None,
             file: RefCell::new(file),
-            text: SharedText::new(text, window),
+            text: SharedText::with_events(text, events),
             outside: Cell::new(false),
             missing: Cell::new(false),
             protective_recovery: Cell::new(false),
@@ -241,18 +237,6 @@ impl OpenDocument {
             history: RefCell::new(History::default()),
             counts: RefCell::new(CountsSlot::default()),
         })
-    }
-
-    #[cfg(test)]
-    pub fn snapshot(
-        title: String,
-        form: crate::file_io::TextForm,
-        text: String,
-        window: Weak<AppWindow>,
-    ) -> Rc<Self> {
-        let mut document = Self::new(DocumentFile::untitled(0), text, window);
-        Rc::get_mut(&mut document).unwrap().external_snapshot = Some((title, form));
-        document
     }
 
     pub fn read_only(&self) -> bool {
@@ -310,10 +294,7 @@ impl OpenDocument {
         });
     }
 
-    /// A document that has never been saved (要件 8.4).
-    pub fn untitled(number: u32, window: Weak<AppWindow>) -> Rc<Self> {
-        Self::new(DocumentFile::untitled(number), String::new(), window)
-    }
+
 }
 
 /// One change to a document's text, and everything it takes to undo it.
@@ -539,6 +520,26 @@ pub fn replace_source_range(
 
 #[cfg(test)]
 mod snapshot_tests {
+    use slint::Weak;
+    #[test]
+    fn document_notifies_its_host_without_a_window() {
+        let flags = Rc::new(RefCell::new(Vec::new()));
+        let edits = Rc::new(Cell::new(0));
+        let notify_flags = flags.clone();
+        let notify_edits = edits.clone();
+        let text = SharedText::with_events("原稿".into(), DocumentEvents {
+            edited: Some(Rc::new(move |flag| notify_flags.borrow_mut().push(flag))),
+            editing: Some(Rc::new(move || notify_edits.set(notify_edits.get() + 1))),
+        });
+        text.borrow_mut().push('一');
+        text.borrow_mut().push('二');
+        assert_eq!(&*flags.borrow(), &[true]);
+        assert_eq!(edits.get(), 2);
+        *text.borrow_mut() = "原稿".into();
+        text.reconcile_saved();
+        assert_eq!(&*flags.borrow(), &[true, false]);
+        assert!(!text.edited());
+    }
     use super::*;
 
     #[test]

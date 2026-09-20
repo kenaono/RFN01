@@ -1,3 +1,17 @@
+mod draft_editor;
+mod editor_interaction;
+mod editor_render;
+mod input_platform;
+use input_platform::{double_click_time, shift_really_held};
+mod editor_host;
+mod editor_session;
+mod appearance;
+use appearance::luminance;
+mod editor_state;
+use editor_state::{
+    EditorState, normalize_typed_input, release_selection,
+    selection_source_range, source_line_start, update_selection_after_move,
+};
 mod app_data;
 mod buffer;
 mod clipboard;
@@ -10,6 +24,7 @@ mod diff_view;
 mod directwrite_probe;
 mod directwrite_render;
 mod document;
+mod document_ui;
 mod file_dialog;
 mod file_io;
 mod file_tree;
@@ -495,8 +510,6 @@ const EXTERNAL_CHECK_TICK: Duration = Duration::from_secs(2);
 /// ログが流れるのを2秒おきに見るのは遅い。ほかの文書は今までどおり
 /// `EXTERNAL_CHECK_TICK`ごとで、見回りの回数は増やさない。
 const READ_ONLY_CHECK_TICK: Duration = Duration::from_millis(500);
-/// 最下行に「いる」とみなす余り（px）。ホイールの止まり方で1px足りないことがある。
-const READ_ONLY_END_SLACK: f32 = 2.0;
 /// ReadOnlyのあいだは縦書き・プレビューへ切り替えない（追加要件 2026-09-15）。
 fn read_only_stays() -> &'static str {
     pick(
@@ -527,137 +540,6 @@ const TILE_CACHE_LIMIT: usize = 6;
 /// of the same refresh; what is left over waits for the next one. Each is about
 /// two megabytes, and allocating that costs more than drawing it (技術検証 7.8).
 const SPARE_TILE_BUFFERS: usize = 16;
-
-/// One pane's caret, selection and pending IME text, all in source bytes.
-///
-/// Both panes keep one of these. Everything here is about the document, not
-/// about how a pane draws it, so the same struct serves either writing
-/// direction: `preferred_line` is the coordinate on the *line* axis to hold on
-/// to when stepping between lines, which is a y in the vertical pane and an x in
-/// the horizontal one. `active_line_start` is only read back by the vertical
-/// pane: it decides which line shows its Markdown and lags the caret on
-/// purpose, while the horizontal pane works the same answer out from its own
-/// caret ([`PaneId::revealed_line`]).
-#[derive(Clone, Debug, Default)]
-struct EditorState {
-    viewer: bool,
-    /// 追加要件 2026-09-15（書き手）: **ReadOnlyで最下行を追っているか。**
-    ///
-    /// ReadOnly（Viewerをソース表示で開いた形）だけが読む。入った時点で立ち、
-    /// 書き手が上へスクロールすると下り、最下行まで戻すとまた立つ——ログを
-    /// 読む人が`tail -f`でしていることを、スクロールだけで言えるようにする。
-    /// **TABが持つ**のは、同じ文書を別のTABで止めて読めるように。
-    follow: bool,
-    caret_source_byte: Option<usize>,
-    selection_anchor_source_byte: Option<usize>,
-    active_line_start: Option<usize>,
-    preedit: String,
-    preferred_line: Option<f32>,
-    /// Whether the selection is a rectangle rather than a run (要件 7.1).
-    ///
-    /// **The two ends are the same two bytes either way** — what changes is
-    /// what is read out of them: a rectangle takes the lines they sit on and
-    /// the columns they sit at, and covers every line between (`selection_ranges`).
-    rectangular: bool,
-    /// Whether `Ctrl+Space` has been pressed and not yet answered (要件 11.4).
-    ///
-    /// **A held Shift that the writer does not have to hold.** While it is on,
-    /// every move extends the selection the way Shift does; it goes off when
-    /// the writer does anything but move — an edit, or a click — and when
-    /// `Ctrl+Space` is pressed again.
-    mark: bool,
-    /// 検索が置いた選択（E1、書き手の指摘 2026-09-09）。
-    ///
-    /// **「その範囲は書き手が選んだものか」を答えるためだけにある。**範囲内検索
-    /// （`[ ]`）は書き手が選んだ範囲を覚えているが、選び直したら新しい範囲に
-    /// なってほしい——ところが検索そのものも選択を動かす（一致を選ぶ）ので、
-    /// 「選択が変わったら取り直す」では**2回目の検索で範囲が一致そのものに
-    /// 潰れる**。ここに置いた最後の一致と今の選択を比べれば、書き手の手が
-    /// 入ったかどうかが分かる。
-    search_selection: Option<(usize, usize)>,
-    /// 行番号から始まった選択（E3）。**押した行の頭のバイト。**
-    ///
-    /// **これがあるあいだ、引くと行ごと選ばれる。**番号を押すことは行を指す
-    /// ことなので、そのまま引いた書き手が指しているのも行である——1画素の
-    /// ぶれで行の選択が字の選択へ変わってしまうと、押しただけのつもりが
-    /// 選び直しになる。ボタンを離すと消える。
-    line_drag: Option<usize>,
-    /// ダブルクリックが選んだ語（E3、書き手の報告 2026-09-10）。
-    ///
-    /// **2回目を離した合図から、選んだ語を守る。**離した合図はカーソルを押した
-    /// 点へ置くので、そのままでは語の途中までしか残らない——「不安定に感じました」
-    /// 「英語では単語選択にならない感じ」の半分はこれである。**引けば語ごと
-    /// 伸びる**のも同じ印で、押し直すまで残る。
-    word_drag: Option<(usize, usize)>,
-    /// 直前の押下——いつ、どこを（E3）。**2回目かどうかを数えるためだけにある。**
-    ///
-    /// 2回目を数えたら空に戻す：**3回目は普通の押下**である。窓の
-    /// `double-clicked`に任せていたときは3回目・4回目にも来ていて、
-    /// 押すたびに語が選び直されるので選択が外れなくなった（書き手の報告
-    /// 2026-09-10：「契機がわからないのですが、選択がはずれなくなります」）。
-    last_click: Option<(Instant, f32, f32)>,
-}
-
-impl EditorState {
-    /// Shared ReadOnly policy; renderers only adapt selection and scroll coordinates.
-    fn set_read_only(&mut self, viewer: bool, source: bool) {
-        self.viewer = viewer;
-        self.follow = viewer && source;
-        self.preedit.clear();
-    }
-
-    fn follow_at(&mut self, position: f32, end: f32, resized: bool) -> bool {
-        if !self.viewer {
-            return false;
-        }
-        if !(self.follow && resized) {
-            self.follow = position >= end.max(0.0) - READ_ONLY_END_SLACK;
-        }
-        self.follow
-    }
-    /// この押下は「2回目」か——ダブルクリックの判定（E3）。
-    ///
-    /// **速さはWindowsのもの**（`GetDoubleClickTime`）。この編集器が独自の秒数を
-    /// 持てば、書き手が他のアプリで慣れた速さと違う反応をすることになる。
-    ///
-    /// **場所も見る。**離れたところを2回押したのは、同じものを2回押したのではない。
-    fn double_click(&mut self, x: f32, y: f32) -> bool {
-        let now = Instant::now();
-        let doubled = self.last_click.is_some_and(|(when, at_x, at_y)| {
-            now.duration_since(when) <= double_click_time()
-                && (x - at_x).abs() <= DOUBLE_CLICK_SLACK
-                && (y - at_y).abs() <= DOUBLE_CLICK_SLACK
-        });
-        // 2回目で区切る。3回目は、次の1回目である。
-        self.last_click = (!doubled).then_some((now, x, y));
-        doubled
-    }
-}
-
-/// 2回目とみなす、押した場所のずれ（画素、E3）。**手は完全には止まらない。**
-const DOUBLE_CLICK_SLACK: f32 = 4.0;
-
-/// Shiftが本当に押されていたか、Windowsに訊く（書き手の報告 2026-09-12）。
-///
-/// **窓が持っている修飾の旗は、変換をまたぐと古くなることがある。**IMEが
-/// 受け取った打鍵はSlintの手前で消えるので、**Shiftを離した合図を見落とすと
-/// 旗は押されたままになる**——そのあとのクリックが「Shiftを押したクリック」と
-/// して届き、押した場所までがいきなり選ばれる。書き手の「突然選択になりました」は
-/// この形で記録に残った（`pointer.p0 phase=Extend`が、押していないのに続けて出た）。
-///
-/// **`GetKeyState`は、いま処理している合図の時点の答え**である——「たったいまの指」を
-/// 返す`GetAsyncKeyState`ではないので、打鍵が溜まっていても、その打鍵のときの
-/// Shiftを答える。Shiftを押したまま矢印で選んでいる途中に、溜まったぶんだけ
-/// 選択が伸びなくなる、ということが起きない。
-fn shift_really_held() -> (bool, bool) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_SHIFT};
-
-    // SAFETY: どちらも仮想キーの番号を1つ渡すだけの呼び出しで、返るのは状態の
-    // 語である。最上位のビットが立っていれば押されている＝符号付きで見れば負。
-    let by_message = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
-    let by_hand = unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } < 0;
-    (by_message, by_hand)
-}
 
 /// 届いたShiftを、Windowsの答えと突き合わせる（書き手の報告 2026-09-12）。
 ///
@@ -692,15 +574,6 @@ fn shift_as_windows_sees_it(cache: &Rc<RefCell<RenderCache>>, said: bool, what: 
     false
 }
 
-/// Windowsで決められたダブルクリックの間隔（E3）。
-fn double_click_time() -> Duration {
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
-
-    // SAFETY: 引数の無い呼び出しで、返るのはミリ秒の数である。失敗しない。
-    let ms = unsafe { GetDoubleClickTime() };
-    Duration::from_millis(u64::from(ms.max(1)))
-}
-
 /// Both panes' states, so that a callback carrying a pane number can reach the
 /// one it names.
 ///
@@ -720,14 +593,7 @@ struct PaneStates {
     slots: Rc<RefCell<Vec<PaneSlot>>>,
 }
 
-/// One pane's own state, and the document it has in front of it.
-#[derive(Clone)]
-struct PaneSlot {
-    state: Rc<RefCell<EditorState>>,
-    /// **Asked at the moment it is needed, never held**: a pane can be showing
-    /// a different document by the time a timer fires.
-    showing: Rc<RefCell<Rc<OpenDocument>>>,
-}
+type PaneSlot = editor_session::EditorSession;
 
 impl PaneStates {
     /// The editor's first pane, on the document it opened with (要件 6.3).
@@ -740,10 +606,7 @@ impl PaneStates {
     /// Make room for a pane. **The new pane is the last**, which is the number
     /// a split hands out.
     fn add(&self, document: &Rc<OpenDocument>) {
-        self.slots.borrow_mut().push(PaneSlot {
-            state: Rc::new(RefCell::new(EditorState::default())),
-            showing: Rc::new(RefCell::new(document.clone())),
-        });
+        self.slots.borrow_mut().push(PaneSlot::new(document.clone()));
     }
 
     /// Take a pane out, and **close the numbering behind it**.
@@ -2429,6 +2292,12 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = window.as_weak();
+    let ime_weak = window.as_weak();
+    window.on_editor_ime_area(move |x, y, w, h, vertical| {
+        if let Some(window) = ime_weak.upgrade() {
+            ime::candidate_area(window.window(), x, y, w, h, vertical);
+        }
+    });
     let focus_cache = render_cache.clone();
     window.on_pane_focus_trace(move |pane, event| {
         if let Some(window) = weak.upgrade()
@@ -4061,11 +3930,6 @@ fn random_paper(light: bool, seed: u64) -> [f32; 3] {
     channels(Color::from_hsva(hue, saturation, value, 1.0))
 }
 
-/// 色の明るさ（0〜1）。TABの名前を明るい字にするかを決める。
-fn luminance(rgb: [f32; 3]) -> f32 {
-    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-}
-
 /// 乱数の種。**標準ライブラリだけで**——ハッシュの鍵は起動ごと・呼ぶごとに違う。
 fn random_seed() -> u64 {
     use std::hash::{BuildHasher, Hasher};
@@ -4319,7 +4183,8 @@ fn close_run_positions(count: usize, active: usize, keep_active: bool) -> Vec<us
 /// they are what the panes are editing, whatever the lists say about anything
 /// else.
 struct Tabs {
-    panels: std::collections::BTreeMap<u32, PaneTabs>,
+    /// Read-only absence of a TAB strip for embedded editors. Never contains a TAB.
+    no_tabs: PaneTabs,
     /// Indexed by [`PaneId::index`], like everything else that has one of
     /// something per pane. **One entry per pane and no more**: a strip nobody
     /// can see is tabs nobody can reach (要件 6.3).
@@ -4339,14 +4204,14 @@ impl Tabs {
     }
 
     fn of(&self, id: PaneId) -> &PaneTabs {
-        if id.is_panel() { return self.panels.get(&id.0).expect("registered panel"); }
+        if id.is_panel() { return &self.no_tabs; }
         &self.panes[self.at(id.index() as usize)]
     }
 
-    fn of_mut(&mut self, id: PaneId) -> &mut PaneTabs {
-        if id.is_panel() { return self.panels.get_mut(&id.0).expect("registered panel"); }
+    fn of_mut(&mut self, id: PaneId) -> Option<&mut PaneTabs> {
+        if id.is_panel() { return None; }
         let at = self.at(id.index() as usize);
-        &mut self.panes[at]
+        self.panes.get_mut(at)
     }
 
     /// Make room for a pane, at the end, which is the number a split hands out.
@@ -5257,7 +5122,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
     };
     let index = {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let existing = strip
             .tabs
             .iter()
@@ -5288,7 +5153,7 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
     };
     let incoming = {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         strip.active = index;
         strip.current().cloned()
     };
@@ -5983,16 +5848,7 @@ fn select_source_range(
     start: usize,
     end: usize,
 ) {
-    {
-        let mut state = state.borrow_mut();
-        state.selection_anchor_source_byte = Some(start);
-        state.caret_source_byte = Some(end);
-        state.active_line_start = Some(source_line_start(source, end));
-        state.preferred_line = None;
-        state.preedit.clear();
-        state.rectangular = false;
-        state.search_selection = None;
-    }
+    editor_interaction::select_range(state, source, start, end);
     id.set_ime_buffer(window, "");
     refresh_pane_from_state(window, cache, document, id, state, source);
 }
@@ -7869,7 +7725,7 @@ fn finish_workspace_change_confirmed(
         let id = PaneId::from_index(index as i32);
         {
             let mut tabs = live.tabs.borrow_mut();
-            let strip = tabs.of_mut(id);
+            let Some(strip) = tabs.of_mut(id) else { return; };
             strip.tabs.clear();
             strip.history.clear();
             strip.at = 0;
@@ -9352,7 +9208,7 @@ fn open_startup_paths(window: &AppWindow, live: &Live, pane: PaneId, paths: &[Pa
         let id = PaneId::from_index(index as i32);
         {
             let mut tabs = live.tabs.borrow_mut();
-            let strip = tabs.of_mut(id);
+            let Some(strip) = tabs.of_mut(id) else { return; };
             strip.tabs.retain(|tab| {
                 tab.document
                     .file
@@ -9558,7 +9414,7 @@ fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, mut ta
     sync_active_tab(window, live);
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         if index >= strip.tabs.len() {
             return;
         }
@@ -10399,7 +10255,7 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
         .collect::<Vec<_>>();
     let mut tabs = live.tabs.borrow_mut();
     for ((id, view), below) in PaneId::all(window).into_iter().zip(views).zip(strips_below) {
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         if let Some(tab) = strip.tabs.get_mut(strip.active) {
             tab.view = view;
             let (open, height, shell, draft) = below;
@@ -10534,6 +10390,8 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
     window.set_document_edited(showing.text.edited());
     if let Some(tab) = live.tabs.borrow().of(focused_pane(window)).current() {
         show_tab_title(window, tab);
+    } else {
+        show_document_title(window, &showing.file.borrow());
     }
     // **The strips and the arrangement are one thing** (要件 8.5), and this is
     // where the strips change. A boundary dragged without touching a strip is
@@ -10555,7 +10413,7 @@ fn note_navigation(live: &Live, id: PaneId, tab: &PaneTab) {
         return;
     }
     let mut tabs = live.tabs.borrow_mut();
-    let strip = tabs.of_mut(id);
+    let Some(strip) = tabs.of_mut(id) else { return; };
     let standing = strip
         .history
         .get(strip.at)
@@ -10611,7 +10469,7 @@ fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
     // **Where it is going, written down before it goes.** Every road out of
     // here records the arrival, and one that found `at` still on the place
     // being left would cut off everything ahead of it.
-    live.tabs.borrow_mut().of_mut(id).at = next;
+    if let Some(strip) = live.tabs.borrow_mut().of_mut(id) { strip.at = next; }
     live.cache.borrow_mut().log_diag(
         "tab",
         &format!(
@@ -10710,7 +10568,7 @@ fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
     sync_active_tab(window, live);
     let Some(incoming) = ({
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         strip.active = index;
         strip.current().cloned()
     }) else {
@@ -10765,6 +10623,7 @@ fn drop_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize,
 /// Emptying the pane it left undivides that pane, the same as closing its last
 /// tab does (要件 6.4). It is the same event: a pane with nothing in it.
 fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, other: PaneId) {
+    if id.is_panel() || other.is_panel() { return; }
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
     let panels = live
@@ -10781,7 +10640,7 @@ fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, 
     }
     let emptied = {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         if index >= strip.tabs.len() {
             return;
         }
@@ -10790,7 +10649,7 @@ fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, 
         strip.active = active_after_close(before, strip.active, index);
         let emptied = strip.tabs.is_empty();
         let arriving = carried.document();
-        let landing = tabs.of_mut(other);
+        let Some(landing) = tabs.of_mut(other) else { return; };
         landing
             .tabs
             .retain(|held| !Rc::ptr_eq(&held.document(), &arriving));
@@ -10836,7 +10695,7 @@ fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, 
 fn move_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize) {
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let last = strip.tabs.len().saturating_sub(1);
         if from > last || to > last || from == to {
             return;
@@ -10899,7 +10758,7 @@ fn add_tab(window: &AppWindow, live: &Live, id: PaneId, mut tab: PaneTab) {
     sync_active_tab(window, live);
     let index = {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         strip.tabs.push(tab.clone());
         strip.active = strip.tabs.len() - 1;
         strip.active
@@ -11041,7 +10900,7 @@ fn open_settings(window: &AppWindow, live: &Live) {
         sync_active_tab(window, live);
         {
             let mut tabs = live.tabs.borrow_mut();
-            let strip = tabs.of_mut(id);
+            let Some(strip) = tabs.of_mut(id) else { return; };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 tab.empty = false;
@@ -11118,7 +10977,7 @@ fn answer_new_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Option<Ter
     };
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active) else {
             return;
@@ -12305,7 +12164,7 @@ fn finish_close_inner(window: &AppWindow, live: &Live, id: PaneId, index: usize,
     }
     let emptied = {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         if index >= strip.tabs.len() {
             return;
         }
@@ -12544,6 +12403,7 @@ fn divide_pane(window: &AppWindow, live: &Live, here: PaneId, split: Split) {
 /// here arrives as nothing, because a strip holds one tab per document.
 fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
     let here = if here.is_panel() { PaneId::from_index(here.screen(window).panel_owner) } else { here };
+    let here = if here.is_panel() { PaneId::from_index(here.screen(window).panel_owner) } else { here };
     // **Every pane to go is named before any of them does** (2026-09-06). The
     // first version asked "which pane is not `here`" once per turn of a loop,
     // and `here` is a number: as soon as a lower-numbered pane went, the
@@ -12561,7 +12421,7 @@ fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
         let mut tabs = live.tabs.borrow_mut();
         others
             .iter()
-            .map(|other| std::mem::take(&mut tabs.of_mut(*other).tabs))
+            .filter_map(|other| tabs.of_mut(*other).map(|strip| std::mem::take(&mut strip.tabs)))
             .collect::<Vec<Vec<PaneTab>>>()
     };
     // **From the far end**, so that the panes still to go keep the numbers they
@@ -12576,7 +12436,7 @@ fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
     }
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(here);
+        let Some(strip) = tabs.of_mut(here) else { return; };
         for tab in carried.into_iter().flatten() {
             // 要件 6.3: one tab per document in a strip. The pane the writer is
             // in almost always already holds what is coming — a split opens the
@@ -12690,7 +12550,7 @@ fn refill_strip(window: &AppWindow, live: &Live, id: PaneId) {
         .collect();
     let number = next_untitled_number(&taken);
     let empty = OpenDocument::untitled(number, window.as_weak());
-    let strip = tabs.of_mut(id);
+    let Some(strip) = tabs.of_mut(id) else { return; };
     strip.tabs.push(PaneTab {
         empty: true,
         ..PaneTab::showing(window, id, empty)
@@ -12768,9 +12628,9 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
     };
     if own {
         spec.paper = channels(paper);
-        spec.ink = terminal_appearance::readable_ink(spec.ink, spec.paper);
+        spec.ink = appearance::readable_ink(spec.ink, spec.paper);
         for ink in &mut spec.heading_ink {
-            *ink = terminal_appearance::readable_ink(*ink, spec.paper);
+            *ink = appearance::readable_ink(*ink, spec.paper);
         }
     }
     if id.is_panel() {
@@ -13998,7 +13858,7 @@ fn publish_word_modes(window: &AppWindow) {
 fn set_word_mode_of(window: &AppWindow, live: &Live, id: PaneId, mode: u32) {
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let at = strip.active;
         let Some(tab) = strip.tabs.get_mut(at) else {
             return;
@@ -15374,7 +15234,8 @@ impl PaneId {
     /// the editing area is one or more panes, so there is no arrangement
     /// without this one in it.
     const FIRST: PaneId = PaneId(0);
-    fn is_panel(self) -> bool { self.0 >= 65536 }
+    const EMBEDDED_START: u32 = 65536;
+    fn is_panel(self) -> bool { self.0 >= Self::EMBEDDED_START }
     fn row(self, window: &AppWindow) -> usize {
         if self.is_panel() { window.get_panes().iter().position(|s| s.id == self.index()).unwrap_or(usize::MAX) } else { self.0 as usize }
     }
@@ -15386,7 +15247,7 @@ impl PaneId {
     /// opinion about how many there are. Everything with one of something per
     /// pane is built by mapping over this.
     fn all(window: &AppWindow) -> Vec<PaneId> {
-        window.get_panes().iter().filter(|s| s.id < 65536)
+        window.get_panes().iter().filter(|s| !s.embedded_panel)
             .map(|s| PaneId(s.id as u32))
             .collect()
     }
@@ -15886,29 +15747,7 @@ impl PaneId {
     /// Where one rendered slice sits. A vertical tile is as tall as the pane and
     /// stacked along x; a horizontal one spans the pane and is stacked along y.
     fn tile(vertical: bool, shift: f32, span: TileSpan, source: Image) -> PreviewTile {
-        let flow_start = span.flow_start + shift as i32;
-        let flow_size = span.flow_size as i32;
-        // 要件 9: where this slice sits across the page. A page that fits its
-        // pane is one slice starting at nothing, which is what every tile was.
-        let cross_start = span.cross_start as i32;
-        let cross_size = span.cross_size as i32;
-        if vertical {
-            PreviewTile {
-                x: flow_start,
-                y: cross_start,
-                width: flow_size,
-                height: cross_size,
-                source,
-            }
-        } else {
-            PreviewTile {
-                x: cross_start,
-                y: flow_start,
-                width: cross_size,
-                height: flow_size,
-                source,
-            }
-        }
+        editor_render::tile(vertical, shift, span, source)
     }
 
     fn set_tiles(self, window: &AppWindow, tiles: Vec<PreviewTile>) {
@@ -16266,119 +16105,17 @@ impl RenderCache {
     /// name. With the axis and the properties behind [`PaneId`], what is left
     /// here is the same arithmetic either way.
     fn refresh_pane_tiles(
-        &mut self,
-        window: &AppWindow,
-        id: PaneId,
-        prefetch: u32,
-    ) -> windows::core::Result<(usize, usize, usize, usize, usize)> {
-        let scroll = id.scroll(window);
-        let shown_flow = id.shown_flow(window);
-        // 要件 9: and where the pane is looking across the flow, which is only
-        // ever anywhere but the near edge when the line is longer than the pane.
-        let scroll_across = id.scroll_across(window);
-        let shown_across = id.shown_across_flow(window);
-        // Which way the tiles stack, and where the sheet puts flow 0, asked before
-        // the cache is borrowed.
-        let vertical = id.vertical(window);
-        let shift = id.page_shift(window);
-        // Taken apart so the engine and the images can be held at once: reaching
-        // through `self` for each of them would borrow the whole cache.
-        let Pane { graphics, view, .. } = self.pane(id);
-        let PaneGraphics {
-            engine,
-            tiles: images,
-            spare,
-            uploaded_bytes,
-        } = graphics;
-        if engine.total_flow_size() == 0 {
-            return Ok((0, 0, 0, 0, 0));
-        }
-        // Tiles are cut out of the blocks the viewport crosses. Their size along
-        // the flow tracks the pane's extent across it, so a taller window makes
-        // tiles narrower rather than making each one costlier to rasterize.
-        let desired =
-            engine.visible_tiles(scroll, shown_flow, prefetch, scroll_across, shown_across);
-
-        // Keyed by the fingerprint, never by position. The fingerprint names one
-        // block's text at one slice of it, so a tile the layout moved is found
-        // again unchanged, and two blocks with the same text share one image.
-        let preedit = view.preedit_range;
-        let keyed = desired
-            .iter()
-            .map(|span| (*span, engine.tile_signature(*span, preedit)))
-            .collect::<Vec<_>>();
-        let mut missing: Vec<(TileSpan, u64)> = Vec::new();
-        for (span, signature) in &keyed {
-            let already = images.contains_key(signature)
-                || missing.iter().any(|(_, queued)| queued == signature);
-            if !already {
-                missing.push((*span, *signature));
-            }
-        }
-        let rendered = missing.len();
-        let mut reused = 0_usize;
-
-        if !missing.is_empty() {
-            let spans = missing.iter().map(|(span, _)| *span).collect::<Vec<_>>();
-            let mut drawn = TileImages {
-                spare,
-                drawing: None,
-                produced: Vec::with_capacity(spans.len()),
-                uploaded: 0,
-                reused: 0,
-            };
-            engine.render_tiles(&spans, preedit, &mut drawn)?;
-            *uploaded_bytes += drawn.uploaded;
-            reused = drawn.reused;
-            for (span, image, pixels) in drawn.produced {
-                let queued = missing.iter().find(|(other, _)| *other == span);
-                let Some((_, signature)) = queued else {
-                    continue;
-                };
-                images.insert(
-                    *signature,
-                    CachedTile {
-                        image,
-                        pixels,
-                        last_flow: span.flow_start as i32,
-                    },
-                );
-            }
-        }
-
-        // Placement is not cached, so a tile that slid along with the document's
-        // growing edge costs one property assignment rather than a rasterization.
-        let tiles = keyed
-            .iter()
-            .filter_map(|(span, signature)| {
-                let cached = images.get_mut(signature)?;
-                cached.last_flow = span.flow_start as i32;
-                Some(PaneId::tile(vertical, shift, *span, cached.image.clone()))
-            })
-            .collect::<Vec<_>>();
-
-        // **What is evicted leaves its buffer behind, for the refresh after
-        // this one.** Not for this one: the pane is still showing the tiles of
-        // the last refresh, so their images are alive until `set_tiles` below
-        // replaces them — drawn into now, a buffer would be copied rather than
-        // reused (Slint's `SharedVector::detach`), which is what allocating one
-        // cost in the first place (技術検証 7.8).
-        let viewport_center = -scroll + shown_flow * 0.5;
-        let wanted = keyed
-            .iter()
-            .map(|(_, signature)| *signature)
-            .collect::<Vec<_>>();
-        evict_distant_tiles(images, spare, &wanted, viewport_center);
-        let spare_held = spare.len();
-
-        let tile_count = tiles.len();
+        &mut self, window: &AppWindow, id: PaneId, prefetch: u32,
+    ) -> windows::core::Result<editor_render::TileCounts> {
+        let viewport = editor_render::TileViewport {
+            scroll: id.scroll(window), shown_flow: id.shown_flow(window),
+            scroll_across: id.scroll_across(window), shown_across: id.shown_across_flow(window),
+            vertical: id.vertical(window), shift: id.page_shift(window),
+        };
+        let pane = self.pane(id);
+        let (tiles, counts) = editor_render::tiles(&mut pane.graphics, pane.view.preedit_range, viewport, prefetch)?;
         id.set_tiles(window, tiles);
-        // **What was asked for, beside what was placed.** A tile whose image is
-        // not in the cache when the placement runs is dropped without a word
-        // (`images.get_mut`), and a pane missing one shows paper where its text
-        // should be — which looks exactly like a document that has not been
-        // drawn yet. The two numbers differing is the only sign from outside.
-        Ok((tile_count, keyed.len(), rendered, reused, spare_held))
+        Ok(counts)
     }
 
     /// 見えている絵の置き場所を、つまみのために渡す（追加要件 2026-09-16）。**描いたときと同じ組み**
@@ -16680,6 +16417,7 @@ fn evict_distant_tiles(
 
 /// What laying one pane out produced.
 struct PaneLayout {
+    comparison_note: String,
     /// The caret in the shown text, after the IME's string was spliced in.
     render_caret: Option<u32>,
     /// The place the view is being held on, in the shown text (要件 8.5).
@@ -16722,228 +16460,33 @@ fn lay_out_pane(
     selection: PaneSelection,
     preedit: &str,
 ) -> Option<PaneLayout> {
-    let mut counts = document.counts.borrow_mut();
-    let styles = counts.get(source, reading_of(window)).line_styles();
+    let screen = id.screen(window);
+    let options = editor_render::LayoutOptions {
+        reading: reading_of(window),
+        preview: id.shows_preview(window), viewer: screen.viewer,
+        vertical: id.vertical(window), zoom: id.zoom(window),
+        scroll: id.scroll(window), viewport: id.shown_flow(window),
+        words: word_mode_with(screen.word_mode as u32),
+        find_showing: window.get_find_open() && window.get_find_pane() == id.index(),
+        needle: screen.find_needle.to_string(), rules: find_rules(window, id),
+    };
     let pane = cache.pane(id);
-
-    let preview_started = Instant::now();
-    // Which text this pane lays out — the whole of the third and fourth modes
-    // (3.12). Everything below is written against `PaneText` and does not ask
-    // which one it got.
-    let slot = &mut pane.view.preview_slot;
-    let shown = pane_text(window, document, id, slot, source, active_line_start);
-    let differences = document.differences();
-    let note = differences
-        .as_ref()
-        .map(|diff| {
-            let target = if document.read_only() {
-                pick("編集中の本文と比較", "Compared with the text being edited")
-            } else {
-                pick(
-                    "外部版（取得時）と比較",
-                    "Compared with the outside version (when read)",
-                )
-            };
-            let grouped = if diff.grouped {
-                pick("・広い変更をまとめて表示", " (wide changes shown together)")
-            } else {
-                ""
-            };
-            say!(
-                "{target}：差分{}箇所{grouped}",
-                "{target}: {} differences{grouped}",
-                diff.ranges.len()
-            )
-        })
-        .unwrap_or_default();
-    id.update_screen(window, |screen| {
-        if screen.comparison_note.as_str() != note {
-            screen.comparison_note = note.into();
-        }
-    });
-    let difference_utf16 = if preedit.is_empty() {
-        differences
-            .as_ref()
-            .map(|diff| {
-                diff.ranges
-                    .iter()
-                    .map(|range| {
-                        let start = shown.utf16_at_source_byte(range.start) as u32;
-                        let end = shown.utf16_at_source_byte(range.end) as u32;
-                        (start, end.saturating_sub(start))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let caret = caret_source_byte.map(|byte| shown.utf16_at_source_byte(byte) as u32);
-    // 要件 8.5: the place this pane is holding its view on, if it still is.
-    // **The caret having moved is the writer saying where to look**, and that
-    // is the end of the hold — one comparison here rather than a flag every
-    // caret-moving path would have to remember to clear.
-    let anchor_utf16 = held_view(pane.view.top_anchor, caret_source_byte)
-        .map(|byte| shown.utf16_at_source_byte(byte) as u32);
-    let selection_utf16 = selection.ends.map(|(start, end)| {
-        (
-            shown.utf16_at_source_byte(start) as u32,
-            shown.utf16_at_source_byte(end) as u32,
-        )
-    });
-    // E1: **探している語のありか**を、組んだ本文の位置へ写す。空の欄では
-    // 一周も歩かない——これは打鍵のたびに通る道である。
-    // **光るのは帯が出ているあいだだけ**（書き手の報告 2026-09-09：「その色を
-    // 解除できません」）。語は面に残り続けるので（F3のため）、語があるかぎり
-    // 光らせると、探し終えた紙が色を持ったままになる。**`Esc`で帯を閉じれば
-    // 消える**——閉じる鍵が消す鍵でもある、というのがいちばん短い説明になる。
-    let showing = window.get_find_open() && window.get_find_pane() == id.index();
-    let needle = if showing {
-        id.screen(window).find_needle.to_string()
-    } else {
-        String::new()
-    };
-    let rules = find_rules(window, id);
-    let scope = rules
-        .within
-        .filter(|_| showing)
-        .map(|(start, end)| {
-            let start = shown.utf16_at_source_byte(start) as u32;
-            let end = shown.utf16_at_source_byte(end) as u32;
-            (start, end.saturating_sub(start))
-        })
-        .filter(|(_, length)| *length > 0);
-    let matches = if needle.is_empty() {
-        Vec::new()
-    } else {
-        find::Search::new(&needle, rules)
-            .map(|search| search.spans(source, MAX_SHOWN_MATCHES))
-            .unwrap_or_default()
-            .into_iter()
-            // **いま選ばれている一致には敷かない。**そこは選択が濃く出して
-            // いるので、下に薄いのを重ねると同じ語なのに3段の濃さになる
-            // （書き手の報告 2026-09-09：「色の変わり方が壊れています」）。
-            .filter(|span| Some(*span) != selection.ends)
-            .map(|(start, end)| {
-                let start = shown.utf16_at_source_byte(start) as u32;
-                let end = shown.utf16_at_source_byte(end) as u32;
-                // **`selection_rects`が取るのは「始まりと長さ」**であって
-                // 「始まりと終わり」ではない（書き手の報告 2026-09-09、
-                // `検索.png`：語ではなく行が塗られていた。終わりを長さとして
-                // 渡していたので、7文字目の2文字が「7文字目から9文字ぶん」に
-                // なっていた）。選択の走りも同じ形で持っている。
-                (start, end.saturating_sub(start))
-            })
-            // 組んだ本文で幅を持たないものは色を付けない——プレビューでは
-            // ルビの読みのように**隠れている字**があり、そこに入った一致は
-            // 写した先で長さ0になる。
-            .filter(|(_, length)| *length > 0)
-            .collect()
-    };
-    let (render_text, render_caret, preedit_range) = text_with_preedit(&shown, caret, preedit);
-    let preview_ms = elapsed_ms(preview_started);
-
-    let layout_started = Instant::now();
-    let engine = &mut pane.graphics.engine;
-    // **下書きが乗っている行の印だけを外す**（書き手の報告 2026-09-12：
-    // 「横書きで作業すると、IMEをON/OFFするたびに全体が上下に揺れます。
-    // 1行くらい揺れる」）。
-    //
-    // 印は太字と斜体で、**字の幅が変わる＝折り返しが変わる**。ここは変換が
-    // 立っているあいだ**文書じゅうの印を外して**いたので、変換のたびに印のある
-    // ブロックが全部組み直され、**文書の高さが1〜2行ぶん変わって、下にある本文が
-    // 丸ごと動いていた**（記録：`measured=48`と`content=17481↔17552`が交互に出る）。
-    //
-    // ずれるのは**下書きが挿さった行の、挿さった場所より後ろ**だけである。
-    // 外すのもその1行でよく、**印の無い行に下書きを入れるのなら1行も外さない**
-    // ——ほとんどの打鍵はこちらで、組み直しは起きない。
-    let masked;
-    let marks = match caret.filter(|_| !preedit.is_empty()) {
-        None => shown.marks(),
-        Some(caret) => {
-            let at = shown.shown_byte_at_utf16(caret as usize);
-            // 印は論理行ごとに並んでいる（`StyledText::spans`）ので、数えるのは
-            // 挿さった場所より前の改行である。**数えるのは下書きを入れる前の
-            // 本文**——入れたあとの`render_text`でも同じ数になるが、下書きに
-            // 改行は無いという当てにしなくてよい。
-            let line = shown.text()[..at].matches('\n').count();
-            match shown.marks().get(line) {
-                Some(spans) if !spans.is_empty() => {
-                    masked = marks_without_line(shown.marks(), line);
-                    masked.as_slice()
+    match editor_render::layout(&mut pane.graphics, &mut pane.view, document, source, line_fit, typography,
+        active_line_start, caret_source_byte, selection, preedit, &options) {
+        Ok(layout) => {
+            id.update_screen(window, |screen| {
+                if screen.comparison_note.as_str() != layout.comparison_note {
+                    screen.comparison_note = layout.comparison_note.clone().into();
                 }
-                _ => shown.marks(),
-            }
+            });
+            Some(layout)
         }
-    };
-    // **The boxes are not held back the way the marks are.** A composition sits
-    // at the caret, the caret's line is the active one, and the active line has
-    // no box over its marker (要件 7.3.1) — so there is no range here for a
-    // preedit to move. Holding them back would instead make the text jump by an
-    // indent for as long as somebody is converting.
-    let marked = StyledText::marked(&render_text, styles, marks);
-    let styled = marked
-        .with_markers(shown.markers())
-        .with_source_line(shown.source_line());
-    // 要件 7.9: **この面のモードの語を渡す**（`set_words`）。モードは文書ごと
-    // なので、2つのペインが別の作品を開いていれば別の色分けになる。
-    // **組み直しの判定には入らない**——幾何を1画素も動かさないので、変わっても
-    // タイルだけが古くなる（技術検証 9.3.1）。
-    engine.set_words(word_mode_with(id.screen(window).word_mode as u32));
-    // 追加要件 2026-09-15: 画像の行に描く絵。これも幾何の外（大きさは箱が持つ）。
-    engine.set_pictures(shown.pictures());
-    let through = engine
-        .viewport_end_utf16(id.scroll(window), id.shown_flow(window))
-        .max(render_caret.unwrap_or(0))
-        .max(anchor_utf16.unwrap_or(0));
-    let measured = match engine.update_interactive(styled, line_fit, typography, through) {
-        Ok(measured) => measured,
         Err(error) => {
             let label = id.label(window);
-            window.tell_pane(
-                say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into(),
-            );
-            return None;
+            window.tell_pane(say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into());
+            None
         }
-    };
-    let layout_ms = elapsed_ms(layout_started);
-
-    // **Cut into runs only now.** A rectangle's runs are one per *layout* line,
-    // and which lines those are is what the update just decided (要件 7.1).
-    let runs = match selection_utf16 {
-        Some((start, end)) if selection.rectangular => {
-            rectangular_runs(window, id, engine, start, end)
-        }
-        Some((start, end)) if start < end => vec![(start, end - start)],
-        _ => Vec::new(),
-    };
-    let selection_source = runs
-        .iter()
-        .map(|(start, length)| {
-            (
-                shown.source_byte_at_utf16(*start as usize),
-                shown.source_byte_at_utf16((*start + *length) as usize),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    pane.view.caret_utf16 = render_caret;
-    pane.view.selection_utf16 = runs.clone();
-    pane.view.difference_utf16 = difference_utf16;
-    pane.view.selection_source = selection_source.clone();
-    pane.view.preedit_range = preedit_range;
-
-    Some(PaneLayout {
-        render_caret,
-        anchor_utf16,
-        selection: runs,
-        selection_source,
-        matches,
-        scope,
-        measured,
-        preview_ms,
-        layout_ms,
-    })
+    }
 }
 
 /// Lay one pane out, place its caret and selection, draw what it shows, and
@@ -17389,7 +16932,7 @@ fn switch_shell_confirmed(window: &AppWindow, live: &Live, id: PaneId, shell: Te
     }
     {
         let mut tabs = live.tabs.borrow_mut();
-        let strip = tabs.of_mut(id);
+        let Some(strip) = tabs.of_mut(id) else { return; };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active) else {
             return;
@@ -17946,7 +17489,7 @@ fn store_below_on_tab(window: &AppWindow, live: &Live, id: PaneId) {
     };
     let draft = id.screen(window).below_draft.to_string();
     let mut tabs = live.tabs.borrow_mut();
-    let strip = tabs.of_mut(id);
+    let Some(strip) = tabs.of_mut(id) else { return; };
     let active = strip.active;
     if let Some(tab) = strip.tabs.get_mut(active) {
         tab.below.open = open;
@@ -18144,6 +17687,7 @@ fn refresh_pane(
         return;
     };
     let PaneLayout {
+        comparison_note: _,
         render_caret,
         anchor_utf16,
         selection,
@@ -19283,26 +18827,6 @@ fn selected_runs(cache: &Rc<RefCell<RenderCache>>, id: PaneId) -> Vec<(usize, us
 /// and an x where it runs across — the same measurement the up and down keys
 /// hold on to (`PaneId::line_anchor`), so a rectangle drawn by moving the caret
 /// keeps the width the caret was already keeping.
-fn rectangular_runs(
-    window: &AppWindow,
-    id: PaneId,
-    engine: &mut TextEngine,
-    start: u32,
-    end: u32,
-) -> Vec<(u32, u32)> {
-    let vertical = id.vertical(window);
-    let (Ok(from), Ok(to)) = (engine.caret_geometry(start), engine.caret_geometry(end)) else {
-        return Vec::new();
-    };
-    let lo = PaneId::line_anchor(vertical, &from);
-    let hi = PaneId::line_anchor(vertical, &to);
-    engine
-        .rectangle_runs(start, end, lo, hi)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(start, end)| (start, end - start))
-        .collect()
-}
 
 /// What a pane has selected, before it is cut into runs (要件 7.1).
 ///
@@ -19329,31 +18853,6 @@ impl PaneSelection {
     fn run(self) -> Vec<(usize, usize)> {
         self.ends.into_iter().collect()
     }
-}
-
-fn selection_source_range(state: &EditorState) -> Option<(usize, usize)> {
-    let anchor = state.selection_anchor_source_byte?;
-    let focus = state.caret_source_byte?;
-    (anchor != focus).then_some((anchor.min(focus), anchor.max(focus)))
-}
-
-fn update_selection_after_move(
-    state: &mut EditorState,
-    source_byte: usize,
-    next_source_byte: usize,
-    extend_selection: bool,
-) -> Option<(usize, usize)> {
-    // **The mark is a Shift nobody is holding** (要件 11.4), so it is read in
-    // the one place a move decides what the selection becomes.
-    if extend_selection || state.mark {
-        if state.selection_anchor_source_byte.is_none() {
-            state.selection_anchor_source_byte = Some(source_byte);
-        }
-    } else {
-        state.selection_anchor_source_byte = Some(next_source_byte);
-    }
-    state.caret_source_byte = Some(next_source_byte);
-    selection_source_range(state)
 }
 
 /// Where in the document a point on a pane is.
@@ -19541,134 +19040,20 @@ fn update_pane_selection(
     let Some(hit) = hit else {
         return;
     };
-    // E3: **行番号を押したら、その論理行が選ばれる。**番号は本文ではないので、
-    // そこへカーソルを置いても書き手の言ったことにならない——押した先が行その
-    // ものであるほうが、次にすること（動かす・複製する・消す）に繋がる。
-    // **押した瞬間だけ**：そのまま引けば、行の頭から普通の選択が伸びる。
-    let from_numbers = match phase {
-        SelectionPhase::Begin => hit.in_numbers.then_some(hit.byte),
-        // 引いているあいだは、始まりが番号だったかどうかで決まる——途中で
-        // ポインタが本文へ入っても、選んでいるのは行のままである。
-        _ => state.borrow().line_drag,
-    };
-    if from_numbers.is_none() && phase == SelectionPhase::Begin {
-        // **本文で押し直したら、行の選択は終わり。**離した合図（`End`）は
-        // 窓の外へポインタが出ると来ないことがあるので、次に押した回でも畳む。
-        state.borrow_mut().line_drag = None;
-    }
-    // E3: ダブルクリックが選んだ語（書き手の報告 2026-09-10）。
-    let chosen_word = match phase {
-        SelectionPhase::Begin => None,
-        _ => state.borrow().word_drag,
-    };
-    if let Some((first_start, first_end)) = chosen_word {
-        if phase == SelectionPhase::Update {
-            // **押したまま動かせば、語ごと伸びる。**押した語は必ず入る。
-            let (start, end) = document::word_around(&source, hit.letter);
-            let (start, end) = (first_start.min(start), first_end.max(end));
+    let decision = editor_interaction::pointer(state, &source, hit, x, y, phase, id.vertical(window));
+    let (hit, next_active_line_start, selection) = match decision {
+        editor_interaction::PointerResult::NoChange => return,
+        editor_interaction::PointerResult::Range(start, end) => {
+            cache.borrow_mut().log_diag(&format!("pointer.{}", id.diag_suffix()),
+                &format!("phase={phase:?} range={start}..{end}"));
             select_source_range(window, cache, document, state, id, &source, start, end);
             return;
         }
-        // **離した合図では、何もしない**（書き手の報告 2026-09-10：「white catは
-        // 2語です」「不安定に感じました」）。ここでカーソルを押した点へ置くと、
-        // アンカーは語の頭のままなので語の途中までの選択になり、離した点が隣の語に
-        // 寄っていれば2語ぶんに広がる——**選んだ語は、選んだそのままでよい。**
-        let mut state = state.borrow_mut();
-        state.word_drag = None;
-        state.mark = false;
-        return;
-    }
-    // 2回目の押下は語を選ぶ（E3）。**数えるのはここ**——窓の`double-clicked`は
-    // 離した合図の前後どちらで来るか決まっておらず、3回目・4回目にも来る
-    // （それが「契機がわからないのですが、選択がはずれなくなります」であった）。
-    // ここで数えれば、2回目で区切って3回目は普通の押下に戻せる。
-    if phase == SelectionPhase::Begin {
-        let doubled = {
-            let mut state = state.borrow_mut();
-            state.word_drag = None;
-            state.double_click(x, y)
-        };
-        if doubled && !hit.in_numbers {
-            let (start, end) = document::word_around(&source, hit.letter);
-            state.borrow_mut().word_drag = Some((start, end));
-            cache.borrow_mut().log_diag(
-                &format!("pointer.{}", id.diag_suffix()),
-                &format!(
-                    "word pane={} letter={} span={start}..{end}",
-                    id.log_name(),
-                    hit.letter,
-                ),
-            );
-            select_source_range(window, cache, document, state, id, &source, start, end);
-            return;
-        }
-    }
-    if let Some(anchor) = from_numbers {
-        let (first, _) = document::line_span(&source, anchor);
-        let (start, end) = document::line_span(&source, hit.byte);
-        // 上へ引けば上の行まで、下へ引けば下の行まで。**始めた行は必ず入る。**
-        let (start, end) = (first.min(start), first.max(end));
-        {
-            let mut state = state.borrow_mut();
-            state.line_drag = (phase != SelectionPhase::End).then_some(anchor);
-        }
-        cache.borrow_mut().log_diag(
-            &format!("pointer.{}", id.diag_suffix()),
-            &format!(
-                "numbers pane={} {phase:?} lines={start}..{end}",
-                id.log_name()
-            ),
-        );
-        select_source_range(window, cache, document, state, id, &source, start, end);
-        return;
-    }
-    let hit = hit.byte;
-
-    let next_active_line_start = source_line_start(&source, hit);
-    cache.borrow_mut().log_diag(
-        &format!("pointer.{}", id.diag_suffix()),
-        &format!(
-            "phase={phase:?} x={x:.1} y={y:.1} scroll={scroll:.0} \
-             hit_byte={hit} active={active_line_start:?} preview={preview}",
-            scroll = id.scroll(window),
-            preview = u8::from(id.shows_preview(window)),
-        ),
-    );
-    let selection = {
-        let mut state = state.borrow_mut();
-        // **A standing mark answers the mouse too** (書き手の報告 2026-09-07).
-        // 要件 11.4's mark is a Shift nobody is holding, and a Shift that only
-        // the arrow keys could extend was half a key: the writer who asked for
-        // a selection and then pointed at where it should end had said the
-        // whole of it. So the press keeps the anchor the mark dropped — the
-        // rectangle with it (要件 7.1) — and the release puts the mark down,
-        // which is what makes the *next* click plain again and so the way to
-        // let a selection go.
-        let held = state.mark && phase != SelectionPhase::Extend;
-        if !held && (phase == SelectionPhase::Begin || state.selection_anchor_source_byte.is_none())
-        {
-            state.selection_anchor_source_byte = Some(hit);
-            state.rectangular = false;
-        }
-        if phase == SelectionPhase::End {
-            state.mark = false;
-        }
-        state.caret_source_byte = Some(hit);
-        // Only the vertical pane keeps the revealed line: the horizontal one
-        // derives it from its caret on every lookup, so writing it there would
-        // be storing an answer that is recomputed anyway.
-        //
-        // **縦書きは離したときに開く**（書き手の報告 2026-09-16：「縦書きだと、2行目を選択する
-        // ことが難しかった」）。縦書きは文書の終わり側から積むので、押した行が開いて広がると
-        // その行が右へずれる——画像の行なら絵の幅ぶん——、離した点は隣の行に落ち、カーソルが
-        // 行を出てまた閉じていた。押したあいだは押したときの組みのまま答える。
-        if id.vertical(window) && phase == SelectionPhase::End {
-            state.active_line_start = Some(next_active_line_start);
-        }
-        state.preedit.clear();
-        state.preferred_line = None;
-        pane_selection(&state)
+        editor_interaction::PointerResult::Caret { hit, next_active_line_start, selection } =>
+            (hit, next_active_line_start, selection),
     };
+    cache.borrow_mut().log_diag(&format!("pointer.{}", id.diag_suffix()),
+        &format!("phase={phase:?} x={x:.1} y={y:.1} hit_byte={hit} active={active_line_start:?}"));
     id.set_ime_buffer(window, "");
 
     if id.vertical(window) && phase == SelectionPhase::Update {
@@ -20209,7 +19594,7 @@ fn insert_pane_text(
     }
     let state = states.of(id);
     let started = Instant::now();
-    let mut source = document.text.borrow().clone();
+    let source = document.text.borrow().clone();
     let cloned_ms = elapsed_ms(started);
     if !fits_document_limit(&source, &input) {
         window.tell_tab(over_limit_message(&input).into());
@@ -20238,15 +19623,7 @@ fn insert_pane_text(
     } else {
         input
     };
-    // What the change took out, for the undo that puts it back (要件 7.1).
-    // Read before the text moves, because afterwards there is nowhere to read
-    // it from.
-    let removed = match selection {
-        Some((start, end)) => source[start..end].to_owned(),
-        None => String::new(),
-    };
     let at = if let Some(range) = selection {
-        replace_source_range(&mut source, range, &input);
         range.0
     } else if id.vertical(window) && id.shows_preview(window) {
         // A Tab at the start of a heading has to land in front of a marker that
@@ -20275,34 +19652,16 @@ fn insert_pane_text(
         let shown = preview.utf16_at_source_byte(caret);
         let at = vertical_insertion_source_byte(&source, preview, shown, indent_line_start);
         drop(borrowed);
-        source.insert_str(at, &input);
         at
     } else {
         // Nothing is hidden here, so there is no marker to insert in front of
         // and the caret is already a position in the document.
-        source.insert_str(caret, &input);
         caret
     };
-    let next = at + input.len();
-    {
-        let mut state = state.borrow_mut();
-        state.caret_source_byte = Some(next);
-        state.selection_anchor_source_byte = Some(next);
-        state.active_line_start = Some(source_line_start(&source, next));
-        state.preedit.clear();
-        state.preferred_line = None;
-        // 要件 11.4: the mark was a selection being made, and it has been
-        // answered — the text it named is gone or replaced.
-        state.mark = false;
-    }
-    let change = Change {
-        at,
-        removed: removed.len(),
-        inserted: input.len(),
-    };
-    document.record(at, removed, input);
+    let end = selection.map_or(at, |range| range.1);
+    let session = editor_session::EditorSession::with_state(document.clone(), state);
     let stored = Instant::now();
-    *document.text.borrow_mut() = source.clone();
+    let Some((source, next, change)) = session.insert_at(source, at, end, input) else { return; };
     let stored_ms = elapsed_ms(stored);
     id.draw_edit(window, states, cache, document, &source, Some(next), change);
     let name = id.log_name();
@@ -20707,31 +20066,9 @@ fn undo_in_pane(
         return;
     }
     let state = states.of(id);
-    let mut source = document.text.borrow().clone();
-    let moved = {
-        let mut history = document.history.borrow_mut();
-        if forwards {
-            history.redo_into(&mut source)
-        } else {
-            history.undo_into(&mut source)
-        }
-    };
-    let Some((caret, change)) = moved else {
-        return;
-    };
-    // A composition that is still open belongs to the text that was there
-    // before this took it back.
+    let session = editor_session::EditorSession::with_state(document.clone(), state);
+    let Some((source, caret, change)) = session.undo(forwards) else { return; };
     id.set_ime_buffer(window, "");
-    {
-        let mut state = state.borrow_mut();
-        state.caret_source_byte = Some(caret);
-        state.selection_anchor_source_byte = Some(caret);
-        state.active_line_start = Some(source_line_start(&source, caret));
-        state.preedit.clear();
-        state.preferred_line = None;
-    }
-    *document.text.borrow_mut() = source.clone();
-    document.text.reconcile_saved();
     id.draw_edit(
         window,
         states,
@@ -20811,36 +20148,6 @@ fn toggle_mark(
     };
     window.tell_pane(told.into());
     refresh_pane_from_state(window, cache, document, id, &state, &source);
-}
-
-/// 選んでいる途中を畳んで、畳むものがあったかを返す（書き手の報告 2026-09-12）。
-///
-/// **選び始める道はいくつもあり、降りる道は1つでよい。**`Ctrl+Space`の印
-/// （要件 11.4）は同じ鍵をもう一度押せば下りるが、**押した覚えのない書き手に
-/// その鍵は無い**——「打鍵中に、選択が始まり戻れなくなり」は、始めたつもりが
-/// 無いからこそ終わらせ方も分からない、という形である。だから見るのは
-/// 「どうやって始まったか」ではなく「いま選んでいる途中か」だけにする。
-///
-/// **カーソルは動かさない。**畳むのは選択のほうで、書き手が字を打つ場所は
-/// 打つ前と同じところにある。
-fn release_selection(state: &mut EditorState) -> bool {
-    let selecting = state.mark
-        || state.line_drag.is_some()
-        || state.word_drag.is_some()
-        || !state.preedit.is_empty()
-        || selection_source_range(state).is_some();
-    if !selecting {
-        return false;
-    }
-    state.mark = false;
-    state.rectangular = false;
-    state.line_drag = None;
-    state.word_drag = None;
-    // 選択はカーソルのところへ畳む。**本文は動かさない**——打った字が選択を
-    // 置き換えるのは`insert_pane_text`のほうで、ここは何も消さない。
-    state.selection_anchor_source_byte = state.caret_source_byte;
-    state.preedit.clear();
-    true
 }
 
 /// Escapeで、選んでいる途中から戻る（書き手の報告 2026-09-12）。
@@ -21285,30 +20592,8 @@ fn splice_source(
         window.tell_tab(viewer_cannot_edit().into());
         return;
     }
-    if start >= end {
-        return;
-    }
-    let state = states.of(id);
-    let mut source = document.text.borrow().clone();
-    let removed = source[start..end].to_owned();
-    replace_source_range(&mut source, (start, end), text);
-    let caret = caret.min(source.len());
-    {
-        let mut state = state.borrow_mut();
-        state.caret_source_byte = Some(caret);
-        state.selection_anchor_source_byte = Some(caret);
-        state.active_line_start = Some(source_line_start(&source, caret));
-        state.preferred_line = None;
-        state.mark = false;
-        state.rectangular = false;
-    }
-    let change = Change {
-        at: start,
-        removed: removed.len(),
-        inserted: text.len(),
-    };
-    document.record(start, removed, text.to_owned());
-    *document.text.borrow_mut() = source.clone();
+    let session = editor_session::EditorSession::with_state(document.clone(), states.of(id));
+    let Some((source, caret, change)) = session.splice(start, end, text, caret) else { return; };
     id.draw_edit(
         window,
         states,
@@ -21352,45 +20637,7 @@ fn move_pane_caret(
             return;
         };
         let MeasuredPane { shown, engine } = measured;
-        let at = shown.utf16_at_source_byte(caret) as u32;
-        match direction {
-            -1 => Ok((shown.previous_grapheme(caret), None)),
-            1 => Ok((shown.next_grapheme(caret), None)),
-            // 下の`hidden_indent`で跨ぐ。ここは1歩ぶんの答えだけを出す。
-            // 要件 11.4's `Alt+B` and `Alt+F`. **Asked of the text the pane
-            // laid out**, like the grapheme steps beside them (技術検証 3.12):
-            // a word is a run of the characters the writer can see, and in the
-            // preview the markers are not among them.
-            -3 | 3 => {
-                let text = shown.text();
-                let at = shown.shown_byte_at_utf16(at as usize);
-                let moved = if direction < 0 {
-                    document::previous_word_boundary(text, at)
-                } else {
-                    document::next_word_boundary(text, at)
-                };
-                let landed = shown.source_byte_at_utf16(utf16_at_byte(text, moved));
-                Ok((landed, None))
-            }
-            -2 | 2 => {
-                let anchor = match preferred_line {
-                    Some(anchor) => Ok(anchor),
-                    None => {
-                        let geometry = engine.caret_geometry(at);
-                        geometry.map(|caret| PaneId::line_anchor(id.vertical(window), &caret))
-                    }
-                };
-                anchor.and_then(|anchor| {
-                    engine
-                        .move_caret_by_line(at, direction, Some(anchor))
-                        .map(|hit| {
-                            let position = hit.utf16_position as usize;
-                            (shown.source_byte_at_utf16(position), Some(anchor))
-                        })
-                })
-            }
-            _ => Ok((caret, None)),
-        }
+        editor_interaction::move_caret(engine, shown, caret, direction, preferred_line, id.vertical(window))
     };
 
     let (next, next_preferred) = match moved {
@@ -21657,41 +20904,6 @@ fn carry_state_across(state: &Rc<RefCell<EditorState>>, change: Change, source: 
     // is in bytes and the position it lands on has to be one a slice can start
     // at (6.7).
     clamp_state_into(state, source);
-}
-
-fn source_line_start(source: &str, source_byte: usize) -> usize {
-    let source_byte = source_byte.min(source.len());
-    source[..source_byte]
-        .rfind('\n')
-        .map(|newline| newline + 1)
-        .unwrap_or(0)
-}
-
-/// Drop what a text field hands over that a document should not hold: control
-/// characters and the private-use codepoints some IMEs emit. Both panes type
-/// through this.
-fn normalize_typed_input(input: &str) -> String {
-    // A Windows clipboard hands over CRLF, and mapping each half of it to a line
-    // break would double every one. Typed input never contains a carriage
-    // return, so the common path allocates nothing.
-    let input = if input.contains('\r') {
-        Cow::Owned(input.replace("\r\n", "\n"))
-    } else {
-        Cow::Borrowed(input)
-    };
-    input
-        .chars()
-        .filter_map(|character| match character {
-            '\r' => Some('\n'),
-            '\n' | '\t' => Some(character),
-            character
-                if !character.is_control() && !('\u{e000}'..='\u{f8ff}').contains(&character) =>
-            {
-                Some(character)
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 /// What to say when text is turned away for being over the limit.
