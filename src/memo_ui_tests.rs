@@ -1297,3 +1297,89 @@ fn standalone_draft_keeps_end_visible_after_long_text_and_resize() {
     window.invoke_editor_undo(false);
     assert!(window.get_text().ends_with("末尾"));
 }
+
+#[test]
+fn standalone_draft_reports_real_ime_cell_at_bottom_after_scroll_and_resize() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = QuickDraft::new().unwrap();
+    crate::draft_editor::install(&window);
+    let areas = Rc::new(RefCell::new(Vec::new()));
+    let reported = areas.clone();
+    window.on_editor_ime_area(move |x, y, w, h, vertical| reported.borrow_mut().push((x, y, w, h, vertical)));
+    surface.set_size(slint::PhysicalSize::new(690, 340));
+    window.show().unwrap();
+    window.invoke_take_focus();
+    for (width, height) in [(690, 340), (400, 240)] {
+        surface.set_size(slint::PhysicalSize::new(width, height));
+        slint::platform::update_timers_and_animations();
+        surface.draw_if_needed(|renderer| {
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (width * height) as usize];
+            renderer.render(&mut pixels, width as usize);
+        });
+        window.set_text("日本語の行\n".repeat(80).into());
+        window.invoke_set_caret(window.get_text().len() as i32);
+        window.invoke_editor_text("末尾".into());
+        areas.borrow_mut().clear();
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(5));
+            slint::platform::update_timers_and_animations();
+            surface.draw_if_needed(|renderer| {
+                let mut pixels = vec![slint::Rgb8Pixel::default(); (width * height) as usize];
+                renderer.render(&mut pixels, width as usize);
+            });
+        }
+        let screen = window.get_editor_screen();
+        let &(x, y, w, h, vertical) = areas.borrow().last().expect("focused shared editor reports its native IME area");
+        assert!(!vertical);
+        assert_eq!((w, h), (screen.caret_width, screen.caret_height));
+        assert!(h > 10.0, "IME exclusion must not use the hidden 1px font");
+        assert!(x >= 0.0 && y >= 0.0 && y + h <= height as f32,
+            "native area=({x},{y},{w},{h}), window={width}x{height}, caret_y={}, scroll={}, viewport={}",
+            screen.caret_y, screen.scroll_y, screen.shown_height);
+        assert!(screen.scroll_y < 0.0);
+    }
+}
+
+#[test]
+fn editor_ime_exclusion_tracks_vertical_heading_size_without_moving_input_focus() {
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    surface.set_size(slint::PhysicalSize::new(1000, 740));
+    publish_panes(&window, 1);
+    let id = PaneId::from_index(0);
+    let areas = Rc::new(RefCell::new(Vec::new()));
+    let reported = areas.clone();
+    window.on_editor_ime_area(move |x, y, w, h, vertical| reported.borrow_mut().push((x, y, w, h, vertical)));
+    id.update_screen(&window, |s| {
+        s.empty = false;
+        s.width = 950.0;
+        s.height = 620.0;
+        s.content_width = 1000;
+        s.content_height = 2000;
+        s.caret_visible = true;
+        s.caret_x = 300.0;
+        s.caret_y = 300.0;
+        s.ime_anchor_x = 15000.0;
+        s.ime_anchor_y = 15000.0;
+    });
+    window.show().unwrap();
+    for (vertical, w, h) in [(false, 2.0, 22.0), (true, 22.0, 2.0), (true, 52.0, 2.0)] {
+        areas.borrow_mut().clear();
+        id.update_screen(&window, |s| { s.vertical = vertical; s.caret_width = w; s.caret_height = h; });
+        window.set_focus_generation(window.get_focus_generation() + 1);
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(5));
+            slint::platform::update_timers_and_animations();
+            surface.draw_if_needed(|renderer| {
+                let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+                renderer.render(&mut pixels, 1000);
+            });
+        }
+        let &(x, y, actual_w, actual_h, actual_vertical) = areas.borrow().last().expect("main editor reports its native IME area");
+        assert_eq!((actual_w, actual_h, actual_vertical), (w, h, vertical));
+        assert!(x > 0.0 && x < 1000.0 && y > 0.0 && y < 740.0,
+            "candidate position follows the real cell, not the clamped/offscreen input anchor");
+    }
+}

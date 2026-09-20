@@ -2292,6 +2292,12 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = window.as_weak();
+    let ime_weak = window.as_weak();
+    window.on_editor_ime_area(move |x, y, w, h, vertical| {
+        if let Some(window) = ime_weak.upgrade() {
+            ime::candidate_area(window.window(), x, y, w, h, vertical);
+        }
+    });
     let focus_cache = render_cache.clone();
     window.on_pane_focus_trace(move |pane, event| {
         if let Some(window) = weak.upgrade()

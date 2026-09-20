@@ -383,6 +383,12 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
 }
 
 pub(crate) fn install(window: &QuickDraft) {
+    let weak = window.as_weak();
+    window.on_editor_ime_area(move |x, y, w, h, vertical| {
+        if let Some(window) = weak.upgrade() {
+            ime::candidate_area(window.window(), x, y, w, h, vertical);
+        }
+    });
     let document = OpenDocument::with_events(
         DocumentFile::untitled(0),
         window.get_text().to_string(),

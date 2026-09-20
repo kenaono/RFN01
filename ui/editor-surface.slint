@@ -9,6 +9,28 @@ import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, PreviewSelecti
 export component EditorSurface inherits Rectangle {
     in property <bool> standalone: false;
     out property <bool> input-focused: ime-input.has-focus;
+    callback ime-area(float, float, float, float, bool);
+    // Focus lives on the clipped input; native candidates exclude the actual
+    // rendered cell, including large headings. Run after Slint's own IME update.
+    property <length> native-ime-x: page.absolute-position.x + root.caret-x * 1px;
+    property <length> native-ime-y: page.absolute-position.y + root.caret-y * 1px;
+    changed native-ime-x => { native-ime-update.start(); }
+    changed native-ime-y => { native-ime-update.start(); }
+    changed caret-width => { native-ime-update.start(); }
+    changed caret-height => { native-ime-update.start(); }
+    changed vertical => { native-ime-update.start(); }
+    changed input-focused => { native-ime-update.start(); }
+    changed ime-buffer => { native-ime-update.start(); }
+    native-ime-update := Timer {
+        interval: 1ms;
+        triggered => {
+            self.stop();
+            if root.input-focused && root.writing && !root.terminal && !root.settings && root.caret-visible {
+                root.ime-area(root.native-ime-x / 1px, root.native-ime-y / 1px,
+                    root.caret-width, root.caret-height, root.vertical);
+            }
+        }
+    }
     in property <bool> embedded-panel;
     callback key-number(string) -> int;
     in property <bool> vertical;
@@ -603,6 +625,7 @@ export component EditorSurface inherits Rectangle {
                                 }
                             }
                             changed preedit-text => {
+                                native-ime-update.start();
                                 if !root.settings {
                                     if self.preedit-text != "" {
                                         root.had-preedit = true;

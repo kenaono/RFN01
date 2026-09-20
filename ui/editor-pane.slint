@@ -411,6 +411,7 @@ export component EditorPane inherits Rectangle {
     callback home-end(bool, bool, bool);
     /// This pane now has the keyboard.
     callback focus-taken();
+    callback ime-area(float, float, float, float, bool);
     /// 紙の周りの余白が押された——このPaneへ移る（書き手の報告 2026-09-15）。
     callback margin-pressed();
     callback focus-trace(string);
@@ -1803,6 +1804,7 @@ export component EditorPane inherits Rectangle {
             move-caret(a0, a1) => { root.move-caret(a0, a1); }
             home-end(a0, a1, a2) => { root.home-end(a0, a1, a2); }
             focus-taken() => { root.focus-taken(); }
+            ime-area(x, y, w, h, vertical) => { root.ime-area(x, y, w, h, vertical); }
             margin-pressed() => { root.margin-pressed(); }
             focus-trace(a0) => { root.focus-trace(a0); }
             save-requested() => { root.save-requested(); }

@@ -67,6 +67,7 @@ export component QuickDraft inherits Window {
     in property <int> editor-focus-generation;
     in property <bool> editor-selected;
     callback editor-replaced();
+    callback editor-ime-area(float, float, float, float, bool);
     callback editor-caret(int);
     callback editor-copy-all();
     callback editor-resized();
@@ -137,6 +138,7 @@ export component QuickDraft inherits Window {
             border-color: source-view.input-focused ? Tok.accent : Tok.rule;
             clip: true;
             source-view := EditorSurface {
+                ime-area(x, y, w, h, vertical) => { root.editor-ime-area(x, y, w, h, vertical); }
                 x: 1px;
                 y: 1px;
                 width: parent.width - 2px;
