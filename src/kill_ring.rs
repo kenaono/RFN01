@@ -57,6 +57,8 @@ pub struct KillRing {
 }
 
 impl KillRing {
+    /// Query availability without changing the position used by older().
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     /// Add a kill, and start the ring's reading again at the top.
     ///
     /// **Empty text is not a kill.** `Ctrl+K` at the very end of a document has
@@ -102,6 +104,17 @@ impl KillRing {
 mod tests {
     use super::KillAction;
     use super::KillRing;
+
+    #[test]
+    fn availability_does_not_rewind_the_previous_yank() {
+        let mut ring=KillRing::default();
+        assert!(ring.is_empty());
+        for value in ["one","two","three"] {ring.add(value.into());}
+        assert_eq!(ring.newest(),Some("three"));
+        assert_eq!(ring.older(),Some("two"));
+        assert!(!ring.is_empty());
+        assert_eq!(ring.older(),Some("one"));
+    }
 
     #[test]
     fn the_newest_kill_is_the_one_a_yank_gets() {

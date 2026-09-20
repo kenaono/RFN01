@@ -202,9 +202,9 @@ impl slint::platform::Platform for Offscreen {
 /// A minimal, offscreen `AppWindow`/`Live` pair, the same shape the other
 /// `*_ui_tests` files build — just enough to hold one document in one
 /// pane so [`open_documents`] and [`write_document_in`] work normally.
-struct Harness {
-    window: AppWindow,
-    live: Live,
+pub(super) struct Harness {
+    pub(super) window: AppWindow,
+    pub(super) live: Live,
     surface: Rc<MinimalSoftwareWindow>,
 }
 
@@ -213,7 +213,7 @@ impl Harness {
     /// is only handed the window's `Weak` afterwards, because
     /// `AppWindow::new` needs a platform already set, and the document a
     /// test wants has to be built with this window's own handle.
-    fn new(
+    pub(super) fn new(
         make_document: impl FnOnce(slint::Weak<AppWindow>) -> Rc<OpenDocument>,
     ) -> (Self, Rc<OpenDocument>) {
         let directory = std::env::temp_dir().join(format!(

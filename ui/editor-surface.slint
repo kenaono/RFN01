@@ -181,6 +181,9 @@ export component EditorSurface inherits Rectangle {
     }
     changed scroll-generation => { root.take-scroll(); }
     public function take-focus() { ime-input.focus(); }
+    // Host menu commands reuse the same input and clipboard/confirmation path.
+    public function paste-from-clipboard() { ime-input.focus(); ime-input.paste(); }
+    callback menu-key(string) -> bool;
     commit-reset := Timer {
         interval: 50ms;
         running: false;
@@ -634,6 +637,7 @@ export component EditorSurface inherits Rectangle {
                                 }
                             }
                             key-pressed(event) => {
+                                if self.preedit-text == "" && root.menu-key(event.text) { return accept; }
                                 if root.embedded-panel && event.modifiers.control && event.text == Key.Return { root.below-sent(); return accept; }
                                 if root.embedded-panel && event.modifiers.control && event.modifiers.alt && event.text == Key.UpArrow { root.below-left(); return accept; }
                                 if root.link-popup-open && !root.terminal && !root.settings && !root.commit-just-finished && self.preedit-text == "" && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift {

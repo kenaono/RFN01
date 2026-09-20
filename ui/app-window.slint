@@ -3,10 +3,12 @@ import { PanelStyleEditor } from "panel-style-editor.slint";
 import { PanelStyle, EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
+import { TitleMenuBar } from "title-menu-bar.slint";
 import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
 // **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
 // 窓の外から見えない。
 export { Ime }
+export { MenuInput } from "controls.slint";
 import { QuickDraft } from "quick-draft.slint";
 export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
@@ -121,6 +123,19 @@ export struct LeftRow {
 }
 
 export component AppWindow inherits Window {
+    in property <bool> custom-title: false;
+    in property <bool> title-maximized: false;
+    in-out property <bool> title-menu-visible: false;
+    callback title-menu-requested(int);
+    callback title-menu-dismissed();
+    in-out property <int> title-menu-focus-generation: 0;
+    in-out property <int> title-menu-active: 0;
+    in-out property <bool> title-menu-open: false;
+    callback title-menu-visibility(bool);
+    in-out property <int> menu-pane: -1;
+    in-out property <int> menu-action: 0;
+    in-out property <int> menu-generation: 0;
+    changed title-menu-visible => { root.title-menu-visibility(root.title-menu-visible); }
     // The document in front, then the editor's name. It said
     // 「Editor - 横書き・縦書き切り替え検証」 until 2026-09-06, which was the
     // title of the technical validation this grew out of — true once, and a
@@ -1156,13 +1171,32 @@ export component AppWindow inherits Window {
 
     // The outer layout padding belongs to the chrome, not the transparent paper.
     Rectangle {
+        y: root.custom-title ? 36px : 0px;
         width: root.width;
-        height: root.height;
+        height: root.height - (root.custom-title ? 36px : 0px);
         border-width: 8px;
         border-color: Tok.paper;
         background: transparent;
     }
+    if root.custom-title: TitleMenuBar {
+        x: 0px; y: 0px; width: root.width;
+        menu-visible: root.title-menu-visible;
+        blocked: root.question-open || root.print-active || root.diff-active;
+        maximized: root.title-maximized;
+        document-title: root.document-title;
+        focus-generation: root.title-menu-focus-generation;
+        selected <=> root.title-menu-active;
+        popup-open: root.title-menu-open;
+        requested(index) => { root.title-menu-requested(index); }
+        dismissed => { root.title-menu-dismissed(); }
+        toggled => {
+            if root.title-menu-visible { root.title-menu-dismissed(); }
+            else { root.title-menu-visible = true; }
+        }
+    }
     VerticalBox {
+        y: root.custom-title ? 36px : 0px;
+        height: root.height - (root.custom-title ? 36px : 0px);
         spacing: 0px;
 
         // 要件 6.1: the left pane, the editing area and the status bar. The
@@ -1193,6 +1227,7 @@ export component AppWindow inherits Window {
                 // (40 - 26) / 2 on x, so the button sits in the middle of the
                 // rail; 30px apart down it.
                 IconButton {
+                    visible: !root.custom-title;
                     x: 7px;
                     y: 4px;
                     icon: Icons.menu;
@@ -1203,7 +1238,7 @@ export component AppWindow inherits Window {
                 }
 
                 IconButton {
-                    x: 7px; y: 40px;
+                    x: 7px; y: root.custom-title ? 4px : 40px;
                     icon: "M1 1h5v5H1zM10 1h5v5h-5zM1 10h5v5H1zM10 10h5v5h-5z";
                     tip: @tr("Workspace");
                     checked: root.tree-open && root.left-tab == 4;
@@ -1221,7 +1256,7 @@ export component AppWindow inherits Window {
                 // was in stays with it.
                 IconButton {
                     x: 7px;
-                    y: 70px;
+                    y: root.custom-title ? 34px : 70px;
                     icon: Icons.folder;
                     tip: @tr("Explorer");
                     checked: root.tree-open && root.left-tab == 0;
@@ -1235,7 +1270,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 100px;
+                    y: root.custom-title ? 64px : 100px;
                     icon: Icons.search;
                     tip: @tr("Search");
                     checked: root.tree-open && root.left-tab == 1;
@@ -1249,7 +1284,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 130px;
+                    y: root.custom-title ? 94px : 130px;
                     icon: Icons.history;
                     tip: @tr("History");
                     checked: root.tree-open && root.left-tab == 2;
@@ -1263,7 +1298,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 160px;
+                    y: root.custom-title ? 124px : 160px;
                     icon: Icons.outline;
                     tip: @tr("Outline");
                     checked: root.tree-open && root.left-tab == 3;
@@ -2307,6 +2342,8 @@ export component AppWindow inherits Window {
                     // and takes the keyboard at `init` as well as on change,
                     // because it is built when it becomes visible.
                     if pane.width > 0: EditorPane {
+                        menu-action: root.menu-action;
+                        menu-generation: root.menu-pane == pane.id ? root.menu-generation : 0;
                         embedded-panel: pane.embedded-panel;
                         // 書き手の決定 2026-09-11: 読む記号ぶんの行を右クリックに
                         // 出すために、窓の言っていることをそのまま渡す。

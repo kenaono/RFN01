@@ -16,6 +16,9 @@
 # 画面の確認に使ったスクリーンショット。会話ごとに増えるもので、製品の一部ではない
 /ScreenShot/
 
+# Main-menu verification processes use isolated profiles and executable copies.
+/testdata/menu-ui-*/
+
 # 手で動かしたときにできた保存先の切れ端。手で確かめる一式は testdata/ にある
 /TEST.md
 /TEST 2.md

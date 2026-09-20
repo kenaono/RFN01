@@ -348,6 +348,24 @@ msgstr "表示の言語"
 msgid "Layout"
 msgstr "レイアウト"
 
+msgid "Help"
+msgstr "ヘルプ"
+
+msgid "File"
+msgstr "ファイル"
+
+msgid "Edit"
+msgstr "編集"
+
+msgid "Insert"
+msgstr "挿入"
+
+msgid "View"
+msgstr "表示"
+
+msgid "Run"
+msgstr "実行"
+
 msgid "Layout…"
 msgstr "レイアウト…"
 

@@ -37,6 +37,7 @@ mod ime;
 #[cfg(test)]
 mod incremental_ui_tests;
 mod kill_ring;
+mod menu_commands;
 #[cfg(test)]
 mod layout_snapshot_ui_tests;
 mod link_completion;
@@ -89,6 +90,7 @@ mod vertical_layout;
 mod wallpaper;
 mod wiring;
 mod word_marks;
+mod window_chrome;
 #[cfg(test)]
 mod word_ui_tests;
 mod workspace;
@@ -3041,6 +3043,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
                     if let Some(window) = weak.upgrade() {
                         wallpaper::follow_window(&window);
+                        if let Some(hwnd) = window_chrome::window_handle(&window) {
+                            window.set_title_maximized(unsafe { windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool() });
+                        }
                     }
                 }
                 WindowEvent::ScaleFactorChanged { .. } => {
@@ -3589,6 +3594,34 @@ fn main() -> Result<(), slint::PlatformError> {
         CloseRequestResponse::KeepWindowShown
     });
 
+    menu_commands::install(&window, &live, &kill_ring);
+    // Winit creates its HWND only after entering the event loop.
+    let chrome: Rc<RefCell<Option<Box<window_chrome::Chrome>>>> = Rc::default();
+    let held = chrome.clone();
+    window.on_title_menu_visibility(move |shown| {
+        if let Some(chrome) = held.borrow().as_ref() {
+            chrome.set_interactive_end(if shown { 372. } else { 36. });
+        }
+    });
+    let weak = window.as_weak();
+    let held = chrome.clone();
+    Timer::single_shot(Duration::ZERO, move || {
+        let Some(window) = weak.upgrade() else { return; };
+        let _ = slint::spawn_local(async move {
+            use slint::winit_030::WinitWindowAccessor;
+            if let Err(error) = window.window().winit_window().await {
+                window.tell(say!("タイトルバーを初期化できません: {error}", "Cannot initialize the title bar: {error}").into());
+                return;
+            }
+            let Some(hwnd) = window_chrome::window_handle(&window) else {
+                window.tell(pick("タイトルバーのウィンドウを取得できません", "Cannot obtain the title bar window").into()); return;
+            };
+            match window_chrome::Chrome::install(hwnd) {
+                Ok(chrome) => { *held.borrow_mut() = Some(chrome); window.set_custom_title(true); }
+                Err(error) => window.tell(say!("タイトルバーを初期化できません: {error}", "Cannot initialize the title bar: {error}").into()),
+            }
+        });
+    });
     let outcome = window.run();
     terminal_panels::stop_all(&live);
     // 要件 8.5: the arrangement as the writer left it, including a boundary
