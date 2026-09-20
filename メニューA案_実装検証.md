@@ -26,6 +26,8 @@
 
 ## 実画面検証
 
+追加修正`d757dcc`：旧Menu位置の空白をなくすため、Workspace／Explorer／検索／履歴／OutlineのY座標だけを36px上へ移動。確認用exeでWorkspaceが最上段に並び、空白がなくなることを実画面確認した。ビルド成功。配置だけの変更のため全体テストの再実行は省略（直前の`6166df2`で1,059成功）。
+
 修正版で確認：アプリアイコンから横並び7分類を表示、スクロール量0のポインタ移動によるクリックなしのホバー展開、リンク3種類の無効表示、Helpの無効表示、File→新規文書を選ぶと分類も閉じてタイトルへ戻ること、Popup中のアプリアイコン再クリックで全体を閉じること。以下は初回版での確認記録も含む。
 
 既存ユーザー設定から分離したLOCALAPPDATAと、確認用実行ファイルのコピーを使用した。確認済みと未確認を分けて追記する。
@@ -47,8 +49,8 @@
 
 ## 確認用ビルド
 
-- 製品ソースの検証コミット：`6166df2`。後続コミットは本検証記録のみ。
-- 実行ファイル：`D:\Projects\10_Creation\50_Dev\10_Editor_menu\target\accept\basic-menus-6166df2\editor_spike.exe`
-- SHA-256：`5F6AB83504F40C6223167EBF2B95DDE15331DC37D40CACCB804AD7F6123FC486`
+- 製品ソースの検証コミット：`d757dcc`。後続コミットは本検証記録のみ。
+- 実行ファイル：`D:\Projects\10_Creation\50_Dev\10_Editor_menu\target\accept\basic-menus-d757dcc\editor_spike.exe`
+- SHA-256：`F6CF5A57AB7D480CCA80D5A3E62613F255C692732E0EA6BA264F061DAC36998F`
 - Debugビルド。実画面試験でもこのファイルを起動した。手動起動では通常の既存プロファイルを使う。試験時のみLOCALAPPDATAを分離した。
 - ユーザーAccept待ち。PRのマージおよびIssue Closeは実施していない。
