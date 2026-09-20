@@ -1,0 +1,56 @@
+import { Tok } from "tokens.slint";
+export component TitleMenuBar inherits Rectangle {
+    in property <bool> menu-visible;
+    in property <bool> blocked;
+    in property <bool> maximized;
+    in property <string> document-title;
+    in property <int> focus-generation;
+    in-out property <int> selected: 0;
+    in property <bool> popup-open;
+    callback requested(int);
+    callback dismissed();
+    changed focus-generation => { keys.focus(); }
+    height: 36px;
+    background: Tok.chrome;
+    Image { x: 8px; y: 10px; width: 16px; height: 16px; source: @image-url("icon.png"); }
+    if !root.menu-visible: Text {
+        x: 36px; y: 0px; width: max(0px, root.width - 184px); height: root.height;
+        text: root.document-title + " - RFN Edit";
+        color: Tok.ink; font-size: 12px; vertical-alignment: center; overflow: elide;
+    }
+    if root.menu-visible: HorizontalLayout {
+        x: 36px; y: 0px; width: 372px; height: root.height; spacing: 0px;
+        for label[index] in [@tr("File"), @tr("Edit"), @tr("Insert"), @tr("Layout"), @tr("View"), @tr("Run")]: Rectangle {
+            width: 62px;
+            background: (touch.has-hover || ((keys.has-focus || root.popup-open) && root.selected == index)) && !root.blocked ? Tok.accent-soft : transparent;
+            Text { text: label; font-size: 12px; color: Tok.ink; horizontal-alignment: center; vertical-alignment: center; }
+            touch := TouchArea { enabled: !root.blocked; clicked => { root.selected = index; root.requested(index); } }
+        }
+    }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape || event.text == Key.F10 { root.dismissed(); return accept; }
+            if event.text == Key.LeftArrow { root.selected = mod(root.selected + 5, 6); return accept; }
+            if event.text == Key.RightArrow { root.selected = mod(root.selected + 1, 6); return accept; }
+            if event.text == Key.DownArrow || event.text == Key.Return || event.text == " " {
+                if !root.blocked { root.requested(root.selected); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    // Windows owns these hit regions (including Snap and system commands).
+    for label[index] in ["─", "", "×"]: Text {
+        x: root.width - (3 - index) * 46px; y: 0px; width: 46px; height: root.height;
+        text: label; font-size: 15px; color: Tok.ink;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    if root.maximized: Rectangle {
+        x: root.width - 74px; y: 11px; width: 10px; height: 9px;
+        border-width: 1px; border-color: Tok.ink; background: Tok.chrome;
+    }
+    Rectangle {
+        x: root.width - 77px; y: root.maximized ? 14px : 13px;
+        width: 10px; height: 9px; border-width: 1px; border-color: Tok.ink; background: Tok.chrome;
+    }
+}

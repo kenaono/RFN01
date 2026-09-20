@@ -20,6 +20,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_HiDpi",
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
     # 追加要件 2026-09-06: the terminal. ConPTY (`CreatePseudoConsole`), the

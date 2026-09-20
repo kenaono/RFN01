@@ -164,6 +164,16 @@ export global Ime {
     callback settled();
 }
 
+// Commands go to the last real input, never to a document behind an input field.
+export global MenuInput {
+    in-out property <int> next-id: 1;
+    in-out property <int> target: 0;
+    in-out property <int> kind: 0;
+    in-out property <int> generation: 0;
+    callback open-menu();
+    callback dismiss-menu() -> bool;
+}
+
 /// 「終わりまで」を表す選択の終端（`Field`）。**位置ではなく合図**なので、
 /// ありえない負の数にしてある。
 export global Selection {
@@ -176,6 +186,20 @@ export global Selection {
 // selection and every editing key are Slint's — inside a box drawn in `Tok`,
 // for the same reason `TextButton` exists.
 export component Field inherits Rectangle {
+    property <int> menu-id;
+    init => { root.menu-id = MenuInput.next-id; MenuInput.next-id += 1; }
+    property <int> menu-generation: MenuInput.generation;
+    changed menu-generation => {
+        if MenuInput.target == root.menu-id && root.enabled {
+            input.focus();
+            if MenuInput.kind == 0 { input.undo(); }
+            else if MenuInput.kind == 1 { input.redo(); }
+            else if MenuInput.kind == 2 { input.cut(); }
+            else if MenuInput.kind == 3 { input.copy(); }
+            else if MenuInput.kind == 4 { input.paste(); }
+            else if MenuInput.kind == 5 { input.select-all(); }
+        }
+    }
     in property <bool> enabled: true;
     in property <string> placeholder;
     in-out property <string> text <=> input.text;
@@ -184,6 +208,7 @@ export component Field inherits Rectangle {
     out property <bool> has-focus: input.has-focus;
     // **どの欄でも、打っているあいだIMEは横書き**（上の`Ime`）。
     changed has-focus => {
+        if self.has-focus { MenuInput.target = root.menu-id; }
         if (!self.has-focus) {
             settle.running = false;
             root.focus-lost();
@@ -336,6 +361,8 @@ export component Field inherits Rectangle {
             root.edited();
         }
         key-pressed(event) => {
+            if event.text == Key.F10 && self.preedit-text == "" { MenuInput.open-menu(); return accept; }
+            if event.text == Key.Escape && self.preedit-text == "" && MenuInput.dismiss-menu() { return accept; }
             if (event.text == Key.Escape) {
                 root.escaped();
                 return accept;

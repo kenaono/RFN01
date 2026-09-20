@@ -289,6 +289,8 @@ fn bindings(raw: &str) -> Vec<String> {
             }
         }
     }
+    // ID 18 stays reserved for saved bindings; New Tab is now the + button only.
+    keys[18].clear();
     if keys
         .iter()
         .enumerate()
@@ -297,6 +299,10 @@ fn bindings(raw: &str) -> Vec<String> {
         return DEFAULTS.iter().map(|s| s.to_string()).collect();
     }
     keys
+}
+
+pub(crate) fn label(app: &AppWindow, id: usize) -> String {
+    bindings(&app.get_shortcut_bindings()).get(id).cloned().unwrap_or_default()
 }
 // -1 is unhandled; -2 consumes a removed default so legacy handlers cannot run it.
 pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shift: bool) -> i32 {
@@ -351,7 +357,7 @@ pub fn publish(app: &AppWindow) {
         let changeable = NAMES
             .iter()
             .enumerate()
-            .filter(|(i, _)| CATEGORIES[*i] == category)
+            .filter(|(i, _)| *i != 18 && CATEGORIES[*i] == category)
             .map(|(i, name)| (i as i32, shown(*name), keys[i].as_str(), false));
         let fixed = FIXED
             .iter()
@@ -588,7 +594,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
                     }
                 }
                 17 => app.invoke_pane_below_toggled(pane.index()),
-                18 => app.invoke_pane_new_tab(pane.index()),
+                18 => {}, // Reserved: New Tab is the + button only.
                 19 => app.invoke_pane_navigate(pane.index(), false),
                 20 => app.invoke_pane_navigate(pane.index(), true),
                 21 => app.invoke_pane_delete(pane.index()),
@@ -631,6 +637,12 @@ pub fn wire(app: &AppWindow, live: &Live) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removed_new_tab_binding_does_not_shift_following_ids() {
+        assert!(bindings("18=Ctrl+Alt+N;19=Ctrl+Alt+B")[18].is_empty());
+        assert_eq!(resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B",0,"n",true,true,false),-1);
+        assert_eq!(resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B",0,"b",true,true,false),19);
+    }
     #[test]
     fn settings_validate_and_roundtrip() {
         assert_eq!(normalize("ctrl+alt+s").as_deref(), Some("Ctrl+Alt+S"));

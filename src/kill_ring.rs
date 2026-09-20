@@ -57,6 +57,8 @@ pub struct KillRing {
 }
 
 impl KillRing {
+    /// Query availability without changing the position used by older().
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     /// Add a kill, and start the ring's reading again at the top.
     ///
     /// **Empty text is not a kill.** `Ctrl+K` at the very end of a document has

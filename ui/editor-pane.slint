@@ -2,7 +2,7 @@ import { EditorSurface } from "editor-surface.slint";
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
 import { LinkCompletion } from "link-completion.slint";
-import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Role, Slider, Tab, TextButton, ToggleChip } from "controls.slint";
+import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, MenuInput, Role, Slider, Tab, TextButton, ToggleChip } from "controls.slint";
 
 // One editing pane.
 //
@@ -24,6 +24,18 @@ export { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, PreviewSelecti
 import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
 
 export component EditorPane inherits Rectangle {
+    in property <int> menu-action;
+    in property <int> menu-generation;
+    changed menu-generation => {
+        if root.menu-generation > 0 {
+            if root.menu-action == 0 { body-clip.paste-from-clipboard(); }
+            else if root.menu-action == 6 { body-clip.take-focus(); }
+            else if root.menu-action == 2 { root.tab-menu-target = root.active-tab; root.rename-token += 1; }
+            else if root.menu-action >= 3 && root.menu-action <= 5 {
+                root.open-paper-palette(root.menu-action - 3, 0px, 0px);
+            }
+        }
+    }
     in property <bool> embedded-panel: false;
     /// Which key this is, as a number `terminal.rs` knows (追加要件 Terminal).
     /// 0 is "an ordinary character", and then the text is what matters.
@@ -1694,6 +1706,11 @@ export component EditorPane inherits Rectangle {
 
         body-clip := EditorSurface {
             vertical-stretch: 1;
+            menu-key(text) => {
+                if !root.terminal && text == Key.F10 { MenuInput.open-menu(); return true; }
+                if !root.terminal && text == Key.Escape { return MenuInput.dismiss-menu(); }
+                return false;
+            }
             embedded-panel: root.embedded-panel;
             key-number(a0) => { root.key-number(a0); }
             vertical: root.vertical;
@@ -1803,7 +1820,7 @@ export component EditorPane inherits Rectangle {
             delete-pressed() => { root.delete-pressed(); }
             move-caret(a0, a1) => { root.move-caret(a0, a1); }
             home-end(a0, a1, a2) => { root.home-end(a0, a1, a2); }
-            focus-taken() => { root.focus-taken(); }
+            focus-taken() => { MenuInput.target = 0; root.focus-taken(); }
             ime-area(x, y, w, h, vertical) => { root.ime-area(x, y, w, h, vertical); }
             margin-pressed() => { root.margin-pressed(); }
             focus-trace(a0) => { root.focus-trace(a0); }
@@ -1875,6 +1892,7 @@ export component EditorPane inherits Rectangle {
                                 edit-title: root.panel-file-names[index];
                                 stem-length: root.panel-file-stems[index];
                                 current: index == root.panel-active;
+                                rename-asked: index == root.panel-active && root.menu-action == 8 ? root.menu-generation : 0;
                                 switchable: root.below-kind == 1;
                                 renamable: root.below-kind == 2 && !root.panel-capturing;
                                 renamed(name) => { root.panel-renamed(index, name); }
@@ -2037,6 +2055,12 @@ export component EditorPane inherits Rectangle {
                         // **Let go first, then take it.** Taking focus that is
                         // already held raises nothing, and it is the raising
                         // that turns the IME on.
+                        property <int> menu-generation: root.menu-generation;
+                        changed menu-generation => {
+                            if root.menu-action == 1 && root.menu-generation > 0 { self.focus(); self.paste(); }
+                            else if root.menu-action == 7 && root.menu-generation > 0 { self.focus(); }
+                        }
+                        changed has-focus => { if self.has-focus { MenuInput.target = -1; } }
                         property <int> generation: root.below-focus-generation;
                         changed generation => {
                             self.clear-focus();
@@ -2458,13 +2482,6 @@ export component EditorPane inherits Rectangle {
                     activated => {
                         strip-menu.close();
                         root.new-file-requested();
-                    }
-                }
-                MenuRow {
-                    title: @tr("New Tab");
-                    activated => {
-                        strip-menu.close();
-                        root.new-tab-requested();
                     }
                 }
                 MenuRow {
