@@ -124,6 +124,118 @@ impl Drop for Popup {
     }
 }
 
+// Planned commands deliberately have no executable ID. Keep the complete
+// menu structure discoverable without introducing new document mutations.
+fn pending(menu: &Popup, ja: &str, en: &str) -> windows::core::Result<()> {
+    menu.row(
+        &format!(
+            "{} {}",
+            pick(ja, en),
+            pick("（未実装）", "(not implemented)")
+        ),
+        0,
+        false,
+        false,
+    )
+}
+
+fn pending_group(
+    menu: &Popup,
+    ja: &str,
+    en: &str,
+    rows: &[(&str, &str)],
+) -> windows::core::Result<()> {
+    let child = Popup::new()?;
+    for (ja, en) in rows {
+        pending(&child, ja, en)?;
+    }
+    menu.child(pick(ja, en), child)
+}
+
+fn insert_placeholders(menu: &Popup) -> windows::core::Result<()> {
+    pending_group(
+        menu,
+        "リンク",
+        "Link",
+        &[
+            ("Markdownリンク", "Markdown Link"),
+            ("Wikiリンク", "Wiki Link"),
+            ("別名付きWikiリンク", "Wiki Link with Alias"),
+        ],
+    )?;
+    pending(menu, "ルビ", "Ruby")?;
+    pending_group(
+        menu,
+        "注記",
+        "Annotation",
+        &[
+            ("左側の注記", "Left-side Annotation"),
+            ("ルビと左側の注記", "Ruby and Left-side Annotation"),
+        ],
+    )?;
+    pending_group(
+        menu,
+        "傍点",
+        "Emphasis Marks",
+        &[
+            ("傍点", "Emphasis Dots"),
+            ("ゴマ傍点", "Sesame Dots"),
+            ("丸傍点", "Round Dots"),
+            ("白丸傍点", "White Round Dots"),
+            ("二重丸傍点", "Double Round Dots"),
+            ("×傍点", "Cross Dots"),
+        ],
+    )?;
+    pending_group(
+        menu,
+        "傍線",
+        "Emphasis Lines",
+        &[
+            ("傍線", "Single Line"),
+            ("二重傍線", "Double Line"),
+            ("波線", "Wavy Line"),
+            ("鎖線", "Chain Line"),
+            ("破線", "Dashed Line"),
+        ],
+    )?;
+    pending_group(
+        menu,
+        "文字注記",
+        "Text Annotation",
+        &[
+            ("縦中横", "Tate-chu-yoko"),
+            ("割り注", "Warichu"),
+            ("小さな文字", "Small Text"),
+            ("大きな文字", "Large Text"),
+        ],
+    )?;
+    let heading = Popup::new()?;
+    for level in 1..=6 {
+        let name = say!("見出し {level}", "Heading {level}");
+        pending(&heading, &name, &name)?;
+    }
+    pending(&heading, "見出しを解除", "Remove Heading")?;
+    menu.child(pick("見出し", "Heading"), heading)?;
+    let paragraph = Popup::new()?;
+    let indent = Popup::new()?;
+    for count in 1..=4 {
+        let name = say!("{count}字下げ", "Indent {count} Characters");
+        pending(&indent, &name, &name)?;
+    }
+    pending(&indent, "字下げを解除", "Remove Indent")?;
+    paragraph.child(pick("字下げ", "Indent"), indent)?;
+    let tail = Popup::new()?;
+    pending(&tail, "地付き", "Align to End")?;
+    for count in 1..=4 {
+        let name = say!("地から{count}字上げ", "{count} Characters from End");
+        pending(&tail, &name, &name)?;
+    }
+    pending(&tail, "地付きを解除", "Remove End Alignment")?;
+    paragraph.child(pick("地付き", "End Alignment"), tail)?;
+    menu.child(pick("段落注記", "Paragraph Annotation"), paragraph)?;
+    pending(menu, "改ページ", "Page Break")
+}
+
 struct Target {
     id: PaneId,
     parent: PaneId,
@@ -649,6 +761,8 @@ fn show(
             root.child(pick("単語チェック", "Word Check"), words)?;
         }
         2 => {
+            insert_placeholders(&root)?;
+            root.sep()?;
             let marks = bullet_marks_of(window);
             for (i, mark) in document::BULLET_MARKS.iter().enumerate() {
                 let name = format!("{} {mark}", pick("箇条書き", "Bullet List"));
@@ -1012,6 +1126,23 @@ fn show(
                 );
             }
         }
+        6 => {
+            root.row(
+                pick("使い方…（未実装）", "User Guide… (not implemented)"),
+                0,
+                false,
+                false,
+            )?;
+            root.row(
+                pick(
+                    "RFN Editについて…（未実装）",
+                    "About RFN Edit… (not implemented)",
+                ),
+                0,
+                false,
+                false,
+            )?;
+        }
         _ => return Ok(None),
     }
     let Some(hwnd) = window_chrome::window_handle(window) else {
@@ -1026,7 +1157,7 @@ fn show(
     };
     let scale = window.window().scale_factor();
     let mut point = POINT {
-        x: ((36. + group as f32 * 62.) * scale) as i32,
+        x: ((36. + group as f32 * 48.) * scale) as i32,
         y: (36. * scale) as i32,
     };
     unsafe {
@@ -1057,6 +1188,7 @@ fn show(
         if navigation.escaped.get() {
             window.set_title_menu_focus_generation(window.get_title_menu_focus_generation() + 1);
         } else {
+            window.set_title_menu_visible(false);
             restore_input(window, t.id, t.field);
         }
     }
@@ -1064,6 +1196,7 @@ fn show(
         && let Some(command) = commands.get(picked as usize - 1)
     {
         if t.valid(window, live) {
+            window.set_title_menu_visible(false);
             execute(window, live, t, command.clone());
         } else {
             window.tell(
@@ -1170,10 +1303,10 @@ unsafe extern "system" fn menu_filter(
                     nav.escaped.set(true);
                 }
                 if message.wParam.0 == 0x25 {
-                    next = Some((nav.group + 5) % 6);
+                    next = Some((nav.group + 6) % 7);
                 }
                 if message.wParam.0 == 0x27 && !nav.submenu.get() {
-                    next = Some((nav.group + 1) % 6);
+                    next = Some((nav.group + 1) % 7);
                 }
             } else if matches!(message.message, WM_MOUSEMOVE | WM_LBUTTONDOWN) {
                 let mut point = message.pt;
@@ -1184,8 +1317,17 @@ unsafe extern "system" fn menu_filter(
                 if unsafe { ScreenToClient(nav.hwnd, &mut point) }.as_bool() {
                     let x = point.x as f32 / nav.scale;
                     let y = point.y as f32 / nav.scale;
-                    if (0. ..36.).contains(&y) && (36. ..408.).contains(&x) {
-                        let group = ((x - 36.) / 62.) as i32;
+                    if message.message == WM_LBUTTONDOWN
+                        && (0. ..36.).contains(&y)
+                        && (0. ..32.).contains(&x)
+                    {
+                        unsafe {
+                            let _ = EndMenu();
+                        }
+                        return true;
+                    }
+                    if (0. ..36.).contains(&y) && (36. ..372.).contains(&x) {
+                        let group = ((x - 36.) / 48.) as i32;
                         if group != nav.group {
                             next = Some(group);
                         }
@@ -1454,6 +1596,36 @@ fn shortcut(window: &AppWindow, command: &Command, field: bool) -> String {
 mod tests {
     use super::*;
     use crate::terminal_ui_tests::Harness;
+
+    #[test]
+    fn planned_insert_items_are_present_but_have_no_executable_command() {
+        fn count_leaves(menu: HMENU) -> usize {
+            let count = unsafe { GetMenuItemCount(Some(menu)) };
+            assert!(count >= 0);
+            let mut leaves = 0;
+            for index in 0..count {
+                let mut item = MENUITEMINFOW {
+                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_ID | MIIM_STATE | MIIM_SUBMENU,
+                    ..Default::default()
+                };
+                unsafe {
+                    GetMenuItemInfoW(menu, index as u32, true, &mut item).unwrap();
+                }
+                if item.hSubMenu.0.is_null() {
+                    assert_eq!(item.wID, 0);
+                    assert_ne!(item.fState.0 & MFS_DISABLED.0, 0);
+                    leaves += 1;
+                } else {
+                    leaves += count_leaves(item.hSubMenu);
+                }
+            }
+            leaves
+        }
+        let menu = Popup::new().unwrap();
+        insert_placeholders(&menu).unwrap();
+        assert_eq!(count_leaves(menu.handle), 40);
+    }
 
     #[test]
     fn display_toggle_writes_effective_shared_sheet_and_restores_settings_tab() {

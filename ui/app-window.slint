@@ -1189,6 +1189,10 @@ export component AppWindow inherits Window {
         popup-open: root.title-menu-open;
         requested(index) => { root.title-menu-requested(index); }
         dismissed => { root.title-menu-dismissed(); }
+        toggled => {
+            if root.title-menu-visible { root.title-menu-dismissed(); }
+            else { root.title-menu-visible = true; }
+        }
     }
     VerticalBox {
         y: root.custom-title ? 36px : 0px;
@@ -1223,13 +1227,13 @@ export component AppWindow inherits Window {
                 // (40 - 26) / 2 on x, so the button sits in the middle of the
                 // rail; 30px apart down it.
                 IconButton {
+                    visible: !root.custom-title;
                     x: 7px;
                     y: 4px;
                     icon: Icons.menu;
                     tip: @tr("Menu");
                     clicked => {
-                        if root.custom-title { root.title-menu-visible = !root.title-menu-visible; }
-                        else { app-menu.show(); }
+                        app-menu.show();
                     }
                 }
 

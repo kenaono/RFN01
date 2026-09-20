@@ -348,6 +348,9 @@ msgstr "表示の言語"
 msgid "Layout"
 msgstr "レイアウト"
 
+msgid "Help"
+msgstr "ヘルプ"
+
 msgid "File"
 msgstr "ファイル"
 

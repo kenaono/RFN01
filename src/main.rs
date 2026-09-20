@@ -3600,7 +3600,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let held = chrome.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
-            chrome.set_interactive_end(if shown { 408. } else { 36. });
+            chrome.set_interactive_end(if shown { 372. } else { 36. });
         }
     });
     let weak = window.as_weak();

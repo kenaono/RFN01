@@ -100,7 +100,7 @@ fn title_hit(x: f32, y: f32, width: f32, interactive_end: f32) -> u32 {
     } else if x >= width - 3. * BUTTON_WIDTH {
         HTMINBUTTON
     } else if x < 32. {
-        HTSYSMENU
+        HTCLIENT // App icon opens the title menu; Alt+Space retains the system menu.
     } else if x < interactive_end {
         HTCLIENT
     } else {
@@ -267,6 +267,7 @@ mod tests {
     use super::*;
     #[test]
     fn menus_do_not_drag_and_caption_buttons_do_not_run_commands() {
+        assert_eq!(title_hit(16., 18., 640., 36.), HTCLIENT);
         assert_eq!(title_hit(60., 20., 640., 380.), HTCLIENT);
         assert_eq!(title_hit(410., 20., 640., 380.), HTCAPTION);
         assert_eq!(title_hit(520., 20., 640., 380.), HTMINBUTTON);
