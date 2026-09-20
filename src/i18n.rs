@@ -95,6 +95,8 @@ mod tests {
         let sources = [
             include_str!("../ui/app-window.slint"),
             include_str!("../ui/editor-pane.slint"),
+            include_str!("../ui/editor-surface.slint"),
+            include_str!("../ui/title-menu-bar.slint"),
             include_str!("../ui/controls.slint"),
             include_str!("../ui/diff-window.slint"),
             include_str!("../ui/quick-draft.slint"),
@@ -185,6 +187,7 @@ mod tests {
             ("ime.rs", include_str!("ime.rs")),
             ("kill_ring.rs", include_str!("kill_ring.rs")),
             ("main.rs", include_str!("main.rs")),
+            ("menu_commands.rs", include_str!("menu_commands.rs")),
             ("open_document.rs", include_str!("open_document.rs")),
             ("pane_layout.rs", include_str!("pane_layout.rs")),
             ("pty.rs", include_str!("pty.rs")),

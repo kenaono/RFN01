@@ -124,9 +124,6 @@ unsafe extern "system" fn frame_proc(
         if message == WM_MENUSELECT {
             super::menu_commands::native_selection(w, l);
         }
-        if message == WM_ACTIVATE && w.0 & 0xffff == WA_INACTIVE as usize {
-            super::menu_commands::cancel_native_menu();
-        }
         let chrome = &*(data as *const Chrome);
         if message == WM_NCLBUTTONDOWN && matches!(w.0 as u32, HTMINBUTTON | HTMAXBUTTON | HTCLOSE)
         {
@@ -230,15 +227,24 @@ unsafe extern "system" fn frame_proc(
             let border = GetSystemMetricsForDpi(SM_CYFRAME, dpi)
                 + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
             if !IsZoomed(hwnd).as_bool() {
-                let left=point.x<border; let right=point.x>=rect.right-border;
-                let top=point.y<border; let bottom=point.y>=rect.bottom-border;
-                let hit=match (left,right,top,bottom) {
-                    (true,_,true,_)=>HTTOPLEFT, (_,true,true,_)=>HTTOPRIGHT,
-                    (true,_,_,true)=>HTBOTTOMLEFT,(_,true,_,true)=>HTBOTTOMRIGHT,
-                    (_,_,true,_)=>HTTOP,(_,_,_,true)=>HTBOTTOM,
-                    (true,_,_,_)=>HTLEFT,(_,true,_,_)=>HTRIGHT,_=>HTCLIENT,
+                let left = point.x < border;
+                let right = point.x >= rect.right - border;
+                let top = point.y < border;
+                let bottom = point.y >= rect.bottom - border;
+                let hit = match (left, right, top, bottom) {
+                    (true, _, true, _) => HTTOPLEFT,
+                    (_, true, true, _) => HTTOPRIGHT,
+                    (true, _, _, true) => HTBOTTOMLEFT,
+                    (_, true, _, true) => HTBOTTOMRIGHT,
+                    (_, _, true, _) => HTTOP,
+                    (_, _, _, true) => HTBOTTOM,
+                    (true, _, _, _) => HTLEFT,
+                    (_, true, _, _) => HTRIGHT,
+                    _ => HTCLIENT,
                 };
-                if hit!=HTCLIENT {return LRESULT(hit as isize);}
+                if hit != HTCLIENT {
+                    return LRESULT(hit as isize);
+                }
             }
             let chrome = &*(data as *const Chrome);
             return LRESULT(title_hit(

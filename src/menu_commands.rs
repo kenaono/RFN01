@@ -202,6 +202,7 @@ pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
                 return;
             }
             window.set_title_menu_visible(true);
+            window.set_title_menu_active(0);
             window.set_title_menu_focus_generation(window.get_title_menu_focus_generation() + 1);
         }
     });
@@ -318,6 +319,24 @@ fn show(
     let text = !screen.settings && !terminal && !empty;
     let editable = text && !screen.viewer && !t.document.read_only() && t.field <= 0;
     let main = text && !t.id.is_panel();
+    let parent_screen = t.parent.screen(window);
+    let neighbours = [
+        parent_screen.swap_left,
+        parent_screen.swap_right,
+        parent_screen.swap_up,
+        parent_screen.swap_down,
+    ];
+    let tab_count = live.tabs.borrow().of(t.parent).tabs.len();
+    let can_back = {
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(t.id);
+        stepped_place(strip.history.len(), strip.at, false).is_some()
+    };
+    let can_forward = {
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(t.id);
+        stepped_place(strip.history.len(), strip.at, true).is_some()
+    };
     let path = t.document.file.borrow().path().is_some();
     let selected = if terminal {
         live.cache
@@ -739,7 +758,7 @@ fn show(
                 "Viewer・ReadOnly開始／終了",
                 "Start / Exit Viewer or ReadOnly",
                 Command::Viewer,
-                text
+                text && !t.document.read_only()
             );
             for (setting, ja, en) in [
                 (12, "行番号", "Line Numbers"),
@@ -768,13 +787,23 @@ fn show(
                 )?;
             }
             root.sep()?;
-            add!("右へ分割", "Split Right", Command::Split(true), true);
-            add!("下へ分割", "Split Down", Command::Split(false), true);
+            add!(
+                "右へ分割",
+                "Split Right",
+                Command::Split(true),
+                PaneId::count(window) < MAX_PANES
+            );
+            add!(
+                "下へ分割",
+                "Split Down",
+                Command::Split(false),
+                PaneId::count(window) < MAX_PANES
+            );
             add!(
                 "他のPaneを閉じる",
                 "Close Other Panes",
                 Command::OtherPanes,
-                true
+                PaneId::count(window) > 1
             );
             for (n, (ja, en)) in [
                 ("左と入替", "Swap Left"),
@@ -791,12 +820,7 @@ fn show(
                     ja,
                     en,
                     Command::Swap(n as i32),
-                    [
-                        screen.swap_left,
-                        screen.swap_right,
-                        screen.swap_up,
-                        screen.swap_down,
-                    ][n],
+                    neighbours[n],
                     false,
                 )?;
             }
@@ -807,7 +831,7 @@ fn show(
                 "次のTAB",
                 "Next Tab",
                 Command::Step(false),
-                !t.id.is_panel(),
+                !t.id.is_panel() && tab_count > 1,
                 false,
             )?;
             row(
@@ -816,7 +840,7 @@ fn show(
                 "前のTAB",
                 "Previous Tab",
                 Command::Step(true),
-                !t.id.is_panel(),
+                !t.id.is_panel() && tab_count > 1,
                 false,
             )?;
             for (n, (ja, en)) in [
@@ -834,7 +858,7 @@ fn show(
                     ja,
                     en,
                     Command::Focus(n as i32),
-                    true,
+                    neighbours[n] || (n == 3 && parent_screen.below_kind != 0),
                     false,
                 )?;
             }
@@ -844,7 +868,7 @@ fn show(
                 "戻る",
                 "Back",
                 Command::Navigate(false),
-                text,
+                text && can_back,
                 false,
             )?;
             row(
@@ -853,7 +877,7 @@ fn show(
                 "進む",
                 "Forward",
                 Command::Navigate(true),
-                text,
+                text && can_forward,
                 false,
             )?;
             root.child(pick("移動", "Go To"), go)?;
@@ -876,8 +900,18 @@ fn show(
             }
             add!("Quick Draft…", "Quick Draft…", Command::Draft, true);
             root.sep()?;
-            add!("拡大", "Zoom In", Command::Zoom(1), main);
-            add!("縮小", "Zoom Out", Command::Zoom(-1), main);
+            add!(
+                "拡大",
+                "Zoom In",
+                Command::Zoom(1),
+                main && t.id.zoom(window) < ZOOM_MAX
+            );
+            add!(
+                "縮小",
+                "Zoom Out",
+                Command::Zoom(-1),
+                main && t.id.zoom(window) > ZOOM_MIN
+            );
             add!("既定倍率に戻す", "Reset Zoom", Command::ZoomReset, main);
             let zoom = Popup::new()?;
             for percent in (ZOOM_MIN..=ZOOM_MAX).step_by(ZOOM_STEP as usize) {
@@ -1019,6 +1053,13 @@ fn show(
         }
     }
     drop(navigation_guard);
+    if picked == 0 && navigation.next.get().is_none() {
+        if navigation.escaped.get() {
+            window.set_title_menu_focus_generation(window.get_title_menu_focus_generation() + 1);
+        } else {
+            restore_input(window, t.id, t.field);
+        }
+    }
     if picked > 0
         && let Some(command) = commands.get(picked as usize - 1)
     {
@@ -1048,6 +1089,8 @@ struct Navigation {
     submenu: Cell<bool>,
     next: Cell<Option<i32>>,
     hook: Cell<HHOOK>,
+    pointer: Cell<(i32, i32)>,
+    escaped: Cell<bool>,
 }
 thread_local! { static NAVIGATION: RefCell<Option<Rc<Navigation>>> = const { RefCell::new(None) }; }
 impl Navigation {
@@ -1057,6 +1100,10 @@ impl Navigation {
         group: i32,
         scale: f32,
     ) -> windows::core::Result<Rc<Self>> {
+        let mut pointer = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pointer);
+        }
         let nav = Rc::new(Self {
             hwnd,
             root,
@@ -1066,6 +1113,8 @@ impl Navigation {
             submenu: Cell::new(false),
             next: Cell::new(None),
             hook: Cell::new(HHOOK::default()),
+            pointer: Cell::new((pointer.x, pointer.y)),
+            escaped: Cell::new(false),
         });
         let hook = unsafe {
             SetWindowsHookExW(
@@ -1102,15 +1151,6 @@ pub(crate) fn native_selection(w: WPARAM, l: LPARAM) {
     });
 }
 
-pub(crate) fn cancel_native_menu() {
-    NAVIGATION.with(|held| {
-        if held.borrow().is_some() {
-            unsafe {
-                let _ = EndMenu();
-            }
-        }
-    });
-}
 unsafe extern "system" fn menu_filter(
     code: i32,
     w: WPARAM,
@@ -1126,6 +1166,9 @@ unsafe extern "system" fn menu_filter(
             };
             let mut next = None;
             if message.message == WM_KEYDOWN && nav.in_root.get() {
+                if message.wParam.0 == 0x1b {
+                    nav.escaped.set(true);
+                }
                 if message.wParam.0 == 0x25 {
                     next = Some((nav.group + 5) % 6);
                 }
@@ -1134,6 +1177,10 @@ unsafe extern "system" fn menu_filter(
                 }
             } else if matches!(message.message, WM_MOUSEMOVE | WM_LBUTTONDOWN) {
                 let mut point = message.pt;
+                let previous = nav.pointer.replace((point.x, point.y));
+                if message.message == WM_MOUSEMOVE && previous == (point.x, point.y) {
+                    return false;
+                }
                 if unsafe { ScreenToClient(nav.hwnd, &mut point) }.as_bool() {
                     let x = point.x as f32 / nav.scale;
                     let y = point.y as f32 / nav.scale;
@@ -1301,7 +1348,13 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
             }
             window.invoke_pane_preview_toggled(p);
         }
-        Command::Viewer => window.invoke_pane_viewer_toggled(p),
+        Command::Viewer => {
+            if t.id.is_panel() {
+                terminal_panels::action(window, live, t.parent, 4, 0)
+            } else {
+                window.invoke_pane_viewer_toggled(p)
+            }
+        }
         Command::Split(side) => {
             window.set_focused_pane(parent);
             window.invoke_divide_requested(side);
@@ -1403,11 +1456,31 @@ mod tests {
     use crate::terminal_ui_tests::Harness;
 
     #[test]
+    fn display_toggle_writes_effective_shared_sheet_and_restores_settings_tab() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        PaneId::FIRST.update_screen(&h.window, |s| s.vertical = true);
+        h.window.set_text_shared(true);
+        h.window.set_layout_shared(true);
+        h.window.set_paper_shared(true);
+        h.window.set_sheet(1);
+        let seen = Rc::new(Cell::new((-1, -1)));
+        let capture = seen.clone();
+        let weak = h.window.as_weak();
+        h.window.on_sheet_chose(move |setting, _| {
+            capture.set((setting, weak.upgrade().unwrap().get_sheet()));
+        });
+        let target = Target::capture(&h.window, &h.live);
+        execute(&h.window, &h.live, &target, Command::Display(12));
+        assert_eq!(seen.get(), (12, 0));
+        assert_eq!(h.window.get_sheet(), 1);
+    }
+
+    #[test]
     fn target_rejects_a_different_tab_even_when_it_shares_the_document() {
         let (h, doc) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let target = Target::capture(&h.window, &h.live);
         assert!(target.valid(&h.window, &h.live));
-        h.live.tabs.borrow_mut().of_mut(PaneId::FIRST).tabs[0] =
+        h.live.tabs.borrow_mut().of_mut(PaneId::FIRST).unwrap().tabs[0] =
             PaneTab::showing(&h.window, PaneId::FIRST, doc);
         assert!(!target.valid(&h.window, &h.live));
     }
@@ -1427,7 +1500,7 @@ mod tests {
         let target = Target::capture(&h.window, &h.live);
         assert!(target.id.is_panel());
         assert!(target.valid(&h.window, &h.live));
-        h.live.tabs.borrow_mut().of_mut(owner).tabs[0]
+        h.live.tabs.borrow_mut().of_mut(owner).unwrap().tabs[0]
             .below
             .entries
             .clear();

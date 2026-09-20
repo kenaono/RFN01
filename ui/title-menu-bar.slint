@@ -28,6 +28,9 @@ export component TitleMenuBar inherits Rectangle {
         }
     }
     keys := FocusScope {
+        // Keyboard-only focus must not cover the menu TouchAreas.
+        width: 0px;
+        height: 0px;
         key-pressed(event) => {
             if event.text == Key.Escape || event.text == Key.F10 { root.dismissed(); return accept; }
             if event.text == Key.LeftArrow { root.selected = mod(root.selected + 5, 6); return accept; }
