@@ -1238,7 +1238,7 @@ export component AppWindow inherits Window {
                 }
 
                 IconButton {
-                    x: 7px; y: 40px;
+                    x: 7px; y: root.custom-title ? 4px : 40px;
                     icon: "M1 1h5v5H1zM10 1h5v5h-5zM1 10h5v5H1zM10 10h5v5h-5z";
                     tip: @tr("Workspace");
                     checked: root.tree-open && root.left-tab == 4;
@@ -1256,7 +1256,7 @@ export component AppWindow inherits Window {
                 // was in stays with it.
                 IconButton {
                     x: 7px;
-                    y: 70px;
+                    y: root.custom-title ? 34px : 70px;
                     icon: Icons.folder;
                     tip: @tr("Explorer");
                     checked: root.tree-open && root.left-tab == 0;
@@ -1270,7 +1270,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 100px;
+                    y: root.custom-title ? 64px : 100px;
                     icon: Icons.search;
                     tip: @tr("Search");
                     checked: root.tree-open && root.left-tab == 1;
@@ -1284,7 +1284,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 130px;
+                    y: root.custom-title ? 94px : 130px;
                     icon: Icons.history;
                     tip: @tr("History");
                     checked: root.tree-open && root.left-tab == 2;
@@ -1298,7 +1298,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: 160px;
+                    y: root.custom-title ? 124px : 160px;
                     icon: Icons.outline;
                     tip: @tr("Outline");
                     checked: root.tree-open && root.left-tab == 3;
