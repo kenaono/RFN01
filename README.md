@@ -1362,4 +1362,4 @@ Terminal・Editor Panel・Terminal Panelの外観既定は設定 → Terminalに
 - 別Windowへの接続例：`src/draft_editor.rs`。AppWindowや代理TABを作らず、共有部品をQuick Draftへ接続します。
 - 主Windowへの埋込み：`src/editor_host.rs`。状態・表示行・描画キャッシュの登録と解放をまとめます。Panelの代理TABは不要です。
 
-設計の境界・維持する動作・検証条件は[Editor部品化_実装計画.md](Editor部品化_実装計画.md)を参照してください。
+追加機能・修正の着手前に[開発ガイドライン.md](開発ガイドライン.md)を参照してください。部品の責務、接続手順、IME・通知・寿命の注意点、利用先ごとの検証条件をまとめています。設計の経緯と検証記録は[Editor部品化_実装計画.md](Editor部品化_実装計画.md)にあります。
