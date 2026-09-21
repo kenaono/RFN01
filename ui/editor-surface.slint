@@ -1200,20 +1200,12 @@ export component EditorSurface inherits Rectangle {
                         }
 
                         context-menu := PopupWindow {
-                            // **画面から出そうなら中へ寄せる**（RFN01-47）。右クリック
-                            // した場所へそのまま出すと、画面の下寄りでは下が切れる
-                            // ——メニューの高さは中身で決まるので、それを測ってから
-                            // 位置を決める。
-                            x: clamp(
-                                root.context-x,
-                                0px,
-                                max(0px, root.width - root.context-menu-width),
-                            );
-                            y: clamp(
-                                root.context-y,
-                                0px,
-                                max(0px, root.height - menu-frame.height),
-                            );
+                            // **位置の補正は保留**（RFN01-47）。中身の寸法を読んで位置を
+                            // 決める形にしたところ、押しても行が反応しなくなった
+                            // （書き手の報告 2026-09-22）。まず元の位置へ戻し、直し方は
+                            // 別に決める。
+                            x: root.context-x;
+                            y: root.context-y;
                             width: root.context-menu-width;
                             close-policy: close-on-click-outside;
 
@@ -1364,12 +1356,7 @@ export component EditorSurface inherits Rectangle {
 
                                                 if insert.flyout && root.insert-open == insert.group: MenuFrame {
                                                     x: parent.width - 8px;
-                                                    // **下から出そうなら上へずらす。**
-                                                    y: clamp(
-                                                        -6px,
-                                                        -(context-menu.y + parent.y),
-                                                        root.height - context-menu.y - parent.y - insert-flyout.preferred-height - 6px,
-                                                    );
+                                                    y: -6px;
                                                     width: 176px;
                                                     height: insert-flyout.preferred-height;
 
@@ -1452,12 +1439,7 @@ export component EditorSurface inherits Rectangle {
 
                                                 if root.bullet-rows-open: MenuFrame {
                                                     x: parent.width - 8px;
-                                                    // **下から出そうなら上へずらす**（RFN01-47）。
-                                                    y: clamp(
-                                                        -6px,
-                                                        -(context-menu.y + parent.y),
-                                                        root.height - context-menu.y - parent.y - bullet-rows.preferred-height - 6px,
-                                                    );
+                                                    y: -6px;
                                                     width: 136px;
                                                     height: bullet-rows.preferred-height;
 
