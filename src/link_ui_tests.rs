@@ -167,6 +167,22 @@ fn an_unsaved_heading_reaches_the_completion_popup() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+
+    // 4. Re-picking a heading with the caret inside the written target
+    //    replaces the whole target, rather than leaving its tail behind
+    //    (書き手の報告 2026-09-21).
+    *review.text.borrow_mut() = "[[Target#Target heading]]\n".to_owned();
+    live.states.of(id).borrow_mut().caret_source_byte = Some("[[Target#Target head".len());
+    for _ in 0..8 {
+        workspace_links_tick(&window, &live);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    accept_link_completion(&window, &live, id);
+    assert_eq!(
+        &*review.text.borrow(),
+        "[[Target#Target%20heading%20TEST]]\n",
+        "the written target is replaced whole, with one closer"
+    );
     let _ = std::fs::remove_dir_all(directory);
 }
 

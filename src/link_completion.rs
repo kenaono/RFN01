@@ -85,12 +85,19 @@ pub struct Context {
     pub query_at: usize,
     /// `source[query_at..caret]` at the moment this [`Context`] was built.
     pub query: String,
-    /// Whether the source right after `caret` already starts with this
-    /// trigger's own closing delimiter (`]]` or `)`) — a link the caret
-    /// landed back inside, mid-edit. A candidate's `insert` leaves the
-    /// closer off when this is `true`, so accepting one never writes a
-    /// second `]]`/`)` next to the one already there (仕様の実装依頼 #11).
+    /// Whether the target already ends *after* `caret` — at this trigger's
+    /// own closing delimiter (`]]` or `)`), or at the `|` a wiki link uses to
+    /// start its shown text. A candidate's `insert` leaves the closer off
+    /// when this is `true`, so accepting one never writes a second `]]`/`)`
+    /// next to the one already there, and never cuts an alias off (仕様の実装
+    /// 依頼 #11; the alias case 2026-09-21).
     pub already_closed: bool,
+    /// Where the target's own text ends, when something already ends it —
+    /// see [`Context::already_closed`]. A chosen candidate replaces up to
+    /// here rather than up to `caret`, so a caret placed *inside* a written
+    /// target replaces the whole of it and leaves whatever follows — an
+    /// alias, the closer — untouched (書き手の報告 2026-09-21).
+    pub target_end: Option<usize>,
 }
 
 /// Whether `range` is a byte range a caller could safely slice `source`
@@ -142,7 +149,25 @@ pub fn detect(source: &str, caret: usize) -> Option<Context> {
         .find('#')
         .map(|hash| after_open[..hash].to_owned());
     let closer = if is_wiki { "]]" } else { ")" };
-    let already_closed = source[caret..].starts_with(closer);
+    // **Where the target already ends, not where the caret is.** The caret
+    // can sit inside a target that is already written — `[[Target#Target
+    // heading]]` with the caret before its own `ing`, say. Replacing only up
+    // to the caret left the tail behind and wrote a second closer
+    // (`[[Target#Target%20heading%20Test]]ing]]`, 書き手の報告 2026-09-21);
+    // ending at the target's own end replaces the whole of it and keeps what
+    // follows — an alias, the closer — intact. Only this line is searched, so
+    // a `]]` further down the document is never mistaken for this link's.
+    let rest_of_line = {
+        let rest = &source[caret..];
+        let end = rest.find('\n').unwrap_or(rest.len());
+        &rest[..end]
+    };
+    let closer_at = rest_of_line.find(closer).map(|at| caret + at);
+    let alias_bar_at = is_wiki
+        .then(|| rest_of_line.find('|').map(|at| caret + at))
+        .flatten();
+    let target_end = [closer_at, alias_bar_at].into_iter().flatten().min();
+    let already_closed = target_end.is_some();
 
     let kind = match (is_wiki, file) {
         (true, Some(file)) => TriggerKind::WikiHeading { file },
@@ -157,6 +182,7 @@ pub fn detect(source: &str, caret: usize) -> Option<Context> {
         query_at,
         query: source[query_at..caret].to_owned(),
         already_closed,
+        target_end,
     })
 }
 
@@ -183,9 +209,10 @@ pub struct Candidate {
     /// marker like `(2/3)` is appended so the list itself never hides the
     /// ambiguity.
     pub display: String,
-    /// What replaces `context.query_at..caret` if this candidate is chosen —
-    /// percent-encoded per [`percent_encode_reserved`], and closed (`]]` or
-    /// `)`) unless [`Context::already_closed`] said one was already there.
+    /// What replaces `context.query_at..context.target_end.unwrap_or(caret)`
+    /// if this candidate is chosen — percent-encoded per
+    /// [`percent_encode_reserved`], and closed (`]]` or `)`) unless
+    /// [`Context::already_closed`] said one was already there.
     pub insert: String,
     /// Where the caret should land within `insert` after it is written — 直後
     /// of the path or heading text, *before* any closing delimiter this
@@ -769,6 +796,33 @@ mod tests {
 
         let unclosed = "[[部分";
         let context = detect(unclosed, unclosed.len()).expect("finds a trigger");
+        assert!(!context.already_closed);
+    }
+
+    /// 書き手の報告 2026-09-21: the caret can sit *inside* a target that is
+    /// already written. The replacement has to end where the target ends, not
+    /// at the caret — ending at the caret left the tail behind and wrote a
+    /// second closer (`[[Target#Target%20heading%20Test]]ing]]`).
+    #[test]
+    fn a_written_target_ends_the_replacement_where_it_ends() {
+        let source = "[[Target#Target heading]]";
+        let caret = source.find("ing").expect("typing inside the heading");
+        let context = detect(source, caret).expect("finds the heading trigger");
+        assert_eq!(context.query, "Target head");
+        assert_eq!(context.target_end, Some(source.len() - 2));
+        assert!(context.already_closed);
+
+        // An alias bar ends the target too, so the alias survives.
+        let source = "[[Target#Target heading|表示名]]";
+        let caret = source.find("ing").expect("typing inside the heading");
+        let context = detect(source, caret).expect("finds the heading trigger");
+        assert_eq!(context.target_end, source.find('|'));
+        assert!(context.already_closed);
+
+        // Nothing ends it yet: the caret is the end, and a closer is added.
+        let source = "[[Target#Target head";
+        let context = detect(source, source.len()).expect("finds the heading trigger");
+        assert_eq!(context.target_end, None);
         assert!(!context.already_closed);
     }
 

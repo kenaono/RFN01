@@ -1362,7 +1362,9 @@ impl Completion {
         }
         let candidate = open.candidates.get(open.selected)?;
         Some(Accepted {
-            range: open.context.query_at..caret,
+            // To the end of the target, not to the caret: a caret placed
+            // inside an already-written target replaces the whole of it.
+            range: open.context.query_at..open.context.target_end.unwrap_or(caret),
             text: candidate.insert.clone(),
             caret: open.context.query_at + candidate.caret_after_insert,
         })
@@ -2206,6 +2208,45 @@ mod tests {
             document,
             source_generation,
         }
+    }
+
+    /// 書き手の報告 2026-09-21: キャレットを既存リンクの対象の途中に置いて
+    /// 選び直すと、`[[Target#Target%20heading%20Test]]ing]]` のように残りと
+    /// `]]` が二重になっていた。受け入れは対象の終わりまでを置き換える。
+    #[test]
+    fn accepting_inside_a_written_target_replaces_the_whole_target() {
+        let entries = vec![entry(
+            "/根",
+            "Target.md",
+            vec![heading(1, "Target heading", 0)],
+        )];
+        let source_file = Path::new("/根/Review.md");
+        let replace = |source: &str| {
+            let caret = source.find("ing").expect("typing inside the heading");
+            let mut completion = Completion::new();
+            assert!(completion.detect(
+                stamp(1, 1, 0),
+                source,
+                caret,
+                Some(source_file),
+                &entries,
+                10
+            ));
+            let accepted = completion
+                .accept(stamp(1, 1, 0), caret)
+                .expect("the caret still matches the open popup");
+            let mut next = source.to_owned();
+            next.replace_range(accepted.range.clone(), &accepted.text);
+            next
+        };
+        assert_eq!(
+            replace("[[Target#Target heading]]"),
+            "[[Target#Target%20heading]]"
+        );
+        assert_eq!(
+            replace("[[Target#Target heading|表示名]]"),
+            "[[Target#Target%20heading|表示名]]"
+        );
     }
 
     #[test]
