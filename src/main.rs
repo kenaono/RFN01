@@ -20264,13 +20264,7 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
 fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
     // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
     answer_new_tab(window, live, id, None);
-    let Some(what) = usize::try_from(what)
-        .ok()
-        .and_then(|index| document::INSERT_EDITS.get(index))
-        .copied()
-    else {
-        return;
-    };
+    let index = usize::try_from(what).unwrap_or(usize::MAX);
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
@@ -20284,15 +20278,46 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
             }
         }
     };
-    let Some((region, text, chosen)) = document::insert_edit(&source, from, to, what) else {
-        // **何も起きなかったことを、ログが言う**（`edit_list`と同じ）。
-        live.cache.borrow_mut().log_diag(
-            "lines",
-            &format!(
-                "pane={} insert={what:?} asked={from}..{to} nothing",
-                id.log_name()
-            ),
-        );
+    // **前半は字を包む形、後半は行の体裁**（`document::INSERT_EDITS` →
+    // `document::LINE_NOTE_EDITS`）。番号は画面の並びそのものである。
+    let at = index.checked_sub(document::INSERT_EDITS.len());
+    let noted = at.and_then(|at| document::LINE_NOTE_EDITS.get(at)).copied();
+    let edit = match document::INSERT_EDITS.get(index).copied() {
+        Some(what) => document::insert_edit(&source, from, to, what),
+        None => match noted {
+            Some(what) => document::line_note_edit(&source, from, to, what, reading_of(window)),
+            // **最後の1つは改ページ**（I40）。
+            None if at == Some(document::LINE_NOTE_EDITS.len()) => {
+                document::page_break_edit(&source, from, to)
+            }
+            None => return,
+        },
+    };
+    let Some((region, text, chosen)) = edit else {
+        // **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）——理由を言う。
+        if document::inside_a_note_range(&source, from.min(to))
+            && matches!(
+                noted,
+                Some(document::LineNoteEdit::Indent(_) | document::LineNoteEdit::NoIndent)
+            )
+        {
+            window.tell_tab(
+                pick(
+                    "範囲の字下げの中は付け替えられません",
+                    "Inside a range indent, this cannot be changed",
+                )
+                .into(),
+            );
+        } else {
+            // **何も起きなかったことを、ログが言う**（`edit_list`と同じ）。
+            live.cache.borrow_mut().log_diag(
+                "lines",
+                &format!(
+                    "pane={} insert={index} note={noted:?} asked={from}..{to} nothing",
+                    id.log_name()
+                ),
+            );
+        }
         return;
     };
     apply_span_edit(
@@ -20303,7 +20328,7 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
         region,
         &text,
         chosen,
-        &format!("Insert{what:?} asked={from}..{to}"),
+        &format!("Insert{index} note={noted:?} asked={from}..{to}"),
     );
 }
 

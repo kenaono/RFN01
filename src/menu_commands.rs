@@ -125,21 +125,6 @@ impl Drop for Popup {
     }
 }
 
-// Planned commands deliberately have no executable ID. Keep the complete
-// menu structure discoverable without introducing new document mutations.
-fn pending(menu: &Popup, ja: &str, en: &str) -> windows::core::Result<()> {
-    menu.row(
-        &format!(
-            "{} {}",
-            pick(ja, en),
-            pick("（未実装）", "(not implemented)")
-        ),
-        0,
-        false,
-        false,
-    )
-}
-
 /// メニューの1行を足す。**番号は押されたときの言い方**——`commands`の並びが
 /// そのままIDになり、`execute`が同じ並びで読み返す。既定のキーがあれば行に併記する。
 #[allow(clippy::too_many_arguments)]
@@ -167,6 +152,7 @@ fn menu_row(
 /// 挿入メニューの**実行できる項目**（RFN01-38）。子メニューの並びも行の並びも
 /// A案のままである。**番号は`document::INSERT_EDITS`の位置**——画面と本文のどちらも
 /// 同じ並びを読む。
+#[allow(clippy::too_many_arguments)]
 fn insert_commands(
     window: &AppWindow,
     menu: &Popup,
@@ -174,22 +160,19 @@ fn insert_commands(
     field: bool,
     enabled: bool,
     picked: bool,
+    notes: document::LineNoteState,
+    breakable: bool,
 ) -> windows::core::Result<()> {
-    // **番号は並べた順**（`document::INSERT_EDITS`の位置）。1行足すたびに1つ進む。
-    let mut at = 0usize;
-    let mut row = |menu: &Popup,
-                   commands: &mut Vec<Command>,
-                   ja: &str,
-                   en: &str|
+    // **番号は並べた順**（`document::INSERT_EDITS`の後ろに`LINE_NOTE_EDITS`が続く）。
+    // `menu_row`が`commands`の長さを番号にするので、ここでは数え直さない。
+    let row = |menu: &Popup,
+               commands: &mut Vec<Command>,
+               ja: &str,
+               en: &str,
+               allowed: bool,
+               checked: bool|
      -> windows::core::Result<()> {
-        let index = at;
-        at += 1;
-        // **選んだ字を指す注記は、字が無ければ押せない**（書き手の合意
-        // 2026-09-21）。どの形がそうかは本文を持つ側が知っている
-        // ——`document::InsertEdit`に聞く。
-        let wanted = document::INSERT_EDITS
-            .get(index)
-            .is_some_and(|what| what.needs_a_picked_word());
+        let index = commands.len() as i32;
         menu_row(
             window,
             menu,
@@ -197,83 +180,178 @@ fn insert_commands(
             field,
             ja,
             en,
-            Command::Insert(index as i32),
-            enabled && (!wanted || picked),
-            false,
+            Command::Insert(index),
+            enabled && allowed,
+            checked,
         )
     };
+    // **選んだ字を指す注記は、字が無ければ押せない**（書き手の合意 2026-09-21）。
+    // どの形がそうかは本文を持つ側が知っている——`document::InsertEdit`に聞く。
+    let word = |at: usize| !document::INSERT_EDITS[at].needs_a_picked_word() || picked;
     let link = Popup::new()?;
-    row(&link, commands, "Markdownリンク", "Markdown Link")?;
-    row(&link, commands, "Wikiリンク", "Wiki Link")?;
+    row(
+        &link,
+        commands,
+        "Markdownリンク",
+        "Markdown Link",
+        word(0),
+        false,
+    )?;
+    row(&link, commands, "Wikiリンク", "Wiki Link", word(1), false)?;
     row(
         &link,
         commands,
         "別名付きWikiリンク",
         "Wiki Link with Alias",
+        word(2),
+        false,
     )?;
     menu.child(pick("リンク", "Link"), link)?;
-    row(menu, commands, "ルビ", "Ruby")?;
+    row(menu, commands, "ルビ", "Ruby", word(3), false)?;
     let note = Popup::new()?;
-    row(&note, commands, "左側の注記", "Left-side Annotation")?;
+    row(
+        &note,
+        commands,
+        "左側の注記",
+        "Left-side Annotation",
+        word(4),
+        false,
+    )?;
     row(
         &note,
         commands,
         "ルビと左側の注記",
         "Ruby and Left-side Annotation",
+        word(5),
+        false,
     )?;
     menu.child(pick("注記", "Annotation"), note)?;
     let dots = Popup::new()?;
-    row(&dots, commands, "傍点", "Emphasis Dots")?;
-    row(&dots, commands, "ゴマ傍点", "Sesame Dots")?;
-    row(&dots, commands, "丸傍点", "Round Dots")?;
-    row(&dots, commands, "白丸傍点", "White Round Dots")?;
-    row(&dots, commands, "二重丸傍点", "Double Round Dots")?;
-    row(&dots, commands, "×傍点", "Cross Dots")?;
+    row(&dots, commands, "傍点", "Emphasis Dots", word(6), false)?;
+    row(&dots, commands, "ゴマ傍点", "Sesame Dots", word(7), false)?;
+    row(&dots, commands, "丸傍点", "Round Dots", word(8), false)?;
+    row(
+        &dots,
+        commands,
+        "白丸傍点",
+        "White Round Dots",
+        word(9),
+        false,
+    )?;
+    row(
+        &dots,
+        commands,
+        "二重丸傍点",
+        "Double Round Dots",
+        word(10),
+        false,
+    )?;
+    row(&dots, commands, "×傍点", "Cross Dots", word(11), false)?;
     menu.child(pick("傍点", "Emphasis Marks"), dots)?;
     let lines = Popup::new()?;
-    row(&lines, commands, "傍線", "Single Line")?;
-    row(&lines, commands, "二重傍線", "Double Line")?;
-    row(&lines, commands, "波線", "Wavy Line")?;
-    row(&lines, commands, "鎖線", "Chain Line")?;
-    row(&lines, commands, "破線", "Dashed Line")?;
+    row(&lines, commands, "傍線", "Single Line", word(12), false)?;
+    row(&lines, commands, "二重傍線", "Double Line", word(13), false)?;
+    row(&lines, commands, "波線", "Wavy Line", word(14), false)?;
+    row(&lines, commands, "鎖線", "Chain Line", word(15), false)?;
+    row(&lines, commands, "破線", "Dashed Line", word(16), false)?;
     menu.child(pick("傍線", "Emphasis Lines"), lines)?;
-    let text = Popup::new()?;
-    row(&text, commands, "縦中横", "Tate-chu-yoko")?;
-    row(&text, commands, "割り注", "Warichu")?;
-    row(&text, commands, "小さな文字", "Small Text")?;
-    row(&text, commands, "大きな文字", "Large Text")?;
-    menu.child(pick("文字注記", "Text Annotation"), text)
-}
-
-/// 挿入メニューのうち、まだ実行しない項目（RFN01-38の単位3以降）。**「メニューに
-/// 無い」と「まだ実行しない」を区別する**（要件 6.7）——末端は「（未実装）」の
-/// 無効表示のままにする。
-fn insert_pending(menu: &Popup) -> windows::core::Result<()> {
+    let marks = Popup::new()?;
+    row(&marks, commands, "縦中横", "Tate-chu-yoko", word(17), false)?;
+    row(&marks, commands, "割り注", "Warichu", word(18), false)?;
+    row(
+        &marks,
+        commands,
+        "小さな文字",
+        "Small Text",
+        word(19),
+        false,
+    )?;
+    row(
+        &marks,
+        commands,
+        "大きな文字",
+        "Large Text",
+        word(20),
+        false,
+    )?;
+    menu.child(pick("文字注記", "Text Annotation"), marks)?;
+    // ここから行の体裁（I22〜I39）。**印は「全行が同じ指定か」を表す**
+    // ——混在していれば、どれにも印が付かない（書き手の合意 2026-09-21）。
     let heading = Popup::new()?;
-    for level in 1..=6 {
+    for level in 1..=6u8 {
         let name = say!("見出し {level}", "Heading {level}");
-        pending(&heading, &name, &name)?;
+        row(
+            &heading,
+            commands,
+            &name,
+            &name,
+            notes.can_heading,
+            notes.level == Some(level),
+        )?;
     }
-    pending(&heading, "見出しを解除", "Remove Heading")?;
+    row(
+        &heading,
+        commands,
+        "見出しを解除",
+        "Remove Heading",
+        notes.can_heading && notes.level.is_some(),
+        false,
+    )?;
     menu.child(pick("見出し", "Heading"), heading)?;
     let paragraph = Popup::new()?;
     let indent = Popup::new()?;
-    for count in 1..=4 {
+    for count in 1..=4u8 {
         let name = say!("{count}字下げ", "Indent {count} Characters");
-        pending(&indent, &name, &name)?;
+        row(
+            &indent,
+            commands,
+            &name,
+            &name,
+            notes.can_indent,
+            notes.indent == Some(count),
+        )?;
     }
-    pending(&indent, "字下げを解除", "Remove Indent")?;
+    row(
+        &indent,
+        commands,
+        "字下げを解除",
+        "Remove Indent",
+        notes.can_indent && notes.indent.is_some(),
+        false,
+    )?;
     paragraph.child(pick("字下げ", "Indent"), indent)?;
     let tail = Popup::new()?;
-    pending(&tail, "地付き", "Align to End")?;
-    for count in 1..=4 {
-        let name = say!("地から{count}字上げ", "{count} Characters from End");
-        pending(&tail, &name, &name)?;
+    row(
+        &tail,
+        commands,
+        "地付き",
+        "Align to End",
+        notes.can_tail,
+        notes.tail == Some(0),
+    )?;
+    for cells in 1..=4u8 {
+        let name = say!("地から{cells}字上げ", "{cells} Characters from End");
+        row(
+            &tail,
+            commands,
+            &name,
+            &name,
+            notes.can_tail,
+            notes.tail == Some(cells),
+        )?;
     }
-    pending(&tail, "地付きを解除", "Remove End Alignment")?;
+    row(
+        &tail,
+        commands,
+        "地付きを解除",
+        "Remove End Alignment",
+        notes.can_tail && notes.tail.is_some(),
+        false,
+    )?;
     paragraph.child(pick("地付き", "End Alignment"), tail)?;
     menu.child(pick("段落注記", "Paragraph Annotation"), paragraph)?;
-    pending(menu, "改ページ", "Page Break")
+    // **最後の1つは改ページ**（I40）。行ではなく、行と行のあいだへ入れる。
+    row(menu, commands, "改ページ", "Page Break", breakable, false)
 }
 
 struct Target {
@@ -804,10 +882,29 @@ fn show(
             root.child(pick("単語チェック", "Word Check"), words)?;
         }
         2 => {
-            // RFN01-38の単位1と2: リンク・ルビと、注記・傍点・傍線・文字注記が
-            // 実行できる。**矩形選択のときは押せない**——矩形へまとめて入れるのは
-            // 別の課題である（RFN01-41）。
+            // RFN01-38: リンク・ルビ・注記・行の体裁が実行できる。**矩形選択のときは
+            // 押せない**——矩形へまとめて入れるのは別の課題である（RFN01-41）。
             let rectangular = live.states.of(t.id).borrow().rectangular;
+            // **行の体裁は、いまの行が何かを読んでから出す**——押せるのに何も
+            // 起きない行を作らないため、見る側と押す側が同じ答えを使う。
+            let (notes, breakable) = {
+                let source = t.document.text.borrow();
+                let pane_state = live.states.of(t.id);
+                let (from, to) = {
+                    let state = pane_state.borrow();
+                    match selection_source_range(&state) {
+                        Some((start, end)) => (start, end),
+                        None => {
+                            let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
+                            (caret, caret)
+                        }
+                    }
+                };
+                (
+                    document::line_note_state(&source, from, to, reading_of(window)),
+                    document::can_break_page_here(&source, from, to),
+                )
+            };
             insert_commands(
                 window,
                 &root,
@@ -815,8 +912,9 @@ fn show(
                 t.field > 0,
                 editable && !rectangular,
                 selected,
+                notes,
+                breakable,
             )?;
-            insert_pending(&root)?;
             root.sep()?;
             let marks = bullet_marks_of(window);
             for (i, mark) in document::BULLET_MARKS.iter().enumerate() {
@@ -1653,8 +1751,8 @@ mod tests {
     use super::*;
     use crate::terminal_ui_tests::Harness;
 
-    /// 末端の項目を、**押せるかどうかと番号つきで**並べる（RFN01-38）。
-    fn leaves(menu: HMENU) -> Vec<(u32, bool)> {
+    /// 末端の項目を、**押せるか・印が付いているかと番号つきで**並べる（RFN01-38）。
+    fn leaves(menu: HMENU) -> Vec<(u32, bool, bool)> {
         let count = unsafe { GetMenuItemCount(Some(menu)) };
         assert!(count >= 0);
         let mut found = Vec::new();
@@ -1668,7 +1766,11 @@ mod tests {
                 GetMenuItemInfoW(menu, index as u32, true, &mut item).unwrap();
             }
             if item.hSubMenu.0.is_null() {
-                found.push((item.wID, item.fState.0 & MFS_DISABLED.0 == 0));
+                found.push((
+                    item.wID,
+                    item.fState.0 & MFS_DISABLED.0 == 0,
+                    item.fState.0 & MFS_CHECKED.0 != 0,
+                ));
             } else {
                 found.extend(leaves(item.hSubMenu));
             }
@@ -1676,16 +1778,41 @@ mod tests {
         found
     }
 
-    /// RFN01-38の単位1と2: **本文へ置ける項目は押せる。**番号は画面の並びと同じで、
-    /// `document::INSERT_EDITS`の位置と1対1になる。
+    /// 行の体裁を何も持たない文書の答え（試験の初期値）。
+    fn bare_notes() -> document::LineNoteState {
+        document::LineNoteState {
+            can_heading: true,
+            can_indent: true,
+            can_tail: true,
+            level: None,
+            indent: None,
+            tail: None,
+        }
+    }
+
+    /// RFN01-38: **本文へ置ける項目は押せる。**番号は画面の並びと同じで、
+    /// `document::INSERT_EDITS`の後ろに`LINE_NOTE_EDITS`が続く。
     #[test]
     fn the_insert_menu_offers_what_it_can_write_into_the_body() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let menu = Popup::new().unwrap();
         let mut commands = Vec::new();
-        insert_commands(&h.window, &menu, &mut commands, false, true, true).unwrap();
+        insert_commands(
+            &h.window,
+            &menu,
+            &mut commands,
+            false,
+            true,
+            true,
+            bare_notes(),
+            true,
+        )
+        .unwrap();
 
-        assert_eq!(commands.len(), document::INSERT_EDITS.len());
+        assert_eq!(
+            commands.len(),
+            document::INSERT_EDITS.len() + document::LINE_NOTE_EDITS.len() + 1
+        );
         for (index, command) in commands.iter().enumerate() {
             assert!(
                 matches!(command, Command::Insert(n) if *n == index as i32),
@@ -1693,28 +1820,118 @@ mod tests {
             );
         }
         let rows = leaves(menu.handle);
-        assert_eq!(rows.len(), document::INSERT_EDITS.len());
+        assert_eq!(rows.len(), commands.len());
+        // **解除だけは、その指定がある行でしか押せない**（この文書には何も無い）。
+        let closed: Vec<document::LineNoteEdit> = rows
+            .iter()
+            .enumerate()
+            .skip(document::INSERT_EDITS.len())
+            .take(document::LINE_NOTE_EDITS.len())
+            .filter(|(_, (_, pickable, _))| !*pickable)
+            .map(|(at, _)| document::LINE_NOTE_EDITS[at - document::INSERT_EDITS.len()])
+            .collect();
+        assert_eq!(
+            closed,
+            vec![
+                document::LineNoteEdit::NoHeading,
+                document::LineNoteEdit::NoIndent,
+                document::LineNoteEdit::NoAlignToEnd,
+            ]
+        );
+        // **入れられる位置の改ページは押せる。**
         assert!(
-            rows.iter().all(|(_, pickable)| *pickable),
-            "字を選んでいれば、どの行も押せる"
+            rows.last().is_some_and(|(_, pickable, _)| *pickable),
+            "改ページ"
         );
     }
 
     /// **選んだ字を指す注記は、字を選んでいなければ押せない**（書き手の合意
     /// 2026-09-21）——同じ語を本文と注記の2か所へ書く形は、指す先が無いと書けない。
-    /// どの形がそうかは本文を持つ側（`document::InsertEdit`）が答える。
+    /// どの形がそうかは本文を持つ側（`document::InsertEdit`）が答える。**解除の行は、
+    /// その指定がある行でだけ押せる。**
     #[test]
     fn a_note_that_points_at_a_word_needs_the_word_picked() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let menu = Popup::new().unwrap();
         let mut commands = Vec::new();
-        insert_commands(&h.window, &menu, &mut commands, false, true, false).unwrap();
+        insert_commands(
+            &h.window,
+            &menu,
+            &mut commands,
+            false,
+            true,
+            false,
+            bare_notes(),
+            false,
+        )
+        .unwrap();
 
         let rows = leaves(menu.handle);
-        for (index, (_, pickable)) in rows.iter().enumerate() {
+        for (index, (_, pickable, _)) in rows.iter().take(document::INSERT_EDITS.len()).enumerate()
+        {
             let wanted = document::INSERT_EDITS[index].needs_a_picked_word();
             assert_eq!(*pickable, !wanted, "選んだ字が要る形だけが押せない");
         }
+        // 何も指定の無い行では、値の行だけが押せて、解除の行は押せない。
+        for (at, (_, pickable, _)) in rows
+            .iter()
+            .enumerate()
+            .skip(document::INSERT_EDITS.len())
+            .take(document::LINE_NOTE_EDITS.len())
+        {
+            let edit = document::LINE_NOTE_EDITS[at - document::INSERT_EDITS.len()];
+            let allowed = !matches!(
+                edit,
+                document::LineNoteEdit::NoHeading
+                    | document::LineNoteEdit::NoIndent
+                    | document::LineNoteEdit::NoAlignToEnd
+            );
+            assert_eq!(*pickable, allowed, "{edit:?}");
+        }
+        // **入れられない位置の改ページも押せない。**
+        assert!(rows.last().is_some_and(|(_, pickable, _)| !*pickable));
+    }
+
+    /// **いま効いている指定には印が付く**（書き手の合意 2026-09-21）。
+    #[test]
+    fn the_line_note_rows_mark_the_value_that_is_in_force() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let menu = Popup::new().unwrap();
+        let mut commands = Vec::new();
+        let notes = document::LineNoteState {
+            level: Some(3),
+            indent: Some(2),
+            tail: Some(1),
+            ..bare_notes()
+        };
+        insert_commands(
+            &h.window,
+            &menu,
+            &mut commands,
+            false,
+            true,
+            true,
+            notes,
+            true,
+        )
+        .unwrap();
+
+        let marked: Vec<document::LineNoteEdit> = leaves(menu.handle)
+            .iter()
+            .enumerate()
+            .skip(document::INSERT_EDITS.len())
+            .take(document::LINE_NOTE_EDITS.len())
+            .filter(|(_, (_, _, checked))| *checked)
+            .map(|(at, _)| document::LINE_NOTE_EDITS[at - document::INSERT_EDITS.len()])
+            .collect();
+        assert_eq!(
+            marked,
+            vec![
+                document::LineNoteEdit::Heading(3),
+                document::LineNoteEdit::Indent(2),
+                document::LineNoteEdit::AlignToEnd(1),
+            ]
+        );
     }
 
     /// 本文へ何も書けないとき（Viewer・ReadOnly・矩形選択のとき）は、**同じ行が
@@ -1723,26 +1940,23 @@ mod tests {
     fn no_insert_row_is_pickable_when_the_body_cannot_be_written() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let menu = Popup::new().unwrap();
-        insert_commands(&h.window, &menu, &mut Vec::new(), false, false, true).unwrap();
+        insert_commands(
+            &h.window,
+            &menu,
+            &mut Vec::new(),
+            false,
+            false,
+            true,
+            bare_notes(),
+            true,
+        )
+        .unwrap();
 
         assert!(
-            leaves(menu.handle).iter().all(|(_, pickable)| !*pickable),
+            leaves(menu.handle)
+                .iter()
+                .all(|(_, pickable, _)| !*pickable),
             "書けないときは押せない"
-        );
-    }
-
-    /// RFN01-38: **まだ実行しない項目は、番号を持たず無効のままである。**「メニュー
-    /// に無い」のではなく「まだ実行しない」ことを、行が言っている（要件 6.7）。
-    #[test]
-    fn the_rest_of_the_insert_menu_is_still_planned() {
-        let menu = Popup::new().unwrap();
-        insert_pending(&menu).unwrap();
-
-        let rows = leaves(menu.handle);
-        assert_eq!(rows.len(), 19);
-        assert!(
-            rows.iter().all(|(id, pickable)| *id == 0 && !*pickable),
-            "未実装の行は押せない"
         );
     }
 
