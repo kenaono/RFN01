@@ -114,6 +114,10 @@ pub fn turn(window: &AppWindow, live: &Live, to: i32) {
 }
 
 pub fn close(window: &AppWindow, live: &Live) {
+    // 診断（RFN01-44）：**この道が呼ばれたか**。上側の「閉じる」を押しても閉じない
+    // という報告なので、クリックがボタンに届いているかを、ここで切り分ける
+    // （Escでもここへ来る——書き手には**押すだけ**を頼む）。
+    live.cache.borrow_mut().log_diag("print", "close reached");
     window.set_print_active(false);
     // **組版器はここで捨てる。**紙のぶんの組版は編集には要らないし、次に開くときの
     // 文書は同じとは限らない。
