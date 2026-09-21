@@ -1010,6 +1010,29 @@ mod tests {
         assert_eq!(percent_decode(target), "./第(一)章.md");
     }
 
+    /// RFN01-43: **拡張子を省いた名前でも、見出しの候補が出ること。**
+    /// 書き手の確認（2026-09-21）：同じフォルダなら出る，違うフォルダだと出ない。
+    #[test]
+    fn a_heading_candidate_is_found_without_the_extension() {
+        let found = |folder: &str| {
+            let entries = vec![entry(folder, "次.md", vec![heading(1, "第一章")])];
+            let source = "[[次#第一";
+            let context = detect(source, source.len()).unwrap();
+            let source_file = Path::new("/根/現在.md");
+            candidates(
+                &entries,
+                Some(source_file),
+                "",
+                &context,
+                DEFAULT_CANDIDATE_LIMIT,
+            )
+            .len()
+        };
+
+        assert_eq!(found("/根"), 1, "同じフォルダ");
+        assert_eq!(found("/根/別"), 1, "違うフォルダ（RFN01-43）");
+    }
+
     #[test]
     fn heading_candidates_come_from_the_named_files_own_headings() {
         let entries = vec![entry(

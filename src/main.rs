@@ -9114,6 +9114,35 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
         document: pointer as u64,
         source_generation: ui.generation,
     };
+    // 診断（RFN01-43）：見出しの候補が出ないとき、**材料のどこで食い違っているか**を
+    // 1行で残す。**名前は残さない**——字数・道の有無・件数・解決の成否だけである。
+    if let Some(context) = link_completion::detect(&source, caret)
+        && let link_completion::TriggerKind::WikiHeading { file } = &context.kind
+        && !file.is_empty()
+    {
+        let document_file = doc.file.borrow();
+        let path = document_file.path();
+        let resolved = workspace_links::resolve_indexed_file(
+            &link_completion::percent_decode(file),
+            true,
+            path,
+            &entries,
+            false,
+        );
+        live.cache.borrow_mut().log_diag(
+            "completion",
+            &format!(
+                "heading_file_chars={} source_has_path={} entries={} resolved={}",
+                file.chars().count(),
+                path.is_some(),
+                entries.len(),
+                match &resolved {
+                    Ok(_) => "yes".to_owned(),
+                    Err(error) => format!("{error:?}"),
+                }
+            ),
+        );
+    }
     ui.completion.detect(
         stamp,
         &source,
