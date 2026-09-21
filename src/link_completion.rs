@@ -308,6 +308,9 @@ fn file_candidates(
 
     let mut matched: Vec<&Entry> = Vec::new();
     for entry in entries {
+        if !crate::workspace_index::is_indexable(&entry.canonical) {
+            continue;
+        }
         if matched.len() >= limit {
             break;
         }
@@ -406,12 +409,16 @@ fn heading_candidates(
         // sides — a same-directory candidate's own `insert` now carries one
         // (see `relative_between`), but a hand-typed bare filename never did
         // and must still match.
-        let decoded_full = percent_decode(file);
-        let decoded = strip_current_dir_prefix(&decoded_full);
-        let matched = entries.iter().find(|entry| {
-            let entry_path = percent_decode(&wiki_or_markdown_path(entry, source_file, wiki));
-            strip_current_dir_prefix(&entry_path) == decoded
-        });
+        let decoded = percent_decode(file);
+        let resolved = crate::workspace_links::resolve_indexed_file(
+            &decoded,
+            wiki,
+            source_file,
+            entries,
+            false,
+        )
+        .ok();
+        let matched = resolved.and_then(|path| entries.iter().find(|e| e.canonical == path));
         match matched {
             Some(entry) => (entry.canonical.clone(), entry.headings.clone()),
             None => return Vec::new(),
@@ -538,22 +545,6 @@ pub(crate) fn path_to_string(path: &Path) -> String {
 #[cfg(not(windows))]
 pub(crate) fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
-}
-
-/// The `./` `relative_between` prefixes a same-directory candidate with,
-/// taken back off for a comparison that must not care whether either side
-/// wrote it — see its own two call sites.
-fn strip_current_dir_prefix(text: &str) -> &str {
-    text.strip_prefix("./").unwrap_or(text)
-}
-
-fn wiki_or_markdown_path(entry: &Entry, source_file: Option<&Path>, wiki: bool) -> String {
-    let reserved: &[u8] = if wiki {
-        &WIKI_RESERVED
-    } else {
-        &MARKDOWN_RESERVED
-    };
-    percent_encode_reserved(&path_to_string(&display_path(entry, source_file)), reserved)
 }
 
 /// Encode a known target using the same qualified relative spelling as completion.

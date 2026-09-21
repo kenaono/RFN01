@@ -25,6 +25,7 @@ pub struct ValidityDocument {
 
 type InvalidTargets = Vec<(usize, Vec<std::ops::Range<usize>>)>;
 struct ValidityRequest {
+    complete: bool,
     generation: u64,
     roots: Vec<PathBuf>,
     entries: std::sync::Arc<Vec<Entry>>,
@@ -60,7 +61,7 @@ impl ValidityChecker {
                         if !matches() {
                             break;
                         }
-                        let ranges = if healthy {
+                        let mut ranges = if healthy {
                             invalid_destinations(
                                 doc,
                                 &request.roots,
@@ -78,6 +79,16 @@ impl ValidityChecker {
                         } else {
                             Vec::new()
                         };
+                        if !request.complete {
+                            // Partial inventories cannot prove absence or uniqueness of a name.
+                            ranges.retain(|r| {
+                                let raw = doc.text[r.clone()].trim().trim_matches(['<', '>']);
+                                raw.starts_with('#')
+                                    || raw.starts_with("./")
+                                    || raw.starts_with("../")
+                                    || Path::new(raw).is_absolute()
+                            });
+                        }
                         invalid.push((doc.id, ranges));
                     }
                     if matches() {
@@ -99,16 +110,24 @@ impl ValidityChecker {
             .store(self.next, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn submit(
+    /// `complete` says whether the name list behind `entries` covers every
+    /// root in `roots`. A partial list can still suggest a target but cannot
+    /// prove one is missing or unique, so an incomplete request keeps only the
+    /// targets the document itself spells out literally (`#`, `./`, `../`, or
+    /// an absolute path) — see the retain below. Every caller (the tick, the
+    /// scope reset, a rename) goes through here.
+    pub fn submit_scoped(
         &mut self,
         roots: Vec<PathBuf>,
         entries: std::sync::Arc<Vec<Entry>>,
         documents: Vec<ValidityDocument>,
+        complete: bool,
     ) -> Option<u64> {
         self.cancel();
         let generation = self.next;
         self.sender
             .try_send(ValidityRequest {
+                complete,
                 generation,
                 roots,
                 entries,
@@ -588,15 +607,16 @@ mod validity_tests {
             path: Some(root.join("source.md")),
             text: "[[missing.md]]".repeat(2000),
         }];
-        worker.submit(
+        worker.submit_scoped(
             vec![root.clone()],
             std::sync::Arc::new(Vec::new()),
             documents,
+            true,
         );
         worker.cancel();
         let until = Instant::now() + Duration::from_secs(3);
         let newest = loop {
-            if let Some(id) = worker.submit(
+            if let Some(id) = worker.submit_scoped(
                 vec![root.clone()],
                 std::sync::Arc::new(Vec::new()),
                 vec![ValidityDocument {
@@ -604,6 +624,7 @@ mod validity_tests {
                     path: Some(root.join("source.md")),
                     text: "plain".into(),
                 }],
+                true,
             ) {
                 break id;
             }
@@ -665,6 +686,22 @@ pub struct Status {
 /// to whichever Workspace (or none) is currently active. A caller polls this
 /// on a timer; nothing here blocks.
 pub struct WorkspaceLinks {
+    names_complete: bool,
+    force_reparse: bool,
+    recent: Vec<(Vec<PathBuf>, Vec<Entry>, Instant)>,
+    /// The one view every caller reads: the shared index with open documents
+    /// overlaid. Held behind [`std::sync::Arc`] so a caller that needs to keep
+    /// or hand it to a worker shares it instead of copying every entry (the
+    /// index holds up to [`crate::workspace_index::MAX_ENTRIES`] files).
+    visible: std::sync::Arc<Vec<Entry>>,
+    /// Set by anything that can change `visible` (a folded entry event, a new
+    /// priority overlay, a scope change) so a poll that merely reported
+    /// progress — `Complete`, `InventoryComplete`, an error — does not pay for
+    /// rebuilding and re-comparing the whole view.
+    visible_dirty: bool,
+    view_metrics: ViewMetrics,
+    priority_entries: Vec<Entry>,
+    background_revision: u64,
     completed: bool,
     revision: u64,
     appdata_dir: Option<PathBuf>,
@@ -685,13 +722,57 @@ pub struct WorkspaceLinks {
     last_maintenance_error: Option<String>,
 }
 
+/// What keeping the shared view fresh cost since the last drain — counts and
+/// times only, never a name or a path (要件: 本文・ファイル名を記録しない).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ViewMetrics {
+    pub rebuilds: u64,
+    /// Building the view (map, filter, sort).
+    pub rebuild_ms: f64,
+    /// Deciding whether the rebuilt view differs from the published one.
+    pub compare_ms: f64,
+    /// Entries in the published view, as of the last rebuild.
+    pub entries: usize,
+}
+
+impl ViewMetrics {
+    pub fn log(&self) -> String {
+        format!(
+            "index_view rebuilds={} rebuild_ms={:.3} compare_ms={:.3} entries={}",
+            self.rebuilds, self.rebuild_ms, self.compare_ms, self.entries
+        )
+    }
+}
+
 impl WorkspaceLinks {
+    pub fn retain_shared(&mut self, roots: Vec<PathBuf>) {
+        self.recent.retain(|(covered, _, _)| {
+            covered.iter().any(|r| {
+                roots.iter().any(|keep| {
+                    contained(r, std::slice::from_ref(keep))
+                        || contained(keep, std::slice::from_ref(r))
+                })
+            })
+        });
+        if let Some(appdata) = &self.appdata_dir {
+            self.indexer
+                .retain_shared(appdata.join("workspace-index/shared-v2"), roots);
+        }
+    }
     /// `appdata_dir` is the editor's own AppData directory, or `None` when it
     /// is unavailable — every scan then runs through `Indexer::restart_memory`
     /// instead, and `clear_cache` does nothing (仕様 "Appdata unavailable =>
     /// memory-only indexing, no temp cache under manuscript cwd").
     pub fn new(appdata_dir: Option<PathBuf>) -> Self {
         Self {
+            names_complete: false,
+            force_reparse: false,
+            recent: Vec::new(),
+            visible: std::sync::Arc::new(Vec::new()),
+            visible_dirty: false,
+            view_metrics: ViewMetrics::default(),
+            priority_entries: Vec::new(),
+            background_revision: 0,
             completed: false,
             revision: 0,
             appdata_dir,
@@ -706,7 +787,115 @@ impl WorkspaceLinks {
     }
 
     pub fn entries(&self) -> &[Entry] {
-        self.snapshot.entries()
+        &self.visible
+    }
+
+    /// The same view as [`WorkspaceLinks::entries`], shared rather than
+    /// copied — what callers that keep it (a validity request, a priority
+    /// request, the picture index) should take. It is replaced, never
+    /// mutated in place, so a holder always sees one consistent snapshot.
+    pub fn entries_shared(&self) -> std::sync::Arc<Vec<Entry>> {
+        self.visible.clone()
+    }
+
+    /// Drains what [`WorkspaceLinks::rebuild_visible`] cost since the last
+    /// call, for the caller that writes it to the diagnostics log.
+    pub fn take_view_metrics(&mut self) -> ViewMetrics {
+        std::mem::take(&mut self.view_metrics)
+    }
+
+    pub fn background_revision(&self) -> u64 {
+        self.background_revision
+    }
+    pub fn names_complete(&self) -> bool {
+        self.names_complete
+    }
+    /// Called only by the explicit open operation, never by layout or candidate generation.
+    pub fn resolve_for_open(
+        &self,
+        target: &str,
+        wiki: bool,
+        source: Option<&Path>,
+        text: &str,
+    ) -> Result<ResolvedLink, ResolveError> {
+        let raw = target.trim().trim_matches(['<', '>']);
+        let (file, heading) = link_completion::split_target_heading(raw);
+        let decoded = link_completion::percent_decode(file);
+        let direct = resolve_explicit_path(&decoded, source);
+        if !file.is_empty() && direct.as_ref().is_some_and(|p| p.is_file()) {
+            return Ok(ResolvedLink::Target {
+                path: direct.unwrap(),
+                heading: heading.map(parse_heading_spec),
+            });
+        }
+        let resolved = resolve_link(target, wiki, source, text, self.entries())?;
+        if !self.names_complete {
+            if let ResolvedLink::Target { path, .. } = &resolved {
+                let local = direct.as_ref().is_some_and(|p| {
+                    lexical_path(p) == lexical_path(path)
+                        || lexical_path(&PathBuf::from(format!("{}.md", p.display())))
+                            == lexical_path(path)
+                });
+                if !local {
+                    return Err(ResolveError::NotFound);
+                }
+            }
+        }
+        Ok(resolved)
+    }
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.identity
+            .as_ref()
+            .map(|s| s.roots.clone())
+            .unwrap_or_default()
+    }
+    pub fn take_metrics(&self) -> Vec<crate::workspace_index::ScanMetrics> {
+        self.indexer.take_metrics()
+    }
+    pub fn set_priority(&mut self, entries: Vec<Entry>) {
+        if self.priority_entries != entries {
+            self.priority_entries = entries;
+            self.visible_dirty = true;
+            self.rebuild_visible();
+        }
+    }
+    fn rebuild_visible(&mut self) {
+        if !self.visible_dirty {
+            return;
+        }
+        self.visible_dirty = false;
+        let started = Instant::now();
+        let roots = self.roots();
+        let mut entries: std::collections::HashMap<PathBuf, Entry> = self
+            .snapshot
+            .entries()
+            .iter()
+            .cloned()
+            .map(|e| (e.canonical.clone(), e))
+            .collect();
+        for entry in &self.priority_entries {
+            entries.insert(entry.canonical.clone(), entry.clone());
+        }
+        let mut next: Vec<_> = entries
+            .into_values()
+            .filter(|e| {
+                crate::workspace_index::is_indexable(&e.canonical)
+                    && contained(&e.canonical, &roots)
+            })
+            .collect();
+        next.sort_by(|a, b| a.canonical.cmp(&b.canonical));
+        let rebuilt = started.elapsed();
+        let compared = Instant::now();
+        let changed = self.visible.as_slice() != next.as_slice();
+        let compared = compared.elapsed();
+        if changed {
+            self.visible = std::sync::Arc::new(next);
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.view_metrics.rebuilds += 1;
+        self.view_metrics.rebuild_ms += rebuilt.as_secs_f64() * 1000.0;
+        self.view_metrics.compare_ms += compared.as_secs_f64() * 1000.0;
+        self.view_metrics.entries = self.visible.len();
     }
 
     pub fn revision(&self) -> u64 {
@@ -766,7 +955,16 @@ impl WorkspaceLinks {
         if self.identity.as_ref() == Some(&candidate) {
             return;
         }
+        self.force_reparse = self.identity.as_ref().is_some_and(|old| {
+            old.workspace == candidate.workspace
+                && old.reset_generation != candidate.reset_generation
+        });
         self.indexer.cancel();
+        self.names_complete = false;
+        self.visible = std::sync::Arc::new(Vec::new());
+        self.visible_dirty = true;
+        self.priority_entries.clear();
+        self.background_revision = self.background_revision.wrapping_add(1);
         self.completed = false;
         self.revision = self.revision.wrapping_add(1);
         self.snapshot = Snapshot::new();
@@ -776,11 +974,45 @@ impl WorkspaceLinks {
         let started = !candidate.roots.is_empty();
         self.identity = Some(candidate);
         if started {
+            let roots = self.roots();
+            if let Some((_, entries, at)) = self.recent.iter().rev().find(|(covered, _, at)| {
+                !self.force_reparse
+                    && at.elapsed() < Duration::from_secs(30)
+                    && roots.iter().all(|r| contained(r, covered))
+            }) {
+                let entries = entries
+                    .iter()
+                    .filter_map(|e| {
+                        let root = roots
+                            .iter()
+                            .filter(|r| contained(&e.canonical, std::slice::from_ref(r)))
+                            .max_by_key(|r| r.components().count())?;
+                        let mut e = e.clone();
+                        e.root = lexical_path(root);
+                        e.relative = lexical_path(&e.canonical)
+                            .strip_prefix(&e.root)
+                            .ok()?
+                            .to_path_buf();
+                        Some(e)
+                    })
+                    .collect();
+                let at = *at;
+                self.snapshot.apply(Event {
+                    generation: 0,
+                    kind: EventKind::Cached(entries),
+                });
+                self.completed = true;
+                self.names_complete = true;
+                self.last_scan_started = Some(at);
+                self.rebuild_visible();
+                return;
+            }
             self.start_scan();
         }
     }
 
     fn start_scan(&mut self) {
+        self.names_complete = false;
         self.completed = false;
         let identity = self
             .identity
@@ -795,15 +1027,17 @@ impl WorkspaceLinks {
             ..Status::default()
         };
         self.last_scan_started = Some(Instant::now());
+        let options = ScanOptions {
+            force_reparse: std::mem::take(&mut self.force_reparse),
+            ..ScanOptions::default()
+        };
         let generation = match (identity.workspace, &self.appdata_dir) {
             (Some(id), Some(appdata)) => {
-                let cache_dir = cache_dir_for(appdata, id);
-                self.indexer
-                    .restart(identity.roots, cache_dir, ScanOptions::default())
+                let _ = id;
+                let cache_dir = appdata.join("workspace-index").join("shared-v2");
+                self.indexer.restart(identity.roots, cache_dir, options)
             }
-            _ => self
-                .indexer
-                .restart_memory(identity.roots, ScanOptions::default()),
+            _ => self.indexer.restart_memory(identity.roots, options),
         };
         self.expected_generation = Some(generation);
     }
@@ -838,12 +1072,21 @@ impl WorkspaceLinks {
     /// the snapshot and status — cheap enough for a UI timer tick regardless
     /// of how fast the worker is producing them.
     pub fn poll(&mut self) {
+        let before = self.background_revision;
         for event in self.indexer.poll() {
-            self.apply(event);
+            self.fold_event(event);
+        }
+        if before != self.background_revision {
+            self.publish();
         }
     }
 
+    #[cfg(test)]
     fn apply(&mut self, event: Event) {
+        self.fold_event(event);
+        self.publish();
+    }
+    fn fold_event(&mut self, event: Event) {
         if event.generation == MAINTENANCE_GENERATION {
             // A `clear_cache` error — for any Workspace, active or not.
             // Deliberately kept out of `Status`: it must never read as "the
@@ -859,6 +1102,9 @@ impl WorkspaceLinks {
         }
         self.revision = self.revision.wrapping_add(1);
         match &event.kind {
+            EventKind::InventoryComplete { complete } => {
+                self.names_complete = *complete;
+            }
             EventKind::Complete {
                 failed,
                 missing_roots,
@@ -877,9 +1123,29 @@ impl WorkspaceLinks {
             EventKind::CacheWriteFailed { .. } => {
                 self.status.cache_write_failed += 1;
             }
-            EventKind::Cached(_) | EventKind::Updated(_) | EventKind::Removed(_) => {}
+            // Only these three can move an entry in or out of the view; the
+            // progress reports above never can, so they must not dirty it.
+            EventKind::Cached(found) | EventKind::Updated(found) => {
+                self.visible_dirty |= !found.is_empty();
+            }
+            EventKind::Removed(paths) => {
+                self.visible_dirty |= !paths.is_empty();
+            }
         }
         self.snapshot.apply(event);
+        self.background_revision = self.background_revision.wrapping_add(1);
+    }
+    fn publish(&mut self) {
+        self.rebuild_visible();
+        if self.completed && self.validation_roots().is_some() {
+            let roots = self.roots();
+            self.recent.retain(|(r, _, _)| r != &roots);
+            if self.recent.len() >= 4 {
+                self.recent.remove(0);
+            }
+            self.recent
+                .push((roots, self.snapshot.entries().to_vec(), Instant::now()));
+        }
     }
 
     /// Removes `workspace`'s entire on-disk index cache directory — every
@@ -899,6 +1165,17 @@ impl WorkspaceLinks {
     /// through [`WorkspaceLinks::last_maintenance_error`], not `status`. Does
     /// nothing when there is no AppData directory.
     pub fn clear_cache(&mut self, workspace: WorkspaceId) {
+        if self
+            .identity
+            .as_ref()
+            .is_some_and(|i| i.workspace == Some(workspace))
+        {
+            let roots = self.roots();
+            self.recent.retain(|(covered, _, _)| {
+                !covered.iter().any(|r| contained(r, &roots))
+                    && !roots.iter().any(|r| contained(r, covered))
+            });
+        }
         let Some(appdata) = &self.appdata_dir else {
             return;
         };
@@ -1198,43 +1475,112 @@ pub fn resolve_link(
 
     let heading = heading_part.map(parse_heading_spec);
     let decoded_file = link_completion::percent_decode(file_part);
-    let is_separator_path = decoded_file.contains('/') || decoded_file.contains('\\');
-    let is_absolute = Path::new(&decoded_file).is_absolute();
-
-    let path = if is_absolute || is_separator_path || !wiki {
-        if !is_absolute && source_file.is_none() {
-            return Err(ResolveError::NoSourceFile);
-        }
-        resolve_explicit_path(&decoded_file, source_file).ok_or(ResolveError::NotFound)?
-    } else {
-        let matches: Vec<&Entry> = entries
-            .iter()
-            .filter(|entry| basename_matches(entry, &decoded_file))
-            .collect();
-        match matches.as_slice() {
-            [] => return Err(ResolveError::NotFound),
-            [only] => only.canonical.clone(),
-            _ => {
-                return Err(ResolveError::Ambiguous(
-                    matches
-                        .iter()
-                        .map(|entry| entry.canonical.clone())
-                        .collect(),
-                ));
-            }
-        }
-    };
+    let path = resolve_indexed_file(&decoded_file, wiki, source_file, entries, false)?;
 
     Ok(ResolvedLink::Target { path, heading })
 }
 
-fn basename_matches(entry: &Entry, name: &str) -> bool {
-    entry
-        .canonical
-        .file_name()
-        .map(|found| found.to_string_lossy())
-        .as_deref()
-        == Some(name)
+/// Shared, disk-free name resolution for notes, heading completion and images.
+pub fn resolve_indexed_file(
+    decoded: &str,
+    wiki: bool,
+    source: Option<&Path>,
+    entries: &[Entry],
+    image: bool,
+) -> Result<PathBuf, ResolveError> {
+    let direct = resolve_explicit_path(decoded, source);
+    let qualified = decoded.contains(['/', '\\']);
+    let explicit = Path::new(decoded).is_absolute()
+        || decoded.starts_with("./")
+        || decoded.starts_with("../")
+        || decoded.starts_with(".\\")
+        || decoded.starts_with("..\\");
+    let same = |a: &Path, b: &Path| {
+        let (a, b) = (lexical_path(a), lexical_path(b));
+        if cfg!(windows) {
+            a.to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy())
+        } else {
+            a == b
+        }
+    };
+    // Every entry list reaching here is already restricted to the index's own
+    // types: `run_scan` filters cached and walked files, `load_shared_cache`
+    // filters what it re-projects, `WorkspaceLinks::rebuild_visible` filters
+    // the published view, and the priority/completion paths filter their own
+    // copies. Re-testing the type here would instead *break* the rename and
+    // move path, whose entries are the moved files themselves: a `.pdf` or
+    // `.txt` is out of scope for name resolution through the index, but a
+    // link to one still follows the file when it moves (2026-09-21).
+    let allowed = |e: &&Entry| !image || crate::workspace_index::is_image(&e.canonical);
+    if let Some(path) = &direct {
+        if let Some(e) = entries
+            .iter()
+            .filter(allowed)
+            .find(|e| same(&e.canonical, path))
+        {
+            return Ok(e.canonical.clone());
+        }
+    }
+    let can_md = !image
+        && !Path::new(decoded)
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| {
+                [
+                    "md", "txt", "log", "pdf", "rs", "json", "toml", "html", "png", "jpg", "jpeg",
+                    "gif", "webp", "bmp", "svg",
+                ]
+                .iter()
+                .any(|e| x.eq_ignore_ascii_case(e))
+            });
+    if can_md {
+        if let Some(path) = &direct {
+            let appended = PathBuf::from(format!("{}.md", path.display()));
+            if let Some(e) = entries
+                .iter()
+                .filter(allowed)
+                .find(|e| same(&e.canonical, &appended))
+            {
+                return Ok(e.canonical.clone());
+            }
+        }
+    }
+    if !explicit && (wiki || image || qualified) {
+        for name in
+            std::iter::once(decoded.to_owned()).chain(can_md.then(|| format!("{decoded}.md")))
+        {
+            let mut found: Vec<PathBuf> = entries
+                .iter()
+                .filter(allowed)
+                .filter(|e| {
+                    if qualified {
+                        same(&e.relative, Path::new(&name))
+                    } else {
+                        e.canonical.file_name().is_some_and(|n| {
+                            if cfg!(windows) {
+                                n.to_string_lossy().eq_ignore_ascii_case(&name)
+                            } else {
+                                n == std::ffi::OsStr::new(&name)
+                            }
+                        })
+                    }
+                })
+                .map(|e| e.canonical.clone())
+                .collect();
+            found.sort();
+            found.dedup();
+            match found.len() {
+                0 => {}
+                1 => return Ok(found.remove(0)),
+                _ => return Err(ResolveError::Ambiguous(found)),
+            }
+        }
+    }
+    if wiki && !qualified && !Path::new(decoded).is_absolute() && !image {
+        return Err(ResolveError::NotFound);
+    }
+    direct.ok_or(ResolveError::NoSourceFile)
 }
 
 /// An already-decoded file path (never re-decoded — the caller decodes
@@ -1373,6 +1719,81 @@ mod tests {
         directory
     }
 
+    /// 2026-09-21: what keeping the shared view costs the UI thread at the
+    /// size a real manuscript reaches. The first line is the whole first
+    /// publish; each later line is one event batch carrying a single changed
+    /// file — what a keystroke or a scan update actually pays. Release
+    /// benchmark: run alone with `--release -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "release benchmark; explicitly invoked"]
+    fn view_rebuild_benchmark() {
+        const FILES: usize = 10_000;
+        const HEADINGS: usize = 30;
+        let root = scratch_directory("view-benchmark");
+        let mut links = WorkspaceLinks::new(None);
+        links.identity = Some(ScopeIdentity {
+            workspace: Some(1),
+            roots: vec![root.clone()],
+            reset_generation: 0,
+        });
+        links.expected_generation = Some(7);
+        let entry_for = |index: usize, revision: usize| Entry {
+            root: root.clone(),
+            relative: PathBuf::from(format!("n{index}.md")),
+            canonical: root.join(format!("n{index}.md")),
+            fingerprint: FileStamp {
+                modified: None,
+                length: 0,
+            },
+            headings: (0..HEADINGS)
+                .map(|heading| document::Heading {
+                    level: 2,
+                    text: format!("見出し{index}-{heading}-{revision}"),
+                    at: heading * 8,
+                })
+                .collect(),
+            headings_complete: true,
+        };
+
+        let started = Instant::now();
+        links.apply(Event {
+            generation: 7,
+            kind: EventKind::Updated((0..FILES).map(|index| entry_for(index, 0)).collect()),
+        });
+        let published = links.take_view_metrics();
+        println!(
+            "view_rebuild_benchmark files={FILES} headings={HEADINGS} phase=first rebuild_ms={:.3} compare_ms={:.3} entries={} wall_ms={:.3}",
+            published.rebuild_ms,
+            published.compare_ms,
+            published.entries,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+
+        let mut samples = Vec::new();
+        for round in 1..=5 {
+            let started = Instant::now();
+            links.apply(Event {
+                generation: 7,
+                kind: EventKind::Updated(vec![entry_for(round, round)]),
+            });
+            let metrics = links.take_view_metrics();
+            samples.push(metrics.rebuild_ms + metrics.compare_ms);
+            println!(
+                "view_rebuild_benchmark files={FILES} phase=one-file round={round} rebuild_ms={:.3} compare_ms={:.3} entries={} wall_ms={:.3}",
+                metrics.rebuild_ms,
+                metrics.compare_ms,
+                metrics.entries,
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "view_rebuild_benchmark files={FILES} median_rebuild_plus_compare_ms={:.3}",
+            samples[samples.len() / 2]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     // --- WorkspaceLinks scope lifecycle -------------------------------
 
     #[test]
@@ -1399,12 +1820,12 @@ mod tests {
         std::fs::write(new_root.join("new.md"), "# 新\n").expect("writes");
 
         let mut links = WorkspaceLinks::new(None);
-        links.sync_scope(Some(1), vec![old_root], 0);
+        links.sync_scope(Some(1), vec![old_root.clone()], 0);
         // A stale event tagged with a generation from before the switch must
         // never appear in the new scope's entries.
         links.apply(Event {
             generation: links.expected_generation.unwrap(),
-            kind: EventKind::Updated(vec![entry("/stale", "x.md", Vec::new())]),
+            kind: EventKind::Updated(vec![entry(old_root.to_str().unwrap(), "x.md", Vec::new())]),
         });
         assert_eq!(links.entries().len(), 1);
 
@@ -1510,6 +1931,10 @@ mod tests {
             links.poll();
         }
         let cache_dir = cache_dir_for(&appdata, 7);
+        // New scans use the shared store; legacy per-Workspace cleanup stays supported.
+        assert!(appdata.join("workspace-index/shared-v2").exists());
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("index-0000000000000001.rfnwsidx"), "legacy").unwrap();
         assert_eq!(
             std::fs::read_dir(&cache_dir)
                 .map(|it| it.count())
@@ -1523,6 +1948,68 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!cache_dir.exists());
+        assert!(appdata.join("workspace-index/shared-v2").exists());
+    }
+
+    #[test]
+    fn notes_and_images_resolve_through_one_rule() {
+        let entries = vec![
+            entry("/root", "notes/person.md", vec![]),
+            entry("/root", "assets/photo.png", vec![]),
+            entry("/root", "other/person.md", vec![]),
+        ];
+        let source = Path::new("/root/notes/source.md");
+        assert_eq!(
+            resolve_indexed_file("person", true, Some(source), &entries, false).unwrap(),
+            PathBuf::from("/root/notes/person.md")
+        );
+        assert_eq!(
+            resolve_indexed_file("photo.png", true, Some(source), &entries, true).unwrap(),
+            PathBuf::from("/root/assets/photo.png")
+        );
+        assert_eq!(
+            resolve_indexed_file("assets/photo.png", true, Some(source), &entries, true).unwrap(),
+            PathBuf::from("/root/assets/photo.png")
+        );
+        assert!(matches!(
+            resolve_indexed_file("person", true, None, &entries, false),
+            Err(ResolveError::Ambiguous(_))
+        ));
+        // Explicit paths must never be redirected to a matching name elsewhere.
+        assert_eq!(
+            resolve_indexed_file("./photo.png", true, Some(source), &entries, true).unwrap(),
+            PathBuf::from("/root/notes/photo.png")
+        );
+        assert_eq!(
+            resolve_indexed_file("plain.txt", true, None, &entries, false),
+            Err(ResolveError::NotFound)
+        );
+    }
+
+    #[test]
+    fn completed_parent_snapshot_is_reused_by_another_workspaces_child() {
+        let root = scratch_directory("share-parent-live");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("one.md"), "# One\n").unwrap();
+        std::fs::write(root.join("outside.md"), "# Outside\n").unwrap();
+        let mut links = WorkspaceLinks::new(None);
+        links.sync_scope(Some(1), vec![root], 0);
+        let until = Instant::now() + Duration::from_secs(5);
+        while links.status.busy {
+            links.poll();
+            assert!(Instant::now() < until);
+        }
+        links.sync_scope(Some(2), vec![child.clone()], 0);
+        assert!(!links.status.busy);
+        assert_eq!(links.entries().len(), 1);
+        assert!(links.entries()[0].canonical.ends_with("one.md"));
+        assert_eq!(links.entries()[0].relative, PathBuf::from("one.md"));
+        links.sync_scope(Some(2), vec![child], 1);
+        assert!(
+            links.status.busy,
+            "reset must bypass a fresh shared snapshot"
+        );
     }
 
     /// Codex preliminary review, engine corrections: clearing an *inactive*

@@ -36,8 +36,8 @@ mod image_ui_tests;
 mod ime;
 #[cfg(test)]
 mod incremental_ui_tests;
+mod index_work;
 mod kill_ring;
-mod menu_commands;
 #[cfg(test)]
 mod layout_snapshot_ui_tests;
 mod link_completion;
@@ -47,8 +47,10 @@ mod link_rewrite;
 mod link_ui_tests;
 #[cfg(test)]
 mod memo_ui_tests;
+mod menu_commands;
 mod open_document;
 mod pane_layout;
+mod panel_source;
 mod pictures;
 #[cfg(test)]
 mod print_tests;
@@ -75,7 +77,6 @@ mod table_ui_tests;
 mod terminal;
 mod terminal_appearance;
 mod terminal_panels;
-mod panel_source;
 mod terminal_session;
 mod terminal_shells;
 #[cfg(test)]
@@ -88,9 +89,9 @@ mod typography_ui_tests;
 #[cfg(test)]
 mod vertical_layout;
 mod wallpaper;
+mod window_chrome;
 mod wiring;
 mod word_marks;
-mod window_chrome;
 #[cfg(test)]
 mod word_ui_tests;
 mod workspace;
@@ -100,6 +101,7 @@ mod workspace_index;
 mod workspace_links;
 #[cfg(test)]
 mod workspace_manager_ui_tests;
+mod workspace_priority;
 mod workspace_ui;
 mod writer;
 
@@ -629,7 +631,14 @@ impl PaneStates {
     }
 
     fn of(&self, id: PaneId) -> Rc<RefCell<EditorState>> {
-        if id.is_panel() { return self.panels.borrow().get(&id.0).map(|slot| slot.state.clone()).unwrap_or_default(); }
+        if id.is_panel() {
+            return self
+                .panels
+                .borrow()
+                .get(&id.0)
+                .map(|slot| slot.state.clone())
+                .unwrap_or_default();
+        }
         let slots = self.slots.borrow();
         match slots.get(id.index() as usize) {
             Some(slot) => slot.state.clone(),
@@ -643,7 +652,14 @@ impl PaneStates {
 
     /// What this pane is showing.
     fn document(&self, id: PaneId) -> Rc<OpenDocument> {
-        if id.is_panel() { return self.panels.borrow().get(&id.0).map(|slot| slot.showing.borrow().clone()).unwrap_or_else(|| OpenDocument::untitled(0, slint::Weak::default())); }
+        if id.is_panel() {
+            return self
+                .panels
+                .borrow()
+                .get(&id.0)
+                .map(|slot| slot.showing.borrow().clone())
+                .unwrap_or_else(|| OpenDocument::untitled(0, slint::Weak::default()));
+        }
         let slots = self.slots.borrow();
         let slot = slots.get(id.index() as usize).or(slots.first());
         slot.map(|slot| slot.showing.borrow().clone())
@@ -652,7 +668,12 @@ impl PaneStates {
 
     /// Put a document in front of this pane.
     fn show(&self, id: PaneId, document: &Rc<OpenDocument>) {
-        if id.is_panel() { if let Some(slot) = self.panels.borrow().get(&id.0) { *slot.showing.borrow_mut() = document.clone(); } return; }
+        if id.is_panel() {
+            if let Some(slot) = self.panels.borrow().get(&id.0) {
+                *slot.showing.borrow_mut() = document.clone();
+            }
+            return;
+        }
         let slots = self.slots.borrow();
         if let Some(slot) = slots.get(id.index() as usize) {
             *slot.showing.borrow_mut() = document.clone();
@@ -688,6 +709,7 @@ enum SelectionPhase {
 /// must not touch it.
 #[derive(Default)]
 struct PreviewSlot {
+    image_revision: u64,
     validity_publication: Option<(usize, Instant, Option<u64>)>,
     invalid_link_source: String,
     invalid_link_targets: Vec<Range<usize>>,
@@ -734,6 +756,7 @@ impl PreviewSlot {
             Some((picture, size))
         });
         self.sized = Some((zoom_percent, folder.map(Path::to_path_buf)));
+        self.image_revision = pictures::index_revision();
     }
 
     /// 要件 E9: `ruby`は**この文書を組むときの読み方**。取り違えのないよう
@@ -774,6 +797,7 @@ impl PreviewSlot {
             self.validity_changed = false;
         }
         if stale
+            || self.image_revision != pictures::index_revision()
             || self
                 .sized
                 .as_ref()
@@ -1372,7 +1396,8 @@ impl Default for RenderCache {
             // the tab in front of it says, so the mode it starts in is the
             // tab's business rather than the pane's.
             panes: vec![Pane::new(WritingMode::Horizontal)],
-            panel_panes: Default::default(), panel_pace: Default::default(),
+            panel_panes: Default::default(),
+            panel_pace: Default::default(),
             frames: Rc::default(),
             source_push_ms: None,
             perf_log: PerfLog::default(),
@@ -2388,7 +2413,9 @@ fn main() -> Result<(), slint::PlatformError> {
         };
         timer.start(TimerMode::SingleShot, RESIZE_SETTLE, move || {
             if let Some(window) = weak.upgrade() {
-                if id.is_panel() && !states.panels.borrow().contains_key(&id.0) { return; }
+                if id.is_panel() && !states.panels.borrow().contains_key(&id.0) {
+                    return;
+                }
                 let started = Instant::now();
                 let showing = states.document(id);
                 let source = showing.text.borrow().clone();
@@ -2873,7 +2900,16 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_viewer_toggled(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            if id.is_panel() { terminal_panels::action(&window, &viewer_live, PaneId::from_index(id.screen(&window).panel_owner), 4, 0); return; }
+            if id.is_panel() {
+                terminal_panels::action(
+                    &window,
+                    &viewer_live,
+                    PaneId::from_index(id.screen(&window).panel_owner),
+                    4,
+                    0,
+                );
+                return;
+            }
             toggle_viewer(&window, &states, &cache, id);
         }
     });
@@ -3044,7 +3080,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     if let Some(window) = weak.upgrade() {
                         wallpaper::follow_window(&window);
                         if let Some(hwnd) = window_chrome::window_handle(&window) {
-                            window.set_title_maximized(unsafe { windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool() });
+                            window.set_title_maximized(unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool()
+                            });
                         }
                     }
                 }
@@ -3325,7 +3363,11 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_below_focus(move |pane, into| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            let owner = if id.is_panel() { PaneId::from_index(id.screen(&window).panel_owner) } else { id };
+            let owner = if id.is_panel() {
+                PaneId::from_index(id.screen(&window).panel_owner)
+            } else {
+                id
+            };
             if owner.screen(&window).below_kind == 2 {
                 panel_source::focus(&window, &focus_live, owner, into);
                 return;
@@ -3606,19 +3648,43 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let held = chrome.clone();
     Timer::single_shot(Duration::ZERO, move || {
-        let Some(window) = weak.upgrade() else { return; };
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
         let _ = slint::spawn_local(async move {
             use slint::winit_030::WinitWindowAccessor;
             if let Err(error) = window.window().winit_window().await {
-                window.tell(say!("タイトルバーを初期化できません: {error}", "Cannot initialize the title bar: {error}").into());
+                window.tell(
+                    say!(
+                        "タイトルバーを初期化できません: {error}",
+                        "Cannot initialize the title bar: {error}"
+                    )
+                    .into(),
+                );
                 return;
             }
             let Some(hwnd) = window_chrome::window_handle(&window) else {
-                window.tell(pick("タイトルバーのウィンドウを取得できません", "Cannot obtain the title bar window").into()); return;
+                window.tell(
+                    pick(
+                        "タイトルバーのウィンドウを取得できません",
+                        "Cannot obtain the title bar window",
+                    )
+                    .into(),
+                );
+                return;
             };
             match window_chrome::Chrome::install(hwnd) {
-                Ok(chrome) => { *held.borrow_mut() = Some(chrome); window.set_custom_title(true); }
-                Err(error) => window.tell(say!("タイトルバーを初期化できません: {error}", "Cannot initialize the title bar: {error}").into()),
+                Ok(chrome) => {
+                    *held.borrow_mut() = Some(chrome);
+                    window.set_custom_title(true);
+                }
+                Err(error) => window.tell(
+                    say!(
+                        "タイトルバーを初期化できません: {error}",
+                        "Cannot initialize the title bar: {error}"
+                    )
+                    .into(),
+                ),
             }
         });
     });
@@ -4478,7 +4544,9 @@ impl Live {
         if id.reads_only(window) && state.borrow().follow {
             scroll_to_end(window, &self.cache, id);
         }
-        if !id.is_panel() { panel_source::sync(window, self); }
+        if !id.is_panel() {
+            panel_source::sync(window, self);
+        }
     }
 }
 
@@ -4600,14 +4668,22 @@ impl StatusBar for AppWindow {
     fn tell_pane(&self, told: SharedString) {
         self.set_render_status_scope(1);
         let id = focused_pane(self);
-        self.set_render_status_pane(if id.is_panel() { id.screen(self).panel_owner } else { id.index() });
+        self.set_render_status_pane(if id.is_panel() {
+            id.screen(self).panel_owner
+        } else {
+            id.index()
+        });
         self.set_render_status(told);
     }
 
     fn tell_tab(&self, told: SharedString) {
         self.set_render_status_scope(2);
         let id = focused_pane(self);
-        self.set_render_status_pane(if id.is_panel() { id.screen(self).panel_owner } else { id.index() });
+        self.set_render_status_pane(if id.is_panel() {
+            id.screen(self).panel_owner
+        } else {
+            id.index()
+        });
         self.set_render_status(told);
     }
 }
@@ -8543,11 +8619,24 @@ fn open_dropped_file(window: &AppWindow, live: &Live, path: &Path, id: PaneId) {
 
 fn open_path_in_focused_pane(window: &AppWindow, live: &Live, path: &Path, opening: Opening) {
     let id = focused_pane(window);
-    if id.is_panel() { terminal_panels::open_file(window, live, PaneId::from_index(id.screen(window).panel_owner), path); return; }
+    if id.is_panel() {
+        terminal_panels::open_file(
+            window,
+            live,
+            PaneId::from_index(id.screen(window).panel_owner),
+            path,
+        );
+        return;
+    }
     open_path_in_pane(window, live, id, path, opening);
 }
 
 struct WorkspaceLinkUi {
+    priority: workspace_priority::Priority,
+    priority_requested: Option<(Vec<PathBuf>, Vec<(usize, Instant, Option<PathBuf>)>)>,
+    priority_background: u64,
+    priority_pending: bool,
+    pictures_revision: u64,
     validity: workspace_links::ValidityChecker,
     validity_requested: Option<(u64, bool, Vec<(usize, Instant, Option<PathBuf>)>)>,
     validity_generation: Option<u64>,
@@ -8569,6 +8658,11 @@ fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
         .links
         .get_or_insert_with(|| {
             Rc::new(RefCell::new(WorkspaceLinkUi {
+                priority: workspace_priority::Priority::new(),
+                priority_requested: None,
+                priority_background: 0,
+                priority_pending: false,
+                pictures_revision: u64::MAX,
                 validity: workspace_links::ValidityChecker::new(),
                 validity_requested: None,
                 validity_generation: None,
@@ -8593,6 +8687,22 @@ fn workspace_links_scope_changed(
     clear_id: Option<workspace::WorkspaceId>,
 ) {
     let held = workspace_link_ui(live);
+    if let Some(runtime) = live.folder.borrow().workspace.clone() {
+        let runtime = runtime.borrow();
+        let registry = runtime.registry();
+        let roots = registry
+            .folders()
+            .iter()
+            .filter(|f| {
+                registry
+                    .workspaces()
+                    .iter()
+                    .any(|w| w.folders.contains(&f.id))
+            })
+            .map(|f| f.path.clone())
+            .collect();
+        held.borrow_mut().index.retain_shared(roots);
+    }
     if let Some(id) = clear_id {
         held.borrow_mut().index.clear_cache(id);
     }
@@ -8729,11 +8839,12 @@ fn update_link_validity(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkU
             documents.push(tab.document.clone());
         }
     }
-    let roots = ui.index.validation_roots().map(<[PathBuf]>::to_vec);
+    let roots = (!ui.index.roots().is_empty()).then(|| ui.index.roots());
+    let complete = ui.index.validation_roots().is_some();
     let revision = ui.index.revision();
     let stamp = (
         revision,
-        roots.is_some(),
+        complete,
         documents
             .iter()
             .map(|doc| {
@@ -8755,8 +8866,7 @@ fn update_link_validity(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkU
                 .as_ref()
                 .is_none_or(|(known, _)| *known != revision)
             {
-                ui.validity_entries =
-                    Some((revision, std::sync::Arc::new(ui.index.entries().to_vec())));
+                ui.validity_entries = Some((revision, ui.index.entries_shared()));
             }
             let inputs = documents
                 .iter()
@@ -8766,10 +8876,11 @@ fn update_link_validity(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkU
                     text: doc.text.borrow().clone(),
                 })
                 .collect::<Vec<_>>();
-            if let Some(generation) = ui.validity.submit(
+            if let Some(generation) = ui.validity.submit_scoped(
                 roots,
                 ui.validity_entries.as_ref().unwrap().1.clone(),
                 inputs,
+                complete,
             ) {
                 ui.validity_generation = Some(generation);
                 ui.validity_requested = Some(stamp);
@@ -8847,6 +8958,24 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let mut ui = held.borrow_mut();
     ui.index.sync_scope(active, roots, reset);
     ui.index.poll();
+    for measured in ui.index.take_metrics() {
+        let line = measured.log();
+        let mut cache = live.cache.borrow_mut();
+        cache.log_diag("work.index", &line);
+        cache.log_perf(&line);
+    }
+    // 2026-09-21: the view rebuild and the request build are the two costs a
+    // tick can add on the UI thread itself, so they are measured separately
+    // from the worker's own scan and priority times (要件 4.5「UIへの反映待ち」
+    // の内訳). Counts and times only — never a name or a path.
+    let submit_ms = update_priority_index(window, live, &mut ui);
+    let view = ui.index.take_view_metrics();
+    if view.rebuilds > 0 || submit_ms > 0.0 {
+        let line = format!("{} priority_submit_ms={:.3}", view.log(), submit_ms);
+        let mut cache = live.cache.borrow_mut();
+        cache.log_diag("work.index", &line);
+        cache.log_perf(&line);
+    }
     if let Some(error) = ui.index.last_maintenance_error().map(str::to_owned) {
         if ui.notified_maintenance.as_ref() != Some(&error) {
             window.tell_tab(
@@ -8891,7 +9020,10 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
         publish_link_popup(window, id, &ui);
         return;
     }
-    let mut entries = ui.index.entries().to_vec();
+    // Shared until a held document actually needs its unsaved headings laid
+    // over the index: the copy is then made once, by `make_mut`, only when
+    // this pane has such a document.
+    let mut entries = ui.index.entries_shared();
     let tabs = live.tabs.borrow();
     let mut held_pointers = Vec::new();
     for tab in tabs.panes.iter().flat_map(|pane| &pane.tabs) {
@@ -8916,7 +9048,13 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
             *headings = (changed, document::outline(&document.text.borrow()));
         }
         let canonical = path.canonicalize().unwrap_or(path);
-        for entry in entries.iter_mut().filter(|e| e.canonical == canonical) {
+        if !entries.iter().any(|e| e.canonical == canonical) {
+            continue;
+        }
+        for entry in std::sync::Arc::make_mut(&mut entries)
+            .iter_mut()
+            .filter(|e| e.canonical == canonical)
+        {
             entry.headings = headings.1.clone();
             entry.headings_complete = true;
         }
@@ -9080,12 +9218,11 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
         return false;
     };
     let held_index = workspace_link_ui(live);
-    let resolved = workspace_links::resolve_link(
+    let resolved = held_index.borrow().index.resolve_for_open(
         target,
         wiki,
         document.file.borrow().path(),
         &source,
-        held_index.borrow().index.entries(),
     );
     let (path, heading) = match resolved {
         Ok(workspace_links::ResolvedLink::SameFileHeading { result }) => {
@@ -10138,7 +10275,9 @@ fn publish_panes(window: &AppWindow, count: usize) {
         window.set_panes(ModelRc::new(VecModel::from(made)));
         return;
     };
-    while PaneId::count(window) > count { rows.remove(PaneId::count(window) - 1); }
+    while PaneId::count(window) > count {
+        rows.remove(PaneId::count(window) - 1);
+    }
     while PaneId::count(window) < count {
         let at = PaneId::count(window);
         rows.insert(at, PaneId(at as u32).initial_screen(false, false));
@@ -10156,7 +10295,11 @@ fn place_panes(window: &AppWindow, layout: &Layout) {
     // own length says how many panes there are**, and a second opinion about
     // that is exactly what went stale.
     let focused = PaneId::from_index(window.get_focused_pane());
-    let structural_focus = if focused.is_panel() { PaneId::from_index(focused.screen(window).panel_owner) } else { focused };
+    let structural_focus = if focused.is_panel() {
+        PaneId::from_index(focused.screen(window).panel_owner)
+    } else {
+        focused
+    };
     let on_screen = placed
         .iter()
         .any(|(pane, _)| *pane == structural_focus.index() as usize);
@@ -10339,18 +10482,25 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                 // Settings stays neutral. Terminal chips retain their own paper
                 // even while another tab is active, with the same contrast rule.
                 let paper = if tab.terminal.is_some() {
-                    Some(tab.below.front_style.as_ref().filter(|style| style.paper_own)
-                        .map(|style| style.paper)
-                        .or(tab.paper[direction])
-                        .or(strip.paper[direction])
-                        .unwrap_or_else(|| terminal_appearance::default_style(window, 0).paper))
-                } else { (!tab.stands_in())
-                    .then(|| {
-                        tab.paper[direction]
+                    Some(
+                        tab.below
+                            .front_style
+                            .as_ref()
+                            .filter(|style| style.paper_own)
+                            .map(|style| style.paper)
+                            .or(tab.paper[direction])
                             .or(strip.paper[direction])
-                            .or(global[direction])
-                    })
-                    .flatten() };
+                            .unwrap_or_else(|| terminal_appearance::default_style(window, 0).paper),
+                    )
+                } else {
+                    (!tab.stands_in())
+                        .then(|| {
+                            tab.paper[direction]
+                                .or(strip.paper[direction])
+                                .or(global[direction])
+                        })
+                        .flatten()
+                };
                 let chip = tab.tab_colour.or(paper);
                 // **編集の始まったタブは、もう覗いているだけではない**
                 // （書き手の報告 2026-09-07）。ここが不変の借りしか持たないので
@@ -10841,7 +10991,16 @@ fn new_file_tab(window: &AppWindow, live: &Live, id: PaneId) {
 }
 
 fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
-    if id.is_panel() { terminal_panels::action(window, live, PaneId::from_index(id.screen(window).panel_owner), 1, 0); return; }
+    if id.is_panel() {
+        terminal_panels::action(
+            window,
+            live,
+            PaneId::from_index(id.screen(window).panel_owner),
+            1,
+            0,
+        );
+        return;
+    }
     // **新しい紙に、前の紙の知らせは付いてこない**（書き手の報告 2026-09-10：
     // 「New Tabで新規のファイルを作ったら、『保存しました』が出ているのは違和感が
     // あります。新規のファイルはまだ保存されていないからです」）。
@@ -11844,7 +12003,9 @@ fn reopen_as_asked(window: &AppWindow, live: &Live, encoding: file_io::Encoding)
 /// **True when a question is now standing**, which is what stops a run of
 /// closes ([`advance_close_run`]) until it has been answered.
 fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool {
-    if id.is_panel() { return panel_source::close(window, live, id); }
+    if id.is_panel() {
+        return panel_source::close(window, live, id);
+    }
     sync_active_tab(window, live);
     let target = live
         .tabs
@@ -12349,7 +12510,11 @@ fn drop_pane_row(window: &AppWindow, id: PaneId) {
 /// two, and every other pane keeps what it had. The new pane opens showing the
 /// same file, which is what 要件 6.4 asks a new pane to start with.
 fn divide_pane(window: &AppWindow, live: &Live, here: PaneId, split: Split) {
-    let here = if here.is_panel() { PaneId::from_index(here.screen(window).panel_owner) } else { here };
+    let here = if here.is_panel() {
+        PaneId::from_index(here.screen(window).panel_owner)
+    } else {
+        here
+    };
     let room = here.screen(window);
     let across = match split {
         Split::SideBySide => room.width,
@@ -12679,7 +12844,9 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
     // 追加要件 2026-09-15: 壁紙を敷いているあいだ、紙は面が1枚だけ透かして塗る。
     spec.paper_painted =
         window.get_wall_kind() == wallpaper::NONE && window.get_background_transparency() == 0;
-    if id.is_panel() { spec.paper_painted = screen.panel_style.transparency == 0; }
+    if id.is_panel() {
+        spec.paper_painted = screen.panel_style.transparency == 0;
+    }
     spec
 }
 
@@ -15270,7 +15437,15 @@ impl PaneId {
     const EMBEDDED_START: u32 = 65536;
     fn is_panel(self) -> bool { self.0 >= Self::EMBEDDED_START }
     fn row(self, window: &AppWindow) -> usize {
-        if self.is_panel() { window.get_panes().iter().position(|s| s.id == self.index()).unwrap_or(usize::MAX) } else { self.0 as usize }
+        if self.is_panel() {
+            window
+                .get_panes()
+                .iter()
+                .position(|s| s.id == self.index())
+                .unwrap_or(usize::MAX)
+        } else {
+            self.0 as usize
+        }
     }
 
     /// Every pane that exists, in order.
@@ -15343,7 +15518,9 @@ impl PaneId {
     fn update_screen(self, window: &AppWindow, edit: impl FnOnce(&mut PaneScreen)) {
         let panes = window.get_panes();
         let row = self.row(window);
-        if row >= panes.row_count() { return; }
+        if row >= panes.row_count() {
+            return;
+        }
         let mut screen = panes.row_data(row).unwrap_or_default();
         let previous = screen.clone();
         edit(&mut screen);
@@ -15473,7 +15650,9 @@ impl PaneId {
     /// show is shown by scrolling across it, because a line length that the
     /// pane silently overruled would be a setting nobody could check.
     fn line_fit(self, window: &AppWindow, typography: &Typography) -> LineFit {
-        if self.is_panel() { return LineFit::Extent(usable_horizontal_width(self.shown_across_flow(window))); }
+        if self.is_panel() {
+            return LineFit::Extent(usable_horizontal_width(self.shown_across_flow(window)));
+        }
         let vertical = self.vertical(window);
         let sheet = usize::from(vertical);
         match Setting::WrapMode.read(window, sheet) {
@@ -15695,7 +15874,9 @@ impl PaneId {
     }
 
     fn set_shows_preview(self, window: &AppWindow, shows: bool) {
-        if self.is_panel() { return; }
+        if self.is_panel() {
+            return;
+        }
         self.update_screen(window, |screen| screen.preview = shows);
     }
 
@@ -15987,7 +16168,14 @@ impl PaneId {
         self.draw_both(window, states, cache, document, source, caret);
         let took = elapsed_ms(started);
         cache.borrow_mut().pace_of(self).drew(took);
-        if self.is_panel() { let weak = window.as_weak(); let _ = slint::invoke_from_event_loop(move || { if let Some(window) = weak.upgrade() { window.invoke_republish_tabs(); } }); }
+        if self.is_panel() {
+            let weak = window.as_weak();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(window) = weak.upgrade() {
+                    window.invoke_republish_tabs();
+                }
+            });
+        }
     }
 
     /// This pane and, if it is showing the same document, the other one.
@@ -16096,7 +16284,12 @@ impl RenderCache {
     /// The pane an id names. **The only place the two are told apart by
     /// anything other than a [`PaneId`].**
     fn pane(&mut self, id: PaneId) -> &mut Pane {
-        if id.is_panel() { return self.panel_panes.entry(id.0).or_insert_with(|| Pane::new(WritingMode::Horizontal)); }
+        if id.is_panel() {
+            return self
+                .panel_panes
+                .entry(id.0)
+                .or_insert_with(|| Pane::new(WritingMode::Horizontal));
+        }
         let at = (id.index() as usize).min(self.panes.len().saturating_sub(1));
         &mut self.panes[at]
     }
@@ -16107,7 +16300,9 @@ impl RenderCache {
     /// like every other list indexed by pane: a stale number arrives with a
     /// keystroke and must not be able to stop the editor.
     fn pace_of(&mut self, id: PaneId) -> &mut EditPace {
-        if id.is_panel() { return self.panel_pace.entry(id.0).or_default(); }
+        if id.is_panel() {
+            return self.panel_pace.entry(id.0).or_default();
+        }
         let at = (id.index() as usize).min(self.pace.len().saturating_sub(1));
         &mut self.pace[at]
     }
@@ -17006,7 +17201,11 @@ fn open_terminal(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShe
 }
 
 fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShell) {
-    let id = if id.is_panel() { PaneId::from_index(id.screen(window).panel_owner) } else { id };
+    let id = if id.is_panel() {
+        PaneId::from_index(id.screen(window).panel_owner)
+    } else {
+        id
+    };
     sync_active_tab(window, live);
     let number = {
         let tabs = live.tabs.borrow();
@@ -17443,7 +17642,11 @@ fn below_kind(pane: &mut Pane) -> i32 {
 /// **Closing does not end the shell in it.** A panel put away is not a command
 /// abandoned, and the writer who opens it again expects to find what they left.
 fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
-    let id = if id.is_panel() { PaneId::from_index(id.screen(window).panel_owner) } else { id };
+    let id = if id.is_panel() {
+        PaneId::from_index(id.screen(window).panel_owner)
+    } else {
+        id
+    };
     let (open, needs_shell) = {
         let mut borrowed = live.cache.borrow_mut();
         let pane = borrowed.pane(id);
@@ -17485,7 +17688,112 @@ fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
         refresh_terminal(window, &live.cache, id, TerminalSpot::Below);
     }
     panel_source::sync(window, live);
-    if kind == 2 { panel_source::focus(window, live, id, open); }
+    if kind == 2 {
+        panel_source::focus(window, live, id, open);
+    }
+}
+
+/// Refreshes the priority overlay and the picture index. Returns how long the
+/// request was built for (milliseconds), which is the part of this work that
+/// runs on the UI thread — the worker's own time is reported by its own
+/// `index_priority` line.
+fn update_priority_index(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkUi) -> f64 {
+    let mut docs: Vec<Rc<OpenDocument>> = Vec::new();
+    for tab in live.tabs.borrow().panes.iter().flat_map(|p| &p.tabs) {
+        if !tab
+            .document
+            .file
+            .borrow()
+            .path()
+            .is_some_and(workspace_index::is_markdown)
+        {
+            continue;
+        }
+        if !docs.iter().any(|d| Rc::ptr_eq(d, &tab.document)) {
+            docs.push(tab.document.clone());
+        }
+    }
+    let roots = ui.index.roots();
+    let key = (
+        roots.clone(),
+        docs.iter()
+            .map(|d| {
+                (
+                    Rc::as_ptr(d) as usize,
+                    d.text.changed_at(),
+                    d.file.borrow().path().map(Path::to_path_buf),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let changed = ui.priority_requested.as_ref() != Some(&key);
+    let mut submit_ms = 0.0;
+    if changed || (!ui.priority_pending && ui.priority_background != ui.index.background_revision())
+    {
+        if changed {
+            ui.index.set_priority(Vec::new());
+        }
+        let started = Instant::now();
+        let inputs = docs
+            .iter()
+            .map(|d| workspace_links::ValidityDocument {
+                id: Rc::as_ptr(d) as usize,
+                path: d.file.borrow().path().map(Path::to_path_buf),
+                text: d.text.borrow().clone(),
+            })
+            .collect();
+        // The entries are shared, not copied: the worker reads one consistent
+        // snapshot and the UI thread pays nothing for it.
+        ui.priority.submit(workspace_priority::Request {
+            roots,
+            entries: ui.index.entries_shared(),
+            documents: inputs,
+        });
+        submit_ms = started.elapsed().as_secs_f64() * 1000.0;
+        ui.priority_requested = Some(key);
+        ui.priority_background = ui.index.background_revision();
+        ui.priority_pending = true;
+    }
+    if let Some(mut result) = ui.priority.poll() {
+        ui.priority_pending = false;
+        if ui.priority_background != ui.index.background_revision() {
+            result
+                .entries
+                .retain(|e| result.live_paths.contains(&e.canonical));
+        }
+        result.entries.sort_by(|a, b| a.canonical.cmp(&b.canonical));
+        let line = format!(
+            "index_priority generation={} wait_ms={:.3} processing_ms={:.3} entries={}",
+            result.generation,
+            result.wait_ms,
+            result.elapsed_ms,
+            result.entries.len()
+        );
+        live.cache.borrow_mut().log_diag("work.index", &line);
+        live.cache.borrow_mut().log_perf(&line);
+        ui.index.set_priority(result.entries);
+    }
+    if ui.pictures_revision != ui.index.revision() {
+        ui.pictures_revision = ui.index.revision();
+        if pictures::publish_index(ui.index.entries_shared(), ui.index.names_complete()) {
+            for id in PaneId::all(window) {
+                if !id.is_shown(window) {
+                    continue;
+                }
+                let doc = live.states.document(id);
+                let source = doc.text.borrow();
+                refresh_pane_from_state(
+                    window,
+                    &live.cache,
+                    &doc,
+                    id,
+                    &live.states.of(id),
+                    &source,
+                );
+            }
+        }
+    }
+    submit_ms
 }
 
 /// Start the shell that stands in a pane's strip (追加要件 Terminal).
@@ -17604,7 +17912,11 @@ fn show_draft(window: &AppWindow, id: PaneId, draft: &str) {
 }
 
 fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
-    let id = if id.is_panel() { PaneId::from_index(id.screen(window).panel_owner) } else { id };
+    let id = if id.is_panel() {
+        PaneId::from_index(id.screen(window).panel_owner)
+    } else {
+        id
+    };
     if id.screen(window).panel_read_only {
         return;
     }
@@ -20428,7 +20740,11 @@ fn stepped_tab(count: usize, active: usize, backwards: bool) -> Option<usize> {
 /// takes it says so itself (`focus-taken`), which is what turns the IME the
 /// right way round for the writing it is about to be used for.
 fn move_focus(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>, from: PaneId, towards: i32) {
-    let from = if from.is_panel() { PaneId::from_index(from.screen(window).panel_owner) } else { from };
+    let from = if from.is_panel() {
+        PaneId::from_index(from.screen(window).panel_owner)
+    } else {
+        from
+    };
     let Some(towards) = Towards::from_index(towards) else {
         return;
     };
