@@ -3653,9 +3653,20 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let open_live = live.clone();
     let open_kills = kill_ring.clone();
+    let menu_live = live.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
             chrome.set_interactive_end(if shown { 372. } else { 36. });
+            // 診断（RFN01-44）：**この道も同じ値を書く**。印刷プレビュー中の値を
+            // ここが上書きしていないかを見る（書き手の見立て：メニューの作業の後から
+            // 上側が押せなくなった）。
+            menu_live.cache.borrow_mut().log_diag(
+                "print",
+                &format!(
+                    "menu_interactive_end shown={shown} end={}",
+                    if shown { 372. } else { 36. }
+                ),
+            );
         }
         if shown && let Some(me) = weak.upgrade() {
             let openable: Vec<bool> = (0..menu_commands::MENU_GROUPS)
