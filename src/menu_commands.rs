@@ -140,19 +140,6 @@ fn pending(menu: &Popup, ja: &str, en: &str) -> windows::core::Result<()> {
     )
 }
 
-fn pending_group(
-    menu: &Popup,
-    ja: &str,
-    en: &str,
-    rows: &[(&str, &str)],
-) -> windows::core::Result<()> {
-    let child = Popup::new()?;
-    for (ja, en) in rows {
-        pending(&child, ja, en)?;
-    }
-    menu.child(pick(ja, en), child)
-}
-
 /// メニューの1行を足す。**番号は押されたときの言い方**——`commands`の並びが
 /// そのままIDになり、`execute`が同じ並びで読み返す。既定のキーがあれば行に併記する。
 #[allow(clippy::too_many_arguments)]
@@ -177,100 +164,91 @@ fn menu_row(
     menu.row(&title, commands.len(), enabled, checked)
 }
 
-/// 実行できる挿入項目（RFN01-38の単位1）。**並びが`Command::Insert(n)`の番号**で、
-/// `insert_in_pane`の言い方と1対1である。
-const INSERT_LINKS: [(&str, &str); 3] = [
-    ("Markdownリンク", "Markdown Link"),
-    ("Wikiリンク", "Wiki Link"),
-    ("別名付きWikiリンク", "Wiki Link with Alias"),
-];
-
-/// 挿入メニューの**実行できる項目**（RFN01-38）。リンク3つは子メニュー、ルビは
-/// 親メニューの1行——画面の並びはA案のままである。
+/// 挿入メニューの**実行できる項目**（RFN01-38）。子メニューの並びも行の並びも
+/// A案のままである。**番号は`document::INSERT_EDITS`の位置**——画面と本文のどちらも
+/// 同じ並びを読む。
 fn insert_commands(
     window: &AppWindow,
     menu: &Popup,
     commands: &mut Vec<Command>,
     field: bool,
     enabled: bool,
+    picked: bool,
 ) -> windows::core::Result<()> {
-    let link = Popup::new()?;
-    for (index, (ja, en)) in INSERT_LINKS.iter().copied().enumerate() {
+    // **番号は並べた順**（`document::INSERT_EDITS`の位置）。1行足すたびに1つ進む。
+    let mut at = 0usize;
+    let mut row = |menu: &Popup,
+                   commands: &mut Vec<Command>,
+                   ja: &str,
+                   en: &str|
+     -> windows::core::Result<()> {
+        let index = at;
+        at += 1;
+        // **選んだ字を指す注記は、字が無ければ押せない**（書き手の合意
+        // 2026-09-21）。どの形がそうかは本文を持つ側が知っている
+        // ——`document::InsertEdit`に聞く。
+        let wanted = document::INSERT_EDITS
+            .get(index)
+            .is_some_and(|what| what.needs_a_picked_word());
         menu_row(
             window,
-            &link,
+            menu,
             commands,
             field,
             ja,
             en,
             Command::Insert(index as i32),
-            enabled,
+            enabled && (!wanted || picked),
             false,
-        )?;
-    }
-    menu.child(pick("リンク", "Link"), link)?;
-    menu_row(
-        window,
-        menu,
+        )
+    };
+    let link = Popup::new()?;
+    row(&link, commands, "Markdownリンク", "Markdown Link")?;
+    row(&link, commands, "Wikiリンク", "Wiki Link")?;
+    row(
+        &link,
         commands,
-        field,
-        "ルビ",
-        "Ruby",
-        Command::Insert(INSERT_LINKS.len() as i32),
-        enabled,
-        false,
-    )
+        "別名付きWikiリンク",
+        "Wiki Link with Alias",
+    )?;
+    menu.child(pick("リンク", "Link"), link)?;
+    row(menu, commands, "ルビ", "Ruby")?;
+    let note = Popup::new()?;
+    row(&note, commands, "左側の注記", "Left-side Annotation")?;
+    row(
+        &note,
+        commands,
+        "ルビと左側の注記",
+        "Ruby and Left-side Annotation",
+    )?;
+    menu.child(pick("注記", "Annotation"), note)?;
+    let dots = Popup::new()?;
+    row(&dots, commands, "傍点", "Emphasis Dots")?;
+    row(&dots, commands, "ゴマ傍点", "Sesame Dots")?;
+    row(&dots, commands, "丸傍点", "Round Dots")?;
+    row(&dots, commands, "白丸傍点", "White Round Dots")?;
+    row(&dots, commands, "二重丸傍点", "Double Round Dots")?;
+    row(&dots, commands, "×傍点", "Cross Dots")?;
+    menu.child(pick("傍点", "Emphasis Marks"), dots)?;
+    let lines = Popup::new()?;
+    row(&lines, commands, "傍線", "Single Line")?;
+    row(&lines, commands, "二重傍線", "Double Line")?;
+    row(&lines, commands, "波線", "Wavy Line")?;
+    row(&lines, commands, "鎖線", "Chain Line")?;
+    row(&lines, commands, "破線", "Dashed Line")?;
+    menu.child(pick("傍線", "Emphasis Lines"), lines)?;
+    let text = Popup::new()?;
+    row(&text, commands, "縦中横", "Tate-chu-yoko")?;
+    row(&text, commands, "割り注", "Warichu")?;
+    row(&text, commands, "小さな文字", "Small Text")?;
+    row(&text, commands, "大きな文字", "Large Text")?;
+    menu.child(pick("文字注記", "Text Annotation"), text)
 }
 
-/// 挿入メニューのうち、まだ実行しない項目（RFN01-38の単位2以降）。**「メニューに
+/// 挿入メニューのうち、まだ実行しない項目（RFN01-38の単位3以降）。**「メニューに
 /// 無い」と「まだ実行しない」を区別する**（要件 6.7）——末端は「（未実装）」の
 /// 無効表示のままにする。
 fn insert_pending(menu: &Popup) -> windows::core::Result<()> {
-    pending_group(
-        menu,
-        "注記",
-        "Annotation",
-        &[
-            ("左側の注記", "Left-side Annotation"),
-            ("ルビと左側の注記", "Ruby and Left-side Annotation"),
-        ],
-    )?;
-    pending_group(
-        menu,
-        "傍点",
-        "Emphasis Marks",
-        &[
-            ("傍点", "Emphasis Dots"),
-            ("ゴマ傍点", "Sesame Dots"),
-            ("丸傍点", "Round Dots"),
-            ("白丸傍点", "White Round Dots"),
-            ("二重丸傍点", "Double Round Dots"),
-            ("×傍点", "Cross Dots"),
-        ],
-    )?;
-    pending_group(
-        menu,
-        "傍線",
-        "Emphasis Lines",
-        &[
-            ("傍線", "Single Line"),
-            ("二重傍線", "Double Line"),
-            ("波線", "Wavy Line"),
-            ("鎖線", "Chain Line"),
-            ("破線", "Dashed Line"),
-        ],
-    )?;
-    pending_group(
-        menu,
-        "文字注記",
-        "Text Annotation",
-        &[
-            ("縦中横", "Tate-chu-yoko"),
-            ("割り注", "Warichu"),
-            ("小さな文字", "Small Text"),
-            ("大きな文字", "Large Text"),
-        ],
-    )?;
     let heading = Popup::new()?;
     for level in 1..=6 {
         let name = say!("見出し {level}", "Heading {level}");
@@ -826,8 +804,9 @@ fn show(
             root.child(pick("単語チェック", "Word Check"), words)?;
         }
         2 => {
-            // RFN01-38の単位1: リンクとルビは実行できる。**矩形選択のときは押せない**
-            // ——矩形へまとめて入れるのは別の課題である（RFN01-41）。
+            // RFN01-38の単位1と2: リンク・ルビと、注記・傍点・傍線・文字注記が
+            // 実行できる。**矩形選択のときは押せない**——矩形へまとめて入れるのは
+            // 別の課題である（RFN01-41）。
             let rectangular = live.states.of(t.id).borrow().rectangular;
             insert_commands(
                 window,
@@ -835,6 +814,7 @@ fn show(
                 &mut commands,
                 t.field > 0,
                 editable && !rectangular,
+                selected,
             )?;
             insert_pending(&root)?;
             root.sep()?;
@@ -1696,31 +1676,59 @@ mod tests {
         found
     }
 
-    /// RFN01-38の単位1: **リンクとルビは押せる。**番号は画面の並びと同じで、
-    /// `Command::Insert`の言い方と1対1になる。
+    /// RFN01-38の単位1と2: **本文へ置ける項目は押せる。**番号は画面の並びと同じで、
+    /// `document::INSERT_EDITS`の位置と1対1になる。
     #[test]
-    fn the_insert_menu_offers_the_links_and_ruby() {
+    fn the_insert_menu_offers_what_it_can_write_into_the_body() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let menu = Popup::new().unwrap();
         let mut commands = Vec::new();
-        insert_commands(&h.window, &menu, &mut commands, false, true).unwrap();
+        insert_commands(&h.window, &menu, &mut commands, false, true, true).unwrap();
 
-        assert_eq!(commands.len(), 4);
+        assert_eq!(commands.len(), document::INSERT_EDITS.len());
         for (index, command) in commands.iter().enumerate() {
             assert!(
                 matches!(command, Command::Insert(n) if *n == index as i32),
                 "並びがそのまま番号になる"
             );
         }
+        let rows = leaves(menu.handle);
+        assert_eq!(rows.len(), document::INSERT_EDITS.len());
         assert!(
-            leaves(menu.handle).iter().all(|(_, pickable)| *pickable),
-            "I01〜I04は押せる"
+            rows.iter().all(|(_, pickable)| *pickable),
+            "字を選んでいれば、どの行も押せる"
         );
+    }
 
-        // **押せない条件では、同じ行が無効になる**（Viewerや矩形選択のとき）。
-        let frozen = Popup::new().unwrap();
-        insert_commands(&h.window, &frozen, &mut Vec::new(), false, false).unwrap();
-        assert!(leaves(frozen.handle).iter().all(|(_, pickable)| !*pickable));
+    /// **選んだ字を指す注記は、字を選んでいなければ押せない**（書き手の合意
+    /// 2026-09-21）——同じ語を本文と注記の2か所へ書く形は、指す先が無いと書けない。
+    /// どの形がそうかは本文を持つ側（`document::InsertEdit`）が答える。
+    #[test]
+    fn a_note_that_points_at_a_word_needs_the_word_picked() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let menu = Popup::new().unwrap();
+        let mut commands = Vec::new();
+        insert_commands(&h.window, &menu, &mut commands, false, true, false).unwrap();
+
+        let rows = leaves(menu.handle);
+        for (index, (_, pickable)) in rows.iter().enumerate() {
+            let wanted = document::INSERT_EDITS[index].needs_a_picked_word();
+            assert_eq!(*pickable, !wanted, "選んだ字が要る形だけが押せない");
+        }
+    }
+
+    /// 本文へ何も書けないとき（Viewer・ReadOnly・矩形選択のとき）は、**同じ行が
+    /// どれも無効になる**。
+    #[test]
+    fn no_insert_row_is_pickable_when_the_body_cannot_be_written() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let menu = Popup::new().unwrap();
+        insert_commands(&h.window, &menu, &mut Vec::new(), false, false, true).unwrap();
+
+        assert!(
+            leaves(menu.handle).iter().all(|(_, pickable)| !*pickable),
+            "書けないときは押せない"
+        );
     }
 
     /// RFN01-38: **まだ実行しない項目は、番号を持たず無効のままである。**「メニュー
@@ -1731,7 +1739,7 @@ mod tests {
         insert_pending(&menu).unwrap();
 
         let rows = leaves(menu.handle);
-        assert_eq!(rows.len(), 36);
+        assert_eq!(rows.len(), 19);
         assert!(
             rows.iter().all(|(id, pickable)| *id == 0 && !*pickable),
             "未実装の行は押せない"

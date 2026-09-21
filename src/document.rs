@@ -1596,7 +1596,92 @@ pub enum InsertEdit {
     /// 縦線で書く**（書き手の選択 2026-09-21）——半角と縦線省略は読めるままだが、
     /// 書き出す形は1つにする。
     Ruby,
+    /// `本文［＃「本文」の左に「よみ」の注記］`。**選んだ字を指す**ので、字が要る。
+    SideNote,
+    /// `｜本文《よみ》［＃「本文」の左に「」の注記］`（要件 7.8の両側の注記）。
+    /// 読みを先に書き、左の注記へは書き手が自分で移る（自動で飛ばさない）。
+    RubyWithSideNote,
+    /// `《《本文》》`。囲む形なので、**字が無くても置ける**——空のひな形の中へ書く。
+    EmphasisDots,
+    /// `本文［＃「本文」にゴマ傍点］`。以下5つは選んだ字を指す参照型で、字が要る。
+    SesameDotsNote,
+    /// `本文［＃「本文」に丸傍点］`。
+    RoundDotsNote,
+    /// `本文［＃「本文」に白丸傍点］`。
+    WhiteRoundDotsNote,
+    /// `本文［＃「本文」に二重丸傍点］`。
+    DoubleRoundDotsNote,
+    /// `本文［＃「本文」に×傍点］`。
+    CrossDotsNote,
+    /// `本文［＃「本文」に傍線］`。
+    LineNote,
+    /// `本文［＃「本文」に二重傍線］`。
+    DoubleLineNote,
+    /// `本文［＃「本文」に波線］`。
+    WaveLineNote,
+    /// `本文［＃「本文」に鎖線］`。
+    ChainLineNote,
+    /// `本文［＃「本文」に破線］`。
+    DashLineNote,
+    /// `［＃縦中横］本文［＃縦中横終わり］`。開いて閉じる形なので、字は要らない。
+    Upright,
+    /// `［＃割り注］本文［＃割り注終わり］`。
+    Warichu,
+    /// `［＃小さな文字］本文［＃小さな文字終わり］`。
+    SmallText,
+    /// `［＃大きな文字］本文［＃大きな文字終わり］`。
+    LargeText,
 }
+
+impl InsertEdit {
+    /// **選んだ字を指す注記か。**同じ語を本文と注記の2か所へ書く形は、選んだ字が
+    /// 無ければ指す先が無い——だからメニューでも押せない（書き手の合意
+    /// 2026-09-21）。空のひな形を置ける形（`《《》》`と範囲の注記）はここに居ない。
+    pub fn needs_a_picked_word(self) -> bool {
+        matches!(
+            self,
+            Self::SideNote
+                | Self::RubyWithSideNote
+                | Self::SesameDotsNote
+                | Self::RoundDotsNote
+                | Self::WhiteRoundDotsNote
+                | Self::DoubleRoundDotsNote
+                | Self::CrossDotsNote
+                | Self::LineNote
+                | Self::DoubleLineNote
+                | Self::WaveLineNote
+                | Self::ChainLineNote
+                | Self::DashLineNote
+        )
+    }
+}
+
+/// 挿入メニューの並び（RFN01-38）。**画面の並びそのもの**である——`Command::Insert(n)`
+/// の番号はこの並びの位置で、`insert_in_pane`もここから引く。**増やすときは末尾へ
+/// 足す**：間へ入れると、番号が指す先が動く。
+pub const INSERT_EDITS: [InsertEdit; 21] = [
+    InsertEdit::MarkdownLink,
+    InsertEdit::WikiLink,
+    InsertEdit::WikiLinkAlias,
+    InsertEdit::Ruby,
+    InsertEdit::SideNote,
+    InsertEdit::RubyWithSideNote,
+    InsertEdit::EmphasisDots,
+    InsertEdit::SesameDotsNote,
+    InsertEdit::RoundDotsNote,
+    InsertEdit::WhiteRoundDotsNote,
+    InsertEdit::DoubleRoundDotsNote,
+    InsertEdit::CrossDotsNote,
+    InsertEdit::LineNote,
+    InsertEdit::DoubleLineNote,
+    InsertEdit::WaveLineNote,
+    InsertEdit::ChainLineNote,
+    InsertEdit::DashLineNote,
+    InsertEdit::Upright,
+    InsertEdit::Warichu,
+    InsertEdit::SmallText,
+    InsertEdit::LargeText,
+];
 
 /// 挿入メニューのひな形を組む（RFN01-38）。
 ///
@@ -1610,7 +1695,8 @@ pub enum InsertEdit {
 /// （`link_completion.rs`）。
 ///
 /// **`None`は「入れられない」。**範囲が本文の外を指すか、字の切れ目に乗って
-/// いなければ入れない——数え違いのまま`&str`を切ると落ちる。
+/// いなければ入れない——数え違いのまま`&str`を切ると落ちる。選んだ字を指す注記を
+/// 字なしで頼まれたときも入れない（[`InsertEdit::needs_a_picked_word`]）。
 pub fn insert_edit(
     source: &str,
     from: usize,
@@ -1622,6 +1708,9 @@ pub fn insert_edit(
         return None;
     }
     let picked = &source[start..end];
+    if picked.is_empty() && what.needs_a_picked_word() {
+        return None;
+    }
     let (text, after) = match what {
         InsertEdit::MarkdownLink => (
             format!("[{picked}]()"),
@@ -1630,11 +1719,95 @@ pub fn insert_edit(
         InsertEdit::WikiLink => (format!("[[{picked}]]"), "[[".len() + picked.len()),
         InsertEdit::WikiLinkAlias => (format!("[[|{picked}]]"), "[[".len()),
         InsertEdit::Ruby => (format!("｜{picked}《》"), "｜".len() + picked.len()),
+        InsertEdit::SideNote => {
+            let note = side_note_of(picked);
+            // キャレットは空けた欄の中——次に打つのは左に出す字である。
+            let after = picked.len() + note.len() - SIDE_NOTE_TAIL.len();
+            (format!("{picked}{note}"), after)
+        }
+        InsertEdit::RubyWithSideNote => {
+            let text = format!("｜{picked}《》{}", side_note_of(picked));
+            // キャレットは読みの欄——次に打つのは読みである。
+            (text, "｜".len() + picked.len())
+        }
+        InsertEdit::EmphasisDots => {
+            let text = format!("《《{picked}》》");
+            let after = if picked.is_empty() {
+                "《《".len()
+            } else {
+                text.len()
+            };
+            (text, after)
+        }
+        // **書く形は、読む側が読む字そのもので名指す**——[`dots_note_here`]の表と
+        // 同じ組を渡すので、生成と解析が食い違うことがない。
+        InsertEdit::SesameDotsNote => beside_note(picked, "」にゴマ傍点］"),
+        InsertEdit::RoundDotsNote => beside_note(picked, "」に丸傍点］"),
+        InsertEdit::WhiteRoundDotsNote => beside_note(picked, "」に白丸傍点］"),
+        InsertEdit::DoubleRoundDotsNote => beside_note(picked, "」に二重丸傍点］"),
+        InsertEdit::CrossDotsNote => beside_note(picked, "」に×傍点］"),
+        InsertEdit::LineNote => beside_note(picked, "」に傍線］"),
+        InsertEdit::DoubleLineNote => beside_note(picked, "」に二重傍線］"),
+        InsertEdit::WaveLineNote => beside_note(picked, "」に波線］"),
+        InsertEdit::ChainLineNote => beside_note(picked, "」に鎖線］"),
+        InsertEdit::DashLineNote => beside_note(picked, "」に破線］"),
+        // 同じく、[`RANGE_NOTES`]の表と同じ組を渡す。
+        InsertEdit::Upright => range_note(picked, "［＃縦中横］", "［＃縦中横終わり］"),
+        InsertEdit::Warichu => range_note(picked, "［＃割り注］", "［＃割り注終わり］"),
+        InsertEdit::SmallText => range_note(picked, "［＃小さな文字］", "［＃小さな文字終わり］"),
+        InsertEdit::LargeText => range_note(picked, "［＃大きな文字］", "［＃大きな文字終わり］"),
     };
     // **選び直す位置は新しい本文のものである**（[`line_edit`]と同じ）——置き換えた
     // 範囲の頭から数えるので、`apply_span_edit`がそのまま使える。
     let caret = start + after;
     Some((start..end, text, (caret, caret)))
+}
+
+/// 注記の書き出し（`［＃「`）。**記法であって、画面の言葉ではない。**
+const NOTE_OPEN: &str = "［＃「";
+
+/// 左の注記の終わり（`」の注記］`）。**左に出す字を書く欄は、この手前にある。**
+const SIDE_NOTE_TAIL: &str = "」の注記］";
+
+/// 左の注記そのもの（`［＃「本文」の左に「よみ」の注記］`）。
+///
+/// **指す語は本文に置く**ので、ここには書かない——本文の字と食い違えば何も打たれ
+/// ないからである（[`InsertEdit::needs_a_picked_word`]）。左に出す字を書く欄は空けて
+/// おき、書き手がそこへ書く。
+fn side_note_of(picked: &str) -> String {
+    let mut note = format!("{NOTE_OPEN}{picked}");
+    note.push_str("」の左に「");
+    note.push_str(SIDE_NOTE_TAIL);
+    note
+}
+
+/// 選んだ語を指す注記（`本文［＃「本文」に丸傍点］`）。
+///
+/// **同じ語を2か所へ書く。**注記は指す先を自分の中に持っているので、本文の字と
+/// 食い違えば何も打たれない——だから空では置かない
+/// （[`InsertEdit::needs_a_picked_word`]）。`tail`は印の言い方で、**読む側
+/// （[`dots_note_here`]）が読む字そのもの**を渡す。キャレットは注記の後ろに置く：
+/// 次に打つのは続きの本文である。
+fn beside_note(picked: &str, tail: &str) -> (String, usize) {
+    let text = format!("{picked}{NOTE_OPEN}{picked}{tail}");
+    let after = text.len();
+    (text, after)
+}
+
+/// 開いて閉じる注記（`［＃縦中横］本文［＃縦中横終わり］`）。`open`と`close`は
+/// **読む側（[`RANGE_NOTES`]）が読む字そのもの**を渡す。
+///
+/// **字が無くても置ける**——中を書く所へキャレットを置く。中身が入るまでは画面で
+/// 注記として読まれない（[`range_note_here`]は組む相手の要る注記を記法としない）が、
+/// 書けば読まれる。
+fn range_note(picked: &str, open: &str, close: &str) -> (String, usize) {
+    let text = format!("{open}{picked}{close}");
+    let after = if picked.is_empty() {
+        open.len()
+    } else {
+        text.len()
+    };
+    (text, after)
 }
 
 /// この項目の**種類**——CommonMark §5.3 の「同じ種類の項目の並び」（書き手の決定
@@ -5411,6 +5584,159 @@ mod tests {
         assert!(insert_edit(source, 1, 3, InsertEdit::WikiLink).is_none());
         assert!(insert_edit(source, 0, source.len() + 1, InsertEdit::WikiLink).is_none());
         assert!(insert_edit(source, 0, source.len(), InsertEdit::WikiLink).is_some());
+    }
+
+    /// RFN01-38: **選んだ字を指す注記は、字が無ければ入れない**（書き手の合意
+    /// 2026-09-21）。空で置けば、指す先の無い注記が本文に残るだけである。
+    #[test]
+    fn a_note_that_points_at_a_word_is_refused_without_a_word() {
+        for what in [
+            InsertEdit::SideNote,
+            InsertEdit::RubyWithSideNote,
+            InsertEdit::RoundDotsNote,
+            InsertEdit::LineNote,
+        ] {
+            assert!(insert_edit("前後", 3, 3, what).is_none(), "{what:?}");
+        }
+        // 囲む形の傍点と、開いて閉じる注記は、字が無くても置ける。
+        for what in [InsertEdit::EmphasisDots, InsertEdit::Upright] {
+            assert!(insert_edit("前後", 3, 3, what).is_some(), "{what:?}");
+        }
+    }
+
+    /// RFN01-38: **メニューの並びは、同じものを2度名指さない。**番号が指す先は
+    /// 1つである。
+    #[test]
+    fn the_insert_menu_order_names_each_edit_once() {
+        let mut seen: Vec<String> = INSERT_EDITS
+            .iter()
+            .map(|what| format!("{what:?}"))
+            .collect();
+        seen.sort();
+        seen.dedup();
+
+        assert_eq!(seen.len(), INSERT_EDITS.len());
+    }
+
+    /// RFN01-38: **左の注記は、左に出す字を書く欄を空けて置く。**同じ語を本文と
+    /// 注記の2か所へ書く形なので、注記の中の語も選んだ字である。
+    #[test]
+    fn a_left_note_leaves_the_room_for_what_goes_beside() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::SideNote).expect("入る");
+
+        assert_eq!(next, "前東京［＃「東京」の左に「」の注記］後");
+        // キャレットは空けた欄の中——次に打つのは左に出す字である。
+        assert_eq!(&next[caret..], "」の注記］後");
+
+        // **空のままでは読まれない**（左に出す字が無い）。書けば読まれる。
+        assert_eq!(
+            preview_of("前東京［＃「東京」の左に「」の注記］後").0,
+            "前東京［＃「東京」の左に「」の注記］後"
+        );
+        assert_eq!(
+            preview_of("前東京［＃「東京」の左に「とうきょう」の注記］後").0,
+            "前東京とうきょう後"
+        );
+    }
+
+    /// RFN01-38: **ルビと左の注記は一緒に置く。**読みを書く所へキャレットが立ち、
+    /// 左の注記へは書き手が自分で移る（自動で飛ばさない）。
+    #[test]
+    fn ruby_and_a_left_note_are_placed_together() {
+        let (next, caret) =
+            inserted("前東京後", (3, 9), InsertEdit::RubyWithSideNote).expect("入る");
+
+        assert_eq!(next, "前｜東京《》［＃「東京」の左に「」の注記］後");
+        assert_eq!(&next[caret..], "《》［＃「東京」の左に「」の注記］後");
+
+        // 読みを書けば、両方の記法が読まれる。
+        assert_eq!(
+            preview_of("前｜東京《とうきょう》［＃「東京」の左に「とうけい」の注記］後").0,
+            "前東京《とうきょう》とうけい後"
+        );
+    }
+
+    /// RFN01-38: **囲む形の傍点は、字が無くても置ける。**空のうちは中へ書く所に
+    /// キャレットが立ち、字を選んでいれば記法の後ろへ出る。
+    #[test]
+    fn emphasis_dots_wrap_the_word_or_leave_the_room() {
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::EmphasisDots).expect("入る");
+        assert_eq!(empty, "前《《》》後");
+        assert_eq!(&empty[caret..], "》》後");
+
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::EmphasisDots).expect("入る");
+        assert_eq!(next, "前《《東京》》後");
+        assert_eq!(&next[caret..], "後");
+
+        // **読む側が要る**：ここが食い違えば、書いても何も打たれない。印の位置は
+        // **画面に出ている字**のもので、`《《`はそこには無い（「前」の次）。
+        assert_eq!(
+            shape(&preview_of("前《《東京》》後").1),
+            vec![(1, 2, "dots")]
+        );
+    }
+
+    /// RFN01-38: **選んだ語を指す注記は、書いたとおりに読まれる。**本文と注記が
+    /// 同じ語を指しているので、読む側はその語に印を打つ——ここが食い違えば、挿入して
+    /// も何も起きない。
+    #[test]
+    fn every_kind_of_note_the_menu_writes_is_read_back() {
+        let beside = |line: &str| {
+            preview_of(line)
+                .1
+                .iter()
+                .map(|mark| mark.marks.beside)
+                .find(|beside| !beside.is_none())
+        };
+        for (what, kind) in [
+            (InsertEdit::SesameDotsNote, "ゴマ傍点"),
+            (InsertEdit::RoundDotsNote, "丸傍点"),
+            (InsertEdit::WhiteRoundDotsNote, "白丸傍点"),
+            (InsertEdit::DoubleRoundDotsNote, "二重丸傍点"),
+            (InsertEdit::CrossDotsNote, "×傍点"),
+            (InsertEdit::LineNote, "傍線"),
+            (InsertEdit::DoubleLineNote, "二重傍線"),
+            (InsertEdit::WaveLineNote, "波線"),
+            (InsertEdit::ChainLineNote, "鎖線"),
+            (InsertEdit::DashLineNote, "破線"),
+        ] {
+            let (next, caret) = inserted("前東京後", (3, 9), what).expect("入る");
+            assert_eq!(next, format!("前東京［＃「東京」に{kind}］後"), "{kind}");
+            // キャレットは注記の後ろ——次に打つのは続きの本文である。
+            assert_eq!(&next[caret..], "後", "{kind}");
+            assert!(beside(&next).is_some(), "{kind}が読まれていない");
+        }
+    }
+
+    /// RFN01-38: **開いて閉じる注記も、字が無くても置ける。**中へ書く所にキャレットが
+    /// 立ち、字を選んでいれば記法の後ろへ出る。
+    #[test]
+    fn a_range_note_encloses_the_word_or_leaves_the_room() {
+        for (what, label) in [
+            (InsertEdit::Upright, "縦中横"),
+            (InsertEdit::Warichu, "割り注"),
+            (InsertEdit::SmallText, "小さな文字"),
+            (InsertEdit::LargeText, "大きな文字"),
+        ] {
+            let (empty, caret) = inserted("前後", (3, 3), what).expect("入る");
+            assert_eq!(
+                empty,
+                format!("前［＃{label}］［＃{label}終わり］後"),
+                "{label}"
+            );
+            assert_eq!(&empty[caret..], format!("［＃{label}終わり］後"), "{label}");
+
+            let (next, caret) = inserted("前東京後", (3, 9), what).expect("入る");
+            assert_eq!(
+                next,
+                format!("前［＃{label}］東京［＃{label}終わり］後"),
+                "{label}"
+            );
+            assert_eq!(&next[caret..], "後", "{label}");
+            // **空のうちは読まれない**（組む相手が無い）。中身が入れば読まれる。
+            assert_eq!(preview_of(&empty).0, empty, "{label}");
+            assert_eq!(preview_of(&next).0, "前東京後", "{label}");
+        }
     }
 
     /// [`list_edit`]を、その文書の行の見方で呼ぶ（試験）。

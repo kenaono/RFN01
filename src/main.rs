@@ -20264,11 +20264,12 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
 fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
     // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
     answer_new_tab(window, live, id, None);
-    let what = match what {
-        0 => document::InsertEdit::MarkdownLink,
-        1 => document::InsertEdit::WikiLink,
-        2 => document::InsertEdit::WikiLinkAlias,
-        _ => document::InsertEdit::Ruby,
+    let Some(what) = usize::try_from(what)
+        .ok()
+        .and_then(|index| document::INSERT_EDITS.get(index))
+        .copied()
+    else {
+        return;
     };
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
