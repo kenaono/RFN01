@@ -1634,6 +1634,13 @@ pub enum InsertEdit {
 }
 
 impl InsertEdit {
+    /// 縦中横の注記に収められる字の数（書き手の求め 2026-09-21）。
+    ///
+    /// **1マスに収める**ので、字が増えるほど1字が小さくなる（描く側が
+    /// `upright_fit`で縮めて収める）。読めなくなる前に止める。**自動の規則が1マスに
+    /// 収める最大に合わせた**——`12`（2桁）と`!?`（記号2つ）で4字である。
+    pub const UPRIGHT_LIMIT: usize = 4;
+
     /// **選んだ字を指す注記か。**同じ語を本文と注記の2か所へ書く形は、選んだ字が
     /// 無ければ指す先が無い——だからメニューでも押せない（書き手の合意
     /// 2026-09-21）。空のひな形を置ける形（`《《》》`と範囲の注記）はここに居ない。
@@ -1709,6 +1716,10 @@ pub fn insert_edit(
     }
     let picked = &source[start..end];
     if picked.is_empty() && what.needs_a_picked_word() {
+        return None;
+    }
+    // **長すぎる縦中横は置かない**（書き手の求め 2026-09-21）。
+    if what == InsertEdit::Upright && picked.chars().count() > InsertEdit::UPRIGHT_LIMIT {
         return None;
     }
     let (text, after) = match what {
@@ -6041,6 +6052,18 @@ mod tests {
         seen.dedup();
 
         assert_eq!(seen.len(), INSERT_EDITS.len());
+    }
+
+    /// 書き手の求め 2026-09-21: **縦中横は長すぎるものを置かない。**1マスに収めるので、
+    /// 字が増えるほど1字が小さくなる——読めなくなる前に止める。
+    #[test]
+    fn an_upright_note_is_refused_when_it_is_too_long() {
+        // 4字までは置ける（自動の規則が1マスに収める最大に合わせてある）。
+        assert!(insert_edit("前1234後", 3, 7, InsertEdit::Upright).is_some());
+        // 5字からは置かない。
+        assert!(insert_edit("前12345後", 3, 8, InsertEdit::Upright).is_none());
+        // **空のひな形は置ける**——中へ書く所である。
+        assert!(insert_edit("前後", 3, 3, InsertEdit::Upright).is_some());
     }
 
     /// 行の体裁を当てて、出来上がる本文を見る（RFN01-38）。
