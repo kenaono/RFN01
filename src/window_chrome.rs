@@ -7,6 +7,9 @@ use windows::Win32::{
     Graphics::Gdi::ScreenToClient,
     UI::{
         HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
+        Input::KeyboardAndMouse::{
+            ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
+        },
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::*,
     },
@@ -15,6 +18,11 @@ use windows::Win32::{
 const SUBCLASS_ID: usize = 0x52464e41;
 pub const TITLE_HEIGHT: f32 = 36.;
 pub const BUTTON_WIDTH: f32 = 46.;
+
+/// Private message carrying the caption-button state to Slint. The frame cannot
+/// call Slint itself (resizing reenters), so the state travels the same way the
+/// system commands do and the UI is set from the message queue instead.
+const WM_CAPTION_STATE: u32 = WM_APP + 1;
 
 pub fn window_handle(window: &super::AppWindow) -> Option<HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -30,17 +38,29 @@ pub fn window_handle(window: &super::AppWindow) -> Option<HWND> {
 
 pub struct Chrome {
     hwnd: HWND,
+    window: slint::Weak<super::AppWindow>,
     // UI geometry, logical pixels. Only accessed on the window's owning thread.
     interactive_end: Cell<f32>,
+    // 1 minimise, 2 maximise, 3 close, 0 nothing: which caption button the
+    // pointer is over and which one is held down.
+    hot: Cell<u32>,
     pressed: Cell<u32>,
+    // The pair last posted, so a mouse move that changes nothing stays silent.
+    sent: Cell<(u32, u32)>,
 }
 
 impl Chrome {
-    pub fn install(hwnd: HWND) -> Result<Box<Self>, windows::core::Error> {
+    pub fn install(
+        hwnd: HWND,
+        window: slint::Weak<super::AppWindow>,
+    ) -> Result<Box<Self>, windows::core::Error> {
         let chrome = Box::new(Self {
             hwnd,
+            window,
             interactive_end: Cell::new(36.),
+            hot: Cell::new(0),
             pressed: Cell::new(0),
+            sent: Cell::new((0, 0)),
         });
         unsafe {
             SetWindowSubclass(
@@ -68,6 +88,36 @@ impl Chrome {
 
     pub fn set_interactive_end(&self, x: f32) {
         self.interactive_end.set(x.max(36.));
+    }
+
+    /// Send the caption state to the UI if it differs from the last one posted.
+    fn publish(&self) {
+        let state = (self.hot.get(), self.pressed.get());
+        if self.sent.replace(state) == state {
+            return;
+        }
+        unsafe {
+            let _ = PostMessageW(
+                Some(self.hwnd),
+                WM_CAPTION_STATE,
+                WPARAM(state.0 as usize),
+                LPARAM(state.1 as isize),
+            );
+        }
+    }
+
+    /// Ask Windows for WM_NCMOUSELEAVE, so a pointer that leaves the window
+    /// straight off a caption button still clears the highlight.
+    fn track_leave(&self) {
+        let mut track = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE | TME_NONCLIENT,
+            hwndTrack: self.hwnd,
+            dwHoverTime: u32::MAX,
+        };
+        unsafe {
+            let _ = TrackMouseEvent(&mut track);
+        }
     }
 }
 
@@ -108,6 +158,18 @@ fn title_hit(x: f32, y: f32, width: f32, interactive_end: f32) -> u32 {
     }
 }
 
+/// The caption button a Windows hit-test code stands for. Windows sends its own
+/// answer back in `WM_NCMOUSEMOVE`, so the frame learns which button the pointer
+/// is over without hit testing the same point a second time.
+fn caption_slot(hit: u32) -> u32 {
+    match hit {
+        HTMINBUTTON => 1,
+        HTMAXBUTTON => 2,
+        HTCLOSE => 3,
+        _ => 0,
+    }
+}
+
 unsafe extern "system" fn frame_proc(
     hwnd: HWND,
     message: u32,
@@ -125,15 +187,40 @@ unsafe extern "system" fn frame_proc(
             super::menu_commands::native_selection(w, l);
         }
         let chrome = &*(data as *const Chrome);
+        if message == WM_CAPTION_STATE {
+            // Posted from the frame callback, so this runs from the message
+            // queue and cannot reenter a resize the way a direct call would.
+            if let Some(window) = chrome.window.upgrade() {
+                window.set_title_hot(w.0 as i32);
+                window.set_title_pressed(l.0 != 0);
+            }
+            return LRESULT(0);
+        }
+        if message == WM_NCMOUSEMOVE {
+            chrome.hot.set(caption_slot(w.0 as u32));
+            chrome.publish();
+            if chrome.hot.get() != 0 {
+                chrome.track_leave();
+            }
+        }
+        if (message == WM_MOUSEMOVE || message == WM_NCMOUSELEAVE) && chrome.hot.get() != 0 {
+            // Into the client area (the menus, the icon, the document) or out of
+            // the window: either way nothing on the caption is under the pointer.
+            chrome.hot.set(0);
+            chrome.publish();
+        }
         if message == WM_NCLBUTTONDOWN && matches!(w.0 as u32, HTMINBUTTON | HTMAXBUTTON | HTCLOSE)
         {
+            chrome.hot.set(caption_slot(w.0 as u32));
             chrome.pressed.set(w.0 as u32);
-            windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd);
+            chrome.publish();
+            SetCapture(hwnd);
             return LRESULT(0);
         }
         if message == WM_LBUTTONUP && chrome.pressed.get() != 0 {
             let pressed = chrome.pressed.replace(0);
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+            chrome.publish();
+            let _ = ReleaseCapture();
             let x = (l.0 as u32 & 0xffff) as i16 as f32;
             let y = ((l.0 as u32 >> 16) & 0xffff) as i16 as f32;
             let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.;
@@ -168,9 +255,11 @@ unsafe extern "system" fn frame_proc(
         }
         if message == WM_CAPTURECHANGED {
             chrome.pressed.set(0);
+            chrome.publish();
         }
         if message == WM_KEYDOWN && w.0 == 0x1b && chrome.pressed.replace(0) != 0 {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+            chrome.publish();
+            let _ = ReleaseCapture();
             return LRESULT(0);
         }
         if message == WM_NCCALCSIZE && w.0 != 0 {
@@ -275,5 +364,19 @@ mod tests {
         assert_eq!(title_hit(620., 20., 640., 380.), HTCLOSE);
         assert_eq!(title_hit(60., 36., 640., 380.), HTCLIENT);
         assert_eq!(title_hit(-10., 20., 640., 380.), HTCLIENT);
+    }
+
+    /// Only the three caption buttons light up. Windows sends its own hit-test
+    /// code in `WM_NCMOUSEMOVE`, so the caption, the icon and the resize border
+    /// have to fall through to "nothing".
+    #[test]
+    fn only_the_caption_buttons_report_a_slot() {
+        assert_eq!(caption_slot(HTMINBUTTON), 1);
+        assert_eq!(caption_slot(HTMAXBUTTON), 2);
+        assert_eq!(caption_slot(HTCLOSE), 3);
+        assert_eq!(caption_slot(HTCAPTION), 0);
+        assert_eq!(caption_slot(HTCLIENT), 0);
+        assert_eq!(caption_slot(HTTOP), 0);
+        assert_eq!(caption_slot(HTBOTTOMRIGHT), 0);
     }
 }
