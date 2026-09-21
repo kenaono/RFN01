@@ -1585,16 +1585,18 @@ fn renumber_below(
 /// キャレット1つ**——次に打つのは読みかリンク先であって、囲んだ字ではない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InsertEdit {
-    /// `[表示名](リンク先)`。**未選択はリンク先から書く**（書き手の選択
-    /// 2026-09-21）——`](`の後ろに立つので、既存のリンク先補完がそのまま出る。
+    /// `[表示名](リンク先)`。**未選択は表示名から書く**（書き手の確認 2026-09-21、
+    /// 1.1の指摘）。行き先へは普通のキャレット移動で移る。選んでいれば表示名はもう
+    /// 入っているので、次に書くのはリンク先である。
     MarkdownLink,
     /// `[[リンク先]]`。選んだ字をリンク先にする（書き手の選択 2026-09-21）。
     WikiLink,
     /// `[[リンク先|表示名]]`。選んだ字を表示名にする（同上）。
     WikiLinkAlias,
     /// `![説明](画像)`。**画像もリンクの一種**なのでリンクの隣に置く（RFN01-48）。
-    /// キャレットは行き先の欄（`](`の後ろ）に立つ——説明は後から足せるが、行き先が
-    /// 無ければ絵にならない。既存の画像の名前の補完もそこから出る。
+    /// **立ち方も[`InsertEdit::MarkdownLink`]と同じ**——未選択は説明から書き、選んだ
+    /// 字があればそれが説明になって、次に書くのは行き先である（書き手の指摘
+    /// 2026-09-22：同じ形が2つの立ち方を持つと、覚えることが2つになる）。
     MarkdownImage,
     /// `![[画像]]`。選んだ字を画像の場所にする（[`InsertEdit::WikiLink`]と同じ立ち方）。
     /// **大きさ（`|300`）はここで置かない**——角のつまみで後から書ける（要件 7.3.3）。
@@ -1735,12 +1737,16 @@ pub fn insert_edit(
         }
         InsertEdit::WikiLink => (format!("[[{picked}]]"), "[[".len() + picked.len()),
         InsertEdit::WikiLinkAlias => (format!("[[|{picked}]]"), "[[".len()),
-        // **画像は行き先から書く**（RFN01-48）。説明（`![]`の中）は後から足せるが、
-        // 行き先が無ければ絵にならない——リンクが表示名から書き始めるのとは、そこが
-        // 違う。キャレットは`](`の後ろなので、画像の名前の補完がそのまま出る。
+        // **画像もMarkdownリンクと同じ立ち方**（RFN01-48、書き手の指摘 2026-09-22）。
+        // 未選択は説明（`![]`の中）から書き、行き先へは普通のキャレット移動で移る
+        // ——同じ形が2つの立ち方を持つと、覚えることが2つになる。
         InsertEdit::MarkdownImage => {
             let text = format!("![{picked}]()");
-            let after = "![".len() + picked.len() + "](".len();
+            let after = if picked.is_empty() {
+                "![".len()
+            } else {
+                "![".len() + picked.len() + "](".len()
+            };
             (text, after)
         }
         InsertEdit::WikiImage => (format!("![[{picked}]]"), "![[".len() + picked.len()),
@@ -6014,13 +6020,14 @@ mod tests {
         assert_eq!(caret, "前[[".len());
     }
 
-    /// RFN01-48: **画像は行き先から書く。**説明は空のまま、キャレットは`](`の後ろに
-    /// 立つので、画像の名前の補完が出る。選んだ字は説明になる。
+    /// RFN01-48: **画像もMarkdownリンクと同じ立ち方。**未選択は説明から書き、選んだ
+    /// 字があればそれが説明になって、キャレットは行き先へ立つ（書き手の指摘
+    /// 2026-09-22：同じ形が2つの立ち方を持つと、覚えることが2つになる）。
     #[test]
-    fn a_markdown_image_is_written_from_its_target() {
+    fn a_markdown_image_is_written_like_a_markdown_link() {
         let (empty, caret) = inserted("前後", (3, 3), InsertEdit::MarkdownImage).expect("入る");
         assert_eq!(empty, "前![]()後");
-        assert_eq!(caret, "前![](".len());
+        assert_eq!(caret, "前![".len());
 
         let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::MarkdownImage).expect("入る");
         assert_eq!(next, "前![東京]()後");
