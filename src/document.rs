@@ -1577,6 +1577,66 @@ fn renumber_below(
     Some((start..end, text, chosen))
 }
 
+/// 挿入メニューのひな形（RFN01-38）。**本文へ記法を置く**もので、行の体裁を
+/// 変える[`LineEdit`]／[`ListEdit`]とは別の群である。
+///
+/// どれも「選んだ字を包む」形なので、返すのは[`line_edit`]と同じ
+/// 「置き換える範囲・そこへ入る字・そのあと選び直す範囲」。**選び直すのは
+/// キャレット1つ**——次に打つのは読みかリンク先であって、囲んだ字ではない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertEdit {
+    /// `[表示名](リンク先)`。**未選択はリンク先から書く**（書き手の選択
+    /// 2026-09-21）——`](`の後ろに立つので、既存のリンク先補完がそのまま出る。
+    MarkdownLink,
+    /// `[[リンク先]]`。選んだ字をリンク先にする（書き手の選択 2026-09-21）。
+    WikiLink,
+    /// `[[リンク先|表示名]]`。選んだ字を表示名にする（同上）。
+    WikiLinkAlias,
+    /// `｜親文字《よみ》`。選んだ字を親文字にし、読みを書く所へ立つ。**全角の
+    /// 縦線で書く**（書き手の選択 2026-09-21）——半角と縦線省略は読めるままだが、
+    /// 書き出す形は1つにする。
+    Ruby,
+}
+
+/// 挿入メニューのひな形を組む（RFN01-38）。
+///
+/// **`from..to`は書き手が選んだ範囲**（同じ所ならキャレット1つ）。選んだ向きに
+/// よらず同じ結果にするので、頭と尻を入れ替えてから読む。
+///
+/// **形はここで決め、本文へ入れるのは[`crate::apply_span_edit`]に任せる**——文字数・
+/// 読み取り専用・Viewerの検査と、取り消し1回の区切りは、打鍵と同じ道に1つだけ
+/// ある（要件 7.1）。開きと閉じは**一度に置く**：閉じを先に用意しておくのは、
+/// リンクの補完が後ろの閉じ括弧を見て重ねて書かないためである
+/// （`link_completion.rs`）。
+///
+/// **`None`は「入れられない」。**範囲が本文の外を指すか、字の切れ目に乗って
+/// いなければ入れない——数え違いのまま`&str`を切ると落ちる。
+pub fn insert_edit(
+    source: &str,
+    from: usize,
+    to: usize,
+    what: InsertEdit,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    let (start, end) = if from <= to { (from, to) } else { (to, from) };
+    if end > source.len() || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    let picked = &source[start..end];
+    let (text, after) = match what {
+        InsertEdit::MarkdownLink => (
+            format!("[{picked}]()"),
+            "[".len() + picked.len() + "](".len(),
+        ),
+        InsertEdit::WikiLink => (format!("[[{picked}]]"), "[[".len() + picked.len()),
+        InsertEdit::WikiLinkAlias => (format!("[[|{picked}]]"), "[[".len()),
+        InsertEdit::Ruby => (format!("｜{picked}《》"), "｜".len() + picked.len()),
+    };
+    // **選び直す位置は新しい本文のものである**（[`line_edit`]と同じ）——置き換えた
+    // 範囲の頭から数えるので、`apply_span_edit`がそのまま使える。
+    let caret = start + after;
+    Some((start..end, text, (caret, caret)))
+}
+
 /// この項目の**種類**——CommonMark §5.3 の「同じ種類の項目の並び」（書き手の決定
 /// 2026-09-11：「記号を変えるとそこから別のリストが始まる。これはそうするべき」）。
 ///
@@ -5261,6 +5321,96 @@ mod tests {
         // `Shift+Tab`で戻る。
         let back = shift_indent(&next, second, second, false, BulletMarks::all()).expect("戻せる");
         assert_eq!(back.text, source);
+    }
+
+    /// 挿入のひな形を当てて、出来上がる本文と、そのあとキャレットが立つ所を見る
+    /// （RFN01-38）。
+    fn inserted(source: &str, at: (usize, usize), what: InsertEdit) -> Option<(String, usize)> {
+        let (region, text, chosen) = insert_edit(source, at.0, at.1, what)?;
+        let mut next = source.to_owned();
+        next.replace_range(region, &text);
+        assert_eq!(
+            chosen.0, chosen.1,
+            "挿入のあとに選ばれているのはキャレット1つ"
+        );
+        Some((next, chosen.0))
+    }
+
+    /// RFN01-38: **未選択ならリンク先から書く。**`](`の後ろに立つので、既存の
+    /// リンク先補完がそのまま出る（書き手の選択 2026-09-21）。
+    #[test]
+    fn a_link_written_from_nothing_starts_at_its_target() {
+        let (next, caret) = inserted("前後", (3, 3), InsertEdit::MarkdownLink).expect("入る");
+
+        assert_eq!(next, "前[]()後");
+        // `[`の直後ではなく`(`の直後——次に打つのはリンク先である。
+        assert_eq!(caret, "前[".len() + "](".len());
+    }
+
+    /// RFN01-38: **選んだ字は表示名になり、キャレットはリンク先へ。**
+    #[test]
+    fn a_link_keeps_the_chosen_text_for_its_own_name() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::MarkdownLink).expect("入る");
+
+        assert_eq!(next, "前[東京]()後");
+        assert_eq!(caret, "前[東京](".len());
+    }
+
+    /// RFN01-38: **Wikiリンクは選んだ字をリンク先にする。**続けて`#`を打てるよう、
+    /// キャレットは字の後ろ（`]]`の前）に立つ。
+    #[test]
+    fn a_wiki_link_puts_the_chosen_text_in_the_target() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::WikiLink).expect("入る");
+        assert_eq!(next, "前[[東京]]後");
+        assert_eq!(caret, "前[[東京".len());
+
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::WikiLink).expect("入る");
+        assert_eq!(empty, "前[[]]後");
+        assert_eq!(caret, "前[[".len());
+    }
+
+    /// RFN01-38: **別名付きは選んだ字を表示名にする。**書くのはリンク先なので、
+    /// キャレットは`[[`の直後（`|`の前）に立つ。
+    #[test]
+    fn an_aliased_wiki_link_keeps_the_chosen_text_for_its_name() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::WikiLinkAlias).expect("入る");
+
+        assert_eq!(next, "前[[|東京]]後");
+        assert_eq!(caret, "前[[".len());
+    }
+
+    /// RFN01-38: **ルビは全角の縦線で書く**（書き手の選択 2026-09-21）。選択なしは
+    /// 親文字から、選択ありは読みから書く。
+    #[test]
+    fn ruby_is_written_with_the_full_width_bar() {
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::Ruby).expect("入る");
+        assert_eq!(empty, "前｜《》後");
+        assert_eq!(caret, "前｜".len());
+
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::Ruby).expect("入る");
+        assert_eq!(next, "前｜東京《》後");
+        assert_eq!(caret, "前｜東京".len());
+    }
+
+    /// RFN01-38: **選択の向きは結果を変えない。**逆向きに引いても同じ字が同じ形に
+    /// なり、キャレットは同じ所に立つ（書き手の選択 2026-09-21）。
+    #[test]
+    fn the_direction_of_the_selection_does_not_change_the_template() {
+        let forward = inserted("前東京後", (3, 9), InsertEdit::Ruby).expect("入る");
+        let backward = inserted("前東京後", (9, 3), InsertEdit::Ruby).expect("入る");
+
+        assert_eq!(forward, backward);
+    }
+
+    /// RFN01-38: **字の切れ目に乗っていない範囲は入れない。**数え違いのまま
+    /// 切るより、入れないと言うほうがよい。
+    #[test]
+    fn a_range_that_is_not_on_a_character_boundary_is_refused() {
+        let source = "東京";
+
+        assert!(insert_edit(source, 1, 3, InsertEdit::WikiLink).is_none());
+        assert!(insert_edit(source, 0, source.len() + 1, InsertEdit::WikiLink).is_none());
+        assert!(insert_edit(source, 0, source.len(), InsertEdit::WikiLink).is_some());
     }
 
     /// [`list_edit`]を、その文書の行の見方で呼ぶ（試験）。

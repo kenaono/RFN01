@@ -46,6 +46,7 @@ enum Command {
     Kill(i32),
     Word(u32),
     List(i32, i32),
+    Insert(i32),
     Direction(bool),
     Appearance(i32),
     Sidebar(i32),
@@ -152,18 +153,79 @@ fn pending_group(
     menu.child(pick(ja, en), child)
 }
 
-fn insert_placeholders(menu: &Popup) -> windows::core::Result<()> {
-    pending_group(
+/// メニューの1行を足す。**番号は押されたときの言い方**——`commands`の並びが
+/// そのままIDになり、`execute`が同じ並びで読み返す。既定のキーがあれば行に併記する。
+#[allow(clippy::too_many_arguments)]
+fn menu_row(
+    window: &AppWindow,
+    menu: &Popup,
+    commands: &mut Vec<Command>,
+    field: bool,
+    ja: &str,
+    en: &str,
+    command: Command,
+    enabled: bool,
+    checked: bool,
+) -> windows::core::Result<()> {
+    let key = shortcut(window, &command, field);
+    let title = if key.is_empty() {
+        pick(ja, en).to_owned()
+    } else {
+        format!("{}\t{key}", pick(ja, en))
+    };
+    commands.push(command);
+    menu.row(&title, commands.len(), enabled, checked)
+}
+
+/// 実行できる挿入項目（RFN01-38の単位1）。**並びが`Command::Insert(n)`の番号**で、
+/// `insert_in_pane`の言い方と1対1である。
+const INSERT_LINKS: [(&str, &str); 3] = [
+    ("Markdownリンク", "Markdown Link"),
+    ("Wikiリンク", "Wiki Link"),
+    ("別名付きWikiリンク", "Wiki Link with Alias"),
+];
+
+/// 挿入メニューの**実行できる項目**（RFN01-38）。リンク3つは子メニュー、ルビは
+/// 親メニューの1行——画面の並びはA案のままである。
+fn insert_commands(
+    window: &AppWindow,
+    menu: &Popup,
+    commands: &mut Vec<Command>,
+    field: bool,
+    enabled: bool,
+) -> windows::core::Result<()> {
+    let link = Popup::new()?;
+    for (index, (ja, en)) in INSERT_LINKS.iter().copied().enumerate() {
+        menu_row(
+            window,
+            &link,
+            commands,
+            field,
+            ja,
+            en,
+            Command::Insert(index as i32),
+            enabled,
+            false,
+        )?;
+    }
+    menu.child(pick("リンク", "Link"), link)?;
+    menu_row(
+        window,
         menu,
-        "リンク",
-        "Link",
-        &[
-            ("Markdownリンク", "Markdown Link"),
-            ("Wikiリンク", "Wiki Link"),
-            ("別名付きWikiリンク", "Wiki Link with Alias"),
-        ],
-    )?;
-    pending(menu, "ルビ", "Ruby")?;
+        commands,
+        field,
+        "ルビ",
+        "Ruby",
+        Command::Insert(INSERT_LINKS.len() as i32),
+        enabled,
+        false,
+    )
+}
+
+/// 挿入メニューのうち、まだ実行しない項目（RFN01-38の単位2以降）。**「メニューに
+/// 無い」と「まだ実行しない」を区別する**（要件 6.7）——末端は「（未実装）」の
+/// 無効表示のままにする。
+fn insert_pending(menu: &Popup) -> windows::core::Result<()> {
     pending_group(
         menu,
         "注記",
@@ -470,14 +532,17 @@ fn show(
                command,
                enabled,
                checked| {
-        let key = shortcut(window, &command, t.field > 0);
-        let title = if key.is_empty() {
-            pick(ja, en).to_owned()
-        } else {
-            format!("{}\t{key}", pick(ja, en))
-        };
-        commands.push(command);
-        menu.row(&title, commands.len(), enabled, checked)
+        menu_row(
+            window,
+            menu,
+            commands,
+            t.field > 0,
+            ja,
+            en,
+            command,
+            enabled,
+            checked,
+        )
     };
     macro_rules! add {
         ($ja:expr,$en:expr,$cmd:expr,$enabled:expr) => {
@@ -761,7 +826,17 @@ fn show(
             root.child(pick("単語チェック", "Word Check"), words)?;
         }
         2 => {
-            insert_placeholders(&root)?;
+            // RFN01-38の単位1: リンクとルビは実行できる。**矩形選択のときは押せない**
+            // ——矩形へまとめて入れるのは別の課題である（RFN01-41）。
+            let rectangular = live.states.of(t.id).borrow().rectangular;
+            insert_commands(
+                window,
+                &root,
+                &mut commands,
+                t.field > 0,
+                editable && !rectangular,
+            )?;
+            insert_pending(&root)?;
             root.sep()?;
             let marks = bullet_marks_of(window);
             for (i, mark) in document::BULLET_MARKS.iter().enumerate() {
@@ -1473,6 +1548,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Kill(n) => window.invoke_pane_kill(p, n),
         Command::Word(n) => set_word_mode_of(window, live, t.id, n),
         Command::List(n, mark) => window.invoke_pane_list_edit(p, n, mark),
+        Command::Insert(n) => insert_in_pane(window, live, t.id, n),
         Command::Direction(vertical) => {
             if t.id.vertical(window) != vertical {
                 window.invoke_pane_direction_toggled(p)
@@ -1597,34 +1673,69 @@ mod tests {
     use super::*;
     use crate::terminal_ui_tests::Harness;
 
-    #[test]
-    fn planned_insert_items_are_present_but_have_no_executable_command() {
-        fn count_leaves(menu: HMENU) -> usize {
-            let count = unsafe { GetMenuItemCount(Some(menu)) };
-            assert!(count >= 0);
-            let mut leaves = 0;
-            for index in 0..count {
-                let mut item = MENUITEMINFOW {
-                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-                    fMask: MIIM_ID | MIIM_STATE | MIIM_SUBMENU,
-                    ..Default::default()
-                };
-                unsafe {
-                    GetMenuItemInfoW(menu, index as u32, true, &mut item).unwrap();
-                }
-                if item.hSubMenu.0.is_null() {
-                    assert_eq!(item.wID, 0);
-                    assert_ne!(item.fState.0 & MFS_DISABLED.0, 0);
-                    leaves += 1;
-                } else {
-                    leaves += count_leaves(item.hSubMenu);
-                }
+    /// 末端の項目を、**押せるかどうかと番号つきで**並べる（RFN01-38）。
+    fn leaves(menu: HMENU) -> Vec<(u32, bool)> {
+        let count = unsafe { GetMenuItemCount(Some(menu)) };
+        assert!(count >= 0);
+        let mut found = Vec::new();
+        for index in 0..count {
+            let mut item = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_ID | MIIM_STATE | MIIM_SUBMENU,
+                ..Default::default()
+            };
+            unsafe {
+                GetMenuItemInfoW(menu, index as u32, true, &mut item).unwrap();
             }
-            leaves
+            if item.hSubMenu.0.is_null() {
+                found.push((item.wID, item.fState.0 & MFS_DISABLED.0 == 0));
+            } else {
+                found.extend(leaves(item.hSubMenu));
+            }
         }
+        found
+    }
+
+    /// RFN01-38の単位1: **リンクとルビは押せる。**番号は画面の並びと同じで、
+    /// `Command::Insert`の言い方と1対1になる。
+    #[test]
+    fn the_insert_menu_offers_the_links_and_ruby() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let menu = Popup::new().unwrap();
-        insert_placeholders(&menu).unwrap();
-        assert_eq!(count_leaves(menu.handle), 40);
+        let mut commands = Vec::new();
+        insert_commands(&h.window, &menu, &mut commands, false, true).unwrap();
+
+        assert_eq!(commands.len(), 4);
+        for (index, command) in commands.iter().enumerate() {
+            assert!(
+                matches!(command, Command::Insert(n) if *n == index as i32),
+                "並びがそのまま番号になる"
+            );
+        }
+        assert!(
+            leaves(menu.handle).iter().all(|(_, pickable)| *pickable),
+            "I01〜I04は押せる"
+        );
+
+        // **押せない条件では、同じ行が無効になる**（Viewerや矩形選択のとき）。
+        let frozen = Popup::new().unwrap();
+        insert_commands(&h.window, &frozen, &mut Vec::new(), false, false).unwrap();
+        assert!(leaves(frozen.handle).iter().all(|(_, pickable)| !*pickable));
+    }
+
+    /// RFN01-38: **まだ実行しない項目は、番号を持たず無効のままである。**「メニュー
+    /// に無い」のではなく「まだ実行しない」ことを、行が言っている（要件 6.7）。
+    #[test]
+    fn the_rest_of_the_insert_menu_is_still_planned() {
+        let menu = Popup::new().unwrap();
+        insert_pending(&menu).unwrap();
+
+        let rows = leaves(menu.handle);
+        assert_eq!(rows.len(), 36);
+        assert!(
+            rows.iter().all(|(id, pickable)| *id == 0 && !*pickable),
+            "未実装の行は押せない"
+        );
     }
 
     #[test]

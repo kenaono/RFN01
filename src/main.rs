@@ -20253,6 +20253,59 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
     apply_span_edit(window, live, id, &source, region, &text, chosen, &told);
 }
 
+/// 挿入メニューのひな形を、このPaneの本文へ入れる（RFN01-38）。
+///
+/// **編集の道は1本**（[`apply_span_edit`]）なので、取り消しは1回で戻り、同じ
+/// 文書を出している別の面も付いてくる。行の操作（[`edit_lines`]／[`edit_list`]）
+/// と同じ形で、選んだ範囲をそのまま読む。
+///
+/// 番号は画面のメニューと1対1（`menu_commands`の`Command::Insert`）で、**増やす
+/// ときは末尾へ足す**——既存の番号を動かさない。
+fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
+    // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
+    answer_new_tab(window, live, id, None);
+    let what = match what {
+        0 => document::InsertEdit::MarkdownLink,
+        1 => document::InsertEdit::WikiLink,
+        2 => document::InsertEdit::WikiLinkAlias,
+        _ => document::InsertEdit::Ruby,
+    };
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let (from, to) = {
+        let state = state.borrow();
+        match selection_source_range(&state) {
+            Some((start, end)) => (start, end),
+            None => {
+                let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
+                (caret, caret)
+            }
+        }
+    };
+    let Some((region, text, chosen)) = document::insert_edit(&source, from, to, what) else {
+        // **何も起きなかったことを、ログが言う**（`edit_list`と同じ）。
+        live.cache.borrow_mut().log_diag(
+            "lines",
+            &format!(
+                "pane={} insert={what:?} asked={from}..{to} nothing",
+                id.log_name()
+            ),
+        );
+        return;
+    };
+    apply_span_edit(
+        window,
+        live,
+        id,
+        &source,
+        region,
+        &text,
+        chosen,
+        &format!("Insert{what:?} asked={from}..{to}"),
+    );
+}
+
 /// 本文のひと続きを、別の字で置き換える——1回の編集として（E3）。
 ///
 /// **普通の編集の道**（`draw_edit`）を通るので、取り消しは1回で戻り、同じ文書を
