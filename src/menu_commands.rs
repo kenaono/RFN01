@@ -129,6 +129,19 @@ impl Drop for Popup {
 /// **画面の並びと1対1**である（`title-menu-bar.slint`の並び）。
 pub const MENU_GROUPS: i32 = 7;
 
+/// 開ける分類のうち、この向きでいちばん近いもの（RFN01-38）。**灰色の分類を
+/// 飛ばす**——キーの左右で、押しても何も出ない分類に止まらないようにする。
+fn step_openable(from: i32, delta: i32, openable: &[bool; MENU_GROUPS as usize]) -> Option<i32> {
+    let mut at = from;
+    for _ in 0..MENU_GROUPS {
+        at = (at + delta).rem_euclid(MENU_GROUPS);
+        if openable.get(at as usize) == Some(&true) {
+            return Some(at);
+        }
+    }
+    None
+}
+
 /// 押せる末端の行が1つでもあるか（RFN01-38）。
 fn any_enabled(menu: HMENU) -> bool {
     let count = unsafe { GetMenuItemCount(Some(menu)) };
@@ -529,6 +542,12 @@ fn queue_group(
     target: Rc<Target>,
     group: i32,
 ) {
+    // **押せる行が1つも無い分類は開かない**（書き手の決定 2026-09-21）。開く道は
+    // ここ1つに集まっているので、断るのもここに置く——見た目（灰色）と実際が
+    // 食い違わないように、同じ問いを、答えを使う場所で聞く。
+    if !menu_opens(window, &live, &kills, group) {
+        return;
+    }
     window.set_title_menu_open(true);
     window.set_title_menu_active(group);
     let weak = window.as_weak();
@@ -1380,7 +1399,10 @@ fn show(
     unsafe {
         let _ = ClientToScreen(hwnd, &mut point);
     }
-    let navigation = Navigation::begin(hwnd, root.handle, group, scale)?;
+    // **開ける分類を、メニューの輪へも渡す**（RFN01-38）——開いている間の横移動は
+    // Slintを通らないので、ここで渡さないと灰色の分類へも動いてしまう。
+    let openable = std::array::from_fn(|group| menu_opens(window, live, kills, group as i32));
+    let navigation = Navigation::begin(hwnd, root.handle, group, scale, openable)?;
     let navigation_guard = NavigationGuard;
     let picked = unsafe {
         windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0));
@@ -1441,6 +1463,10 @@ struct Navigation {
     hook: Cell<HHOOK>,
     pointer: Cell<(i32, i32)>,
     escaped: Cell<bool>,
+    /// 各分類が開けるか（RFN01-38）。**メニューが開いている間の横移動はSlintを
+    /// 通らない**——Windowsのメニューの輪の中でここが分類を切り替えるので、その
+    /// 切り替えにも同じ答えが要る（書き手の確認 2026-09-21）。
+    openable: [bool; MENU_GROUPS as usize],
 }
 thread_local! { static NAVIGATION: RefCell<Option<Rc<Navigation>>> = const { RefCell::new(None) }; }
 impl Navigation {
@@ -1449,6 +1475,7 @@ impl Navigation {
         root: HMENU,
         group: i32,
         scale: f32,
+        openable: [bool; MENU_GROUPS as usize],
     ) -> windows::core::Result<Rc<Self>> {
         let mut pointer = POINT::default();
         unsafe {
@@ -1465,6 +1492,7 @@ impl Navigation {
             hook: Cell::new(HHOOK::default()),
             pointer: Cell::new((pointer.x, pointer.y)),
             escaped: Cell::new(false),
+            openable,
         });
         let hook = unsafe {
             SetWindowsHookExW(
@@ -1519,11 +1547,12 @@ unsafe extern "system" fn menu_filter(
                 if message.wParam.0 == 0x1b {
                     nav.escaped.set(true);
                 }
+                // **開ける分類まで送る**（RFN01-38）——灰色の分類へは動かない。
                 if message.wParam.0 == 0x25 {
-                    next = Some((nav.group + 6) % 7);
+                    next = step_openable(nav.group, -1, &nav.openable);
                 }
                 if message.wParam.0 == 0x27 && !nav.submenu.get() {
-                    next = Some((nav.group + 1) % 7);
+                    next = step_openable(nav.group, 1, &nav.openable);
                 }
             } else if matches!(message.message, WM_MOUSEMOVE | WM_LBUTTONDOWN) {
                 let mut point = message.pt;
@@ -1545,7 +1574,9 @@ unsafe extern "system" fn menu_filter(
                     }
                     if (0. ..36.).contains(&y) && (36. ..372.).contains(&x) {
                         let group = ((x - 36.) / 48.) as i32;
-                        if group != nav.group {
+                        // **開ける分類のときだけ動く**（RFN01-38）。開けないところへ
+                        // ポインタが入っても、いま開いているメニューはそのまま。
+                        if group != nav.group && nav.openable.get(group as usize) == Some(&true) {
                             next = Some(group);
                         }
                     }
