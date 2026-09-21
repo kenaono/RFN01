@@ -355,6 +355,12 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
 /// hand-edit, must not open a window nobody can reach the edges of. Where it
 /// sits is left alone — a window off the side of a screen is one drag away,
 /// and second-guessing which monitor a writer meant is worse than obeying them.
+///
+/// **This pass is the one before the window is shown** (要件 8.5), and asking
+/// Slint for a size goes through winit, which counts the caption this chrome
+/// paints over. It opens in the right place and close to the right size, and
+/// [`super::window_chrome::restore_place`] puts the client back exactly once the
+/// window has a handle (RFN01-40).
 pub fn restore_window_place(
     window: &AppWindow,
     place: Option<app_data::WindowPlace>,
@@ -384,6 +390,11 @@ pub const MAX_WINDOW: u32 = 16_384;
 /// filling rather than the size they would go back to, and a window restored to
 /// a maximised size without being maximised is one that cannot be un-maximised.
 /// The place kept is the last one the writer actually put it in.
+///
+/// The pair is the outer position and the **client** size — where the window
+/// sits and how much room the document has. [`restore_window_place`] asks Slint
+/// for both; [`super::window_chrome::restore_place`] puts the frame back on
+/// around the client on the monitor the window landed on.
 pub fn window_place(window: &AppWindow) -> Option<app_data::WindowPlace> {
     let handle = window.window();
     if handle.is_maximized() || handle.is_minimized() {

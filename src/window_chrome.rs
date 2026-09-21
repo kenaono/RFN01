@@ -121,6 +121,42 @@ impl Chrome {
     }
 }
 
+/// Put the remembered place back on the window itself (要件 8.5, RFN01-40).
+///
+/// [`super::session::restore_window_place`] asks Slint for the size before the
+/// window exists, and winit works the outer size out from the window style — a
+/// style that still carries the caption this chrome paints over. The window
+/// therefore came back a caption taller on every run, and the height grew by
+/// that much again on the next one.
+///
+/// Here the difference the window actually has is measured, and the outer
+/// rectangle is set with it. The place keeps the outer position and the client
+/// size, so the frame goes back on and the client the writer left is what comes
+/// back — on whatever monitor's DPI the window landed on.
+pub fn restore_place(hwnd: HWND, place: Option<super::app_data::WindowPlace>) {
+    let Some(place) = place else {
+        return;
+    };
+    unsafe {
+        let mut outer = RECT::default();
+        let mut client = RECT::default();
+        if GetWindowRect(hwnd, &mut outer).is_err() || GetClientRect(hwnd, &mut client).is_err() {
+            return;
+        }
+        let frame_x = (outer.right - outer.left) - (client.right - client.left);
+        let frame_y = (outer.bottom - outer.top) - (client.bottom - client.top);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            place.x,
+            place.y,
+            place.width as i32 + frame_x,
+            place.height as i32 + frame_y,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 impl Drop for Chrome {
     fn drop(&mut self) {
         unsafe {
