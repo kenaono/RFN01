@@ -1592,6 +1592,13 @@ pub enum InsertEdit {
     WikiLink,
     /// `[[リンク先|表示名]]`。選んだ字を表示名にする（同上）。
     WikiLinkAlias,
+    /// `![説明](画像)`。**画像もリンクの一種**なのでリンクの隣に置く（RFN01-48）。
+    /// キャレットは行き先の欄（`](`の後ろ）に立つ——説明は後から足せるが、行き先が
+    /// 無ければ絵にならない。既存の画像の名前の補完もそこから出る。
+    MarkdownImage,
+    /// `![[画像]]`。選んだ字を画像の場所にする（[`InsertEdit::WikiLink`]と同じ立ち方）。
+    /// **大きさ（`|300`）はここで置かない**——角のつまみで後から書ける（要件 7.3.3）。
+    WikiImage,
     /// `｜親文字《よみ》`。選んだ字を親文字にし、読みを書く所へ立つ。**全角の
     /// 縦線で書く**（書き手の選択 2026-09-21）——半角と縦線省略は読めるままだが、
     /// 書き出す形は1つにする。
@@ -1659,10 +1666,12 @@ impl InsertEdit {
 /// 挿入メニューの並び（RFN01-38）。**画面の並びそのもの**である——`Command::Insert(n)`
 /// の番号はこの並びの位置で、`insert_in_pane`もここから引く。**増やすときは末尾へ
 /// 足す**：間へ入れると、番号が指す先が動く。
-pub const INSERT_EDITS: [InsertEdit; 21] = [
+pub const INSERT_EDITS: [InsertEdit; 23] = [
     InsertEdit::MarkdownLink,
     InsertEdit::WikiLink,
     InsertEdit::WikiLinkAlias,
+    InsertEdit::MarkdownImage,
+    InsertEdit::WikiImage,
     InsertEdit::Ruby,
     InsertEdit::SideNote,
     InsertEdit::RubyWithSideNote,
@@ -1726,6 +1735,15 @@ pub fn insert_edit(
         }
         InsertEdit::WikiLink => (format!("[[{picked}]]"), "[[".len() + picked.len()),
         InsertEdit::WikiLinkAlias => (format!("[[|{picked}]]"), "[[".len()),
+        // **画像は行き先から書く**（RFN01-48）。説明（`![]`の中）は後から足せるが、
+        // 行き先が無ければ絵にならない——リンクが表示名から書き始めるのとは、そこが
+        // 違う。キャレットは`](`の後ろなので、画像の名前の補完がそのまま出る。
+        InsertEdit::MarkdownImage => {
+            let text = format!("![{picked}]()");
+            let after = "![".len() + picked.len() + "](".len();
+            (text, after)
+        }
+        InsertEdit::WikiImage => (format!("![[{picked}]]"), "![[".len() + picked.len()),
         InsertEdit::Ruby => {
             let text = format!("｜{picked}《》");
             // **選んだ字があれば、キャレットは読みの欄**（`《`と`》`の間）へ。無ければ
@@ -5996,6 +6014,32 @@ mod tests {
         assert_eq!(caret, "前[[".len());
     }
 
+    /// RFN01-48: **画像は行き先から書く。**説明は空のまま、キャレットは`](`の後ろに
+    /// 立つので、画像の名前の補完が出る。選んだ字は説明になる。
+    #[test]
+    fn a_markdown_image_is_written_from_its_target() {
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::MarkdownImage).expect("入る");
+        assert_eq!(empty, "前![]()後");
+        assert_eq!(caret, "前![](".len());
+
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::MarkdownImage).expect("入る");
+        assert_eq!(next, "前![東京]()後");
+        assert_eq!(caret, "前![東京](".len());
+    }
+
+    /// RFN01-48: **Wikiの画像は、選んだ字を画像の場所にする。**キャレットは字の
+    /// 後ろ（`]]`の前）に立ち、リンクと同じ立ち方になる。大きさは置かない。
+    #[test]
+    fn a_wiki_image_puts_the_chosen_text_in_the_target() {
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::WikiImage).expect("入る");
+        assert_eq!(empty, "前![[]]後");
+        assert_eq!(caret, "前![[".len());
+
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::WikiImage).expect("入る");
+        assert_eq!(next, "前![[東京]]後");
+        assert_eq!(caret, "前![[東京".len());
+    }
+
     /// RFN01-38: **ルビは全角の縦線で書く**（書き手の選択 2026-09-21）。選択なしは
     /// 親文字から、選択ありは読みから書く。
     #[test]
@@ -6044,8 +6088,13 @@ mod tests {
         ] {
             assert!(insert_edit("前後", 3, 3, what).is_none(), "{what:?}");
         }
-        // 囲む形の傍点と、開いて閉じる注記は、字が無くても置ける。
-        for what in [InsertEdit::EmphasisDots, InsertEdit::Upright] {
+        // 囲む形の傍点と、開いて閉じる注記、行き先から書く画像は、字が無くても置ける。
+        for what in [
+            InsertEdit::EmphasisDots,
+            InsertEdit::Upright,
+            InsertEdit::MarkdownImage,
+            InsertEdit::WikiImage,
+        ] {
             assert!(insert_edit("前後", 3, 3, what).is_some(), "{what:?}");
         }
     }

@@ -79,12 +79,41 @@ pub enum ShortcutAction {
     NewFile,
     NewTerminal,
     FolderTerminal,
-    /// 挿入メニューの番号（`document::INSERT_EDITS`から続く`Command::Insert`の番号）。
-    Insert(i32),
+    /// 挿入メニューのひな形そのもの（RFN01-48）。
+    Insert(InsertShape),
     /// 箇条書きの記号（`document::BULLET_MARKS`の位置）。
     Bullets(i32),
     NumberedList,
     Renumber,
+}
+
+/// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
+/// 変えるたびに動くので、番号で持つと数え違えて別の形を走らせてしまう。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertShape {
+    /// `document::INSERT_EDITS`の形（字を包むもの）。
+    Edit(document::InsertEdit),
+    /// `document::LINE_NOTE_EDITS`の形（見出し・字下げ・地付き）。
+    Line(document::LineNoteEdit),
+    /// 改ページ。並びの最後の1つである。
+    PageBreak,
+}
+
+/// 挿入の番号（`Command::Insert`の番号）を引く。**並びを知っているのはここだけ。**
+fn insert_number(shape: InsertShape) -> Option<i32> {
+    let at = match shape {
+        InsertShape::Edit(what) => document::INSERT_EDITS
+            .iter()
+            .position(|edit| *edit == what)?,
+        InsertShape::Line(what) => {
+            document::INSERT_EDITS.len()
+                + document::LINE_NOTE_EDITS
+                    .iter()
+                    .position(|edit| *edit == what)?
+        }
+        InsertShape::PageBreak => document::INSERT_EDITS.len() + document::LINE_NOTE_EDITS.len(),
+    };
+    Some(at as i32)
 }
 
 struct Popup {
@@ -257,34 +286,69 @@ fn insert_commands(
     };
     // **選んだ字を指す注記は、字が無ければ押せない**（書き手の合意 2026-09-21）。
     // どの形がそうかは本文を持つ側が知っている——`document::InsertEdit`に聞く。
-    let word = |at: usize| !document::INSERT_EDITS[at].needs_a_picked_word() || picked;
+    // **形そのもので聞く**——番号は挿入の並びが変わるたびに動くので、番号で聞くと
+    // 数え違えたときに別の形を押せるようにしてしまう（RFN01-48で画像が入ったとき、
+    // 実際にそうなった）。
+    let word = |what: document::InsertEdit| !what.needs_a_picked_word() || picked;
     let link = Popup::new()?;
     row(
         &link,
         commands,
         "Markdownリンク",
         "Markdown Link",
-        word(0),
+        word(document::InsertEdit::MarkdownLink),
         false,
     )?;
-    row(&link, commands, "Wikiリンク", "Wiki Link", word(1), false)?;
+    row(
+        &link,
+        commands,
+        "Wikiリンク",
+        "Wiki Link",
+        word(document::InsertEdit::WikiLink),
+        false,
+    )?;
     row(
         &link,
         commands,
         "別名付きWikiリンク",
         "Wiki Link with Alias",
-        word(2),
+        word(document::InsertEdit::WikiLinkAlias),
+        false,
+    )?;
+    // **画像もリンクの一種**なので、同じ副メニューへ置く（RFN01-48）。行き先から
+    // 書く形で字は要らないので、選択が無くても押せる——`word`を通さない。
+    row(
+        &link,
+        commands,
+        "画像リンク(Markdown)",
+        "Image Link (Markdown)",
+        true,
+        false,
+    )?;
+    row(
+        &link,
+        commands,
+        "画像リンク(Wiki)",
+        "Image Link (Wiki)",
+        true,
         false,
     )?;
     menu.child(pick("リンク", "Link"), link)?;
-    row(menu, commands, "ルビ", "Ruby", word(3), false)?;
+    row(
+        menu,
+        commands,
+        "ルビ",
+        "Ruby",
+        word(document::InsertEdit::Ruby),
+        false,
+    )?;
     let note = Popup::new()?;
     row(
         &note,
         commands,
         "左側の注記",
         "Left-side Annotation",
-        word(4),
+        word(document::InsertEdit::SideNote),
         false,
     )?;
     row(
@@ -292,20 +356,41 @@ fn insert_commands(
         commands,
         "ルビと左側の注記",
         "Ruby and Left-side Annotation",
-        word(5),
+        word(document::InsertEdit::RubyWithSideNote),
         false,
     )?;
     menu.child(pick("注記", "Annotation"), note)?;
     let dots = Popup::new()?;
-    row(&dots, commands, "傍点", "Emphasis Dots", word(6), false)?;
-    row(&dots, commands, "ゴマ傍点", "Sesame Dots", word(7), false)?;
-    row(&dots, commands, "丸傍点", "Round Dots", word(8), false)?;
+    row(
+        &dots,
+        commands,
+        "傍点",
+        "Emphasis Dots",
+        word(document::InsertEdit::EmphasisDots),
+        false,
+    )?;
+    row(
+        &dots,
+        commands,
+        "ゴマ傍点",
+        "Sesame Dots",
+        word(document::InsertEdit::SesameDotsNote),
+        false,
+    )?;
+    row(
+        &dots,
+        commands,
+        "丸傍点",
+        "Round Dots",
+        word(document::InsertEdit::RoundDotsNote),
+        false,
+    )?;
     row(
         &dots,
         commands,
         "白丸傍点",
         "White Round Dots",
-        word(9),
+        word(document::InsertEdit::WhiteRoundDotsNote),
         false,
     )?;
     row(
@@ -313,27 +398,83 @@ fn insert_commands(
         commands,
         "二重丸傍点",
         "Double Round Dots",
-        word(10),
+        word(document::InsertEdit::DoubleRoundDotsNote),
         false,
     )?;
-    row(&dots, commands, "×傍点", "Cross Dots", word(11), false)?;
+    row(
+        &dots,
+        commands,
+        "×傍点",
+        "Cross Dots",
+        word(document::InsertEdit::CrossDotsNote),
+        false,
+    )?;
     menu.child(pick("傍点", "Emphasis Marks"), dots)?;
     let lines = Popup::new()?;
-    row(&lines, commands, "傍線", "Single Line", word(12), false)?;
-    row(&lines, commands, "二重傍線", "Double Line", word(13), false)?;
-    row(&lines, commands, "波線", "Wavy Line", word(14), false)?;
-    row(&lines, commands, "鎖線", "Chain Line", word(15), false)?;
-    row(&lines, commands, "破線", "Dashed Line", word(16), false)?;
+    row(
+        &lines,
+        commands,
+        "傍線",
+        "Single Line",
+        word(document::InsertEdit::LineNote),
+        false,
+    )?;
+    row(
+        &lines,
+        commands,
+        "二重傍線",
+        "Double Line",
+        word(document::InsertEdit::DoubleLineNote),
+        false,
+    )?;
+    row(
+        &lines,
+        commands,
+        "波線",
+        "Wavy Line",
+        word(document::InsertEdit::WaveLineNote),
+        false,
+    )?;
+    row(
+        &lines,
+        commands,
+        "鎖線",
+        "Chain Line",
+        word(document::InsertEdit::ChainLineNote),
+        false,
+    )?;
+    row(
+        &lines,
+        commands,
+        "破線",
+        "Dashed Line",
+        word(document::InsertEdit::DashLineNote),
+        false,
+    )?;
     menu.child(pick("傍線", "Emphasis Lines"), lines)?;
     let marks = Popup::new()?;
-    row(&marks, commands, "縦中横", "Tate-chu-yoko", word(17), false)?;
-    row(&marks, commands, "割り注", "Warichu", word(18), false)?;
+    row(
+        &marks,
+        commands,
+        "縦中横",
+        "Tate-chu-yoko",
+        word(document::InsertEdit::Upright),
+        false,
+    )?;
+    row(
+        &marks,
+        commands,
+        "割り注",
+        "Warichu",
+        word(document::InsertEdit::Warichu),
+        false,
+    )?;
     row(
         &marks,
         commands,
         "小さな文字",
         "Small Text",
-        word(19),
+        word(document::InsertEdit::SmallText),
         false,
     )?;
     row(
@@ -341,7 +482,7 @@ fn insert_commands(
         commands,
         "大きな文字",
         "Large Text",
-        word(20),
+        word(document::InsertEdit::LargeText),
         false,
     )?;
     menu.child(pick("文字注記", "Text Annotation"), marks)?;
@@ -1642,7 +1783,14 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         // 特定のシェルを結び付けない（書き手の合意 2026-09-21）。
         ShortcutAction::NewTerminal => Command::NewTerminal(window.get_default_shell()),
         ShortcutAction::FolderTerminal => Command::FolderTerminal,
-        ShortcutAction::Insert(index) => Command::Insert(index),
+        // **番号はここで引く。**設定が持つのは形なので、挿入の並びが動いても指す先は
+        // 動かない。
+        ShortcutAction::Insert(shape) => {
+            let Some(index) = insert_number(shape) else {
+                return;
+            };
+            Command::Insert(index)
+        }
         ShortcutAction::Bullets(index) => Command::List(0, index),
         ShortcutAction::NumberedList => Command::List(1, -1),
         ShortcutAction::Renumber => Command::List(2, -1),
