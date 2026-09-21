@@ -3674,10 +3674,21 @@ fn main() -> Result<(), slint::PlatformError> {
     // 2026-09-21：上は押せないのに下は押せる）。出ている間だけ、窓の幅いっぱいまで
     // 押せる場所にする。
     let held = chrome.clone();
+    let print_live = live.clone();
     window.on_print_active_changed(move |active| {
         if let Some(chrome) = held.borrow().as_ref() {
             chrome.set_interactive_end(if active { f32::MAX } else { 36. });
         }
+        // 診断（RFN01-44）：**受け口が呼ばれたか**、そのとき何を入れたか、窓が
+        // あるか。上側のボタンが押せないままなので、配線が届いているかを確かめる。
+        print_live.cache.borrow_mut().log_diag(
+            "print",
+            &format!(
+                "active_changed active={active} end={} chrome={}",
+                if active { f32::MAX } else { 36. },
+                held.borrow().is_some()
+            ),
+        );
     });
     let held = chrome.clone();
     Timer::single_shot(Duration::ZERO, move || {
