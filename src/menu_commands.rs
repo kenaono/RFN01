@@ -162,7 +162,6 @@ fn insert_commands(
     picked: bool,
     notes: document::LineNoteState,
     breakable: bool,
-    picked_chars: usize,
 ) -> windows::core::Result<()> {
     // **番号は並べた順**（`document::INSERT_EDITS`の後ろに`LINE_NOTE_EDITS`が続く）。
     // `menu_row`が`commands`の長さを番号にするので、ここでは数え直さない。
@@ -189,9 +188,6 @@ fn insert_commands(
     // **選んだ字を指す注記は、字が無ければ押せない**（書き手の合意 2026-09-21）。
     // どの形がそうかは本文を持つ側が知っている——`document::InsertEdit`に聞く。
     let word = |at: usize| !document::INSERT_EDITS[at].needs_a_picked_word() || picked;
-    // **縦中横は長すぎるものを置かない**（書き手の求め 2026-09-21）——1マスに収めるので、
-    // 字が増えるほど小さくなる。長さの上限も本文を持つ側が持っている。
-    let upright = picked_chars == 0 || picked_chars <= document::InsertEdit::UPRIGHT_LIMIT;
     let link = Popup::new()?;
     row(
         &link,
@@ -260,14 +256,7 @@ fn insert_commands(
     row(&lines, commands, "破線", "Dashed Line", word(16), false)?;
     menu.child(pick("傍線", "Emphasis Lines"), lines)?;
     let marks = Popup::new()?;
-    row(
-        &marks,
-        commands,
-        "縦中横",
-        "Tate-chu-yoko",
-        word(17) && upright,
-        false,
-    )?;
+    row(&marks, commands, "縦中横", "Tate-chu-yoko", word(17), false)?;
     row(&marks, commands, "割り注", "Warichu", word(18), false)?;
     row(
         &marks,
@@ -898,7 +887,7 @@ fn show(
             let rectangular = live.states.of(t.id).borrow().rectangular;
             // **行の体裁は、いまの行が何かを読んでから出す**——押せるのに何も
             // 起きない行を作らないため、見る側と押す側が同じ答えを使う。
-            let (notes, breakable, picked_chars) = {
+            let (notes, breakable) = {
                 let source = t.document.text.borrow();
                 let pane_state = live.states.of(t.id);
                 let (from, to) = {
@@ -914,7 +903,6 @@ fn show(
                 (
                     document::line_note_state(&source, from, to, reading_of(window)),
                     document::can_break_page_here(&source, from, to),
-                    source[from.min(to)..from.max(to)].chars().count(),
                 )
             };
             insert_commands(
@@ -926,7 +914,6 @@ fn show(
                 selected,
                 notes,
                 breakable,
-                picked_chars,
             )?;
             root.sep()?;
             let marks = bullet_marks_of(window);
@@ -1819,7 +1806,6 @@ mod tests {
             true,
             bare_notes(),
             true,
-            0,
         )
         .unwrap();
 
@@ -1877,7 +1863,6 @@ mod tests {
             false,
             bare_notes(),
             false,
-            0,
         )
         .unwrap();
 
@@ -1928,7 +1913,6 @@ mod tests {
             true,
             notes,
             true,
-            0,
         )
         .unwrap();
 
@@ -1965,7 +1949,6 @@ mod tests {
             true,
             bare_notes(),
             true,
-            0,
         )
         .unwrap();
 

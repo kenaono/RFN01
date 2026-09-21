@@ -1634,13 +1634,6 @@ pub enum InsertEdit {
 }
 
 impl InsertEdit {
-    /// 縦中横の注記に収められる字の数（書き手の求め 2026-09-21）。
-    ///
-    /// **1マスに収める**ので、字が増えるほど1字が小さくなる（描く側が
-    /// `upright_fit`で縮めて収める）。読めなくなる前に止める。**自動の規則が1マスに
-    /// 収める最大に合わせた**——`12`（2桁）と`!?`（記号2つ）で4字である。
-    pub const UPRIGHT_LIMIT: usize = 4;
-
     /// **選んだ字を指す注記か。**同じ語を本文と注記の2か所へ書く形は、選んだ字が
     /// 無ければ指す先が無い——だからメニューでも押せない（書き手の合意
     /// 2026-09-21）。空のひな形を置ける形（`《《》》`と範囲の注記）はここに居ない。
@@ -1716,10 +1709,6 @@ pub fn insert_edit(
     }
     let picked = &source[start..end];
     if picked.is_empty() && what.needs_a_picked_word() {
-        return None;
-    }
-    // **長すぎる縦中横は置かない**（書き手の求め 2026-09-21）。
-    if what == InsertEdit::Upright && picked.chars().count() > InsertEdit::UPRIGHT_LIMIT {
         return None;
     }
     let (text, after) = match what {
@@ -3702,6 +3691,13 @@ enum RangeNote {
 
 /// 開き・閉じ・種類。**長い言い方から先に並べる**必要はない——開きは`］`まで含めて
 /// 比べるので、「小さな文字」と「文字」のような取りこぼしが起きない。
+/// 縦中横の注記を**読む**上限（字。書き手の決定 2026-09-21）。
+///
+/// **これ以上は読まない。**1マスに収めるので字が増えるほど小さくなり、読めなくなる。
+/// 読まなければ原文のまま出るので、書き手には何が書いてあるかが分かる。**挿入には
+/// 上限を置かない**——手で書けるものを道具だけ断るのは筋が通らない（同じ決定）。
+pub const UPRIGHT_NOTE_LIMIT: usize = 4;
+
 const RANGE_NOTES: [(&str, &str, RangeNote); 4] = [
     ("［＃縦中横］", "［＃縦中横終わり］", RangeNote::Upright),
     ("［＃割り注］", "［＃割り注終わり］", RangeNote::Warichu),
@@ -3722,6 +3718,10 @@ const RANGE_NOTES: [(&str, &str, RangeNote); 4] = [
 /// **閉じないものは注記ではない。**太字の`**`と同じ規則で、閉じない`［＃縦中横］`は
 /// 字のまま本文に残る——原文にある指示が画面から消えたまま何も起きない、を避ける道である。
 /// 空の`［＃縦中横］［＃縦中横終わり］`も組む相手がいないので記法ではない。
+///
+/// **縦中横は、長すぎるものを読まない**（書き手の決定 2026-09-21）。1マスに収めるので
+/// 字が増えるほど小さくなり、読めなくなる。読まなければ原文のまま出るので、書き手には
+/// 何が書いてあるかが分かる——知らない注記を消さないのと同じ扱いである。
 fn range_note_here(rest: &str) -> Option<(&str, RangeNote, &str)> {
     if !rest.starts_with("［＃") {
         return None;
@@ -3734,6 +3734,9 @@ fn range_note_here(rest: &str) -> Option<(&str, RangeNote, &str)> {
             continue;
         };
         if at == 0 {
+            continue;
+        }
+        if kind == RangeNote::Upright && after[..at].chars().count() >= UPRIGHT_NOTE_LIMIT {
             continue;
         }
         return Some((&after[..at], kind, &after[at + close.len()..]));
@@ -6054,16 +6057,22 @@ mod tests {
         assert_eq!(seen.len(), INSERT_EDITS.len());
     }
 
-    /// 書き手の求め 2026-09-21: **縦中横は長すぎるものを置かない。**1マスに収めるので、
-    /// 字が増えるほど1字が小さくなる——読めなくなる前に止める。
+    /// 書き手の決定 2026-09-21: **挿入には上限を置かず、読む側に上限を置く。**
+    /// 手で書けるものを道具だけ断るのは筋が通らない。読めないほど縮むものは、
+    /// 読まなければ原文のまま出る——書き手には何が書いてあるかが分かる。
     #[test]
-    fn an_upright_note_is_refused_when_it_is_too_long() {
-        // 4字までは置ける（自動の規則が1マスに収める最大に合わせてある）。
-        assert!(insert_edit("前1234後", 3, 7, InsertEdit::Upright).is_some());
-        // 5字からは置かない。
-        assert!(insert_edit("前12345後", 3, 8, InsertEdit::Upright).is_none());
-        // **空のひな形は置ける**——中へ書く所である。
-        assert!(insert_edit("前後", 3, 3, InsertEdit::Upright).is_some());
+    fn a_long_upright_note_is_left_as_source() {
+        // 3字までは読む（1マスに収まる）。
+        assert_eq!(
+            preview_of("第［＃縦中横］ABC［＃縦中横終わり］章").0,
+            "第ABC章"
+        );
+        // **4字からは読まない**——注記ごと原文のまま出る。
+        let source = "第［＃縦中横］ABCD［＃縦中横終わり］章";
+        assert_eq!(preview_of(source).0, source);
+        assert!(preview_of(source).1.is_empty(), "印を立てない");
+        // **挿入は断らない**——手で書けるものを道具だけ止めない。
+        assert!(insert_edit("前12345後", 3, 8, InsertEdit::Upright).is_some());
     }
 
     /// 行の体裁を当てて、出来上がる本文を見る（RFN01-38）。
