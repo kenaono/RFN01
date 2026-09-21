@@ -2372,6 +2372,7 @@ export component AppWindow inherits Window {
                         menu-action: root.menu-action;
                         menu-generation: root.menu-pane == pane.id ? root.menu-generation : 0;
                         embedded-panel: pane.embedded-panel;
+                        window-height: root.height;
                         // 書き手の決定 2026-09-11: 読む記号ぶんの行を右クリックに
                         // 出すために、窓の言っていることをそのまま渡す。
                         bullet-marks: root.bullet-marks;

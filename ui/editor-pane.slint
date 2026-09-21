@@ -37,6 +37,8 @@ export component EditorPane inherits Rectangle {
         }
     }
     in property <bool> embedded-panel: false;
+    /// 窓の高さ。面の右クリックのメニューが、これより高ければ中を流す（RFN01-47）。
+    in property <length> window-height;
     /// Which key this is, as a number `terminal.rs` knows (追加要件 Terminal).
     /// 0 is "an ordinary character", and then the text is what matters.
     pure function key-number(text: string) -> int {
@@ -1716,6 +1718,7 @@ export component EditorPane inherits Rectangle {
                 return false;
             }
             embedded-panel: root.embedded-panel;
+            window-height: root.window-height;
             key-number(a0) => { root.key-number(a0); }
             vertical: root.vertical;
             focused: root.focused;

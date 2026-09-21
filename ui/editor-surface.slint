@@ -8,6 +8,9 @@ import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, Pre
 // TAB strips and auxiliary panels are supplied by the host.
 export component EditorSurface inherits Rectangle {
     in property <bool> standalone: false;
+    /// 窓の高さ（RFN01-47）。右クリックのメニューがこれより高ければ、中を流す。
+    /// 0は「知らない」で、流さない。
+    in property <length> window-height;
     out property <bool> input-focused: ime-input.has-focus;
     callback ime-area(float, float, float, float, bool);
     // Focus lives on the clipped input; native candidates exclude the actual
@@ -177,6 +180,20 @@ export component EditorSurface inherits Rectangle {
     /// 開いてから広げても枠は264pxのままで、右の面は描かれるのに押すと「外」と
     /// 見なされて閉じていた（書き手の報告 2026-09-22）。いちばん広い右の面に合わせる。
     private property <length> context-menu-width: 432px;
+    /// **端では左へ開く**（RFN01-47、Windowsのメニューと同じ）。右クリックした
+    /// 点から面の右端までの残り——紙は横に流れて面より広いことがあるので、
+    /// 画面の上の位置で測る。
+    private property <length> context-room: root.absolute-position.x + root.width
+        - editor.absolute-position.x - root.context-x;
+    /// メニューが点の右に収まらなければ、右端を点に合わせて左へ出す。
+    private property <bool> context-flipped: root.context-room < 264px;
+    /// 右へ開く面の場所が無ければ、面は左へ開く。枠もそのぶん左へ取る。
+    private property <bool> flyouts-left: root.context-room < root.context-menu-width;
+    /// 右へ開く面を出す高さ——乗せた行の、メニューの枠の上からの位置。
+    private property <length> flyout-y;
+    private property <length> context-menu-left: root.context-flipped
+        ? root.context-x - 264px
+        : root.context-x;
     callback open-file-requested();
     callback escaped() -> bool;
     callback selection-escaped() -> bool;
@@ -1200,13 +1217,20 @@ export component EditorSurface inherits Rectangle {
                         }
 
                         context-menu := PopupWindow {
-                            // **位置の補正は保留**（RFN01-47）。中身の寸法を読んで位置を
-                            // 決める形にしたところ、押しても行が反応しなくなった
-                            // （書き手の報告 2026-09-22）。まず元の位置へ戻し、直し方は
-                            // 別に決める。
-                            x: root.context-x;
+                            // **横は端で左へ開き、縦はSlintが窓の中へ寄せる**（RFN01-47）。
+                            // 枠の幅は右へ開く面ぶんを含むので、面が左へ開くときは枠を
+                            // そのぶん左から取り、メニューは枠の右端に寄せる。
+                            x: root.flyouts-left
+                                ? root.context-menu-left - (root.context-menu-width - 264px)
+                                : root.context-menu-left;
                             y: root.context-y;
                             width: root.context-menu-width;
+                            // **窓より高ければ、枠を窓の高さに留めて中を流す**（RFN01-47）。
+                            // Slintは窓より高いpopupを縮めずに置くので、下の行が窓の外に
+                            // 出て押せなかった。
+                            height: root.window-height > 0 && menu-rows.preferred-height > root.window-height
+                                ? root.window-height
+                                : menu-rows.preferred-height;
                             close-policy: close-on-click-outside;
 
                             // **メニューの右の空きを押せば閉じる。**枠を右の面ぶん
@@ -1214,29 +1238,70 @@ export component EditorSurface inherits Rectangle {
                             // 閉じる振る舞いを、ここで保つ。行より先に置くので、
                             // 行と右の面が上に乗り、何も無い所だけがここへ落ちる。
                             // メニューの内側の余白は押しても閉じない（今までどおり）
-                            // ので、面の右からだけ取る。
+                            // ので、面の開く側からだけ取る。
                             TouchArea {
-                                x: 264px;
+                                x: root.flyouts-left ? 0px : 264px;
                                 y: 0px;
                                 width: parent.width - 264px;
                                 height: parent.height;
                                 clicked => { context-menu.close(); }
                             }
 
-                            // **左端に寄せる**（書き手の報告 2026-09-11：「元の
-                            // メニューも右に動きます」「メニューが透明になりました」）。
-                            // popupの中の子は**真ん中に寄る**ので、右に開くぶんを
-                            // 広げた幅の半分だけメニューが動いていた。**`x`で釘を
-                            // 打つと、その子はpopupの並べ方から外れて枠の高さを
-                            // 失う**（透明になったのはそれ）——寄せ方そのものを
-                            // 言うほうが正しい。
-                            HorizontalLayout {
-                                alignment: start;
+                            // **枠の中の置き場所は、面の開く側で決める**——面が左へ開くときは
+                            // メニューを枠の右端に置く。高さはpopupが決めている（上）ので、
+                            // 釘を打っても枠が高さを失わない（2026-09-11の「透明」は、
+                            // popupが中身から高さを読んでいたときの話）。
+                            menu-frame := MenuFrame {
+                                x: root.flyouts-left ? root.context-menu-width - 264px : 0px;
+                                y: 0px;
+                                width: 264px;
+                                height: parent.height;
 
-                                menu-frame := MenuFrame {
-                                    width: 264px;
+                                // **流すときだけ、上下に▲▼の帯を出す**（Windowsのメニューと同じ）。
+                                // 乗せているあいだ流れ、押せば1行進む。ホイールでも流れる。
+                                property <bool> overflows: menu-rows.preferred-height > self.height;
+                                property <length> arrow: 20px;
+                                property <length> lowest: min(0px, menu-scroll.height - menu-rows.preferred-height);
 
-                                    VerticalLayout {
+                                menu-up := TouchArea {
+                                    y: 0px;
+                                    height: parent.arrow;
+                                    visible: parent.overflows;
+                                    clicked => {
+                                        menu-scroll.viewport-y = min(0px, menu-scroll.viewport-y + 29px);
+                                    }
+
+                                    Text {
+                                        text: "▲";
+                                        font-size: 9px;
+                                        color: menu-scroll.viewport-y < 0px ? Tok.ink : Tok.ink-faint;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Timer {
+                                    interval: 16ms;
+                                    running: menu-up.has-hover && menu-scroll.viewport-y < 0px;
+                                    triggered => {
+                                        menu-scroll.viewport-y = min(0px, menu-scroll.viewport-y + 4px);
+                                    }
+                                }
+
+                                menu-scroll := Flickable {
+                                    y: parent.overflows ? parent.arrow : 0px;
+                                    width: parent.width;
+                                    height: parent.height - (parent.overflows ? 2 * parent.arrow : 0px);
+                                    viewport-height: menu-rows.preferred-height;
+                                    // **流したら、開いていた面は畳む。**面は行の横に置いてあり、
+                                    // 行と一緒には流れない。
+                                    changed viewport-y => {
+                                        root.insert-open = -1;
+                                        root.bullet-rows-open = false;
+                                    }
+
+                                    menu-rows := VerticalLayout {
+                                        width: parent.width;
                                         padding: 6px;
                                         spacing: 1px;
 
@@ -1334,63 +1399,36 @@ export component EditorSurface inherits Rectangle {
                                         // タイトルバーの挿入メニューと同じ並び・同じ押せる
                                         // 条件で、中身はRustが作る。右へ開く1段は箇条書きと
                                         // 同じ作り——入れ子のpopupにはしない（6.24・6.30）。
-                                        if root.writing && !root.standalone: VerticalLayout {
+                                        if root.writing && !root.standalone: insert-block := VerticalLayout {
                                             spacing: 1px;
 
                                             MenuSep { }
 
-                                            for insert in root.insert-rows: Rectangle {
-                                                height: 28px;
-
-                                                insert-row := MenuRow {
-                                                    width: parent.width;
-                                                    height: parent.height;
-                                                    title: insert.title;
-                                                    shortcut: insert.flyout ? "▸" : "";
-                                                    enabled: insert.enabled;
-                                                    checked: insert.checked;
-                                                    // **乗せれば開く。**押しても開く
-                                                    // ——押した書き手を待たせない。
-                                                    changed hovered => {
-                                                        if (self.hovered) {
-                                                            root.insert-open = insert.flyout ? insert.group : -1;
-                                                            // 右へ開くのは1つだけ。
-                                                            root.bullet-rows-open = false;
-                                                        }
-                                                    }
-                                                    activated => {
-                                                        if (insert.flyout) {
-                                                            root.insert-open = root.insert-open == insert.group ? -1 : insert.group;
-                                                        } else {
-                                                            root.insert-chosen(insert.number);
-                                                            context-menu.close();
-                                                        }
+                                            // 面を出す高さは**並びの頭から数える**——`for`の中の行の
+                                            // `absolute-position`は、並びの中の位置を二重に足した
+                                            // （3行目で2行ぶん下に出た、2026-09-22）。
+                                            for insert[index] in root.insert-rows: MenuRow {
+                                                title: insert.title;
+                                                shortcut: insert.flyout ? "▸" : "";
+                                                enabled: insert.enabled;
+                                                checked: insert.checked;
+                                                // **乗せれば開く。**押しても開く
+                                                // ——押した書き手を待たせない。
+                                                changed hovered => {
+                                                    if (self.hovered) {
+                                                        root.flyout-y = insert-block.absolute-position.y - menu-frame.absolute-position.y + 12px + index * 29px;
+                                                        root.insert-open = insert.flyout ? insert.group : -1;
+                                                        // 右へ開くのは1つだけ。
+                                                        root.bullet-rows-open = false;
                                                     }
                                                 }
-
-                                                if insert.flyout && root.insert-open == insert.group: MenuFrame {
-                                                    x: parent.width - 8px;
-                                                    y: -6px;
-                                                    width: 176px;
-                                                    height: insert-flyout.preferred-height;
-
-                                                    insert-flyout := VerticalLayout {
-                                                        padding: 6px;
-                                                        spacing: 1px;
-
-                                                        // **番号ではなく組で選ぶ**——
-                                                        // 開いている組の中身だけが立つ。
-                                                        for child in root.insert-children: VerticalLayout {
-                                                            if child.group == insert.group: MenuRow {
-                                                                title: child.title;
-                                                                enabled: child.enabled;
-                                                                checked: child.checked;
-                                                                activated => {
-                                                                    root.insert-chosen(child.number);
-                                                                    context-menu.close();
-                                                                }
-                                                            }
-                                                        }
+                                                activated => {
+                                                    if (insert.flyout) {
+                                                        root.flyout-y = insert-block.absolute-position.y - menu-frame.absolute-position.y + 12px + index * 29px;
+                                                        root.insert-open = root.insert-open == insert.group ? -1 : insert.group;
+                                                    } else {
+                                                        root.insert-chosen(insert.number);
+                                                        context-menu.close();
                                                     }
                                                 }
                                             }
@@ -1428,70 +1466,22 @@ export component EditorSurface inherits Rectangle {
                                             // その木ごと消え、消えた木から`root`へ登った
                                             // 生成コードは黙って何もしない（6.24・6.30）
                                             // ——同じ木の中で右へ出せば、その罠の外にいる。
-                                            Rectangle {
-                                                height: 28px;
-
-                                                bullet-row := MenuRow {
-                                                    width: parent.width;
-                                                    height: parent.height;
-                                                    title: @tr("Bullet List");
-                                                    shortcut: "▸";
-                                                    // **乗せれば開く。**押しても開く
-                                                    // ——押した書き手を待たせない。
-                                                    changed hovered => {
-                                                        if (self.hovered) {
-                                                            root.bullet-rows-open = true;
-                                                            // 右へ開くのは1つだけ。
-                                                            root.insert-open = -1;
-                                                        }
-                                                    }
-                                                    activated => {
-                                                        root.bullet-rows-open
-                                                            = !root.bullet-rows-open;
+                                            MenuRow {
+                                                title: @tr("Bullet List");
+                                                shortcut: "▸";
+                                                // **乗せれば開く。**押しても開く
+                                                // ——押した書き手を待たせない。
+                                                changed hovered => {
+                                                    if (self.hovered) {
+                                                        root.flyout-y = self.absolute-position.y - menu-frame.absolute-position.y;
+                                                        root.bullet-rows-open = true;
+                                                        // 右へ開くのは1つだけ。
+                                                        root.insert-open = -1;
                                                     }
                                                 }
-
-                                                if root.bullet-rows-open: MenuFrame {
-                                                    x: parent.width - 8px;
-                                                    y: -6px;
-                                                    width: 136px;
-                                                    height: bullet-rows.preferred-height;
-
-                                                    bullet-rows := VerticalLayout {
-                                                        padding: 6px;
-                                                        spacing: 1px;
-
-                                                        if root.bullet-marks[0]: MenuRow {
-                                                            title: "-";
-                                                            shortcut: "Ctrl+Shift+8";
-                                                            // **頼んでから閉じる**（6.24）。
-                                                            activated => {
-                                                                root.list-edit(0, 0);
-                                                                context-menu.close();
-                                                            }
-                                                        }
-                                                        if root.bullet-marks[1]: MenuRow {
-                                                            title: "*";
-                                                            shortcut: root.bullet-marks[0]
-                                                                ? ""
-                                                                : "Ctrl+Shift+8";
-                                                            activated => {
-                                                                root.list-edit(0, 1);
-                                                                context-menu.close();
-                                                            }
-                                                        }
-                                                        if root.bullet-marks[2]: MenuRow {
-                                                            title: "+";
-                                                            shortcut: root.bullet-marks[0]
-                                                                || root.bullet-marks[1]
-                                                                ? ""
-                                                                : "Ctrl+Shift+8";
-                                                            activated => {
-                                                                root.list-edit(0, 2);
-                                                                context-menu.close();
-                                                            }
-                                                        }
-                                                    }
+                                                activated => {
+                                                    root.flyout-y = self.absolute-position.y - menu-frame.absolute-position.y;
+                                                    root.bullet-rows-open = !root.bullet-rows-open;
                                                 }
                                             }
                                             MenuRow {
@@ -1619,6 +1609,100 @@ export component EditorSurface inherits Rectangle {
                                                 root.navigate-requested(true);
                                                 context-menu.close();
                                             }
+                                        }
+                                    }
+                                }
+
+                                menu-down := TouchArea {
+                                    y: parent.height - parent.arrow;
+                                    height: parent.arrow;
+                                    visible: parent.overflows;
+                                    clicked => {
+                                        menu-scroll.viewport-y = max(menu-frame.lowest, menu-scroll.viewport-y - 29px);
+                                    }
+
+                                    Text {
+                                        text: "▼";
+                                        font-size: 9px;
+                                        color: menu-scroll.viewport-y > menu-frame.lowest ? Tok.ink : Tok.ink-faint;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Timer {
+                                    interval: 16ms;
+                                    running: menu-down.has-hover && menu-scroll.viewport-y > menu-frame.lowest;
+                                    triggered => {
+                                        menu-scroll.viewport-y = max(menu-frame.lowest, menu-scroll.viewport-y - 4px);
+                                    }
+                                }
+                            }
+
+                            // **右へ開く面は、流れる行の外に置く。**Flickableは中身を自分の枠で
+                            // 切るので、行の子にすると枠の外へ開く面が消える。乗せた行の高さに
+                            // 出し、popupの中に収める（外にはみ出た所は押しても届かない）。
+                            // **入れ子のpopupにはしない**（6.24・6.30）——同じ木の中に置く。
+                            if root.insert-open >= 0: MenuFrame {
+                                x: root.flyouts-left ? menu-frame.x + 14px - self.width : menu-frame.x + 250px;
+                                y: clamp(root.flyout-y - 6px, 0px, max(0px, parent.height - self.height));
+                                width: 176px;
+                                height: insert-flyout.preferred-height;
+
+                                insert-flyout := VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 1px;
+
+                                    // **番号ではなく組で選ぶ**——開いている組の中身だけが立つ。
+                                    for child in root.insert-children: VerticalLayout {
+                                        if child.group == root.insert-open: MenuRow {
+                                            title: child.title;
+                                            enabled: child.enabled;
+                                            checked: child.checked;
+                                            activated => {
+                                                root.insert-chosen(child.number);
+                                                context-menu.close();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 読む記号が1つも無ければ、開いても空である
+                            // （書き手の言葉：「何も選ばれていなければ、空」）。
+                            if root.bullet-rows-open: MenuFrame {
+                                x: root.flyouts-left ? menu-frame.x + 14px - self.width : menu-frame.x + 250px;
+                                y: clamp(root.flyout-y - 6px, 0px, max(0px, parent.height - self.height));
+                                width: 136px;
+                                height: bullet-rows.preferred-height;
+
+                                bullet-rows := VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 1px;
+
+                                    if root.bullet-marks[0]: MenuRow {
+                                        title: "-";
+                                        shortcut: "Ctrl+Shift+8";
+                                        // **頼んでから閉じる**（6.24）。
+                                        activated => {
+                                            root.list-edit(0, 0);
+                                            context-menu.close();
+                                        }
+                                    }
+                                    if root.bullet-marks[1]: MenuRow {
+                                        title: "*";
+                                        shortcut: root.bullet-marks[0] ? "" : "Ctrl+Shift+8";
+                                        activated => {
+                                            root.list-edit(0, 1);
+                                            context-menu.close();
+                                        }
+                                    }
+                                    if root.bullet-marks[2]: MenuRow {
+                                        title: "+";
+                                        shortcut: root.bullet-marks[0] || root.bullet-marks[1] ? "" : "Ctrl+Shift+8";
+                                        activated => {
+                                            root.list-edit(0, 2);
+                                            context-menu.close();
                                         }
                                     }
                                 }

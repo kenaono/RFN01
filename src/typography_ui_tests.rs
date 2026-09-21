@@ -1091,25 +1091,131 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
             .window()
             .dispatch_event(WindowEvent::PointerReleased { position, button });
     };
-    // 窓の右寄りで開く——枠が右の面ぶん広いので、左へ寄せて窓に収まる（x=668）。
-    press(800.0, 200.0, PointerEventButton::Right);
-    // 「箇条書き▸」に乗せて右へ開き、開いた面のいちばん上（`-`）を押す。
-    window.window().dispatch_event(WindowEvent::PointerMoved {
-        position: slint::LogicalPosition::new(840.0, 430.0),
+    // RFN01-47: **端では左へ開く。**左寄りでは面を右へ、右寄りでは左へ開き、
+    // 右端ではメニューの右端を点に合わせる。どの向きでも、開いた面の行が押せて、
+    // 面の側の空きを押せば閉じる。
+    // （右クリックの点、「箇条書き▸」の点、開いた面の`-`、面の側の空き、「本文だけをコピー」）
+    for (at, bullet, dash, empty, copy) in [
+        (300.0, 340.0, 620.0, 680.0, 340.0),
+        (800.0, 840.0, 720.0, 650.0, 840.0),
+        (1000.0, 800.0, 660.0, 600.0, 800.0),
+    ] {
+        listed.borrow_mut().clear();
+        copied.set(0);
+        press(at, 200.0, PointerEventButton::Right);
+        window.window().dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(bullet, 430.0),
+        });
+        press(dash, 430.0, PointerEventButton::Left);
+        assert_eq!(
+            &*listed.borrow(),
+            &[(0, 0)],
+            "a row in the flyout must answer the click at {at}"
+        );
+        press(at, 200.0, PointerEventButton::Right);
+        press(empty, 220.0, PointerEventButton::Left);
+        press(copy, 376.0, PointerEventButton::Left);
+        assert_eq!(
+            copied.get(),
+            0,
+            "the empty side must close the menu at {at}"
+        );
+        // 閉じずに押せば、同じ位置の「本文だけをコピー」に届く（位置の確かめ）。
+        press(at, 200.0, PointerEventButton::Right);
+        press(copy, 376.0, PointerEventButton::Left);
+        assert_eq!(copied.get(), 1, "the menu stands where expected at {at}");
+    }
+}
+
+/// RFN01-47（書き手の求め 2026-09-22）: **窓より高いメニューは、枠を窓の高さに留めて中を流す。**
+/// Slintは窓より高いpopupを縮めずに置くので、下の行が窓の外に出て押せなかった。ホイールで
+/// 流せば下の行に届き、流したあとに開いた面の行も押せる。
+#[test]
+fn a_menu_taller_than_the_window_scrolls_to_its_last_rows() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    surface.set_size(slint::PhysicalSize::new(1100, 440));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let source = "本文の一行目。\n二行目。\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 1050.0;
+        screen.height = 320.0;
+        screen.shown_width = 1050.0;
+        screen.shown_height = 220.0;
+        screen.preview = true;
     });
-    press(1000.0, 430.0, PointerEventButton::Left);
+    set_pane_direction(&window, &cache, id, false);
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+    let navigated = Rc::new(RefCell::new(Vec::new()));
+    let received = navigated.clone();
+    window.on_pane_navigate(move |_, forward| received.borrow_mut().push(forward));
+    let listed = Rc::new(RefCell::new(Vec::new()));
+    let received = listed.clone();
+    window.on_pane_list_edit(move |_, what, mark| received.borrow_mut().push((what, mark)));
+    let press = |x, y, button| {
+        let position = slint::LogicalPosition::new(x, y);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    let wheel = || {
+        for _ in 0..4 {
+            window
+                .window()
+                .dispatch_event(WindowEvent::PointerScrolled {
+                    position: slint::LogicalPosition::new(340.0, 200.0),
+                    delta_x: 0.0,
+                    delta_y: -120.0,
+                });
+        }
+    };
+    let snapshot = |name: &str| {
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 440];
+        surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1100);
+        });
+        let mut ppm = b"P6\n1100 440\n255\n".to_vec();
+        for pixel in pixels {
+            ppm.extend([pixel.r, pixel.g, pixel.b]);
+        }
+        let output = PathBuf::from("target/typography-qa");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join(name), ppm).unwrap();
+    };
+    press(300.0, 150.0, PointerEventButton::Right);
+    snapshot("menu-scroll-top.ppm");
+    wheel();
+    snapshot("menu-scroll-bottom.ppm");
+    // 流し切ると、いちばん下の行（Forward）が▼の帯のすぐ上に来る。
+    press(340.0, 400.0, PointerEventButton::Left);
+    assert_eq!(
+        &*navigated.borrow(),
+        &[true],
+        "the last row must be reachable by scrolling"
+    );
+    // 流したあとに開いた面の行も押せる。
+    press(300.0, 150.0, PointerEventButton::Right);
+    wheel();
+    window.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(340.0, 90.0),
+    });
+    snapshot("menu-scroll-flyout.ppm");
+    press(620.0, 90.0, PointerEventButton::Left);
     assert_eq!(
         &*listed.borrow(),
         &[(0, 0)],
-        "a row in the flyout must answer the click, not close the menu"
+        "a flyout opened after scrolling must answer"
     );
-    // 枠の右の空きは今までどおり「外」——押せば閉じ、下の行の位置はもう押せない。
-    press(800.0, 200.0, PointerEventButton::Right);
-    press(1060.0, 220.0, PointerEventButton::Left);
-    press(840.0, 376.0, PointerEventButton::Left);
-    assert_eq!(copied.get(), 0, "the empty right of the menu must close it");
-    // 閉じずに押せば、同じ位置の「本文だけをコピー」に届く（位置の確かめ）。
-    press(800.0, 200.0, PointerEventButton::Right);
-    press(840.0, 376.0, PointerEventButton::Left);
-    assert_eq!(copied.get(), 1);
 }
