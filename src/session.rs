@@ -173,7 +173,13 @@ pub fn open_session(
         })
         .unwrap_or_else(|| Layout::single(focused.index() as usize));
     window.set_focused_pane(focused.index());
-    (Tabs { panes: strips, no_tabs: Default::default() }, layout)
+    (
+        Tabs {
+            panes: strips,
+            no_tabs: Default::default(),
+        },
+        layout,
+    )
 }
 
 /// The document one session tab names, from the work copies or from disk.
@@ -262,7 +268,10 @@ pub fn open_without_session(
         ..PaneTabs::default()
     }];
     (
-        Tabs { panes: strips, no_tabs: Default::default() },
+        Tabs {
+            panes: strips,
+            no_tabs: Default::default(),
+        },
         Layout::single(here.index() as usize),
     )
 }
@@ -312,7 +321,14 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         layout: live.layout.borrow().encode(),
         place: window_place(window),
         maximized: window.window().is_maximized(),
-        focused: { let id = focused_pane(window); if id.is_panel() { id.screen(window).panel_owner } else { id.index() } },
+        focused: {
+            let id = focused_pane(window);
+            if id.is_panel() {
+                id.screen(window).panel_owner
+            } else {
+                id.index()
+            }
+        },
         panes,
         folder: folder.root.clone(),
         search_folder: folder.searching.clone(),

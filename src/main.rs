@@ -3,14 +3,14 @@ mod editor_interaction;
 mod editor_render;
 mod input_platform;
 use input_platform::{double_click_time, shift_really_held};
+mod appearance;
 mod editor_host;
 mod editor_session;
-mod appearance;
 use appearance::luminance;
 mod editor_state;
 use editor_state::{
-    EditorState, normalize_typed_input, release_selection,
-    selection_source_range, source_line_start, update_selection_after_move,
+    EditorState, normalize_typed_input, release_selection, selection_source_range,
+    source_line_start, update_selection_after_move,
 };
 mod app_data;
 mod buffer;
@@ -610,7 +610,9 @@ impl PaneStates {
     /// Make room for a pane. **The new pane is the last**, which is the number
     /// a split hands out.
     fn add(&self, document: &Rc<OpenDocument>) {
-        self.slots.borrow_mut().push(PaneSlot::new(document.clone()));
+        self.slots
+            .borrow_mut()
+            .push(PaneSlot::new(document.clone()));
     }
 
     /// Take a pane out, and **close the numbering behind it**.
@@ -4303,12 +4305,16 @@ impl Tabs {
     }
 
     fn of(&self, id: PaneId) -> &PaneTabs {
-        if id.is_panel() { return &self.no_tabs; }
+        if id.is_panel() {
+            return &self.no_tabs;
+        }
         &self.panes[self.at(id.index() as usize)]
     }
 
     fn of_mut(&mut self, id: PaneId) -> Option<&mut PaneTabs> {
-        if id.is_panel() { return None; }
+        if id.is_panel() {
+            return None;
+        }
         let at = self.at(id.index() as usize);
         self.panes.get_mut(at)
     }
@@ -5231,7 +5237,9 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
     };
     let index = {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         let existing = strip
             .tabs
             .iter()
@@ -5262,7 +5270,9 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
     };
     let incoming = {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         strip.active = index;
         strip.current().cloned()
     };
@@ -7834,7 +7844,9 @@ fn finish_workspace_change_confirmed(
         let id = PaneId::from_index(index as i32);
         {
             let mut tabs = live.tabs.borrow_mut();
-            let Some(strip) = tabs.of_mut(id) else { return; };
+            let Some(strip) = tabs.of_mut(id) else {
+                return;
+            };
             strip.tabs.clear();
             strip.history.clear();
             strip.at = 0;
@@ -9408,7 +9420,9 @@ fn open_startup_paths(window: &AppWindow, live: &Live, pane: PaneId, paths: &[Pa
         let id = PaneId::from_index(index as i32);
         {
             let mut tabs = live.tabs.borrow_mut();
-            let Some(strip) = tabs.of_mut(id) else { return; };
+            let Some(strip) = tabs.of_mut(id) else {
+                return;
+            };
             strip.tabs.retain(|tab| {
                 tab.document
                     .file
@@ -9614,7 +9628,9 @@ fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, mut ta
     sync_active_tab(window, live);
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         if index >= strip.tabs.len() {
             return;
         }
@@ -10461,7 +10477,9 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
         .collect::<Vec<_>>();
     let mut tabs = live.tabs.borrow_mut();
     for ((id, view), below) in PaneId::all(window).into_iter().zip(views).zip(strips_below) {
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         if let Some(tab) = strip.tabs.get_mut(strip.active) {
             tab.view = view;
             let (open, height, shell, draft) = below;
@@ -10626,7 +10644,9 @@ fn note_navigation(live: &Live, id: PaneId, tab: &PaneTab) {
         return;
     }
     let mut tabs = live.tabs.borrow_mut();
-    let Some(strip) = tabs.of_mut(id) else { return; };
+    let Some(strip) = tabs.of_mut(id) else {
+        return;
+    };
     let standing = strip
         .history
         .get(strip.at)
@@ -10682,7 +10702,9 @@ fn navigate(window: &AppWindow, live: &Live, id: PaneId, forward: bool) {
     // **Where it is going, written down before it goes.** Every road out of
     // here records the arrival, and one that found `at` still on the place
     // being left would cut off everything ahead of it.
-    if let Some(strip) = live.tabs.borrow_mut().of_mut(id) { strip.at = next; }
+    if let Some(strip) = live.tabs.borrow_mut().of_mut(id) {
+        strip.at = next;
+    }
     live.cache.borrow_mut().log_diag(
         "tab",
         &format!(
@@ -10781,7 +10803,9 @@ fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
     sync_active_tab(window, live);
     let Some(incoming) = ({
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         strip.active = index;
         strip.current().cloned()
     }) else {
@@ -10836,7 +10860,9 @@ fn drop_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize,
 /// Emptying the pane it left undivides that pane, the same as closing its last
 /// tab does (要件 6.4). It is the same event: a pane with nothing in it.
 fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, other: PaneId) {
-    if id.is_panel() || other.is_panel() { return; }
+    if id.is_panel() || other.is_panel() {
+        return;
+    }
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
     let panels = live
@@ -10853,7 +10879,9 @@ fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, 
     }
     let emptied = {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         if index >= strip.tabs.len() {
             return;
         }
@@ -10862,7 +10890,9 @@ fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, 
         strip.active = active_after_close(before, strip.active, index);
         let emptied = strip.tabs.is_empty();
         let arriving = carried.document();
-        let Some(landing) = tabs.of_mut(other) else { return; };
+        let Some(landing) = tabs.of_mut(other) else {
+            return;
+        };
         landing
             .tabs
             .retain(|held| !Rc::ptr_eq(&held.document(), &arriving));
@@ -10908,7 +10938,9 @@ fn carry_tab_to_pane(window: &AppWindow, live: &Live, id: PaneId, index: usize, 
 fn move_tab(window: &AppWindow, live: &Live, id: PaneId, from: usize, to: usize) {
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         let last = strip.tabs.len().saturating_sub(1);
         if from > last || to > last || from == to {
             return;
@@ -10971,7 +11003,9 @@ fn add_tab(window: &AppWindow, live: &Live, id: PaneId, mut tab: PaneTab) {
     sync_active_tab(window, live);
     let index = {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         strip.tabs.push(tab.clone());
         strip.active = strip.tabs.len() - 1;
         strip.active
@@ -11122,7 +11156,9 @@ fn open_settings(window: &AppWindow, live: &Live) {
         sync_active_tab(window, live);
         {
             let mut tabs = live.tabs.borrow_mut();
-            let Some(strip) = tabs.of_mut(id) else { return; };
+            let Some(strip) = tabs.of_mut(id) else {
+                return;
+            };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 tab.empty = false;
@@ -11199,7 +11235,9 @@ fn answer_new_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Option<Ter
     };
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active) else {
             return;
@@ -12388,7 +12426,9 @@ fn finish_close_inner(window: &AppWindow, live: &Live, id: PaneId, index: usize,
     }
     let emptied = {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         if index >= strip.tabs.len() {
             return;
         }
@@ -12630,8 +12670,16 @@ fn divide_pane(window: &AppWindow, live: &Live, here: PaneId, split: Split) {
 /// is the only way to collapse that keeps that promise. A document already open
 /// here arrives as nothing, because a strip holds one tab per document.
 fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
-    let here = if here.is_panel() { PaneId::from_index(here.screen(window).panel_owner) } else { here };
-    let here = if here.is_panel() { PaneId::from_index(here.screen(window).panel_owner) } else { here };
+    let here = if here.is_panel() {
+        PaneId::from_index(here.screen(window).panel_owner)
+    } else {
+        here
+    };
+    let here = if here.is_panel() {
+        PaneId::from_index(here.screen(window).panel_owner)
+    } else {
+        here
+    };
     // **Every pane to go is named before any of them does** (2026-09-06). The
     // first version asked "which pane is not `here`" once per turn of a loop,
     // and `here` is a number: as soon as a lower-numbered pane went, the
@@ -12649,7 +12697,10 @@ fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
         let mut tabs = live.tabs.borrow_mut();
         others
             .iter()
-            .filter_map(|other| tabs.of_mut(*other).map(|strip| std::mem::take(&mut strip.tabs)))
+            .filter_map(|other| {
+                tabs.of_mut(*other)
+                    .map(|strip| std::mem::take(&mut strip.tabs))
+            })
             .collect::<Vec<Vec<PaneTab>>>()
     };
     // **From the far end**, so that the panes still to go keep the numbers they
@@ -12664,7 +12715,9 @@ fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
     }
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(here) else { return; };
+        let Some(strip) = tabs.of_mut(here) else {
+            return;
+        };
         for tab in carried.into_iter().flatten() {
             // 要件 6.3: one tab per document in a strip. The pane the writer is
             // in almost always already holds what is coming — a split opens the
@@ -12778,7 +12831,9 @@ fn refill_strip(window: &AppWindow, live: &Live, id: PaneId) {
         .collect();
     let number = next_untitled_number(&taken);
     let empty = OpenDocument::untitled(number, window.as_weak());
-    let Some(strip) = tabs.of_mut(id) else { return; };
+    let Some(strip) = tabs.of_mut(id) else {
+        return;
+    };
     strip.tabs.push(PaneTab {
         empty: true,
         ..PaneTab::showing(window, id, empty)
@@ -14088,7 +14143,9 @@ fn publish_word_modes(window: &AppWindow) {
 fn set_word_mode_of(window: &AppWindow, live: &Live, id: PaneId, mode: u32) {
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         let at = strip.active;
         let Some(tab) = strip.tabs.get_mut(at) else {
             return;
@@ -15465,7 +15522,9 @@ impl PaneId {
     /// without this one in it.
     const FIRST: PaneId = PaneId(0);
     const EMBEDDED_START: u32 = 65536;
-    fn is_panel(self) -> bool { self.0 >= Self::EMBEDDED_START }
+    fn is_panel(self) -> bool {
+        self.0 >= Self::EMBEDDED_START
+    }
     fn row(self, window: &AppWindow) -> usize {
         if self.is_panel() {
             window
@@ -15485,7 +15544,10 @@ impl PaneId {
     /// opinion about how many there are. Everything with one of something per
     /// pane is built by mapping over this.
     fn all(window: &AppWindow) -> Vec<PaneId> {
-        window.get_panes().iter().filter(|s| !s.embedded_panel)
+        window
+            .get_panes()
+            .iter()
+            .filter(|s| !s.embedded_panel)
             .map(|s| PaneId(s.id as u32))
             .collect()
     }
@@ -16363,15 +16425,26 @@ impl RenderCache {
     /// name. With the axis and the properties behind [`PaneId`], what is left
     /// here is the same arithmetic either way.
     fn refresh_pane_tiles(
-        &mut self, window: &AppWindow, id: PaneId, prefetch: u32,
+        &mut self,
+        window: &AppWindow,
+        id: PaneId,
+        prefetch: u32,
     ) -> windows::core::Result<editor_render::TileCounts> {
         let viewport = editor_render::TileViewport {
-            scroll: id.scroll(window), shown_flow: id.shown_flow(window),
-            scroll_across: id.scroll_across(window), shown_across: id.shown_across_flow(window),
-            vertical: id.vertical(window), shift: id.page_shift(window),
+            scroll: id.scroll(window),
+            shown_flow: id.shown_flow(window),
+            scroll_across: id.scroll_across(window),
+            shown_across: id.shown_across_flow(window),
+            vertical: id.vertical(window),
+            shift: id.page_shift(window),
         };
         let pane = self.pane(id);
-        let (tiles, counts) = editor_render::tiles(&mut pane.graphics, pane.view.preedit_range, viewport, prefetch)?;
+        let (tiles, counts) = editor_render::tiles(
+            &mut pane.graphics,
+            pane.view.preedit_range,
+            viewport,
+            prefetch,
+        )?;
         id.set_tiles(window, tiles);
         Ok(counts)
     }
@@ -16721,16 +16794,31 @@ fn lay_out_pane(
     let screen = id.screen(window);
     let options = editor_render::LayoutOptions {
         reading: reading_of(window),
-        preview: id.shows_preview(window), viewer: screen.viewer,
-        vertical: id.vertical(window), zoom: id.zoom(window),
-        scroll: id.scroll(window), viewport: id.shown_flow(window),
+        preview: id.shows_preview(window),
+        viewer: screen.viewer,
+        vertical: id.vertical(window),
+        zoom: id.zoom(window),
+        scroll: id.scroll(window),
+        viewport: id.shown_flow(window),
         words: word_mode_with(screen.word_mode as u32),
         find_showing: window.get_find_open() && window.get_find_pane() == id.index(),
-        needle: screen.find_needle.to_string(), rules: find_rules(window, id),
+        needle: screen.find_needle.to_string(),
+        rules: find_rules(window, id),
     };
     let pane = cache.pane(id);
-    match editor_render::layout(&mut pane.graphics, &mut pane.view, document, source, line_fit, typography,
-        active_line_start, caret_source_byte, selection, preedit, &options) {
+    match editor_render::layout(
+        &mut pane.graphics,
+        &mut pane.view,
+        document,
+        source,
+        line_fit,
+        typography,
+        active_line_start,
+        caret_source_byte,
+        selection,
+        preedit,
+        &options,
+    ) {
         Ok(layout) => {
             id.update_screen(window, |screen| {
                 if screen.comparison_note.as_str() != layout.comparison_note {
@@ -16741,7 +16829,9 @@ fn lay_out_pane(
         }
         Err(error) => {
             let label = id.label(window);
-            window.tell_pane(say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into());
+            window.tell_pane(
+                say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into(),
+            );
             None
         }
     }
@@ -17190,7 +17280,9 @@ fn switch_shell_confirmed(window: &AppWindow, live: &Live, id: PaneId, shell: Te
     }
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active) else {
             return;
@@ -17860,7 +17952,9 @@ fn store_below_on_tab(window: &AppWindow, live: &Live, id: PaneId) {
     };
     let draft = id.screen(window).below_draft.to_string();
     let mut tabs = live.tabs.borrow_mut();
-    let Some(strip) = tabs.of_mut(id) else { return; };
+    let Some(strip) = tabs.of_mut(id) else {
+        return;
+    };
     let active = strip.active;
     if let Some(tab) = strip.tabs.get_mut(active) {
         tab.below.open = open;
@@ -19415,20 +19509,28 @@ fn update_pane_selection(
     let Some(hit) = hit else {
         return;
     };
-    let decision = editor_interaction::pointer(state, &source, hit, x, y, phase, id.vertical(window));
+    let decision =
+        editor_interaction::pointer(state, &source, hit, x, y, phase, id.vertical(window));
     let (hit, next_active_line_start, selection) = match decision {
         editor_interaction::PointerResult::NoChange => return,
         editor_interaction::PointerResult::Range(start, end) => {
-            cache.borrow_mut().log_diag(&format!("pointer.{}", id.diag_suffix()),
-                &format!("phase={phase:?} range={start}..{end}"));
+            cache.borrow_mut().log_diag(
+                &format!("pointer.{}", id.diag_suffix()),
+                &format!("phase={phase:?} range={start}..{end}"),
+            );
             select_source_range(window, cache, document, state, id, &source, start, end);
             return;
         }
-        editor_interaction::PointerResult::Caret { hit, next_active_line_start, selection } =>
-            (hit, next_active_line_start, selection),
+        editor_interaction::PointerResult::Caret {
+            hit,
+            next_active_line_start,
+            selection,
+        } => (hit, next_active_line_start, selection),
     };
-    cache.borrow_mut().log_diag(&format!("pointer.{}", id.diag_suffix()),
-        &format!("phase={phase:?} x={x:.1} y={y:.1} hit_byte={hit} active={active_line_start:?}"));
+    cache.borrow_mut().log_diag(
+        &format!("pointer.{}", id.diag_suffix()),
+        &format!("phase={phase:?} x={x:.1} y={y:.1} hit_byte={hit} active={active_line_start:?}"),
+    );
     id.set_ime_buffer(window, "");
 
     if id.vertical(window) && phase == SelectionPhase::Update {
@@ -20036,7 +20138,9 @@ fn insert_pane_text(
     let end = selection.map_or(at, |range| range.1);
     let session = editor_session::EditorSession::with_state(document.clone(), state);
     let stored = Instant::now();
-    let Some((source, next, change)) = session.insert_at(source, at, end, input) else { return; };
+    let Some((source, next, change)) = session.insert_at(source, at, end, input) else {
+        return;
+    };
     let stored_ms = elapsed_ms(stored);
     id.draw_edit(window, states, cache, document, &source, Some(next), change);
     let name = id.log_name();
@@ -20442,7 +20546,9 @@ fn undo_in_pane(
     }
     let state = states.of(id);
     let session = editor_session::EditorSession::with_state(document.clone(), state);
-    let Some((source, caret, change)) = session.undo(forwards) else { return; };
+    let Some((source, caret, change)) = session.undo(forwards) else {
+        return;
+    };
     id.set_ime_buffer(window, "");
     id.draw_edit(
         window,
@@ -20972,7 +21078,9 @@ fn splice_source(
         return;
     }
     let session = editor_session::EditorSession::with_state(document.clone(), states.of(id));
-    let Some((source, caret, change)) = session.splice(start, end, text, caret) else { return; };
+    let Some((source, caret, change)) = session.splice(start, end, text, caret) else {
+        return;
+    };
     id.draw_edit(
         window,
         states,
@@ -21016,7 +21124,14 @@ fn move_pane_caret(
             return;
         };
         let MeasuredPane { shown, engine } = measured;
-        editor_interaction::move_caret(engine, shown, caret, direction, preferred_line, id.vertical(window))
+        editor_interaction::move_caret(
+            engine,
+            shown,
+            caret,
+            direction,
+            preferred_line,
+            id.vertical(window),
+        )
     };
 
     let (next, next_preferred) = match moved {

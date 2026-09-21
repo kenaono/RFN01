@@ -588,7 +588,9 @@ impl ColourDoors {
                 let id = crate::PaneId::from_index(slot);
                 {
                     let mut tabs = self.live.tabs.borrow_mut();
-                    let Some(strip) = tabs.of_mut(id) else { return; };
+                    let Some(strip) = tabs.of_mut(id) else {
+                        return;
+                    };
                     let active = strip.active;
                     let Some(tab) = strip.tabs.get_mut(active) else {
                         return;
@@ -610,7 +612,9 @@ impl ColourDoors {
                 let id = crate::PaneId::from_index(slot);
                 {
                     let mut tabs = self.live.tabs.borrow_mut();
-                    let Some(strip) = tabs.of_mut(id) else { return; };
+                    let Some(strip) = tabs.of_mut(id) else {
+                        return;
+                    };
                     let active = strip.active;
                     let paper = if kind == 3 {
                         match strip.tabs.get_mut(active) {

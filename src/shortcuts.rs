@@ -302,7 +302,10 @@ fn bindings(raw: &str) -> Vec<String> {
 }
 
 pub(crate) fn label(app: &AppWindow, id: usize) -> String {
-    bindings(&app.get_shortcut_bindings()).get(id).cloned().unwrap_or_default()
+    bindings(&app.get_shortcut_bindings())
+        .get(id)
+        .cloned()
+        .unwrap_or_default()
 }
 // -1 is unhandled; -2 consumes a removed default so legacy handlers cannot run it.
 pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shift: bool) -> i32 {
@@ -594,7 +597,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
                     }
                 }
                 17 => app.invoke_pane_below_toggled(pane.index()),
-                18 => {}, // Reserved: New Tab is the + button only.
+                18 => {} // Reserved: New Tab is the + button only.
                 19 => app.invoke_pane_navigate(pane.index(), false),
                 20 => app.invoke_pane_navigate(pane.index(), true),
                 21 => app.invoke_pane_delete(pane.index()),
@@ -640,8 +643,14 @@ mod tests {
     #[test]
     fn removed_new_tab_binding_does_not_shift_following_ids() {
         assert!(bindings("18=Ctrl+Alt+N;19=Ctrl+Alt+B")[18].is_empty());
-        assert_eq!(resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B",0,"n",true,true,false),-1);
-        assert_eq!(resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B",0,"b",true,true,false),19);
+        assert_eq!(
+            resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B", 0, "n", true, true, false),
+            -1
+        );
+        assert_eq!(
+            resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B", 0, "b", true, true, false),
+            19
+        );
     }
     #[test]
     fn settings_validate_and_roundtrip() {
