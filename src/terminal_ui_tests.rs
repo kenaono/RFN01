@@ -38,12 +38,34 @@ fn editor_panel_uses_source_engine_document_and_selection() {
     let state = h.live.states.of(id);
     assert!(Rc::ptr_eq(&state, &entry.borrow().view));
     state.borrow_mut().caret_source_byte = Some(document.text.borrow().len());
-    insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "追記", false);
+    insert_pane_text(
+        &h.window,
+        id,
+        &document,
+        &h.live.states,
+        &h.live.cache,
+        "追記",
+        false,
+    );
     assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
     assert!(original.text.borrow().is_empty());
-    undo_in_pane(&h.window, id, &document, &h.live.states, &h.live.cache, false);
+    undo_in_pane(
+        &h.window,
+        id,
+        &document,
+        &h.live.states,
+        &h.live.cache,
+        false,
+    );
     assert_eq!(&*document.text.borrow(), "# source\n日本語");
-    undo_in_pane(&h.window, id, &document, &h.live.states, &h.live.cache, true);
+    undo_in_pane(
+        &h.window,
+        id,
+        &document,
+        &h.live.states,
+        &h.live.cache,
+        true,
+    );
     assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
     state.borrow_mut().selection_anchor_source_byte = Some(0);
     assert!(release_selection(&mut state.borrow_mut()));
@@ -51,15 +73,30 @@ fn editor_panel_uses_source_engine_document_and_selection() {
     panel_source::sync(&h.window, &h.live);
     assert_eq!(entry.borrow().source_id, Some(id));
     assert!(Rc::ptr_eq(&h.live.states.of(id), &state));
-    entry.borrow_mut().view.borrow_mut().set_read_only(true, true);
+    entry
+        .borrow_mut()
+        .view
+        .borrow_mut()
+        .set_read_only(true, true);
     panel_source::sync(&h.window, &h.live);
-    insert_pane_text(&h.window, id, &document, &h.live.states, &h.live.cache, "blocked", false);
+    insert_pane_text(
+        &h.window,
+        id,
+        &document,
+        &h.live.states,
+        &h.live.cache,
+        "blocked",
+        false,
+    );
     assert_eq!(&*document.text.borrow(), "# source\n日本語追記");
     panel_source::focus(&h.window, &h.live, owner, true);
     assert_eq!(focused_pane(&h.window), id);
     panel_source::focus(&h.window, &h.live, owner, false);
     assert_eq!(focused_pane(&h.window), owner);
-    h.live.tabs.borrow_mut().of_mut(owner).unwrap().tabs[0].below.entries.clear();
+    h.live.tabs.borrow_mut().of_mut(owner).unwrap().tabs[0]
+        .below
+        .entries
+        .clear();
     panel_source::sync(&h.window, &h.live);
     assert!(h.live.states.panels.borrow().is_empty());
     assert_eq!(h.live.tabs.borrow().of(owner).tabs.len(), 1);
@@ -70,7 +107,11 @@ fn editor_panel_uses_source_engine_document_and_selection() {
 fn embedded_editor_host_releases_all_resources_without_reusing_ids() {
     let (h, original) = Harness::new(|weak| OpenDocument::untitled(1, weak));
     let host = editor_host::EditorHost::new(&h.window, &h.live);
-    let document = OpenDocument::with_events(DocumentFile::untitled(2), "独立した面".into(), Default::default());
+    let document = OpenDocument::with_events(
+        DocumentFile::untitled(2),
+        "独立した面".into(),
+        Default::default(),
+    );
     let session = editor_session::EditorSession::new(document.clone());
     let held_state = Rc::downgrade(&session.state);
     let id = host.attach(PaneId::FIRST, session).unwrap();
@@ -78,7 +119,10 @@ fn embedded_editor_host_releases_all_resources_without_reusing_ids() {
     assert!(h.live.tabs.borrow_mut().of_mut(id).is_none());
     assert_eq!(h.live.tabs.borrow().of(PaneId::FIRST).tabs.len(), 1);
     assert!(Rc::ptr_eq(&h.live.states.document(id), &document));
-    assert!(Rc::ptr_eq(&h.live.states.document(PaneId::FIRST), &original));
+    assert!(Rc::ptr_eq(
+        &h.live.states.document(PaneId::FIRST),
+        &original
+    ));
     id.update_screen(&h.window, |screen| screen.width = 200.);
     h.live.cache.borrow_mut().pane(id);
     h.live.cache.borrow_mut().pace_of(id);
@@ -91,8 +135,15 @@ fn embedded_editor_host_releases_all_resources_without_reusing_ids() {
     assert!(h.live.tabs.borrow_mut().of_mut(id).is_none());
     assert!(!h.live.cache.borrow().panel_panes.contains_key(&id.0));
     assert!(!h.live.cache.borrow().panel_pace.contains_key(&id.0));
-    assert!(!h.window.get_panes().iter().any(|screen| screen.id == id.index()));
-    let next = host.attach(PaneId::FIRST, editor_session::EditorSession::new(document)).unwrap();
+    assert!(
+        !h.window
+            .get_panes()
+            .iter()
+            .any(|screen| screen.id == id.index())
+    );
+    let next = host
+        .attach(PaneId::FIRST, editor_session::EditorSession::new(document))
+        .unwrap();
     assert_ne!(id, next);
     host.retain(&[next]);
     assert!(h.live.states.panels.borrow().contains_key(&next.0));
@@ -455,16 +506,38 @@ fn terminal_panel_long_text_click_and_end_render() {
     h.window.on_pane_home_end(move |pane, end, edge, extend| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            move_pane_to_line_edge(&window, id, &live.states.document(id), &live.states.of(id),
-                &live.cache, &Rc::new(Timer::default()), end, edge, extend);
+            move_pane_to_line_edge(
+                &window,
+                id,
+                &live.states.document(id),
+                &live.states.of(id),
+                &live.cache,
+                &Rc::new(Timer::default()),
+                end,
+                edge,
+                extend,
+            );
         }
     });
-    let weak = h.window.as_weak(); let live = h.live.clone();
+    let weak = h.window.as_weak();
+    let live = h.live.clone();
     h.window.on_pane_selection_start(move |pane, x, y, extend| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            update_pane_selection(&window, &live.states.document(id), &live.states.of(id), &live.cache,
-                id, id.flow_x(&window, x), y, if extend { SelectionPhase::Extend } else { SelectionPhase::Begin });
+            update_pane_selection(
+                &window,
+                &live.states.document(id),
+                &live.states.of(id),
+                &live.cache,
+                id,
+                id.flow_x(&window, x),
+                y,
+                if extend {
+                    SelectionPhase::Extend
+                } else {
+                    SelectionPhase::Begin
+                },
+            );
         }
     });
     h.window.show().unwrap();
@@ -502,7 +575,10 @@ fn terminal_panel_long_text_click_and_end_render() {
         text: Key::Control.into(),
     });
     render();
-    assert_eq!(h.live.states.of(source_id).borrow().caret_source_byte, Some(text.len()));
+    assert_eq!(
+        h.live.states.of(source_id).borrow().caret_source_byte,
+        Some(text.len())
+    );
     // Selection rectangles and ReadOnly use the same large scroll coordinates.
     h.window.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Control.into(),
@@ -517,7 +593,11 @@ fn terminal_panel_long_text_click_and_end_render() {
         text: Key::Control.into(),
     });
     render();
-    entry.borrow_mut().view.borrow_mut().set_read_only(true, true);
+    entry
+        .borrow_mut()
+        .view
+        .borrow_mut()
+        .set_read_only(true, true);
     panel_source::sync(&h.window, &h.live);
     h.window
         .window()
@@ -539,7 +619,9 @@ fn terminal_panel_long_text_click_and_end_render() {
 fn terminal_panel_restored_draft_can_be_saved_and_edited_with_live_notifications() {
     let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
     let id = PaneId::FIRST;
-    h.live.tabs.borrow_mut().of_mut(id).unwrap().tabs[0].below.draft = "restored draft".into();
+    h.live.tabs.borrow_mut().of_mut(id).unwrap().tabs[0]
+        .below
+        .draft = "restored draft".into();
     terminal_panels::ensure(&h.window, &h.live, id);
     let panel = terminal_panels::current(&h.live, id).unwrap();
     let document = panel.borrow().document.clone();
@@ -894,7 +976,14 @@ fn terminal_search_preserves_output_and_toggle_clears_state() {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
         source.borrow_mut().wait(Duration::from_millis(50));
-        if source.borrow().screen().retained_text().contains("\neditor_spike.exe\n") { break; }
+        if source
+            .borrow()
+            .screen()
+            .retained_text()
+            .contains("\neditor_spike.exe\n")
+        {
+            break;
+        }
     }
     source.borrow_mut().wait(Duration::from_millis(200));
     refresh_terminal_panes(&h.window, &h.live);

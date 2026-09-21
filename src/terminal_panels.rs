@@ -49,7 +49,9 @@ impl PanelDocument {
         self.collect();
         if let Some(session) = self.capture.take() {
             session.borrow_mut().stop_capture();
-            self.view.borrow_mut().set_read_only(self.before_read_only, true);
+            self.view
+                .borrow_mut()
+                .set_read_only(self.before_read_only, true);
             self.pending_tail = 0;
         }
     }
@@ -129,7 +131,9 @@ pub(crate) fn ensure(window: &AppWindow, live: &Live, id: PaneId) {
     }
     let doc = new_document(live);
     let mut tabs = live.tabs.borrow_mut();
-    let Some(strip) = tabs.of_mut(id) else { return; };
+    let Some(strip) = tabs.of_mut(id) else {
+        return;
+    };
     let active = strip.active;
     if let Some(tab) = strip.tabs.get_mut(active) {
         if !tab.below.draft.is_empty() {
@@ -151,14 +155,19 @@ fn new_document(live: &Live) -> Rc<OpenDocument> {
     // callback belongs to upper documents: firing it during a panel edit
     // re-enters Tabs (sync_entry) or the captured terminal (collect).
     // Keep dirty tracking, but do not change the upper document's UI state.
-    OpenDocument::with_events(DocumentFile::untitled(next_number(live)), String::new(), Default::default())
+    OpenDocument::with_events(
+        DocumentFile::untitled(next_number(live)),
+        String::new(),
+        Default::default(),
+    )
 }
 
 pub(crate) fn sync_entry(tab: &mut PaneTab) {
     if let Some(entry) = tab.below.entries.get(tab.below.active) {
         let mut entry = entry.borrow_mut();
         entry.shell = tab.below.shell.clone();
-        if entry.source_id.is_none() && tab.terminal.is_some()
+        if entry.source_id.is_none()
+            && tab.terminal.is_some()
             && !entry.view.borrow().viewer
             && *entry.document.text.borrow() != tab.below.draft
         {
@@ -231,7 +240,9 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
 fn show(window: &AppWindow, live: &Live, id: PaneId) {
     let below = {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active) else {
             return;
@@ -276,7 +287,9 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
     match action {
         0 => {
             let mut tabs = live.tabs.borrow_mut();
-            let Some(strip) = tabs.of_mut(id) else { return; };
+            let Some(strip) = tabs.of_mut(id) else {
+                return;
+            };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 if index >= 0 && (index as usize) < tab.below.entries.len() {
@@ -309,7 +322,9 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
             let doc = new_document(live);
             let entry = Rc::new(RefCell::new(PanelDocument::new(window, doc, shell)));
             let mut tabs = live.tabs.borrow_mut();
-            let Some(strip) = tabs.of_mut(id) else { return; };
+            let Some(strip) = tabs.of_mut(id) else {
+                return;
+            };
             let active = strip.active;
             if let Some(tab) = strip.tabs.get_mut(active) {
                 tab.below.entries.push(entry);
@@ -775,7 +790,9 @@ pub(crate) fn open_file(window: &AppWindow, live: &Live, id: PaneId, path: &Path
     let doc = OpenDocument::with_events(file, text, Default::default());
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         let active = strip.active;
         let Some(tab) = strip.tabs.get_mut(active).filter(|t| t.terminal.is_some()) else {
             return;
@@ -886,7 +903,9 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
     }
     let mut tabs = live.tabs.borrow_mut();
     for id in PaneId::all(window) {
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         for (index, tab) in strip.tabs.iter_mut().enumerate() {
             let Some(entry) = tab.below.entries.get(tab.below.active) else {
                 continue;
@@ -1006,14 +1025,35 @@ fn request_close(window: &AppWindow, live: &Live, id: PaneId) {
             vec![pick("閉じる", "Close"), cancel()]
         };
         let message = match (capturing, shell_running) {
-            (true, true) => pick("PanelのTABを閉じますか？\n\nこのPanelへのログ出力とシェルは停止します。", "Close this panel tab?\n\nIts log output and shell will stop."),
-            (true, false) => pick("PanelのTABを閉じますか？\n\nこのPanelへのログ出力は停止します。", "Close this panel tab?\n\nLog output to this panel will stop."),
-            (false, true) => pick("PanelのTABを閉じますか？\n\nこのシェルは終了します。", "Close this panel tab?\n\nIts shell will exit."),
-            (false, false) => pick("変更を保存してPanelのTABを閉じますか？", "Save changes before closing this panel tab?"),
+            (true, true) => pick(
+                "PanelのTABを閉じますか？\n\nこのPanelへのログ出力とシェルは停止します。",
+                "Close this panel tab?\n\nIts log output and shell will stop.",
+            ),
+            (true, false) => pick(
+                "PanelのTABを閉じますか？\n\nこのPanelへのログ出力は停止します。",
+                "Close this panel tab?\n\nLog output to this panel will stop.",
+            ),
+            (false, true) => pick(
+                "PanelのTABを閉じますか？\n\nこのシェルは終了します。",
+                "Close this panel tab?\n\nIts shell will exit.",
+            ),
+            (false, false) => pick(
+                "変更を保存してPanelのTABを閉じますか？",
+                "Save changes before closing this panel tab?",
+            ),
         };
-        ask_question(window, live, Question::PanelClose { pane: id, entry, save },
+        ask_question(
+            window,
+            live,
+            Question::PanelClose {
+                pane: id,
+                entry,
+                save,
+            },
             message.into(),
-            &choices, if save { 1 } else { 0 });
+            &choices,
+            if save { 1 } else { 0 },
+        );
     } else {
         drop(held);
         close(window, live, id, &entry);
@@ -1046,7 +1086,9 @@ pub(crate) fn close(
     let mut visible = false;
     {
         let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else { return; };
+        let Some(strip) = tabs.of_mut(id) else {
+            return;
+        };
         for (index, tab) in strip.tabs.iter_mut().enumerate() {
             if !tab.below.entries.iter().any(|p| Rc::ptr_eq(p, entry)) {
                 continue;
@@ -1103,7 +1145,11 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
         };
         let id = PaneId::from_index(pane);
         if let Some(entry) = current(&scroll_live, id) {
-            let follow = entry.borrow_mut().view.borrow_mut().follow_at(position, end, false);
+            let follow = entry
+                .borrow_mut()
+                .view
+                .borrow_mut()
+                .follow_at(position, end, false);
             id.update_screen(&window, |screen| screen.panel_follow = follow);
         }
     });

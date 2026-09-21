@@ -846,8 +846,10 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
 pub fn save_document(window: &AppWindow, live: &Live, ask_for_name: bool) {
     let pane = focused_pane(window);
     if pane.is_panel() {
-        if let Some(entry) = crate::terminal_panels::entries(live).into_iter()
-            .find(|entry| entry.borrow().source_id == Some(pane)) {
+        if let Some(entry) = crate::terminal_panels::entries(live)
+            .into_iter()
+            .find(|entry| entry.borrow().source_id == Some(pane))
+        {
             crate::terminal_panels::save(window, live, &entry, ask_for_name);
             crate::terminal_panels::drain(window, live);
         }

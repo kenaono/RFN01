@@ -94,7 +94,9 @@ impl SharedText {
     /// あとに出す言葉（「CP932で開き直しました」）は消えない：先に畳んで、
     /// それから言う、の順になる。
     fn forget_status(&self) {
-        if let Some(notify) = &self.events.editing { notify(); }
+        if let Some(notify) = &self.events.editing {
+            notify();
+        }
     }
 
     /// When the changes now waiting for a work copy began, if any are.
@@ -171,7 +173,9 @@ impl SharedText {
         if self.edited.replace(edited) == edited {
             return;
         }
-        if let Some(notify) = &self.events.edited { notify(edited); }
+        if let Some(notify) = &self.events.edited {
+            notify(edited);
+        }
     }
 }
 
@@ -293,8 +297,6 @@ impl OpenDocument {
             made_at: Instant::now(),
         });
     }
-
-
 }
 
 /// One change to a document's text, and everything it takes to undo it.
@@ -527,10 +529,13 @@ mod snapshot_tests {
         let edits = Rc::new(Cell::new(0));
         let notify_flags = flags.clone();
         let notify_edits = edits.clone();
-        let text = SharedText::with_events("原稿".into(), DocumentEvents {
-            edited: Some(Rc::new(move |flag| notify_flags.borrow_mut().push(flag))),
-            editing: Some(Rc::new(move || notify_edits.set(notify_edits.get() + 1))),
-        });
+        let text = SharedText::with_events(
+            "原稿".into(),
+            DocumentEvents {
+                edited: Some(Rc::new(move |flag| notify_flags.borrow_mut().push(flag))),
+                editing: Some(Rc::new(move || notify_edits.set(notify_edits.get() + 1))),
+            },
+        );
         text.borrow_mut().push('一');
         text.borrow_mut().push('二');
         assert_eq!(&*flags.borrow(), &[true]);

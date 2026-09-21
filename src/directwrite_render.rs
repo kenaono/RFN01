@@ -11842,7 +11842,10 @@ pub mod cells {
         fn default() -> Self {
             Self {
                 family: crate::text_blocks::DEFAULT_CODE_FONT.to_owned(),
-                transparent: false, bold: false, italic: false, underline: false,
+                transparent: false,
+                bold: false,
+                italic: false,
+                underline: false,
                 font_size: 15.0,
                 line_spacing: 1.0,
                 paper: crate::text_blocks::DEFAULT_PAPER,
@@ -11958,7 +11961,11 @@ pub mod cells {
                     &family,
                     None,
                     weight,
-                    if look.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL },
+                    if look.italic {
+                        DWRITE_FONT_STYLE_ITALIC
+                    } else {
+                        DWRITE_FONT_STYLE_NORMAL
+                    },
                     DWRITE_FONT_STRETCH_NORMAL,
                     size,
                     w!("ja-JP"),
@@ -12101,7 +12108,16 @@ pub mod cells {
             // and BeginDraw/EndDraw are paired below.
             unsafe {
                 target.BeginDraw();
-                target.Clear(Some(&if look.transparent { D2D1_COLOR_F { r:0.0, g:0.0, b:0.0, a:0.0 } } else { colour(look.paper) }));
+                target.Clear(Some(&if look.transparent {
+                    D2D1_COLOR_F {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }
+                } else {
+                    colour(look.paper)
+                }));
             }
             for (row, line) in lines.iter().enumerate() {
                 let top = row as f32 * cell.line;
