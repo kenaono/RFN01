@@ -2509,6 +2509,23 @@ fn main() -> Result<(), slint::PlatformError> {
         edit_list(&window, &list_live, PaneId::from_index(pane), what, mark);
     });
 
+    // RFN01-47: **本文の右クリックメニューの挿入の行。**開いた時点で組み直し、
+    // 選ばれた番号は、タイトルバーの挿入メニューと同じ道へ渡す（`insert_in_pane`）。
+    let weak = window.as_weak();
+    let insert_live = live.clone();
+    window.on_pane_menu_opened(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            menu_commands::publish_context_insert(&window, &insert_live, PaneId::from_index(pane));
+        }
+    });
+    let weak = window.as_weak();
+    let chosen_live = live.clone();
+    window.on_pane_insert_chosen(move |pane, what| {
+        if let Some(window) = weak.upgrade() {
+            insert_in_pane(&window, &chosen_live, PaneId::from_index(pane), what);
+        }
+    });
+
     // E3の③: Enter。**継ぐものはRustが決める**——画面と同じ行の見方を使うため。
     let weak = window.as_weak();
     let enter_live = live.clone();

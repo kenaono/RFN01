@@ -2,7 +2,7 @@ import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
 import { LinkCompletion } from "link-completion.slint";
 import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Role, Slider, Tab, TextButton, ToggleChip } from "controls.slint";
-import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
+import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
 
 // The shared text surface: tiles, selection, IME, scrolling and body actions.
 // TAB strips and auxiliary panels are supplied by the host.
@@ -165,6 +165,18 @@ export component EditorSurface inherits Rectangle {
     callback quick-draft-requested();
     private property <length> context-x;
     private property <length> context-y;
+    // 挿入の行（RFN01-47）。**中身はRustが作る**——タイトルバーの挿入メニューと
+    // 同じ言葉・同じ押せる条件にするためで、ここは並べるだけである。
+    in property <[InsertRow]> insert-rows;
+    in property <[InsertRow]> insert-children;
+    /// 右へ開いている組（開いていなければ-1）。
+    private property <int> insert-open: -1;
+    callback insert-chosen(int);
+    /// 右クリックメニューの幅（RFN01-47）。**右へ開くぶんを、開いているあいだだけ
+    /// 取る**——popupは自分の大きさの外を描かないので、広げておかないと右の面が切れる。
+    private property <length> context-menu-width: root.bullet-rows-open
+        ? 408px
+        : (root.insert-open >= 0 ? 432px : 264px);
     callback open-file-requested();
     callback escaped() -> bool;
     callback selection-escaped() -> bool;
@@ -1116,6 +1128,7 @@ export component EditorSurface inherits Rectangle {
                                     // **開くたびに畳んでおく**——前に開いた形が
                                     // 残っていると、右クリックの長さが回ごとに違う。
                                     root.bullet-rows-open = false;
+                                    root.insert-open = -1;
                                     context-menu.show();
                                     return;
                                 }
@@ -1187,12 +1200,21 @@ export component EditorSurface inherits Rectangle {
                         }
 
                         context-menu := PopupWindow {
-                            x: root.context-x;
-                            y: root.context-y;
-                            // **右に開くぶんの場所を、開いているあいだだけ取る**
-                            // （書き手の求め 2026-09-11）。popupは自分の大きさの
-                            // 外を描かないので、広げておかないと右の面が切れる。
-                            width: root.bullet-rows-open ? 408px : 264px;
+                            // **画面から出そうなら中へ寄せる**（RFN01-47）。右クリック
+                            // した場所へそのまま出すと、画面の下寄りでは下が切れる
+                            // ——メニューの高さは中身で決まるので、それを測ってから
+                            // 位置を決める。
+                            x: clamp(
+                                root.context-x,
+                                0px,
+                                max(0px, root.width - root.context-menu-width),
+                            );
+                            y: clamp(
+                                root.context-y,
+                                0px,
+                                max(0px, root.height - menu-frame.height),
+                            );
+                            width: root.context-menu-width;
                             close-policy: close-on-click-outside;
 
                             // **左端に寄せる**（書き手の報告 2026-09-11：「元の
@@ -1205,7 +1227,7 @@ export component EditorSurface inherits Rectangle {
                             HorizontalLayout {
                                 alignment: start;
 
-                                MenuFrame {
+                                menu-frame := MenuFrame {
                                     width: 264px;
 
                                     VerticalLayout {
@@ -1302,6 +1324,76 @@ export component EditorSurface inherits Rectangle {
                                                 context-menu.close();
                                             }
                                         }
+                                        // RFN01-47: **挿入の1段目を右クリックにも置く。**
+                                        // タイトルバーの挿入メニューと同じ並び・同じ押せる
+                                        // 条件で、中身はRustが作る。右へ開く1段は箇条書きと
+                                        // 同じ作り——入れ子のpopupにはしない（6.24・6.30）。
+                                        if root.writing && !root.standalone: VerticalLayout {
+                                            spacing: 1px;
+
+                                            MenuSep { }
+
+                                            for insert in root.insert-rows: Rectangle {
+                                                height: 28px;
+
+                                                insert-row := MenuRow {
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    title: insert.title;
+                                                    shortcut: insert.flyout ? "▸" : "";
+                                                    enabled: insert.enabled;
+                                                    checked: insert.checked;
+                                                    // **乗せれば開く。**押しても開く
+                                                    // ——押した書き手を待たせない。
+                                                    changed hovered => {
+                                                        if (self.hovered) {
+                                                            root.insert-open = insert.flyout ? insert.group : -1;
+                                                            // 右へ開くのは1つだけ。
+                                                            root.bullet-rows-open = false;
+                                                        }
+                                                    }
+                                                    activated => {
+                                                        if (insert.flyout) {
+                                                            root.insert-open = root.insert-open == insert.group ? -1 : insert.group;
+                                                        } else {
+                                                            root.insert-chosen(insert.number);
+                                                            context-menu.close();
+                                                        }
+                                                    }
+                                                }
+
+                                                if insert.flyout && root.insert-open == insert.group: MenuFrame {
+                                                    x: parent.width - 8px;
+                                                    // **下から出そうなら上へずらす。**
+                                                    y: clamp(
+                                                        -6px,
+                                                        -(context-menu.y + parent.y),
+                                                        root.height - context-menu.y - parent.y - insert-flyout.preferred-height - 6px,
+                                                    );
+                                                    width: 176px;
+                                                    height: insert-flyout.preferred-height;
+
+                                                    insert-flyout := VerticalLayout {
+                                                        padding: 6px;
+                                                        spacing: 1px;
+
+                                                        // **番号ではなく組で選ぶ**——
+                                                        // 開いている組の中身だけが立つ。
+                                                        for child in root.insert-children: VerticalLayout {
+                                                            if child.group == insert.group: MenuRow {
+                                                                title: child.title;
+                                                                enabled: child.enabled;
+                                                                checked: child.checked;
+                                                                activated => {
+                                                                    root.insert-chosen(child.number);
+                                                                    context-menu.close();
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         // E10（2026-09-11）: 選んだ行を後から
                                         // 箇条書きにする。**もう一度押せば外れる**
                                         // ので、行は2つで足りる（書き手の選択）。
@@ -1348,6 +1440,8 @@ export component EditorSurface inherits Rectangle {
                                                     changed hovered => {
                                                         if (self.hovered) {
                                                             root.bullet-rows-open = true;
+                                                            // 右へ開くのは1つだけ。
+                                                            root.insert-open = -1;
                                                         }
                                                     }
                                                     activated => {
@@ -1358,7 +1452,12 @@ export component EditorSurface inherits Rectangle {
 
                                                 if root.bullet-rows-open: MenuFrame {
                                                     x: parent.width - 8px;
-                                                    y: -6px;
+                                                    // **下から出そうなら上へずらす**（RFN01-47）。
+                                                    y: clamp(
+                                                        -6px,
+                                                        -(context-menu.y + parent.y),
+                                                        root.height - context-menu.y - parent.y - bullet-rows.preferred-height - 6px,
+                                                    );
                                                     width: 136px;
                                                     height: bullet-rows.preferred-height;
 
@@ -1407,6 +1506,7 @@ export component EditorSurface inherits Rectangle {
                                                 changed hovered => {
                                                     if (self.hovered) {
                                                         root.bullet-rows-open = false;
+                                                        root.insert-open = -1;
                                                     }
                                                 }
                                                 activated => {
@@ -1423,6 +1523,7 @@ export component EditorSurface inherits Rectangle {
                                                 changed hovered => {
                                                     if (self.hovered) {
                                                         root.bullet-rows-open = false;
+                                                        root.insert-open = -1;
                                                     }
                                                 }
                                                 activated => {

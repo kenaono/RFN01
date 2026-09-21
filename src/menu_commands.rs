@@ -116,6 +116,354 @@ fn insert_number(shape: InsertShape) -> Option<i32> {
     Some(at as i32)
 }
 
+/// 右クリックメニューに出す挿入の並び（RFN01-47）。
+///
+/// **1段目と、右へ開く組の中身を1つの表で持つ**——[`ContextEntry::Row`]はそのまま
+/// 入る行、[`ContextEntry::Group`]は右へ開く組である。並びと名前はタイトルバーの
+/// 挿入メニュー（[`insert_commands`]）と同じで、
+/// `the_right_click_rows_are_the_insert_menu`の試験が突き合わせる。
+enum ContextEntry {
+    Row(InsertShape, (&'static str, &'static str)),
+    Group(
+        (&'static str, &'static str),
+        &'static [(InsertShape, (&'static str, &'static str))],
+    ),
+}
+
+const CONTEXT_INSERT: &[ContextEntry] = &[
+    ContextEntry::Group(
+        ("リンク", "Link"),
+        &[
+            (
+                InsertShape::Edit(document::InsertEdit::MarkdownLink),
+                ("Markdownリンク", "Markdown Link"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::WikiLink),
+                ("Wikiリンク", "Wiki Link"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::WikiLinkAlias),
+                ("別名付きWikiリンク", "Wiki Link with Alias"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::MarkdownImage),
+                ("画像リンク(Markdown)", "Image Link (Markdown)"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::WikiImage),
+                ("画像リンク(Wiki)", "Image Link (Wiki)"),
+            ),
+        ],
+    ),
+    ContextEntry::Row(
+        InsertShape::Edit(document::InsertEdit::Ruby),
+        ("ルビ", "Ruby"),
+    ),
+    ContextEntry::Group(
+        ("注記", "Annotation"),
+        &[
+            (
+                InsertShape::Edit(document::InsertEdit::SideNote),
+                ("左側の注記", "Left-side Annotation"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::RubyWithSideNote),
+                ("ルビと左側の注記", "Ruby and Left-side Annotation"),
+            ),
+        ],
+    ),
+    ContextEntry::Group(
+        ("傍点", "Emphasis Marks"),
+        &[
+            (
+                InsertShape::Edit(document::InsertEdit::EmphasisDots),
+                ("傍点", "Emphasis Dots"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::SesameDotsNote),
+                ("ゴマ傍点", "Sesame Dots"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::RoundDotsNote),
+                ("丸傍点", "Round Dots"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::WhiteRoundDotsNote),
+                ("白丸傍点", "White Round Dots"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::DoubleRoundDotsNote),
+                ("二重丸傍点", "Double Round Dots"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::CrossDotsNote),
+                ("×傍点", "Cross Dots"),
+            ),
+        ],
+    ),
+    ContextEntry::Group(
+        ("傍線", "Emphasis Lines"),
+        &[
+            (
+                InsertShape::Edit(document::InsertEdit::LineNote),
+                ("傍線", "Single Line"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::DoubleLineNote),
+                ("二重傍線", "Double Line"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::WaveLineNote),
+                ("波線", "Wavy Line"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::ChainLineNote),
+                ("鎖線", "Chain Line"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::DashLineNote),
+                ("破線", "Dashed Line"),
+            ),
+        ],
+    ),
+    ContextEntry::Group(
+        ("文字注記", "Text Annotation"),
+        &[
+            (
+                InsertShape::Edit(document::InsertEdit::Upright),
+                ("縦中横", "Tate-chu-yoko"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::Warichu),
+                ("割り注", "Warichu"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::SmallText),
+                ("小さな文字", "Small Text"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::LargeText),
+                ("大きな文字", "Large Text"),
+            ),
+        ],
+    ),
+    ContextEntry::Group(
+        ("見出し", "Heading"),
+        &[
+            (
+                InsertShape::Line(document::LineNoteEdit::Heading(1)),
+                ("見出し 1", "Heading 1"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Heading(2)),
+                ("見出し 2", "Heading 2"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Heading(3)),
+                ("見出し 3", "Heading 3"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Heading(4)),
+                ("見出し 4", "Heading 4"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Heading(5)),
+                ("見出し 5", "Heading 5"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Heading(6)),
+                ("見出し 6", "Heading 6"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::NoHeading),
+                ("見出しを解除", "Remove Heading"),
+            ),
+        ],
+    ),
+    ContextEntry::Group(
+        ("段落注記", "Paragraph Annotation"),
+        &[
+            (
+                InsertShape::Line(document::LineNoteEdit::Indent(1)),
+                ("1字下げ", "Indent 1 Characters"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Indent(2)),
+                ("2字下げ", "Indent 2 Characters"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Indent(3)),
+                ("3字下げ", "Indent 3 Characters"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::Indent(4)),
+                ("4字下げ", "Indent 4 Characters"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::NoIndent),
+                ("字下げを解除", "Remove Indent"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::AlignToEnd(0)),
+                ("地付き", "Align to End"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::AlignToEnd(1)),
+                ("地から1字上げ", "1 Characters from End"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::AlignToEnd(2)),
+                ("地から2字上げ", "2 Characters from End"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::AlignToEnd(3)),
+                ("地から3字上げ", "3 Characters from End"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::AlignToEnd(4)),
+                ("地から4字上げ", "4 Characters from End"),
+            ),
+            (
+                InsertShape::Line(document::LineNoteEdit::NoAlignToEnd),
+                ("地付きを解除", "Remove End Alignment"),
+            ),
+        ],
+    ),
+    ContextEntry::Row(InsertShape::PageBreak, ("改ページ", "Page Break")),
+];
+
+/// その形が押せるか、いま効いているか（RFN01-47）。
+///
+/// **タイトルバーの挿入メニューと同じ規則**——[`insert_commands`]が行ごとに見ている
+/// ものを、同じ材料から決める。`editable`には矩形選択の断りまで含めて渡す。
+fn context_insert_state(
+    shape: InsertShape,
+    editable: bool,
+    picked: bool,
+    notes: &document::LineNoteState,
+    breakable: bool,
+) -> (bool, bool) {
+    match shape {
+        InsertShape::Edit(what) => {
+            let allowed = !what.needs_a_picked_word() || picked;
+            (editable && allowed, false)
+        }
+        InsertShape::Line(document::LineNoteEdit::Heading(level)) => {
+            (editable && notes.can_heading, notes.level == Some(level))
+        }
+        InsertShape::Line(document::LineNoteEdit::NoHeading) => (
+            editable && notes.can_heading && notes.level.is_some(),
+            false,
+        ),
+        InsertShape::Line(document::LineNoteEdit::Indent(count)) => {
+            (editable && notes.can_indent, notes.indent == Some(count))
+        }
+        InsertShape::Line(document::LineNoteEdit::NoIndent) => (
+            editable && notes.can_indent && notes.indent.is_some(),
+            false,
+        ),
+        InsertShape::Line(document::LineNoteEdit::AlignToEnd(cells)) => {
+            (editable && notes.can_tail, notes.tail == Some(cells))
+        }
+        InsertShape::Line(document::LineNoteEdit::NoAlignToEnd) => {
+            (editable && notes.can_tail && notes.tail.is_some(), false)
+        }
+        InsertShape::PageBreak => (editable && breakable, false),
+    }
+}
+
+/// 右クリックメニューへ出す挿入の行（RFN01-47）。返すのは1段目と、組の中身。
+fn context_insert_rows(
+    editable: bool,
+    picked: bool,
+    notes: document::LineNoteState,
+    breakable: bool,
+) -> (Vec<crate::InsertRow>, Vec<crate::InsertRow>) {
+    let entry = |shape: InsertShape, title: (&str, &str), group: i32| {
+        let (enabled, checked) = context_insert_state(shape, editable, picked, &notes, breakable);
+        crate::InsertRow {
+            title: pick(title.0, title.1).into(),
+            flyout: false,
+            group,
+            number: insert_number(shape).unwrap_or(-1),
+            enabled,
+            checked,
+        }
+    };
+    let mut top = Vec::new();
+    let mut children = Vec::new();
+    let mut group = 0;
+    for what in CONTEXT_INSERT {
+        match what {
+            ContextEntry::Row(shape, title) => top.push(entry(*shape, *title, -1)),
+            ContextEntry::Group((ja, en), rows) => {
+                let opened = group;
+                group += 1;
+                let mut openable = false;
+                for (shape, title) in *rows {
+                    let row = entry(*shape, *title, opened);
+                    openable |= row.enabled;
+                    children.push(row);
+                }
+                // **押せる行が1つも無い組も出す**——開けば空である（書き手の言葉
+                // 2026-09-11：「何も選ばれていなければ、空」）。箇条書きと同じ。
+                top.push(crate::InsertRow {
+                    title: pick(ja, en).into(),
+                    flyout: true,
+                    group: opened,
+                    number: -1,
+                    enabled: openable,
+                    checked: false,
+                });
+            }
+        }
+    }
+    (top, children)
+}
+
+/// 本文の右クリックメニューの挿入の行を組み直す（RFN01-47）。
+///
+/// **開いた時点の状態で組む**——選んだ字や、いまの行の体裁で押せる行が変わる。
+pub fn publish_context_insert(window: &AppWindow, live: &Live, id: PaneId) {
+    if id.is_panel() {
+        return;
+    }
+    let screen = id.screen(window);
+    let document = live.states.document(id);
+    let empty = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.empty);
+    let text = !screen.settings && !screen.terminal && !empty;
+    let editable = text && !screen.viewer && !document.read_only();
+    let picked = !selected_runs(&live.cache, id).is_empty();
+    let rectangular = live.states.of(id).borrow().rectangular;
+    let (notes, breakable) = {
+        let source = document.text.borrow();
+        let pane_state = live.states.of(id);
+        let (from, to) = {
+            let state = pane_state.borrow();
+            match selection_source_range(&state) {
+                Some((start, end)) => (start, end),
+                None => {
+                    let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
+                    (caret, caret)
+                }
+            }
+        };
+        (
+            document::line_note_state(&source, from, to, reading_of(window)),
+            document::can_break_page_here(&source, from, to),
+        )
+    };
+    let (top, children) = context_insert_rows(editable && !rectangular, picked, notes, breakable);
+    window.set_insert_rows(slint::ModelRc::new(slint::VecModel::from(top)));
+    window.set_insert_children(slint::ModelRc::new(slint::VecModel::from(children)));
+}
+
 struct Popup {
     handle: HMENU,
 }
@@ -2072,6 +2420,43 @@ mod tests {
         found
     }
 
+    /// 末端の項目を、**文言つきで**並べる（RFN01-47）。道順は[`leaves`]と同じで、
+    /// 右クリックメニューと突き合わせるために言葉も取る。
+    fn titled_leaves(menu: HMENU) -> Vec<(String, bool, bool)> {
+        let count = unsafe { GetMenuItemCount(Some(menu)) };
+        assert!(count >= 0);
+        let mut found = Vec::new();
+        for index in 0..count {
+            let mut item = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_ID | MIIM_STATE | MIIM_SUBMENU | MIIM_STRING,
+                ..Default::default()
+            };
+            unsafe {
+                GetMenuItemInfoW(menu, index as u32, true, &mut item).unwrap();
+            }
+            if !item.hSubMenu.0.is_null() {
+                found.extend(titled_leaves(item.hSubMenu));
+                continue;
+            }
+            // 文言は2度問い合わせる——1度目で長さ、2度目で本文。
+            let mut text = vec![0u16; item.cch as usize + 1];
+            item.dwTypeData = windows::core::PWSTR(text.as_mut_ptr());
+            // **渡すときは、終わりの0まで含めた長さ**——含めないと1字足りない。
+            item.cch = text.len() as u32;
+            unsafe {
+                GetMenuItemInfoW(menu, index as u32, true, &mut item).unwrap();
+            }
+            let title = String::from_utf16_lossy(&text[..item.cch as usize]);
+            found.push((
+                title,
+                item.fState.0 & MFS_DISABLED.0 == 0,
+                item.fState.0 & MFS_CHECKED.0 != 0,
+            ));
+        }
+        found
+    }
+
     /// 行の体裁を何も持たない文書の答え（試験の初期値）。
     fn bare_notes() -> document::LineNoteState {
         document::LineNoteState {
@@ -2184,6 +2569,73 @@ mod tests {
         }
         // **入れられない位置の改ページも押せない。**
         assert!(rows.last().is_some_and(|(_, pickable, _)| !*pickable));
+    }
+
+    /// RFN01-47: **右クリックメニューの挿入は、タイトルバーの挿入メニューと同じ。**
+    /// 言葉も、押せるかも、いま効いている印も一致する——見る側が2つに分かれると
+    /// 必ず食い違うので、ここで突き合わせる。
+    #[test]
+    fn the_right_click_rows_are_the_insert_menu() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let notes = bare_notes();
+        for picked in [false, true] {
+            let menu = Popup::new().unwrap();
+            let mut commands = Vec::new();
+            insert_commands(
+                &h.window,
+                &menu,
+                &mut commands,
+                false,
+                true,
+                picked,
+                notes,
+                false,
+            )
+            .unwrap();
+            let native = titled_leaves(menu.handle);
+
+            let (top, children) = context_insert_rows(true, picked, notes, false);
+            let mut ours: Vec<(&str, bool, bool)> = Vec::new();
+            let (mut at_top, mut at_child) = (0, 0);
+            for what in CONTEXT_INSERT {
+                match what {
+                    ContextEntry::Row(_, _) => {
+                        let row = &top[at_top];
+                        ours.push((row.title.as_str(), row.enabled, row.checked));
+                        at_top += 1;
+                    }
+                    ContextEntry::Group(_, rows) => {
+                        for row in &children[at_child..at_child + rows.len()] {
+                            ours.push((row.title.as_str(), row.enabled, row.checked));
+                        }
+                        at_child += rows.len();
+                        at_top += 1;
+                    }
+                }
+            }
+            assert_eq!(ours.len(), native.len(), "picked={picked}");
+            for (at, (ours, native)) in ours.iter().zip(native.iter()).enumerate() {
+                assert_eq!(ours.0, native.0, "row {at}, picked={picked}");
+                assert_eq!(ours.1, native.1, "enabled, row {at}: {}", native.0);
+                assert_eq!(ours.2, native.2, "checked, row {at}: {}", native.0);
+            }
+            // 組の行は、中に押せる行があるかどうかで押せる（**空でも出す**）。
+            let mut group = 0;
+            for what in CONTEXT_INSERT {
+                let ContextEntry::Group(_, rows) = what else {
+                    continue;
+                };
+                let inside = children.iter().filter(|row| row.group == group).count();
+                let openable = children.iter().any(|row| row.group == group && row.enabled);
+                let row = top
+                    .iter()
+                    .find(|row| row.flyout && row.group == group)
+                    .unwrap();
+                assert_eq!(inside, rows.len(), "組 {group}");
+                assert_eq!(row.enabled, openable, "組 {group}");
+                group += 1;
+            }
+        }
     }
 
     /// **いま効いている指定には印が付く**（書き手の合意 2026-09-21）。

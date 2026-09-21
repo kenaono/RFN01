@@ -1,6 +1,8 @@
 import { CheckBox, ComboBox, HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { PanelStyleEditor } from "panel-style-editor.slint";
 import { PanelStyle, EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
+// RFN01-47: 本文の右クリックメニューへ出す挿入の行（中身はRustが作る）。
+import { InsertRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
 import { TitleMenuBar } from "title-menu-bar.slint";
@@ -630,6 +632,10 @@ export component AppWindow inherits Window {
     /// E10: 選んだ行を箇条書きにする、やめる。0=印、1=番号、2=数え直す。
     /// 3つめは**どの記号か**（`-1`は読む記号のいちばん前）。
     callback pane-list-edit(int, int, int);
+    /// RFN01-47: 右クリックメニューの挿入の行。2つめは挿入の番号。
+    callback pane-insert-chosen(int, int);
+    /// 右クリックメニューが開いた——**そのPaneの挿入の行を組み直す**。
+    callback pane-menu-opened(int);
     /// E3の③: Enterで字下げ・箇条書き・引用を継ぐ。2つめはShiftが押されているか。
     callback pane-enter(int, bool);
     callback pane-selection-update(int, float, float);
@@ -857,6 +863,11 @@ export component AppWindow inherits Window {
     /// （CommonMarkがそう認めている）なので、`-`も切れる。
     in-out property <[bool]> bullet-marks: [true, true, true];
     callback bullet-mark-toggled(int);
+    /// RFN01-47: 本文の右クリックメニューに出す挿入の1段目と、その組の中身。
+    /// **中身はRustが作る**——タイトルバーの挿入メニューと同じ言葉・同じ押せる
+    /// 条件にするためで、メニューを開いた時点の状態で組み直す。
+    in-out property <[InsertRow]> insert-rows;
+    in-out property <[InsertRow]> insert-children;
     /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
     callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
@@ -2642,6 +2653,9 @@ export component AppWindow inherits Window {
                         // E4: 出すのはRust——**開いた瞬間に「1〜128行」と言う**
                         // には、その文書に何行あるかを知っていなければならない。
                         shortcut-keys: root.shortcut-keys;
+                        insert-rows: root.insert-rows;
+                        insert-children: root.insert-children;
+                        insert-chosen(number) => { root.pane-insert-chosen(pane.id, number); }
                         shortcut-key(text, control, alt, shift) => { root.focused-pane = pane.id; root.focused-pane-row = index; return root.shortcut-key(text, control, alt, shift); }
                         reopen-closed-requested => { root.focused-pane = pane.id; root.focused-pane-row = index; root.reopen-closed-requested(); }
                         compare-saved-requested => {
@@ -2805,6 +2819,9 @@ export component AppWindow inherits Window {
                         // have to ask.
                         menu-opened => {
                             root.focused-pane = pane.id; root.focused-pane-row = index;
+                            // RFN01-47: **開いた時点の状態で挿入の行を組む**——選んだ字や
+                            // 行の体裁で押せる行が変わるので、開くたびに組み直す。
+                            root.pane-menu-opened(pane.id);
                         }
                         split-requested(right) => {
                             root.divide-requested(right);
