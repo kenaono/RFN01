@@ -227,7 +227,7 @@ fn typography_settings_roundtrip_and_render() {
     });
     click(1077.0, 24.0);
     menu_snapshot("pane-menu.ppm");
-    click(930.0, 455.0);
+    click(930.0, 484.0);
     assert_eq!(
         goto_requests.get(),
         1,
@@ -235,7 +235,7 @@ fn typography_settings_roundtrip_and_render() {
     );
     click(1077.0, 24.0);
     menu_snapshot("pane-menu.ppm");
-    click(930.0, 514.0);
+    click(930.0, 542.0);
     assert_eq!(
         saved_requests.get(),
         1,
@@ -243,7 +243,7 @@ fn typography_settings_roundtrip_and_render() {
     );
     click(1077.0, 24.0);
     menu_snapshot("pane-menu.ppm");
-    click(930.0, 572.0);
+    click(930.0, 600.0);
     assert_eq!(compare_requests.get(), 1, "comparison is in the pane menu");
     let navigated = Rc::new(RefCell::new(Vec::new()));
     let received_navigation = navigated.clone();
@@ -1047,4 +1047,69 @@ fn a_note_indent_moves_where_the_line_starts() {
             "vertical={vertical}: 地から2字上げになっていない（地付き{flush}、結び{raised}）"
         );
     }
+}
+
+/// 書き手の報告 2026-09-22: **右クリックの右へ開いた面の行が押せる。**Slintは`show()`の
+/// 時点の幅をpopupへ書き込むので、開いてから枠を広げても、右の面は「外」と見なされ、
+/// 押せば行に届かずメニューが閉じていた。
+#[test]
+fn a_row_in_the_right_click_flyout_answers_the_click() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let source = "本文の一行目。\n二行目。\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 1050.0;
+        screen.height = 640.0;
+        screen.shown_width = 1050.0;
+        screen.shown_height = 540.0;
+        screen.preview = true;
+    });
+    set_pane_direction(&window, &cache, id, false);
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+    let listed = Rc::new(RefCell::new(Vec::new()));
+    let received = listed.clone();
+    window.on_pane_list_edit(move |_, what, mark| received.borrow_mut().push((what, mark)));
+    let copied = Rc::new(Cell::new(0));
+    let received = copied.clone();
+    window.on_pane_copy_body(move |_| received.set(received.get() + 1));
+    let press = |x, y, button| {
+        let position = slint::LogicalPosition::new(x, y);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    // 窓の右寄りで開く——枠が右の面ぶん広いので、左へ寄せて窓に収まる（x=668）。
+    press(800.0, 200.0, PointerEventButton::Right);
+    // 「箇条書き▸」に乗せて右へ開き、開いた面のいちばん上（`-`）を押す。
+    window.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(840.0, 430.0),
+    });
+    press(1000.0, 430.0, PointerEventButton::Left);
+    assert_eq!(
+        &*listed.borrow(),
+        &[(0, 0)],
+        "a row in the flyout must answer the click, not close the menu"
+    );
+    // 枠の右の空きは今までどおり「外」——押せば閉じ、下の行の位置はもう押せない。
+    press(800.0, 200.0, PointerEventButton::Right);
+    press(1060.0, 220.0, PointerEventButton::Left);
+    press(840.0, 376.0, PointerEventButton::Left);
+    assert_eq!(copied.get(), 0, "the empty right of the menu must close it");
+    // 閉じずに押せば、同じ位置の「本文だけをコピー」に届く（位置の確かめ）。
+    press(800.0, 200.0, PointerEventButton::Right);
+    press(840.0, 376.0, PointerEventButton::Left);
+    assert_eq!(copied.get(), 1);
 }

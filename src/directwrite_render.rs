@@ -3901,8 +3901,25 @@ unsafe fn set_character_spacing(
     unsafe { layout.SetCharacterSpacing(half, half, 0.0, range) }
 }
 
+/// スレッドごとの描く道具の置き場。
+///
+/// **スレッドの終わりには解放しない。**`thread_local`の片付けは、Windowsでは
+/// DLLの読み込みと同じ錠を握ったまま走る。そこでDirectWrite・Direct2D・WICを
+/// 解放すると錠を返さずに止まり、次に道具を作るスレッドが
+/// `CreateWicBitmapRenderTarget`の中で待ち続けた（2026-09-22、試験の並び
+/// `incremental`→天地→ノンブルで再現。スレッドが自分で手放せば止まらない）。
+/// 終わるスレッドは`release_graphics`で錠の外で手放し、手放さなかったものは
+/// プロセスと一緒に消えるに任せる。
+struct GraphicsSlot(RefCell<Option<Graphics>>);
+
+impl Drop for GraphicsSlot {
+    fn drop(&mut self) {
+        std::mem::forget(self.0.get_mut().take());
+    }
+}
+
 thread_local! {
-    static GRAPHICS: RefCell<Option<Graphics>> = const { RefCell::new(None) };
+    static GRAPHICS: GraphicsSlot = const { GraphicsSlot(RefCell::new(None)) };
 }
 
 /// One block to measure, and everything the measuring needs.
@@ -4806,12 +4823,17 @@ fn on_layout_threads(tasks: Vec<PoolTask>) -> Option<Result<Vec<PoolAnswer>>> {
 
 fn with_graphics<T>(body: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> {
     GRAPHICS.with(|cell| {
-        let mut slot = cell.borrow_mut();
+        let mut slot = cell.0.borrow_mut();
         if slot.is_none() {
             *slot = Some(Graphics::new()?);
         }
         body(slot.as_mut().expect("graphics initialized above"))
     })
+}
+
+/// **このスレッドの描く道具を、スレッドが終わる前に手放す**（`GraphicsSlot`）。
+pub(crate) fn release_graphics() {
+    let _ = GRAPHICS.try_with(|cell| cell.0.borrow_mut().take());
 }
 
 #[derive(Clone)]

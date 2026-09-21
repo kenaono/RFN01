@@ -97,6 +97,9 @@ impl BackgroundLayout {
                             slot = shared.1.wait(slot).unwrap_or_else(|e| e.into_inner());
                         }
                         if slot.stopped {
+                            drop(slot);
+                            // 錠の外で道具を手放してから終わる（`release_graphics`）。
+                            release_graphics();
                             break;
                         }
                         slot.job.take().unwrap()

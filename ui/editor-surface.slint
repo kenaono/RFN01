@@ -172,11 +172,11 @@ export component EditorSurface inherits Rectangle {
     /// 右へ開いている組（開いていなければ-1）。
     private property <int> insert-open: -1;
     callback insert-chosen(int);
-    /// 右クリックメニューの幅（RFN01-47）。**右へ開くぶんを、開いているあいだだけ
-    /// 取る**——popupは自分の大きさの外を描かないので、広げておかないと右の面が切れる。
-    private property <length> context-menu-width: root.bullet-rows-open
-        ? 408px
-        : (root.insert-open >= 0 ? 432px : 264px);
+    /// 右クリックメニューの幅（RFN01-47）。**右へ開くぶんを、はじめから取っておく**
+    /// ——Slintは`show()`の時点の幅をpopupへ書き込み、幅の式はそこで外れる。
+    /// 開いてから広げても枠は264pxのままで、右の面は描かれるのに押すと「外」と
+    /// 見なされて閉じていた（書き手の報告 2026-09-22）。いちばん広い右の面に合わせる。
+    private property <length> context-menu-width: 432px;
     callback open-file-requested();
     callback escaped() -> bool;
     callback selection-escaped() -> bool;
@@ -1208,6 +1208,20 @@ export component EditorSurface inherits Rectangle {
                             y: root.context-y;
                             width: root.context-menu-width;
                             close-policy: close-on-click-outside;
+
+                            // **メニューの右の空きを押せば閉じる。**枠を右の面ぶん
+                            // 広げたので、そこはpopupの「中」になった——外を押せば
+                            // 閉じる振る舞いを、ここで保つ。行より先に置くので、
+                            // 行と右の面が上に乗り、何も無い所だけがここへ落ちる。
+                            // メニューの内側の余白は押しても閉じない（今までどおり）
+                            // ので、面の右からだけ取る。
+                            TouchArea {
+                                x: 264px;
+                                y: 0px;
+                                width: parent.width - 264px;
+                                height: parent.height;
+                                clicked => { context-menu.close(); }
+                            }
 
                             // **左端に寄せる**（書き手の報告 2026-09-11：「元の
                             // メニューも右に動きます」「メニューが透明になりました」）。
