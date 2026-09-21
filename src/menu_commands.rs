@@ -127,7 +127,7 @@ impl Drop for Popup {
 
 /// タイトルバーの分類の数（File / Edit / Insert / Layout / View / Run / Help）。
 /// **画面の並びと1対1**である（`title-menu-bar.slint`の並び）。
-const MENU_GROUPS: i32 = 7;
+pub const MENU_GROUPS: i32 = 7;
 
 /// 押せる末端の行が1つでもあるか（RFN01-38）。
 fn any_enabled(menu: HMENU) -> bool {
@@ -466,22 +466,11 @@ impl Target {
 
 pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
     let weak = window.as_weak();
-    let open_live = live.clone();
-    let open_kills = kills.clone();
     window.global::<MenuInput>().on_open_menu(move || {
         if let Some(window) = weak.upgrade() {
             if window.get_question_open() || window.get_print_active() || window.get_diff_active() {
                 return;
             }
-            // **開ける分類だけを生かす。**子が全部無効な分類は灰色にして、押しても
-            // 開かない（書き手の決定 2026-09-21）——開いて「全部押せない」を見せるより、
-            // 入口で分かるほうがよい。
-            let openable: Vec<bool> = (0..MENU_GROUPS)
-                .map(|group| menu_opens(&window, &open_live, &open_kills, group))
-                .collect();
-            window.set_title_menu_openable(slint::ModelRc::from(std::rc::Rc::new(
-                slint::VecModel::from(openable),
-            )));
             window.set_title_menu_visible(true);
             window.set_title_menu_active(0);
             window.set_title_menu_focus_generation(window.get_title_menu_focus_generation() + 1);

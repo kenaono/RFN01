@@ -3646,9 +3646,23 @@ fn main() -> Result<(), slint::PlatformError> {
     // Winit creates its HWND only after entering the event loop.
     let chrome: Rc<RefCell<Option<Box<window_chrome::Chrome>>>> = Rc::default();
     let held = chrome.clone();
+    // **バーが出るたびに、開ける分類を決める**（RFN01-38、書き手の決定 2026-09-21）。
+    // アイコンの押下はSlintの中で`title-menu-visible`を立てるので、
+    // `MenuInput.open_menu()`を通らない——**ここが両方の道の合流点**である。
+    let weak = window.as_weak();
+    let open_live = live.clone();
+    let open_kills = kill_ring.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
             chrome.set_interactive_end(if shown { 372. } else { 36. });
+        }
+        if shown && let Some(me) = weak.upgrade() {
+            let openable: Vec<bool> = (0..menu_commands::MENU_GROUPS)
+                .map(|group| menu_commands::menu_opens(&me, &open_live, &open_kills, group))
+                .collect();
+            me.set_title_menu_openable(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                openable,
+            ))));
         }
     });
     let weak = window.as_weak();
