@@ -32,11 +32,70 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::document;
 use crate::file_io;
-use crate::file_tree;
+
+pub fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("md"))
+}
+pub fn is_image(path: &Path) -> bool {
+    path.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+        [
+            "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "ico", "jxr", "heic",
+        ]
+        .iter()
+        .any(|e| x.eq_ignore_ascii_case(e))
+    })
+}
+pub fn is_indexable(path: &Path) -> bool {
+    is_markdown(path) || is_image(path)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ScanMetrics {
+    pub queue_ms: f64,
+    pub first_ms: Option<f64>,
+    pub parse_work_ms: f64,
+    pub partial: bool,
+    pub generation: u64,
+    pub elapsed_ms: f64,
+    pub cache_ms: f64,
+    pub walk_ms: f64,
+    pub parse_ms: f64,
+    pub save_ms: f64,
+    pub directories: usize,
+    pub files: usize,
+    pub reused: usize,
+    pub parsed: usize,
+    pub workers: usize,
+    pub completed: bool,
+}
+impl ScanMetrics {
+    pub fn log(&self) -> String {
+        format!(
+            "index generation={} elapsed_ms={:.3} queue_ms={:.3} first_ms={:?} cache_ms={:.3} walk_ms={:.3} parse_ms={:.3} parse_work_ms={:.3} save_ms={:.3} dirs={} files={} reused={} parsed={} workers={} completed={} partial={}",
+            self.generation,
+            self.elapsed_ms,
+            self.queue_ms,
+            self.first_ms,
+            self.cache_ms,
+            self.walk_ms,
+            self.parse_ms,
+            self.parse_work_ms,
+            self.save_ms,
+            self.directories,
+            self.files,
+            self.reused,
+            self.parsed,
+            self.workers,
+            self.completed,
+            self.partial
+        )
+    }
+}
 
 /// One file under a registered root, as the index knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,11 +108,12 @@ pub struct Entry {
     pub canonical: PathBuf,
     /// Modified time and length — what change detection compares against.
     pub fingerprint: file_io::FileStamp,
-    /// Empty when this is not a markdown/text file at all
-    /// ([`file_tree::is_searchable`]), when parsing has not happened yet
-    /// this run ([`Entry::headings_complete`] is `false` and the file was
-    /// just published as a file-only stub), or when it is one but could not
-    /// be read in full.
+    /// Empty when this is not a markdown file at all ([`is_markdown`] — an
+    /// image entry keeps only its name, per 索引対象の合意, and `.txt`/`.log`
+    /// are not indexed), when parsing has not happened yet this run
+    /// ([`Entry::headings_complete`] is `false` and the file was just
+    /// published as a file-only stub), or when it is one but could not be
+    /// read in full.
     pub headings: Vec<document::Heading>,
     /// `false` for a file-only stub not parsed yet, for a file over
     /// [`ScanOptions::max_heading_bytes`], or one that failed to decode. A
@@ -66,10 +126,12 @@ pub struct Entry {
 /// Limits a scan enforces on itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanOptions {
+    pub force_reparse: bool,
+    pub workers: usize,
     pub max_entries: usize,
     pub batch_size: usize,
-    /// A markdown/text file past this many bytes is listed but not parsed
-    /// for headings.
+    /// A markdown file past this many bytes is listed but not parsed for
+    /// headings.
     pub max_heading_bytes: u64,
     pub excludes: Vec<String>,
 }
@@ -88,6 +150,8 @@ pub const MAINTENANCE_GENERATION: u64 = u64::MAX;
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
+            force_reparse: false,
+            workers: thread::available_parallelism().map_or(2, |n| n.get().min(4)),
             max_entries: MAX_ENTRIES,
             batch_size: MAX_BATCH,
             max_heading_bytes: 2 * 1024 * 1024,
@@ -105,6 +169,9 @@ pub struct Event {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EventKind {
+    InventoryComplete {
+        complete: bool,
+    },
     /// What a per-root cache file already held.
     Cached(Vec<Entry>),
     /// A file-only stub (just discovered, headings not parsed yet) or a
@@ -118,7 +185,10 @@ pub enum EventKind {
     Removed(Vec<PathBuf>),
     /// A per-root cache write failed — reported, not swallowed. The scan
     /// itself still finished; only its cache is stale or missing for `root`.
-    CacheWriteFailed { root: PathBuf, message: String },
+    CacheWriteFailed {
+        root: PathBuf,
+        message: String,
+    },
     /// The scan reached the end of every kept root.
     Complete {
         /// Directories that could not be read (permission, mostly).
@@ -185,7 +255,8 @@ impl Snapshot {
                     self.remove(path);
                 }
             }
-            EventKind::Complete { .. }
+            EventKind::InventoryComplete { .. }
+            | EventKind::Complete { .. }
             | EventKind::Error(_)
             | EventKind::CacheWriteFailed { .. } => {}
         }
@@ -217,7 +288,12 @@ impl Snapshot {
 /// order [`Indexer`] sent them — the whole basis for [`Indexer::clear`] never
 /// racing a [`Command::Scan`]'s cache write.
 enum Command {
+    PruneShared {
+        cache_dir: PathBuf,
+        roots: Vec<PathBuf>,
+    },
     Scan {
+        queued: Instant,
         generation: u64,
         roots: Vec<PathBuf>,
         /// `None` for [`Indexer::restart_memory`]: scans without reading or
@@ -242,6 +318,7 @@ enum Command {
 /// caller currently wants active. See the module doc for why this shape —
 /// not one thread per scan — is what makes cancellation and reset safe.
 pub struct Indexer {
+    metrics: Arc<std::sync::Mutex<std::collections::VecDeque<ScanMetrics>>>,
     commands: mpsc::Sender<Command>,
     events: mpsc::Receiver<Event>,
     /// Kept alongside `events`'s own receiver so `restart`/`clear` can report
@@ -264,6 +341,13 @@ impl Default for Indexer {
 const EVENT_CHANNEL_CAPACITY: usize = 8;
 
 impl Indexer {
+    pub fn retain_shared(&self, cache_dir: PathBuf, roots: Vec<PathBuf>) {
+        self.report_if_disconnected(
+            self.commands
+                .send(Command::PruneShared { cache_dir, roots }),
+            MAINTENANCE_GENERATION,
+        );
+    }
     pub fn new() -> Self {
         let (command_tx, command_rx) = mpsc::channel::<Command>();
         // Bounded: a scan cannot outrun a slow or absent consumer without
@@ -276,9 +360,13 @@ impl Indexer {
         // spawn (or, later, a disconnected worker) can still report an
         // `EventKind::Error` from here rather than going silently idle.
         let worker_events = event_tx.clone();
+        let metrics = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let worker_metrics = metrics.clone();
         let spawned = thread::Builder::new()
             .name("workspace-index".into())
-            .spawn(move || run_worker(command_rx, worker_events, worker_generation));
+            .spawn(move || {
+                run_worker(command_rx, worker_events, worker_generation, worker_metrics)
+            });
         if spawned.is_err() {
             let _ = event_tx.try_send(Event {
                 generation: 0,
@@ -288,6 +376,7 @@ impl Indexer {
             });
         }
         Self {
+            metrics,
             commands: command_tx,
             events: event_rx,
             events_tx: event_tx,
@@ -337,6 +426,7 @@ impl Indexer {
         self.next_generation += 1;
         self.generation.store(generation, Ordering::SeqCst);
         let sent = self.commands.send(Command::Scan {
+            queued: Instant::now(),
             generation,
             roots,
             cache_dir,
@@ -400,6 +490,10 @@ impl Indexer {
     /// Up to [`EVENT_CHANNEL_CAPACITY`] events waiting right now, without
     /// blocking — bounded even if the worker keeps refilling the channel, so
     /// one UI tick's cost stays bounded too.
+    pub fn take_metrics(&self) -> Vec<ScanMetrics> {
+        self.metrics.lock().unwrap().drain(..).collect()
+    }
+
     pub fn poll(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         while events.len() < EVENT_CHANNEL_CAPACITY {
@@ -439,15 +533,88 @@ fn run_worker(
     commands: mpsc::Receiver<Command>,
     events: mpsc::SyncSender<Event>,
     generation: Arc<AtomicU64>,
+    metrics: Arc<std::sync::Mutex<std::collections::VecDeque<ScanMetrics>>>,
 ) {
+    let inventory = crate::index_work::Inventory::default();
+    let mut previous_scope = None;
     while let Ok(command) = commands.recv() {
         match command {
+            Command::PruneShared { cache_dir, roots } => {
+                if let Ok(read) = fs::read_dir(&cache_dir) {
+                    for item in read.flatten() {
+                        if !item.file_type().is_ok_and(|t| t.is_file())
+                            || !is_own_cache_file_name(&item.file_name().to_string_lossy())
+                        {
+                            continue;
+                        }
+                        let Some(raw) = read_bounded(&item.path()) else {
+                            continue;
+                        };
+                        let Some((root, _)) = decode_cache(&raw) else {
+                            continue;
+                        };
+                        if roots
+                            .iter()
+                            .any(|r| root.starts_with(r) || r.starts_with(&root))
+                        {
+                            continue;
+                        }
+                        let lock = item.path().with_extension("lock");
+                        let mut options = fs::OpenOptions::new();
+                        options.write(true).create(true).truncate(false);
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::fs::OpenOptionsExt;
+                            options.share_mode(0);
+                        }
+                        // The lease is released *before* the lock file itself is removed:
+                        // Windows refuses to delete a file whose handle is still open, so
+                        // removing it inside the block would always fail. A writer that
+                        // starts in the meantime simply recreates the file.
+                        if let Ok(lease) = options.open(&lock) {
+                            let _ = fs::remove_file(item.path());
+                            drop(lease);
+                            let _ = fs::remove_file(&lock);
+                        }
+                    }
+                }
+            }
             Command::Scan {
+                queued,
                 generation: my_generation,
                 roots,
                 cache_dir,
                 options,
             } => {
+                let key = (roots.clone(), options.excludes.clone());
+                // Deliberately asymmetric, 2026-09-21: the direction is the
+                // decision, not an inverted comparison.
+                //
+                // A *changed* scope keeps the directory listings this cache
+                // exists for — switching from a parent folder to a child one
+                // inside the same 30-second window must not list the shared
+                // subtree a second time. A repeat scan of the *same* scope
+                // drops them: scans of one scope are 30 seconds apart, so
+                // those listings sit at the end of their life anyway, and
+                // dropping them keeps the map bounded to the scope in use.
+                // (`options.force_reparse`, a reset, always drops them.)
+                if options.force_reparse
+                    || previous_scope
+                        .as_ref()
+                        .is_none_or(|(old_roots, old_excludes)| {
+                            old_roots == &roots || old_excludes != &options.excludes
+                        })
+                {
+                    inventory.lock().unwrap().clear();
+                }
+                previous_scope = Some(key);
+                let started = Instant::now();
+                let mut measured = ScanMetrics {
+                    queue_ms: started.duration_since(queued).as_secs_f64() * 1000.0,
+                    generation: my_generation,
+                    workers: options.workers,
+                    ..Default::default()
+                };
                 run_scan(
                     my_generation,
                     roots,
@@ -455,7 +622,15 @@ fn run_worker(
                     options,
                     &generation,
                     &events,
+                    &mut measured,
+                    &inventory,
                 );
+                measured.elapsed_ms = queued.elapsed().as_secs_f64() * 1000.0;
+                let mut log = metrics.lock().unwrap();
+                if log.len() == 64 {
+                    log.pop_front();
+                }
+                log.push_back(measured);
             }
             Command::Clear {
                 generation: my_generation,
@@ -624,7 +799,7 @@ pub fn dedupe_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// [`std::fs::FileType::is_symlink`] is not guaranteed to catch every
 /// Windows reparse point a junction can be — the `FILE_ATTRIBUTE_REPARSE_POINT`
 /// bit itself, checked directly under `cfg(windows)` (仕様の実装依頼 #5).
-fn is_unsafe_to_descend(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_unsafe_to_descend(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink() || is_reparse_point(metadata)
 }
 
@@ -645,6 +820,53 @@ fn fingerprint_of(metadata: &fs::Metadata) -> file_io::FileStamp {
         modified: metadata.modified().ok(),
         length: metadata.len(),
     }
+}
+
+pub(crate) fn read_entry(path: &Path, roots: &[PathBuf]) -> Option<Entry> {
+    if !is_indexable(path) {
+        return None;
+    }
+    // Inspect the original path before canonicalization can hide reparse points.
+    let mut prefix = PathBuf::new();
+    for part in path.components() {
+        prefix.push(part);
+        if let Ok(meta) = fs::symlink_metadata(&prefix) {
+            if is_unsafe_to_descend(&meta) {
+                return None;
+            }
+        }
+    }
+    let canonical = path.canonicalize().ok()?;
+    let root = roots
+        .iter()
+        .filter(|r| canonical.starts_with(r))
+        .max_by_key(|r| r.components().count())?
+        .clone();
+    let relative = canonical.strip_prefix(&root).ok()?.to_path_buf();
+    if relative
+        .components()
+        .any(|p| matches!(p.as_os_str().to_str(), Some(".git" | "target")))
+    {
+        return None;
+    }
+    let metadata = fs::metadata(&canonical).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let fingerprint = fingerprint_of(&metadata);
+    let (headings, headings_complete) = if is_markdown(&canonical) {
+        parse_headings(&canonical, fingerprint.length, 2 * 1024 * 1024)
+    } else {
+        (Vec::new(), true)
+    };
+    Some(Entry {
+        root,
+        relative,
+        canonical,
+        fingerprint,
+        headings,
+        headings_complete,
+    })
 }
 
 /// Headings for a file already known to be `length` bytes, bounded to
@@ -702,6 +924,8 @@ fn run_scan(
     options: ScanOptions,
     generation: &AtomicU64,
     events: &mpsc::SyncSender<Event>,
+    metrics: &mut ScanMetrics,
+    inventory: &crate::index_work::Inventory,
 ) {
     if !still_current(my_generation, generation) {
         return;
@@ -711,7 +935,16 @@ fn run_scan(
         batch_size: options.batch_size.clamp(1, MAX_BATCH),
         ..options
     };
-    let send = |kind: EventKind| send_checked(events, my_generation, generation, kind);
+    let started = Instant::now();
+    let first = std::cell::Cell::new(None);
+    let send = |kind: EventKind| {
+        let candidate = matches!(&kind,EventKind::Cached(e)|EventKind::Updated(e) if !e.is_empty());
+        let sent = send_checked(events, my_generation, generation, kind);
+        if sent && candidate && first.get().is_none() {
+            first.set(Some(started.elapsed().as_secs_f64() * 1000.0));
+        }
+        sent
+    };
 
     let mut missing_roots = Vec::new();
     let mut canonical_roots = Vec::new();
@@ -734,6 +967,7 @@ fn run_scan(
     let mut total = 0usize;
     let mut truncated = false;
 
+    let phase = Instant::now();
     if let Some(cache_dir) = &cache_dir {
         for root in &kept_roots {
             if !still_current(my_generation, generation) {
@@ -744,6 +978,9 @@ fn run_scan(
             };
             let mut batch = Vec::new();
             for entry in entries {
+                if !is_indexable(&entry.canonical) {
+                    continue;
+                }
                 if total >= options.max_entries {
                     truncated = true;
                     continue;
@@ -763,168 +1000,145 @@ fn run_scan(
         }
     }
 
+    metrics.cache_ms = phase.elapsed().as_secs_f64() * 1000.0;
+    let phase = Instant::now();
     // --- Phase A: enumerate, publishing file-only stubs as they're found. ---
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut failed_dirs: Vec<PathBuf> = Vec::new();
     let mut to_parse: Vec<ToParse> = Vec::new();
     let mut stub_batch: Vec<Entry> = Vec::new();
 
-    for root in &kept_roots {
-        if !still_current(my_generation, generation) {
-            return;
-        }
-        let mut stack = vec![root.clone()];
-        let mut since_check = 0u32;
-        while let Some(directory) = stack.pop() {
-            if !still_current(my_generation, generation) {
-                return;
-            }
-            let mut read = match fs::read_dir(&directory) {
-                Ok(read) => read,
-                Err(_) => {
-                    failed_dirs.push(directory);
-                    continue;
-                }
-            };
-            loop {
-                since_check += 1;
-                if since_check >= 128 {
-                    since_check = 0;
-                    if !still_current(my_generation, generation) {
-                        return;
-                    }
-                }
-                // A `Some(Err(_))` mid-listing (permission revoked while
-                // reading, or similar) is not silently dropped the way
-                // `.flatten()` would: the directory it came from is
-                // marked failed, the same as if `read_dir` itself had
-                // refused, so cached entries under it are protected from
-                // the prune step rather than the scan claiming a
-                // complete result from a partially unreadable area.
-                let dir_entry = match read.next() {
-                    Some(Ok(dir_entry)) => dir_entry,
-                    Some(Err(_)) => {
-                        failed_dirs.push(directory.clone());
-                        continue;
-                    }
-                    None => break,
-                };
-                let name = dir_entry.file_name();
-                if options
-                    .excludes
-                    .iter()
-                    .any(|excluded| name.to_string_lossy() == excluded.as_str())
-                {
-                    continue;
-                }
-                let path = dir_entry.path();
-                let metadata = match dir_entry.metadata() {
-                    Ok(metadata) => metadata,
-                    Err(_) => {
-                        // This one path's own state could not be read —
-                        // protect it specifically, rather than the whole
-                        // directory (which the successful listing itself
-                        // says is otherwise readable).
-                        failed_dirs.push(path);
-                        continue;
-                    }
-                };
-                if is_unsafe_to_descend(&metadata) {
-                    continue;
-                }
-                if metadata.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if !metadata.is_file() {
-                    continue;
-                }
-                seen.insert(path.clone());
-                let fingerprint = fingerprint_of(&metadata);
-                let previous = known.get(&path);
-                let is_new = previous.is_none();
-                let needs_parse = !previous.is_some_and(|entry| {
-                    entry.fingerprint == fingerprint && entry.headings_complete
-                });
-                if is_new {
-                    if total >= options.max_entries {
-                        // Refuse only this new-beyond-cap entry — keep
-                        // walking so already-known entries elsewhere are
-                        // still checked for updates and removals.
-                        truncated = true;
-                        continue;
-                    }
-                    total += 1;
-                }
-                if !needs_parse {
-                    continue;
-                }
-                let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-                to_parse.push(ToParse {
-                    root: root.clone(),
-                    path: path.clone(),
-                    fingerprint,
-                });
-                stub_batch.push(Entry {
-                    root: root.clone(),
-                    relative,
-                    canonical: path,
-                    fingerprint,
-                    headings: Vec::new(),
-                    headings_complete: false,
-                });
-                if stub_batch.len() >= options.batch_size
-                    && !send(EventKind::Updated(std::mem::take(&mut stub_batch)))
-                {
+    crate::index_work::walk(
+        &kept_roots,
+        &options.excludes,
+        options.workers,
+        inventory,
+        &|| still_current(my_generation, generation),
+        |found| {
+            let (root, path, metadata) = match found {
+                crate::index_work::Found::Directory => {
+                    metrics.directories += 1;
                     return;
                 }
+                crate::index_work::Found::Failed(path) => {
+                    failed_dirs.push(path);
+                    return;
+                }
+                crate::index_work::Found::File(root, path, meta) => (root, path, meta),
+            };
+            metrics.files += 1;
+            if !is_indexable(&path) {
+                return;
             }
-        }
-    }
+            seen.insert(path.clone());
+            let fingerprint = fingerprint_of(&metadata);
+            let previous = known.get(&path);
+            if !options.force_reparse
+                && previous.is_some_and(|e| e.fingerprint == fingerprint && e.headings_complete)
+            {
+                metrics.reused += 1;
+                return;
+            }
+            if previous.is_none() {
+                if total >= options.max_entries {
+                    truncated = true;
+                    return;
+                }
+                total += 1;
+            }
+            let relative = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+            to_parse.push(ToParse {
+                root: root.clone(),
+                path: path.clone(),
+                fingerprint,
+            });
+            stub_batch.push(Entry {
+                root,
+                relative,
+                canonical: path,
+                fingerprint,
+                headings: Vec::new(),
+                headings_complete: false,
+            });
+            if stub_batch.len() >= options.batch_size {
+                send(EventKind::Updated(std::mem::take(&mut stub_batch)));
+            }
+        },
+    );
+    metrics.walk_ms = phase.elapsed().as_secs_f64() * 1000.0;
+    let phase = Instant::now();
     if !stub_batch.is_empty() && !send(EventKind::Updated(stub_batch)) {
+        return;
+    }
+    if !send(EventKind::InventoryComplete {
+        complete: failed_dirs.is_empty() && missing_roots.is_empty() && !truncated,
+    }) {
         return;
     }
 
     // --- Phase B: parse headings for exactly what Phase A flagged. ---
     let mut final_batch: Vec<Entry> = Vec::new();
-    for item in to_parse {
-        if !still_current(my_generation, generation) {
-            return;
+    metrics.parsed = to_parse.iter().filter(|i| is_markdown(&i.path)).count();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parse_work = AtomicU64::new(0);
+    let (tx, rx) = mpsc::sync_channel(options.batch_size);
+    thread::scope(|scope| {
+        for _ in 0..options.workers.clamp(1, 8) {
+            let (tx, items, next, parse_work) = (tx.clone(), &to_parse, &next, &parse_work);
+            let options = &options;
+            scope.spawn(move || {
+                while still_current(my_generation, generation) {
+                    let Some(item) = items.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                        break;
+                    };
+                    let task_started = Instant::now();
+                    let (headings, headings_complete) = if is_markdown(&item.path) {
+                        parse_headings(
+                            &item.path,
+                            item.fingerprint.length,
+                            options.max_heading_bytes,
+                        )
+                    } else {
+                        (Vec::new(), true)
+                    };
+                    parse_work
+                        .fetch_add(task_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    let entry = Entry {
+                        root: item.root.clone(),
+                        relative: item
+                            .path
+                            .strip_prefix(&item.root)
+                            .unwrap_or(&item.path)
+                            .to_path_buf(),
+                        canonical: item.path.clone(),
+                        fingerprint: item.fingerprint,
+                        headings,
+                        headings_complete,
+                    };
+                    if tx.send(entry).is_err() {
+                        break;
+                    }
+                }
+            });
         }
-        let (headings, headings_complete) = if file_tree::is_searchable(&item.path) {
-            parse_headings(
-                &item.path,
-                item.fingerprint.length,
-                options.max_heading_bytes,
-            )
-        } else {
-            (Vec::new(), true)
-        };
-        let relative = item
-            .path
-            .strip_prefix(&item.root)
-            .unwrap_or(&item.path)
-            .to_path_buf();
-        let entry = Entry {
-            root: item.root,
-            relative,
-            canonical: item.path.clone(),
-            fingerprint: item.fingerprint,
-            headings,
-            headings_complete,
-        };
-        known.insert(item.path, entry.clone());
-        final_batch.push(entry);
-        if final_batch.len() >= options.batch_size
-            && !send(EventKind::Updated(std::mem::take(&mut final_batch)))
-        {
-            return;
+        drop(tx);
+        for entry in rx {
+            if !still_current(my_generation, generation) {
+                continue;
+            }
+            known.insert(entry.canonical.clone(), entry.clone());
+            final_batch.push(entry);
+            if final_batch.len() >= options.batch_size {
+                send(EventKind::Updated(std::mem::take(&mut final_batch)));
+            }
         }
-    }
+    });
     if !final_batch.is_empty() && !send(EventKind::Updated(final_batch)) {
         return;
     }
 
+    metrics.parse_ms = phase.elapsed().as_secs_f64() * 1000.0;
+    metrics.parse_work_ms = parse_work.load(Ordering::Relaxed) as f64 / 1000.0;
     // Pruned only from a successfully scanned area. Runs whether or not this
     // scan was `truncated` — the walk above always covers every root in
     // full, so `seen`/`failed_dirs` are complete regardless; `truncated`
@@ -949,6 +1163,7 @@ fn run_scan(
         }
     }
 
+    let phase = Instant::now();
     if let Some(cache_dir) = &cache_dir {
         for root in &kept_roots {
             if !still_current(my_generation, generation) {
@@ -968,6 +1183,10 @@ fn run_scan(
         }
     }
 
+    metrics.save_ms = phase.elapsed().as_secs_f64() * 1000.0;
+    metrics.completed = still_current(my_generation, generation);
+    metrics.first_ms = first.get().map(|n| n + metrics.queue_ms);
+    metrics.partial = !failed_dirs.is_empty() || !missing_roots.is_empty() || truncated;
     let _ = send(EventKind::Complete {
         failed: failed_dirs,
         missing_roots,
@@ -1013,9 +1232,79 @@ fn read_bounded(path: &Path) -> Option<String> {
 }
 
 fn load_cache(cache_dir: &Path, root: &Path) -> Option<Vec<Entry>> {
+    if cache_dir.file_name().is_some_and(|n| n == "shared-v2") {
+        return load_shared_cache(cache_dir, root);
+    }
     let raw = read_bounded(&cache_file_for(cache_dir, root))?;
     let (stored_root, entries) = decode_cache(&raw)?;
     (stored_root == root).then_some(entries)
+}
+
+/// Shared roots (including parent/child roots) and legacy caches are provisional.
+/// Rebase the view to the requesting root; never expose another Workspace.
+fn load_shared_cache(cache_dir: &Path, root: &Path) -> Option<Vec<Entry>> {
+    let mut directories = vec![cache_dir.to_path_buf()];
+    if let Some(parent) = cache_dir.parent() {
+        if let Ok(read) = fs::read_dir(parent) {
+            directories.extend(
+                read.flatten()
+                    .filter(|e| {
+                        e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink())
+                            && e.file_name().to_string_lossy().parse::<u64>().is_ok()
+                    })
+                    .take(32)
+                    .map(|e| e.path()),
+            );
+        }
+    }
+    let mut candidates = Vec::new();
+    for dir in directories {
+        if let Ok(read) = fs::read_dir(dir) {
+            for item in read.flatten().take(256) {
+                if !item.file_type().is_ok_and(|t| t.is_file())
+                    || !is_own_cache_file_name(&item.file_name().to_string_lossy())
+                {
+                    continue;
+                }
+                if let Ok(meta) = item.metadata() {
+                    candidates.push((meta.modified().ok(), meta.len(), item.path()));
+                }
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut budget = 64 * 1024 * 1024u64;
+    let mut entries = HashMap::new();
+    for (_, size, path) in candidates {
+        if size > budget {
+            continue;
+        }
+        budget -= size;
+        let Some(raw) = read_bounded(&path) else {
+            continue;
+        };
+        let Some((_, loaded)) = decode_cache(&raw) else {
+            continue;
+        };
+        for mut e in loaded {
+            if !is_indexable(&e.canonical) || entries.len() >= MAX_ENTRIES {
+                continue;
+            }
+            let Ok(relative) = e.canonical.strip_prefix(root) else {
+                continue;
+            };
+            if relative
+                .components()
+                .any(|p| matches!(p.as_os_str().to_str(), Some(".git" | "target")))
+            {
+                continue;
+            }
+            e.relative = relative.to_path_buf();
+            e.root = root.to_path_buf();
+            entries.entry(e.canonical.clone()).or_insert(e);
+        }
+    }
+    Some(entries.into_values().collect())
 }
 
 fn write_cache(cache_dir: &Path, root: &Path, entries: &[Entry]) -> io::Result<()> {
@@ -1027,6 +1316,20 @@ fn write_cache(cache_dir: &Path, root: &Path, entries: &[Entry]) -> io::Result<(
         ));
     }
     fs::create_dir_all(cache_dir)?;
+    // Serialize writers from different application instances too. The lock file
+    // is persistent; Windows releases its exclusive handle on process exit.
+    let mut lock = fs::OpenOptions::new();
+    lock.write(true).create(true).truncate(false);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        lock.share_mode(0);
+    }
+    let _lease = if cache_dir.file_name().is_some_and(|n| n == "shared-v2") {
+        Some(lock.open(cache_file_for(cache_dir, root).with_extension("lock"))?)
+    } else {
+        None
+    };
     file_io::write_atomically(&cache_file_for(cache_dir, root), encoded.as_bytes())?;
     Ok(())
 }
@@ -1181,6 +1484,52 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    #[test]
+    #[ignore = "release benchmark; explicitly invoked"]
+    fn scan_benchmark() {
+        let root = scratch_directory("benchmark-input");
+        for folder in 0..32 {
+            let dir = root.join(format!("d{folder}"));
+            fs::create_dir_all(&dir).unwrap();
+            for file in 0..64 {
+                fs::write(
+                    dir.join(format!("n{file}.md")),
+                    "# Heading\ntext\n".repeat(100),
+                )
+                .unwrap();
+                fs::write(dir.join(format!("n{file}.txt")), "unindexed").unwrap();
+                fs::write(dir.join(format!("n{file}.png")), "image metadata only").unwrap();
+            }
+        }
+        for workers in [1, 2, 4] {
+            for sample in 0..3 {
+                let cache = scratch_directory(&format!("benchmark-cache-{workers}-{sample}"));
+                fs::write(root.join("d0/n0.md"), "# Heading\ntext\n".repeat(100)).unwrap();
+                let mut indexer = Indexer::new();
+                for round in 0..3 {
+                    if round == 2 {
+                        fs::write(root.join("d0/n0.md"), "# Changed\n").unwrap();
+                    }
+                    let start = Instant::now();
+                    let generation = indexer.restart(
+                        vec![root.clone()],
+                        cache.clone(),
+                        ScanOptions {
+                            workers,
+                            ..ScanOptions::default()
+                        },
+                    );
+                    let (snapshot, _) = run_to_completion(&indexer, generation);
+                    println!(
+                        "scan_benchmark workers={workers} sample={sample} round={round} elapsed_ms={:.3} entries={}",
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        snapshot.entries().len()
+                    );
+                }
+            }
+        }
+    }
+
     fn scratch_directory(name: &str) -> PathBuf {
         let directory = std::env::temp_dir().join(format!("rfnedit-wsindex-{name}"));
         let _ = fs::remove_dir_all(&directory);
@@ -1190,6 +1539,8 @@ mod tests {
 
     fn small_options() -> ScanOptions {
         ScanOptions {
+            force_reparse: false,
+            workers: 2,
             max_entries: 50,
             batch_size: 4,
             max_heading_bytes: 2 * 1024 * 1024,
@@ -1197,8 +1548,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_notes_and_images_are_indexed_and_report_metrics() {
+        let root = scratch_directory("types");
+        for name in ["note.MD", "photo.PNG", "plain.txt", "app.log", "code.rs"] {
+            fs::write(root.join(name), "# Heading\n").unwrap();
+        }
+        let mut index = Indexer::new();
+        let generation = index.restart_memory(vec![root], small_options());
+        let (snapshot, _) = run_to_completion(&index, generation);
+        assert_eq!(snapshot.entries().len(), 2);
+        assert!(
+            snapshot
+                .entries()
+                .iter()
+                .filter(|e| is_image(&e.canonical))
+                .all(|e| e.headings.is_empty())
+        );
+        let until = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(m) = index.take_metrics().pop() {
+                assert!(m.completed);
+                assert_eq!(m.files, 5);
+                assert_eq!(m.parsed, 1);
+                assert!(!m.log().contains("note"));
+                break;
+            }
+            assert!(Instant::now() < until);
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn shared_cache_rebases_parent_and_filters_legacy_types() {
+        let root = scratch_directory("shared-parent");
+        let child = root.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("note.md"), "# Heading\n").unwrap();
+        fs::write(root.join("other.md"), "# Other\n").unwrap();
+        let cache = scratch_directory("shared-store").join("shared-v2");
+        let mut index = Indexer::new();
+        let g = index.restart(vec![root], cache.clone(), small_options());
+        run_to_completion(&index, g);
+        let child = child.canonicalize().unwrap();
+        let entries = load_cache(&cache, &child).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].root, child);
+        assert_eq!(entries[0].relative, PathBuf::from("note.md"));
+    }
+
     fn kind_name(kind: &EventKind) -> String {
         match kind {
+            EventKind::InventoryComplete { .. } => "inventory".to_owned(),
             EventKind::Cached(_) => "cached".to_owned(),
             EventKind::Updated(_) => "updated".to_owned(),
             EventKind::Removed(_) => "removed".to_owned(),

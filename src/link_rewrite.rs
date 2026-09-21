@@ -187,7 +187,7 @@ mod tests {
         );
     }
     #[test]
-    fn excluded_and_ambiguous_links_remain_unchanged() {
+    fn syntax_exclusions_remain_unchanged_and_existing_relative_target_wins() {
         let source = "`[[./old.md]]` ![image](./old.md) \\[[./old.md]]\n```\n[[./old.md]]\n```\n[[old.md]] [web](https://example.com/old.md) [[unknown.md]]";
         assert_eq!(
             rewrite(
@@ -198,7 +198,7 @@ mod tests {
                 &path("new.md"),
                 &[entry("old.md"), entry("other/old.md")]
             ),
-            source
+            source.replace("[[old.md]]", "[[./new.md]]")
         );
     }
     #[test]

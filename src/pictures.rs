@@ -73,7 +73,52 @@ pub fn resolve(folder: Option<&Path>, target: &str) -> Option<PathBuf> {
     if path.is_absolute() {
         return Some(path.to_path_buf());
     }
-    Some(folder?.join(path))
+    let direct = folder.map(|f| f.join(path));
+    if direct.as_ref().is_some_and(|p| p.is_file()) {
+        return direct;
+    }
+    INDEX
+        .with(|index| {
+            if !index.borrow().2 {
+                return None;
+            }
+            let source = folder.map(|f| f.join("__source__.md"));
+            crate::workspace_links::resolve_indexed_file(
+                &decoded,
+                true,
+                source.as_deref(),
+                &index.borrow().1,
+                true,
+            )
+            .ok()
+        })
+        .or(direct)
+}
+
+thread_local! {
+    static INDEX: RefCell<(u64, std::sync::Arc<Vec<crate::workspace_index::Entry>>, bool)> = RefCell::new((0, std::sync::Arc::new(Vec::new()), false));
+}
+/// Publishes the shared view (a clone-free [`std::sync::Arc`] of the index
+/// the caller already holds) for whoever resolves an image by name. Returns
+/// whether the picture index actually changed, so a caller can skip a repaint
+/// that would redraw identical pictures.
+pub fn publish_index(
+    entries: std::sync::Arc<Vec<crate::workspace_index::Entry>>,
+    complete: bool,
+) -> bool {
+    INDEX.with(|index| {
+        let mut current = index.borrow_mut();
+        if *current.1 == *entries && current.2 == complete {
+            return false;
+        }
+        current.0 = current.0.wrapping_add(1);
+        current.1 = entries;
+        current.2 = complete;
+        true
+    })
+}
+pub fn index_revision() -> u64 {
+    INDEX.with(|i| i.borrow().0)
 }
 
 /// 絵を読む。前に読んだものと更新時刻・長さが同じなら、読み直さない。
@@ -174,6 +219,52 @@ pub fn resized(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_index_publication_resolves_names_and_scope_switch_invalidates_them() {
+        let root = std::env::temp_dir().join(format!(
+            "rfn-image-index-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        let mut bmp = b"BM".to_vec();
+        bmp.extend(70u32.to_le_bytes());
+        bmp.extend([0; 4]);
+        bmp.extend(54u32.to_le_bytes());
+        bmp.extend(40u32.to_le_bytes());
+        bmp.extend(2i32.to_le_bytes());
+        bmp.extend(2i32.to_le_bytes());
+        bmp.extend(1u16.to_le_bytes());
+        bmp.extend(24u16.to_le_bytes());
+        bmp.extend([0; 24]);
+        bmp.extend([0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0]);
+        let path = root.join("assets/picture.bmp");
+        std::fs::write(&path, bmp).unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        let entry =
+            crate::workspace_index::read_entry(&path, std::slice::from_ref(&canonical_root))
+                .unwrap();
+        let folder = root.join("notes");
+        publish_index(std::sync::Arc::new(vec![entry.clone()]), false);
+        assert!(load(&resolve(Some(&folder), "picture.bmp").unwrap()).is_none());
+        let before = index_revision();
+        publish_index(std::sync::Arc::new(vec![entry.clone()]), true);
+        assert_ne!(index_revision(), before);
+        assert_eq!(
+            resolve(Some(&folder), "picture.bmp"),
+            Some(entry.canonical.clone())
+        );
+        let picture =
+            load(&entry.canonical).expect("indexed BMP decodes using the normal renderer");
+        assert_eq!((picture.width, picture.height), (2, 2));
+        publish_index(std::sync::Arc::new(Vec::new()), false);
+        assert!(load(&resolve(Some(&folder), "picture.bmp").unwrap()).is_none());
+    }
 
     #[test]
     fn a_relative_target_is_read_from_the_document_folder() {

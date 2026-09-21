@@ -271,7 +271,7 @@ fn image_of(pixels: &[u8], width: u32, height: u32) -> Image {
 /// 文書を紙の寸法で組む。
 fn lay_out(
     window: &AppWindow,
-    live: &Live,
+    _live: &Live,
     document: &OpenDocument,
     mode: WritingMode,
     paper: Paper,
@@ -291,7 +291,12 @@ fn lay_out(
         // **編集行の原文表示はしない**（活性行は`None`）。紙に出るのは、どの行も
         // 組まれた姿である——原文が見たいときは画面で見る。
         preview.refresh(&source, None, reading);
-        let folder = live.folder.borrow().root.clone();
+        let folder = document
+            .file
+            .borrow()
+            .path()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf);
         preview.size_images(|image| {
             let picture = pictures::load(&pictures::resolve(folder.as_deref(), image.target)?)?;
             // 絵は紙の寸法で入れる。**画面の拡大率は紙には効かない**——拡大は読む

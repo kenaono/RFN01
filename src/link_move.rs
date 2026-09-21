@@ -111,10 +111,22 @@ fn plan(
         }
         let current = path.canonicalize().unwrap_or_else(|_| path.clone());
         let before = file_tree::moved_path(to, from, &current).unwrap_or(current);
+        // Every moved file becomes an entry, whatever its type. The index
+        // itself keeps only notes and images, but a link to a `.pdf` or
+        // `.txt` still has to follow that file when it is renamed or moved
+        // (2026-09-21). Resolving those entries is `resolve_indexed_file`'s
+        // job; the entries here are what it resolves against.
+        let root = roots
+            .iter()
+            .filter(|r| before.starts_with(r))
+            .max_by_key(|r| r.components().count())
+            .cloned()
+            .unwrap_or_default();
+        let relative = before.strip_prefix(&root).unwrap_or(&before).to_path_buf();
         let fingerprint = file_io::FileStamp::read(path).map_err(|error| error.to_string())?;
         entries.push(workspace_index::Entry {
-            root: roots.first().cloned().unwrap_or_default(),
-            relative: before.clone(),
+            root,
+            relative,
             canonical: before,
             fingerprint,
             headings: Vec::new(),
