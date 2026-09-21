@@ -133,11 +133,29 @@ impl Chrome {
 /// rectangle is set with it. The place keeps the outer position and the client
 /// size, so the frame goes back on and the client the writer left is what comes
 /// back — on whatever monitor's DPI the window landed on.
+/// この状態の窓に、覚えていた位置と大きさを入れてよいか（RFN01-45）。
+///
+/// **最大化中・最小化中は入れない。**ここで入れるのは「元の大きさ」であり、
+/// Windowsはそれを自分で持っている。状態と矩形は別のものなので、最大化された窓へ
+/// 入れ直すと「状態は最大化、大きさは通常」の食い違いになり、元の大きさへ戻すと
+/// さらに小さくなる。
+fn wants_place(zoomed: bool, iconic: bool) -> bool {
+    !zoomed && !iconic
+}
+
 pub fn restore_place(hwnd: HWND, place: Option<super::app_data::WindowPlace>) {
     let Some(place) = place else {
         return;
     };
     unsafe {
+        // **最大化・最小化のときは触らない**（RFN01-45）。ここが入れるのは
+        // **元の大きさと位置**で、Windowsはそれを自分でも持っている。状態と矩形は
+        // 別のものなので、最大化された窓へ入れ直すと「状態は最大化、大きさは通常」
+        // という食い違いになる（キャプションは「元の大きさに戻す」の絵なのに、
+        // 実際は通常の大きさ、そして戻すとさらに小さくなる）。
+        if !wants_place(IsZoomed(hwnd).as_bool(), IsIconic(hwnd).as_bool()) {
+            return;
+        }
         let mut outer = RECT::default();
         let mut client = RECT::default();
         if GetWindowRect(hwnd, &mut outer).is_err() || GetClientRect(hwnd, &mut client).is_err() {
@@ -390,6 +408,16 @@ unsafe extern "system" fn frame_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFN01-45: **最大化中・最小化中の窓には、覚えていた大きさを入れない。**
+    /// 入れるのは「元の大きさ」で、Windowsがそれを自分で持っている。
+    #[test]
+    fn a_maximized_window_keeps_its_own_place() {
+        assert!(wants_place(false, false), "通常の窓には入れる");
+        assert!(!wants_place(true, false), "最大化中は入れない");
+        assert!(!wants_place(false, true), "最小化中は入れない");
+    }
+
     #[test]
     fn menus_do_not_drag_and_caption_buttons_do_not_run_commands() {
         assert_eq!(title_hit(16., 18., 640., 36.), HTCLIENT);
