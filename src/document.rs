@@ -1712,10 +1712,18 @@ pub fn insert_edit(
         return None;
     }
     let (text, after) = match what {
-        InsertEdit::MarkdownLink => (
-            format!("[{picked}]()"),
-            "[".len() + picked.len() + "](".len(),
-        ),
+        InsertEdit::MarkdownLink => {
+            let text = format!("[{picked}]()");
+            // **未選択なら表示名の欄**（`[`と`]`の間）へ。選んでいればリンク先の欄へ
+            // ——表示名はもう入っているので、次に書くのは宛先である（書き手の確認
+            // 2026-09-21、1.1の指摘）。
+            let after = if picked.is_empty() {
+                "[".len()
+            } else {
+                "[".len() + picked.len() + "](".len()
+            };
+            (text, after)
+        }
         InsertEdit::WikiLink => (format!("[[{picked}]]"), "[[".len() + picked.len()),
         InsertEdit::WikiLinkAlias => (format!("[[|{picked}]]"), "[[".len()),
         InsertEdit::Ruby => {
@@ -5946,15 +5954,14 @@ mod tests {
         Some((next, chosen.0))
     }
 
-    /// RFN01-38: **未選択ならリンク先から書く。**`](`の後ろに立つので、既存の
-    /// リンク先補完がそのまま出る（書き手の選択 2026-09-21）。
+    /// RFN01-38: **未選択なら表示名から書く**（書き手の確認 2026-09-21、1.1の指摘）。
     #[test]
-    fn a_link_written_from_nothing_starts_at_its_target() {
+    fn a_link_written_from_nothing_starts_at_its_name() {
         let (next, caret) = inserted("前後", (3, 3), InsertEdit::MarkdownLink).expect("入る");
 
         assert_eq!(next, "前[]()後");
-        // `[`の直後ではなく`(`の直後——次に打つのはリンク先である。
-        assert_eq!(caret, "前[".len() + "](".len());
+        // **`[`と`]`の間**——次に打つのは表示名である。
+        assert_eq!(&next[caret..], "]()後");
     }
 
     /// RFN01-38: **選んだ字は表示名になり、キャレットはリンク先へ。**
