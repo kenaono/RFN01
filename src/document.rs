@@ -1718,7 +1718,18 @@ pub fn insert_edit(
         ),
         InsertEdit::WikiLink => (format!("[[{picked}]]"), "[[".len() + picked.len()),
         InsertEdit::WikiLinkAlias => (format!("[[|{picked}]]"), "[[".len()),
-        InsertEdit::Ruby => (format!("｜{picked}《》"), "｜".len() + picked.len()),
+        InsertEdit::Ruby => {
+            let text = format!("｜{picked}《》");
+            // **選んだ字があれば、キャレットは読みの欄**（`《`と`》`の間）へ。無ければ
+            // 親文字の欄（`｜`の直後）へ——次に打つのは、そこに書く字である
+            // （書き手の確認 2026-09-21）。
+            let after = if picked.is_empty() {
+                "｜".len()
+            } else {
+                "｜".len() + picked.len() + "《".len()
+            };
+            (text, after)
+        }
         InsertEdit::SideNote => {
             let note = side_note_of(picked);
             // キャレットは空けた欄の中——次に打つのは左に出す字である。
@@ -1727,8 +1738,8 @@ pub fn insert_edit(
         }
         InsertEdit::RubyWithSideNote => {
             let text = format!("｜{picked}《》{}", side_note_of(picked));
-            // キャレットは読みの欄——次に打つのは読みである。
-            (text, "｜".len() + picked.len())
+            // キャレットは読みの欄（`《`と`》`の間）——次に打つのは読みである。
+            (text, "｜".len() + picked.len() + "《".len())
         }
         InsertEdit::EmphasisDots => {
             let text = format!("《《{picked}》》");
@@ -1972,7 +1983,7 @@ pub fn line_note_edit(
     let mut text = String::with_capacity(end - start);
     let mut caret_after = None;
     let mut line_start = start;
-    for (offset, line) in source[start..end].split_inclusive('\n').enumerate() {
+    for (offset, line) in block_lines(source, start, end).into_iter().enumerate() {
         let body = line.strip_suffix('\n').unwrap_or(line);
         let style = styles.get(first + offset).copied().unwrap_or_default();
         let (new_body, head_before, head_after) = reshape_head(body, style, what)?;
@@ -1981,12 +1992,18 @@ pub fn line_note_edit(
         if line.ends_with('\n') {
             text.push('\n');
         }
-        if (line_start..line_start + body.len()).contains(&caret) {
+        // **行の末尾も含める。**`..`で見ていたときは、末尾ぴったり（空行では先頭）に
+        // 立っているときに当たらず、キャレットが塊の先頭へ飛んでいた（書き手の報告
+        // 2026-09-21：「行の末尾で改行すると、キャレット位置がおかしくなる」）。
+        if (line_start..=line_start + body.len()).contains(&caret) {
             // **未選択なら、キャレットは本文の中の同じ所へ戻る**——頭が伸びた分だけ
             // 後ろへずれる。頭より前へは戻さない（書いた記号の中に立たせない）。
             let into = (caret - line_start).saturating_sub(head_before);
             let room = new_body.len() - head_after;
-            caret_after = Some(at + head_after + into.min(room));
+            // **返すのは文書の中の位置**（[`line_edit`]と同じ）——塊の中の位置を
+            // そのまま返すと、2行目より後ろで選んだときに、キャレットが文書の先頭
+            // 寄りへ飛ぶ（書き手の報告 2026-09-21）。
+            caret_after = Some(start + at + head_after + into.min(room));
         }
         line_start += line.len();
     }
@@ -2003,6 +2020,18 @@ pub fn line_note_edit(
         (caret, caret)
     };
     Some((start..end, text, chosen))
+}
+
+/// 塊の中の行。**幅0の塊も1行として数える。**
+///
+/// 文書の末尾で改行したあとの空行は、字が1つも無いので `split_inclusive` が何も
+/// 返さない——そのままでは「書き換える字が無い」ことになり、見出しも字下げも置け
+/// なかった（書き手の報告 2026-09-21）。
+fn block_lines(source: &str, start: usize, end: usize) -> Vec<&str> {
+    if start == end {
+        return vec![""];
+    }
+    source[start..end].split_inclusive('\n').collect()
 }
 
 /// この行が、行頭の体裁の注記（見出し・字下げ・地付き）を受けられる**素の本文の行**か。
@@ -5956,7 +5985,9 @@ mod tests {
 
         let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::Ruby).expect("入る");
         assert_eq!(next, "前｜東京《》後");
-        assert_eq!(caret, "前｜東京".len());
+        // **選んだ字があるときは、キャレットは読みの欄**（`《`と`》`の間）
+        // ——書き手の確認 2026-09-21。
+        assert_eq!(caret, "前｜東京《".len());
     }
 
     /// RFN01-38: **選択の向きは結果を変えない。**逆向きに引いても同じ字が同じ形に
@@ -6166,6 +6197,31 @@ mod tests {
         assert_eq!(chosen.0, "## ".len() + at);
     }
 
+    /// 書き手の報告 2026-09-21: **行の末尾で改行しくらべ、その空行で見出しを選ぶと、
+    /// キャレットが塊の先頭へ飛んでいた。**末尾ぴったり（空行では先頭）も、その行の
+    /// ものとして扱う。
+    #[test]
+    fn a_caret_at_the_end_of_a_line_stays_at_the_end() {
+        let source = "TEST［＃「TEST」に白丸傍点］\n";
+        let end = source.len() - 1;
+        let (_, text, chosen) =
+            line_note_edit(source, end, end, LineNoteEdit::Heading(2), Reading::all())
+                .expect("付く");
+
+        assert_eq!(text, "## TEST［＃「TEST」に白丸傍点］\n");
+        // **キャレットは本文の終わり**——塊の先頭へは飛ばない。
+        assert_eq!(chosen.0, chosen.1);
+        assert_eq!(chosen.0, "## ".len() + end);
+
+        // **空行では、記号の後ろ**——次に打つのは見出しの本文である。
+        let (_, text, chosen) =
+            line_note_edit("本文\n", 7, 7, LineNoteEdit::Heading(2), Reading::all()).expect("付く");
+        // 幅0の塊を置き換えるので、返る字は記号だけである（文書は「本文\n## 」になる）。
+        assert_eq!(text, "## ");
+        assert_eq!(chosen.0, chosen.1);
+        assert_eq!(chosen.0, "本文\n## ".len());
+    }
+
     /// RFN01-38: **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）。
     #[test]
     fn an_indent_inside_a_range_is_left_alone() {
@@ -6298,7 +6354,8 @@ mod tests {
             inserted("前東京後", (3, 9), InsertEdit::RubyWithSideNote).expect("入る");
 
         assert_eq!(next, "前｜東京《》［＃「東京」の左に「」の注記］後");
-        assert_eq!(&next[caret..], "《》［＃「東京」の左に「」の注記］後");
+        // こちらも読みの欄に立つ（書き手の確認 2026-09-21）。
+        assert_eq!(&next[caret..], "》［＃「東京」の左に「」の注記］後");
 
         // 読みを書けば、両方の記法が読まれる。
         assert_eq!(
