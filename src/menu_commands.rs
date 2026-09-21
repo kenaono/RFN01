@@ -125,6 +125,46 @@ impl Drop for Popup {
     }
 }
 
+/// タイトルバーの分類の数（File / Edit / Insert / Layout / View / Run / Help）。
+/// **画面の並びと1対1**である（`title-menu-bar.slint`の並び）。
+const MENU_GROUPS: i32 = 7;
+
+/// 押せる末端の行が1つでもあるか（RFN01-38）。
+fn any_enabled(menu: HMENU) -> bool {
+    let count = unsafe { GetMenuItemCount(Some(menu)) };
+    if count <= 0 {
+        return false;
+    }
+    for index in 0..count {
+        let mut item = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STATE | MIIM_SUBMENU,
+            ..Default::default()
+        };
+        if unsafe { GetMenuItemInfoW(menu, index as u32, true, &mut item) }.is_err() {
+            continue;
+        }
+        if !item.hSubMenu.0.is_null() {
+            if any_enabled(item.hSubMenu) {
+                return true;
+            }
+        } else if item.fState.0 & MFS_DISABLED.0 == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// この分類を開けるか（RFN01-38）。**子が全部無効なら親も無効**——書き手の決定
+/// 2026-09-21。タイトルバーの分類を灰色にするために、本文を見て答える。
+pub fn menu_opens(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>, group: i32) -> bool {
+    let target = Target::capture(window, live);
+    match build(window, live, kills, &target, group) {
+        Ok(Some((root, _))) => any_enabled(root.handle),
+        _ => false,
+    }
+}
+
 /// メニューの1行を足す。**番号は押されたときの言い方**——`commands`の並びが
 /// そのままIDになり、`execute`が同じ並びで読み返す。既定のキーがあれば行に併記する。
 #[allow(clippy::too_many_arguments)]
@@ -426,11 +466,22 @@ impl Target {
 
 pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
     let weak = window.as_weak();
+    let open_live = live.clone();
+    let open_kills = kills.clone();
     window.global::<MenuInput>().on_open_menu(move || {
         if let Some(window) = weak.upgrade() {
             if window.get_question_open() || window.get_print_active() || window.get_diff_active() {
                 return;
             }
+            // **開ける分類だけを生かす。**子が全部無効な分類は灰色にして、押しても
+            // 開かない（書き手の決定 2026-09-21）——開いて「全部押せない」を見せるより、
+            // 入口で分かるほうがよい。
+            let openable: Vec<bool> = (0..MENU_GROUPS)
+                .map(|group| menu_opens(&window, &open_live, &open_kills, group))
+                .collect();
+            window.set_title_menu_openable(slint::ModelRc::from(std::rc::Rc::new(
+                slint::VecModel::from(openable),
+            )));
             window.set_title_menu_visible(true);
             window.set_title_menu_active(0);
             window.set_title_menu_focus_generation(window.get_title_menu_focus_generation() + 1);
@@ -529,13 +580,17 @@ fn queue_group(
     });
 }
 
-fn show(
+/// 分類のメニューを組み立てる（RFN01-38）。
+///
+/// **出す前に、押せる行があるかを見るのにも使う**——子が全部無効なら親も無効に
+/// するためである（書き手の決定 2026-09-21）。
+fn build(
     window: &AppWindow,
     live: &Live,
     kills: &Rc<RefCell<Kills>>,
     t: &Target,
     group: i32,
-) -> windows::core::Result<Option<i32>> {
+) -> windows::core::Result<Option<(Popup, Vec<Command>)>> {
     let root = Popup::new()?;
     let mut commands = Vec::new();
     let screen = t.id.screen(window);
@@ -1298,6 +1353,20 @@ fn show(
         }
         _ => return Ok(None),
     }
+    Ok(Some((root, commands)))
+}
+
+/// 分類のメニューを出す（RFN01-38）。
+fn show(
+    window: &AppWindow,
+    live: &Live,
+    kills: &Rc<RefCell<Kills>>,
+    t: &Target,
+    group: i32,
+) -> windows::core::Result<Option<i32>> {
+    let Some((root, commands)) = build(window, live, kills, t, group)? else {
+        return Ok(None);
+    };
     let Some(hwnd) = window_chrome::window_handle(window) else {
         window.tell(
             pick(
@@ -2011,5 +2080,19 @@ mod tests {
             .clear();
         panel_source::sync(&h.window, &h.live);
         assert!(!target.valid(&h.window, &h.live));
+    }
+
+    /// RFN01-38: **子が全部無効なら親も無効**（書き手の決定 2026-09-21）。
+    /// 本文に書けるTabでは「挿入」が開き、まだ何も実行しないHelpは開かない。
+    #[test]
+    fn a_category_with_nothing_to_pick_does_not_open() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let kills = Rc::new(RefCell::new(Kills::default()));
+
+        assert!(menu_opens(&h.window, &h.live, &kills, 2), "挿入は開く");
+        assert!(
+            !menu_opens(&h.window, &h.live, &kills, 6),
+            "Helpは押せる行が無い（未実装だけ）"
+        );
     }
 }

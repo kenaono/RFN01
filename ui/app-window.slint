@@ -136,6 +136,9 @@ export component AppWindow inherits Window {
     in-out property <int> title-menu-focus-generation: 0;
     in-out property <int> title-menu-active: 0;
     in-out property <bool> title-menu-open: false;
+    /// 分類ごとに開けるか（RFN01-38）。**子が全部無効なら親も無効**——書き手の
+    /// 決定 2026-09-21。開けるかどうかはRustが本文を見て決めるので、ここは置き場。
+    in-out property <[bool]> title-menu-openable: [true, true, true, true, true, true, true];
     callback title-menu-visibility(bool);
     in-out property <int> menu-pane: -1;
     in-out property <int> menu-action: 0;
@@ -1194,6 +1197,7 @@ export component AppWindow inherits Window {
         focus-generation: root.title-menu-focus-generation;
         selected <=> root.title-menu-active;
         popup-open: root.title-menu-open;
+        openable: root.title-menu-openable;
         requested(index) => { root.title-menu-requested(index); }
         dismissed => { root.title-menu-dismissed(); }
         toggled => {
