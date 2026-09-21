@@ -319,7 +319,13 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
     let folder = live.folder.borrow().explorer_location();
     app_data::Session {
         layout: live.layout.borrow().encode(),
-        place: window_place(window),
+        // **最大化中は「元の大きさ」を持っていない**（[`window_place`]が`None`を返す）。
+        // そのときは**前に書いてあった大きさを残す**（RFN01-45）——ここで`None`を書くと、
+        // 最大化のまま終了しただけで覚えていた大きさが消え、次の起動は既定の小さな
+        // 大きさで出る（そして「元の大きさに戻す」と、いよいよ小さくなる）。
+        place: window_place(window).or_else(|| {
+            app_data::read_session(&app_data::app_directory()?).and_then(|old| old.place)
+        }),
         maximized: window.window().is_maximized(),
         focused: {
             let id = focused_pane(window);

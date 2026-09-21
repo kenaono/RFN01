@@ -1617,6 +1617,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // through winit's frame arithmetic, which adds the caption this chrome paints
     // over (RFN01-40). The native pass puts the client back exactly.
     let saved_place = session.as_ref().and_then(|session| session.place);
+    let saved_maximized = session.as_ref().is_some_and(|session| session.maximized);
     let (tabs, arrangement) = open_session(&window, session, restored);
     let opening = tabs
         .of(focused_pane(&window))
@@ -3700,6 +3701,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     // 要件 8.5（RFN01-40）: now that there is a window to measure,
                     // put the remembered place on it in Windows' own numbers.
                     window_chrome::restore_place(hwnd, saved_place);
+                    // **最大化はここでもう一度頼む**（RFN01-45）。窓が出る前の指示は
+                    // 「最大化している」という状態だけを立て、実際の大きさが付いて
+                    // こないことがある——書き手の報告では、状態は最大化なのに大きさは
+                    // 通常のままで、元の大きさへ戻すとさらに小さくなっていた。
+                    if saved_maximized {
+                        window.window().set_maximized(true);
+                    }
                 }
                 Err(error) => window.tell(
                     say!(
