@@ -1,3 +1,4 @@
+use crate::menu_commands::ShortcutAction;
 use crate::{AppWindow, Live, ShortcutItem};
 use slint::{ComponentHandle, ModelRc, VecModel};
 /// 操作名：日本語と英語（追加要件 2026-09-15、表示の国際化）。
@@ -115,7 +116,7 @@ const CATEGORIES: &[i32] = &[
 ];
 /// Keys の面の分類（書き手の求め 2026-09-15：タブで切り替えず、全部を並べて
 /// 分類ごとに畳めるように）。番号は[`CATEGORIES`]の値。
-const CATEGORY_NAMES: [(&str, &str); 7] = [
+const CATEGORY_NAMES: [(&str, &str); 9] = [
     ("本文の操作", "Text Actions"),
     ("基本編集", "Basic Editing"),
     ("Terminal", "Terminal"),
@@ -123,8 +124,10 @@ const CATEGORY_NAMES: [(&str, &str); 7] = [
     ("Pane・TAB", "Panes & Tabs"),
     ("Emacs", "Emacs"),
     ("Quick Draft", "Quick Draft"),
+    ("ファイル", "File"),
+    ("挿入", "Insert"),
 ];
-const CATEGORY_NOTES: [(&str, &str); 7] = [
+const CATEGORY_NOTES: [(&str, &str); 9] = [
     (
         "本文にフォーカスがあり、IME変換中でないときに有効です。",
         "Active when the text has focus and no IME conversion is in progress.",
@@ -152,6 +155,14 @@ const CATEGORY_NOTES: [(&str, &str); 7] = [
     (
         "本文から開く操作と、Quick Draft内の操作を区別します。",
         "Tells opening from the text apart from actions inside Quick Draft.",
+    ),
+    (
+        "メニューの「ファイル」と同じ操作です。既定では割り当てていません。",
+        "The same actions as the File menu. Nothing is assigned to most of them by default.",
+    ),
+    (
+        "メニューの「挿入」と同じ操作です。選んだ字が要る形は、選んでいないときは何もしません。",
+        "The same actions as the Insert menu. A form that needs a picked word does nothing when nothing is picked.",
     ),
 ];
 /// 変えられないキー。**同じ一覧に並べる**——「このキーは何か」を探す書き手に
@@ -195,24 +206,324 @@ fn shown((japanese, english): (&'static str, &'static str)) -> &'static str {
 /// **検索（4）は通す**（書き手の報告 2026-09-15：設定TABでCtrl+Fが効かない）。設定のTABでは
 /// 検索欄が「設定を探す」欄になり、代役の文書は探さない。
 const SETTINGS_PASS: &[i32] = &[0, 3, 4, 7, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20];
+/// 設定のTABが前にあるときに通す操作か（追加要件 2026-09-14、RFN01-18で拡張）。
+///
+/// 既存の46枠は[`SETTINGS_PASS`]のまま。**メニューから来た分は、新しいTABを
+/// 作るものだけ通す**——挿入は代役の空文書へ入ってしまうので通さない。
+fn passes_settings(command: i32) -> bool {
+    let Ok(id) = usize::try_from(command) else {
+        return false;
+    };
+    if id < NAMES.len() {
+        return SETTINGS_PASS.contains(&command);
+    }
+    matches!(
+        menu_at(id).map(|(action, _)| action.action),
+        Some(
+            ShortcutAction::NewFile | ShortcutAction::NewTerminal | ShortcutAction::FolderTerminal
+        )
+    )
+}
 const SCOPES: &[i32] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0,
 ];
+/// メニューから来た操作（RFN01-18）。**`NAMES`の後ろへ続く**——並びの位置が
+/// そのままidなので、既存の46枠を動かさないよう末尾へだけ足す。
+///
+/// **名前はメニューの文言と同じ**にする。設定画面で探す書き手が見るのは、どちらも
+/// メニューの言葉である。**既定は空（未設定）**で、キーは書き手が決める。
+struct MenuAction {
+    ja: &'static str,
+    en: &'static str,
+    /// 既定のキー。**空は「まだ決めていない」**（`DEFAULTS`の空と同じ意味）。
+    default: &'static str,
+    action: ShortcutAction,
+}
+/// 既定を持たない操作を並べるための短い書き方。
+macro_rules! menu_action {
+    ($ja:expr, $en:expr, $action:expr) => {
+        MenuAction {
+            ja: $ja,
+            en: $en,
+            default: "",
+            action: $action,
+        }
+    };
+    // 既定を持つもの（いまは新規文書の`Ctrl+N`だけ）。
+    ($ja:expr, $en:expr, $default:expr, $action:expr) => {
+        MenuAction {
+            ja: $ja,
+            en: $en,
+            default: $default,
+            action: $action,
+        }
+    };
+}
+/// メニューから来た操作の分類。`CATEGORY_NAMES`の番号。
+const FILE_CATEGORY: i32 = 7;
+const INSERT_CATEGORY: i32 = 8;
+/// ファイルの分類に並べる、メニューから来た操作。
+///
+/// **新規文書だけは既定を持つ**（`Ctrl+N`、書き手の合意 2026-09-21）——Windowsの
+/// 慣例どおりのキーで、どこも使っていない。
+const FILE_ACTIONS: &[MenuAction] = &[
+    menu_action!("新規文書", "New File", "Ctrl+N", ShortcutAction::NewFile),
+    menu_action!(
+        "新しいTerminal",
+        "New Terminal",
+        ShortcutAction::NewTerminal
+    ),
+    menu_action!(
+        "文書のフォルダでTerminal起動",
+        "Terminal in Document Folder",
+        ShortcutAction::FolderTerminal
+    ),
+];
+/// 挿入の分類に並べる、メニューから来た操作。
+///
+/// **`document::INSERT_EDITS`と`document::LINE_NOTE_EDITS`の並びそのもの**である
+/// ——番号が挿入の番号なので、間へ入れず末尾へだけ足す。
+const INSERT_ACTIONS: &[MenuAction] = &[
+    // リンク・ルビ・注記
+    menu_action!("Markdownリンク", "Markdown Link", ShortcutAction::Insert(0)),
+    menu_action!("Wikiリンク", "Wiki Link", ShortcutAction::Insert(1)),
+    menu_action!(
+        "別名付きWikiリンク",
+        "Wiki Link with Alias",
+        ShortcutAction::Insert(2)
+    ),
+    menu_action!("ルビ", "Ruby", ShortcutAction::Insert(3)),
+    menu_action!(
+        "左側の注記",
+        "Left-side Annotation",
+        ShortcutAction::Insert(4)
+    ),
+    menu_action!(
+        "ルビと左側の注記",
+        "Ruby and Left-side Annotation",
+        ShortcutAction::Insert(5)
+    ),
+    // 傍点
+    menu_action!("傍点", "Emphasis Dots", ShortcutAction::Insert(6)),
+    menu_action!("ゴマ傍点", "Sesame Dots", ShortcutAction::Insert(7)),
+    menu_action!("丸傍点", "Round Dots", ShortcutAction::Insert(8)),
+    menu_action!("白丸傍点", "White Round Dots", ShortcutAction::Insert(9)),
+    menu_action!(
+        "二重丸傍点",
+        "Double Round Dots",
+        ShortcutAction::Insert(10)
+    ),
+    menu_action!("×傍点", "Cross Dots", ShortcutAction::Insert(11)),
+    // 傍線
+    menu_action!("傍線", "Single Line", ShortcutAction::Insert(12)),
+    menu_action!("二重傍線", "Double Line", ShortcutAction::Insert(13)),
+    menu_action!("波線", "Wavy Line", ShortcutAction::Insert(14)),
+    menu_action!("鎖線", "Chain Line", ShortcutAction::Insert(15)),
+    menu_action!("破線", "Dashed Line", ShortcutAction::Insert(16)),
+    // 文字注記
+    menu_action!("縦中横", "Tate-chu-yoko", ShortcutAction::Insert(17)),
+    menu_action!("割り注", "Warichu", ShortcutAction::Insert(18)),
+    menu_action!("小さな文字", "Small Text", ShortcutAction::Insert(19)),
+    menu_action!("大きな文字", "Large Text", ShortcutAction::Insert(20)),
+    // 見出し
+    menu_action!("見出し 1", "Heading 1", ShortcutAction::Insert(21)),
+    menu_action!("見出し 2", "Heading 2", ShortcutAction::Insert(22)),
+    menu_action!("見出し 3", "Heading 3", ShortcutAction::Insert(23)),
+    menu_action!("見出し 4", "Heading 4", ShortcutAction::Insert(24)),
+    menu_action!("見出し 5", "Heading 5", ShortcutAction::Insert(25)),
+    menu_action!("見出し 6", "Heading 6", ShortcutAction::Insert(26)),
+    menu_action!("見出しを解除", "Remove Heading", ShortcutAction::Insert(27)),
+    // 字下げ
+    menu_action!("1字下げ", "Indent 1 Characters", ShortcutAction::Insert(28)),
+    menu_action!("2字下げ", "Indent 2 Characters", ShortcutAction::Insert(29)),
+    menu_action!("3字下げ", "Indent 3 Characters", ShortcutAction::Insert(30)),
+    menu_action!("4字下げ", "Indent 4 Characters", ShortcutAction::Insert(31)),
+    menu_action!("字下げを解除", "Remove Indent", ShortcutAction::Insert(32)),
+    // 地付き
+    menu_action!("地付き", "Align to End", ShortcutAction::Insert(33)),
+    menu_action!(
+        "地から1字上げ",
+        "1 Characters from End",
+        ShortcutAction::Insert(34)
+    ),
+    menu_action!(
+        "地から2字上げ",
+        "2 Characters from End",
+        ShortcutAction::Insert(35)
+    ),
+    menu_action!(
+        "地から3字上げ",
+        "3 Characters from End",
+        ShortcutAction::Insert(36)
+    ),
+    menu_action!(
+        "地から4字上げ",
+        "4 Characters from End",
+        ShortcutAction::Insert(37)
+    ),
+    menu_action!(
+        "地付きを解除",
+        "Remove End Alignment",
+        ShortcutAction::Insert(38)
+    ),
+    // 改ページ
+    menu_action!("改ページ", "Page Break", ShortcutAction::Insert(39)),
+    // 箇条書き（`document::BULLET_MARKS`の並び）
+    menu_action!("箇条書き -", "Bullet List -", ShortcutAction::Bullets(0)),
+    menu_action!("箇条書き *", "Bullet List *", ShortcutAction::Bullets(1)),
+    menu_action!("箇条書き +", "Bullet List +", ShortcutAction::Bullets(2)),
+    menu_action!(
+        "番号付きリスト",
+        "Numbered List",
+        ShortcutAction::NumberedList
+    ),
+    menu_action!("番号を振り直す", "Renumber", ShortcutAction::Renumber),
+];
+/// 変更できる操作の数——既存の46枠と、メニューから来た分。
+fn count() -> usize {
+    NAMES.len() + FILE_ACTIONS.len() + INSERT_ACTIONS.len()
+}
+/// idがメニューから来たものなら、その1つと分類の番号。
+fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
+    let index = id.checked_sub(NAMES.len())?;
+    FILE_ACTIONS
+        .get(index)
+        .map(|action| (action, FILE_CATEGORY))
+        .or_else(|| {
+            INSERT_ACTIONS
+                .get(index - FILE_ACTIONS.len())
+                .map(|action| (action, INSERT_CATEGORY))
+        })
+}
+fn name_at(id: usize) -> (&'static str, &'static str) {
+    match menu_at(id) {
+        Some((action, _)) => (action.ja, action.en),
+        None => NAMES[id],
+    }
+}
+fn default_at(id: usize) -> &'static str {
+    match menu_at(id) {
+        Some((action, _)) => action.default,
+        None => DEFAULTS[id],
+    }
+}
+fn category_at(id: usize) -> i32 {
+    match menu_at(id) {
+        Some((_, category)) => category,
+        None => CATEGORIES[id],
+    }
+}
+fn scope_at(id: usize) -> i32 {
+    match menu_at(id) {
+        // **メニューの操作は本文の場面**——メニューも本文から開く。
+        Some(_) => 0,
+        None => SCOPES[id],
+    }
+}
+/// 割り当てられない組み合わせ。
+///
+/// **固定の基本編集**（要件 11.1）と、**窓とアプリが先に使う鍵**——`F3`／
+/// `Shift+F3`は本文の「次／前の一致」（要件 11.2）、`Alt+Tab`などは窓が先に取る。
+const TAKEN: &[&str] = &[
+    "Ctrl+C",
+    "Ctrl+X",
+    "Ctrl+V",
+    "Ctrl+A",
+    "Ctrl+Shift+C",
+    "Alt+Tab",
+    "Alt+Shift+Tab",
+    "Alt+F4",
+    "Alt+Space",
+    "F3",
+    "Shift+F3",
+];
+/// 綴りから、キー1つ分の名前にする。**綴りは`chord`と揃える。**
+fn key_token(token: &str) -> Option<String> {
+    let upper = token.trim().to_ascii_uppercase();
+    if upper.len() == 1 && upper.as_bytes()[0].is_ascii_alphanumeric() {
+        return Some(upper);
+    }
+    if let Some(number) = upper.strip_prefix('F')
+        && let Ok(number) = number.parse::<u8>()
+        && (1..=12).contains(&number)
+    {
+        return Some(format!("F{number}"));
+    }
+    let named = match upper.as_str() {
+        "TAB" => "Tab",
+        "SPACE" => "Space",
+        "`" => "`",
+        "LEFT" => "Left",
+        "RIGHT" => "Right",
+        "UP" => "Up",
+        "DOWN" => "Down",
+        _ => return None,
+    };
+    Some(named.to_owned())
+}
+/// F1〜F12の綴りか。**`F`1文字の鍵と混ざらないよう**、数も見る。
+fn is_function(name: &str) -> bool {
+    name.strip_prefix('F')
+        .and_then(|number| number.parse::<u8>().ok())
+        .is_some_and(|number| (1..=12).contains(&number))
+}
+/// 押された鍵がF1〜F12なら、その名前。
+///
+/// **Slintは名前付きの鍵を私用面の文字で渡す**ので、綴りではなく鍵そのもので
+/// 見分ける（[`modifier_only`]と同じ考え方）。
+fn function_key(text: &str) -> Option<&'static str> {
+    use slint::platform::Key;
+    const KEYS: [(Key, &str); 12] = [
+        (Key::F1, "F1"),
+        (Key::F2, "F2"),
+        (Key::F3, "F3"),
+        (Key::F4, "F4"),
+        (Key::F5, "F5"),
+        (Key::F6, "F6"),
+        (Key::F7, "F7"),
+        (Key::F8, "F8"),
+        (Key::F9, "F9"),
+        (Key::F10, "F10"),
+        (Key::F11, "F11"),
+        (Key::F12, "F12"),
+    ];
+    KEYS.iter().find_map(|(key, name)| {
+        let value: slint::SharedString = (*key).into();
+        (value.as_str() == text).then_some(*name)
+    })
+}
+/// 押された組み合わせが、保存する綴りになるか。
+///
+/// 取るのは**修飾キー付き**か、**F1〜F12だけ**（書き手の合意 2026-09-21）。素の
+/// 打鍵を取ると本文が打てなくなるので、`Shift`だけの`Shift+A`も同じ理由で断る。
+/// 固定の基本編集と、窓が先に取る鍵（[`TAKEN`]）も断る。
 fn normalize(value: &str) -> Option<String> {
     if value.is_empty() {
         return Some(String::new());
     }
     let upper = value.trim().to_ascii_uppercase();
-    if let Some(key) = DEFAULTS
-        .iter()
-        .find(|key| !key.is_empty() && key.to_ascii_uppercase() == upper)
-    {
-        return Some((*key).to_owned());
+    let mut parts: Vec<&str> = upper.split('+').collect();
+    let key = key_token(parts.pop()?)?;
+    let (mut control, mut alt, mut shift) = (false, false, false);
+    for part in parts {
+        match part {
+            "CTRL" if !control => control = true,
+            "ALT" if !alt => alt = true,
+            "SHIFT" if !shift => shift = true,
+            _ => return None,
+        }
     }
-    let tail = upper.strip_prefix("CTRL+ALT+")?;
-    (tail.len() == 1 && tail.as_bytes()[0].is_ascii_alphabetic())
-        .then(|| format!("Ctrl+Alt+{tail}"))
+    if !control && !alt && !is_function(&key) {
+        return None;
+    }
+    let written = format!(
+        "{}{}{}{key}",
+        if control { "Ctrl+" } else { "" },
+        if alt { "Alt+" } else { "" },
+        if shift { "Shift+" } else { "" }
+    );
+    (!TAKEN.contains(&written.as_str())).then_some(written)
 }
 fn modifier_only(text: &str) -> bool {
     use slint::platform::Key;
@@ -247,6 +558,8 @@ fn chord(text: &str, control: bool, alt: bool, shift: bool) -> Option<String> {
         value.as_str() == text
     }) {
         (*name).to_owned()
+    } else if let Some(name) = function_key(text) {
+        name.to_owned()
     } else {
         let mut chars = text.chars();
         let c = chars.next()?;
@@ -256,11 +569,12 @@ fn chord(text: &str, control: bool, alt: bool, shift: bool) -> Option<String> {
         match c {
             ' ' => "Space".to_owned(),
             '`' => "`".to_owned(),
-            _ if c.is_ascii_alphabetic() => c.to_ascii_uppercase().to_string(),
+            _ if c.is_ascii_alphanumeric() => c.to_ascii_uppercase().to_string(),
             _ => return None,
         }
     };
-    if !control && !alt {
+    // **修飾キー付きか、F1〜F12だけ**（書き手の合意 2026-09-21）。
+    if !control && !alt && !is_function(&key) {
         return None;
     }
     Some(format!(
@@ -276,10 +590,10 @@ fn conflict(keys: &[String], i: usize, key: &str) -> Option<usize> {
     }
     keys.iter()
         .enumerate()
-        .position(|(other, value)| other != i && SCOPES[other] == SCOPES[i] && value == key)
+        .position(|(other, value)| other != i && scope_at(other) == scope_at(i) && value == key)
 }
 fn bindings(raw: &str) -> Vec<String> {
-    let mut keys: Vec<_> = DEFAULTS.iter().map(|s| s.to_string()).collect();
+    let mut keys: Vec<_> = (0..count()).map(|i| default_at(i).to_string()).collect();
     for entry in raw.split(';') {
         if let Some((i, value)) = entry.split_once('=') {
             if let (Ok(i), Some(key)) = (i.parse::<usize>(), normalize(value)) {
@@ -296,7 +610,7 @@ fn bindings(raw: &str) -> Vec<String> {
         .enumerate()
         .any(|(i, k)| conflict(&keys, i, k).is_some())
     {
-        return DEFAULTS.iter().map(|s| s.to_string()).collect();
+        return (0..count()).map(|i| default_at(i).to_string()).collect();
     }
     keys
 }
@@ -321,15 +635,11 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
     if let Some(i) = bindings(raw)
         .iter()
         .enumerate()
-        .position(|(i, k)| SCOPES[i] == scope && k == &key)
+        .position(|(i, k)| scope_at(i) == scope && k == &key)
     {
         return i as i32;
     }
-    if DEFAULTS
-        .iter()
-        .enumerate()
-        .any(|(i, k)| SCOPES[i] == scope && *k == key)
-    {
+    if (0..count()).any(|i| scope_at(i) == scope && default_at(i) == key) {
         -2
     } else {
         -1
@@ -357,11 +667,9 @@ pub fn publish(app: &AppWindow) {
     let mut rows = Vec::new();
     for (category, title) in CATEGORY_NAMES.iter().enumerate() {
         let category = category as i32;
-        let changeable = NAMES
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 18 && CATEGORIES[*i] == category)
-            .map(|(i, name)| (i as i32, shown(*name), keys[i].as_str(), false));
+        let changeable = (0..count())
+            .filter(|i| *i != 18 && category_at(*i) == category)
+            .map(|i| (i as i32, shown(name_at(i)), keys[i].as_str(), false));
         let fixed = FIXED
             .iter()
             .filter(|(owner, _, _)| *owner == category)
@@ -465,8 +773,8 @@ pub fn wire(app: &AppWindow, live: &Live) {
                 ))
             } else {
                 shown((
-                    "一覧の既定キー、またはCtrl+Alt+A〜Zを押してください",
-                    "Press a default key from the list, or Ctrl+Alt+A–Z",
+                    "修飾キー付き（Ctrl／Alt／Shift）かF1〜F12を押してください",
+                    "Press a key with Ctrl, Alt or Shift, or one of F1–F12",
                 ))
             }
             .into(),
@@ -479,19 +787,19 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return;
         };
         let i = app.get_shortcut_selected() as usize;
-        if i >= NAMES.len() {
+        if i >= count() {
             return;
         }
         let typed = if reset {
-            DEFAULTS[i].to_owned()
+            default_at(i).to_owned()
         } else {
             app.get_shortcut_edit().to_string()
         };
         let Some(key) = normalize(&typed) else {
             app.set_shortcut_status(
                 shown((
-                    "一覧の既定キー、またはCtrl+Alt+A〜Zを指定してください",
-                    "Use a default key from the list, or Ctrl+Alt+A–Z",
+                    "修飾キー付き（Ctrl／Alt／Shift）かF1〜F12を指定してください",
+                    "Use a key with Ctrl, Alt or Shift, or one of F1–F12",
                 ))
                 .into(),
             );
@@ -499,7 +807,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         };
         let mut keys = bindings(&app.get_shortcut_bindings());
         if let Some(other) = conflict(&keys, i, &key) {
-            let name = shown(NAMES[other]);
+            let name = shown(name_at(other));
             let told = crate::say!("{name}に割り当て済みです", "Already assigned to {name}");
             app.set_shortcut_status(told.into());
             return;
@@ -516,7 +824,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.set_shortcut_edit(key.into());
         publish(&app);
         crate::write_session(&app, &saved_live);
-        let name = shown(NAMES[i]);
+        let name = shown(name_at(i));
         let told = crate::say!("{name}の設定を保存しました", "Saved the key for {name}");
         app.set_shortcut_status(told.into());
     });
@@ -560,7 +868,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
             .of(pane)
             .current()
             .is_some_and(|tab| tab.settings);
-        if on_settings && !SETTINGS_PASS.contains(&command) {
+        if on_settings && !passes_settings(command) {
             return true;
         }
         let weak = weak.clone();
@@ -631,7 +939,14 @@ pub fn wire(app: &AppWindow, live: &Live) {
                 // 要件 7.10: 紙の形で見る。**入口は窓に一つ**なので、どの面から
                 // 押しても同じ——刷るのは前に出ている文書である。
                 45 => app.invoke_print_requested(),
-                _ => {}
+                // RFN01-18: メニューから来た操作は、メニューと同じ道で実行する
+                // （`menu_at`が`None`を返す18・38〜41番は、これまでどおり何もしない）。
+                _ => {
+                    if let Some(action) = menu_at(command as usize).map(|(action, _)| action.action)
+                    {
+                        crate::menu_commands::run_shortcut(&app, &live, action);
+                    }
+                }
             }
         });
         true
@@ -717,5 +1032,103 @@ mod tests {
         assert_eq!(resolve(settings, 0, "r", true, true, false), 42);
         assert_eq!(resolve(settings, 0, "p", true, true, false), 43);
         assert_eq!(resolve(settings, 0, "r", true, false, false), -1);
+    }
+
+    /// RFN01-18: **メニューから来た操作は、既定では何も決まっていない。**
+    /// 例外は新規文書の`Ctrl+N`だけ（書き手の合意 2026-09-21）。
+    #[test]
+    fn menu_actions_start_unassigned_except_new_file() {
+        let keys = bindings("");
+        assert_eq!(keys[NAMES.len()], "Ctrl+N");
+        assert_eq!(keys[NAMES.len() + 1], "");
+        for (id, key) in keys.iter().enumerate().skip(NAMES.len()) {
+            let expected = default_at(id);
+            assert_eq!(key, expected, "{id}");
+        }
+    }
+
+    /// 割り当てれば効き、割り当てていなければ効かない。
+    #[test]
+    fn an_assigned_menu_action_runs_and_an_unassigned_one_does_not() {
+        let new_file = NAMES.len() as i32;
+        let insert = new_file + FILE_ACTIONS.len() as i32;
+        let raw = format!("{insert}=Ctrl+Shift+U");
+        assert_eq!(resolve(&raw, 0, "u", true, false, true), insert);
+        assert_eq!(resolve("", 0, "u", true, false, true), -1);
+        // 新規文書の`Ctrl+N`は既定のまま効く。
+        assert_eq!(resolve("", 0, "n", true, false, false), new_file);
+    }
+
+    /// 挿入の番号は`document::INSERT_EDITS`と`LINE_NOTE_EDITS`の並びそのもの。
+    /// **間へ入れると番号が指す先が動く**ので、並びそのものを試験で留めておく。
+    #[test]
+    fn insert_actions_keep_the_insert_numbering() {
+        for (index, action) in INSERT_ACTIONS.iter().take(40).enumerate() {
+            assert_eq!(action.action, ShortcutAction::Insert(index as i32));
+        }
+        assert_eq!(
+            INSERT_ACTIONS[40].action,
+            ShortcutAction::Bullets(0),
+            "箇条書きは記号の並びから始まる"
+        );
+        assert_eq!(INSERT_ACTIONS[44].action, ShortcutAction::Renumber);
+        assert_eq!(INSERT_ACTIONS.len(), 45);
+    }
+
+    /// 指定できるキーは**修飾キー付きかF1〜F12**。素の打鍵と、窓・アプリが先に
+    /// 使う鍵は断る。
+    #[test]
+    fn only_modifier_keys_and_function_keys_are_accepted() {
+        for key in [
+            "Ctrl+Shift+A",
+            "Ctrl+Alt+5",
+            "Alt+Shift+F",
+            "F1",
+            "F12",
+            "Shift+F5",
+            "Ctrl+Alt+Left",
+        ] {
+            assert!(normalize(key).is_some(), "{key} was refused");
+        }
+        for key in [
+            "A",
+            "Shift+A",
+            "5",
+            "Ctrl+C",
+            "Ctrl+Shift+C",
+            "F3",
+            "Shift+F3",
+            "Alt+Tab",
+            "Alt+F4",
+            "Ctrl+Alt+Del",
+            "Ctrl+Shift+@",
+        ] {
+            assert!(normalize(key).is_none(), "{key} was accepted");
+        }
+    }
+
+    /// F1〜F12は**鍵そのもの**から読む（Slintは私用面の文字で渡す）。
+    #[test]
+    fn function_keys_are_read_from_the_key_itself() {
+        let f5: slint::SharedString = slint::platform::Key::F5.into();
+        assert_eq!(chord(&f5, false, false, false).as_deref(), Some("F5"));
+        assert_eq!(chord(&f5, true, false, false).as_deref(), Some("Ctrl+F5"));
+        let f12: slint::SharedString = slint::platform::Key::F12.into();
+        assert_eq!(
+            chord(&f12, true, true, false).as_deref(),
+            Some("Ctrl+Alt+F12")
+        );
+        // **素の字は取らない。**
+        assert!(chord("a", false, false, false).is_none());
+    }
+
+    /// 設定のTABでは、**新しいTABを作るものだけ**通す。
+    #[test]
+    fn only_new_panes_pass_the_settings_tab() {
+        assert!(passes_settings(0), "ファイルを開く");
+        assert!(passes_settings(NAMES.len() as i32), "新規文書");
+        assert!(passes_settings(NAMES.len() as i32 + 1), "新しいTerminal");
+        let insert = (NAMES.len() + FILE_ACTIONS.len()) as i32;
+        assert!(!passes_settings(insert), "挿入は代役の空文書へ入ってしまう");
     }
 }

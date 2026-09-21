@@ -70,6 +70,23 @@ enum Command {
     ZoomSet(i32),
 }
 
+/// 設定から割り当てたキーで走らせる、メニューの操作（RFN01-18）。
+///
+/// **同じ[`Command`]へ落として実行する**——入口が2つになっても、効く先は1つに
+/// 保つ。名前と並びは`shortcuts::MENU_ACTIONS`が持ち、ここは意味だけを言う。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutAction {
+    NewFile,
+    NewTerminal,
+    FolderTerminal,
+    /// 挿入メニューの番号（`document::INSERT_EDITS`から続く`Command::Insert`の番号）。
+    Insert(i32),
+    /// 箇条書きの記号（`document::BULLET_MARKS`の位置）。
+    Bullets(i32),
+    NumberedList,
+    Renumber,
+}
+
 struct Popup {
     handle: HMENU,
 }
@@ -419,13 +436,23 @@ struct Target {
 }
 impl Target {
     fn capture(window: &AppWindow, live: &Live) -> Self {
+        let field = window.global::<MenuInput>().get_target();
+        Self::with_field(window, live, field)
+    }
+    /// 設定から割り当てたキーで走らせるときの対象（RFN01-18）。
+    ///
+    /// **メニューから開いたのではない**ので、字を入れていた欄の持ち主はいない
+    /// ——`field`は0（欄ではない）から始める。
+    fn for_shortcut(window: &AppWindow, live: &Live) -> Self {
+        Self::with_field(window, live, 0)
+    }
+    fn with_field(window: &AppWindow, live: &Live, field: i32) -> Self {
         let id = focused_pane(window);
         let parent = if id.is_panel() {
             PaneId::from_index(id.screen(window).panel_owner)
         } else {
             id
         };
-        let field = window.global::<MenuInput>().get_target();
         let spot = if !id.is_panel() && field == -1 {
             TerminalSpot::Below
         } else {
@@ -1597,6 +1624,30 @@ unsafe extern "system" fn menu_filter(
         }
     }
     unsafe { CallNextHookEx(None, code, w, l) }
+}
+
+/// 設定から割り当てたキーで、メニューの操作を実行する（RFN01-18）。
+///
+/// **対象は、いまフォーカスしているPane・TAB**——メニューは開いた時点で対象を
+/// 捕まえるが、キーには捕まえる瞬間が無い。押せない条件（選んだ字が要る形など）は
+/// それぞれの実行先が同じ判定を持っているので、ここでは断らない。
+pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
+    let target = Target::for_shortcut(window, live);
+    if !target.valid(window, live) {
+        return;
+    }
+    let command = match action {
+        ShortcutAction::NewFile => Command::NewFile,
+        // **既定のシェルで開く。**シェルの一覧は設定で変わるので、キーには
+        // 特定のシェルを結び付けない（書き手の合意 2026-09-21）。
+        ShortcutAction::NewTerminal => Command::NewTerminal(window.get_default_shell()),
+        ShortcutAction::FolderTerminal => Command::FolderTerminal,
+        ShortcutAction::Insert(index) => Command::Insert(index),
+        ShortcutAction::Bullets(index) => Command::List(0, index),
+        ShortcutAction::NumberedList => Command::List(1, -1),
+        ShortcutAction::Renumber => Command::List(2, -1),
+    };
+    execute(window, live, &target, command);
 }
 
 fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
