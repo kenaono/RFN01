@@ -511,6 +511,12 @@ pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
         if window.get_title_menu_open() {
             return;
         }
+        // **押せる行が1つも無い分類は開かない**（書き手の決定 2026-09-21）。
+        // タイトルバーも同じ判定で灰色にしているが、**開くのはここ**なので、
+        // ここでも断る——見た目と実際が食い違わないように、同じ答えを使う。
+        if !menu_opens(&window, &live, &kills, group) {
+            return;
+        }
         let target = Rc::new(Target::capture(&window, &live));
         queue_group(&window, live.clone(), kills.clone(), target, group);
     });
