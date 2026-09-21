@@ -3646,9 +3646,23 @@ fn main() -> Result<(), slint::PlatformError> {
     // Winit creates its HWND only after entering the event loop.
     let chrome: Rc<RefCell<Option<Box<window_chrome::Chrome>>>> = Rc::default();
     let held = chrome.clone();
+    // **バーが出るたびに、開ける分類を決める**（RFN01-38、書き手の決定 2026-09-21）。
+    // アイコンの押下はSlintの中で`title-menu-visible`を立てるので、
+    // `MenuInput.open_menu()`を通らない——**ここが両方の道の合流点**である。
+    let weak = window.as_weak();
+    let open_live = live.clone();
+    let open_kills = kill_ring.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
             chrome.set_interactive_end(if shown { 372. } else { 36. });
+        }
+        if shown && let Some(me) = weak.upgrade() {
+            let openable: Vec<bool> = (0..menu_commands::MENU_GROUPS)
+                .map(|group| menu_commands::menu_opens(&me, &open_live, &open_kills, group))
+                .collect();
+            me.set_title_menu_openable(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                openable,
+            ))));
         }
     });
     let weak = window.as_weak();
@@ -20251,6 +20265,85 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
         return;
     };
     apply_span_edit(window, live, id, &source, region, &text, chosen, &told);
+}
+
+/// 挿入メニューのひな形を、このPaneの本文へ入れる（RFN01-38）。
+///
+/// **編集の道は1本**（[`apply_span_edit`]）なので、取り消しは1回で戻り、同じ
+/// 文書を出している別の面も付いてくる。行の操作（[`edit_lines`]／[`edit_list`]）
+/// と同じ形で、選んだ範囲をそのまま読む。
+///
+/// 番号は画面のメニューと1対1（`menu_commands`の`Command::Insert`）で、**増やす
+/// ときは末尾へ足す**——既存の番号を動かさない。
+fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
+    // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
+    answer_new_tab(window, live, id, None);
+    let index = usize::try_from(what).unwrap_or(usize::MAX);
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let (from, to) = {
+        let state = state.borrow();
+        match selection_source_range(&state) {
+            Some((start, end)) => (start, end),
+            None => {
+                let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
+                (caret, caret)
+            }
+        }
+    };
+    // **前半は字を包む形、後半は行の体裁**（`document::INSERT_EDITS` →
+    // `document::LINE_NOTE_EDITS`）。番号は画面の並びそのものである。
+    let at = index.checked_sub(document::INSERT_EDITS.len());
+    let noted = at.and_then(|at| document::LINE_NOTE_EDITS.get(at)).copied();
+    let edit = match document::INSERT_EDITS.get(index).copied() {
+        Some(what) => document::insert_edit(&source, from, to, what),
+        None => match noted {
+            Some(what) => document::line_note_edit(&source, from, to, what, reading_of(window)),
+            // **最後の1つは改ページ**（I40）。
+            None if at == Some(document::LINE_NOTE_EDITS.len()) => {
+                document::page_break_edit(&source, from, to)
+            }
+            None => return,
+        },
+    };
+    let Some((region, text, chosen)) = edit else {
+        // **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）——理由を言う。
+        if document::inside_a_note_range(&source, from.min(to))
+            && matches!(
+                noted,
+                Some(document::LineNoteEdit::Indent(_) | document::LineNoteEdit::NoIndent)
+            )
+        {
+            window.tell_tab(
+                pick(
+                    "範囲の字下げの中は付け替えられません",
+                    "Inside a range indent, this cannot be changed",
+                )
+                .into(),
+            );
+        } else {
+            // **何も起きなかったことを、ログが言う**（`edit_list`と同じ）。
+            live.cache.borrow_mut().log_diag(
+                "lines",
+                &format!(
+                    "pane={} insert={index} note={noted:?} asked={from}..{to} nothing",
+                    id.log_name()
+                ),
+            );
+        }
+        return;
+    };
+    apply_span_edit(
+        window,
+        live,
+        id,
+        &source,
+        region,
+        &text,
+        chosen,
+        &format!("Insert{index} note={noted:?} asked={from}..{to}"),
+    );
 }
 
 /// 本文のひと続きを、別の字で置き換える——1回の編集として（E3）。

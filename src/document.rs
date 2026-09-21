@@ -1577,6 +1577,647 @@ fn renumber_below(
     Some((start..end, text, chosen))
 }
 
+/// 挿入メニューのひな形（RFN01-38）。**本文へ記法を置く**もので、行の体裁を
+/// 変える[`LineEdit`]／[`ListEdit`]とは別の群である。
+///
+/// どれも「選んだ字を包む」形なので、返すのは[`line_edit`]と同じ
+/// 「置き換える範囲・そこへ入る字・そのあと選び直す範囲」。**選び直すのは
+/// キャレット1つ**——次に打つのは読みかリンク先であって、囲んだ字ではない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertEdit {
+    /// `[表示名](リンク先)`。**未選択はリンク先から書く**（書き手の選択
+    /// 2026-09-21）——`](`の後ろに立つので、既存のリンク先補完がそのまま出る。
+    MarkdownLink,
+    /// `[[リンク先]]`。選んだ字をリンク先にする（書き手の選択 2026-09-21）。
+    WikiLink,
+    /// `[[リンク先|表示名]]`。選んだ字を表示名にする（同上）。
+    WikiLinkAlias,
+    /// `｜親文字《よみ》`。選んだ字を親文字にし、読みを書く所へ立つ。**全角の
+    /// 縦線で書く**（書き手の選択 2026-09-21）——半角と縦線省略は読めるままだが、
+    /// 書き出す形は1つにする。
+    Ruby,
+    /// `本文［＃「本文」の左に「よみ」の注記］`。**選んだ字を指す**ので、字が要る。
+    SideNote,
+    /// `｜本文《よみ》［＃「本文」の左に「」の注記］`（要件 7.8の両側の注記）。
+    /// 読みを先に書き、左の注記へは書き手が自分で移る（自動で飛ばさない）。
+    RubyWithSideNote,
+    /// `《《本文》》`。囲む形なので、**字が無くても置ける**——空のひな形の中へ書く。
+    EmphasisDots,
+    /// `本文［＃「本文」にゴマ傍点］`。以下5つは選んだ字を指す参照型で、字が要る。
+    SesameDotsNote,
+    /// `本文［＃「本文」に丸傍点］`。
+    RoundDotsNote,
+    /// `本文［＃「本文」に白丸傍点］`。
+    WhiteRoundDotsNote,
+    /// `本文［＃「本文」に二重丸傍点］`。
+    DoubleRoundDotsNote,
+    /// `本文［＃「本文」に×傍点］`。
+    CrossDotsNote,
+    /// `本文［＃「本文」に傍線］`。
+    LineNote,
+    /// `本文［＃「本文」に二重傍線］`。
+    DoubleLineNote,
+    /// `本文［＃「本文」に波線］`。
+    WaveLineNote,
+    /// `本文［＃「本文」に鎖線］`。
+    ChainLineNote,
+    /// `本文［＃「本文」に破線］`。
+    DashLineNote,
+    /// `［＃縦中横］本文［＃縦中横終わり］`。開いて閉じる形なので、字は要らない。
+    Upright,
+    /// `［＃割り注］本文［＃割り注終わり］`。
+    Warichu,
+    /// `［＃小さな文字］本文［＃小さな文字終わり］`。
+    SmallText,
+    /// `［＃大きな文字］本文［＃大きな文字終わり］`。
+    LargeText,
+}
+
+impl InsertEdit {
+    /// **選んだ字を指す注記か。**同じ語を本文と注記の2か所へ書く形は、選んだ字が
+    /// 無ければ指す先が無い——だからメニューでも押せない（書き手の合意
+    /// 2026-09-21）。空のひな形を置ける形（`《《》》`と範囲の注記）はここに居ない。
+    pub fn needs_a_picked_word(self) -> bool {
+        matches!(
+            self,
+            Self::SideNote
+                | Self::RubyWithSideNote
+                | Self::SesameDotsNote
+                | Self::RoundDotsNote
+                | Self::WhiteRoundDotsNote
+                | Self::DoubleRoundDotsNote
+                | Self::CrossDotsNote
+                | Self::LineNote
+                | Self::DoubleLineNote
+                | Self::WaveLineNote
+                | Self::ChainLineNote
+                | Self::DashLineNote
+        )
+    }
+}
+
+/// 挿入メニューの並び（RFN01-38）。**画面の並びそのもの**である——`Command::Insert(n)`
+/// の番号はこの並びの位置で、`insert_in_pane`もここから引く。**増やすときは末尾へ
+/// 足す**：間へ入れると、番号が指す先が動く。
+pub const INSERT_EDITS: [InsertEdit; 21] = [
+    InsertEdit::MarkdownLink,
+    InsertEdit::WikiLink,
+    InsertEdit::WikiLinkAlias,
+    InsertEdit::Ruby,
+    InsertEdit::SideNote,
+    InsertEdit::RubyWithSideNote,
+    InsertEdit::EmphasisDots,
+    InsertEdit::SesameDotsNote,
+    InsertEdit::RoundDotsNote,
+    InsertEdit::WhiteRoundDotsNote,
+    InsertEdit::DoubleRoundDotsNote,
+    InsertEdit::CrossDotsNote,
+    InsertEdit::LineNote,
+    InsertEdit::DoubleLineNote,
+    InsertEdit::WaveLineNote,
+    InsertEdit::ChainLineNote,
+    InsertEdit::DashLineNote,
+    InsertEdit::Upright,
+    InsertEdit::Warichu,
+    InsertEdit::SmallText,
+    InsertEdit::LargeText,
+];
+
+/// 挿入メニューのひな形を組む（RFN01-38）。
+///
+/// **`from..to`は書き手が選んだ範囲**（同じ所ならキャレット1つ）。選んだ向きに
+/// よらず同じ結果にするので、頭と尻を入れ替えてから読む。
+///
+/// **形はここで決め、本文へ入れるのは[`crate::apply_span_edit`]に任せる**——文字数・
+/// 読み取り専用・Viewerの検査と、取り消し1回の区切りは、打鍵と同じ道に1つだけ
+/// ある（要件 7.1）。開きと閉じは**一度に置く**：閉じを先に用意しておくのは、
+/// リンクの補完が後ろの閉じ括弧を見て重ねて書かないためである
+/// （`link_completion.rs`）。
+///
+/// **`None`は「入れられない」。**範囲が本文の外を指すか、字の切れ目に乗って
+/// いなければ入れない——数え違いのまま`&str`を切ると落ちる。選んだ字を指す注記を
+/// 字なしで頼まれたときも入れない（[`InsertEdit::needs_a_picked_word`]）。
+pub fn insert_edit(
+    source: &str,
+    from: usize,
+    to: usize,
+    what: InsertEdit,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    let (start, end) = if from <= to { (from, to) } else { (to, from) };
+    if end > source.len() || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    let picked = &source[start..end];
+    if picked.is_empty() && what.needs_a_picked_word() {
+        return None;
+    }
+    let (text, after) = match what {
+        InsertEdit::MarkdownLink => {
+            let text = format!("[{picked}]()");
+            // **未選択なら表示名の欄**（`[`と`]`の間）へ。選んでいればリンク先の欄へ
+            // ——表示名はもう入っているので、次に書くのは宛先である（書き手の確認
+            // 2026-09-21、1.1の指摘）。
+            let after = if picked.is_empty() {
+                "[".len()
+            } else {
+                "[".len() + picked.len() + "](".len()
+            };
+            (text, after)
+        }
+        InsertEdit::WikiLink => (format!("[[{picked}]]"), "[[".len() + picked.len()),
+        InsertEdit::WikiLinkAlias => (format!("[[|{picked}]]"), "[[".len()),
+        InsertEdit::Ruby => {
+            let text = format!("｜{picked}《》");
+            // **選んだ字があれば、キャレットは読みの欄**（`《`と`》`の間）へ。無ければ
+            // 親文字の欄（`｜`の直後）へ——次に打つのは、そこに書く字である
+            // （書き手の確認 2026-09-21）。
+            let after = if picked.is_empty() {
+                "｜".len()
+            } else {
+                "｜".len() + picked.len() + "《".len()
+            };
+            (text, after)
+        }
+        InsertEdit::SideNote => {
+            let note = side_note_of(picked);
+            // キャレットは空けた欄の中——次に打つのは左に出す字である。
+            let after = picked.len() + note.len() - SIDE_NOTE_TAIL.len();
+            (format!("{picked}{note}"), after)
+        }
+        InsertEdit::RubyWithSideNote => {
+            let text = format!("｜{picked}《》{}", side_note_of(picked));
+            // キャレットは読みの欄（`《`と`》`の間）——次に打つのは読みである。
+            (text, "｜".len() + picked.len() + "《".len())
+        }
+        InsertEdit::EmphasisDots => {
+            let text = format!("《《{picked}》》");
+            let after = if picked.is_empty() {
+                "《《".len()
+            } else {
+                text.len()
+            };
+            (text, after)
+        }
+        // **書く形は、読む側が読む字そのもので名指す**——[`dots_note_here`]の表と
+        // 同じ組を渡すので、生成と解析が食い違うことがない。
+        InsertEdit::SesameDotsNote => beside_note(picked, "」にゴマ傍点］"),
+        InsertEdit::RoundDotsNote => beside_note(picked, "」に丸傍点］"),
+        InsertEdit::WhiteRoundDotsNote => beside_note(picked, "」に白丸傍点］"),
+        InsertEdit::DoubleRoundDotsNote => beside_note(picked, "」に二重丸傍点］"),
+        InsertEdit::CrossDotsNote => beside_note(picked, "」に×傍点］"),
+        InsertEdit::LineNote => beside_note(picked, "」に傍線］"),
+        InsertEdit::DoubleLineNote => beside_note(picked, "」に二重傍線］"),
+        InsertEdit::WaveLineNote => beside_note(picked, "」に波線］"),
+        InsertEdit::ChainLineNote => beside_note(picked, "」に鎖線］"),
+        InsertEdit::DashLineNote => beside_note(picked, "」に破線］"),
+        // 同じく、[`RANGE_NOTES`]の表と同じ組を渡す。
+        InsertEdit::Upright => range_note(picked, "［＃縦中横］", "［＃縦中横終わり］"),
+        InsertEdit::Warichu => range_note(picked, "［＃割り注］", "［＃割り注終わり］"),
+        InsertEdit::SmallText => range_note(picked, "［＃小さな文字］", "［＃小さな文字終わり］"),
+        InsertEdit::LargeText => range_note(picked, "［＃大きな文字］", "［＃大きな文字終わり］"),
+    };
+    // **選び直す位置は新しい本文のものである**（[`line_edit`]と同じ）——置き換えた
+    // 範囲の頭から数えるので、`apply_span_edit`がそのまま使える。
+    let caret = start + after;
+    Some((start..end, text, (caret, caret)))
+}
+
+/// 注記の書き出し（`［＃「`）。**記法であって、画面の言葉ではない。**
+const NOTE_OPEN: &str = "［＃「";
+
+/// 左の注記の終わり（`」の注記］`）。**左に出す字を書く欄は、この手前にある。**
+const SIDE_NOTE_TAIL: &str = "」の注記］";
+
+/// 左の注記そのもの（`［＃「本文」の左に「よみ」の注記］`）。
+///
+/// **指す語は本文に置く**ので、ここには書かない——本文の字と食い違えば何も打たれ
+/// ないからである（[`InsertEdit::needs_a_picked_word`]）。左に出す字を書く欄は空けて
+/// おき、書き手がそこへ書く。
+fn side_note_of(picked: &str) -> String {
+    let mut note = format!("{NOTE_OPEN}{picked}");
+    note.push_str("」の左に「");
+    note.push_str(SIDE_NOTE_TAIL);
+    note
+}
+
+/// 選んだ語を指す注記（`本文［＃「本文」に丸傍点］`）。
+///
+/// **同じ語を2か所へ書く。**注記は指す先を自分の中に持っているので、本文の字と
+/// 食い違えば何も打たれない——だから空では置かない
+/// （[`InsertEdit::needs_a_picked_word`]）。`tail`は印の言い方で、**読む側
+/// （[`dots_note_here`]）が読む字そのもの**を渡す。キャレットは注記の後ろに置く：
+/// 次に打つのは続きの本文である。
+fn beside_note(picked: &str, tail: &str) -> (String, usize) {
+    let text = format!("{picked}{NOTE_OPEN}{picked}{tail}");
+    let after = text.len();
+    (text, after)
+}
+
+/// 開いて閉じる注記（`［＃縦中横］本文［＃縦中横終わり］`）。`open`と`close`は
+/// **読む側（[`RANGE_NOTES`]）が読む字そのもの**を渡す。
+///
+/// **字が無くても置ける**——中を書く所へキャレットを置く。中身が入るまでは画面で
+/// 注記として読まれない（[`range_note_here`]は組む相手の要る注記を記法としない）が、
+/// 書けば読まれる。
+fn range_note(picked: &str, open: &str, close: &str) -> (String, usize) {
+    let text = format!("{open}{picked}{close}");
+    let after = if picked.is_empty() {
+        open.len()
+    } else {
+        text.len()
+    };
+    (text, after)
+}
+
+/// 行の体裁を変える挿入（RFN01-38、I22〜I39）。
+///
+/// 見出し・字下げ・地付きは**行ごとの指定**なので、字を包む[`InsertEdit`]とは別の
+/// 群である。返すのは[`line_edit`]と同じ「置き換える範囲・そこへ入る字・実行後に
+/// 選び直す範囲」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineNoteEdit {
+    /// 見出しの記号（`## `）を付け替える。1〜6。
+    Heading(u8),
+    /// 見出しの記号を外す。
+    NoHeading,
+    /// 行頭の`［＃N字下げ］`を付け替える。1〜4。
+    Indent(u8),
+    /// 字下げの注記を外す。
+    NoIndent,
+    /// 行頭の`［＃地付き］`・`［＃地からN字上げ］`を付け替える。0が地付き。
+    AlignToEnd(u8),
+    /// その注記を外す。
+    NoAlignToEnd,
+}
+
+/// 行単位の指定の並び（RFN01-38、I22〜I39）。**画面の並びそのもの**である——
+/// `Command::Insert(n)`の番号は、`INSERT_EDITS`の後ろにこれを続けた位置になる。
+pub const LINE_NOTE_EDITS: [LineNoteEdit; 18] = [
+    LineNoteEdit::Heading(1),
+    LineNoteEdit::Heading(2),
+    LineNoteEdit::Heading(3),
+    LineNoteEdit::Heading(4),
+    LineNoteEdit::Heading(5),
+    LineNoteEdit::Heading(6),
+    LineNoteEdit::NoHeading,
+    LineNoteEdit::Indent(1),
+    LineNoteEdit::Indent(2),
+    LineNoteEdit::Indent(3),
+    LineNoteEdit::Indent(4),
+    LineNoteEdit::NoIndent,
+    LineNoteEdit::AlignToEnd(0),
+    LineNoteEdit::AlignToEnd(1),
+    LineNoteEdit::AlignToEnd(2),
+    LineNoteEdit::AlignToEnd(3),
+    LineNoteEdit::AlignToEnd(4),
+    LineNoteEdit::NoAlignToEnd,
+];
+
+/// 選んだ行の体裁がどうなっているか（RFN01-38）。**メニューの有効条件と印**がこれで
+/// 決まる——「押せるのに何も起きない行」を作らないため、見る側と押す側が同じ答えを
+/// 使う。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LineNoteState {
+    /// 見出しの記号を置けるか（本文の行で、行頭の注記が無い）。
+    pub can_heading: bool,
+    /// 字下げの注記を置けるか（本文の行で、見出しではなく、範囲の字下げの中でもない）。
+    pub can_indent: bool,
+    /// 地付きの注記を置けるか（本文の行で、見出しではない）。
+    pub can_tail: bool,
+    /// **全行が同じ見出しレベルなら、それ。**混在か、見出しが無ければ`None`。
+    pub level: Option<u8>,
+    /// 全行が同じ字下げなら、それ。
+    pub indent: Option<u8>,
+    /// 全行が同じ地付き指定なら、それ。
+    pub tail: Option<u8>,
+}
+
+/// 選んだ行の体裁を読む（RFN01-38）。
+///
+/// **字下げの範囲の中は、字下げを触れないものとして答える**（書き手の合意
+/// 2026-09-21）——範囲の注記は選んだ行の外にあり、書き換えると書き手が打っていない
+/// 行が動く。
+pub fn line_note_state(source: &str, from: usize, to: usize, reading: Reading) -> LineNoteState {
+    let (start, end) = selected_lines(source, from, to);
+    if start > end || end > source.len() {
+        return LineNoteState::default();
+    }
+    let styles = line_styles_reading(source, reading);
+    let first = source[..start].matches('\n').count();
+    // **触れないものが1つでも混じれば、その操作は出さない。**
+    let mut state = LineNoteState {
+        can_heading: true,
+        can_indent: true,
+        can_tail: true,
+        level: None,
+        indent: None,
+        tail: None,
+    };
+    let mut seen = 0usize;
+    let mut level: Option<Option<u8>> = None;
+    let mut indent: Option<Option<u8>> = None;
+    let mut tail: Option<Option<u8>> = None;
+    let range = inside_a_note_range(source, start);
+    for (offset, line) in source[start..end].split_inclusive('\n').enumerate() {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let style = styles.get(first + offset).copied().unwrap_or_default();
+        let (line_tail, line_indent, _) = head_notes(body);
+        let plain = plain_body(body, style);
+        let body_text = plain && style.heading_level == 0;
+        // 見出しは、注記の無い本文の行にだけ置ける。
+        state.can_heading &= plain && line_tail.is_none() && line_indent.is_none();
+        // 注記は、見出しでない本文の行にだけ置ける。**範囲の中の字下げは触れない。**
+        state.can_indent &= body_text && !range;
+        state.can_tail &= body_text;
+        seen += 1;
+        same(
+            &mut level,
+            (style.heading_level > 0).then_some(style.heading_level),
+        );
+        same(&mut indent, line_indent);
+        same(&mut tail, line_tail);
+    }
+    if seen == 0 {
+        return LineNoteState::default();
+    }
+    state.level = level.flatten();
+    state.indent = indent.flatten();
+    state.tail = tail.flatten();
+    state
+}
+
+/// 同じ値が続いているかだけを覚える（混在したら`None`のまま）。
+fn same(held: &mut Option<Option<u8>>, value: Option<u8>) {
+    match held {
+        None => *held = Some(value),
+        Some(previous) if *previous != value => *held = Some(None),
+        _ => {}
+    }
+}
+
+/// 選んだ行の体裁を変える（RFN01-38）。
+///
+/// **行は[`selected_lines`]の見方で選ぶ**——画面が見出しとして組んでいる行と、ここが
+/// 触る行を食い違わせない。
+///
+/// **一部だけ書換えない。**触れない行が1つでも混じっていれば`None`を返す（書き手の
+/// 合意 2026-09-21）——選んだ半分だけが変わると、どれが効いたかを目で探すことになる。
+/// 何も変わらないときも`None`（取り消しの要らない一手）。
+pub fn line_note_edit(
+    source: &str,
+    from: usize,
+    to: usize,
+    what: LineNoteEdit,
+    reading: Reading,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    let (start, end) = selected_lines(source, from, to);
+    if start > end || end > source.len() {
+        return None;
+    }
+    // **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）——範囲の注記は選んだ
+    // 行の外にあり、書き換えれば書き手が打っていない行が動く。
+    if matches!(what, LineNoteEdit::Indent(_) | LineNoteEdit::NoIndent)
+        && inside_a_note_range(source, start)
+    {
+        return None;
+    }
+    let styles = line_styles_reading(source, reading);
+    let first = source[..start].matches('\n').count();
+    let (caret, picked) = if from <= to {
+        (from, from != to)
+    } else {
+        (to, true)
+    };
+    let mut text = String::with_capacity(end - start);
+    let mut caret_after = None;
+    let mut line_start = start;
+    for (offset, line) in block_lines(source, start, end).into_iter().enumerate() {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let style = styles.get(first + offset).copied().unwrap_or_default();
+        let (new_body, head_before, head_after) = reshape_head(body, style, what)?;
+        let at = text.len();
+        text.push_str(&new_body);
+        if line.ends_with('\n') {
+            text.push('\n');
+        }
+        // **行の末尾も含める。**`..`で見ていたときは、末尾ぴったり（空行では先頭）に
+        // 立っているときに当たらず、キャレットが塊の先頭へ飛んでいた（書き手の報告
+        // 2026-09-21：「行の末尾で改行すると、キャレット位置がおかしくなる」）。
+        if (line_start..=line_start + body.len()).contains(&caret) {
+            // **未選択なら、キャレットは本文の中の同じ所へ戻る**——頭が伸びた分だけ
+            // 後ろへずれる。頭より前へは戻さない（書いた記号の中に立たせない）。
+            let into = (caret - line_start).saturating_sub(head_before);
+            let room = new_body.len() - head_after;
+            // **返すのは文書の中の位置**（[`line_edit`]と同じ）——塊の中の位置を
+            // そのまま返すと、2行目より後ろで選んだときに、キャレットが文書の先頭
+            // 寄りへ飛ぶ（書き手の報告 2026-09-21）。
+            caret_after = Some(start + at + head_after + into.min(room));
+        }
+        line_start += line.len();
+    }
+    if text == source[start..end] {
+        return None;
+    }
+    let chosen = if picked {
+        // **対象の行は選ばれたまま**（書き手の合意 2026-09-21）——続けて別のレベルや
+        // 字数を指定できる。改行は選びに入れない（[`line_edit`]と同じ）。
+        let body = text.strip_suffix('\n').unwrap_or(&text).len();
+        (start, start + body)
+    } else {
+        let caret = caret_after.unwrap_or(start);
+        (caret, caret)
+    };
+    Some((start..end, text, chosen))
+}
+
+/// 塊の中の行。**幅0の塊も1行として数える。**
+///
+/// 文書の末尾で改行したあとの空行は、字が1つも無いので `split_inclusive` が何も
+/// 返さない——そのままでは「書き換える字が無い」ことになり、見出しも字下げも置け
+/// なかった（書き手の報告 2026-09-21）。
+fn block_lines(source: &str, start: usize, end: usize) -> Vec<&str> {
+    if start == end {
+        return vec![""];
+    }
+    source[start..end].split_inclusive('\n').collect()
+}
+
+/// この行が、行頭の体裁の注記（見出し・字下げ・地付き）を受けられる**素の本文の行**か。
+///
+/// **引用・箇条書き・コード・表・空白で始まる行は外す**（書き手の合意 2026-09-21）。
+/// 記号も注記も**行のいちばん頭**に置くので、`>`や空白の後ろへ置けば読まれない
+/// ——読まれない注記を書くより、押せないほうがよい。
+fn plain_body(line: &str, style: LineStyle) -> bool {
+    style.kind == LineKind::Body
+        && style.quote_depth == 0
+        && style.list_indent == 0
+        && !line.starts_with([' ', '\t'])
+}
+
+/// 1行の体裁を変える。返すのは（新しい行、元の頭の長さ、新しい頭の長さ）。
+///
+/// **`None`は「この行には触れない」。**1行でも触れなければ、呼ぶ側は何もしない。
+fn reshape_head(
+    body: &str,
+    style: LineStyle,
+    what: LineNoteEdit,
+) -> Option<(String, usize, usize)> {
+    if !plain_body(body, style) {
+        return None;
+    }
+    let (tail, indent, rest) = head_notes(body);
+    match what {
+        LineNoteEdit::Heading(level) => {
+            // **見出しの記号と注記は混ぜない。**どちらを先に置いても、片方が読まれ
+            // なくなる（`line_style`は素の行から見出しを読む）。
+            if tail.is_some() || indent.is_some() || !(1..=6).contains(&level) {
+                return None;
+            }
+            let visible = strip_heading_marker(rest);
+            let new_body = format!("{} {visible}", "#".repeat(level as usize));
+            Some((
+                new_body,
+                marker_bytes(style.heading_level),
+                marker_bytes(level),
+            ))
+        }
+        LineNoteEdit::NoHeading => {
+            if tail.is_some() || indent.is_some() || style.heading_level == 0 {
+                return None;
+            }
+            Some((
+                strip_heading_marker(rest).to_owned(),
+                marker_bytes(style.heading_level),
+                0,
+            ))
+        }
+        LineNoteEdit::Indent(count) => {
+            if style.heading_level > 0 || !(1..=4).contains(&count) {
+                return None;
+            }
+            Some(rebuild_head(body, rest, tail, Some(count)))
+        }
+        LineNoteEdit::NoIndent => {
+            if style.heading_level > 0 || indent.is_none() {
+                return None;
+            }
+            Some(rebuild_head(body, rest, tail, None))
+        }
+        LineNoteEdit::AlignToEnd(cells) => {
+            if style.heading_level > 0 || cells > 4 {
+                return None;
+            }
+            Some(rebuild_head(body, rest, Some(cells), indent))
+        }
+        LineNoteEdit::NoAlignToEnd => {
+            if style.heading_level > 0 || tail.is_none() {
+                return None;
+            }
+            Some(rebuild_head(body, rest, None, indent))
+        }
+    }
+}
+
+/// 行頭の2つの注記を組み直す。**地付きを先に置く**（書き手の合意 2026-09-21）。
+fn rebuild_head(
+    body: &str,
+    rest: &str,
+    tail: Option<u8>,
+    indent: Option<u8>,
+) -> (String, usize, usize) {
+    let mut new_body = String::new();
+    if let Some(cells) = tail {
+        new_body.push_str(&tail_note(cells));
+    }
+    if let Some(count) = indent {
+        new_body.push_str(&indent_note(count));
+    }
+    let head_after = new_body.len();
+    new_body.push_str(rest);
+    (new_body, body.len() - rest.len(), head_after)
+}
+
+/// 字下げの注記（`［＃2字下げ］`）。行の頭に置く形である。
+fn indent_note(count: u8) -> String {
+    format!("［＃{count}字下げ］")
+}
+
+/// 行末へ寄せる注記（`［＃地付き］`・`［＃地から2字上げ］`）。0が地付き。
+fn tail_note(cells: u8) -> String {
+    if cells == 0 {
+        "［＃地付き］".to_owned()
+    } else {
+        format!("［＃地から{cells}字上げ］")
+    }
+}
+
+/// 見出しの記号が取るバイト数（`## `なら3）。見出しでなければ0。
+fn marker_bytes(level: u8) -> usize {
+    usize::from(level) + usize::from(level > 0)
+}
+
+/// この位置の行が、範囲の字下げ（`［＃ここから2字下げ］`〜`［＃ここで字下げ終わり］`）の
+/// 中にいるか。
+///
+/// **中の行の字下げは付け替えない**（書き手の合意 2026-09-21）——範囲の注記は選んだ行の
+/// 外にあり、書き換えれば書き手が打っていない行が動く。
+pub fn inside_a_note_range(source: &str, at: usize) -> bool {
+    if at > source.len() {
+        return false;
+    }
+    let mut open = false;
+    for line in source[..at].lines() {
+        match note_indent_of(line) {
+            Some(NoteIndent::From(_)) => open = true,
+            Some(NoteIndent::End) => open = false,
+            None => {}
+        }
+    }
+    open
+}
+
+/// 改ページの注記（`［＃改ページ］`）。**紙の区切りであって、行の体裁ではない。**
+const PAGE_BREAK: &str = "［＃改ページ］";
+
+/// この位置の行の前に、改ページを入れられるか（RFN01-38）。
+///
+/// **文書の先頭では入れない**——その前に紙が無いので、空の1枚目を作るだけである。
+/// **直前に既に改ページがあるときも入れない**——同じところで2度切っても、やはり
+/// 空の紙が1枚増えるだけである。
+pub fn can_break_page_here(source: &str, from: usize, to: usize) -> bool {
+    let (start, _) = selected_lines(source, from, to);
+    if start == 0 || start > source.len() {
+        return false;
+    }
+    let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+    !source[..line_start]
+        .lines()
+        .next_back()
+        .is_some_and(|line| line.trim() == PAGE_BREAK)
+}
+
+/// 改ページの注記を、対象の行の前に独立した1行として入れる（RFN01-38、I40）。
+///
+/// **選んだ本文は消さない。**選んでいればその先頭の行の前へ、選んでいなければ現在行の
+/// 前へ置き、キャレットは元の行の頭に戻す——次に打つのは本文である（書き手の合意
+/// 2026-09-21）。
+///
+/// **画面では紙を切らない**（要件 7.10）——画面はそこに破線を見せるだけである。紙に
+/// するとき（印刷）は、この行で次の紙へ移る。
+pub fn page_break_edit(
+    source: &str,
+    from: usize,
+    to: usize,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    if !can_break_page_here(source, from, to) {
+        return None;
+    }
+    let (start, _) = selected_lines(source, from, to);
+    let text = format!("{PAGE_BREAK}\n");
+    let caret = start + text.len();
+    Some((start..start, text, (caret, caret)))
+}
+
 /// この項目の**種類**——CommonMark §5.3 の「同じ種類の項目の並び」（書き手の決定
 /// 2026-09-11：「記号を変えるとそこから別のリストが始まる。これはそうするべき」）。
 ///
@@ -2293,16 +2934,12 @@ fn push_visible_line(
         return;
     }
     let content = strip_heading_marker(content);
-    // 要件 7.8（2026-09-16）: 行の頭の`［＃2字下げ］`は、その行の字下げとしてもう効いている
-    // （`LineStyle::note_indent`）。**字としては消える**——ルビの縦線と同じで、指示は本文ではない。
+    // 要件 7.8（2026-09-16）: 行の頭の`［＃2字下げ］`と`［＃地付き］`は、その行の
+    // 体裁としてもう効いている（`LineStyle::note_indent`／`tail_cells`）。**字としては
+    // 消える**——ルビの縦線と同じで、指示は本文ではない。**2つ並んでいても両方消す**
+    // （書き手の合意 2026-09-21）。
     let content = if reading.ruby {
-        note_indent_head(content).map_or(content, |(_, rest)| rest)
-    } else {
-        content
-    };
-    // 同じく、行の頭の`［＃地付き］`・`［＃地から2字上げ］`（`LineStyle::tail_cells`）。
-    let content = if reading.ruby {
-        note_tail_head(content).map_or(content, |(_, rest)| rest)
+        head_notes(content).2
     } else {
         content
     };
@@ -3062,6 +3699,13 @@ enum RangeNote {
 
 /// 開き・閉じ・種類。**長い言い方から先に並べる**必要はない——開きは`］`まで含めて
 /// 比べるので、「小さな文字」と「文字」のような取りこぼしが起きない。
+/// 縦中横の注記を**読む**上限（字。書き手の決定 2026-09-21）。
+///
+/// **これ以上は読まない。**1マスに収めるので字が増えるほど小さくなり、読めなくなる。
+/// 読まなければ原文のまま出るので、書き手には何が書いてあるかが分かる。**挿入には
+/// 上限を置かない**——手で書けるものを道具だけ断るのは筋が通らない（同じ決定）。
+pub const UPRIGHT_NOTE_LIMIT: usize = 4;
+
 const RANGE_NOTES: [(&str, &str, RangeNote); 4] = [
     ("［＃縦中横］", "［＃縦中横終わり］", RangeNote::Upright),
     ("［＃割り注］", "［＃割り注終わり］", RangeNote::Warichu),
@@ -3082,6 +3726,10 @@ const RANGE_NOTES: [(&str, &str, RangeNote); 4] = [
 /// **閉じないものは注記ではない。**太字の`**`と同じ規則で、閉じない`［＃縦中横］`は
 /// 字のまま本文に残る——原文にある指示が画面から消えたまま何も起きない、を避ける道である。
 /// 空の`［＃縦中横］［＃縦中横終わり］`も組む相手がいないので記法ではない。
+///
+/// **縦中横は、長すぎるものを読まない**（書き手の決定 2026-09-21）。1マスに収めるので
+/// 字が増えるほど小さくなり、読めなくなる。読まなければ原文のまま出るので、書き手には
+/// 何が書いてあるかが分かる——知らない注記を消さないのと同じ扱いである。
 fn range_note_here(rest: &str) -> Option<(&str, RangeNote, &str)> {
     if !rest.starts_with("［＃") {
         return None;
@@ -3094,6 +3742,9 @@ fn range_note_here(rest: &str) -> Option<(&str, RangeNote, &str)> {
             continue;
         };
         if at == 0 {
+            continue;
+        }
+        if kind == RangeNote::Upright && after[..at].chars().count() >= UPRIGHT_NOTE_LIMIT {
             continue;
         }
         return Some((&after[..at], kind, &after[at + close.len()..]));
@@ -3990,6 +4641,37 @@ fn note_count(text: &str) -> Option<u8> {
     Some(digits.iter().fold(0u8, |total, digit| total * 10 + digit))
 }
 
+/// 行の頭に並んだ体裁の注記を読む（書き手の合意 2026-09-21）。
+///
+/// **地付きを先に見て、そのあと字下げ。**どちらが先に書かれていても両方読む
+/// ——併用を許すと決めたので、2つ目を黙って効かなくさせない。今までは1つ目しか
+/// 読んでおらず、`［＃2字下げ］［＃地付き］本文` のように並べた2つ目は画面へ
+/// 届かなかった。
+///
+/// 返すのは（行末から空ける字数、下げる字数、注記を外した残り）。**同じ種類は
+/// 2度取らない**——3つ目から先は本文の字として残る。
+fn head_notes(line: &str) -> (Option<u8>, Option<u8>, &str) {
+    let mut rest = line;
+    let mut tail = None;
+    let mut indent = None;
+    for _ in 0..2 {
+        if tail.is_none()
+            && let Some((count, after)) = note_tail_head(rest)
+        {
+            tail = Some(count);
+            rest = after;
+        } else if indent.is_none()
+            && let Some((count, after)) = note_indent_head(rest)
+        {
+            indent = Some(count);
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    (tail, indent, rest)
+}
+
 /// How much of `content` the marker at its head takes, in UTF-16 units.
 ///
 /// Every part of every marker is one ASCII character — `list_kind` allows
@@ -4420,17 +5102,13 @@ fn line_style(
             };
         }
     }
-    // 行の頭の`［＃2字下げ］`は、その行だけ。範囲の中にいればそこへ足す。
-    let head_indent = if reading.ruby && fence.is_none() {
-        note_indent_head(line).map(|(count, _)| count)
+    // 行の頭の`［＃2字下げ］`と`［＃地付き］`は、その行だけ。範囲の中にいれば
+    // そこへ足す。**並んでいれば両方読む**（書き手の合意 2026-09-21）。
+    let (tail, head_indent) = if reading.ruby && fence.is_none() {
+        let (tail, indent, _) = head_notes(line);
+        (tail, indent)
     } else {
-        None
-    };
-    // 行の頭の`［＃地付き］`・`［＃地から2字上げ］`も、その行だけ。
-    let tail = if reading.ruby && fence.is_none() {
-        note_tail_head(line).map(|(count, _)| count)
-    } else {
-        None
+        (None, None)
     };
     let style = match (*fence, fence_marker(line)) {
         (None, Some(opened)) => {
@@ -5261,6 +5939,551 @@ mod tests {
         // `Shift+Tab`で戻る。
         let back = shift_indent(&next, second, second, false, BulletMarks::all()).expect("戻せる");
         assert_eq!(back.text, source);
+    }
+
+    /// 挿入のひな形を当てて、出来上がる本文と、そのあとキャレットが立つ所を見る
+    /// （RFN01-38）。
+    fn inserted(source: &str, at: (usize, usize), what: InsertEdit) -> Option<(String, usize)> {
+        let (region, text, chosen) = insert_edit(source, at.0, at.1, what)?;
+        let mut next = source.to_owned();
+        next.replace_range(region, &text);
+        assert_eq!(
+            chosen.0, chosen.1,
+            "挿入のあとに選ばれているのはキャレット1つ"
+        );
+        Some((next, chosen.0))
+    }
+
+    /// RFN01-38: **未選択なら表示名から書く**（書き手の確認 2026-09-21、1.1の指摘）。
+    #[test]
+    fn a_link_written_from_nothing_starts_at_its_name() {
+        let (next, caret) = inserted("前後", (3, 3), InsertEdit::MarkdownLink).expect("入る");
+
+        assert_eq!(next, "前[]()後");
+        // **`[`と`]`の間**——次に打つのは表示名である。
+        assert_eq!(&next[caret..], "]()後");
+    }
+
+    /// RFN01-38: **選んだ字は表示名になり、キャレットはリンク先へ。**
+    #[test]
+    fn a_link_keeps_the_chosen_text_for_its_own_name() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::MarkdownLink).expect("入る");
+
+        assert_eq!(next, "前[東京]()後");
+        assert_eq!(caret, "前[東京](".len());
+    }
+
+    /// RFN01-38: **Wikiリンクは選んだ字をリンク先にする。**続けて`#`を打てるよう、
+    /// キャレットは字の後ろ（`]]`の前）に立つ。
+    #[test]
+    fn a_wiki_link_puts_the_chosen_text_in_the_target() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::WikiLink).expect("入る");
+        assert_eq!(next, "前[[東京]]後");
+        assert_eq!(caret, "前[[東京".len());
+
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::WikiLink).expect("入る");
+        assert_eq!(empty, "前[[]]後");
+        assert_eq!(caret, "前[[".len());
+    }
+
+    /// RFN01-38: **別名付きは選んだ字を表示名にする。**書くのはリンク先なので、
+    /// キャレットは`[[`の直後（`|`の前）に立つ。
+    #[test]
+    fn an_aliased_wiki_link_keeps_the_chosen_text_for_its_name() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::WikiLinkAlias).expect("入る");
+
+        assert_eq!(next, "前[[|東京]]後");
+        assert_eq!(caret, "前[[".len());
+    }
+
+    /// RFN01-38: **ルビは全角の縦線で書く**（書き手の選択 2026-09-21）。選択なしは
+    /// 親文字から、選択ありは読みから書く。
+    #[test]
+    fn ruby_is_written_with_the_full_width_bar() {
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::Ruby).expect("入る");
+        assert_eq!(empty, "前｜《》後");
+        assert_eq!(caret, "前｜".len());
+
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::Ruby).expect("入る");
+        assert_eq!(next, "前｜東京《》後");
+        // **選んだ字があるときは、キャレットは読みの欄**（`《`と`》`の間）
+        // ——書き手の確認 2026-09-21。
+        assert_eq!(caret, "前｜東京《".len());
+    }
+
+    /// RFN01-38: **選択の向きは結果を変えない。**逆向きに引いても同じ字が同じ形に
+    /// なり、キャレットは同じ所に立つ（書き手の選択 2026-09-21）。
+    #[test]
+    fn the_direction_of_the_selection_does_not_change_the_template() {
+        let forward = inserted("前東京後", (3, 9), InsertEdit::Ruby).expect("入る");
+        let backward = inserted("前東京後", (9, 3), InsertEdit::Ruby).expect("入る");
+
+        assert_eq!(forward, backward);
+    }
+
+    /// RFN01-38: **字の切れ目に乗っていない範囲は入れない。**数え違いのまま
+    /// 切るより、入れないと言うほうがよい。
+    #[test]
+    fn a_range_that_is_not_on_a_character_boundary_is_refused() {
+        let source = "東京";
+
+        assert!(insert_edit(source, 1, 3, InsertEdit::WikiLink).is_none());
+        assert!(insert_edit(source, 0, source.len() + 1, InsertEdit::WikiLink).is_none());
+        assert!(insert_edit(source, 0, source.len(), InsertEdit::WikiLink).is_some());
+    }
+
+    /// RFN01-38: **選んだ字を指す注記は、字が無ければ入れない**（書き手の合意
+    /// 2026-09-21）。空で置けば、指す先の無い注記が本文に残るだけである。
+    #[test]
+    fn a_note_that_points_at_a_word_is_refused_without_a_word() {
+        for what in [
+            InsertEdit::SideNote,
+            InsertEdit::RubyWithSideNote,
+            InsertEdit::RoundDotsNote,
+            InsertEdit::LineNote,
+        ] {
+            assert!(insert_edit("前後", 3, 3, what).is_none(), "{what:?}");
+        }
+        // 囲む形の傍点と、開いて閉じる注記は、字が無くても置ける。
+        for what in [InsertEdit::EmphasisDots, InsertEdit::Upright] {
+            assert!(insert_edit("前後", 3, 3, what).is_some(), "{what:?}");
+        }
+    }
+
+    /// RFN01-38: **メニューの並びは、同じものを2度名指さない。**番号が指す先は
+    /// 1つである。
+    #[test]
+    fn the_insert_menu_order_names_each_edit_once() {
+        let mut seen: Vec<String> = INSERT_EDITS
+            .iter()
+            .map(|what| format!("{what:?}"))
+            .collect();
+        seen.sort();
+        seen.dedup();
+
+        assert_eq!(seen.len(), INSERT_EDITS.len());
+    }
+
+    /// 書き手の決定 2026-09-21: **挿入には上限を置かず、読む側に上限を置く。**
+    /// 手で書けるものを道具だけ断るのは筋が通らない。読めないほど縮むものは、
+    /// 読まなければ原文のまま出る——書き手には何が書いてあるかが分かる。
+    #[test]
+    fn a_long_upright_note_is_left_as_source() {
+        // 3字までは読む（1マスに収まる）。
+        assert_eq!(
+            preview_of("第［＃縦中横］ABC［＃縦中横終わり］章").0,
+            "第ABC章"
+        );
+        // **4字からは読まない**——注記ごと原文のまま出る。
+        let source = "第［＃縦中横］ABCD［＃縦中横終わり］章";
+        assert_eq!(preview_of(source).0, source);
+        assert!(preview_of(source).1.is_empty(), "印を立てない");
+        // **挿入は断らない**——手で書けるものを道具だけ止めない。
+        assert!(insert_edit("前12345後", 3, 8, InsertEdit::Upright).is_some());
+    }
+
+    /// 行の体裁を当てて、出来上がる本文を見る（RFN01-38）。
+    fn reshaped(source: &str, at: (usize, usize), what: LineNoteEdit) -> Option<String> {
+        let (region, text, _) = line_note_edit(source, at.0, at.1, what, Reading::all())?;
+        let mut next = source.to_owned();
+        next.replace_range(region, &text);
+        Some(next)
+    }
+
+    /// RFN01-38: **見出しの記号を付け替える。**同じレベルを選び直しても変わらず、
+    /// 解除は記号だけを外す。
+    #[test]
+    fn a_heading_marker_is_put_on_and_taken_off() {
+        let source = "第一章\n本文\n";
+        assert_eq!(
+            reshaped(source, (0, 0), LineNoteEdit::Heading(2)).expect("付く"),
+            "## 第一章\n本文\n"
+        );
+        // **同じレベルを選び直しても変わらない**——取り消しの要らない一手である。
+        assert!(reshaped("## 第一章\n本文\n", (0, 0), LineNoteEdit::Heading(2)).is_none());
+        assert_eq!(
+            reshaped("## 第一章\n本文\n", (0, 0), LineNoteEdit::Heading(3)).expect("替わる"),
+            "### 第一章\n本文\n"
+        );
+        // 解除は記号だけを外す——本文の字は動かさない。
+        assert_eq!(
+            reshaped("### 第一章\n本文\n", (0, 0), LineNoteEdit::NoHeading).expect("外れる"),
+            "第一章\n本文\n"
+        );
+        assert!(reshaped(source, (0, 0), LineNoteEdit::NoHeading).is_none());
+    }
+
+    /// RFN01-38: **選んだ行が全部まとめて変わる。**選択の端が次の行の頭に立って
+    /// いれば、その行は入らない（`selected_lines`の見方のまま）。
+    #[test]
+    fn every_chosen_line_takes_the_marker() {
+        let source = "一\n二\n三\n";
+        let third = "一\n二\n".len();
+
+        assert_eq!(
+            reshaped(source, (0, third), LineNoteEdit::Heading(1)).expect("付く"),
+            "# 一\n# 二\n三\n"
+        );
+        assert_eq!(
+            reshaped(source, (0, 0), LineNoteEdit::Heading(1)).expect("付く"),
+            "# 一\n二\n三\n"
+        );
+    }
+
+    /// RFN01-38・書き手の合意 2026-09-21: **字下げと地付きは併用できる。**地付きを先に
+    /// 置き、片方を変えてももう片方は残る。
+    #[test]
+    fn an_indent_and_an_alignment_stand_together() {
+        let indented = reshaped("署名\n", (0, 0), LineNoteEdit::Indent(2)).expect("付く");
+        assert_eq!(indented, "［＃2字下げ］署名\n");
+
+        let both = reshaped(&indented, (0, 0), LineNoteEdit::AlignToEnd(1)).expect("付く");
+        assert_eq!(both, "［＃地から1字上げ］［＃2字下げ］署名\n");
+
+        // 字下げを替えても、地付きは残る。逆も同じ。
+        assert_eq!(
+            reshaped(&both, (0, 0), LineNoteEdit::Indent(3)).expect("替わる"),
+            "［＃地から1字上げ］［＃3字下げ］署名\n"
+        );
+        assert_eq!(
+            reshaped(&both, (0, 0), LineNoteEdit::AlignToEnd(0)).expect("替わる"),
+            "［＃地付き］［＃2字下げ］署名\n"
+        );
+        // 解除は片方だけを外す。
+        assert_eq!(
+            reshaped(&both, (0, 0), LineNoteEdit::NoIndent).expect("外れる"),
+            "［＃地から1字上げ］署名\n"
+        );
+        assert_eq!(
+            reshaped(&both, (0, 0), LineNoteEdit::NoAlignToEnd).expect("外れる"),
+            "［＃2字下げ］署名\n"
+        );
+    }
+
+    /// **並んだ2つの注記は、両方とも読まれる**（書き手の合意 2026-09-21）。
+    /// どちらの並びでも同じで、字としてはどちらも消える。
+    #[test]
+    fn both_head_notes_are_read_and_both_come_off_the_line() {
+        for source in [
+            "［＃地から1字上げ］［＃2字下げ］署名\n",
+            "［＃2字下げ］［＃地から1字上げ］署名\n",
+        ] {
+            let styles = line_styles(source);
+            assert_eq!(styles[0].note_indent, 2, "{source:?}");
+            assert_eq!(styles[0].tail_cells, Some(1), "{source:?}");
+            assert_eq!(preview_of(source.trim_end()).0, "署名", "{source:?}");
+        }
+    }
+
+    /// RFN01-38: **引用・箇条書き・コード・空白で始まる行には触らない**（書き手の
+    /// 合意 2026-09-21）。記号も注記も行のいちばん頭に置くので、そこ以外では読まれ
+    /// ない——読まれない注記を書くより、押せないほうがよい。
+    #[test]
+    fn a_line_that_is_not_plain_body_is_left_alone() {
+        for line in [" 本文\n", "> 本文\n", "- 本文\n", "```\n"] {
+            assert!(
+                reshaped(line, (0, 0), LineNoteEdit::Heading(2)).is_none(),
+                "{line:?}"
+            );
+            assert!(
+                reshaped(line, (0, 0), LineNoteEdit::Indent(2)).is_none(),
+                "{line:?}"
+            );
+        }
+        // **素の本文、空行には置ける。**
+        assert!(reshaped("本文\n", (0, 0), LineNoteEdit::Heading(2)).is_some());
+        assert!(reshaped("\n", (0, 0), LineNoteEdit::Indent(2)).is_some());
+    }
+
+    /// RFN01-38: **見出しの記号と注記は混ぜない**——どちらを先に置いても、読む側は
+    /// 片方しか読めない（書き手の合意 2026-09-21）。
+    #[test]
+    fn a_heading_and_a_head_note_do_not_mix() {
+        assert!(reshaped("［＃2字下げ］本文\n", (0, 0), LineNoteEdit::Heading(2)).is_none());
+        assert!(reshaped("## 本文\n", (0, 0), LineNoteEdit::Indent(2)).is_none());
+        assert!(reshaped("## 本文\n", (0, 0), LineNoteEdit::AlignToEnd(0)).is_none());
+    }
+
+    /// RFN01-38: **選んだ行は選ばれたまま。**続けて別のレベルや字数を指定できる。
+    #[test]
+    fn the_chosen_lines_stay_chosen() {
+        let source = "一\n二\n";
+        let (region, text, chosen) = line_note_edit(
+            source,
+            0,
+            source.len(),
+            LineNoteEdit::Heading(1),
+            Reading::all(),
+        )
+        .expect("付く");
+
+        assert_eq!(region, 0..source.len());
+        assert_eq!(text, "# 一\n# 二\n");
+        // 改行は選びに入れない（`line_edit`と同じ）。
+        assert_eq!(chosen, (0, text.len() - 1));
+    }
+
+    /// RFN01-38: **選んでいなければ、キャレットは本文の中の同じ所へ戻る。**
+    #[test]
+    fn a_caret_stays_where_it_was_in_the_line() {
+        let source = "本文です\n";
+        let at = "本文".len();
+        let (_, text, chosen) =
+            line_note_edit(source, at, at, LineNoteEdit::Heading(2), Reading::all()).expect("付く");
+
+        assert_eq!(text, "## 本文です\n");
+        assert_eq!(chosen.0, chosen.1, "選び直すのはキャレット1つ");
+        assert_eq!(chosen.0, "## ".len() + at);
+    }
+
+    /// 書き手の報告 2026-09-21: **行の末尾で改行しくらべ、その空行で見出しを選ぶと、
+    /// キャレットが塊の先頭へ飛んでいた。**末尾ぴったり（空行では先頭）も、その行の
+    /// ものとして扱う。
+    #[test]
+    fn a_caret_at_the_end_of_a_line_stays_at_the_end() {
+        let source = "TEST［＃「TEST」に白丸傍点］\n";
+        let end = source.len() - 1;
+        let (_, text, chosen) =
+            line_note_edit(source, end, end, LineNoteEdit::Heading(2), Reading::all())
+                .expect("付く");
+
+        assert_eq!(text, "## TEST［＃「TEST」に白丸傍点］\n");
+        // **キャレットは本文の終わり**——塊の先頭へは飛ばない。
+        assert_eq!(chosen.0, chosen.1);
+        assert_eq!(chosen.0, "## ".len() + end);
+
+        // **空行では、記号の後ろ**——次に打つのは見出しの本文である。
+        let (_, text, chosen) =
+            line_note_edit("本文\n", 7, 7, LineNoteEdit::Heading(2), Reading::all()).expect("付く");
+        // 幅0の塊を置き換えるので、返る字は記号だけである（文書は「本文\n## 」になる）。
+        assert_eq!(text, "## ");
+        assert_eq!(chosen.0, chosen.1);
+        assert_eq!(chosen.0, "本文\n## ".len());
+    }
+
+    /// RFN01-38: **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）。
+    #[test]
+    fn an_indent_inside_a_range_is_left_alone() {
+        let source = "［＃ここから2字下げ］\n本文\n［＃ここで字下げ終わり］\n";
+        let inside = "［＃ここから2字下げ］\n".len();
+
+        assert!(inside_a_note_range(source, inside));
+        assert!(!inside_a_note_range(source, 0));
+        assert!(
+            line_note_edit(
+                source,
+                inside,
+                inside,
+                LineNoteEdit::Indent(3),
+                Reading::all()
+            )
+            .is_none()
+        );
+        assert!(
+            line_note_edit(
+                source,
+                inside,
+                inside,
+                LineNoteEdit::NoIndent,
+                Reading::all()
+            )
+            .is_none()
+        );
+        // 地付きは範囲と関係が無いので、同じ行でも置ける。
+        assert!(
+            line_note_edit(
+                source,
+                inside,
+                inside,
+                LineNoteEdit::AlignToEnd(0),
+                Reading::all()
+            )
+            .is_some()
+        );
+    }
+
+    /// RFN01-38: **メニューの有効条件と印は、本文を読んで決める。**
+    #[test]
+    fn the_line_note_state_reads_the_chosen_lines() {
+        let source = "## 見出し\n本文\n";
+        let state = line_note_state(source, 0, 0, Reading::all());
+        assert_eq!(state.level, Some(2));
+        assert!(state.can_heading, "見出しは付け替えられる");
+        assert!(!state.can_indent, "見出しの行には字下げを置けない");
+        assert!(!state.can_tail);
+
+        let at = "## 見出し\n".len();
+        let state = line_note_state(source, at, at, Reading::all());
+        assert_eq!(state.level, None);
+        assert!(state.can_heading && state.can_indent && state.can_tail);
+
+        // **混在していれば、どのレベルにも印を付けない。**
+        let state = line_note_state(source, 0, source.len(), Reading::all());
+        assert_eq!(state.level, None);
+        assert!(!state.can_indent, "見出しの行が混じっている");
+    }
+
+    /// RFN01-38: **改ページは、対象の行の前に独立した1行として入る。**選んだ本文は
+    /// 消さず、キャレットは元の行の頭へ戻る（書き手の合意 2026-09-21）。
+    #[test]
+    fn a_page_break_goes_on_its_own_line_before_the_chosen_one() {
+        let source = "前の章\n次の章\n";
+        let second = "前の章\n".len();
+        let (region, text, chosen) = page_break_edit(source, second, second).expect("入る");
+
+        assert_eq!(region, second..second);
+        assert_eq!(text, "［＃改ページ］\n");
+        let mut next = source.to_owned();
+        next.replace_range(region, &text);
+        assert_eq!(next, "前の章\n［＃改ページ］\n次の章\n");
+        // **キャレットは元の行の頭**——次に打つのは本文である。
+        assert_eq!(&next[chosen.0..], "次の章\n");
+        assert_eq!(chosen.0, chosen.1);
+        // **入れた行は、改ページとして読まれる。**
+        assert_eq!(line_styles(&next)[1].kind, LineKind::PageBreak);
+
+        // 選んでいても、選んだ本文は消えない——入るのは、その先頭の行の前である。
+        let (region, text, _) = page_break_edit(source, second, source.len()).expect("入る");
+        assert_eq!(region, second..second);
+        assert_eq!(text, "［＃改ページ］\n");
+    }
+
+    /// RFN01-38: **文書の先頭と、既に改ページのあるところには入れない**（書き手の
+    /// 合意 2026-09-21）——空の紙が1枚増えるだけである。
+    #[test]
+    fn a_page_break_is_not_stacked_or_put_at_the_very_start() {
+        assert!(!can_break_page_here("本文\n", 0, 0));
+        assert!(page_break_edit("本文\n", 0, 0).is_none());
+
+        let source = "前\n［＃改ページ］\n次\n";
+        let after = "前\n［＃改ページ］\n".len();
+        assert!(!can_break_page_here(source, after, after));
+        assert!(page_break_edit(source, after, after).is_none());
+
+        // **その次の行なら入れられる。**
+        assert!(can_break_page_here(source, source.len(), source.len()));
+    }
+
+    /// RFN01-38: **左の注記は、左に出す字を書く欄を空けて置く。**同じ語を本文と
+    /// 注記の2か所へ書く形なので、注記の中の語も選んだ字である。
+    #[test]
+    fn a_left_note_leaves_the_room_for_what_goes_beside() {
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::SideNote).expect("入る");
+
+        assert_eq!(next, "前東京［＃「東京」の左に「」の注記］後");
+        // キャレットは空けた欄の中——次に打つのは左に出す字である。
+        assert_eq!(&next[caret..], "」の注記］後");
+
+        // **空のままでは読まれない**（左に出す字が無い）。書けば読まれる。
+        assert_eq!(
+            preview_of("前東京［＃「東京」の左に「」の注記］後").0,
+            "前東京［＃「東京」の左に「」の注記］後"
+        );
+        assert_eq!(
+            preview_of("前東京［＃「東京」の左に「とうきょう」の注記］後").0,
+            "前東京とうきょう後"
+        );
+    }
+
+    /// RFN01-38: **ルビと左の注記は一緒に置く。**読みを書く所へキャレットが立ち、
+    /// 左の注記へは書き手が自分で移る（自動で飛ばさない）。
+    #[test]
+    fn ruby_and_a_left_note_are_placed_together() {
+        let (next, caret) =
+            inserted("前東京後", (3, 9), InsertEdit::RubyWithSideNote).expect("入る");
+
+        assert_eq!(next, "前｜東京《》［＃「東京」の左に「」の注記］後");
+        // こちらも読みの欄に立つ（書き手の確認 2026-09-21）。
+        assert_eq!(&next[caret..], "》［＃「東京」の左に「」の注記］後");
+
+        // 読みを書けば、両方の記法が読まれる。
+        assert_eq!(
+            preview_of("前｜東京《とうきょう》［＃「東京」の左に「とうけい」の注記］後").0,
+            "前東京《とうきょう》とうけい後"
+        );
+    }
+
+    /// RFN01-38: **囲む形の傍点は、字が無くても置ける。**空のうちは中へ書く所に
+    /// キャレットが立ち、字を選んでいれば記法の後ろへ出る。
+    #[test]
+    fn emphasis_dots_wrap_the_word_or_leave_the_room() {
+        let (empty, caret) = inserted("前後", (3, 3), InsertEdit::EmphasisDots).expect("入る");
+        assert_eq!(empty, "前《《》》後");
+        assert_eq!(&empty[caret..], "》》後");
+
+        let (next, caret) = inserted("前東京後", (3, 9), InsertEdit::EmphasisDots).expect("入る");
+        assert_eq!(next, "前《《東京》》後");
+        assert_eq!(&next[caret..], "後");
+
+        // **読む側が要る**：ここが食い違えば、書いても何も打たれない。印の位置は
+        // **画面に出ている字**のもので、`《《`はそこには無い（「前」の次）。
+        assert_eq!(
+            shape(&preview_of("前《《東京》》後").1),
+            vec![(1, 2, "dots")]
+        );
+    }
+
+    /// RFN01-38: **選んだ語を指す注記は、書いたとおりに読まれる。**本文と注記が
+    /// 同じ語を指しているので、読む側はその語に印を打つ——ここが食い違えば、挿入して
+    /// も何も起きない。
+    #[test]
+    fn every_kind_of_note_the_menu_writes_is_read_back() {
+        let beside = |line: &str| {
+            preview_of(line)
+                .1
+                .iter()
+                .map(|mark| mark.marks.beside)
+                .find(|beside| !beside.is_none())
+        };
+        for (what, kind) in [
+            (InsertEdit::SesameDotsNote, "ゴマ傍点"),
+            (InsertEdit::RoundDotsNote, "丸傍点"),
+            (InsertEdit::WhiteRoundDotsNote, "白丸傍点"),
+            (InsertEdit::DoubleRoundDotsNote, "二重丸傍点"),
+            (InsertEdit::CrossDotsNote, "×傍点"),
+            (InsertEdit::LineNote, "傍線"),
+            (InsertEdit::DoubleLineNote, "二重傍線"),
+            (InsertEdit::WaveLineNote, "波線"),
+            (InsertEdit::ChainLineNote, "鎖線"),
+            (InsertEdit::DashLineNote, "破線"),
+        ] {
+            let (next, caret) = inserted("前東京後", (3, 9), what).expect("入る");
+            assert_eq!(next, format!("前東京［＃「東京」に{kind}］後"), "{kind}");
+            // キャレットは注記の後ろ——次に打つのは続きの本文である。
+            assert_eq!(&next[caret..], "後", "{kind}");
+            assert!(beside(&next).is_some(), "{kind}が読まれていない");
+        }
+    }
+
+    /// RFN01-38: **開いて閉じる注記も、字が無くても置ける。**中へ書く所にキャレットが
+    /// 立ち、字を選んでいれば記法の後ろへ出る。
+    #[test]
+    fn a_range_note_encloses_the_word_or_leaves_the_room() {
+        for (what, label) in [
+            (InsertEdit::Upright, "縦中横"),
+            (InsertEdit::Warichu, "割り注"),
+            (InsertEdit::SmallText, "小さな文字"),
+            (InsertEdit::LargeText, "大きな文字"),
+        ] {
+            let (empty, caret) = inserted("前後", (3, 3), what).expect("入る");
+            assert_eq!(
+                empty,
+                format!("前［＃{label}］［＃{label}終わり］後"),
+                "{label}"
+            );
+            assert_eq!(&empty[caret..], format!("［＃{label}終わり］後"), "{label}");
+
+            let (next, caret) = inserted("前東京後", (3, 9), what).expect("入る");
+            assert_eq!(
+                next,
+                format!("前［＃{label}］東京［＃{label}終わり］後"),
+                "{label}"
+            );
+            assert_eq!(&next[caret..], "後", "{label}");
+            // **空のうちは読まれない**（組む相手が無い）。中身が入れば読まれる。
+            assert_eq!(preview_of(&empty).0, empty, "{label}");
+            assert_eq!(preview_of(&next).0, "前東京後", "{label}");
+        }
     }
 
     /// [`list_edit`]を、その文書の行の見方で呼ぶ（試験）。
