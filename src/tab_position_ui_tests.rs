@@ -192,10 +192,13 @@ fn a_message_goes_when_another_pane_takes_over() {
     assert_eq!(window.get_render_status(), "", "another pane takes over");
     window.tell_pane("分割: ペインが多すぎます".into());
     refresh(second);
-    assert_eq!(
-        window.get_render_status_shown(),
-        "Pane 2: 分割: ペインが多すぎます",
-        "a pane's message names the pane"
+    // **区切りの字は画面の言葉で変わる**（日本語は全角のコロン）。訳は工程に1つで、
+    // ほかの試験が切り替えることもある（`settings_ui_tests`の言語の試験）——どちらの
+    // 綴りも受ける。ここで見たいのは、**誰の話かが頭に付くこと**である。
+    let shown = window.get_render_status_shown();
+    assert!(
+        shown == "Pane 2: 分割: ペインが多すぎます" || shown == "Pane 2：分割: ペインが多すぎます",
+        "a pane's message names the pane: {shown}"
     );
     refresh(first);
     assert_eq!(window.get_render_status(), "");
