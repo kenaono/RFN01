@@ -3647,6 +3647,18 @@ fn main() -> Result<(), slint::PlatformError> {
     // Winit creates its HWND only after entering the event loop.
     let chrome: Rc<RefCell<Option<Box<window_chrome::Chrome>>>> = Rc::default();
     let held = chrome.clone();
+    // タイトル行のうち、どこまでを「押せる場所」にするか（RFN01-44）。**2つの状態から
+    // 1つを決める**——書き手を2人にしない。メニューが閉じた知らせが、印刷の知らせより
+    // 後に来ても、結果が変わらないようにする。
+    let reach = |printing: bool, menu: bool| -> f32 {
+        if printing {
+            f32::MAX
+        } else if menu {
+            372.
+        } else {
+            36.
+        }
+    };
     // **バーが出るたびに、開ける分類を決める**（RFN01-38、書き手の決定 2026-09-21）。
     // アイコンの押下はSlintの中で`title-menu-visible`を立てるので、
     // `MenuInput.open_menu()`を通らない——**ここが両方の道の合流点**である。
@@ -3656,16 +3668,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let menu_live = live.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
-            chrome.set_interactive_end(if shown { 372. } else { 36. });
+            // **印刷中なら、メニューが閉じても押せる場所のまま**（RFN01-44）。
+            let printing = weak
+                .upgrade()
+                .is_some_and(|window| window.get_print_active());
+            let end = reach(printing, shown);
+            chrome.set_interactive_end(end);
             // 診断（RFN01-44）：**この道も同じ値を書く**。印刷プレビュー中の値を
             // ここが上書きしていないかを見る（書き手の見立て：メニューの作業の後から
             // 上側が押せなくなった）。
             menu_live.cache.borrow_mut().log_diag(
                 "print",
-                &format!(
-                    "menu_interactive_end shown={shown} end={}",
-                    if shown { 372. } else { 36. }
-                ),
+                &format!("menu_interactive_end shown={shown} printing={printing} end={end}"),
             );
         }
         if shown && let Some(me) = weak.upgrade() {
@@ -3686,20 +3700,21 @@ fn main() -> Result<(), slint::PlatformError> {
     // 押せる場所にする。
     let held = chrome.clone();
     let print_live = live.clone();
+    let print_weak = window.as_weak();
     window.on_print_active_changed(move |active| {
         if let Some(chrome) = held.borrow().as_ref() {
-            chrome.set_interactive_end(if active { f32::MAX } else { 36. });
+            // **メニューのバーが出ていても、印刷中なら押せる場所**（RFN01-44）。
+            let menu = print_weak
+                .upgrade()
+                .is_some_and(|window| window.get_title_menu_visible());
+            let end = reach(active, menu);
+            chrome.set_interactive_end(end);
+            // 診断（RFN01-44）：受け口が呼ばれたか、そのとき何を入れたか。
+            print_live.cache.borrow_mut().log_diag(
+                "print",
+                &format!("active_changed active={active} menu={menu} end={end}"),
+            );
         }
-        // 診断（RFN01-44）：**受け口が呼ばれたか**、そのとき何を入れたか、窓が
-        // あるか。上側のボタンが押せないままなので、配線が届いているかを確かめる。
-        print_live.cache.borrow_mut().log_diag(
-            "print",
-            &format!(
-                "active_changed active={active} end={} chrome={}",
-                if active { f32::MAX } else { 36. },
-                held.borrow().is_some()
-            ),
-        );
     });
     let held = chrome.clone();
     Timer::single_shot(Duration::ZERO, move || {
