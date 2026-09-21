@@ -17,10 +17,13 @@ export component TitleMenuBar inherits Rectangle {
     callback dismissed();
     callback toggled();
     // Windows標準のキャプションボタンに合わせる。ホバーは薄い灰、閉じるだけ
-    // 赤で記号が白へ変わる。押下はその一段暗い色。`blocked`（質問・印刷・比較）
-    // の間は面を出さない。
+    // 赤で記号が白へ変わる。押下はその一段暗い色。**`blocked`では止めない**——
+    // 質問・印刷・比較の間もこのボタンのヒット領域は生きているので、面だけ
+    // 消すと押せないと読めてしまう。止めるのはタイトル行のメニュー側だけ。
+    // （印刷と比較は画面がタイトル行を覆うので面は見えない。質問の幕の下では
+    // 幕に暗くされた面が出る。）
     pure function caption-over(index: int) -> bool {
-        return !root.blocked && root.hot == index + 1;
+        return root.hot == index + 1;
     }
     pure function caption-face(index: int) -> color {
         if !root.caption-over(index) { return Tok.chrome; }
