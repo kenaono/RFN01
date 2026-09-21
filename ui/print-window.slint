@@ -162,6 +162,11 @@ export component PrintView inherits Rectangle {
 
         paper-room := Rectangle {
             background: Tok.chrome-sunken;
+            // **紙をこの面の中で切り取る**（RFN01-44）。拡大して紙が面より大きくなると、
+            // 切り取りが無ければ**隣のボタンの上まで描かれて押せなくなる**。書き手の
+            // 言う「はみ出してよい」は**紙の一部だけが見えていてよい**という意味で、
+            // 窓の外へ出てよいということではない（2026-09-21、書き手の訂正）。
+            clip: true;
             changed width => { root.room-changed(self.width, self.height); }
             changed height => { root.room-changed(self.width, self.height); }
             init => { root.room-changed(self.width, self.height); }

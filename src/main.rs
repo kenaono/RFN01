@@ -3647,15 +3647,40 @@ fn main() -> Result<(), slint::PlatformError> {
     // Winit creates its HWND only after entering the event loop.
     let chrome: Rc<RefCell<Option<Box<window_chrome::Chrome>>>> = Rc::default();
     let held = chrome.clone();
+    // タイトル行のうち、どこまでを「押せる場所」にするか（RFN01-44）。**2つの状態から
+    // 1つを決める**——書き手を2人にしない。メニューが閉じた知らせが、印刷の知らせより
+    // 後に来ても、結果が変わらないようにする。
+    let reach = |printing: bool, menu: bool| -> f32 {
+        if printing {
+            f32::MAX
+        } else if menu {
+            372.
+        } else {
+            36.
+        }
+    };
     // **バーが出るたびに、開ける分類を決める**（RFN01-38、書き手の決定 2026-09-21）。
     // アイコンの押下はSlintの中で`title-menu-visible`を立てるので、
     // `MenuInput.open_menu()`を通らない——**ここが両方の道の合流点**である。
     let weak = window.as_weak();
     let open_live = live.clone();
     let open_kills = kill_ring.clone();
+    let menu_live = live.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
-            chrome.set_interactive_end(if shown { 372. } else { 36. });
+            // **印刷中なら、メニューが閉じても押せる場所のまま**（RFN01-44）。
+            let printing = weak
+                .upgrade()
+                .is_some_and(|window| window.get_print_active());
+            let end = reach(printing, shown);
+            chrome.set_interactive_end(end);
+            // 診断（RFN01-44）：**この道も同じ値を書く**。印刷プレビュー中の値を
+            // ここが上書きしていないかを見る（書き手の見立て：メニューの作業の後から
+            // 上側が押せなくなった）。
+            menu_live.cache.borrow_mut().log_diag(
+                "print",
+                &format!("menu_interactive_end shown={shown} printing={printing} end={end}"),
+            );
         }
         if shown && let Some(me) = weak.upgrade() {
             let openable: Vec<bool> = (0..menu_commands::MENU_GROUPS)
@@ -3667,6 +3692,30 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let weak = window.as_weak();
+    let held = chrome.clone();
+    // **印刷プレビューの間は、上端を押せる場所にする**（RFN01-44）。プレビューの
+    // 上側の帯（閉じる・`‹`・`›`）は、この窓がタイトル行として扱っている高さに
+    // 重なっている——そのままでは**中のボタンに指が届かない**（書き手の報告
+    // 2026-09-21：上は押せないのに下は押せる）。出ている間だけ、窓の幅いっぱいまで
+    // 押せる場所にする。
+    let held = chrome.clone();
+    let print_live = live.clone();
+    let print_weak = window.as_weak();
+    window.on_print_active_changed(move |active| {
+        if let Some(chrome) = held.borrow().as_ref() {
+            // **メニューのバーが出ていても、印刷中なら押せる場所**（RFN01-44）。
+            let menu = print_weak
+                .upgrade()
+                .is_some_and(|window| window.get_title_menu_visible());
+            let end = reach(active, menu);
+            chrome.set_interactive_end(end);
+            // 診断（RFN01-44）：受け口が呼ばれたか、そのとき何を入れたか。
+            print_live.cache.borrow_mut().log_diag(
+                "print",
+                &format!("active_changed active={active} menu={menu} end={end}"),
+            );
+        }
+    });
     let held = chrome.clone();
     Timer::single_shot(Duration::ZERO, move || {
         let Some(window) = weak.upgrade() else {

@@ -144,6 +144,11 @@ export component AppWindow inherits Window {
     in-out property <int> menu-action: 0;
     in-out property <int> menu-generation: 0;
     changed title-menu-visible => { root.title-menu-visibility(root.title-menu-visible); }
+    /// 印刷プレビューが出入りした（RFN01-44）。**上端の当たり判定を切り替える**ために
+    /// Rustへ伝える——プレビューの上側の帯は、この窓がタイトル行として扱っている
+    /// 高さに重なっているので、そのままでは中のボタンに指が届かない。
+    callback print-active-changed(bool);
+    changed print-active => { root.print-active-changed(root.print-active); }
     // The document in front, then the editor's name. It said
     // 「Editor - 横書き・縦書き切り替え検証」 until 2026-09-06, which was the
     // title of the technical validation this grew out of — true once, and a
