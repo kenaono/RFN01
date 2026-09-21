@@ -3675,7 +3675,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 );
                 return;
             };
-            match window_chrome::Chrome::install(hwnd) {
+            match window_chrome::Chrome::install(hwnd, window.as_weak()) {
                 Ok(chrome) => {
                     *held.borrow_mut() = Some(chrome);
                     window.set_custom_title(true);

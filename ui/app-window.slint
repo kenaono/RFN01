@@ -125,6 +125,11 @@ export struct LeftRow {
 export component AppWindow inherits Window {
     in property <bool> custom-title: false;
     in property <bool> title-maximized: false;
+    // Windows owns the caption hit regions, so the frame reports which of the
+    // three buttons the pointer is over (1 minimise, 2 maximise, 3 close, 0
+    // none) and whether one is held down. Only the faces are drawn here.
+    in property <int> title-hot: 0;
+    in property <bool> title-pressed: false;
     in-out property <bool> title-menu-visible: false;
     callback title-menu-requested(int);
     callback title-menu-dismissed();
@@ -1183,6 +1188,8 @@ export component AppWindow inherits Window {
         menu-visible: root.title-menu-visible;
         blocked: root.question-open || root.print-active || root.diff-active;
         maximized: root.title-maximized;
+        hot: root.title-hot;
+        pressed: root.title-pressed;
         document-title: root.document-title;
         focus-generation: root.title-menu-focus-generation;
         selected <=> root.title-menu-active;
