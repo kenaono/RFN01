@@ -8637,6 +8637,8 @@ struct WorkspaceLinkUi {
     priority_background: u64,
     priority_pending: bool,
     pictures_revision: u64,
+    /// The last `link.popup` line this popup produced — see the tick.
+    popup_logged: Option<(i32, usize, usize, bool, u64)>,
     validity: workspace_links::ValidityChecker,
     validity_requested: Option<(u64, bool, Vec<(usize, Instant, Option<PathBuf>)>)>,
     validity_generation: Option<u64>,
@@ -8663,6 +8665,7 @@ fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
                 priority_background: 0,
                 priority_pending: false,
                 pictures_revision: u64::MAX,
+                popup_logged: None,
                 validity: workspace_links::ValidityChecker::new(),
                 validity_requested: None,
                 validity_generation: None,
@@ -8998,6 +9001,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let doc = live.states.document(id);
     if !link_completion_allowed(window, live, id, &doc) {
         ui.completion.hide();
+        ui.popup_logged = None;
         ui.observed = None;
         window.set_link_popup_open(false);
         return;
@@ -9017,6 +9021,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
         || link_trigger_in_code(&source, caret)
     {
         ui.completion.hide();
+        ui.popup_logged = None;
         publish_link_popup(window, id, &ui);
         return;
     }
@@ -9026,6 +9031,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let mut entries = ui.index.entries_shared();
     let tabs = live.tabs.borrow();
     let mut held_pointers = Vec::new();
+    let mut overlaid = 0usize;
     for tab in tabs.panes.iter().flat_map(|pane| &pane.tabs) {
         let document = &tab.document;
         let pointer = Rc::as_ptr(document) as usize;
@@ -9058,6 +9064,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
             entry.headings = headings.1.clone();
             entry.headings_complete = true;
         }
+        overlaid += 1;
     }
     ui.dirty_headings
         .retain(|key, _| held_pointers.contains(key));
@@ -9074,6 +9081,29 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
         &entries,
         100,
     );
+    // 2026-09-21: a report that the completion did not follow an unsaved
+    // heading has to be separable from the completion not being rebuilt at
+    // all, so every rebuild of the list is recorded — how many candidates,
+    // whether they are headings, how many open documents contributed their
+    // live outline, and which index revision they came from. Counts and
+    // identifiers only: never a name, a path, or a heading's own text.
+    let signature = (
+        id.index(),
+        ui.completion.candidates().len(),
+        overlaid,
+        ui.completion.is_heading(),
+        ui.index.revision(),
+    );
+    if ui.popup_logged != Some(signature) {
+        ui.popup_logged = Some(signature);
+        let line = format!(
+            "link.popup pane={} heading={} candidates={} overlaid={} revision={}",
+            signature.0, signature.3, signature.1, signature.2, signature.4
+        );
+        let mut cache = live.cache.borrow_mut();
+        cache.log_diag("link.popup", &line);
+        cache.log_perf(&line);
+    }
     publish_link_popup(window, id, &ui);
 }
 

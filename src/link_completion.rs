@@ -56,14 +56,14 @@ pub enum TriggerKind {
 }
 
 impl TriggerKind {
-    fn is_wiki(&self) -> bool {
+    pub(crate) fn is_wiki(&self) -> bool {
         matches!(
             self,
             TriggerKind::WikiFile | TriggerKind::WikiHeading { .. }
         )
     }
 
-    fn is_heading(&self) -> bool {
+    pub(crate) fn is_heading(&self) -> bool {
         matches!(
             self,
             TriggerKind::WikiHeading { .. } | TriggerKind::MarkdownHeading { .. }

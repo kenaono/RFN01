@@ -1266,6 +1266,16 @@ impl Completion {
         self.open.is_some()
     }
 
+    /// Whether the open popup is offering a file's headings rather than files
+    /// — for the diagnostics log (`link.popup`), so a report about heading
+    /// candidates can be told from one about the file list without recording
+    /// what either said.
+    pub fn is_heading(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_some_and(|open| open.context.kind.is_heading())
+    }
+
     pub fn candidates(&self) -> &[Candidate] {
         self.open
             .as_ref()
@@ -1717,6 +1727,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("creates");
         directory
+    }
+
+    /// 未保存の見出しが補完候補まで届くことを固定する。索引はディスク上の古い
+    /// 見出しを持ち、優先更新だけが開いている本文の新しい見出しを持つ状況を作る
+    /// （RFN01-24 の確認手順4が実画面で通らなかった、2026-09-21 の報告を受けて）。
+    #[test]
+    fn an_unsaved_heading_reaches_the_completion_candidates() {
+        let root = scratch_directory("unsaved-heading");
+        let notes = root.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("Target.md"), "# 古い見出し\n").unwrap();
+        let review = root.join("Review.md");
+        std::fs::write(&review, "[[Target#\n").unwrap();
+        let root_text = root.to_str().unwrap();
+
+        let mut links = WorkspaceLinks::new(None);
+        links.identity = Some(ScopeIdentity {
+            workspace: Some(1),
+            roots: vec![root.clone()],
+            reset_generation: 0,
+        });
+        links.expected_generation = Some(7);
+        links.apply(Event {
+            generation: 7,
+            kind: EventKind::Cached(vec![entry(
+                root_text,
+                "notes/Target.md",
+                vec![heading(1, "古い見出し", 0)],
+            )]),
+        });
+        assert_eq!(links.entries()[0].headings[0].text, "古い見出し");
+
+        // What the priority worker publishes for a document open with unsaved
+        // edits: its live outline, never the file's.
+        links.set_priority(vec![entry(
+            root_text,
+            "notes/Target.md",
+            vec![heading(1, "新しい見出し", 0)],
+        )]);
+        assert_eq!(
+            links.entries()[0].headings[0].text,
+            "新しい見出し",
+            "the priority overlay has to win over the indexed text"
+        );
+
+        let source = "[[Target#";
+        let context = link_completion::detect(source, source.len()).unwrap();
+        let candidates =
+            link_completion::candidates(links.entries(), Some(&review), source, &context, 100);
+        let shown: Vec<&str> = candidates
+            .iter()
+            .map(|item| item.display.as_str())
+            .collect();
+        assert!(
+            shown.iter().any(|text| text.contains("新しい見出し")),
+            "the unsaved heading should be offered, got {shown:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// 2026-09-21: what keeping the shared view costs the UI thread at the
