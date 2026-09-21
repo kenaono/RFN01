@@ -75,6 +75,9 @@ impl TriggerKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context {
     pub kind: TriggerKind,
+    /// **画像の記法の中か**（RFN01-48）。`![[`の`!`、または`![説明](`の`!`が
+    /// 付いているとき。画像の候補は画像だけなので、絞り込みに使う。
+    pub image: bool,
     /// Byte offset of the trigger's own marker (`[[` or `(`). A caller can
     /// hand this to `document::line_style` (or similar) to decide the caret
     /// is inside a fence or a code span and reject the whole context — this
@@ -175,9 +178,21 @@ pub fn detect(source: &str, caret: usize) -> Option<Context> {
         (false, Some(file)) => TriggerKind::MarkdownHeading { file },
         (false, None) => TriggerKind::MarkdownFile,
     };
+    // **画像の記法か**（RFN01-48）。`![`はどちらの文法でも記法の頭に付く——
+    // `![[`は`[[`の直前、`![説明](`は`]`の手前の`[`の直前にある。文法は
+    // `document::link_here`と同じ素朴な読み方なので、入れ子の角括弧は数えない
+    // （`[a[b]](x)`のような形はリンクとしても読まれない）。
+    let image = if is_wiki {
+        trigger_at > 0 && source.as_bytes()[trigger_at - 1] == b'!'
+    } else {
+        source[..trigger_at]
+            .rfind('[')
+            .is_some_and(|open| open > 0 && source.as_bytes()[open - 1] == b'!')
+    };
 
     Some(Context {
         kind,
+        image,
         trigger_at,
         query_at,
         query: source[query_at..caret].to_owned(),
@@ -298,6 +313,10 @@ pub fn candidates(
         return Vec::new();
     }
     if context.kind.is_heading() {
+        // **画像に見出しは無い**（RFN01-48）。`![[画像.png#`に候補を出さない。
+        if context.image {
+            return Vec::new();
+        }
         let file = match &context.kind {
             TriggerKind::WikiHeading { file } | TriggerKind::MarkdownHeading { file } => {
                 file.as_str()
@@ -335,7 +354,14 @@ fn file_candidates(
 
     let mut matched: Vec<&Entry> = Vec::new();
     for entry in entries {
-        if !crate::workspace_index::is_indexable(&entry.canonical) {
+        // **画像の記法の中では画像だけ**（RFN01-48）。通常のリンクは今までどおり
+        // ——画像も候補に出る（`[[絵.png]]`は開く先として使える）。
+        let wanted = if context.image {
+            crate::workspace_index::is_image(&entry.canonical)
+        } else {
+            crate::workspace_index::is_indexable(&entry.canonical)
+        };
+        if !wanted {
             continue;
         }
         if matched.len() >= limit {
@@ -859,6 +885,69 @@ mod tests {
 
         let found = candidates(&entries, None, "", &context, DEFAULT_CANDIDATE_LIMIT);
         assert_eq!(found.len(), 2);
+    }
+
+    /// RFN01-48: **画像の記法かどうか。**`!`が記法の頭に付いているものだけが画像で、
+    /// `[[`と`[見よ](`は今までどおり普通のリンクである。
+    #[test]
+    fn the_trigger_says_whether_it_is_an_image() {
+        for source in ["![[絵", "![説明](絵"] {
+            let context = detect(source, source.len()).expect("finds a trigger");
+            assert!(context.image, "{source}");
+        }
+        for source in ["[[絵", "[見よ](絵"] {
+            let context = detect(source, source.len()).expect("finds a trigger");
+            assert!(!context.image, "{source}");
+        }
+    }
+
+    /// RFN01-48: **画像の記法では画像だけを候補にする。**普通のリンクは今までどおり
+    /// ——画像も候補に出る（`[[絵.png]]`は開く先として使える）。
+    #[test]
+    fn an_image_trigger_offers_images_only() {
+        let entries = vec![
+            entry("/根", "原稿.md", Vec::new()),
+            entry("/根", "絵.png", Vec::new()),
+            entry("/根", "挿絵.jpg", Vec::new()),
+        ];
+
+        let wiki = detect("![[絵", "![[絵".len()).unwrap();
+        let mut names: Vec<String> = candidates(&entries, None, "", &wiki, DEFAULT_CANDIDATE_LIMIT)
+            .iter()
+            .map(|c| c.display.clone())
+            .collect();
+        names.sort();
+        let mut wanted = vec!["根 / 絵.png".to_owned(), "根 / 挿絵.jpg".to_owned()];
+        wanted.sort();
+        assert_eq!(names, wanted);
+
+        let markdown = detect("![説明](絵", "![説明](絵".len()).unwrap();
+        assert_eq!(
+            candidates(&entries, None, "", &markdown, DEFAULT_CANDIDATE_LIMIT).len(),
+            2
+        );
+
+        // 普通のリンクは、画像も候補のまま（開く先として使える）。ここは絞り込みの
+        // 話なので、問いを空にして3つとも出ることを見る。
+        let plain = detect("[[", "[[".len()).unwrap();
+        assert_eq!(
+            candidates(&entries, None, "", &plain, DEFAULT_CANDIDATE_LIMIT).len(),
+            3
+        );
+    }
+
+    /// RFN01-48: **画像に見出しは無い。**`![[絵.png#`では候補を出さない。
+    #[test]
+    fn an_image_trigger_offers_no_headings() {
+        let entries = vec![
+            entry("/根", "絵.png", Vec::new()),
+            entry("/根", "原稿.md", vec![heading(1, "第一章")]),
+        ];
+        let source = "![[絵.png#";
+        let context = detect(source, source.len()).unwrap();
+
+        assert!(context.image);
+        assert!(candidates(&entries, None, "", &context, DEFAULT_CANDIDATE_LIMIT).is_empty());
     }
 
     #[test]

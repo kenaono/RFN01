@@ -1,4 +1,5 @@
-use crate::menu_commands::ShortcutAction;
+use crate::document::{InsertEdit, LineNoteEdit};
+use crate::menu_commands::{InsertShape, ShortcutAction};
 use crate::{AppWindow, Live, ShortcutItem};
 use slint::{ComponentHandle, ModelRc, VecModel};
 /// 操作名：日本語と英語（追加要件 2026-09-15、表示の国際化）。
@@ -280,95 +281,151 @@ const FILE_ACTIONS: &[MenuAction] = &[
         ShortcutAction::FolderTerminal
     ),
 ];
+/// 挿入の操作を短く書くための言い方。**番号は書かない**——形で指す（RFN01-48）。
+const fn insert(what: InsertEdit) -> ShortcutAction {
+    ShortcutAction::Insert(InsertShape::Edit(what))
+}
+const fn line_note(what: LineNoteEdit) -> ShortcutAction {
+    ShortcutAction::Insert(InsertShape::Line(what))
+}
+const fn page_break() -> ShortcutAction {
+    ShortcutAction::Insert(InsertShape::PageBreak)
+}
 /// 挿入の分類に並べる、メニューから来た操作。
 ///
-/// **`document::INSERT_EDITS`と`document::LINE_NOTE_EDITS`の並びそのもの**である
-/// ——番号が挿入の番号なので、間へ入れず末尾へだけ足す。
+/// **持つのは形であって番号ではない。**番号はメニューの並びが変わるたびに動くので、
+/// 番号で持つと数え違えて別の形を走らせてしまう。**idは末尾へ足す**——既に割り当てた
+/// キーを動かさないためで、だから画面の並びとこの一覧の並びは同じとは限らない
+/// （画像はメニューの途中、一覧では末尾にある）。
 const INSERT_ACTIONS: &[MenuAction] = &[
     // リンク・ルビ・注記
-    menu_action!("Markdownリンク", "Markdown Link", ShortcutAction::Insert(0)),
-    menu_action!("Wikiリンク", "Wiki Link", ShortcutAction::Insert(1)),
+    menu_action!(
+        "Markdownリンク",
+        "Markdown Link",
+        insert(InsertEdit::MarkdownLink)
+    ),
+    menu_action!("Wikiリンク", "Wiki Link", insert(InsertEdit::WikiLink)),
     menu_action!(
         "別名付きWikiリンク",
         "Wiki Link with Alias",
-        ShortcutAction::Insert(2)
+        insert(InsertEdit::WikiLinkAlias)
     ),
-    menu_action!("ルビ", "Ruby", ShortcutAction::Insert(3)),
+    menu_action!("ルビ", "Ruby", insert(InsertEdit::Ruby)),
     menu_action!(
         "左側の注記",
         "Left-side Annotation",
-        ShortcutAction::Insert(4)
+        insert(InsertEdit::SideNote)
     ),
     menu_action!(
         "ルビと左側の注記",
         "Ruby and Left-side Annotation",
-        ShortcutAction::Insert(5)
+        insert(InsertEdit::RubyWithSideNote)
     ),
     // 傍点
-    menu_action!("傍点", "Emphasis Dots", ShortcutAction::Insert(6)),
-    menu_action!("ゴマ傍点", "Sesame Dots", ShortcutAction::Insert(7)),
-    menu_action!("丸傍点", "Round Dots", ShortcutAction::Insert(8)),
-    menu_action!("白丸傍点", "White Round Dots", ShortcutAction::Insert(9)),
+    menu_action!("傍点", "Emphasis Dots", insert(InsertEdit::EmphasisDots)),
+    menu_action!(
+        "ゴマ傍点",
+        "Sesame Dots",
+        insert(InsertEdit::SesameDotsNote)
+    ),
+    menu_action!("丸傍点", "Round Dots", insert(InsertEdit::RoundDotsNote)),
+    menu_action!(
+        "白丸傍点",
+        "White Round Dots",
+        insert(InsertEdit::WhiteRoundDotsNote)
+    ),
     menu_action!(
         "二重丸傍点",
         "Double Round Dots",
-        ShortcutAction::Insert(10)
+        insert(InsertEdit::DoubleRoundDotsNote)
     ),
-    menu_action!("×傍点", "Cross Dots", ShortcutAction::Insert(11)),
+    menu_action!("×傍点", "Cross Dots", insert(InsertEdit::CrossDotsNote)),
     // 傍線
-    menu_action!("傍線", "Single Line", ShortcutAction::Insert(12)),
-    menu_action!("二重傍線", "Double Line", ShortcutAction::Insert(13)),
-    menu_action!("波線", "Wavy Line", ShortcutAction::Insert(14)),
-    menu_action!("鎖線", "Chain Line", ShortcutAction::Insert(15)),
-    menu_action!("破線", "Dashed Line", ShortcutAction::Insert(16)),
+    menu_action!("傍線", "Single Line", insert(InsertEdit::LineNote)),
+    menu_action!(
+        "二重傍線",
+        "Double Line",
+        insert(InsertEdit::DoubleLineNote)
+    ),
+    menu_action!("波線", "Wavy Line", insert(InsertEdit::WaveLineNote)),
+    menu_action!("鎖線", "Chain Line", insert(InsertEdit::ChainLineNote)),
+    menu_action!("破線", "Dashed Line", insert(InsertEdit::DashLineNote)),
     // 文字注記
-    menu_action!("縦中横", "Tate-chu-yoko", ShortcutAction::Insert(17)),
-    menu_action!("割り注", "Warichu", ShortcutAction::Insert(18)),
-    menu_action!("小さな文字", "Small Text", ShortcutAction::Insert(19)),
-    menu_action!("大きな文字", "Large Text", ShortcutAction::Insert(20)),
+    menu_action!("縦中横", "Tate-chu-yoko", insert(InsertEdit::Upright)),
+    menu_action!("割り注", "Warichu", insert(InsertEdit::Warichu)),
+    menu_action!("小さな文字", "Small Text", insert(InsertEdit::SmallText)),
+    menu_action!("大きな文字", "Large Text", insert(InsertEdit::LargeText)),
     // 見出し
-    menu_action!("見出し 1", "Heading 1", ShortcutAction::Insert(21)),
-    menu_action!("見出し 2", "Heading 2", ShortcutAction::Insert(22)),
-    menu_action!("見出し 3", "Heading 3", ShortcutAction::Insert(23)),
-    menu_action!("見出し 4", "Heading 4", ShortcutAction::Insert(24)),
-    menu_action!("見出し 5", "Heading 5", ShortcutAction::Insert(25)),
-    menu_action!("見出し 6", "Heading 6", ShortcutAction::Insert(26)),
-    menu_action!("見出しを解除", "Remove Heading", ShortcutAction::Insert(27)),
+    menu_action!("見出し 1", "Heading 1", line_note(LineNoteEdit::Heading(1))),
+    menu_action!("見出し 2", "Heading 2", line_note(LineNoteEdit::Heading(2))),
+    menu_action!("見出し 3", "Heading 3", line_note(LineNoteEdit::Heading(3))),
+    menu_action!("見出し 4", "Heading 4", line_note(LineNoteEdit::Heading(4))),
+    menu_action!("見出し 5", "Heading 5", line_note(LineNoteEdit::Heading(5))),
+    menu_action!("見出し 6", "Heading 6", line_note(LineNoteEdit::Heading(6))),
+    menu_action!(
+        "見出しを解除",
+        "Remove Heading",
+        line_note(LineNoteEdit::NoHeading)
+    ),
     // 字下げ
-    menu_action!("1字下げ", "Indent 1 Characters", ShortcutAction::Insert(28)),
-    menu_action!("2字下げ", "Indent 2 Characters", ShortcutAction::Insert(29)),
-    menu_action!("3字下げ", "Indent 3 Characters", ShortcutAction::Insert(30)),
-    menu_action!("4字下げ", "Indent 4 Characters", ShortcutAction::Insert(31)),
-    menu_action!("字下げを解除", "Remove Indent", ShortcutAction::Insert(32)),
+    menu_action!(
+        "1字下げ",
+        "Indent 1 Characters",
+        line_note(LineNoteEdit::Indent(1))
+    ),
+    menu_action!(
+        "2字下げ",
+        "Indent 2 Characters",
+        line_note(LineNoteEdit::Indent(2))
+    ),
+    menu_action!(
+        "3字下げ",
+        "Indent 3 Characters",
+        line_note(LineNoteEdit::Indent(3))
+    ),
+    menu_action!(
+        "4字下げ",
+        "Indent 4 Characters",
+        line_note(LineNoteEdit::Indent(4))
+    ),
+    menu_action!(
+        "字下げを解除",
+        "Remove Indent",
+        line_note(LineNoteEdit::NoIndent)
+    ),
     // 地付き
-    menu_action!("地付き", "Align to End", ShortcutAction::Insert(33)),
+    menu_action!(
+        "地付き",
+        "Align to End",
+        line_note(LineNoteEdit::AlignToEnd(0))
+    ),
     menu_action!(
         "地から1字上げ",
         "1 Characters from End",
-        ShortcutAction::Insert(34)
+        line_note(LineNoteEdit::AlignToEnd(1))
     ),
     menu_action!(
         "地から2字上げ",
         "2 Characters from End",
-        ShortcutAction::Insert(35)
+        line_note(LineNoteEdit::AlignToEnd(2))
     ),
     menu_action!(
         "地から3字上げ",
         "3 Characters from End",
-        ShortcutAction::Insert(36)
+        line_note(LineNoteEdit::AlignToEnd(3))
     ),
     menu_action!(
         "地から4字上げ",
         "4 Characters from End",
-        ShortcutAction::Insert(37)
+        line_note(LineNoteEdit::AlignToEnd(4))
     ),
     menu_action!(
         "地付きを解除",
         "Remove End Alignment",
-        ShortcutAction::Insert(38)
+        line_note(LineNoteEdit::NoAlignToEnd)
     ),
     // 改ページ
-    menu_action!("改ページ", "Page Break", ShortcutAction::Insert(39)),
+    menu_action!("改ページ", "Page Break", page_break()),
     // 箇条書き（`document::BULLET_MARKS`の並び）
     menu_action!("箇条書き -", "Bullet List -", ShortcutAction::Bullets(0)),
     menu_action!("箇条書き *", "Bullet List *", ShortcutAction::Bullets(1)),
@@ -379,6 +436,17 @@ const INSERT_ACTIONS: &[MenuAction] = &[
         ShortcutAction::NumberedList
     ),
     menu_action!("番号を振り直す", "Renumber", ShortcutAction::Renumber),
+    // 画像（RFN01-48）。**idは末尾へ足す**——既に割り当てたキーを動かさないため。
+    menu_action!(
+        "画像リンク(Markdown)",
+        "Image Link (Markdown)",
+        insert(InsertEdit::MarkdownImage)
+    ),
+    menu_action!(
+        "画像リンク(Wiki)",
+        "Image Link (Wiki)",
+        insert(InsertEdit::WikiImage)
+    ),
 ];
 /// 変更できる操作の数——既存の46枠と、メニューから来た分。
 fn count() -> usize {
@@ -1059,20 +1127,47 @@ mod tests {
         assert_eq!(resolve("", 0, "n", true, false, false), new_file);
     }
 
-    /// 挿入の番号は`document::INSERT_EDITS`と`LINE_NOTE_EDITS`の並びそのもの。
-    /// **間へ入れると番号が指す先が動く**ので、並びそのものを試験で留めておく。
+    /// 挿入の操作は、`document::INSERT_EDITS`と`LINE_NOTE_EDITS`の**形を1つずつ
+    /// 重複なく指す**。番号ではなく形で持つので、挿入の並びが動いても追随する。
+    ///
+    /// **画面の並びと一覧の並びは同じとは限らない**——idは末尾へ足すので、画像の
+    /// ようにメニューの途中へ入る項目は、一覧では最後に来る（RFN01-48）。
     #[test]
-    fn insert_actions_keep_the_insert_numbering() {
-        for (index, action) in INSERT_ACTIONS.iter().take(40).enumerate() {
-            assert_eq!(action.action, ShortcutAction::Insert(index as i32));
+    fn insert_actions_cover_every_shape_once() {
+        let mut used = Vec::new();
+        for action in INSERT_ACTIONS.iter().map(|action| action.action) {
+            match action {
+                ShortcutAction::Insert(shape) => used.push(shape),
+                ShortcutAction::Bullets(_)
+                | ShortcutAction::NumberedList
+                | ShortcutAction::Renumber => {}
+                other => panic!("挿入の操作ではない: {other:?}"),
+            }
+        }
+        for what in crate::document::INSERT_EDITS {
+            let count = used
+                .iter()
+                .filter(|shape| **shape == InsertShape::Edit(what))
+                .count();
+            assert_eq!(count, 1, "{what:?}");
+        }
+        for what in crate::document::LINE_NOTE_EDITS {
+            let count = used
+                .iter()
+                .filter(|shape| **shape == InsertShape::Line(what))
+                .count();
+            assert_eq!(count, 1, "{what:?}");
         }
         assert_eq!(
-            INSERT_ACTIONS[40].action,
-            ShortcutAction::Bullets(0),
-            "箇条書きは記号の並びから始まる"
+            used.iter()
+                .filter(|shape| **shape == InsertShape::PageBreak)
+                .count(),
+            1
         );
-        assert_eq!(INSERT_ACTIONS[44].action, ShortcutAction::Renumber);
-        assert_eq!(INSERT_ACTIONS.len(), 45);
+        assert_eq!(
+            used.len(),
+            crate::document::INSERT_EDITS.len() + crate::document::LINE_NOTE_EDITS.len() + 1
+        );
     }
 
     /// 指定できるキーは**修飾キー付きかF1〜F12**。素の打鍵と、窓・アプリが先に
