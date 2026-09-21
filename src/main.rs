@@ -3668,6 +3668,18 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     let weak = window.as_weak();
     let held = chrome.clone();
+    // **印刷プレビューの間は、上端を押せる場所にする**（RFN01-44）。プレビューの
+    // 上側の帯（閉じる・`‹`・`›`）は、この窓がタイトル行として扱っている高さに
+    // 重なっている——そのままでは**中のボタンに指が届かない**（書き手の報告
+    // 2026-09-21：上は押せないのに下は押せる）。出ている間だけ、窓の幅いっぱいまで
+    // 押せる場所にする。
+    let held = chrome.clone();
+    window.on_print_active_changed(move |active| {
+        if let Some(chrome) = held.borrow().as_ref() {
+            chrome.set_interactive_end(if active { f32::MAX } else { 36. });
+        }
+    });
+    let held = chrome.clone();
     Timer::single_shot(Duration::ZERO, move || {
         let Some(window) = weak.upgrade() else {
             return;
