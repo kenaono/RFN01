@@ -654,6 +654,8 @@ export component AppWindow inherits Window {
     // its `index` here instead of a literal (ペイン分割設計 5).
     callback pane-selection-start(int, float, float, bool);
     callback pane-link-open(int, float, float) -> bool;
+    // 書き手の求め 2026-09-22: Ctrl+クリックで開ける所の上か（ポインタを手の形にする）。
+    callback pane-link-hover(int, float, float) -> bool;
     in-out property <bool> link-popup-open: false;
     in-out property <int> link-popup-pane: -1;
     in-out property <[string]> link-popup-rows;
@@ -2514,7 +2516,7 @@ export component AppWindow inherits Window {
                         // are that direction's, like everything else on it.
                         // 追加要件 2026-09-15: TAB・Paneの色が付いていればそちら。
                         page-background: pane.vertical && !root.paper-shared
-                            ? (pane.paper-v-own ? pane.paper-v : root.palette[22])
+                            ? (pane.paper-v-own ? pane.paper-v : root.palette[23])
                             : (pane.paper-h-own ? pane.paper-h : root.palette[7]);
                         wall-kind: pane.embedded-panel || root.background-transparency > 0 ? 0 : root.wall-kind;
                         wall-pieces: root.wall-pieces;
@@ -2621,6 +2623,7 @@ export component AppWindow inherits Window {
                             root.pane-selection-start(pane.id, x, y, extend);
                         }
                         link-open(x, y) => { root.pane-link-open(pane.id, x, y) }
+                        link-hover(x, y) => { root.pane-link-hover(pane.id, x, y) }
                         link-popup-open: root.link-popup-open && root.link-popup-pane == pane.id;
                         link-popup-rows: root.link-popup-rows;
                         link-popup-selected: root.link-popup-selected;
@@ -3684,7 +3687,7 @@ export component AppWindow inherits Window {
                                                         points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * 7.5) / 10;
                                                         typed(text) => { root.sheet = sheet-index; root.sheet-typed(0, text); }
                                                         typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(0, text); }
-                                                        shown: root.palette[sheet-index * 15 + 0];
+                                                        shown: root.palette[sheet-index * 16 + 0];
                                                         family: root.sheet-fonts[sheet-index * 8 + 0];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 19] != 0;
                                                         italic: root.sheet-numbers[sheet-index * root.sheet-stride + 20] != 0;
@@ -3692,8 +3695,8 @@ export component AppWindow inherits Window {
                                                         background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 22] != 0;
                                                         rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 23] != 0;
                                                         heading: false;
-                                                        background-colour: root.palette[sheet-index * 15 + 8];
-                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        background-colour: root.palette[sheet-index * 16 + 8];
+                                                        paper-colour: root.palette[sheet-index * 16 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(19 + kind, on ? -1 : 1); }
                                                         background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 8, colour); }
                                                         background-more => { root.sheet = sheet-index; root.colour-more(0, 8); }
@@ -3718,7 +3721,7 @@ export component AppWindow inherits Window {
                                                         points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 4] * 0.075) / 10;
                                                         typed(text) => { root.sheet = sheet-index; root.sheet-typed(4, text); }
                                                         typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(1, text); }
-                                                        shown: root.palette[sheet-index * 15 + 1];
+                                                        shown: root.palette[sheet-index * 16 + 1];
                                                         family: root.sheet-fonts[sheet-index * 8 + 1];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 24] != 0;
                                                         italic: root.sheet-numbers[sheet-index * root.sheet-stride + 25] != 0;
@@ -3726,8 +3729,8 @@ export component AppWindow inherits Window {
                                                         background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 27] != 0;
                                                         rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 28] != 0;
                                                         heading: true;
-                                                        background-colour: root.palette[sheet-index * 15 + 9];
-                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        background-colour: root.palette[sheet-index * 16 + 9];
+                                                        paper-colour: root.palette[sheet-index * 16 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(24 + kind, on ? -1 : 1); }
                                                         background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 9, colour); }
                                                         background-more => { root.sheet = sheet-index; root.colour-more(0, 9); }
@@ -3752,7 +3755,7 @@ export component AppWindow inherits Window {
                                                         points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 5] * 0.075) / 10;
                                                         typed(text) => { root.sheet = sheet-index; root.sheet-typed(5, text); }
                                                         typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(2, text); }
-                                                        shown: root.palette[sheet-index * 15 + 2];
+                                                        shown: root.palette[sheet-index * 16 + 2];
                                                         family: root.sheet-fonts[sheet-index * 8 + 2];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 29] != 0;
                                                         italic: root.sheet-numbers[sheet-index * root.sheet-stride + 30] != 0;
@@ -3760,8 +3763,8 @@ export component AppWindow inherits Window {
                                                         background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 32] != 0;
                                                         rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 33] != 0;
                                                         heading: true;
-                                                        background-colour: root.palette[sheet-index * 15 + 10];
-                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        background-colour: root.palette[sheet-index * 16 + 10];
+                                                        paper-colour: root.palette[sheet-index * 16 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(29 + kind, on ? -1 : 1); }
                                                         background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 10, colour); }
                                                         background-more => { root.sheet = sheet-index; root.colour-more(0, 10); }
@@ -3786,7 +3789,7 @@ export component AppWindow inherits Window {
                                                         points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 6] * 0.075) / 10;
                                                         typed(text) => { root.sheet = sheet-index; root.sheet-typed(6, text); }
                                                         typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(3, text); }
-                                                        shown: root.palette[sheet-index * 15 + 3];
+                                                        shown: root.palette[sheet-index * 16 + 3];
                                                         family: root.sheet-fonts[sheet-index * 8 + 3];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 34] != 0;
                                                         italic: root.sheet-numbers[sheet-index * root.sheet-stride + 35] != 0;
@@ -3794,8 +3797,8 @@ export component AppWindow inherits Window {
                                                         background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 37] != 0;
                                                         rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 38] != 0;
                                                         heading: true;
-                                                        background-colour: root.palette[sheet-index * 15 + 11];
-                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        background-colour: root.palette[sheet-index * 16 + 11];
+                                                        paper-colour: root.palette[sheet-index * 16 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(34 + kind, on ? -1 : 1); }
                                                         background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 11, colour); }
                                                         background-more => { root.sheet = sheet-index; root.colour-more(0, 11); }
@@ -3820,7 +3823,7 @@ export component AppWindow inherits Window {
                                                         points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 7] * 0.075) / 10;
                                                         typed(text) => { root.sheet = sheet-index; root.sheet-typed(7, text); }
                                                         typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(4, text); }
-                                                        shown: root.palette[sheet-index * 15 + 4];
+                                                        shown: root.palette[sheet-index * 16 + 4];
                                                         family: root.sheet-fonts[sheet-index * 8 + 4];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 39] != 0;
                                                         italic: root.sheet-numbers[sheet-index * root.sheet-stride + 40] != 0;
@@ -3828,8 +3831,8 @@ export component AppWindow inherits Window {
                                                         background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 42] != 0;
                                                         rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 43] != 0;
                                                         heading: true;
-                                                        background-colour: root.palette[sheet-index * 15 + 12];
-                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        background-colour: root.palette[sheet-index * 16 + 12];
+                                                        paper-colour: root.palette[sheet-index * 16 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(39 + kind, on ? -1 : 1); }
                                                         background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 12, colour); }
                                                         background-more => { root.sheet = sheet-index; root.colour-more(0, 12); }
@@ -3854,7 +3857,7 @@ export component AppWindow inherits Window {
                                                         points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 8] * 0.075) / 10;
                                                         typed(text) => { root.sheet = sheet-index; root.sheet-typed(8, text); }
                                                         typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(5, text); }
-                                                        shown: root.palette[sheet-index * 15 + 5];
+                                                        shown: root.palette[sheet-index * 16 + 5];
                                                         family: root.sheet-fonts[sheet-index * 8 + 5];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 44] != 0;
                                                         italic: root.sheet-numbers[sheet-index * root.sheet-stride + 45] != 0;
@@ -3862,8 +3865,8 @@ export component AppWindow inherits Window {
                                                         background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 47] != 0;
                                                         rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 48] != 0;
                                                         heading: true;
-                                                        background-colour: root.palette[sheet-index * 15 + 13];
-                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        background-colour: root.palette[sheet-index * 16 + 13];
+                                                        paper-colour: root.palette[sheet-index * 16 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(44 + kind, on ? -1 : 1); }
                                                         background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 13, colour); }
                                                         background-more => { root.sheet = sheet-index; root.colour-more(0, 13); }
@@ -3888,7 +3891,7 @@ export component AppWindow inherits Window {
                                                         points: round(root.sheet-numbers[sheet-index * root.sheet-stride] * root.sheet-numbers[sheet-index * root.sheet-stride + 9] * 0.075) / 10;
                                                         typed(text) => { root.sheet = sheet-index; root.sheet-typed(9, text); }
                                                         typed-points(text) => { root.sheet = sheet-index; root.sheet-typed-points(6, text); }
-                                                        shown: root.palette[sheet-index * 15 + 6];
+                                                        shown: root.palette[sheet-index * 16 + 6];
                                                         family: root.sheet-fonts[sheet-index * 8 + 6];
                                                         bold: root.sheet-numbers[sheet-index * root.sheet-stride + 49] != 0;
                                                         italic: root.sheet-numbers[sheet-index * root.sheet-stride + 50] != 0;
@@ -3896,8 +3899,8 @@ export component AppWindow inherits Window {
                                                         background-on: root.sheet-numbers[sheet-index * root.sheet-stride + 52] != 0;
                                                         rule-on: root.sheet-numbers[sheet-index * root.sheet-stride + 53] != 0;
                                                         heading: true;
-                                                        background-colour: root.palette[sheet-index * 15 + 14];
-                                                        paper-colour: root.palette[sheet-index * 15 + 7];
+                                                        background-colour: root.palette[sheet-index * 16 + 14];
+                                                        paper-colour: root.palette[sheet-index * 16 + 7];
                                                         decoration-toggled(kind, on) => { root.sheet = sheet-index; root.sheet-step(49 + kind, on ? -1 : 1); }
                                                         background-chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 14, colour); }
                                                         background-more => { root.sheet = sheet-index; root.colour-more(0, 14); }
@@ -3913,6 +3916,15 @@ export component AppWindow inherits Window {
                                                             root.font-menu-y = self.picker-y;
                                                             font-menu.show();
                                                         }
+                                                    }
+
+                                                    // 書き手の求め 2026-09-22: `==ハイライト==`の地の色。
+                                                    if root.shows-any([@tr("Highlight"), @tr("Color")]): ColorCell {
+                                                        label: @tr("Highlight");
+                                                        shown: root.palette[sheet-index * 16 + 15];
+                                                        chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 15, colour); }
+                                                        automatic => { root.sheet = sheet-index; root.colour-default(0, 15); }
+                                                        more => { root.sheet = sheet-index; root.colour-more(0, 15); }
                                                     }
 
                                                     // 書き手の求め 2026-09-15: **コードの書体も文字の設定。**本文・見出しの
@@ -4654,7 +4666,7 @@ export component AppWindow inherits Window {
                                                     // （コードの書体は 2026-09-15 に Text へ移した。）
                                                     if (sheet-index == 0 || !root.paper-shared) && (root.shows-any([@tr("Paper Color"), @tr("Paper")])): ColorCell {
                                                         label: @tr("Paper Color");
-                                                        shown: root.palette[sheet-index * 15 + 7];
+                                                        shown: root.palette[sheet-index * 16 + 7];
                                                         chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 7, colour); }
                                                         automatic => { root.sheet = sheet-index; root.colour-default(0, 7); }
                                                         more => { root.sheet = sheet-index; root.colour-more(0, 7); }

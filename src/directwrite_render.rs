@@ -86,9 +86,9 @@ use crate::text_blocks::{
     BlockSpan, CrossSlices, DEFAULT_CODE_FONT, DEFAULT_INK, Emphasis, FlowOrder, GridCell,
     LineInfo, LineKind, LineMarker, LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL,
     Marks, Ornament, Pictures, PreparedWraps, RecordedWraps, StyleRun, StyledText, TableGrid,
-    TileSpan, Typography, UprightRules, block_flow_bound, cells_of, cells_per_line, line_runs,
-    place_blocks, split_blocks, style_runs, table_alignments, table_cells, tables, warichu_halves,
-    wrapping_list_lines,
+    TileSpan, Typography, UprightRules, block_flow_bound, callout_colour, cells_of, cells_per_line,
+    line_runs, place_blocks, split_blocks, style_runs, table_alignments, table_cells, tables,
+    warichu_halves, wrapping_list_lines,
 };
 
 /// Which way the text runs.
@@ -634,7 +634,10 @@ impl Graphics {
     ) -> Result<Vec<(u32, IDWriteTextFormat)>> {
         let mut made: Vec<(u32, IDWriteTextFormat)> = Vec::new();
         for run in runs {
-            if !matches!(run.ornament, Some(Ornament::Warichu { .. })) {
+            if !matches!(
+                run.ornament,
+                Some(Ornament::Warichu { .. } | Ornament::Superscript { .. })
+            ) {
                 continue;
             }
             let scale = run.size_scale(typography);
@@ -2157,7 +2160,9 @@ fn marker_ink(ornament: Ornament, block_text: &str, run: &StyleRun, bullets: [ch
         // 要件 7.8: **箱が覆っている数字を、そのまま正立で描く。**`Number`と
         // 同じ道で、違うのは置き場所だけ——あちらは溝、これは箱の中。
         // 割注も同じ道——覆った字を読み出し、描くときに2行へ割る（`draw_warichu`）。
-        Ornament::Upright | Ornament::Warichu { .. } => covered(block_text, run).to_owned(),
+        Ornament::Upright | Ornament::Warichu { .. } | Ornament::Superscript { .. } => {
+            covered(block_text, run).to_owned()
+        }
         Ornament::Ruby { .. } | Ornament::LeftNote { .. } => {
             ruby_reading(block_text, run).to_owned()
         }
@@ -2536,7 +2541,10 @@ fn draw_warichu(
 ) -> Result<()> {
     let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 8];
     for run in runs {
-        if !matches!(run.ornament, Some(Ornament::Warichu { .. })) {
+        if !matches!(
+            run.ornament,
+            Some(Ornament::Warichu { .. } | Ornament::Superscript { .. })
+        ) {
             continue;
         }
         let Some((_, format)) = formats
@@ -2575,7 +2583,12 @@ fn draw_warichu(
         };
         // 割り方は**記法を読んだところと同じ答え**（`warichu_halves`）。箱の長さは
         // そこで決まっているので、2か所で別々に割ったら字がはみ出す。
-        let (head, tail) = warichu_halves(covered(text, run));
+        // 書き手の求め 2026-09-22: 脚注の参照は割らずに1行、前の側（上・右）にだけ組む。
+        let (head, tail) = if matches!(run.ornament, Some(Ornament::Superscript { .. })) {
+            (covered(text, run), "")
+        } else {
+            warichu_halves(covered(text, run))
+        };
         for (part, at) in [(head, first), (tail, second)] {
             if part.is_empty() {
                 continue;
@@ -3581,6 +3594,66 @@ fn draw_grid(
     Ok(())
 }
 
+/// 書き手の求め 2026-09-22: Calloutの地の濃さ。縦棒と同じ色を、字が読める薄さで。
+const CALLOUT_GROUND_ALPHA: f32 = 0.10;
+
+/// 書き手の求め 2026-09-22: `==ハイライト==`の地を、字の枡目の高さで塗る。
+///
+/// **行の箱ではなく字の枡目**：行の箱は行間とルビの帯まで含むので、そのまま塗ると
+/// 帯のぶん上へはみ出す。横書きは行の箱の下端が字の箱の下端（`beside_rule_flow`と同じ
+/// 見方）、縦書きは字が箱の真ん中にいる。
+fn draw_highlights(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    layout: &IDWriteTextLayout,
+    runs: &[StyleRun],
+    origin: windows_numerics::Vector2,
+    mode: WritingMode,
+    typography: &Typography,
+) -> Result<()> {
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 32];
+    // SAFETY: The brush outlives every call here.
+    let ink = unsafe { brush.GetColor() };
+    unsafe { brush.SetColor(&colour(typography.highlight)) };
+    for run in runs.iter().filter(|run| run.marks.highlight) {
+        let mut count = 0;
+        // SAFETY: `style_runs` keeps every range inside the block's own text.
+        unsafe {
+            layout.HitTestTextRange(
+                run.utf16_start,
+                run.utf16_len,
+                origin.X,
+                origin.Y,
+                Some(&mut regions),
+                &mut count,
+            )?;
+        }
+        let cell = typography.font_size * run.size_scale(typography) * 1.2;
+        for region in regions.iter().take((count as usize).min(regions.len())) {
+            let (flow_start, line_start) = mode.to_axes(region.left, region.top);
+            let (flow_extent, line_extent) = mode.to_axes(region.width, region.height);
+            let cell = cell.min(flow_extent);
+            let ink_start = match mode {
+                WritingMode::Horizontal => flow_start + flow_extent - cell,
+                WritingMode::Vertical => flow_start + (flow_extent - cell) / 2.0,
+            };
+            let (left, top) = mode.to_screen(ink_start, line_start);
+            let (width, height) = mode.to_screen(cell, line_extent);
+            let rect = D2D_RECT_F {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            };
+            // SAFETY: As above.
+            unsafe { target.FillRectangle(&rect, brush) };
+        }
+    }
+    // SAFETY: As above.
+    unsafe { brush.SetColor(&ink) };
+    Ok(())
+}
+
 /// E11: backgrounds and heading separators occupy the line box, not glyph underlines.
 fn draw_text_decorations(
     target: &ID2D1RenderTarget,
@@ -3683,7 +3756,28 @@ fn draw_line_ornaments(
             // one gap clear of the text that level would have begun at — a bar
             // at the near end sits out by the margin with a whole indent of air
             // between it and the words it belongs to.
-            LineOrnament::Quote { depth } => {
+            LineOrnament::Quote { depth, callout } => {
+                // 書き手の求め 2026-09-22: **Calloutは種類の色で**——地を淡く敷き、縦棒をその色で
+                // 引く（Obsidianの見え方）。地は縦棒から紙の端まで。
+                let kind = callout_colour(callout);
+                // SAFETY: The brush outlives every call here.
+                let ink = unsafe { brush.GetColor() };
+                if let Some(ground) = kind {
+                    let text_at = page.margin + page.indent;
+                    let from = text_at - gap - bar;
+                    let rect = page.rect(flow, (from, far));
+                    // SAFETY: As above.
+                    unsafe {
+                        brush.SetColor(&colour(ground));
+                        brush.SetOpacity(CALLOUT_GROUND_ALPHA);
+                        target.FillRectangle(&rect, brush);
+                        brush.SetOpacity(alpha);
+                    }
+                }
+                if let Some(bar_ink) = kind {
+                    // SAFETY: As above.
+                    unsafe { brush.SetColor(&colour(bar_ink)) };
+                }
                 for level in 0..depth.max(1) {
                     let text_at = page.margin + (f32::from(level) + 1.0) * page.indent;
                     let at = text_at - gap - bar;
@@ -3691,6 +3785,13 @@ fn draw_line_ornaments(
                     // SAFETY: The rectangle is read before the call returns,
                     // and the brush and the target both outlive it.
                     unsafe { target.FillRectangle(&rect, brush) };
+                }
+                if kind.is_some() {
+                    // SAFETY: As above. The colour and strength go back for the rest.
+                    unsafe {
+                        brush.SetColor(&ink);
+                        brush.SetOpacity(ORNAMENT_ALPHA);
+                    }
                 }
             }
             // 改ページ（2026-09-16）：ページの切れ目を**破線**で見せる。罫線と同じ太さ・
@@ -4360,8 +4461,14 @@ fn draw_block(
                 // 要件 7.3.2: a comment inside code is drawn in its own ink,
                 // which is the writer's own faded towards their own paper
                 // (`Typography::comment_ink`).
-                if run.marks.comment {
+                if run.marks.comment || run.marks.faint {
                     layout.SetDrawingEffect(&comment_brush, range)?;
+                    continue;
+                }
+                // 書き手の求め 2026-09-22: Calloutのラベルは種類の色で。
+                if let Some(ink) = callout_colour(run.marks.callout) {
+                    let callout_brush = target.CreateSolidColorBrush(&colour(ink), None)?;
+                    layout.SetDrawingEffect(&callout_brush, range)?;
                     continue;
                 }
                 if run.heading_level == 0 {
@@ -4461,6 +4568,12 @@ fn draw_block(
         };
         draw_text_decorations(target, &brush, &task.block, &task.runs, typography, &page);
         draw_line_ornaments(target, &brush, &task.block, &task.lines, &page);
+        // 書き手の求め 2026-09-22: `==ハイライト==`の地。**字より先に**塗る。
+        if task.runs.iter().any(|run| run.marks.highlight) {
+            draw_highlights(
+                target, &brush, &layout, &task.runs, origin, mode, typography,
+            )?;
+        }
         // SAFETY: The layout outlives the draw call, and the underline is set
         // and cleared on the same layout.
         unsafe {
@@ -4521,11 +4634,12 @@ fn draw_block(
             )?;
             // 要件 7.8（2026-09-17）: 割注。**縦中横と同じ「箱の中に組む」側**だが、
             // 半分の字で2行に割るので書式も置き方も別である。
-            if task
-                .runs
-                .iter()
-                .any(|run| matches!(run.ornament, Some(Ornament::Warichu { .. })))
-            {
+            if task.runs.iter().any(|run| {
+                matches!(
+                    run.ornament,
+                    Some(Ornament::Warichu { .. } | Ornament::Superscript { .. })
+                )
+            }) {
                 let formats = graphics.warichu_formats_for(typography, mode, &task.runs)?;
                 draw_warichu(
                     target, &brush, &formats, &layout, &task.runs, &task.text, origin, mode,
@@ -5014,7 +5128,8 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
 /// every tile was already in the cache under a key that said nothing about
 /// colour, so nothing was ever drawn again.
 fn hash_colours(typography: &Typography, hasher: &mut DefaultHasher) {
-    for channel in typography.ink.iter().chain(typography.paper.iter()) {
+    let own = typography.ink.iter().chain(typography.paper.iter());
+    for channel in own.chain(typography.highlight.iter()) {
         channel.to_bits().hash(hasher);
     }
     typography.paper_painted.hash(hasher);
@@ -10888,7 +11003,10 @@ mod tests {
         let run = LineRun {
             utf16_start: 10,
             utf16_len: 5,
-            ornament: LineOrnament::Quote { depth: 1 },
+            ornament: LineOrnament::Quote {
+                depth: 1,
+                callout: 0,
+            },
             own_ends: (true, true),
         };
 

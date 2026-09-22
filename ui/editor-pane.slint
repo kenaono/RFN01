@@ -366,6 +366,7 @@ export component EditorPane inherits Rectangle {
     callback across-scrolled(float);
     callback selection-start(float, float, bool);
     callback link-open(float, float) -> bool;
+    callback link-hover(float, float) -> bool;
     in property <bool> link-popup-open;
     in property <[string]> link-popup-rows;
     in property <int> link-popup-selected;
@@ -1807,6 +1808,7 @@ export component EditorPane inherits Rectangle {
             across-scrolled(a0) => { root.across-scrolled(a0); }
             selection-start(a0, a1, a2) => { root.selection-start(a0, a1, a2); }
             link-open(a0, a1) => { root.link-open(a0, a1); }
+            link-hover(a0, a1) => { root.link-hover(a0, a1); }
             link-popup-open: root.link-popup-open;
             link-popup-rows: root.link-popup-rows;
             link-popup-selected: root.link-popup-selected;

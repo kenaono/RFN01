@@ -121,6 +121,14 @@ export component EditorSurface inherits Rectangle {
     callback across-scrolled(float);
     callback selection-start(float, float, bool);
     callback link-open(float, float) -> bool;
+    /// 書き手の求め 2026-09-22: Ctrlを押したまま、Ctrl+クリックで開ける所（リンク・脚注）の上か。
+    /// ホストが答え、真ならポインタを手の形にする——小さな上付きの番号でも、当たったと分かる。
+    callback link-hover(float, float) -> bool;
+    property <bool> over-link: false;
+    // ポインタが本文の上にいるときの位置（Ctrlを押した・離したときに訊き直すため）。
+    property <bool> pointer-inside: false;
+    property <float> pointer-at-x;
+    property <float> pointer-at-y;
     in property <bool> link-popup-open;
     in property <[string]> link-popup-rows;
     in property <int> link-popup-selected;
@@ -682,7 +690,17 @@ export component EditorSurface inherits Rectangle {
                                     root.preedit-changed(self.preedit-text);
                                 }
                             }
+                            key-released(event) => {
+                                if event.text == Key.Control {
+                                    root.over-link = false;
+                                }
+                                reject
+                            }
                             key-pressed(event) => {
+                                // 書き手の求め 2026-09-22: 止まったポインタの下でも、Ctrlを押せば手の形に。
+                                if event.text == Key.Control && root.pointer-inside && !root.terminal {
+                                    root.over-link = root.link-hover(root.pointer-at-x, root.pointer-at-y);
+                                }
                                 if self.preedit-text == "" && root.menu-key(event.text) { return accept; }
                                 if root.embedded-panel && event.modifiers.control && event.text == Key.Return { root.below-sent(); return accept; }
                                 if root.embedded-panel && event.modifiers.control && event.modifiers.alt && event.text == Key.UpArrow { root.below-left(); return accept; }
@@ -1098,7 +1116,7 @@ export component EditorSurface inherits Rectangle {
                         pointer := TouchArea {
                             // Vertical writing draws its own pointer below, so the
                             // system one is taken away there.
-                            mouse-cursor: root.vertical ? none : text;
+                            mouse-cursor: root.over-link ? MouseCursor.pointer : (root.vertical ? MouseCursor.none : MouseCursor.text);
                             scroll-event(event) => {
                                 // 要件 9, 11.5: with Control down the wheel
                                 // magnifies this pane instead of moving it.
@@ -1194,6 +1212,22 @@ export component EditorSurface inherits Rectangle {
                             moved => {
                                 if root.dragging && self.pressed {
                                     root.selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
+                                }
+                            }
+                            // 書き手の求め 2026-09-22: **`moved`は押しているあいだしか来ない**ので、
+                            // 押さずに動かしたポインタは位置の変化で追う（実操作で効かなかった、同日）。
+                            changed mouse-x => { self.probe-link(); }
+                            changed mouse-y => { self.probe-link(); }
+                            function probe-link() {
+                                root.pointer-at-x = self.mouse-x / 1px;
+                                root.pointer-at-y = self.mouse-y / 1px;
+                                root.over-link = self.has-hover && !self.pressed && !root.terminal
+                                    && root.link-hover(root.pointer-at-x, root.pointer-at-y);
+                            }
+                            changed has-hover => {
+                                root.pointer-inside = self.has-hover;
+                                if !self.has-hover {
+                                    root.over-link = false;
                                 }
                             }
                         }
@@ -1790,7 +1824,7 @@ export component EditorSurface inherits Rectangle {
 
                         // The vertical pane's own pointer, lying across the column
                         // the way the caret does.
-                        if root.vertical && pointer.has-hover: Rectangle {
+                        if root.vertical && pointer.has-hover && !root.over-link: Rectangle {
                             x: pointer.mouse-x - 8px;
                             y: pointer.mouse-y - 1px;
                             width: 16px;

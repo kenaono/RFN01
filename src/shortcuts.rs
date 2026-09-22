@@ -1,4 +1,4 @@
-use crate::document::{InsertEdit, LineNoteEdit};
+use crate::document::{CalloutType, InsertEdit, LineNoteEdit};
 use crate::menu_commands::{InsertShape, ShortcutAction};
 use crate::{AppWindow, Live, ShortcutItem};
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -372,6 +372,15 @@ const INSERT_ACTIONS: &[MenuAction] = &[
     // 画像（RFN01-48）。**idは末尾へ足す**——既に割り当てたキーを動かさないため。
     insert(InsertEdit::MarkdownImage),
     insert(InsertEdit::WikiImage),
+    // Obsidianの記法（書き手の求め 2026-09-22）。同じく末尾へ。
+    insert(InsertEdit::Highlight),
+    insert(InsertEdit::Comment),
+    insert(InsertEdit::Footnote),
+    insert(InsertEdit::Callout(CalloutType::Note)),
+    insert(InsertEdit::Callout(CalloutType::Tip)),
+    insert(InsertEdit::Callout(CalloutType::Important)),
+    insert(InsertEdit::Callout(CalloutType::Warning)),
+    insert(InsertEdit::Callout(CalloutType::Caution)),
 ];
 /// 変更できる操作の数——既存の46枠と、メニューから来た分。
 fn count() -> usize {

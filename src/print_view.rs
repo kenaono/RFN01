@@ -280,7 +280,13 @@ fn lay_out(
     mode: WritingMode,
     paper: Paper,
 ) -> windows::core::Result<TextEngine> {
-    let source = document.text.borrow().clone();
+    // 書き手の求め 2026-09-22: **コメントは紙に出さない**（整形表示の印刷）。ソースの印刷は
+    // 画面のソースそのままなので残す。
+    let source = if focused_pane(window).shows_preview(window) {
+        document::without_comments(&document.text.borrow())
+    } else {
+        document.text.borrow().clone()
+    };
     let reading = crate::reading_of(window);
     // **行の体裁は原稿から読む。**プレビューの本文は行頭の注記（`［＃地付き］`）を
     // 既に取り除いてあるので、そちらから数えると地付きが消える。

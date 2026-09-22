@@ -1216,3 +1216,52 @@ fn a_menu_taller_than_the_window_scrolls_to_its_last_rows() {
         "a flyout opened after scrolling must answer"
     );
 }
+
+/// 書き手の求め 2026-09-22（実操作の報告「カーソルが変わらない」への対応）: **ボタンを押さずに
+/// 動かしたポインタでも、Ctrl+クリックで開ける所かを訊く。**`TouchArea`の`moved`は押している
+/// あいだしか来ないので、それに頼った最初の作りは一度も訊いていなかった。
+#[test]
+fn a_pointer_moved_without_a_button_asks_about_links() {
+    use slint::platform::WindowEvent;
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    surface.set_size(slint::PhysicalSize::new(1100, 440));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let source = "本文[^1]\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 1050.0;
+        screen.height = 320.0;
+        screen.shown_width = 1050.0;
+        screen.shown_height = 220.0;
+        screen.preview = true;
+    });
+    set_pane_direction(&window, &cache, id, false);
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let heard = asked.clone();
+    window.on_pane_link_hover(move |pane, x, y| {
+        heard.borrow_mut().push((pane, x, y));
+        true
+    });
+    for x in [300.0, 320.0] {
+        window.window().dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, 200.0),
+        });
+    }
+    let asked = asked.borrow();
+    assert!(!asked.is_empty(), "moving without a button must ask");
+    assert!(asked.iter().all(|(pane, ..)| *pane == id.index()));
+    let (_, first_x, _) = asked[0];
+    let (_, last_x, _) = asked[asked.len() - 1];
+    assert!(
+        last_x > first_x,
+        "the question follows the pointer: {asked:?}"
+    );
+}

@@ -11,6 +11,14 @@ pub(crate) fn shift_really_held() -> (bool, bool) {
     (by_message, by_hand)
 }
 
+/// Ctrlが押されているか（書き手の求め 2026-09-22：Ctrl+クリックできる所でポインタを変える）。
+pub(crate) fn control_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL};
+
+    // SAFETY: `shift_really_held`と同じ、仮想キーの番号を1つ渡すだけの呼び出し。
+    unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 || GetAsyncKeyState(VK_CONTROL.0 as i32) < 0 }
+}
+
 pub(crate) fn double_click_time() -> Duration {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 

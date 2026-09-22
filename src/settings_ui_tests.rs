@@ -1369,7 +1369,12 @@ fn the_find_bar_searches_the_settings() {
     if let Ok(output) = std::env::var("EDITOR_SETTINGS_SNAPSHOT") {
         let output = PathBuf::from(output);
         std::fs::create_dir_all(&output).unwrap();
-        for (name, needle) in [("font", "Font"), ("color", "Color"), ("margin", "margin")] {
+        for (name, needle) in [
+            ("font", "Font"),
+            ("color", "Color"),
+            ("margin", "margin"),
+            ("highlight", "Highlight"),
+        ] {
             ask(needle);
             window.window().request_redraw();
             let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
