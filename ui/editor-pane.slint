@@ -304,6 +304,7 @@ export component EditorPane inherits Rectangle {
     callback comparison-dismissed();
     in property <[PreviewSelectionRect]> match-rects;
     in property <[PreviewSelectionRect]> scope-rects;
+    in property <[PreviewSelectionRect]> bookmark-rects;
     in property <[PreviewSelectionRect]> picture-rects;
     in property <PreviewSelectionRect> picture-outline;
     in property <bool> picture-outline-shown;
@@ -537,6 +538,7 @@ export component EditorPane inherits Rectangle {
     /// of the document** — a cut is a copy that succeeded, followed by a delete.
     callback copy-requested(bool);
     callback copy-body-requested();
+    callback bookmark-requested();
     /// Bring this pane's next tab out in front, or its previous one (要件 11.3).
     /// True steps backwards. Wraps at either end of the strip.
     callback tab-stepped(bool);
@@ -1773,6 +1775,7 @@ export component EditorPane inherits Rectangle {
             difference-rects: root.difference-rects;
             match-rects: root.match-rects;
             scope-rects: root.scope-rects;
+            bookmark-rects: root.bookmark-rects;
             picture-rects: root.picture-rects;
             picture-outline: root.picture-outline;
             picture-outline-shown: root.picture-outline-shown;
@@ -1848,6 +1851,7 @@ export component EditorPane inherits Rectangle {
             undo-requested(a0) => { root.undo-requested(a0); }
             copy-requested(a0) => { root.copy-requested(a0); }
             copy-body-requested() => { root.copy-body-requested(); }
+            bookmark-requested() => { root.bookmark-requested(); }
             tab-stepped(a0) => { root.tab-stepped(a0); }
             focus-moved(a0) => { root.focus-moved(a0); }
             kill-requested(a0) => { root.kill-requested(a0); }

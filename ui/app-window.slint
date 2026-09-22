@@ -18,6 +18,8 @@ import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
 export { UnusedFolderRow, WorkspaceFolderRow, WorkspaceRow } from "workspace-manager.slint";
+import { BookmarkRow, BookmarkView } from "bookmark-view.slint";
+export { BookmarkRow } from "bookmark-view.slint";
 
 /// 要件 7.9: 設定画面が出す語群の1行。
 ///
@@ -247,6 +249,32 @@ export component AppWindow inherits Window {
     // 書き手の報告 2026-09-07: **二度目のクリックは「これを開いておく」。**
     // 一度のクリックは覗くだけで、次に選んだファイルがそのタブを取る。
     callback left-row-kept(int);
+    // 書き手の求め 2026-09-22: 見出しの一覧を階層で畳む。行の番号は見えている行の。
+    callback outline-fold-toggled(int);
+    // true で全部畳む、false で全部開く。
+    callback outline-fold-all(bool);
+    // 見出しの行の右クリック「Add Bookmark…」。行の番号は見えている行の。
+    callback outline-bookmark-requested(int);
+
+    // 書き手の求め 2026-09-22: Bookmark View（left-tab 5）。行・並び・選びはRustが決める。
+    in property <bool> bookmark-available;
+    in property <[BookmarkRow]> bookmark-rows;
+    in property <[string]> bookmark-groups;
+    in property <bool> bookmark-descending;
+    in property <int> bookmark-selected: -1;
+    in-out property <string> bookmark-filter;
+    in-out property <bool> bookmark-filter-visible;
+    callback bookmark-activated(int);
+    callback bookmark-toggled(int);
+    callback bookmark-cleared();
+    callback bookmark-add-current();
+    callback bookmark-create-group();
+    callback bookmark-sort-toggled();
+    callback bookmark-filter-changed();
+    callback bookmark-rename(int);
+    callback bookmark-remove(int);
+    callback bookmark-move-to(int, int);
+    callback bookmark-dropped(int, int);
     callback work-folder-requested();
 
     // Workspace pane state. Legacy switcher callbacks remain for callers/tests.
@@ -588,6 +616,12 @@ export component AppWindow inherits Window {
     // 6.18.
     in property <bool> question-asks-name: false;
     in property <bool> question-is-clone: false;
+    // 書き手の求め 2026-09-22: 栞を足す問い。Link（読むだけ）・Title（名前の欄）・Group。
+    in property <bool> question-is-bookmark: false;
+    in property <string> question-bookmark-link;
+    // 先頭は「(Root)」。
+    in property <[string]> question-bookmark-groups;
+    in-out property <int> question-bookmark-group: 0;
     in-out property <string> workspace-clone-destination;
     callback workspace-clone-browse();
     callback workspace-clone-url-edited();
@@ -636,6 +670,8 @@ export component AppWindow inherits Window {
     callback pane-insert-chosen(int, int);
     /// 右クリックメニューが開いた——**そのPaneの挿入の行を組み直す**。
     callback pane-menu-opened(int);
+    // 書き手の求め 2026-09-22: 本文の右クリック「Add Bookmark…」。
+    callback pane-bookmark-requested(int);
     /// E3の③: Enterで字下げ・箇条書き・引用を継ぐ。2つめはShiftが押されているか。
     callback pane-enter(int, bool);
     callback pane-selection-update(int, float, float);
@@ -1337,6 +1373,21 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // 書き手の求め 2026-09-22: Bookmark View。
+                IconButton {
+                    x: 7px;
+                    y: root.custom-title ? 154px : 190px;
+                    icon: Icons.bookmark;
+                    tip: @tr("Bookmarks");
+                    checked: root.tree-open && root.left-tab == 5;
+                    clicked => {
+                        root.tree-open = !(root.tree-open && root.left-tab == 5);
+                        root.left-tab = 5;
+                        root.left-tab-chosen(5);
+                        root.focus-generation += 1;
+                    }
+                }
+
                 // Declared here so its position is read against the rail. A popup is
                 // its own layer, so it is drawn over the panes without the window
                 // having to hold it last the way the question overlay does.
@@ -1630,6 +1681,36 @@ export component AppWindow inherits Window {
                             IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
+                    }
+                    if root.left-tab == 5: BookmarkView {
+                        available: root.bookmark-available;
+                        rows: root.bookmark-rows;
+                        groups: root.bookmark-groups;
+                        descending: root.bookmark-descending;
+                        selected: root.bookmark-selected;
+                        filter <=> root.bookmark-filter;
+                        filter-visible <=> root.bookmark-filter-visible;
+                        text-size: root.left-size;
+                        ink: root.left-file-own ? root.left-file-ink : root.left-ink;
+                        group-ink: root.left-folder-own ? root.left-folder-ink : root.left-ink;
+                        activated(row) => { root.bookmark-activated(row); }
+                        toggled(row) => { root.bookmark-toggled(row); }
+                        cleared => { root.bookmark-cleared(); }
+                        add-current => { root.bookmark-add-current(); }
+                        create-group => { root.bookmark-create-group(); }
+                        sort-toggled => { root.bookmark-sort-toggled(); }
+                        filter-changed => { root.bookmark-filter-changed(); }
+                        rename(row) => { root.bookmark-rename(row); }
+                        remove(row) => { root.bookmark-remove(row); }
+                        move-to(row, group) => { root.bookmark-move-to(row, group); }
+                        dropped(row, onto) => { root.bookmark-dropped(row, onto); }
+                    }
+                    // 書き手の求め 2026-09-22: 見出しの一覧の上に、全部畳む・全部開く。
+                    if root.left-tab == 3: HorizontalLayout {
+                        padding: 6px; spacing: 2px; vertical-stretch: 0;
+                        alignment: start;
+                        IconButton { icon: Icons.collapse-all; tip: @tr("Collapse All"); clicked => { root.outline-fold-all(true); } }
+                        IconButton { icon: Icons.expand-all; tip: @tr("Expand All"); clicked => { root.outline-fold-all(false); } }
                     }
                     if root.left-tab == 0: tree-head := Rectangle {
                         height: 34px;
@@ -1933,7 +2014,7 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
-                        visible: root.left-tab != 4 || root.workspace-active;
+                        visible: (root.left-tab != 4 || root.workspace-active) && root.left-tab != 5;
                         vertical-stretch: self.visible ? 1 : 0;
                         max-height: self.visible ? 100000px : 0px;
                         // 要件 5.2: the point being carried, but only while it
@@ -2080,6 +2161,15 @@ export component AppWindow inherits Window {
                                             root.left-context-requested(index);
                                             root.show-tree-menu(tree-row.absolute-position.x + 8px, tree-row.absolute-position.y + 24px);
                                         }
+                                        // 書き手の求め 2026-09-22: 見出しの右クリックで栞を足す。
+                                        if (root.left-tab == 3
+                                            && event.button == PointerEventButton.right
+                                            && event.kind == PointerEventKind.down) {
+                                            root.outline-menu-row = index;
+                                            root.outline-menu-x = tree-row.absolute-position.x + entry.mouse-x;
+                                            root.outline-menu-y = tree-row.absolute-position.y + entry.mouse-y;
+                                            outline-context-menu.show();
+                                        }
                                         if (event.button != PointerEventButton.left) {
                                             return;
                                         }
@@ -2213,6 +2303,16 @@ export component AppWindow inherits Window {
                                     // a click at all.
                                     width: parent.width - self.x
                                         - ((root.left-tab == 0 || root.left-tab == 4) ? 28px : 8px);
+                                }
+
+                                // 書き手の求め 2026-09-22: 見出しの▸／▾を押すと、その下を畳む・開く。
+                                // 行の他の場所は今までどおりその見出しへ行く。**`entry`より後に書く**
+                                // ——先に書くと下に敷かれて押せない。
+                                if root.left-tab == 3 && row.folder: TouchArea {
+                                    x: 4px + row.depth * root.left-size * 7px / 6;
+                                    width: root.left-size * 1px + 8px;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.outline-fold-toggled(index); }
                                 }
 
                                 if root.left-tab == 4 && row.is-root: Rectangle {
@@ -2474,6 +2574,7 @@ export component AppWindow inherits Window {
                         comparison-dismissed => { root.comparison-dismissed(pane.id); }
                         match-rects: pane.match-rects;
                         scope-rects: pane.scope-rects;
+                        bookmark-rects: pane.bookmark-rects;
                         picture-rects: pane.picture-rects;
                         picture-outline: pane.picture-outline;
                         picture-outline-shown: pane.picture-outline-shown;
@@ -2877,6 +2978,7 @@ export component AppWindow inherits Window {
                         undo-requested(forwards) => { root.pane-undo(pane.id, forwards); }
                         copy-requested(cut) => { root.pane-copy(pane.id, cut); }
                         copy-body-requested => { root.pane-copy-body(pane.id); }
+                        bookmark-requested => { root.pane-bookmark-requested(pane.id); }
                         tab-stepped(backwards) => { root.pane-tab-stepped(pane.id, backwards); }
                         focus-moved(towards) => { root.pane-focus-moved(pane.id, towards); }
                         kill-requested(what) => { root.pane-kill(pane.id, what); }
@@ -5832,6 +5934,12 @@ export component AppWindow inherits Window {
                             // while one is already up, which the overlay does
                             // not allow but costs nothing to survive.
                             if root.question-is-clone: Text { text: @tr("Repository URL (HTTPS / SSH)"); color: Tok.ink; }
+                            if root.question-is-bookmark: VerticalLayout {
+                                spacing: 4px;
+                                Text { text: @tr("Link"); color: Tok.ink-muted; font-size: 11px; }
+                                Text { text: root.question-bookmark-link; color: Tok.ink; font-size: 12px; wrap: word-wrap; }
+                            }
+                            if root.question-is-bookmark: Text { text: @tr("Title"); color: Tok.ink-muted; font-size: 11px; }
                             if root.question-asks-name: Field {
                                 enabled: !root.question-is-clone || !root.workspace-cloning;
                                 property <int> asked: root.question-generation;
@@ -5860,6 +5968,32 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            if root.question-is-bookmark: VerticalLayout {
+                                spacing: 4px;
+                                Text { text: @tr("Group"); color: Tok.ink-muted; font-size: 11px; }
+                                Rectangle {
+                                    height: 30px;
+                                    TextButton {
+                                        width: parent.width; wide: true;
+                                        title: (root.question-bookmark-group >= 0 && root.question-bookmark-group < root.question-bookmark-groups.length
+                                            ? root.question-bookmark-groups[root.question-bookmark-group] : "") + " ▾";
+                                        clicked => { bookmark-group-menu.show(); }
+                                    }
+                                    bookmark-group-menu := PopupWindow {
+                                        x: 0px; y: 30px; width: parent.width; close-policy: close-on-click-outside;
+                                        MenuFrame {
+                                            width: parent.width;
+                                            VerticalLayout {
+                                                padding: 6px; spacing: 1px;
+                                                for name[index] in root.question-bookmark-groups: MenuRow {
+                                                    title: name; checked: index == root.question-bookmark-group;
+                                                    activated => { root.question-bookmark-group = index; bookmark-group-menu.close(); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if root.question-is-clone && root.workspace-clone-url-error != "": Text {
                                 text: root.workspace-clone-url-error; color: Tok.alert; wrap: word-wrap; font-size: 12px;
                             }
@@ -6002,6 +6136,33 @@ export component AppWindow inherits Window {
             can-apply: root.diff-can-apply;
             choose-side(right) => { root.diff-choose-side(right); }
             apply-merge => { root.diff-apply-merge(); }
+        }
+    }
+
+    property <int> outline-menu-row: -1;
+    property <length> outline-menu-x;
+    property <length> outline-menu-y;
+    outline-context-menu := PopupWindow {
+        x: root.outline-menu-x;
+        y: root.outline-menu-y;
+        width: 200px;
+        close-policy: close-on-click-outside;
+
+        MenuFrame {
+            width: 200px;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+
+                MenuRow {
+                    title: @tr("Add Bookmark…");
+                    activated => {
+                        outline-context-menu.close();
+                        root.outline-bookmark-requested(root.outline-menu-row);
+                    }
+                }
+            }
         }
     }
 

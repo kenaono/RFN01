@@ -1,0 +1,296 @@
+// 書き手の求め 2026-09-22: 左PaneのBookmark View。
+//
+// Workspaceに1つの木：Rootの栞と、1段だけのグループ。並び・絞り込み・どの行が
+// 何かはRustが決めて`rows`に置く。ここは描いて、押されたことを番号で返すだけ。
+import { ScrollView } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { Field, Icons, IconButton, MenuFrame, MenuRow, MenuSep } from "controls.slint";
+
+export struct BookmarkRow {
+    title: string,
+    // グループの行か、栞の行か。
+    group: bool,
+    // グループが開いているか。
+    open: bool,
+    // 0はRoot（グループと、Rootの栞）、1はグループの中の栞。
+    depth: int,
+    // マウスを載せたときに出す：栞ならLink、グループなら空。
+    tip: string,
+}
+
+export component BookmarkView inherits VerticalLayout {
+    /// Workspaceを開いているか。栞はWorkspaceのもの。
+    in property <bool> available;
+    in property <[BookmarkRow]> rows;
+    /// "Move to"に出すグループの名前（見えている順）。
+    in property <[string]> groups;
+    in property <bool> descending;
+    /// 選んでいる栞の行。-1は無し。**Rustが持つ**——並び替えや絞り込みで行が動いても、
+    /// 選んでいる栞は同じ。
+    in property <int> selected: -1;
+    in-out property <string> filter;
+    in-out property <bool> filter-visible;
+    in property <int> text-size: 12;
+    in property <color> ink;
+    in property <color> group-ink;
+
+    callback activated(int);
+    callback toggled(int);
+    callback cleared();
+    callback add-current();
+    callback create-group();
+    callback sort-toggled();
+    callback filter-changed();
+    callback rename(int);
+    callback remove(int);
+    /// 行を、グループ（`groups`の番号）へ。-1はRoot。
+    callback move-to(int, int);
+    /// 引いてきた行を、どの行の上で放したか。-1は行の無いところ（Root）。
+    callback dropped(int, int);
+
+    property <length> row-height: max(24px, root.text-size * 2px);
+    property <int> menu-row: -1;
+    property <length> menu-x;
+    property <length> menu-y;
+    // 引いている行と、いま指している行。
+    property <int> carried: -1;
+    property <int> pointed: -2;
+
+    padding: 0px;
+
+    HorizontalLayout {
+        padding: 6px;
+        spacing: 2px;
+        vertical-stretch: 0;
+        alignment: start;
+
+        IconButton {
+            icon: Icons.bookmark-add;
+            tip: @tr("Bookmark Active Tab");
+            enabled: root.available;
+            clicked => { root.add-current(); }
+        }
+        IconButton {
+            icon: Icons.folder-add;
+            tip: @tr("New Bookmark Group…");
+            enabled: root.available;
+            clicked => { root.create-group(); }
+        }
+        IconButton {
+            icon: root.descending ? Icons.sort-down : Icons.sort-up;
+            tip: root.descending ? @tr("Sort by Title: Z to A") : @tr("Sort by Title: A to Z");
+            enabled: root.available;
+            clicked => { root.sort-toggled(); }
+        }
+        IconButton {
+            icon: Icons.filter;
+            tip: @tr("Filter Bookmarks…");
+            checked: root.filter-visible;
+            enabled: root.available;
+            clicked => {
+                root.filter-visible = !root.filter-visible;
+                if !root.filter-visible && root.filter != "" {
+                    root.filter = "";
+                    root.filter-changed();
+                }
+            }
+        }
+    }
+
+    if root.available && root.filter-visible: Field {
+        height: 28px;
+        placeholder: @tr("Filter bookmarks…");
+        text <=> root.filter;
+        init => { self.take-focus(); }
+        edited => { root.filter-changed(); }
+        escaped => {
+            root.filter = "";
+            root.filter-visible = false;
+            root.filter-changed();
+        }
+    }
+
+    // 何も無いときの案内。行の字と同じ位置から書く。
+    if !root.available || root.rows.length == 0: VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 4px;
+        vertical-stretch: 0;
+        Text {
+            text: !root.available
+                ? @tr("Open a workspace to use bookmarks.")
+                : (root.filter != "" ? @tr("No bookmark matches.") : @tr("No bookmarks yet. Right-click a heading and choose Add Bookmark…"));
+            color: Tok.ink-muted;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+
+    list := ScrollView {
+        visible: root.available;
+        vertical-stretch: 1;
+
+        VerticalLayout {
+            alignment: start;
+
+            for row[index] in root.rows: line := Rectangle {
+                height: root.row-height;
+                background: root.carried >= 0 && root.pointed == index
+                    ? Tok.accent-faint
+                    : (index == root.selected
+                        ? Tok.accent-soft
+                        : (touch.has-hover ? Tok.accent-faint : transparent));
+                border-width: root.carried >= 0 && root.pointed == index && row.group ? 2px : 0px;
+                border-color: Tok.accent;
+
+                property <bool> pressing: false;
+                property <length> press-x;
+                property <length> press-y;
+
+                touch := TouchArea {
+                    mouse-cursor: root.carried == index ? MouseCursor.grabbing : MouseCursor.default;
+                    pointer-event(event) => {
+                        if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                            root.menu-row = index;
+                            root.menu-x = line.absolute-position.x + self.mouse-x;
+                            root.menu-y = line.absolute-position.y + self.mouse-y;
+                            row-menu.show();
+                            return;
+                        }
+                        if event.button != PointerEventButton.left {
+                            return;
+                        }
+                        if event.kind == PointerEventKind.down {
+                            line.pressing = true;
+                            line.press-x = self.mouse-x;
+                            line.press-y = self.mouse-y;
+                        }
+                        if event.kind == PointerEventKind.up {
+                            if root.carried == index {
+                                // 放した行：押した行からの距離で数える（行は同じ高さ）。
+                                root.dropped(index, root.pointed >= 0 && root.pointed < root.rows.length ? root.pointed : -1);
+                            } else if line.pressing {
+                                if row.group {
+                                    root.toggled(index);
+                                } else {
+                                    root.activated(index);
+                                }
+                            }
+                            line.pressing = false;
+                            root.carried = -1;
+                            root.pointed = -2;
+                        }
+                        if event.kind == PointerEventKind.cancel {
+                            line.pressing = false;
+                            root.carried = -1;
+                            root.pointed = -2;
+                        }
+                    }
+                    moved => {
+                        if !line.pressing || row.group {
+                            return;
+                        }
+                        if root.carried != index
+                            && (self.mouse-x > line.press-x + 4px || self.mouse-x < line.press-x - 4px
+                                || self.mouse-y > line.press-y + 4px || self.mouse-y < line.press-y - 4px) {
+                            root.carried = index;
+                        }
+                        if root.carried == index {
+                            // 押した行の上端から数えて、いまどの行の上にいるか。
+                            root.pointed = floor((line.y + self.mouse-y) / root.row-height);
+                        }
+                    }
+                }
+
+                if row.group: Text {
+                    x: 8px;
+                    width: root.text-size * 1px;
+                    height: parent.height;
+                    text: row.open ? "▾" : "▸";
+                    color: root.group-ink;
+                    font-size: root.text-size * 1px;
+                    vertical-alignment: center;
+                }
+
+                // ▸の欄はどの行にも取る——Rootの栞はグループの名前と揃い、グループの中の栞は一段下がる。
+                Text {
+                    x: 8px + root.text-size * 1.2px + row.depth * root.text-size * 1.4px;
+                    width: parent.width - self.x - 8px;
+                    height: parent.height;
+                    text: row.title;
+                    color: row.group ? root.group-ink : root.ink;
+                    font-size: root.text-size * 1px;
+                    font-weight: row.group ? 600 : 400;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    opacity: root.carried == index ? 0.45 : 1.0;
+                }
+
+                if row.tip != "": Tooltip {
+                    text: @markdown("`\{row.tip}`");
+                }
+            }
+
+            // 行の無いところ：押せば選びをやめ、放せばRootへ。
+            Rectangle {
+                height: max(48px, list.visible-height - root.rows.length * root.row-height);
+                TouchArea {
+                    clicked => { root.cleared(); }
+                }
+            }
+        }
+    }
+
+    row-menu := PopupWindow {
+        x: root.menu-x - root.absolute-position.x;
+        y: root.menu-y - root.absolute-position.y;
+        width: 220px;
+        close-policy: close-on-click-outside;
+
+        MenuFrame {
+            width: 220px;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+
+                MenuRow {
+                    title: @tr("Rename…");
+                    activated => {
+                        row-menu.close();
+                        root.rename(root.menu-row);
+                    }
+                }
+                // グループは中の栞ごと消えるので確かめる（…）。栞はその場で消す。
+                MenuRow {
+                    title: root.menu-row >= 0 && root.menu-row < root.rows.length && root.rows[root.menu-row].group
+                        ? @tr("Delete…") : @tr("Delete");
+                    activated => {
+                        row-menu.close();
+                        root.remove(root.menu-row);
+                    }
+                }
+                if root.menu-row >= 0 && root.menu-row < root.rows.length && !root.rows[root.menu-row].group: VerticalLayout {
+                    spacing: 1px;
+                    MenuSep { }
+                    Text { text: @tr("Move to"); color: Tok.ink-muted; font-size: 11px; }
+                    MenuRow {
+                        title: @tr("(Root)");
+                        checked: root.rows[root.menu-row].depth == 0;
+                        activated => {
+                            root.move-to(root.menu-row, -1);
+                            row-menu.close();
+                        }
+                    }
+                    for name[group] in root.groups: MenuRow {
+                        title: name;
+                        activated => {
+                            root.move-to(root.menu-row, group);
+                            row-menu.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

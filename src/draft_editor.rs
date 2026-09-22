@@ -70,6 +70,7 @@ impl Editor {
             find_showing: false,
             needle: String::new(),
             rules: Default::default(),
+            mark: None,
         };
         let laid_out = editor_render::layout(
             &mut self.graphics,

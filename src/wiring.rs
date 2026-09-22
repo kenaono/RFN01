@@ -2102,6 +2102,122 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
         crate::workspace_read_error_reset_requested
     );
 
+    // 書き手の求め 2026-09-22: the outline's folds and the Bookmark View. Every
+    // one of these comes from a row of a repeater and draws the rows again, so
+    // all of them wait a turn (6.18).
+    macro_rules! deferred_with {
+        ($window:ident, $callback:ident, $live:ident, $body:path $(, $argument:ident)*) => {{
+            let weak = $window.as_weak();
+            let live = $live.clone();
+            $window.$callback(move |$($argument),*| {
+                let weak = weak.clone();
+                let live = live.clone();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(window) = weak.upgrade() {
+                        $body(&window, &live $(, $argument)*);
+                    }
+                });
+            });
+        }};
+    }
+    deferred_with!(
+        window,
+        on_outline_fold_toggled,
+        live,
+        crate::outline_fold_toggled,
+        row
+    );
+    deferred_with!(
+        window,
+        on_outline_fold_all,
+        live,
+        crate::fold_whole_outline,
+        close
+    );
+    deferred_with!(
+        window,
+        on_outline_bookmark_requested,
+        live,
+        crate::bookmark_ui::offer_from_outline,
+        row
+    );
+    deferred_with!(
+        window,
+        on_pane_bookmark_requested,
+        live,
+        crate::bookmark_ui::offer_from_pane,
+        pane
+    );
+    deferred_with!(
+        window,
+        on_bookmark_activated,
+        live,
+        crate::bookmark_ui::activate,
+        row
+    );
+    deferred_with!(
+        window,
+        on_bookmark_toggled,
+        live,
+        crate::bookmark_ui::toggle,
+        row
+    );
+    deferred_with!(window, on_bookmark_cleared, live, crate::bookmark_ui::clear);
+    deferred_with!(
+        window,
+        on_bookmark_add_current,
+        live,
+        crate::bookmark_ui::offer_active
+    );
+    deferred_with!(
+        window,
+        on_bookmark_create_group,
+        live,
+        crate::bookmark_ui::ask_new_group
+    );
+    deferred_with!(
+        window,
+        on_bookmark_sort_toggled,
+        live,
+        crate::bookmark_ui::toggle_order
+    );
+    deferred_with!(
+        window,
+        on_bookmark_filter_changed,
+        live,
+        crate::bookmark_ui::publish
+    );
+    deferred_with!(
+        window,
+        on_bookmark_rename,
+        live,
+        crate::bookmark_ui::ask_rename,
+        row
+    );
+    deferred_with!(
+        window,
+        on_bookmark_remove,
+        live,
+        crate::bookmark_ui::ask_remove,
+        row
+    );
+    deferred_with!(
+        window,
+        on_bookmark_move_to,
+        live,
+        crate::bookmark_ui::move_to,
+        row,
+        group
+    );
+    deferred_with!(
+        window,
+        on_bookmark_dropped,
+        live,
+        crate::bookmark_ui::dropped,
+        row,
+        onto
+    );
+
     let weak = window.as_weak();
     let switcher_live = live.clone();
     window.on_workspace_switcher_chosen(move |index| {

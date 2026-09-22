@@ -159,6 +159,8 @@ export struct PaneScreen {
     /// E1: 範囲内検索の範囲（書き手の求め 2026-09-09）。**いちばん薄い**——
     /// 「ここを探している」だけを言い、一致と現在地はその上に重なる。
     scope-rects: [PreviewSelectionRect],
+    /// 書き手の求め 2026-09-22: 栞を選んで開いた見出しの範囲。選び直すか、本文が変わるまで。
+    bookmark-rects: [PreviewSelectionRect],
     // The laid-out document's size, in pixels.
     content-width: int,
     content-height: int,

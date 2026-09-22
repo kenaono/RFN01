@@ -1217,3 +1217,55 @@ msgstr "Editor Panelへログ出力中"
 
 msgid "Turned off in Editor"
 msgstr "Editor設定で無効になっています"
+
+# 書き手の求め 2026-09-22: 見出しの折りたたみとBookmark View。
+msgid "Expand All"
+msgstr "すべて展開"
+
+msgid "Add Bookmark…"
+msgstr "ブックマークを追加…"
+
+msgid "Bookmarks"
+msgstr "ブックマーク"
+
+msgid "Link"
+msgstr "リンク"
+
+msgid "Title"
+msgstr "タイトル"
+
+msgid "Group"
+msgstr "グループ"
+
+msgid "Bookmark Active Tab"
+msgstr "今のTABをブックマーク"
+
+msgid "New Bookmark Group…"
+msgstr "新しいグループ…"
+
+msgid "Sort by Title: A to Z"
+msgstr "タイトル順：昇順"
+
+msgid "Sort by Title: Z to A"
+msgstr "タイトル順：降順"
+
+msgid "Filter Bookmarks…"
+msgstr "ブックマークを絞り込む…"
+
+msgid "Filter bookmarks…"
+msgstr "ブックマークを絞り込む…"
+
+msgid "Open a workspace to use bookmarks."
+msgstr "ブックマークはWorkspaceに保存されます。Workspaceを開いてください。"
+
+msgid "No bookmark matches."
+msgstr "一致するブックマークはありません。"
+
+msgid "No bookmarks yet. Right-click a heading and choose Add Bookmark…"
+msgstr "ブックマークはまだありません。見出しを右クリックして「ブックマークを追加…」を選んでください。"
+
+msgid "Move to"
+msgstr "移動先"
+
+msgid "(Root)"
+msgstr "（Root）"

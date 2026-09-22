@@ -89,6 +89,7 @@ export component EditorSurface inherits Rectangle {
     in property <[PreviewSelectionRect]> difference-rects;
     in property <[PreviewSelectionRect]> match-rects;
     in property <[PreviewSelectionRect]> scope-rects;
+    in property <[PreviewSelectionRect]> bookmark-rects;
     in property <[PreviewSelectionRect]> picture-rects;
     in property <PreviewSelectionRect> picture-outline;
     in property <bool> picture-outline-shown;
@@ -161,6 +162,8 @@ export component EditorSurface inherits Rectangle {
     callback undo-requested(bool);
     callback copy-requested(bool);
     callback copy-body-requested();
+    /// 書き手の求め 2026-09-22: キャレットのある見出し（無ければファイル）を栞に。
+    callback bookmark-requested();
     callback tab-stepped(bool);
     callback focus-moved(int);
     callback kill-requested(int);
@@ -515,6 +518,16 @@ export component EditorSurface inherits Rectangle {
                         // E1: 範囲はいちばん下、いちばん薄く（書き手の求め
                         // 2026-09-09：「範囲を薄くハイライトしておいた方がいい」）
                         // ——検索が選択を動かすので、**範囲は選択では見えない**。
+                        // 書き手の求め 2026-09-22: 栞で開いた見出しの範囲。範囲内検索より
+                        // はっきり、選択より薄く——「ここが栞の中身」を言い、選択と一致は上に重なる。
+                        for lit in root.bookmark-rects: Rectangle {
+                            x: lit.x * 1px;
+                            y: lit.y * 1px;
+                            width: lit.width * 1px;
+                            height: lit.height * 1px;
+                            background: Tok.accent-soft.transparentize(0.55);
+                        }
+
                         for scope in root.scope-rects: Rectangle {
                             x: scope.x * 1px;
                             y: scope.y * 1px;
@@ -1580,6 +1593,14 @@ export component EditorSurface inherits Rectangle {
                                                     body-palette.show();
                                                     context-menu.close();
                                                 }
+                                            }
+                                        }
+                                        if root.writing && !root.standalone: MenuSep { }
+                                        if root.writing && !root.standalone: MenuRow {
+                                            title: @tr("Add Bookmark…");
+                                            activated => {
+                                                root.bookmark-requested();
+                                                context-menu.close();
                                             }
                                         }
                                         if !root.standalone: MenuSep { }
