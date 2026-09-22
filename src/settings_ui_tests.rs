@@ -1000,7 +1000,7 @@ fn terminal_below_rows_reach_the_pane() {
     click(160.0, 150.0, PointerEventButton::Right);
     // **この試験は挿入の行を組まない**（`menu_commands`の配線をしない）ので、
     // メニューはアプリより少し短い——行の位置は実測で決めている。
-    click(218.0, 590.0, PointerEventButton::Left);
+    click(218.0, 630.0, PointerEventButton::Left);
     assert_eq!(calls.get(), 2, "the body menu row");
     let folder_calls = Rc::new(std::cell::Cell::new(0));
     let seen = folder_calls.clone();

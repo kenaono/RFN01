@@ -1101,9 +1101,9 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
         copied.set(0);
         press(at, 200.0, PointerEventButton::Right);
         window.window().dispatch_event(WindowEvent::PointerMoved {
-            position: slint::LogicalPosition::new(bullet, 430.0),
+            position: slint::LogicalPosition::new(bullet, 390.0),
         });
-        press(dash, 430.0, PointerEventButton::Left);
+        press(dash, 390.0, PointerEventButton::Left);
         assert_eq!(
             &*listed.borrow(),
             &[(0, 0)],
@@ -1111,7 +1111,7 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
         );
         press(at, 200.0, PointerEventButton::Right);
         press(empty, 220.0, PointerEventButton::Left);
-        press(copy, 376.0, PointerEventButton::Left);
+        press(copy, 336.0, PointerEventButton::Left);
         assert_eq!(
             copied.get(),
             0,
@@ -1119,7 +1119,7 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
         );
         // 閉じずに押せば、同じ位置の「本文だけをコピー」に届く（位置の確かめ）。
         press(at, 200.0, PointerEventButton::Right);
-        press(copy, 376.0, PointerEventButton::Left);
+        press(copy, 336.0, PointerEventButton::Left);
         assert_eq!(copied.get(), 1, "the menu stands where expected at {at}");
     }
 }
@@ -1206,10 +1206,10 @@ fn a_menu_taller_than_the_window_scrolls_to_its_last_rows() {
     press(300.0, 150.0, PointerEventButton::Right);
     wheel();
     window.window().dispatch_event(WindowEvent::PointerMoved {
-        position: slint::LogicalPosition::new(340.0, 90.0),
+        position: slint::LogicalPosition::new(340.0, 50.0),
     });
     snapshot("menu-scroll-flyout.ppm");
-    press(620.0, 90.0, PointerEventButton::Left);
+    press(620.0, 50.0, PointerEventButton::Left);
     assert_eq!(
         &*listed.borrow(),
         &[(0, 0)],

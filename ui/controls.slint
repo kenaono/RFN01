@@ -33,6 +33,19 @@ export global Icons {
     out property <string> search: "M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 1 1 9 0M10.6 10.6 14 14";
     out property <string> history: "M14 8a6 6 0 1 1-6-6 6 6 0 0 1 6 6M8 4.5V8l2.5 1.5";
     out property <string> outline: "M3 4h10M5.5 8h7.5M8 12h5";
+    // 書き手の求め 2026-09-22: 見出しを全部畳む（矢印が内へ）・全部開く（外へ）。
+    out property <string> collapse-all: "M4.5 2.5 8 5.5 11.5 2.5M4.5 13.5 8 10.5 11.5 13.5M2.5 8h11";
+    out property <string> expand-all: "M4.5 5.5 8 2.5 11.5 5.5M4.5 10.5 8 13.5 11.5 10.5M2.5 8h11";
+    // 栞。帯の下が切れ込んでいる形。
+    out property <string> bookmark: "M4.5 2h7v12L8 11l-3.5 3z";
+    // 今のTABを栞に：栞に＋。
+    out property <string> bookmark-add: "M4.5 2h5M4.5 2v12L8 11l3.5 3V8M12.5 1.5v5M10 4h5";
+    // グループを作る：フォルダに＋。
+    out property <string> folder-add: "M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM8 7.5v4M6 9.5h4";
+    // 並びの向き：上へ（A→Z）・下へ（Z→A）。
+    out property <string> sort-up: "M4.5 13V3M2 5.5 4.5 3 7 5.5M9 4h5M9 8h4M9 12h3";
+    out property <string> sort-down: "M4.5 3v10M2 10.5 4.5 13 7 10.5M9 4h3M9 8h4M9 12h5";
+    out property <string> filter: "M1 2h14L9 8v6l-2-1V8z";
     /// E4: 指定の行へ。**行の束と、そこを指す矢**。
     out property <string> goto: "M2.5 4h11M2.5 12h11M2.5 8h5M10.5 5.5 13 8l-2.5 2.5";
     // Sliders rather than a gear: a gear at 16px is a ring of specks, and what

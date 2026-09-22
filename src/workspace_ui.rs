@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use crate::bookmarks;
 use crate::file_io;
 use crate::workspace::{self, LoadStatus, Registry, RegistryError, WorkspaceId};
 
@@ -72,6 +73,9 @@ pub struct Runtime {
     /// tell "this Workspace's cache was just cleared" from "same as last
     /// time" without inventing its own counter.
     reset_generation: HashMap<WorkspaceId, u64>,
+    /// 書き手の求め 2026-09-22: each Workspace's bookmarks, read from its own
+    /// file the first time that Workspace's are asked for.
+    bookmarks: HashMap<WorkspaceId, bookmarks::Tree>,
 }
 
 impl Runtime {
@@ -94,6 +98,30 @@ impl Runtime {
             manager_selection: None,
             expanded: HashMap::new(),
             reset_generation: HashMap::new(),
+            bookmarks: HashMap::new(),
+        }
+    }
+
+    /// The active Workspace's bookmarks, or `None` when no Workspace is active
+    /// — bookmarks belong to a Workspace.
+    pub fn bookmarks(&mut self) -> Option<&mut bookmarks::Tree> {
+        let active = self.active?;
+        let appdata_dir = &self.appdata_dir;
+        Some(
+            self.bookmarks
+                .entry(active)
+                .or_insert_with(|| bookmarks::load(appdata_dir, active)),
+        )
+    }
+
+    /// Write the active Workspace's bookmarks to its file.
+    pub fn save_bookmarks(&self) -> io::Result<()> {
+        let Some(active) = self.active else {
+            return Ok(());
+        };
+        match self.bookmarks.get(&active) {
+            Some(tree) => bookmarks::save(&self.appdata_dir, active, tree),
+            None => Ok(()),
         }
     }
 
@@ -114,6 +142,8 @@ impl Runtime {
         // Clear stale numeric IDs before publishing a registry which can reuse
         // them. A failed cleanup leaves the damaged registry blocked.
         clear_all_view_state(&self.appdata_dir)?;
+        bookmarks::remove_all(&self.appdata_dir)?;
+        self.bookmarks.clear();
         let empty = Registry::new();
         workspace::save(&self.appdata_dir, &empty)?;
         self.registry = empty;
@@ -277,7 +307,9 @@ impl Runtime {
     pub fn forget_workspace(&mut self, id: WorkspaceId) -> io::Result<()> {
         self.expanded.remove(&id);
         self.reset_generation.remove(&id);
-        let cleanup = remove_expanded(&self.appdata_dir, id);
+        self.bookmarks.remove(&id);
+        let cleanup =
+            remove_expanded(&self.appdata_dir, id).and(bookmarks::remove(&self.appdata_dir, id));
         if self.active == Some(id) {
             self.active = None;
         }

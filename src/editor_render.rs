@@ -13,6 +13,8 @@ pub(crate) struct LayoutOptions {
     pub find_showing: bool,
     pub needle: String,
     pub rules: find::Rules,
+    /// 書き手の求め 2026-09-22: the bookmarked section to light, in source bytes.
+    pub mark: Option<(usize, usize)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -119,6 +121,14 @@ pub(crate) fn layout(
     let scope = rules
         .within
         .filter(|_| showing)
+        .map(|(start, end)| {
+            let start = shown.utf16_at_source_byte(start) as u32;
+            let end = shown.utf16_at_source_byte(end) as u32;
+            (start, end.saturating_sub(start))
+        })
+        .filter(|(_, length)| *length > 0);
+    let mark = options
+        .mark
         .map(|(start, end)| {
             let start = shown.utf16_at_source_byte(start) as u32;
             let end = shown.utf16_at_source_byte(end) as u32;
@@ -244,6 +254,7 @@ pub(crate) fn layout(
         selection_source,
         matches,
         scope,
+        mark,
         measured,
         preview_ms,
         layout_ms,

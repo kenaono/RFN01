@@ -4,6 +4,10 @@ mod editor_render;
 mod input_platform;
 use input_platform::{double_click_time, shift_really_held};
 mod appearance;
+mod bookmark_ui;
+#[cfg(test)]
+mod bookmark_ui_tests;
+mod bookmarks;
 mod editor_host;
 mod editor_session;
 use appearance::luminance;
@@ -134,7 +138,7 @@ use slint::{
     CloseRequestResponse, Color, ComponentHandle, Image, Model, ModelRc, RenderingState,
     Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel,
 };
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use terminal::{Key as TerminalKey, Modifiers as TerminalModifiers};
@@ -1386,6 +1390,15 @@ struct RenderCache {
     /// — a keystroke that adds no heading must not cost a rebuild of the list
     /// (6.18's third case, met before it happens).
     outline_drawn: Vec<document::Heading>,
+    /// Whose outline that was ([`outline_key`]), so that two documents with the
+    /// same headings but different folds are still told apart.
+    outline_key: String,
+    /// 書き手の求め 2026-09-22: the headings each document's outline has
+    /// closed, by their chain ([`bookmarks::heading_path`]) — a heading typed
+    /// above a closed one does not open it.
+    outline_folds: HashMap<String, HashSet<Vec<String>>>,
+    /// 書き手の求め 2026-09-22: the bookmark whose section is lit, while it is.
+    bookmark_mark: Option<BookmarkMark>,
 }
 
 impl Default for RenderCache {
@@ -1404,6 +1417,9 @@ impl Default for RenderCache {
             diag: DiagLog::default(),
             pace: vec![EditPace::default()],
             outline_drawn: Vec::new(),
+            outline_key: String::new(),
+            outline_folds: HashMap::new(),
+            bookmark_mark: None,
         }
     }
 }
@@ -3059,6 +3075,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let id = PaneId::from_index(pane);
         let document = states.document(id);
         escape_in_pane(&window, id, &document, &states, &cache)
+            // 書き手の求め 2026-09-22: nothing chosen to let go of, so the lit
+            // bookmark section is.
+            || bookmark_ui::let_go_in(&window, &cache, &states, id)
     });
 
     let weak = window.as_weak();
@@ -6474,6 +6493,8 @@ enum LeftTab {
     Recent,
     Outline,
     Workspace,
+    /// 書き手の求め 2026-09-22.
+    Bookmarks,
 }
 
 impl LeftTab {
@@ -6485,6 +6506,7 @@ impl LeftTab {
             Self::Recent => 2,
             Self::Outline => 3,
             Self::Workspace => 4,
+            Self::Bookmarks => 5,
         }
     }
 
@@ -6495,6 +6517,7 @@ impl LeftTab {
             2 => Self::Recent,
             3 => Self::Outline,
             4 => Self::Workspace,
+            5 => Self::Bookmarks,
             _ => Self::Explorer,
         }
     }
@@ -6535,6 +6558,7 @@ fn publish_left(window: &AppWindow, live: &Live) {
         LeftTab::Search => publish_results(window, live),
         LeftTab::Recent => publish_recent(window, live),
         LeftTab::Outline => publish_outline(window, live),
+        LeftTab::Bookmarks => bookmark_ui::publish(window, live),
     }
 }
 
@@ -6609,29 +6633,102 @@ fn publish_outline(window: &AppWindow, live: &Live) {
     // Switching to the panel draws it whatever was drawn last: the rows in
     // front of the writer are another panel's, however unchanged the headings.
     cache.outline_drawn.clear();
-    draw_outline(window, &mut cache, source.as_str());
+    draw_outline(window, &mut cache, &document, source.as_str());
+}
+
+/// Who a document is to the outline's folds: its file, or — untitled — the
+/// document itself.
+fn outline_key(document: &OpenDocument) -> String {
+    let file = document.file.borrow();
+    match file.path() {
+        Some(path) => path.display().to_string(),
+        None => format!("{document:p}"),
+    }
+}
+
+/// The rows the outline shows for `headings`, with its folds.
+fn outline_shown(
+    cache: &RenderCache,
+    key: &str,
+    headings: &[document::Heading],
+) -> Vec<bookmarks::OutlineRow> {
+    let empty = HashSet::new();
+    let folded = cache.outline_folds.get(key).unwrap_or(&empty);
+    bookmarks::outline_rows(headings, folded)
+}
+
+/// 書き手の求め 2026-09-22: a bookmark's section lit in the pane it was opened
+/// in. **It lasts while that pane shows the same document, unedited** — the
+/// writer choosing another bookmark, clicking the list's empty space or
+/// pressing Escape lets it go too.
+struct BookmarkMark {
+    bookmark: bookmarks::Bookmark,
+    pane: PaneId,
+    document: std::rc::Weak<OpenDocument>,
+    changed_at: Instant,
+    start: usize,
+    end: usize,
+}
+
+/// The range lit in `id`, if its bookmark still stands. A mark whose pane has
+/// moved on to other text, or whose text has been edited, is let go here —
+/// every way the text can change ends in a refresh, so there is no second
+/// place to remember to clear it.
+fn bookmark_mark_in(
+    window: &AppWindow,
+    cache: &mut RenderCache,
+    document: &OpenDocument,
+    id: PaneId,
+) -> Option<(usize, usize)> {
+    let mark = cache.bookmark_mark.as_ref()?;
+    if mark.pane != id {
+        return None;
+    }
+    let same = mark
+        .document
+        .upgrade()
+        .is_some_and(|held| std::ptr::eq(Rc::as_ptr(&held), document))
+        && document.text.changed_at() == mark.changed_at;
+    if same {
+        return Some((mark.start, mark.end));
+    }
+    cache.bookmark_mark = None;
+    window.set_bookmark_selected(-1);
+    None
 }
 
 /// Put an outline of `source` in the left pane.
-fn draw_outline(window: &AppWindow, cache: &mut RenderCache, source: &str) {
+fn draw_outline(
+    window: &AppWindow,
+    cache: &mut RenderCache,
+    document: &OpenDocument,
+    source: &str,
+) {
     let headings = document::outline(source);
-    if cache.outline_drawn == headings {
+    let key = outline_key(document);
+    if cache.outline_drawn == headings && cache.outline_key == key {
         return;
     }
-    let drawn = headings
+    let drawn = outline_shown(cache, &key, &headings)
         .iter()
-        .map(|heading| LeftRow {
-            name: heading.text.clone().into(),
-            // H1 sits at the left and each level steps in, which is the same
-            // reading of `depth` the tree has.
-            depth: i32::from(heading.level).saturating_sub(1),
-            folder: false,
-            open: false,
-            parent: -1,
-            is_root: false,
+        .map(|row| {
+            let heading = &headings[row.heading];
+            LeftRow {
+                name: heading.text.clone().into(),
+                // H1 sits at the left and each level steps in, which is the
+                // same reading of `depth` the tree has.
+                depth: i32::from(heading.level).saturating_sub(1),
+                // A heading with headings under it has a fold, drawn the way a
+                // folder's is.
+                folder: row.parent,
+                open: row.open,
+                parent: -1,
+                is_root: false,
+            }
         })
         .collect::<Vec<_>>();
     cache.outline_drawn = headings;
+    cache.outline_key = key;
     window.set_tree_selected(-1);
     window.set_left_rows(ModelRc::new(VecModel::from(drawn)));
 }
@@ -6643,10 +6740,75 @@ fn draw_outline(window: &AppWindow, cache: &mut RenderCache, source: &str) {
 /// not begin with a hash is dismissed on its first character; **the list is
 /// only handed to the window when it has actually changed**, so a keystroke
 /// that adds no heading costs the read and nothing else.
-fn draw_outline_if_showing(window: &AppWindow, cache: &mut RenderCache, source: &str) {
+fn draw_outline_if_showing(
+    window: &AppWindow,
+    cache: &mut RenderCache,
+    document: &OpenDocument,
+    source: &str,
+) {
     if LeftTab::from_index(window.get_left_tab()) == LeftTab::Outline {
-        draw_outline(window, cache, source);
+        draw_outline(window, cache, document, source);
     }
+}
+
+/// 書き手の求め 2026-09-22: open or close the heading on a row of the outline.
+fn toggle_outline_fold(window: &AppWindow, live: &Live, row: usize) {
+    let document = live.active(window);
+    let source = document.text.borrow();
+    let headings = document::outline(&source);
+    let key = outline_key(&document);
+    let mut cache = live.cache.borrow_mut();
+    let Some(shown) = outline_shown(&cache, &key, &headings).get(row).copied() else {
+        return;
+    };
+    if !shown.parent {
+        return;
+    }
+    let chain = bookmarks::heading_path(&headings, shown.heading);
+    let folded = cache.outline_folds.entry(key).or_default();
+    if !folded.remove(&chain) {
+        folded.insert(chain);
+    }
+    cache.outline_drawn.clear();
+    draw_outline(window, &mut cache, &document, &source);
+}
+
+/// The window's row number for [`toggle_outline_fold`].
+fn outline_fold_toggled(window: &AppWindow, live: &Live, row: i32) {
+    if let Ok(row) = usize::try_from(row) {
+        toggle_outline_fold(window, live, row);
+    }
+}
+
+/// 書き手の求め 2026-09-22: close every heading that has something under it,
+/// or open them all.
+fn fold_whole_outline(window: &AppWindow, live: &Live, close: bool) {
+    let document = live.active(window);
+    let source = document.text.borrow();
+    let key = outline_key(&document);
+    let folded = if close {
+        bookmarks::foldable(&document::outline(&source))
+    } else {
+        HashSet::new()
+    };
+    let mut cache = live.cache.borrow_mut();
+    cache.outline_folds.insert(key, folded);
+    cache.outline_drawn.clear();
+    draw_outline(window, &mut cache, &document, &source);
+}
+
+/// Which heading of the whole outline a row of the folded one is.
+fn outline_heading_of_row(
+    live: &Live,
+    document: &OpenDocument,
+    headings: &[document::Heading],
+    row: usize,
+) -> Option<usize> {
+    let key = outline_key(document);
+    let cache = live.cache.borrow();
+    outline_shown(&cache, &key, headings)
+        .get(row)
+        .map(|shown| shown.heading)
 }
 
 /// Draw what the last folder-wide search found (要件 7.7).
@@ -6696,6 +6858,8 @@ fn activate_left_row(window: &AppWindow, live: &Live, index: usize) {
         LeftTab::Search => open_result(window, live, index),
         LeftTab::Recent => open_remembered(window, live, index),
         LeftTab::Outline => go_to_heading(window, live, index),
+        // The view answers its own rows (`bookmark_ui::activate`).
+        LeftTab::Bookmarks => {}
     }
 }
 
@@ -6708,7 +6872,12 @@ fn go_to_heading(window: &AppWindow, live: &Live, index: usize) {
     let id = focused_pane(window);
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
-    let Some(heading) = document::outline(&source).into_iter().nth(index) else {
+    let headings = document::outline(&source);
+    // The row is one of the folded outline's (書き手の求め 2026-09-22).
+    let Some(index) = outline_heading_of_row(live, &document, &headings, index) else {
+        return;
+    };
+    let Some(heading) = headings.get(index) else {
         return;
     };
     show_source_range(window, live, id, &source, heading.at, heading.at);
@@ -7354,6 +7523,8 @@ fn workspace_edit_error_message(error: &workspace_ui::EditError) -> String {
 /// Workspace. Rebuilt whenever the ledger or the active Workspace could have
 /// changed — every editing function below calls this after it succeeds.
 fn publish_workspace_switcher(window: &AppWindow, live: &Live) {
+    // Bookmarks are the active Workspace's, so they change with it.
+    bookmark_ui::publish(window, live);
     let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
         window.set_workspace_available(false);
         window.set_workspace_current_label(SharedString::new());
@@ -11524,6 +11695,18 @@ enum Question {
     /// リセット" — a dedicated confirmation, never folded into the ordinary
     /// per-Workspace reset above.
     ResetWorkspaceRegistry,
+    /// 書き手の求め 2026-09-22: a new bookmark, waiting for its title and
+    /// group. `groups` is where each group the dialog offers is stored, in the
+    /// order it offers them after "(Root)".
+    AddBookmark {
+        path: PathBuf,
+        heading: Vec<String>,
+        groups: Vec<usize>,
+    },
+    NewBookmarkGroup,
+    RenameBookmark(bookmarks::Place),
+    /// A group goes with its bookmarks, so it is confirmed.
+    DeleteBookmarkGroup(usize),
 }
 
 impl Question {
@@ -11560,6 +11743,10 @@ impl Question {
             Self::ResetWorkspaceView(..) => "ResetWorkspaceView",
             Self::RemoveUnusedFolder(..) => "RemoveUnusedFolder",
             Self::ResetWorkspaceRegistry => "ResetWorkspaceRegistry",
+            Self::AddBookmark { .. } => "AddBookmark",
+            Self::NewBookmarkGroup => "NewBookmarkGroup",
+            Self::RenameBookmark(..) => "RenameBookmark",
+            Self::DeleteBookmarkGroup(..) => "DeleteBookmarkGroup",
         }
     }
 }
@@ -11658,6 +11845,7 @@ fn ask_question(
     let described = question.diagnostic_name();
     window.set_question_enter_sends(matches!(&question, Question::TerminalInput(_)));
     window.set_question_is_clone(matches!(&question, Question::CloneWorkspaceUrl));
+    window.set_question_is_bookmark(matches!(&question, Question::AddBookmark { .. }));
     *live.pending.borrow_mut() = Some(question);
     let named = choices
         .iter()
@@ -12107,6 +12295,19 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             workspace_remove_unused_folder(window, live, folder)
         }
         (Question::ResetWorkspaceRegistry, 0) => workspace_reset_after_read_error(window, live),
+        (
+            Question::AddBookmark {
+                path,
+                heading,
+                groups,
+            },
+            0,
+        ) => bookmark_ui::add(window, live, path, heading, groups),
+        (Question::NewBookmarkGroup, 0) => bookmark_ui::create_group(window, live),
+        (Question::RenameBookmark(place), 0) => bookmark_ui::rename(window, live, place),
+        (Question::DeleteBookmarkGroup(group), 0) => {
+            bookmark_ui::remove(window, live, bookmarks::Place::Group(group))
+        }
         _ => {}
     }
 }
@@ -16210,6 +16411,15 @@ impl PaneId {
         self.update_screen(window, |screen| screen.scope_rects = model);
     }
 
+    /// 書き手の求め 2026-09-22: 栞を選んで開いた見出しの範囲の矩形。
+    fn set_bookmark_rects(self, window: &AppWindow, rects: &[SelectionRect]) {
+        if rects.is_empty() && self.screen(window).bookmark_rects.row_count() == 0 {
+            return;
+        }
+        let model = ModelRc::new(VecModel::from(self.preview_rects(window, rects)));
+        self.update_screen(window, |screen| screen.bookmark_rects = model);
+    }
+
     /// E1: 見えている一致の矩形。**選択と同じ形で渡し、描く側が薄く敷く。**
     fn set_matches(self, window: &AppWindow, rects: &[SelectionRect]) {
         let model = ModelRc::new(VecModel::from(self.preview_rects(window, rects)));
@@ -16869,6 +17079,8 @@ struct PaneLayout {
     /// 範囲内検索の範囲（E1、書き手の求め 2026-09-09）。**検索が選択を動かす
     /// ので、範囲は選択では見えない**——だから別に出す。
     scope: Option<(u32, u32)>,
+    /// 書き手の求め 2026-09-22: the bookmarked section, lit until it is let go.
+    mark: Option<(u32, u32)>,
     measured: directwrite_render::UpdateCost,
     preview_ms: f64,
     layout_ms: f64,
@@ -16910,6 +17122,7 @@ fn lay_out_pane(
         find_showing: window.get_find_open() && window.get_find_pane() == id.index(),
         needle: screen.find_needle.to_string(),
         rules: find_rules(window, id),
+        mark: bookmark_mark_in(window, cache, document, id),
     };
     let pane = cache.pane(id);
     match editor_render::layout(
@@ -18269,6 +18482,7 @@ fn refresh_pane(
         selection_source,
         matches,
         scope,
+        mark,
         measured,
         preview_ms,
         layout_ms,
@@ -18416,6 +18630,16 @@ fn refresh_pane(
         }
     };
     id.set_scope(window, &scope_rects);
+    let mark_rects = {
+        let engine = &mut cache.pane(id).graphics.engine;
+        match mark {
+            Some(run) => engine
+                .selection_rects(Some(run), visible)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    };
+    id.set_bookmark_rects(window, &mark_rects);
     cache.refresh_pane_pictures(window, id);
     let rects = selection_rects.len();
     if cache.pane(id).view.direction_caret_source != caret_source_byte {
@@ -18463,7 +18687,7 @@ fn refresh_pane(
     // 要件 7.7: the outline is of the document in front of the writer, and the
     // pane that has just drawn is only sometimes the one they are in.
     if id == focused_pane(window) {
-        draw_outline_if_showing(window, cache, source);
+        draw_outline_if_showing(window, cache, document, source);
     }
     let stats_ms = elapsed_ms(stats_started);
 
