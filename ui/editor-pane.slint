@@ -391,6 +391,11 @@ export component EditorPane inherits Rectangle {
     /// towards what was written earlier. **Rust turns it into rows** — a
     /// terminal has no half-lines to stop on.
     callback terminal-scrolled(float);
+    // 全画面TUIの互換性（2026-09-22）: 最初の数は0が上段・1が下段のシェル、
+    // 残りは`EditorSurface`の`terminal-mouse`と同じ。
+    callback terminal-mouse(int, int, int, float, float, float, bool, bool, bool) -> bool;
+    callback terminal-focus(int, bool);
+    property <int> below-button: 3;
     /// 書き手の決定 2026-09-11: どの記号を箇条書きの印として読むか（窓のもの）。
     /// **この面は表示に使うだけ**——読む記号ぶんの行を右クリックに出す。
     in property <[bool]> bullet-marks: [true, true, true];
@@ -1822,6 +1827,10 @@ export component EditorPane inherits Rectangle {
             text-input(a0, a1) => { root.text-input(a0, a1); }
             terminal-key(a0, a1, a2, a3, a4) => { root.terminal-key(a0, a1, a2, a3, a4); }
             terminal-scrolled(a0) => { root.terminal-scrolled(a0); }
+            terminal-mouse(kind, button, x, y, delta, shift, ctrl, alt) => {
+                return root.terminal-mouse(0, kind, button, x, y, delta, shift, ctrl, alt);
+            }
+            terminal-focus(focused) => { root.terminal-focus(0, focused); }
             bullet-marks: root.bullet-marks;
             insert-rows: root.insert-rows;
             insert-children: root.insert-children;
@@ -2076,7 +2085,10 @@ export component EditorPane inherits Rectangle {
                             if root.menu-action == 1 && root.menu-generation > 0 { self.focus(); self.paste(); }
                             else if root.menu-action == 7 && root.menu-generation > 0 { self.focus(); }
                         }
-                        changed has-focus => { if self.has-focus { MenuInput.target = -1; } }
+                        changed has-focus => {
+                            if self.has-focus { MenuInput.target = -1; }
+                            root.terminal-focus(1, self.has-focus);
+                        }
                         property <int> generation: root.below-focus-generation;
                         changed generation => {
                             self.clear-focus();
@@ -2153,11 +2165,44 @@ export component EditorPane inherits Rectangle {
                     below-pointer := TouchArea {
                         mouse-cursor: text;
                         scroll-event(event) => {
+                            if !event.modifiers.shift && root.terminal-mouse(
+                                1, 3, 3, self.mouse-x / 1px, self.mouse-y / 1px,
+                                event.delta-y != 0px ? event.delta-y / 1px : event.delta-x / 1px,
+                                false, event.modifiers.control, event.modifiers.alt) {
+                                return accept;
+                            }
                             root.below-scrolled(
                                 event.delta-y != 0px ? event.delta-y / 1px : event.delta-x / 1px);
                             accept
                         }
+                        // 全画面TUIの互換性（2026-09-22）: 上段と同じ——Shiftなら選択とメニュー。
+                        changed mouse-x => { self.hover-move(); }
+                        changed mouse-y => { self.hover-move(); }
+                        function hover-move() {
+                            if self.has-hover && !self.pressed {
+                                root.terminal-mouse(1, 2, 3, self.mouse-x / 1px, self.mouse-y / 1px, 0,
+                                    false, false, false);
+                            }
+                        }
                         pointer-event(event) => {
+                            if !event.modifiers.shift
+                                && (event.kind == PointerEventKind.down || event.kind == PointerEventKind.up)
+                                && !(event.modifiers.control && event.button == PointerEventButton.left) {
+                                let button = event.button == PointerEventButton.left ? 0
+                                    : event.button == PointerEventButton.middle ? 1
+                                    : event.button == PointerEventButton.right ? 2 : 3;
+                                if button != 3 && root.terminal-mouse(
+                                    1, event.kind == PointerEventKind.down ? 0 : 1, button,
+                                    self.mouse-x / 1px, self.mouse-y / 1px, 0,
+                                    false, event.modifiers.control, event.modifiers.alt) {
+                                    root.below-button = event.kind == PointerEventKind.down ? button : 3;
+                                    if event.kind == PointerEventKind.up {
+                                        below-ime.clear-focus();
+                                        below-ime.focus();
+                                    }
+                                    return;
+                                }
+                            }
                             // 書き手の報告 2026-09-08: **下段にも右ボタンの
                             // メニューがある。**帯はペインの一段下の面で、
                             // 手がそこにあるときに右を押して何も出ないのは、
@@ -2184,6 +2229,12 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         moved => {
+                            if root.below-button != 3 && self.pressed {
+                                if root.terminal-mouse(1, 2, root.below-button,
+                                    self.mouse-x / 1px, self.mouse-y / 1px, 0, false, false, false) {
+                                    return;
+                                }
+                            }
                             if (self.pressed) {
                                 root.below-selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
                             }

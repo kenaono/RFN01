@@ -393,4 +393,91 @@ mod tests {
             seen.len()
         );
     }
+
+    /// 全画面TUIの互換性の実測（2026-09-22）。**ConPTYを挟んだ時に、アプリの要求と
+    /// こちらの送信がどこまで届くか**を、生のバイト列で見る。
+    ///
+    /// `PTY_SHELL`で起動し、`PTY_STEPS`を` ;; `区切りで順に実行する：
+    /// `wait:ミリ秒`、`send:文字列`（`\e`はESC、`\r`はCR）、`resize:列,行`。
+    /// 出力は全部`PTY_DUMP`のファイルへ書く（分析は外で行う）。
+    #[test]
+    #[ignore]
+    fn tui_probe() {
+        let command = std::env::var("PTY_SHELL").unwrap_or_else(|_| "wsl.exe".to_owned());
+        let steps = std::env::var("PTY_STEPS").unwrap_or_else(|_| "wait:2000".to_owned());
+        let mut pty = Pty::open(&command, 80, 24).expect("open");
+        let reader = pty.take_reader().expect("the reader is there once");
+        let (post, collect) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buffer = vec![0_u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if post.send(buffer[..read].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let mut seen: Vec<u8> = Vec::new();
+        let drain = |seen: &mut Vec<u8>, millis: u64| {
+            let until = Instant::now() + Duration::from_millis(millis);
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                match collect.recv_timeout(left) {
+                    Ok(chunk) => seen.extend_from_slice(&chunk),
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(_) => break,
+                }
+            }
+        };
+        for step in steps.split(" ;; ") {
+            let (verb, value) = step.split_once(':').unwrap_or((step, ""));
+            seen.extend_from_slice(format!("\n<<<{step}>>>\n").as_bytes());
+            match verb {
+                "wait" => drain(&mut seen, value.parse().unwrap_or(500)),
+                "send" => {
+                    let text = value.replace("\\e", "\x1b").replace("\\r", "\r");
+                    // `\xHH`は1バイト。
+                    let mut bytes = Vec::new();
+                    let mut rest = text.as_bytes();
+                    while let Some((&first, tail)) = rest.split_first() {
+                        if first == b'\\' && tail.first() == Some(&b'x') && tail.len() >= 3 {
+                            let hex = std::str::from_utf8(&tail[1..3]).unwrap();
+                            bytes.push(u8::from_str_radix(hex, 16).expect("hex"));
+                            rest = &tail[3..];
+                        } else {
+                            bytes.push(first);
+                            rest = tail;
+                        }
+                    }
+                    pty.write(&bytes).expect("write");
+                    drain(&mut seen, 300);
+                }
+                "resize" => {
+                    let (columns, rows) = value.split_once(',').expect("columns,rows");
+                    pty.resize(columns.parse().unwrap(), rows.parse().unwrap())
+                        .expect("resize");
+                    drain(&mut seen, 300);
+                }
+                other => panic!("unknown step {other}"),
+            }
+        }
+        let path = std::env::var("PTY_DUMP").unwrap_or_else(|_| "tui_probe.bin".to_owned());
+        std::fs::write(&path, &seen).expect("dump");
+        println!("wrote {} bytes to {path}", seen.len());
+        // 今の解析器が読めなかったもの。
+        let mut terminal = crate::terminal::Terminal::new(80, 24);
+        terminal.feed(&seen);
+        println!("--- screen ---");
+        for row in 0..24 {
+            println!("{row:>3}|{}", terminal.screen.row_text(row));
+        }
+        println!("--- unhandled ---");
+        for (what, times) in terminal.screen.unhandled() {
+            println!("  {what} x{times}");
+        }
+        println!("--- modes {:?}", terminal.screen.modes());
+    }
 }

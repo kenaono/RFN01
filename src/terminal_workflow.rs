@@ -313,7 +313,122 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
     refresh_terminal(window, &live.cache, id, spot);
 }
 
+/// A pointer event over a shell (全画面TUIの互換性、2026-09-22). `true` when
+/// the program took it, and the pane then starts no selection of its own.
+///
+/// `kind` is 0 press, 1 release, 2 move, 3 wheel; `button` is 0 left,
+/// 1 middle, 2 right, 3 none. **Not while the history is being looked at**:
+/// the rows on the pane are then not the program's screen.
+#[allow(clippy::too_many_arguments)]
+fn pointer(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    spot: TerminalSpot,
+    (kind, button): (i32, i32),
+    (x, y, delta): (f32, f32, f32),
+    modifiers: TerminalModifiers,
+) -> bool {
+    use crate::terminal::{MouseAction, MouseButton};
+    let Some((session, looking)) = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|shell| (shell.session.clone(), shell.looking))
+    else {
+        return false;
+    };
+    if looking > 0 {
+        return false;
+    }
+    let look = terminal_appearance::look(window, id, spot);
+    let Ok(cell) = cells::terminal_cell_size(&look) else {
+        return false;
+    };
+    let mut session = session.borrow_mut();
+    if session.finished() {
+        return false;
+    }
+    let screen = session.screen();
+    let row = ((y.max(0.0) / cell.line) as usize).min(screen.rows().saturating_sub(1));
+    let column = ((x.max(0.0) / cell.advance) as usize).min(screen.columns().saturating_sub(1));
+    if kind == 3 {
+        let lines = ((delta.abs() / cell.line).round() as usize).max(1);
+        return session.send_wheel(delta > 0.0, lines, row, column, modifiers);
+    }
+    let action = match kind {
+        0 => MouseAction::Press,
+        1 => MouseAction::Release,
+        _ => MouseAction::Move,
+    };
+    let button = match button {
+        0 => MouseButton::Left,
+        1 => MouseButton::Middle,
+        2 => MouseButton::Right,
+        _ => MouseButton::None,
+    };
+    let taken = session.send_mouse(action, button, row, column, modifiers);
+    if taken && action == MouseAction::Press {
+        live.cache.borrow_mut().log_diag(
+            "terminal",
+            &format!(
+                "mouse pane={} spot={spot:?} button={button:?} row={row} column={column}",
+                id.log_name()
+            ),
+        );
+    }
+    taken
+}
+
 pub(crate) fn install(window: &AppWindow, live: &Live) {
+    let weak = window.as_weak();
+    let mouse_live = live.clone();
+    window.on_terminal_mouse(
+        move |pane, spot, kind, button, x, y, delta, shift, control, alt| {
+            let Some(window) = weak.upgrade() else {
+                return false;
+            };
+            let spot = if spot == 0 {
+                TerminalSpot::Front
+            } else {
+                TerminalSpot::Below
+            };
+            pointer(
+                &window,
+                &mouse_live,
+                PaneId::from_index(pane),
+                spot,
+                (kind, button),
+                (x, y, delta),
+                TerminalModifiers {
+                    shift,
+                    alt,
+                    control,
+                },
+            )
+        },
+    );
+    let focus_live = live.clone();
+    window.on_terminal_focus(move |pane, spot, focused| {
+        let spot = if spot == 0 {
+            TerminalSpot::Front
+        } else {
+            TerminalSpot::Below
+        };
+        let session = focus_live
+            .cache
+            .borrow_mut()
+            .pane(PaneId::from_index(pane))
+            .shell(spot)
+            .map(|shell| shell.session.clone());
+        if let Some(session) = session {
+            let mut session = session.borrow_mut();
+            if !session.finished() {
+                session.send_focus(focused);
+            }
+        }
+    });
     let weak = window.as_weak();
     let url_live = live.clone();
     window.on_terminal_url(move |pane, spot, x, y| {

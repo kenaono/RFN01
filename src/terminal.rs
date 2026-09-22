@@ -150,23 +150,39 @@ pub struct Cursor {
     pending_wrap: bool,
 }
 
+/// Which pointer events the program asked to hear about (`ESC[?1000h` and
+/// the two after it). **Each one includes the one before**: a program that
+/// wants motion also wants the presses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MouseTracking {
+    #[default]
+    Off,
+    /// 1000: presses and releases.
+    Click,
+    /// 1002: and movement while a button is held.
+    Drag,
+    /// 1003: and every movement.
+    Motion,
+}
+
 /// The modes the shell has asked for.
 ///
-/// **These are recorded, not obeyed.** Whether the pane sends bracketed paste
-/// markers or focus events is a question for the pane; what this half can do is
-/// say what was asked.
+/// **This half records them and encodes by them**; whether a key, a paste, a
+/// pointer event or a change of focus is sent at all is the pane's question.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Modes {
     pub cursor_visible: bool,
     pub bracketed_paste: bool,
     pub focus_events: bool,
     /// `ESC[?9001h` — conhost asks for Win32 input records instead of VT input.
-    /// **We record it and keep sending VT**, which conhost accepts; honouring it
-    /// would mean encoding key events in a Windows-only form in the half that is
-    /// supposed to be portable.
+    /// **We keep sending VT**, which conhost accepts, except for the few keys
+    /// whose VT form loses the modifier (see `win32_key`).
     pub win32_input: bool,
     pub application_cursor_keys: bool,
-    pub mouse_tracking: bool,
+    pub mouse: MouseTracking,
+    /// 1006: pointer events in the SGR form, which has no column limit and
+    /// says which button was released.
+    pub mouse_sgr: bool,
     pub alternate_screen: bool,
 }
 
@@ -178,7 +194,8 @@ impl Default for Modes {
             focus_events: false,
             win32_input: false,
             application_cursor_keys: false,
-            mouse_tracking: false,
+            mouse: MouseTracking::Off,
+            mouse_sgr: false,
             alternate_screen: false,
         }
     }
@@ -1121,9 +1138,32 @@ impl Screen {
         match mode {
             1 => self.modes.application_cursor_keys = on,
             25 => self.modes.cursor_visible = on,
-            1000 | 1002 | 1003 | 1006 => self.modes.mouse_tracking = on,
+            // 全画面TUIの互換性（2026-09-22）: **どれを切っても追跡は止まる**
+            // （xtermと同じ）。vimは`?1006;1000h`と`?1002h`を続けて送る。
+            1000 | 1002 | 1003 => {
+                self.modes.mouse = match (on, mode) {
+                    (false, _) => MouseTracking::Off,
+                    (true, 1000) => MouseTracking::Click,
+                    (true, 1002) => MouseTracking::Drag,
+                    _ => MouseTracking::Motion,
+                }
+            }
+            1006 => self.modes.mouse_sgr = on,
+            // 1005 (UTF-8 coordinates) is only ever turned off in practice.
+            1005 if !on => {}
             1004 => self.modes.focus_events = on,
-            1049 => self.use_alternate_screen(on),
+            // The older spellings of the alternate screen, and the cursor
+            // save that 1049 does on its own.
+            47 | 1047 | 1049 => self.use_alternate_screen(on),
+            1048 => {
+                if on {
+                    self.save_cursor();
+                } else {
+                    self.restore_cursor();
+                }
+            }
+            // Cursor blinking and the Escape-key mode: nothing here to change.
+            12 | 7727 => {}
             2004 => self.modes.bracketed_paste = on,
             9001 => self.modes.win32_input = on,
             _ => self.note_unhandled(format!("CSI ?{mode}{}", if on { 'h' } else { 'l' })),
@@ -1180,27 +1220,13 @@ fn extended_colour(parts: &[u16], colon: bool) -> Option<Color> {
 /// terminal that thinks `あ` is one cell puts every following character in the
 /// wrong column, and `ls` of a Japanese directory becomes unreadable.
 ///
-/// The ranges below are the wide ones, not the whole of UAX #11: everything not
-/// named is one cell, and the combining marks are zero. That is a deliberate
-/// simplification of a table that changes with every Unicode version.
 pub fn character_width(text: char) -> usize {
-    let code = text as u32;
-    if matches!(code,
-        0x0300..=0x036F | 0x0483..=0x0489 | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF
-        | 0x20D0..=0x20F0 | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F | 0x200B..=0x200F)
-    {
-        return 0;
-    }
-    if matches!(code,
-        0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xA960..=0xA97F | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF | 0xFE10..=0xFE19 | 0xFE30..=0xFE6F | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6 | 0x1F300..=0x1F64F | 0x1F900..=0x1F9FF
-        | 0x20000..=0x2FFFD | 0x30000..=0x3FFFD)
-    {
-        return 2;
-    }
-    1
+    // 全画面TUIの互換性（2026-09-22）: **アプリと同じ数え方をする。**vimやbashは
+    // 1字ずつ`wcwidth`で数えてカーソルを置くので、こちらの表が違えば行が崩れる。
+    // `unicode-width`の1字の幅はそれと揃う（🚀・🫠は2、異体字セレクタとZWJは0、
+    // ○※①のような曖昧な幅は1）。
+    use unicode_width::UnicodeWidthChar;
+    text.width().unwrap_or(0)
 }
 
 /// Where the byte stream is in the middle of a sequence.
@@ -1468,7 +1494,7 @@ impl Parser {
             // carries a rule — 181 columns of it on every one of 85 rows, which
             // is what the writer saw with `vim` and with `claude` (2026-09-06).
             // conhost sends this one right after `ESC[2J`.
-            b'm' if self.private.is_none() => {
+            b'm' if self.private.is_none() && self.intermediate.is_none() => {
                 let groups = std::mem::take(&mut self.groups);
                 screen.select_graphic_rendition(&groups);
                 self.groups = groups;
@@ -1613,6 +1639,11 @@ impl Modifiers {
 /// and then the key, and every shell still reads it that way — which is also
 /// why `Alt` and pressing Escape first are the same thing to the program.
 pub fn encode_key(key: Key, modifiers: Modifiers, modes: Modes) -> Vec<u8> {
+    if modes.win32_input
+        && let Some(event) = win32_key(key, modifiers)
+    {
+        return event;
+    }
     let mut out = Vec::new();
     let alt_prefix = |out: &mut Vec<u8>| {
         if modifiers.alt {
@@ -1735,6 +1766,118 @@ fn control_byte(text: char) -> Option<u8> {
         '?' => Some(0x7f),
         _ => None,
     }
+}
+
+/// Which button a pointer event is about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    /// Movement with nothing held (1003 only).
+    None,
+    WheelUp,
+    WheelDown,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseAction {
+    Press,
+    Release,
+    Move,
+}
+
+/// A pointer event, in the form the program asked for (全画面TUIの互換性、
+/// 2026-09-22). `None` when it did not ask for this one.
+///
+/// **Rows and columns count from 0 here** and from 1 on the wire.
+pub fn encode_mouse(
+    action: MouseAction,
+    button: MouseButton,
+    row: usize,
+    column: usize,
+    modifiers: Modifiers,
+    modes: Modes,
+) -> Option<Vec<u8>> {
+    let wheel = matches!(button, MouseButton::WheelUp | MouseButton::WheelDown);
+    match (modes.mouse, action) {
+        (MouseTracking::Off, _) => return None,
+        (MouseTracking::Click, MouseAction::Move) => return None,
+        (MouseTracking::Drag, MouseAction::Move) if button == MouseButton::None => return None,
+        // A wheel has no release to report.
+        (_, MouseAction::Release) if wheel || button == MouseButton::None => return None,
+        _ => {}
+    }
+    let mut code: u32 = match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::None => 3,
+        MouseButton::WheelUp => 64,
+        MouseButton::WheelDown => 65,
+    };
+    if action == MouseAction::Move {
+        code += 32;
+    }
+    code += 4 * u32::from(modifiers.shift)
+        + 8 * u32::from(modifiers.alt)
+        + 16 * u32::from(modifiers.control);
+    if modes.mouse_sgr {
+        let end = if action == MouseAction::Release {
+            'm'
+        } else {
+            'M'
+        };
+        return Some(format!("\x1b[<{code};{};{}{end}", column + 1, row + 1).into_bytes());
+    }
+    // The old form says "a button went up" without saying which, and each
+    // number is one byte offset by 32 — **a column past 222 cannot be said**.
+    if action == MouseAction::Release {
+        code = (code & !3) | 3;
+    }
+    let column = u8::try_from(column + 1 + 32).ok()?;
+    let row = u8::try_from(row + 1 + 32).ok()?;
+    Some(vec![0x1b, b'[', b'M', (code + 32) as u8, column, row])
+}
+
+/// Whether the pane gained or lost the keyboard, if the program asked to be
+/// told (`ESC[?1004h`). **ConPTY asks on its own behalf**, and passes the event
+/// on to the program inside — `vim`'s `FocusGained` is how it notices a file
+/// changed while it was not being looked at.
+pub fn encode_focus(focused: bool, modes: Modes) -> Vec<u8> {
+    if !modes.focus_events {
+        return Vec::new();
+    }
+    if focused {
+        b"\x1b[I".to_vec()
+    } else {
+        b"\x1b[O".to_vec()
+    }
+}
+
+/// A key VT cannot tell apart, as a Windows key event (全画面TUIの互換性、
+/// 2026-09-22).
+///
+/// **ConPTY asks for these itself** (`ESC[?9001h`). Everything else still goes
+/// as VT, which it accepts; only the keys whose VT form loses the modifier go
+/// this way — `Shift+Enter` would otherwise be a plain return, which is a
+/// command run instead of PowerShell's continuation line. ConPTY turns the
+/// event back into VT for a program that reads VT, so a shell in WSL hears what
+/// it heard before.
+fn win32_key(key: Key, modifiers: Modifiers) -> Option<Vec<u8>> {
+    // Virtual key, scan code, and the character the key makes.
+    let (virtual_key, scan, character) = match key {
+        Key::Enter if modifiers.any() => (13, 28, if modifiers.control { 10 } else { 13 }),
+        Key::Char(' ') if modifiers.control => (32, 57, 32),
+        Key::Tab if modifiers.control => (9, 15, 9),
+        _ => return None,
+    };
+    // SHIFT_PRESSED, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED.
+    let state = 0x10 * u32::from(modifiers.shift)
+        + 0x02 * u32::from(modifiers.alt)
+        + 0x08 * u32::from(modifiers.control);
+    let event = |down: u8| format!("\x1b[{virtual_key};{scan};{character};{down};{state};1_");
+    Some(format!("{}{}", event(1), event(0)).into_bytes())
 }
 
 /// Text pasted into the pane, in the form the shell asked to receive it.
@@ -2195,7 +2338,7 @@ mod tests {
 
     #[test]
     fn a_tab_goes_to_the_next_stop() {
-        let mut it = terminal(20, 2);
+        let mut it = Terminal::new(20, 2);
         it.feed(b"ab\tc");
         assert_eq!(it.screen.row_text(0), "ab      c");
         assert_eq!(it.screen.cursor().column, 9);
@@ -2370,5 +2513,185 @@ mod key_tests {
             encode_paste("ls\n", modes),
             "貼り付けは抱えさせ、打鍵は走らせる"
         );
+    }
+
+    // 全画面TUIの互換性（2026-09-22）: 実測でvim・nano・tmuxがConPTY越しに
+    // 送ってきた要求と、こちらから送る形。
+
+    #[test]
+    fn vims_mouse_request_is_read_parameter_by_parameter() {
+        let mut it = Terminal::new(80, 24);
+        it.feed(b"\x1b[?1006;1000h");
+        assert_eq!(it.screen.modes().mouse, MouseTracking::Click);
+        assert!(it.screen.modes().mouse_sgr);
+        it.feed(b"\x1b[?1002h");
+        assert_eq!(it.screen.modes().mouse, MouseTracking::Drag);
+        it.feed(b"\x1b[?1006;1000l\x1b[?1002l");
+        assert_eq!(it.screen.modes().mouse, MouseTracking::Off);
+        assert!(!it.screen.modes().mouse_sgr);
+        assert!(it.screen.unhandled().is_empty());
+    }
+
+    #[test]
+    fn a_press_goes_in_the_form_that_was_asked_for() {
+        let mut modes = Modes {
+            mouse: MouseTracking::Click,
+            mouse_sgr: true,
+            ..Modes::default()
+        };
+        let none = Modifiers::none();
+        let send = |action, button, modes| encode_mouse(action, button, 5, 19, none, modes);
+        assert_eq!(
+            send(MouseAction::Press, MouseButton::Left, modes),
+            Some(b"\x1b[<0;20;6M".to_vec())
+        );
+        assert_eq!(
+            send(MouseAction::Release, MouseButton::Left, modes),
+            Some(b"\x1b[<0;20;6m".to_vec())
+        );
+        assert_eq!(
+            send(MouseAction::Press, MouseButton::Right, modes),
+            Some(b"\x1b[<2;20;6M".to_vec())
+        );
+        assert_eq!(
+            send(MouseAction::Press, MouseButton::WheelDown, modes),
+            Some(b"\x1b[<65;20;6M".to_vec())
+        );
+        // A wheel has no release, and 1000 does not report movement.
+        assert_eq!(
+            send(MouseAction::Release, MouseButton::WheelUp, modes),
+            None
+        );
+        assert_eq!(send(MouseAction::Move, MouseButton::Left, modes), None);
+
+        modes.mouse = MouseTracking::Drag;
+        assert_eq!(
+            send(MouseAction::Move, MouseButton::Left, modes),
+            Some(b"\x1b[<32;20;6M".to_vec())
+        );
+        assert_eq!(send(MouseAction::Move, MouseButton::None, modes), None);
+        modes.mouse = MouseTracking::Motion;
+        assert_eq!(
+            send(MouseAction::Move, MouseButton::None, modes),
+            Some(b"\x1b[<35;20;6M".to_vec())
+        );
+
+        modes.mouse = MouseTracking::Off;
+        assert_eq!(send(MouseAction::Press, MouseButton::Left, modes), None);
+    }
+
+    #[test]
+    fn modifiers_are_carried_in_the_button_code() {
+        let modes = Modes {
+            mouse: MouseTracking::Click,
+            mouse_sgr: true,
+            ..Modes::default()
+        };
+        let held = Modifiers {
+            shift: false,
+            alt: true,
+            control: true,
+        };
+        assert_eq!(
+            encode_mouse(MouseAction::Press, MouseButton::Left, 0, 0, held, modes),
+            Some(b"\x1b[<24;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn the_old_form_says_only_that_a_button_went_up_and_stops_at_its_edge() {
+        let modes = Modes {
+            mouse: MouseTracking::Click,
+            ..Modes::default()
+        };
+        let none = Modifiers::none();
+        assert_eq!(
+            encode_mouse(MouseAction::Press, MouseButton::Middle, 2, 9, none, modes),
+            Some(vec![0x1b, b'[', b'M', 32 + 1, 32 + 10, 32 + 3])
+        );
+        assert_eq!(
+            encode_mouse(MouseAction::Release, MouseButton::Middle, 2, 9, none, modes),
+            Some(vec![0x1b, b'[', b'M', 32 + 3, 32 + 10, 32 + 3])
+        );
+        assert_eq!(
+            encode_mouse(MouseAction::Press, MouseButton::Left, 2, 230, none, modes),
+            None
+        );
+    }
+
+    #[test]
+    fn focus_is_told_only_when_asked_for() {
+        let mut modes = Modes::default();
+        assert!(encode_focus(true, modes).is_empty());
+        modes.focus_events = true;
+        assert_eq!(encode_focus(true, modes), b"\x1b[I");
+        assert_eq!(encode_focus(false, modes), b"\x1b[O");
+    }
+
+    /// PowerShellで`Shift+Enter`が継続行（`>>`）になることを実測で確認した形。
+    #[test]
+    fn a_modified_return_goes_as_a_windows_key_event_when_conpty_asks() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let mut modes = Modes::default();
+        assert_eq!(encode_key(Key::Enter, shift, modes), b"\r");
+        modes.win32_input = true;
+        assert_eq!(
+            encode_key(Key::Enter, shift, modes),
+            b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_"
+        );
+        assert_eq!(
+            encode_key(Key::Char(' '), Modifiers::control(), modes),
+            b"\x1b[32;57;32;1;8;1_\x1b[32;57;32;0;8;1_"
+        );
+        // Everything VT can say still goes as VT.
+        assert_eq!(encode_key(Key::Enter, Modifiers::none(), modes), b"\r");
+        assert_eq!(
+            encode_key(Key::Char('c'), Modifiers::control(), modes),
+            [0x03]
+        );
+    }
+
+    #[test]
+    fn the_older_alternate_screens_and_the_cursor_save_are_understood() {
+        let mut it = Terminal::new(20, 4);
+        it.feed(b"shell\x1b[?1047h");
+        assert!(it.screen.modes().alternate_screen);
+        assert_eq!(it.screen.row_text(0).trim(), "");
+        it.feed(b"\x1b[?1047l");
+        assert_eq!(it.screen.row_text(0).trim(), "shell");
+        it.feed(b"\x1b[3;4H\x1b[?1048h\x1b[H\x1b[?1048l");
+        assert_eq!((it.screen.cursor().row, it.screen.cursor().column), (2, 3));
+        assert!(it.screen.unhandled().is_empty());
+    }
+
+    /// vimが送る`ESC[0%m`は色の指定ではない。
+    #[test]
+    fn a_sequence_with_an_intermediate_is_not_a_colour() {
+        let mut it = Terminal::new(20, 2);
+        it.feed(b"\x1b[1m\x1b[0%mA");
+        assert!(it.screen.line(0).unwrap().cells[0].attrs.bold);
+    }
+
+    /// アプリの`wcwidth`と同じ数え方（実測でbashが1字ずつ並べた並び）。
+    #[test]
+    fn emoji_are_as_wide_as_the_programs_count_them() {
+        for (text, width) in [
+            ('🚀', 2),
+            ('🫠', 2),
+            ('✅', 2),
+            ('あ', 2),
+            ('Ａ', 2),
+            ('❤', 1),
+            ('\u{FE0F}', 0),
+            ('\u{200D}', 0),
+            ('○', 1),
+            ('※', 1),
+            ('a', 1),
+        ] {
+            assert_eq!(character_width(text), width, "{text:?}");
+        }
     }
 }

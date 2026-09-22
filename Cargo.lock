@@ -1143,6 +1143,7 @@ dependencies = [
  "slint",
  "slint-build",
  "unicode-segmentation",
+ "unicode-width",
  "windows",
  "windows-core",
  "windows-numerics",

@@ -696,6 +696,9 @@ export component AppWindow inherits Window {
     callback pane-terminal-key(int, string, int, bool, bool, bool);
     /// The wheel over a shell (追加要件 Terminal).
     callback pane-terminal-scrolled(int, float);
+    // 全画面TUIの互換性（2026-09-22）: ペイン、上段0／下段1、以降は`EditorPane`と同じ。
+    callback terminal-mouse(int, int, int, int, float, float, float, bool, bool, bool) -> bool;
+    callback terminal-focus(int, int, bool);
     /// The strip along the foot of a pane (追加要件 Terminal).
     callback terminal-url(int, int, float, float);
     callback terminal-action(int, int, int);
@@ -2656,6 +2659,10 @@ export component AppWindow inherits Window {
                         terminal-scrolled(delta) => {
                             root.pane-terminal-scrolled(pane.id, delta);
                         }
+                        terminal-mouse(spot, kind, button, x, y, delta, shift, ctrl, alt) => {
+                            return root.terminal-mouse(pane.id, spot, kind, button, x, y, delta, shift, ctrl, alt);
+                        }
+                        terminal-focus(spot, focused) => { root.terminal-focus(pane.id, spot, focused); }
                         below-kind: pane.below-kind;
                         below-height: pane.below-height;
                         below-tiles: pane.below-tiles;

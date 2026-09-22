@@ -142,6 +142,14 @@ export component EditorSurface inherits Rectangle {
     callback text-input(string, bool);
     callback terminal-key(string, int, bool, bool, bool);
     callback terminal-scrolled(float);
+    // 全画面TUIの互換性（2026-09-22）: ポインタの出来事をシェルへ。種類は0押す・
+    // 1離す・2動く・3ホイール、ボタンは0左・1中・2右・3なし。**プログラムが
+    // 受け取ったら`true`**で、そのときは選択もメニューも始めない。
+    callback terminal-mouse(int, int, float, float, float, bool, bool, bool) -> bool;
+    callback terminal-focus(bool);
+    // The button the program was last told went down, 3 for none, so that a
+    // drag reports which button it is dragging.
+    property <int> terminal-button: 3;
     in property <[bool]> bullet-marks;
     private property <bool> bullet-rows-open;
     callback tab-pressed(bool);
@@ -621,6 +629,9 @@ export component EditorSurface inherits Rectangle {
                                 root.focus-trace(self.has-focus ? "gained" : "lost");
                                 if self.has-focus {
                                     root.focus-taken();
+                                }
+                                if root.terminal {
+                                    root.terminal-focus(self.has-focus);
                                 }
                             }
                             // Slint drops keyboard focus before dispatching a key
@@ -1139,6 +1150,15 @@ export component EditorSurface inherits Rectangle {
                                 // everything the pane holds, and the rest has
                                 // already gone by.
                                 if (root.terminal) {
+                                    // A program that asked for the pointer, or
+                                    // one on the alternate screen, takes the
+                                    // wheel. **Shift keeps it for the history.**
+                                    if (!event.modifiers.shift && root.terminal-mouse(
+                                        3, 3, self.mouse-x / 1px, self.mouse-y / 1px,
+                                        event.delta-y != 0px ? event.delta-y / 1px : event.delta-x / 1px,
+                                        false, event.modifiers.control, event.modifiers.alt)) {
+                                        return accept;
+                                    }
                                     root.terminal-scrolled(
                                         event.delta-y != 0px
                                             ? event.delta-y / 1px
@@ -1166,6 +1186,27 @@ export component EditorSurface inherits Rectangle {
                                         root.navigate-requested(event.button == PointerEventButton.forward);
                                     }
                                     return;
+                                }
+                                // 全画面TUIの互換性（2026-09-22）: **マウスを求めたプログラム
+                                // には、押す・離すを渡す。**Shiftを押していれば今まで
+                                // どおり選択とメニュー、Ctrl+クリックはURLのまま。
+                                if root.terminal && !event.modifiers.shift
+                                    && (event.kind == PointerEventKind.down || event.kind == PointerEventKind.up)
+                                    && !(event.modifiers.control && event.button == PointerEventButton.left) {
+                                    let button = event.button == PointerEventButton.left ? 0
+                                        : event.button == PointerEventButton.middle ? 1
+                                        : event.button == PointerEventButton.right ? 2 : 3;
+                                    if button != 3 && root.terminal-mouse(
+                                        event.kind == PointerEventKind.down ? 0 : 1, button,
+                                        self.mouse-x / 1px, self.mouse-y / 1px, 0,
+                                        false, event.modifiers.control, event.modifiers.alt) {
+                                        root.terminal-button = event.kind == PointerEventKind.down ? button : 3;
+                                        root.dragging = false;
+                                        if event.kind == PointerEventKind.up {
+                                            ime-input.focus();
+                                        }
+                                        return;
+                                    }
                                 }
                                 // 追加要件 2026-09-06: **the right button opens
                                 // the pane's own menu where the pointer is.**
@@ -1210,6 +1251,13 @@ export component EditorSurface inherits Rectangle {
                             // Every mouse move over the pane then moved the caret,
                             // which looked like the two panes being wired together.
                             moved => {
+                                if root.terminal && root.terminal-button != 3 && self.pressed {
+                                    if root.terminal-mouse(2, root.terminal-button,
+                                        self.mouse-x / 1px, self.mouse-y / 1px, 0,
+                                        false, false, false) {
+                                        return;
+                                    }
+                                }
                                 if root.dragging && self.pressed {
                                     root.selection-update(self.mouse-x / 1px, self.mouse-y / 1px);
                                 }
@@ -1221,6 +1269,12 @@ export component EditorSurface inherits Rectangle {
                             function probe-link() {
                                 root.pointer-at-x = self.mouse-x / 1px;
                                 root.pointer-at-y = self.mouse-y / 1px;
+                                // Movement with nothing held, for a program
+                                // that asked for every movement (1003).
+                                if root.terminal && self.has-hover && !self.pressed {
+                                    root.terminal-mouse(2, 3, self.mouse-x / 1px, self.mouse-y / 1px, 0,
+                                        false, false, false);
+                                }
                                 root.over-link = self.has-hover && !self.pressed && !root.terminal
                                     && root.link-hover(root.pointer-at-x, root.pointer-at-y);
                             }
