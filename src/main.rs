@@ -87,6 +87,7 @@ mod terminal_shells;
 mod terminal_ui_tests;
 mod terminal_workflow;
 mod text_blocks;
+mod timestamp;
 mod tree_watch;
 #[cfg(test)]
 mod typography_ui_tests;
@@ -11655,6 +11656,11 @@ enum Question {
         entry: Rc<RefCell<terminal_panels::PanelDocument>>,
         save: bool,
     },
+    /// Capture a Terminal into a new Panel TAB, with or without timestamps.
+    PanelLogStamp {
+        pane: PaneId,
+        source: Rc<RefCell<TerminalSession>>,
+    },
     CloneWorkspaceUrl,
     ChangeWorkspace(Option<workspace::WorkspaceId>),
     DiscardForWorkspace(Option<workspace::WorkspaceId>),
@@ -11780,6 +11786,7 @@ impl Question {
             Self::TerminalInput(..) => "TerminalInput",
             Self::TerminalSwitch { .. } => "TerminalSwitch",
             Self::PanelSwitch { .. } => "PanelSwitch",
+            Self::PanelLogStamp { .. } => "PanelLogStamp",
             Self::TerminalClose(..) => "TerminalClose",
             Self::ChangeWorkspace(..) => "ChangeWorkspace",
             Self::DiscardForWorkspace(..) => "DiscardForWorkspace",
@@ -12000,6 +12007,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     match (question, choice) {
         (Question::PanelSwitch { pane, entry, shell }, 0) => {
             terminal_panels::switch_confirmed(window, live, pane, &entry, shell)
+        }
+        (Question::PanelLogStamp { pane, source }, choice @ 0..=1) => {
+            terminal_panels::start_panel(window, live, pane, source, choice == 0)
         }
         (Question::TerminalSwitch { identity, shell }, 0) => {
             let found = live
@@ -15182,6 +15192,14 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         "terminal.history_limit".into(),
         window.get_terminal_history_limit().to_string(),
     ));
+    values.push((
+        "terminal.timestamp_format".into(),
+        window.get_terminal_timestamp_format().to_string(),
+    ));
+    values.push((
+        "terminal.log_stamp_file".into(),
+        window.get_terminal_log_stamp_file().to_string(),
+    ));
     let palette = window.get_palette();
     let fonts = window.get_sheet_fonts();
     for sheet in 0..2 {
@@ -15426,6 +15444,14 @@ fn apply_settings(
         }
         if written == "terminal.confirm_close" {
             window.set_terminal_confirm_close(value != "false");
+            continue;
+        }
+        if written == "terminal.timestamp_format" {
+            window.set_terminal_timestamp_format(value.into());
+            continue;
+        }
+        if written == "terminal.log_stamp_file" {
+            window.set_terminal_log_stamp_file(value == "true");
             continue;
         }
         if written == "terminal.history_limit" {

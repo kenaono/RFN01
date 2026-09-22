@@ -863,6 +863,13 @@ export component AppWindow inherits Window {
     changed terminal-confirm-paste => { root.terminal-settings-edited(); }
     changed terminal-confirm-close => { root.terminal-settings-edited(); }
     changed terminal-history-limit => { root.terminal-settings-edited(); }
+    /// What each log line starts with when a log is started with timestamps.
+    in-out property <string> terminal-timestamp-format: "[yyyy-MM-dd HH:mm:ss] ";
+    changed terminal-timestamp-format => { root.terminal-settings-edited(); }
+    /// The format applied to the current time, shown beside the field.
+    pure callback terminal-timestamp-sample(string) -> string;
+    /// The timestamp checkbox of the log's save dialog, as it was last left.
+    in-out property <bool> terminal-log-stamp-file: false;
     in-out property <string> terminal-font: "Consolas";
     in-out property <int> terminal-size: 15;
     callback terminal-font-picked();
@@ -3445,6 +3452,18 @@ export component AppWindow inherits Window {
                                                     focus-lost => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
                                                 }
                                                 Rectangle { horizontal-stretch: 1; }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 12px;
+                                                Text { text: @tr("Timestamp format"); color: Tok.ink; vertical-alignment: center; }
+                                                Field { width: 220px; horizontal-stretch: 0; placeholder: "[yyyy-MM-dd HH:mm:ss] "; text <=> root.terminal-timestamp-format; }
+                                                Text { text: root.terminal-timestamp-sample(root.terminal-timestamp-format) + "…"; color: Tok.ink-faint; vertical-alignment: center; }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                            Text {
+                                                text: @tr("yyyy MM dd HH mm ss fff are replaced; everything else is written as it is.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
                                             }
                                             PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Terminal"; style: root.panel-defaults[0]; changed style => { root.panel-defaults[0] = self.style; root.terminal-settings-edited(); } defaults: true; }
                                             PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Editor Panel"; style: root.panel-defaults[1]; changed style => { root.panel-defaults[1] = self.style; root.terminal-settings-edited(); } defaults: true; underline-allowed: false; }

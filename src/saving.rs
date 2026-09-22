@@ -764,6 +764,7 @@ fn save_fields(held: file_io::TextForm) -> file_dialog::SaveFields<'static> {
         encoding: crate::save_form_id(held),
         newlines: &crate::NEWLINE_LABELS,
         newline: crate::newline_id(held.newline),
+        check: None,
     }
 }
 

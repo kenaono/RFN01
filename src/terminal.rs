@@ -253,6 +253,9 @@ struct CapturedOutput {
     completed: String,
     wrapped: String,
     initial: String,
+    /// Written in front of each line as it is completed, when the writer
+    /// started the log with timestamps.
+    stamp: Option<crate::timestamp::Stamp>,
 }
 
 impl Screen {
@@ -328,10 +331,11 @@ impl Screen {
         self.history_origin
     }
 
-    pub fn start_capture(&mut self) {
+    pub fn start_capture(&mut self, stamp: Option<crate::timestamp::Stamp>) {
         self.capture = Some(CapturedOutput {
             first_row: self.cursor.row,
             initial: self.row_text(self.cursor.row),
+            stamp,
             ..CapturedOutput::default()
         });
     }
@@ -358,10 +362,11 @@ impl Screen {
         self.capture = None;
     }
 
-    pub fn start_file_capture(&mut self) {
+    pub fn start_file_capture(&mut self, stamp: Option<crate::timestamp::Stamp>) {
         self.file_capture = Some(CapturedOutput {
             first_row: self.cursor.row,
             initial: self.row_text(self.cursor.row),
+            stamp,
             ..CapturedOutput::default()
         });
     }
@@ -667,6 +672,9 @@ impl Screen {
                     let written = std::mem::take(&mut capture.wrapped);
                     let fresh = written.strip_prefix(&capture.initial).unwrap_or(&written);
                     if !fresh.is_empty() || capture.initial.is_empty() {
+                        if let Some(stamp) = &capture.stamp {
+                            capture.completed.push_str(&stamp.text());
+                        }
                         capture.completed.push_str(fresh);
                         capture.completed.push('\n');
                         capture.repainting = false;
@@ -1971,7 +1979,7 @@ mod tests {
     fn capture_excludes_old_screen_redraw_and_keeps_real_blank_lines() {
         let mut term = Terminal::new(30, 6);
         term.feed(b"old prompt\r\n\r\ncurrent> ");
-        term.screen.start_capture();
+        term.screen.start_capture(None);
         term.feed(b"\x1b[1;1Hold prompt\x1b[3;9Hcommand\r\n\r\nresult\r\n");
         assert_eq!(
             term.screen.capture_update(),
@@ -1983,7 +1991,7 @@ mod tests {
     fn capture_ignores_resize_blank_repaint_but_keeps_output_blank_lines() {
         let mut term = Terminal::new(40, 8);
         term.feed(b"old\r\nprompt> ");
-        term.screen.start_capture();
+        term.screen.start_capture(None);
         term.screen.resize(40, 6);
         term.feed(b"\x1b[H\r\n\r\n\r\n\r\n\r\nfirst\r\n\r\nsecond\r\n");
         assert_eq!(
@@ -1991,7 +1999,7 @@ mod tests {
             Some(("first\n\nsecond\n".into(), "".into()))
         );
         let mut plain = Terminal::new(40, 8);
-        plain.screen.start_capture();
+        plain.screen.start_capture(None);
         plain.feed(b"\r\nfirst\r\n");
         assert_eq!(
             plain.screen.capture_update(),
@@ -2003,7 +2011,7 @@ mod tests {
     fn capture_continues_after_terminal_reset() {
         let mut term = Terminal::new(30, 6);
         term.feed(b"old\r\nprompt> ");
-        term.screen.start_capture();
+        term.screen.start_capture(None);
         term.feed(b"\x1bcnew\r\n");
         assert_eq!(
             term.screen.capture_update(),
@@ -2014,9 +2022,9 @@ mod tests {
     #[test]
     fn terminal_file_and_panel_capture_have_independent_start_and_stop() {
         let mut term = Terminal::new(80, 8);
-        term.screen.start_capture();
+        term.screen.start_capture(None);
         term.feed(b"panel only\r\n");
-        term.screen.start_file_capture();
+        term.screen.start_file_capture(None);
         term.feed(b"both\r\npending");
         assert_eq!(
             term.screen.file_capture_update(),
@@ -2032,7 +2040,7 @@ mod tests {
             term.screen.file_capture_update(),
             Some(("pending\nfile only\n".into(), "".into()))
         );
-        term.screen.start_capture();
+        term.screen.start_capture(None);
         term.feed(b"again\r\n");
         term.screen.stop_file_capture();
         term.feed(b"panel again\r\n");
@@ -2044,9 +2052,41 @@ mod tests {
     }
 
     #[test]
+    fn stamped_capture_starts_every_line_with_the_time_it_was_finished() {
+        fn clock() -> crate::timestamp::LocalTime {
+            crate::timestamp::LocalTime {
+                year: 2026,
+                month: 9,
+                day: 23,
+                hour: 14,
+                minute: 3,
+                second: 12,
+                millis: 0,
+            }
+        }
+        let stamp = || Some(crate::timestamp::Stamp::at("[yyyy-MM-dd HH:mm:ss] ", clock));
+        let mut term = Terminal::new(8, 6);
+        term.screen.start_file_capture(stamp());
+        term.screen.start_capture(None);
+        // A line the width wrapped is still one line, so it has one stamp;
+        // a blank line has one too.
+        term.feed(b"$ ls\r\n12345678ab\r\n\r\n$ ");
+        let t = "[2026-09-23 14:03:12] ";
+        assert_eq!(
+            term.screen.file_capture_update(),
+            Some((format!("{t}$ ls\n{t}12345678ab\n{t}\n"), "$".into()))
+        );
+        // The capture without timestamps is untouched beside it.
+        assert_eq!(
+            term.screen.capture_update(),
+            Some(("$ ls\n12345678ab\n\n".into(), "$".into()))
+        );
+    }
+
+    #[test]
     fn capture_finishes_line_when_conpty_positions_next_prompt() {
         let mut term = Terminal::new(80, 8);
-        term.screen.start_capture();
+        term.screen.start_capture(None);
         term.feed(b"one\r\nlast\x1b[4;1Hprompt");
         assert_eq!(
             term.screen.capture_update(),
@@ -2058,7 +2098,7 @@ mod tests {
     fn capture_handles_wrapping_partial_utf8_and_prompt_redraw() {
         let mut term = Terminal::new(8, 4);
         term.feed(b"old> ");
-        term.screen.start_capture();
+        term.screen.start_capture(None);
         term.feed(b"\r\x1b[2Knew> ab\r\x1b[2Knew> ac");
         assert_eq!(
             term.screen.capture_update(),

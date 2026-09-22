@@ -30,6 +30,7 @@ struct FileLog {
     path: PathBuf,
     writer: BufWriter<std::fs::File>,
     pending: String,
+    stamp: Option<Stamp>,
 }
 
 use crate::pty::Pty;
@@ -37,10 +38,19 @@ use crate::terminal::{
     Key, Modifiers, MouseAction, MouseButton, MouseTracking, Screen, Terminal, encode_focus,
     encode_key, encode_mouse, encode_paste,
 };
+use crate::timestamp::Stamp;
 
 /// How much is read at once. **A screenful of coloured text is a few KB**, and
 /// a program printing a large file will simply come back around the loop.
 const CHUNK: usize = 8192;
+
+impl std::fmt::Debug for TerminalSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalSession")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
 
 /// A running shell and the screen it is writing on.
 pub struct TerminalSession {
@@ -146,13 +156,14 @@ impl TerminalSession {
         self.log_error.take()
     }
 
-    pub fn start_file_log(&mut self, path: PathBuf, file: std::fs::File) {
+    pub fn start_file_log(&mut self, path: PathBuf, file: std::fs::File, stamp: Option<Stamp>) {
         self.drain();
-        self.terminal.screen.start_file_capture();
+        self.terminal.screen.start_file_capture(stamp.clone());
         self.file_log = Some(FileLog {
             path,
             writer: BufWriter::new(file),
             pending: String::new(),
+            stamp,
         });
     }
 
@@ -183,6 +194,11 @@ impl TerminalSession {
 
     fn finish_file_log(&mut self) {
         if let Some(mut log) = self.file_log.take() {
+            // The unfinished last line is finished by stopping, so it is
+            // stamped with the time the log stopped.
+            if let Some(stamp) = log.stamp.as_ref().filter(|_| !log.pending.is_empty()) {
+                log.pending.insert_str(0, &stamp.text());
+            }
             if let Err(error) = log
                 .writer
                 .write_all(log.pending.as_bytes())
@@ -194,8 +210,8 @@ impl TerminalSession {
         }
     }
 
-    pub fn start_capture(&mut self) {
-        self.terminal.screen.start_capture();
+    pub fn start_capture(&mut self, stamp: Option<Stamp>) {
+        self.terminal.screen.start_capture(stamp);
     }
     pub fn stop_capture(&mut self) {
         self.terminal.screen.stop_capture();
@@ -432,8 +448,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!("rfn-both-log-{}.txt", std::process::id()));
         let mut session = TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap();
         session.wait(Duration::from_millis(300));
-        session.start_capture();
-        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
+        session.start_capture(None);
+        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
         let collect = |session: &mut TerminalSession, marker: &str| {
             session.type_text(&format!("echo {marker}\r"));
             let mut panel = String::new();
@@ -455,7 +471,7 @@ mod tests {
         assert!(stopped.contains("RFN_BOTH"));
         collect(&mut session, "RFN_PANEL_CONTINUES");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), stopped);
-        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
+        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
         collect(&mut session, "RFN_RESTARTED");
         session.stop_capture();
         session.type_text("echo RFN_FILE_CONTINUES\r");
@@ -475,12 +491,62 @@ mod tests {
                 .unwrap()
                 .contains("RFN_FILE_CONTINUES")
         );
-        session.start_capture();
-        session.start_file_log(path.clone(), std::fs::File::open(&path).unwrap());
+        session.start_capture(None);
+        session.start_file_log(path.clone(), std::fs::File::open(&path).unwrap(), None);
         collect(&mut session, "RFN_PANEL_AFTER_FILE_FAILURE");
         assert!(session.file_log_path().is_none());
         assert!(session.take_log_error().is_some());
         session.stop_capture();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[ignore = "starts a real Windows shell; run explicitly"]
+    fn stamped_file_log_stamps_every_line_and_the_tail_it_stops_on() {
+        let path = std::env::temp_dir().join(format!("rfn-stamp-log-{}.txt", std::process::id()));
+        let mut session = TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap();
+        session.wait(Duration::from_millis(200));
+        let stamp = Stamp::new("#yyyy-MM-dd HH:mm:ss.fff# ");
+        session.start_file_log(
+            path.clone(),
+            std::fs::File::create(&path).unwrap(),
+            Some(stamp),
+        );
+        session.type_text("echo RFN_STAMP_A& echo RFN_STAMP_B\r");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            session.wait(Duration::from_millis(50));
+            if std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("\nRFN_STAMP_B")
+                || std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("# RFN_STAMP_B")
+            {
+                break;
+            }
+        }
+        session.stop_file_log();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = saved.lines().collect();
+        assert!(
+            lines.iter().any(|l| l.ends_with("# RFN_STAMP_A")),
+            "{saved:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.ends_with("# RFN_STAMP_B")),
+            "{saved:?}"
+        );
+        // `#2026-09-23 14:03:12.345# ` — 26 characters in front of every line,
+        // the prompt the log stopped on included.
+        assert!(
+            lines.iter().all(|l| l.len() >= 26
+                && l.starts_with('#')
+                && &l[24..26] == "# "
+                && l[1..24].bytes().filter(u8::is_ascii_digit).count() == 17),
+            "{saved:?}"
+        );
+        assert!(!saved.ends_with('\n'), "the prompt was the unfinished tail");
         std::fs::remove_file(path).unwrap();
     }
 
@@ -491,7 +557,7 @@ mod tests {
         let mut session = TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap();
         session.wait(Duration::from_millis(200));
         session.set_history_limit(0);
-        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
+        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
         session.type_text("echo RFN_FILE_LINE\r");
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
@@ -506,12 +572,13 @@ mod tests {
         session.stop_file_log();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("RFN_FILE_LINE"));
+        assert!(!saved.contains("[20"), "no timestamps were asked for");
         assert!(session.file_log_path().is_none());
         assert!(session.take_log_error().is_none());
         session.stop_file_log();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
         // A read-only handle exercises failure without changing permissions.
-        session.start_file_log(path.clone(), std::fs::File::open(&path).unwrap());
+        session.start_file_log(path.clone(), std::fs::File::open(&path).unwrap(), None);
         session.type_text("echo RFN_KEEP_ON_FAILURE\r");
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && session.file_log_path().is_some() {

@@ -168,6 +168,7 @@ pub fn wire_terminal_look(
             window.set_terminal_confirm_paste(true);
             window.set_terminal_confirm_close(true);
             window.set_terminal_history_limit(10_000);
+            window.set_terminal_timestamp_format(crate::timestamp::DEFAULT_FORMAT.into());
             window.set_panel_defaults(Default::default());
             cache.borrow_mut().log_diag("spec", "terminal reset");
             // 地と字をひとまとめで戻し、書き出しと描き直しもそこで済む。
