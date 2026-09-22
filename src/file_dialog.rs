@@ -455,6 +455,7 @@ const ENCODING_GROUP: u32 = 1000;
 const ENCODING_COMBO: u32 = 1001;
 const NEWLINE_GROUP: u32 = 1002;
 const NEWLINE_COMBO: u32 = 1003;
+const OPTION_CHECK: u32 = 1004;
 
 /// 名前を付けて保存の欄に出すもの（要件 E2）。
 ///
@@ -468,6 +469,8 @@ pub struct SaveFields<'a> {
     pub encoding: u32,
     pub newlines: &'a [&'a str],
     pub newline: u32,
+    /// One checkbox and whether it starts ticked (a Terminal log's timestamps).
+    pub check: Option<(&'a str, bool)>,
 }
 
 impl SaveFields<'_> {
@@ -481,6 +484,7 @@ impl SaveFields<'_> {
             encoding: 0,
             newlines: &[],
             newline: 0,
+            check: None,
         }
     }
 }
@@ -496,6 +500,8 @@ pub struct SaveChoice {
     pub encoding: u32,
     /// 選ばれた改行の番号。**同じ決めごと**：欄が無ければ、いまの形のまま。
     pub newline: u32,
+    /// The checkbox as it was left; **its starting state when it could not be shown**.
+    pub checked: bool,
 }
 
 /// Ask where to save, starting from the name the document already has.
@@ -557,6 +563,9 @@ pub fn save_document_as(
                 fields.newlines,
                 fields.newline,
             );
+            if let Some((label, checked)) = fields.check {
+                let _ = customize.AddCheckButton(OPTION_CHECK, &HSTRING::from(label), checked);
+            }
         }
         dialog.Show(owner).ok()?;
         let item = dialog.GetResult().ok()?;
@@ -574,6 +583,12 @@ pub fn save_document_as(
             path,
             encoding: taken(ENCODING_COMBO, fields.encoding),
             newline: taken(NEWLINE_COMBO, fields.newline),
+            checked: fields.check.is_some_and(|(_, checked)| {
+                customize
+                    .as_ref()
+                    .and_then(|customize| customize.GetCheckButtonState(OPTION_CHECK).ok())
+                    .map_or(checked, |state| state.as_bool())
+            }),
         })
     }
 }

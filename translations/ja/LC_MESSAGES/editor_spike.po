@@ -1161,6 +1161,12 @@ msgstr "シェルの終了を確認"
 msgid "History lines"
 msgstr "履歴の保持行数"
 
+msgid "Timestamp format"
+msgstr "タイムスタンプの書式"
+
+msgid "yyyy MM dd HH mm ss fff are replaced; everything else is written as it is."
+msgstr "yyyy MM dd HH mm ss fff を日時に置き換え、それ以外の文字はそのまま出力します。"
+
 msgid "Executable"
 msgstr "実行ファイル"
 

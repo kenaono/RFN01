@@ -128,6 +128,9 @@ enum Target {
 }
 
 pub(crate) fn install(window: &AppWindow, live: &Live) {
+    window.on_terminal_timestamp_sample(|format| {
+        crate::timestamp::format(&format, crate::timestamp::now()).into()
+    });
     let weak = window.as_weak();
     window.on_font_list_requested(move || {
         if let Some(window) = weak.upgrade() {

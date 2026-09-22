@@ -1,6 +1,7 @@
 //! RFN01-20: tab-owned lower panels and fixed log destinations.
 use super::*;
 use crate::buffer::ExternalChange;
+use crate::timestamp::Stamp;
 
 impl std::fmt::Debug for PanelDocument {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -21,6 +22,8 @@ pub(crate) struct PanelDocument {
     history_limit: usize,
     log_name: Option<String>,
     save_tail_on_close: bool,
+    /// The timestamps this capture was started with.
+    stamp: Option<Stamp>,
 }
 
 impl PanelDocument {
@@ -42,6 +45,7 @@ impl PanelDocument {
             history_limit: window.get_terminal_history_limit().max(0) as usize,
             log_name: None,
             save_tail_on_close: false,
+            stamp: None,
         }
     }
 
@@ -49,6 +53,12 @@ impl PanelDocument {
         self.collect();
         if let Some(session) = self.capture.take() {
             session.borrow_mut().stop_capture();
+            // Stopping finishes the unfinished last line, as it does for a file.
+            if let Some(stamp) = self.stamp.take().filter(|_| self.pending_tail > 0) {
+                let mut text = self.document.text.borrow_mut();
+                let at = text.len() - self.pending_tail.min(text.len());
+                text.insert_str(at, &stamp.text());
+            }
             self.view
                 .borrow_mut()
                 .set_read_only(self.before_read_only, true);
@@ -414,35 +424,26 @@ fn import(window: &AppWindow, live: &Live, id: PaneId, action: i32) {
         return;
     };
     if action == 7 {
-        // Keep the existing Panel destination; file output has an independent cursor.
-        if entries(live).iter().any(|p| {
-            p.borrow()
-                .capture
-                .as_ref()
-                .is_some_and(|s| Rc::ptr_eq(s, &source))
-        }) {
-            window.tell(
-                pick(
-                    "このTerminalは取り込み中です",
-                    "This terminal is already being captured",
-                )
-                .into(),
-            );
-            return;
+        if captured(live, &source) {
+            return tell_captured(window);
         }
-        action_new(window, live, id);
-        let Some(target) = current(live, id) else {
-            return;
-        };
-        source.borrow_mut().drain();
-        source.borrow_mut().start_capture();
-        let mut target = target.borrow_mut();
-        let before_read_only = target.view.borrow().viewer;
-        target.before_read_only = before_read_only;
-        target.view.borrow_mut().set_read_only(true, true);
-        target.capture = Some(source);
-        target.pending_tail = 0;
-        target.log_name = Some(log_name());
+        ask_question(
+            window,
+            live,
+            Question::PanelLogStamp { pane: id, source },
+            pick(
+                "取り込む各行の前にタイムスタンプを付けますか？\n\n書式は 設定 → Terminal で変えられます。",
+                "Put a timestamp in front of each captured line?\n\nThe format is in Settings → Terminal.",
+            )
+            .into(),
+            &[
+                pick("付ける", "Add Timestamps"),
+                pick("付けない", "No Timestamps"),
+                cancel(),
+            ],
+            -1,
+        );
+        return;
     } else {
         let text = if action == 8 {
             source.borrow().screen().retained_text()
@@ -501,6 +502,69 @@ pub(crate) fn log_name() -> String {
     )
 }
 
+fn captured(live: &Live, source: &Rc<RefCell<TerminalSession>>) -> bool {
+    // Keep the existing Panel destination; file output has an independent cursor.
+    entries(live).iter().any(|p| {
+        p.borrow()
+            .capture
+            .as_ref()
+            .is_some_and(|s| Rc::ptr_eq(s, source))
+    })
+}
+
+fn tell_captured(window: &AppWindow) {
+    window.tell(
+        pick(
+            "このTerminalは取り込み中です",
+            "This terminal is already being captured",
+        )
+        .into(),
+    );
+}
+
+/// The answer to the timestamp question: capture into a new Panel TAB.
+///
+/// **The terminal asked about is the one captured.** The answer comes a turn
+/// of the event loop later, so the tab is checked to still be showing it.
+pub(crate) fn start_panel(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    source: Rc<RefCell<TerminalSession>>,
+    stamped: bool,
+) {
+    let current_source = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .and_then(|t| t.terminal.clone());
+    if !current_source.is_some_and(|s| Rc::ptr_eq(&s, &source)) {
+        return;
+    }
+    if captured(live, &source) {
+        return tell_captured(window);
+    }
+    action_new(window, live, id);
+    let Some(target) = current(live, id) else {
+        return;
+    };
+    let stamp = stamped.then(|| Stamp::new(&window.get_terminal_timestamp_format()));
+    source.borrow_mut().drain();
+    source.borrow_mut().start_capture(stamp.clone());
+    {
+        let mut target = target.borrow_mut();
+        let before_read_only = target.view.borrow().viewer;
+        target.before_read_only = before_read_only;
+        target.view.borrow_mut().set_read_only(true, true);
+        target.capture = Some(source);
+        target.pending_tail = 0;
+        target.log_name = Some(log_name());
+        target.stamp = stamp;
+    }
+    show(window, live, id);
+}
+
 fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
     let source = live
         .tabs
@@ -524,10 +588,20 @@ fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
     let Some(chosen) = file_dialog::save_document_as(
         ime::window_handle(window),
         &log_name(),
-        file_dialog::SaveFields::none(),
+        file_dialog::SaveFields {
+            check: Some((
+                pick("タイムスタンプを付ける", "Add timestamps"),
+                window.get_terminal_log_stamp_file(),
+            )),
+            ..file_dialog::SaveFields::none()
+        },
     ) else {
         return;
     };
+    if chosen.checked != window.get_terminal_log_stamp_file() {
+        window.set_terminal_log_stamp_file(chosen.checked);
+        save_settings(window, &live.cache);
+    }
     if logging_to(live, &chosen.path)
         || document_at(live, &chosen.path).is_some()
         || entries(live)
@@ -565,7 +639,10 @@ fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
             return;
         }
     };
-    source.borrow_mut().start_file_log(chosen.path, file);
+    let stamp = chosen
+        .checked
+        .then(|| Stamp::new(&window.get_terminal_timestamp_format()));
+    source.borrow_mut().start_file_log(chosen.path, file, stamp);
 }
 
 pub(crate) fn stop_for_close(window: &AppWindow, live: &Live) -> bool {

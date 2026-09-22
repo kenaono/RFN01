@@ -191,7 +191,7 @@ fn terminal_new_tab_random_and_direct_file_capture() {
         app_data::TEST_DIRECTORY.with(|p| p.borrow().as_ref().unwrap().join("direct-log.txt"));
     source
         .borrow_mut()
-        .start_file_log(path.clone(), std::fs::File::create(&path).unwrap());
+        .start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
     terminal_panels::publish_source(&h.window, &h.live, id);
     assert!(id.screen(&h.window).terminal_file_logging);
     assert!(!id.screen(&h.window).terminal_capturing);
@@ -717,7 +717,29 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     terminal_panels::edited(&h.window, &h.live, id);
     terminal_panels::action(&h.window, &h.live, id, 0, 0);
     assert_eq!(id.screen(&h.window).below_draft.as_str(), "first draft");
+    // Starting a capture asks about timestamps first; cancelling starts nothing.
+    let panels = |h: &Harness| {
+        h.live
+            .tabs
+            .borrow()
+            .of(id)
+            .current()
+            .unwrap()
+            .below
+            .entries
+            .len()
+    };
+    let before = panels(&h);
     terminal_panels::action(&h.window, &h.live, id, 7, 0);
+    assert!(matches!(
+        *h.live.pending.borrow(),
+        Some(Question::PanelLogStamp { .. })
+    ));
+    answer_question(&h.window, &h.live, 2);
+    assert_eq!(panels(&h), before);
+    assert!(session.borrow_mut().capture_update().is_none());
+    terminal_panels::action(&h.window, &h.live, id, 7, 0);
+    answer_question(&h.window, &h.live, 1);
     let target = terminal_panels::current(&h.live, id).unwrap();
     assert!(target.borrow().view.borrow().viewer);
     switch_shell(
@@ -799,6 +821,68 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
     terminal_panels::action(&h.window, &h.live, id, 13, 0);
     assert!(!target.borrow().view.borrow().viewer);
     assert!(target.borrow().capture.is_none());
+    assert!(
+        !target.borrow().document.text.borrow().starts_with('['),
+        "a capture started without timestamps has none"
+    );
+
+    // With timestamps: every finished line starts with one, and stopping
+    // stamps the unfinished prompt as well.
+    h.window.set_terminal_history_limit(1000);
+    h.window
+        .set_terminal_timestamp_format("<yyyy-MM-dd HH:mm:ss> ".into());
+    terminal_panels::action(&h.window, &h.live, id, 7, 0);
+    answer_question(&h.window, &h.live, 0);
+    let stamped = terminal_panels::current(&h.live, id).unwrap();
+    assert!(!Rc::ptr_eq(&stamped, &target));
+    session.borrow_mut().type_text("echo RFN_STAMPED\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        session.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+        if stamped.borrow().document.text.borrow().contains("\n") {
+            let text = stamped.borrow().document.text.borrow().clone();
+            if text
+                .lines()
+                .any(|l| l.ends_with("RFN_STAMPED") && !l.contains("echo"))
+            {
+                break;
+            }
+        }
+    }
+    // Typed but not entered: the unfinished line the capture stops on.
+    session.borrow_mut().type_text("RFN_TAIL");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until
+        && !stamped
+            .borrow()
+            .document
+            .text
+            .borrow()
+            .ends_with("RFN_TAIL")
+    {
+        session.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+    }
+    stamped.borrow_mut().stop();
+    let text = stamped.borrow().document.text.borrow().clone();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.iter().any(|l| l.ends_with("RFN_STAMPED")), "{text:?}");
+    let shape = |line: &str| {
+        let b = line.as_bytes();
+        b.len() >= 22
+            && b[0] == b'<'
+            && b[20] == b'>'
+            && b[21] == b' '
+            && line[1..20].bytes().enumerate().all(|(i, c)| match i {
+                4 | 7 => c == b'-',
+                10 => c == b' ',
+                13 | 16 => c == b':',
+                _ => c.is_ascii_digit(),
+            })
+    };
+    assert!(lines.iter().all(|l| shape(l)), "{text:?}");
+    assert!(lines.last().unwrap().ends_with(">RFN_TAIL"), "{text:?}");
 }
 
 #[test]
