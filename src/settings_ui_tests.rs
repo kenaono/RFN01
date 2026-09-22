@@ -821,7 +821,7 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     window.invoke_colour_set(5, 0, yellow);
     window.invoke_colour_set(3, 0, blue);
     assert_eq!(chip().colour, yellow, "its own colour stays");
-    assert!(chip().dark == false);
+    assert!(!chip().dark);
     assert_eq!(paper(), channels(blue), "the tab colour is not the paper");
     window.invoke_colour_default(5, 0);
     assert_eq!(chip().colour, blue, "back to following the paper");
@@ -995,8 +995,12 @@ fn terminal_below_rows_reach_the_pane() {
     click(900.0, 382.0, PointerEventButton::Left);
     assert_eq!(calls.get(), 1, "the pane menu row");
     // 本文の右クリック → Terminal Panel
+    // **RFN01-47で挿入の行が増えた**ので、行は下へずれる（メニューは画面内へ
+    // 寄せるので、上端は0に張り付く）。
     click(160.0, 150.0, PointerEventButton::Right);
-    click(218.0, 578.0, PointerEventButton::Left);
+    // **この試験は挿入の行を組まない**（`menu_commands`の配線をしない）ので、
+    // メニューはアプリより少し短い——行の位置は実測で決めている。
+    click(218.0, 590.0, PointerEventButton::Left);
     assert_eq!(calls.get(), 2, "the body menu row");
     let folder_calls = Rc::new(std::cell::Cell::new(0));
     let seen = folder_calls.clone();

@@ -201,7 +201,6 @@ mod tests {
             ("terminal_session.rs", include_str!("terminal_session.rs")),
             ("text_blocks.rs", include_str!("text_blocks.rs")),
             ("tree_watch.rs", include_str!("tree_watch.rs")),
-            ("vertical_layout.rs", include_str!("vertical_layout.rs")),
             ("wallpaper.rs", include_str!("wallpaper.rs")),
             ("wiring.rs", include_str!("wiring.rs")),
             ("word_marks.rs", include_str!("word_marks.rs")),

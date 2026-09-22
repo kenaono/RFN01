@@ -24,6 +24,7 @@ fn events(window: Weak<AppWindow>) -> DocumentEvents {
 }
 
 impl SharedText {
+    #[cfg(test)]
     pub fn new(text: String, window: Weak<AppWindow>) -> Self {
         Self::with_events(text, events(window))
     }

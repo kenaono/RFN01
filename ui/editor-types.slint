@@ -81,6 +81,23 @@ export struct WordModeRow {
     name: string,
 }
 
+// 本文の右クリックメニューに出す、挿入の1行（RFN01-47）。
+//
+// **中身はRustが作る**——タイトルバーの挿入メニューと同じ言葉・同じ押せる条件を
+// 使うためで、Slintの側は並べるだけである。
+export struct InsertRow {
+    /// 表示名。
+    title: string,
+    /// 右へ開く行（組の行）か、押すと本文へ入る行か。
+    flyout: bool,
+    /// 属する組の番号。組の行は自分自身の番号、中身の行は親の番号。
+    group: int,
+    /// 押したときに本文へ入れる挿入の番号（組の行は-1）。
+    number: int,
+    enabled: bool,
+    checked: bool,
+}
+
 export struct PreviewSelectionRect {
     x: float,
     y: float,

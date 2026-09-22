@@ -543,7 +543,7 @@ mod validity_tests {
             invalid_destinations(
                 &input,
                 &[path("")],
-                &[stale.clone()],
+                std::slice::from_ref(&stale),
                 &[live],
                 &|_| Presence::File(stamp()),
                 &|| true
@@ -554,7 +554,7 @@ mod validity_tests {
             invalid_destinations(
                 &input,
                 &[path("")],
-                &[stale.clone()],
+                std::slice::from_ref(&stale),
                 &[],
                 &|_| Presence::File(stamp()),
                 &|| true
@@ -1190,28 +1190,6 @@ fn cache_dir_for(appdata_dir: &Path, workspace: WorkspaceId) -> PathBuf {
         .join(workspace.to_string())
 }
 
-/// `entries` with any path also named in `dirty` given that document's live
-/// outline instead of the indexer's own — for held documents with unsaved
-/// edits, so heading completion/resolution sees what is actually on screen.
-/// Purely in-memory: never touches `entries` itself, the indexer, or its
-/// cache. `dirty` is small (open documents), so a linear scan per entry is
-/// fine.
-pub fn overlay_dirty_headings(entries: &[Entry], dirty: &[(PathBuf, String)]) -> Vec<Entry> {
-    entries
-        .iter()
-        .map(
-            |entry| match dirty.iter().find(|(path, _)| *path == entry.canonical) {
-                Some((_, text)) => Entry {
-                    headings: document::outline(text),
-                    headings_complete: true,
-                    ..entry.clone()
-                },
-                None => entry.clone(),
-            },
-        )
-        .collect()
-}
-
 // --- Completion state machine -----------------------------------------------
 
 /// A caller-supplied stamp identifying which pane, document, and edit a
@@ -1294,8 +1272,8 @@ impl Completion {
     /// Detects a trigger at `caret` in `source` and, if one is found and has
     /// at least one candidate, opens (or refreshes) the popup for it —
     /// otherwise closes whatever was open. Returns whether a popup is open
-    /// after the call. `entries` should already be `dirty`-overlaid by
-    /// [`overlay_dirty_headings`] when the caller holds unsaved documents.
+    /// after the call. `entries` should already carry the live outline of every
+    /// open document with unsaved edits (the caller's `dirty_headings`).
     pub fn detect(
         &mut self,
         stamp: CompletionStamp,
@@ -1438,7 +1416,7 @@ pub enum ResolveError {
 /// exactly as `document::link_target_at` hands it back, still percent-encoded
 /// per [`link_completion::percent_encode_reserved`] and still carrying a
 /// literal `#` as this design's heading separator — against `entries` (an
-/// index snapshot, optionally [`overlay_dirty_headings`]-ed) and, for a
+/// index snapshot, optionally carrying unsaved documents' live outlines) and, for a
 /// same-document heading, `current_source`'s own live text. Decodes the file
 /// portion exactly once, so a filename that legitimately contains `#`
 /// (percent-encoded as `%23` per grammar) is never mistaken for a heading
@@ -1597,12 +1575,11 @@ pub fn resolve_indexed_file(
 
 /// An already-decoded file path (never re-decoded — the caller decodes
 /// exactly once) resolved against `source_file`'s folder, or used directly if
-/// absolute. Mirrors `document::link_path`'s own trimming, `<...>` verbatim
-/// wrapper, and external-URL/newline rejection, **without** its `#` guard —
-/// wrong here, since by this point `#` has already been deliberately split
-/// off as this design's own heading separator by [`resolve_link`], so a `#`
-/// surviving into `decoded` can only be a literal character of the filename
-/// itself (from a decoded `%23`), not a stray separator.
+/// absolute. Trims, strips a `<...>` verbatim wrapper, and rejects external
+/// URLs and newlines. **No `#` guard**: by this point `#` has already been
+/// split off as this design's own heading separator by [`resolve_link`], so a
+/// `#` surviving into `decoded` can only be a literal character of the
+/// filename itself (from a decoded `%23`), not a stray separator.
 fn resolve_explicit_path(decoded: &str, source_file: Option<&Path>) -> Option<PathBuf> {
     let target = decoded
         .trim()
@@ -2177,29 +2154,6 @@ mod tests {
         assert!(links.entries().is_empty());
     }
 
-    // --- overlay_dirty_headings ----------------------------------------
-
-    #[test]
-    fn overlay_replaces_only_the_named_paths_headings() {
-        let entries = vec![
-            entry("/根", "本文.md", vec![heading(1, "古い", 0)]),
-            entry("/根", "他.md", vec![heading(1, "変わらない", 0)]),
-        ];
-        let dirty = vec![(PathBuf::from("/根/本文.md"), "# 新しい\n本文".to_owned())];
-
-        let overlaid = overlay_dirty_headings(&entries, &dirty);
-        let changed = overlaid
-            .iter()
-            .find(|e| e.relative == Path::new("本文.md"))
-            .unwrap();
-        assert_eq!(changed.headings, vec![heading(1, "新しい", 0)]);
-        let unchanged = overlaid
-            .iter()
-            .find(|e| e.relative == Path::new("他.md"))
-            .unwrap();
-        assert_eq!(unchanged.headings, vec![heading(1, "変わらない", 0)]);
-    }
-
     // --- Completion state machine ---------------------------------------
 
     fn stamp(pane: u64, document: u64, source_generation: u64) -> CompletionStamp {
@@ -2439,7 +2393,7 @@ mod tests {
     fn a_same_file_heading_resolves_against_the_live_current_source() {
         let entries: Vec<Entry> = Vec::new();
         let current_source = "# 新しい見出し\n本文";
-        let encoded = link_completion::percent_encode_reserved("新しい見出し", &[b'#']);
+        let encoded = link_completion::percent_encode_reserved("新しい見出し", b"#");
         let target = format!("#{encoded}");
         let resolved =
             resolve_link(&target, true, None, current_source, &entries).expect("resolves");
@@ -2698,7 +2652,7 @@ mod tests {
         let found = link_completion::candidates(&entries, Some(source_file), "", &context, 10);
         let same_directory = found
             .iter()
-            .find(|c| c.path == PathBuf::from("/根/note.md"))
+            .find(|c| c.path == *"/根/note.md")
             .expect("has one");
 
         let full_line = format!("{typed}{}", same_directory.insert);

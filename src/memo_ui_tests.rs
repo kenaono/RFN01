@@ -128,7 +128,7 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
     let actions = Rc::new(RefCell::new(Vec::new()));
     let received = actions.clone();
     window.on_explorer_command(move |command| received.borrow_mut().push(command));
-    for x in [177.0, 205.0, 233.0] {
+    for x in [205.0, 232.0, 261.0] {
         click(x, 24.0, PointerEventButton::Left);
     }
     assert_eq!(
@@ -136,13 +136,13 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
         &[0, 1, 2],
         "Explorer toolbar dispatches each action"
     );
-    click(110.0, 48.0, PointerEventButton::Right);
+    click(110.0, 82.0, PointerEventButton::Right);
     draw();
     assert!(window.get_tree_refresh_blocked());
     let command = Rc::new(Cell::new(-1));
     let received = command.clone();
     window.on_tree_command(move |value| received.set(value));
-    click(100.0, 80.0, PointerEventButton::Left);
+    click(100.0, 114.0, PointerEventButton::Left);
     draw();
     assert_eq!(
         command.get(),
@@ -150,7 +150,7 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
         "menu is below the clicked row and dispatches New File"
     );
     assert!(!window.get_tree_refresh_blocked());
-    click(110.0, 48.0, PointerEventButton::Right);
+    click(110.0, 82.0, PointerEventButton::Right);
     draw();
     assert!(window.get_tree_refresh_blocked());
     click(900.0, 700.0, PointerEventButton::Left);

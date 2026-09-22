@@ -827,6 +827,7 @@ pub fn load_status(directory: &Path) -> LoadStatus {
 /// [`load_status`] narrowed to `Option`, for callers that only need "is there
 /// a usable registry" and already treat absent and invalid the same way —
 /// existing callers and tests predating [`LoadStatus`].
+#[cfg(test)]
 pub fn load(directory: &Path) -> Option<Registry> {
     match load_status(directory) {
         LoadStatus::Loaded(registry) => Some(registry),

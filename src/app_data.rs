@@ -1076,6 +1076,7 @@ pub fn work_file_name(copy: &WorkCopy) -> String {
 /// Header lines, a blank line, then the text taken verbatim. The blank line is
 /// the whole of the parsing rule, which is what lets a document contain lines
 /// that look exactly like the header without any escaping.
+#[cfg(test)]
 pub fn encode(copy: &WorkCopy) -> String {
     encode_with_protection(copy, false)
 }
@@ -1106,21 +1107,30 @@ pub fn encode_with_protection(copy: &WorkCopy, protected: bool) -> String {
 ///
 /// Refused rather than guessed at, for the same reason `file_io` refuses bytes
 /// that are not UTF-8: a half-understood work copy would be restored as damage.
+#[cfg(test)]
 pub fn decode(raw: &str) -> Option<WorkCopy> {
+    decode_record(raw).map(|(copy, _)| copy)
+}
+
+/// [`decode`] and whether the copy was written as protected
+/// ([`encode_with_protection`]) — **the header is read once**, here.
+fn decode_record(raw: &str) -> Option<(WorkCopy, bool)> {
     let mut lines = raw.split('\n');
     if lines.next()? != WORK_MAGIC {
         return None;
     }
     let mut copy = WorkCopy::default();
+    let mut protected = false;
     let mut consumed = WORK_MAGIC.len() + 1;
     for line in lines {
         consumed += line.len() + 1;
         if line.is_empty() {
             copy.text = raw.get(consumed..)?.to_owned();
-            return Some(copy);
+            return Some((copy, protected));
         }
         let (key, value) = line.split_once(": ")?;
         match key {
+            "protected" => protected = value == "1",
             "untitled" => copy.untitled = value.parse().ok()?,
             "origin" => copy.origin = Some(PathBuf::from(value)),
             "caret" => copy.caret = value.parse().ok(),
@@ -1136,6 +1146,7 @@ pub fn decode(raw: &str) -> Option<WorkCopy> {
 }
 
 /// Write one document's work copy, replacing any earlier one for it.
+#[cfg(test)]
 pub fn write_into(directory: &Path, copy: &WorkCopy) -> io::Result<PathBuf> {
     fs::create_dir_all(directory)?;
     let path = directory.join(work_file_name(copy));
@@ -1147,6 +1158,7 @@ pub fn write_into(directory: &Path, copy: &WorkCopy) -> io::Result<PathBuf> {
 ///
 /// Anything unreadable or unrecognised is skipped rather than reported: this
 /// runs at start-up, and one bad file must not stop the others being restored.
+#[cfg(test)]
 pub fn read_all_in(directory: &Path) -> Vec<WorkCopy> {
     read_records_in(directory)
         .into_iter()
@@ -1168,12 +1180,8 @@ pub fn read_records_in(directory: &Path) -> Vec<(WorkCopy, bool)> {
         let Ok(raw) = fs::read_to_string(&path) else {
             continue;
         };
-        if let Some(copy) = decode(&raw) {
-            let header = raw
-                .split_once("\n\n")
-                .map_or(raw.as_str(), |(header, _)| header);
-            let protected = header.lines().any(|line| line == "protected: 1");
-            copies.push((copy, protected));
+        if let Some(record) = decode_record(&raw) {
+            copies.push(record);
         }
     }
     copies
@@ -1590,6 +1598,17 @@ mod tests {
         let copy = untitled_copy("本文\n二行目\n");
         let read = decode(&encode(&copy)).expect("decodes");
         assert_eq!(read, copy);
+    }
+
+    /// 保護の印は見出しの1行で、**本文の中の同じ字は印ではない**。
+    #[test]
+    fn protection_is_read_from_the_header_only() {
+        let copy = untitled_copy("protected: 1\n");
+        let (read, protected) =
+            decode_record(&encode_with_protection(&copy, true)).expect("decodes");
+        assert_eq!((read, protected), (copy.clone(), true));
+        let (read, protected) = decode_record(&encode(&copy)).expect("decodes");
+        assert_eq!((read, protected), (copy, false));
     }
 
     /// The reason the header ends at a blank line rather than at a count.

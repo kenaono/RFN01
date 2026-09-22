@@ -2381,8 +2381,7 @@ impl BlockLayoutPlan {
                 .iter()
                 .enumerate()
                 .take(block_index)
-                .filter(|(_, block)| !block.lines.is_empty())
-                .next_back()?;
+                .rfind(|(_, block)| !block.lines.is_empty())?;
             Some((previous.0, previous.1.lines.len() - 1))
         }
     }

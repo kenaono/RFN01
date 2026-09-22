@@ -20,8 +20,8 @@ import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, Menu
 // computes covers both and this side does not have to know which is which.
 // 追加要件 2026-09-15（書き手）: Windowsの壁紙の、画面1台ぶん。**座標は画面の論理画素**
 // で、面が自分の画面上の位置を引いて置く。画面の矩形で切り、地の色の上に画像を置く。
-export { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
-import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
+export { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
+import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
 
 export component EditorPane inherits Rectangle {
     in property <int> menu-action;
@@ -37,6 +37,8 @@ export component EditorPane inherits Rectangle {
         }
     }
     in property <bool> embedded-panel: false;
+    /// 窓の高さ。面の右クリックのメニューが、これより高ければ中を流す（RFN01-47）。
+    in property <length> window-height;
     /// Which key this is, as a number `terminal.rs` knows (追加要件 Terminal).
     /// 0 is "an ordinary character", and then the text is what matters.
     pure function key-number(text: string) -> int {
@@ -416,6 +418,10 @@ export component EditorPane inherits Rectangle {
     /// 鍵が頼むときの言い方）。**もう一度頼めば外れる**（書き手の選択 2026-09-10）
     /// ——そろっているかどうかを見るのは、本文を持っているRustである。
     callback list-edit(int, int);
+    /// RFN01-47: 右クリックメニューの挿入の行。**中身はRustが作る**（挿入の番号）。
+    in property <[InsertRow]> insert-rows;
+    in property <[InsertRow]> insert-children;
+    callback insert-chosen(int);
     callback preedit-changed(string);
     callback backspace-pressed();
     callback delete-pressed();
@@ -1712,6 +1718,7 @@ export component EditorPane inherits Rectangle {
                 return false;
             }
             embedded-panel: root.embedded-panel;
+            window-height: root.window-height;
             key-number(a0) => { root.key-number(a0); }
             vertical: root.vertical;
             focused: root.focused;
@@ -1811,6 +1818,9 @@ export component EditorPane inherits Rectangle {
             terminal-key(a0, a1, a2, a3, a4) => { root.terminal-key(a0, a1, a2, a3, a4); }
             terminal-scrolled(a0) => { root.terminal-scrolled(a0); }
             bullet-marks: root.bullet-marks;
+            insert-rows: root.insert-rows;
+            insert-children: root.insert-children;
+            insert-chosen(a0) => { root.insert-chosen(a0); }
             tab-pressed(a0) => { root.tab-pressed(a0); }
             enter-pressed(a0) => { root.enter-pressed(a0); }
             line-edit(a0) => { root.line-edit(a0); }

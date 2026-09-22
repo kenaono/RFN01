@@ -68,8 +68,8 @@ impl Fit {
             DWPOS_STRETCH => Fit::Stretch,
             DWPOS_FIT => Fit::Fit,
             DWPOS_SPAN => Fit::Span,
-            // 既定の「ページ幅に合わせる」。知らない値もこれに倒す。
-            DWPOS_FILL | _ => Fit::Fill,
+            // `DWPOS_FILL`（既定の「ページ幅に合わせる」）。知らない値もこれに倒す。
+            _ => Fit::Fill,
         }
     }
 }

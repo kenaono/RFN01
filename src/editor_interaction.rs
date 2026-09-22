@@ -34,7 +34,7 @@ pub(crate) fn move_caret(
                 Some(anchor) => Ok(anchor),
                 None => {
                     let geometry = engine.caret_geometry(at);
-                    geometry.map(|caret| if vertical { caret.y } else { caret.x })
+                    geometry.map(|caret| line_anchor(vertical, &caret))
                 }
             };
             anchor.and_then(|anchor| {
@@ -48,6 +48,16 @@ pub(crate) fn move_caret(
         }
         _ => Ok((caret, None)),
     }
+}
+
+/// The caret coordinate the up and down keys hold on to across a run of
+/// moves, so that passing a short line does not pull the caret in.
+///
+/// It lies across the flow — a y where the text runs down the page, an x
+/// where it runs across — which is why it means nothing in the other pane
+/// (`carry_caret_between_panes`).
+pub(crate) fn line_anchor(vertical: bool, at: &CaretGeometry) -> f32 {
+    if vertical { at.y } else { at.x }
 }
 
 pub(crate) fn select_range(
@@ -110,7 +120,7 @@ pub(crate) fn pointer(
     if let Some((first_start, first_end)) = chosen_word {
         if phase == SelectionPhase::Update {
             // **押したまま動かせば、語ごと伸びる。**押した語は必ず入る。
-            let (start, end) = document::word_around(&source, hit.letter);
+            let (start, end) = document::word_around(source, hit.letter);
             let (start, end) = (first_start.min(start), first_end.max(end));
             return PointerResult::Range(start, end);
         }
@@ -134,15 +144,15 @@ pub(crate) fn pointer(
             state.double_click(x, y)
         };
         if doubled && !hit.in_numbers {
-            let (start, end) = document::word_around(&source, hit.letter);
+            let (start, end) = document::word_around(source, hit.letter);
             state.borrow_mut().word_drag = Some((start, end));
 
             return PointerResult::Range(start, end);
         }
     }
     if let Some(anchor) = from_numbers {
-        let (first, _) = document::line_span(&source, anchor);
-        let (start, end) = document::line_span(&source, hit.byte);
+        let (first, _) = document::line_span(source, anchor);
+        let (start, end) = document::line_span(source, hit.byte);
         // 上へ引けば上の行まで、下へ引けば下の行まで。**始めた行は必ず入る。**
         let (start, end) = (first.min(start), first.max(end));
         {
@@ -154,7 +164,7 @@ pub(crate) fn pointer(
     }
     let hit = hit.byte;
 
-    let next_active_line_start = source_line_start(&source, hit);
+    let next_active_line_start = source_line_start(source, hit);
 
     let selection = {
         let mut state = state.borrow_mut();

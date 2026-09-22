@@ -128,7 +128,7 @@ pub(crate) fn layout(
     let matches = if needle.is_empty() {
         Vec::new()
     } else {
-        find::Search::new(&needle, rules)
+        find::Search::new(needle, rules)
             .map(|search| search.spans(source, MAX_SHOWN_MATCHES))
             .unwrap_or_default()
             .into_iter()
@@ -350,7 +350,7 @@ pub(crate) fn tiles(
                 CachedTile {
                     image,
                     pixels,
-                    last_flow: span.flow_start as i32,
+                    last_flow: span.flow_start,
                 },
             );
         }
@@ -362,7 +362,7 @@ pub(crate) fn tiles(
         .iter()
         .filter_map(|(span, signature)| {
             let cached = images.get_mut(signature)?;
-            cached.last_flow = span.flow_start as i32;
+            cached.last_flow = span.flow_start;
             Some(tile(vertical, shift, *span, cached.image.clone()))
         })
         .collect::<Vec<_>>();

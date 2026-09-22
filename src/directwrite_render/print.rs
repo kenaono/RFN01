@@ -11,7 +11,6 @@
 //!
 //! 画面からは`print_view`の印刷プレビューとプリンタ選択が呼び出す。
 //! `print_tests`では同じ処理でPDF出力とページ描画を検証する。
-#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -155,11 +154,14 @@ pub enum Destination<'a> {
     /// 「Microsoft Print to PDF」にこのファイルを書かせる。
     ///
     /// **PDF専用の道ではない**——同じプリンタに、訊かずに書く先を教えているだけで
-    /// ある（出力先を渡さなければ、プリンタ自身が保存先を訊く）。
+    /// ある（出力先を渡さなければ、プリンタ自身が保存先を訊く）。**画面の入口は
+    /// プリンタを選ぶ形なので、使うのは試験だけ**（`print_tests`）。
+    #[cfg(test)]
     PdfFile(&'a Path),
 }
 
 /// Windowsに入っているPDFのプリンタ。**Windowsの機能なので、切ってあれば無い。**
+#[cfg(test)]
 pub const PDF_PRINTER: &str = "Microsoft Print to PDF";
 
 /// 組み終わった文書を紙に切り、Windowsの印刷へ流す。刷った枚数を返す。
@@ -179,6 +181,7 @@ pub fn print(
     }
     let (printer, file, ticket) = match to {
         Destination::Printer(printer) => (printer.name.clone(), None, printer.ticket()),
+        #[cfg(test)]
         Destination::PdfFile(path) => (PDF_PRINTER.to_owned(), Some(path), None),
     };
     with_graphics(|graphics| {
@@ -770,7 +773,7 @@ fn package_target(
                 let path = HSTRING::from(path.as_os_str());
                 Some(SHCreateStreamOnFileEx(
                     PCWSTR(path.as_ptr()),
-                    (STGM_CREATE.0 | STGM_READWRITE.0) as u32,
+                    STGM_CREATE.0 | STGM_READWRITE.0,
                     0,
                     true,
                     None,
@@ -1337,7 +1340,7 @@ pub fn ask_paper(owner: HWND, printer: &Printer) -> Option<Printer> {
                 PCWSTR(name.as_ptr()),
                 Some(settings.as_mut_ptr() as *mut DEVMODEW),
                 Some(printer.devmode()),
-                (DM_IN_BUFFER.0 | DM_IN_PROMPT.0 | DM_OUT_BUFFER.0) as u32,
+                DM_IN_BUFFER.0 | DM_IN_PROMPT.0 | DM_OUT_BUFFER.0,
             );
             // IDOK。取り消しはIDCANCEL（2）で、そのときは何も変えない。
             (taken == 1).then(|| Printer {
