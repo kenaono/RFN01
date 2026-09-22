@@ -590,7 +590,7 @@ fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
         &log_name(),
         file_dialog::SaveFields {
             check: Some((
-                pick("タイムスタンプを付ける", "Add timestamps"),
+                pick("タイムスタンプ", "Timestamps"),
                 window.get_terminal_log_stamp_file(),
             )),
             ..file_dialog::SaveFields::none()
