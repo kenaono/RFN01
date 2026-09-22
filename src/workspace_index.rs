@@ -10,7 +10,7 @@
 //! [`Indexer`] owns exactly one persistent worker thread for its whole life,
 //! fed by a command queue. This is what actually solves the cancel/reset-vs-
 //! cache-write race the first draft had: because the worker processes one
-//! [`Command`] at a time, a [`Command::Clear`] enqueued after a
+//! [`Command`] at a time, a [`Command::ClearDir`] enqueued after a
 //! [`Command::Scan`] cannot run — and so cannot delete or be raced by
 //! anything — until that scan's own call to [`run_scan`] has already
 //! returned. No two writers are ever touching a cache file at once, by
@@ -224,10 +224,6 @@ impl Snapshot {
         Self::default()
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -285,8 +281,9 @@ impl Snapshot {
 }
 
 /// Sent to the persistent worker; processed strictly one at a time, in the
-/// order [`Indexer`] sent them — the whole basis for [`Indexer::clear`] never
-/// racing a [`Command::Scan`]'s cache write.
+/// order [`Indexer`] sent them — the whole basis for
+/// [`Indexer::clear_workspace_cache`] never racing a [`Command::Scan`]'s cache
+/// write.
 enum Command {
     PruneShared {
         cache_dir: PathBuf,
@@ -301,16 +298,11 @@ enum Command {
         cache_dir: Option<PathBuf>,
         options: ScanOptions,
     },
-    Clear {
-        /// Only for tagging an `EventKind::Error` if deletion fails — never
-        /// gates whether the clear itself runs; see [`run_worker`].
-        generation: u64,
-        cache_dir: PathBuf,
-        roots: Vec<PathBuf>,
-    },
-    /// Like `Clear`, but for every cache file this build's own naming
-    /// produces under `cache_dir` regardless of which roots are currently
-    /// registered — see [`Indexer::clear_workspace_cache`].
+    /// Every cache file this build's own naming produces under `cache_dir`,
+    /// regardless of which roots are currently registered — see
+    /// [`Indexer::clear_workspace_cache`]. `generation` only tags an
+    /// `EventKind::Error` if deletion fails; it never gates whether the clear
+    /// itself runs (see [`run_worker`]).
     ClearDir { generation: u64, cache_dir: PathBuf },
 }
 
@@ -321,7 +313,7 @@ pub struct Indexer {
     metrics: Arc<std::sync::Mutex<std::collections::VecDeque<ScanMetrics>>>,
     commands: mpsc::Sender<Command>,
     events: mpsc::Receiver<Event>,
-    /// Kept alongside `events`'s own receiver so `restart`/`clear` can report
+    /// Kept alongside `events`'s own receiver so `restart`/`clear_workspace_cache` can report
     /// "the worker is gone" as an [`EventKind::Error`] instead of an
     /// [`Indexer`] that silently stops doing anything.
     events_tx: mpsc::SyncSender<Event>,
@@ -443,25 +435,6 @@ impl Indexer {
         self.next_generation += 1;
     }
 
-    /// Removes the cache files for `roots` and supersedes any in-flight scan
-    /// first — safe to call whether or not one is running: the queue's own
-    /// ordering, not the generation bump, is what guarantees this cannot
-    /// race a scan's write (see the module doc). `roots` should be the same
-    /// canonical paths a cache was written under (仕様の実装依頼: do not
-    /// require a live `canonicalize` to find them — see [`clear_cache`]).
-    pub fn clear(&mut self, cache_dir: PathBuf, roots: Vec<PathBuf>) -> u64 {
-        let generation = self.next_generation;
-        self.next_generation += 1;
-        self.generation.store(generation, Ordering::SeqCst);
-        let sent = self.commands.send(Command::Clear {
-            generation,
-            cache_dir,
-            roots,
-        });
-        self.report_if_disconnected(sent, generation);
-        generation
-    }
-
     /// Removes every per-root cache file this build's own naming produces
     /// (`index-<16hex>.rfnwsidx`, see [`cache_file_for`]) directly under
     /// `cache_dir`, then the directory itself if that leaves it empty —
@@ -469,8 +442,7 @@ impl Indexer {
     /// detached or relocated from a Workspace since its cache was written is
     /// not left behind (a caller does not have to track historical roots).
     ///
-    /// **Unlike [`Indexer::clear`], this never supersedes an in-flight
-    /// scan** — it does not touch the shared generation at all, only takes
+    /// **This never supersedes an in-flight scan** — it does not touch the shared generation at all, only takes
     /// its own turn on the same worker queue, after anything already queued
     /// ahead of it (see the module doc), so it cannot race a scan's own
     /// cache write either. This is what makes it safe to call for a
@@ -481,10 +453,6 @@ impl Indexer {
             cache_dir,
         });
         self.report_if_disconnected(sent, MAINTENANCE_GENERATION);
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
     }
 
     /// Up to [`EVENT_CHANNEL_CAPACITY`] events waiting right now, without
@@ -505,13 +473,9 @@ impl Indexer {
         events
     }
 
-    /// The next event, blocking until it arrives — for tests.
-    pub fn recv(&self) -> Option<Event> {
-        self.events.recv().ok()
-    }
-
     /// The next event, waiting at most `timeout` — for tests that must not
     /// hang if a fix regresses.
+    #[cfg(test)]
     pub fn recv_timeout(&self, timeout: Duration) -> Option<Event> {
         self.events.recv_timeout(timeout).ok()
     }
@@ -632,40 +596,17 @@ fn run_worker(
                 }
                 log.push_back(measured);
             }
-            Command::Clear {
+            Command::ClearDir {
                 generation: my_generation,
                 cache_dir,
-                roots,
             } => {
                 // Always runs, whatever `generation` now holds — the queue's
                 // own ordering is what protects this, not a generation check
                 // (see the module doc); skipping it here would be exactly
                 // the "clear gets silently dropped" bug this exists to avoid.
-                for root in &roots {
-                    if let Err(error) = fs::remove_file(cache_file_for(&cache_dir, root)) {
-                        if error.kind() != io::ErrorKind::NotFound {
-                            // `try_send`, never a blocking `send`: a full,
-                            // undrained queue must not stall the clear loop
-                            // (or the worker's next command) waiting on room
-                            // for an error nobody may ever read.
-                            let _ = events.try_send(Event {
-                                generation: my_generation,
-                                kind: EventKind::Error(format!(
-                                    "failed to clear the index cache for {}: {error}",
-                                    root.display()
-                                )),
-                            });
-                        }
-                    }
-                }
-            }
-            Command::ClearDir {
-                generation: my_generation,
-                cache_dir,
-            } => {
-                // Always runs, the same as `Command::Clear` and for the same
-                // reason (see the module doc) — this never checks `generation`
-                // either.
+                // `try_send`, never a blocking `send`: a full, undrained queue
+                // must not stall the worker's next command waiting on room for
+                // an error nobody may ever read.
                 if let Err(error) = clear_workspace_cache_dir(&cache_dir) {
                     let _ = events.try_send(Event {
                         generation: my_generation,
@@ -711,27 +652,6 @@ fn send_checked(
             Err(mpsc::TrySendError::Disconnected(_)) => return false,
         }
     }
-}
-
-/// Removes just the cache files for `roots` — never a directory, and never
-/// anything this build did not itself derive from `roots`.
-///
-/// Does **not** require `root.canonicalize()` to succeed: a folder that no
-/// longer exists cannot be canonicalized, yet its cache file — named from
-/// the canonical path recorded *when it was written* — may still be there.
-/// Callers should pass the same canonical form the cache was written under
-/// (仕様の実装依頼 #6), e.g. `workspace::FolderRegistration::path`, which is
-/// set once at registration and kept even after a folder disappears.
-pub fn clear_cache(cache_dir: &Path, roots: &[PathBuf]) -> io::Result<()> {
-    for root in roots {
-        let path = cache_file_for(cache_dir, root);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
 }
 
 /// Whether `name` is a filename [`cache_file_for`] itself could have
@@ -1911,28 +1831,30 @@ mod tests {
         );
     }
 
-    /// 仕様の実装依頼 #1: a `Clear` whose error report cannot fit in a full,
+    /// 仕様の実装依頼 #1: a clear whose error report cannot fit in a full,
     /// undrained event queue must not block the worker — the clear loop
     /// keeps going and, crucially, so does the next queued `Scan`.
     #[test]
     fn a_failed_clear_does_not_block_the_worker_even_with_a_full_event_queue() {
         let cache_dir = scratch_directory("clear-fullqueue-cache");
-        let bad_root = PathBuf::from("/bad/root/for/clear");
-        fs::create_dir_all(cache_file_for(&cache_dir, &bad_root))
+        // A directory where an own cache file is expected: `fs::remove_file`
+        // reliably fails against it, with an error other than `NotFound`.
+        fs::create_dir_all(cache_file_for(&cache_dir, Path::new("/bad/root/for/clear")))
             .expect("blocks the cache file path with a directory");
 
         let root = scratch_directory("clear-fullqueue-root");
         for index in 0..50 {
             fs::write(root.join(format!("f{index}.md")), "# h\n").expect("writes");
         }
+        let scan_cache = scratch_directory("clear-fullqueue-scan-cache");
 
         let mut indexer = Indexer::new();
         let mut options = small_options();
         options.batch_size = 1;
-        indexer.restart(vec![root], cache_dir.clone(), options);
+        indexer.restart(vec![root], scan_cache.clone(), options);
         // No draining: the event channel fills up and stays full.
-        indexer.clear(cache_dir.clone(), vec![bad_root]);
-        let last = indexer.restart(Vec::new(), cache_dir, small_options());
+        indexer.clear_workspace_cache(cache_dir);
+        let last = indexer.restart(Vec::new(), scan_cache, small_options());
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut completed = false;
@@ -1958,23 +1880,17 @@ mod tests {
 
         let mut indexer = Indexer::new();
 
-        // Seed a real cache through a first scan that runs to completion
-        // undisturbed.
-        let g1 = indexer.restart(vec![root.clone()], cache_dir.clone(), small_options());
-        run_to_completion(&indexer, g1);
-        assert!(load_cache(&cache_dir, &canonical_root).is_some());
-
-        // Queue a second scan, a `clear`, and a third (empty-root) scan back
-        // to back with no draining in between. `clear` bumps the generation
-        // immediately, so the second scan is superseded and never reaches
-        // its own `Complete` — this never waits on it. The third scan's own
-        // `Complete` is instead an observable FIFO barrier: since the
-        // worker processes commands strictly in order, seeing it means the
-        // `Clear` ahead of it has already run.
+        // Queue a scan that writes the cache, the clear, and a second
+        // (empty-root) scan back to back with no draining in between. The
+        // clear does not supersede the first scan, so that scan writes its
+        // cache; the second scan's own `Complete` is an observable FIFO
+        // barrier: since the worker processes commands strictly in order,
+        // seeing it means the clear ahead of it has already run — after the
+        // first scan's write, never racing it.
         indexer.restart(vec![root], cache_dir.clone(), small_options());
-        indexer.clear(cache_dir.clone(), vec![canonical_root.clone()]);
-        let g3 = indexer.restart(Vec::new(), cache_dir.clone(), small_options());
-        run_to_completion(&indexer, g3);
+        indexer.clear_workspace_cache(cache_dir.clone());
+        let last = indexer.restart(Vec::new(), cache_dir.clone(), small_options());
+        run_to_completion(&indexer, last);
 
         assert!(load_cache(&cache_dir, &canonical_root).is_none());
     }
@@ -2148,23 +2064,29 @@ mod tests {
         );
     }
 
-    /// 仕様の実装依頼 #5: a failed cache deletion is reported, not swallowed.
+    /// 仕様の実装依頼 #5: a failed cache deletion is reported, not swallowed —
+    /// tagged with [`MAINTENANCE_GENERATION`], never a scan's own number.
     #[test]
     fn clear_reports_a_deletion_failure_as_an_error_event() {
         let cache_dir = scratch_directory("clear-error-cache");
-        let root = PathBuf::from("/some/root/for/clear/error");
         // A directory where a file is expected: `fs::remove_file` reliably
         // fails against it, with an error other than `NotFound`.
-        fs::create_dir_all(cache_file_for(&cache_dir, &root)).expect("creates");
+        fs::create_dir_all(cache_file_for(
+            &cache_dir,
+            Path::new("/some/root/for/clear/error"),
+        ))
+        .expect("creates");
 
         let mut indexer = Indexer::new();
-        let generation = indexer.clear(cache_dir, vec![root]);
+        indexer.clear_workspace_cache(cache_dir);
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut found = false;
         while Instant::now() < deadline && !found {
             if let Some(event) = indexer.recv_timeout(Duration::from_millis(200)) {
-                if event.generation == generation && matches!(event.kind, EventKind::Error(_)) {
+                if event.generation == MAINTENANCE_GENERATION
+                    && matches!(event.kind, EventKind::Error(_))
+                {
                     found = true;
                 }
             }
@@ -2258,21 +2180,6 @@ mod tests {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(!name.contains("秘密"));
         assert!(!name.contains("誰か"));
-    }
-
-    #[test]
-    fn clear_cache_finds_a_root_that_no_longer_canonicalizes() {
-        let cache_dir = scratch_directory("clear-missing-cache");
-        let gone_root = std::env::temp_dir().join("rfnedit-wsindex-gone-root-for-clear");
-        let _ = fs::remove_dir_all(&gone_root);
-        // Seed a cache keyed by this exact (now-nonexistent) path.
-        write_cache(&cache_dir, &gone_root, &[]).expect("writes");
-        assert!(fs::metadata(cache_file_for(&cache_dir, &gone_root)).is_ok());
-
-        clear_cache(&cache_dir, std::slice::from_ref(&gone_root))
-            .expect("clears without canonicalizing");
-
-        assert!(fs::metadata(cache_file_for(&cache_dir, &gone_root)).is_err());
     }
 
     #[test]
@@ -2399,7 +2306,7 @@ mod tests {
             .map(|entry| entry.root.as_path())
             .collect();
         roots.sort();
-        let mut expected = vec![
+        let mut expected = [
             root_a.canonicalize().unwrap(),
             root_b.canonicalize().unwrap(),
         ];

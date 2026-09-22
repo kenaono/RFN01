@@ -9,8 +9,8 @@ mod editor_session;
 use appearance::luminance;
 mod editor_state;
 use editor_state::{
-    EditorState, normalize_typed_input, release_selection, selection_source_range,
-    source_line_start, update_selection_after_move,
+    EditorState, chosen_source_range, normalize_typed_input, release_selection,
+    selection_source_range, source_line_start, update_selection_after_move,
 };
 mod app_data;
 mod buffer;
@@ -86,8 +86,6 @@ mod text_blocks;
 mod tree_watch;
 #[cfg(test)]
 mod typography_ui_tests;
-#[cfg(test)]
-mod vertical_layout;
 mod wallpaper;
 mod window_chrome;
 mod wiring;
@@ -2510,7 +2508,7 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     // RFN01-47: **本文の右クリックメニューの挿入の行。**開いた時点で組み直し、
-    // 選ばれた番号は、タイトルバーの挿入メニューと同じ道へ渡す（`insert_in_pane`）。
+    // 選ばれた行は形に戻して、タイトルバーの挿入メニューと同じ道へ渡す（`insert_in_pane`）。
     let weak = window.as_weak();
     let insert_live = live.clone();
     window.on_pane_menu_opened(move |pane| {
@@ -2520,9 +2518,11 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     let weak = window.as_weak();
     let chosen_live = live.clone();
-    window.on_pane_insert_chosen(move |pane, what| {
-        if let Some(window) = weak.upgrade() {
-            insert_in_pane(&window, &chosen_live, PaneId::from_index(pane), what);
+    window.on_pane_insert_chosen(move |pane, number| {
+        if let Some(window) = weak.upgrade()
+            && let Some(shape) = menu_commands::InsertShape::from_number(number)
+        {
+            insert_in_pane(&window, &chosen_live, PaneId::from_index(pane), shape);
         }
     });
 
@@ -3708,8 +3708,6 @@ fn main() -> Result<(), slint::PlatformError> {
             ))));
         }
     });
-    let weak = window.as_weak();
-    let held = chrome.clone();
     // **印刷プレビューの間は、上端を押せる場所にする**（RFN01-44）。プレビューの
     // 上側の帯（閉じる・`‹`・`›`）は、この窓がタイトル行として扱っている高さに
     // 重なっている——そのままでは**中のボタンに指が届かない**（書き手の報告
@@ -3733,6 +3731,7 @@ fn main() -> Result<(), slint::PlatformError> {
             );
         }
     });
+    let weak = window.as_weak();
     let held = chrome.clone();
     Timer::single_shot(Duration::ZERO, move || {
         let Some(window) = weak.upgrade() else {
@@ -12877,8 +12876,7 @@ fn close_other_panes(window: &AppWindow, live: &Live, here: PaneId) {
 fn stem_length(title: &str) -> i32 {
     title
         .char_indices()
-        .filter(|(at, character)| *character == '.' && *at > 0)
-        .next_back()
+        .rfind(|(at, character)| *character == '.' && *at > 0)
         .map(|(at, _)| at)
         .unwrap_or(title.len()) as i32
 }
@@ -14227,7 +14225,7 @@ fn publish_word_modes(window: &AppWindow) {
                     .join(pick(" と ", " and "))
                     .into(),
                 word_marks::Trouble::Repeated => {
-                    let name = trouble.groups.first().map_or(String::new(), |at| named(at));
+                    let name = trouble.groups.first().map_or(String::new(), &named);
                     say!("{name} の中で二度", "twice in {name}").into()
                 }
             },
@@ -16174,12 +16172,6 @@ impl PaneId {
         }
     }
 
-    /// Where one rendered slice sits. A vertical tile is as tall as the pane and
-    /// stacked along x; a horizontal one spans the pane and is stacked along y.
-    fn tile(vertical: bool, shift: f32, span: TileSpan, source: Image) -> PreviewTile {
-        editor_render::tile(vertical, shift, span, source)
-    }
-
     fn set_tiles(self, window: &AppWindow, tiles: Vec<PreviewTile>) {
         if self.screen(window).tiles.iter().eq(tiles.iter().cloned()) {
             return;
@@ -16319,16 +16311,6 @@ impl PaneId {
     /// for the caret to settle.
     fn reveals_while_moving(vertical: bool) -> bool {
         !vertical
-    }
-
-    /// The caret coordinate the up and down keys hold on to across a run of
-    /// moves, so that passing a short line does not pull the caret in.
-    ///
-    /// It lies across the flow — a y where the text runs down the page, an x
-    /// where it runs across — which is why it means nothing in the other pane
-    /// (`carry_caret_between_panes`).
-    fn line_anchor(vertical: bool, at: &CaretGeometry) -> f32 {
-        if vertical { at.y } else { at.x }
     }
 
     /// Draw an edit made in this pane: here, and in the other pane showing the
@@ -19307,7 +19289,7 @@ fn thousands(number: usize) -> String {
     let digits = number.to_string();
     let mut marked = String::with_capacity(digits.len() + digits.len() / 3);
     for (at, digit) in digits.char_indices() {
-        if at > 0 && (digits.len() - at) % 3 == 0 {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
             marked.push(',');
         }
         marked.push(digit);
@@ -19412,15 +19394,6 @@ fn selected_runs(cache: &Rc<RefCell<RenderCache>>, id: PaneId) -> Vec<(usize, us
     cache.borrow_mut().pane(id).view.selection_source.clone()
 }
 
-/// A rectangle's runs, one per layout line (要件 7.1).
-///
-/// **The two ends give a coordinate across the line each**, and everything
-/// between those two coordinates, on every line between the two ends, is what
-/// the rectangle holds. The coordinate is a y where the text runs down the page
-/// and an x where it runs across — the same measurement the up and down keys
-/// hold on to (`PaneId::line_anchor`), so a rectangle drawn by moving the caret
-/// keeps the width the caret was already keeping.
-
 /// What a pane has selected, before it is cut into runs (要件 7.1).
 ///
 /// **Two ends and a shape.** A run is the text between them; a rectangle is the
@@ -19428,6 +19401,10 @@ fn selected_runs(cache: &Rc<RefCell<RenderCache>>, id: PaneId) -> Vec<(usize, us
 /// coordinates across the line. Which of the two it is cannot be worked out
 /// from the ends, and where it is cut into runs the engine has to be asked —
 /// so what travels to the layout is this, and the runs come back from there.
+///
+/// The coordinate across the line is the one the up and down keys hold on to
+/// (`editor_interaction::line_anchor`), so a rectangle drawn by moving the
+/// caret keeps the width the caret was already keeping.
 #[derive(Clone, Copy, Default)]
 struct PaneSelection {
     ends: Option<(usize, usize)>,
@@ -20184,8 +20161,8 @@ fn insert_pane_text(
     // would hide it behind an ordinary keystroke.
     let rectangle = {
         let state = states.of(id);
-        let rectangular = state.borrow().rectangular;
-        rectangular
+
+        state.borrow().rectangular
     };
     let rectangle = rectangle.then(|| selected_runs(cache, id));
     if let Some(ranges) = rectangle
@@ -20286,16 +20263,7 @@ fn edit_lines(window: &AppWindow, live: &Live, id: PaneId, what: document::LineE
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
-    let (from, to) = {
-        let state = state.borrow();
-        match selection_source_range(&state) {
-            Some((start, end)) => (start, end),
-            None => {
-                let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
-                (caret, caret)
-            }
-        }
-    };
+    let (from, to) = chosen_source_range(&state.borrow(), source.len());
     let span = document::selected_lines(&source, from, to);
     let Some((region, text, chosen)) = document::line_edit(&source, span, what) else {
         return;
@@ -20325,16 +20293,7 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
-    let (from, to) = {
-        let state = state.borrow();
-        match selection_source_range(&state) {
-            Some((start, end)) => (start, end),
-            None => {
-                let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
-                (caret, caret)
-            }
-        }
-    };
+    let (from, to) = chosen_source_range(&state.borrow(), source.len());
     let styles = document
         .counts
         .borrow_mut()
@@ -20376,46 +20335,31 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
 /// 文書を出している別の面も付いてくる。行の操作（[`edit_lines`]／[`edit_list`]）
 /// と同じ形で、選んだ範囲をそのまま読む。
 ///
-/// 番号は画面のメニューと1対1（`menu_commands`の`Command::Insert`）で、**増やす
-/// ときは末尾へ足す**——既存の番号を動かさない。
-fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
+/// **形で受け取る**（[`menu_commands::InsertShape`]）。番号は右クリックメニューが
+/// 押された行を言い返すための言い方で、境目（`on_pane_insert_chosen`）で形に戻す。
+fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_commands::InsertShape) {
+    use menu_commands::InsertShape;
     // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
     answer_new_tab(window, live, id, None);
-    let index = usize::try_from(what).unwrap_or(usize::MAX);
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let state = live.states.of(id);
-    let (from, to) = {
-        let state = state.borrow();
-        match selection_source_range(&state) {
-            Some((start, end)) => (start, end),
-            None => {
-                let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
-                (caret, caret)
-            }
+    let (from, to) = chosen_source_range(&state.borrow(), source.len());
+    let edit = match shape {
+        InsertShape::Edit(what) => document::insert_edit(&source, from, to, what),
+        InsertShape::Line(what) => {
+            document::line_note_edit(&source, from, to, what, reading_of(window))
         }
-    };
-    // **前半は字を包む形、後半は行の体裁**（`document::INSERT_EDITS` →
-    // `document::LINE_NOTE_EDITS`）。番号は画面の並びそのものである。
-    let at = index.checked_sub(document::INSERT_EDITS.len());
-    let noted = at.and_then(|at| document::LINE_NOTE_EDITS.get(at)).copied();
-    let edit = match document::INSERT_EDITS.get(index).copied() {
-        Some(what) => document::insert_edit(&source, from, to, what),
-        None => match noted {
-            Some(what) => document::line_note_edit(&source, from, to, what, reading_of(window)),
-            // **最後の1つは改ページ**（I40）。
-            None if at == Some(document::LINE_NOTE_EDITS.len()) => {
-                document::page_break_edit(&source, from, to)
-            }
-            None => return,
-        },
+        InsertShape::PageBreak => document::page_break_edit(&source, from, to),
     };
     let Some((region, text, chosen)) = edit else {
         // **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）——理由を言う。
         if document::inside_a_note_range(&source, from.min(to))
             && matches!(
-                noted,
-                Some(document::LineNoteEdit::Indent(_) | document::LineNoteEdit::NoIndent)
+                shape,
+                InsertShape::Line(
+                    document::LineNoteEdit::Indent(_) | document::LineNoteEdit::NoIndent
+                )
             )
         {
             window.tell_tab(
@@ -20430,7 +20374,7 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
             live.cache.borrow_mut().log_diag(
                 "lines",
                 &format!(
-                    "pane={} insert={index} note={noted:?} asked={from}..{to} nothing",
+                    "pane={} insert={shape:?} asked={from}..{to} nothing",
                     id.log_name()
                 ),
             );
@@ -20445,7 +20389,7 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: i32) {
         region,
         &text,
         chosen,
-        &format!("Insert{index} note={noted:?} asked={from}..{to}"),
+        &format!("Insert {shape:?} asked={from}..{to}"),
     );
 }
 
@@ -21753,7 +21697,7 @@ mod tests {
         // 1色でも読めなければ、何も替えない。
         let broken = said.replacen("#", "?", 1);
         assert!(!apply_ink_set(&other, &broken));
-        assert!(read_ink_set(&said.rsplit_once(',').unwrap().0).is_none());
+        assert!(read_ink_set(said.rsplit_once(',').unwrap().0).is_none());
         assert_eq!(ink_set_index("ink.set.1"), Some(0));
         assert_eq!(ink_set_index("ink.set.10"), Some(9));
         assert_eq!(ink_set_index("ink.set.0"), None);
@@ -21915,7 +21859,7 @@ mod tests {
             },
             ornament: None,
         };
-        let marks = vec![vec![bold.clone()], Vec::new(), vec![bold.clone()]];
+        let marks = vec![vec![bold], Vec::new(), vec![bold]];
 
         let masked = marks_without_line(&marks, 0);
 
@@ -22051,7 +21995,7 @@ mod tests {
                 a_group(5, "地名", &["京都"]),
             ],
         );
-        let written = app_data::encode_words(&stored_of(&[mode.clone()]));
+        let written = app_data::encode_words(&stored_of(std::slice::from_ref(&mode)));
         let (read, damaged) = app_data::decode_words(&written).expect("decodes");
 
         assert_eq!(damaged, 0);
@@ -22710,8 +22654,8 @@ mod tests {
             height: 20.0,
         };
 
-        assert_eq!(PaneId::line_anchor(true, &caret), 34.0);
-        assert_eq!(PaneId::line_anchor(false, &caret), 12.0);
+        assert_eq!(editor_interaction::line_anchor(true, &caret), 34.0);
+        assert_eq!(editor_interaction::line_anchor(false, &caret), 12.0);
     }
 
     #[test]

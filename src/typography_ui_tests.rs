@@ -660,11 +660,8 @@ fn every_kind_of_mark_beside_the_word_reaches_the_pixels() {
     window.show().unwrap();
     let ink_of = |note: &str| {
         let source = format!("ここに印{note}を振る。\n");
-        let document = OpenDocument::new(
-            DocumentFile::untitled(1),
-            source.clone().into(),
-            window.as_weak(),
-        );
+        let document =
+            OpenDocument::new(DocumentFile::untitled(1), source.clone(), window.as_weak());
         let states = PaneStates::new(&document);
         id.update_screen(&window, |screen| {
             screen.width = 1050.0;
@@ -905,7 +902,7 @@ fn a_left_note_lands_on_the_other_side_of_the_word() {
     let columns_of = |source: &str| {
         let document = OpenDocument::new(
             DocumentFile::untitled(1),
-            source.to_owned().into(),
+            source.to_owned(),
             window.as_weak(),
         );
         let states = PaneStates::new(&document);

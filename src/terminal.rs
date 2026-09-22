@@ -27,8 +27,6 @@
 //! one direction that flows backwards**, and keeping it as bytes-in-a-vec rather
 //! than a callback is what lets the tests see it.
 
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 /// A colour as the shell named it.
@@ -93,11 +91,6 @@ impl Cell {
             attrs,
             trailing: false,
         }
-    }
-
-    /// The cell holds nothing a reader would see.
-    pub fn is_blank(&self) -> bool {
-        self.text == ' ' && !self.trailing
     }
 }
 
@@ -288,6 +281,7 @@ impl Screen {
         self.modes
     }
 
+    #[cfg(test)]
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -300,6 +294,7 @@ impl Screen {
         self.lines.get(row)
     }
 
+    #[cfg(test)]
     pub fn lines(&self) -> &[Line] {
         &self.lines
     }
@@ -521,6 +516,7 @@ impl Screen {
     }
 
     /// What arrived that this does not implement, most common first.
+    #[cfg(test)]
     pub fn unhandled(&self) -> Vec<(String, u32)> {
         let mut seen = self.unhandled.clone();
         seen.sort_by(|left, right| right.1.cmp(&left.1));
@@ -1301,7 +1297,7 @@ impl Parser {
             }
             0x08 => screen.backspace(),
             0x09 => screen.tab(),
-            0x0a | 0x0b | 0x0c => screen.line_feed(),
+            0x0a..=0x0c => screen.line_feed(),
             0x0d => screen.carriage_return(),
             // BEL and the rest of C0 say nothing about the screen.
             0x00..=0x1f | 0x7f => {}
@@ -1587,10 +1583,12 @@ pub struct Modifiers {
 }
 
 impl Modifiers {
+    #[cfg(test)]
     pub fn none() -> Self {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn control() -> Self {
         Self {
             control: true,

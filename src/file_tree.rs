@@ -476,6 +476,7 @@ pub fn is_searchable(path: &Path) -> bool {
 ///
 /// `limit` bounds it, because a work folder can have anything dropped into it
 /// and a search must not be a way to make the editor stop answering.
+#[cfg(test)]
 pub fn files_under(
     root: &Path,
     read_nodes: &dyn Fn(&Path) -> Vec<Node>,
@@ -490,6 +491,7 @@ pub fn files_under(
 ///
 /// Files and directories are deduplicated by canonical identity, regardless
 /// of the registration order of overlapping roots.
+#[cfg(test)]
 pub fn files_under_many(
     roots: &[PathBuf],
     read_nodes: &dyn Fn(&Path) -> Vec<Node>,

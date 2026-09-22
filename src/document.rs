@@ -1665,9 +1665,10 @@ impl InsertEdit {
     }
 }
 
-/// 挿入メニューの並び（RFN01-38）。**画面の並びそのもの**である——`Command::Insert(n)`
-/// の番号はこの並びの位置で、`insert_in_pane`もここから引く。**増やすときは末尾へ
-/// 足す**：間へ入れると、番号が指す先が動く。
+/// 字を包む形の全部（RFN01-38）。**試験が数える一覧**——メニューの並びと文言は
+/// `menu_commands`の`INSERT_MENU`が持ち、そこに形が1つずつ漏れなく並ぶことを
+/// 試験がこの一覧と突き合わせる。
+#[cfg(test)]
 pub const INSERT_EDITS: [InsertEdit; 23] = [
     InsertEdit::MarkdownLink,
     InsertEdit::WikiLink,
@@ -1874,8 +1875,9 @@ pub enum LineNoteEdit {
     NoAlignToEnd,
 }
 
-/// 行単位の指定の並び（RFN01-38、I22〜I39）。**画面の並びそのもの**である——
-/// `Command::Insert(n)`の番号は、`INSERT_EDITS`の後ろにこれを続けた位置になる。
+/// 行単位の指定の全部（RFN01-38、I22〜I39）。[`INSERT_EDITS`]と同じく試験が数える
+/// 一覧で、メニューではその後ろに続く。
+#[cfg(test)]
 pub const LINE_NOTE_EDITS: [LineNoteEdit; 18] = [
     LineNoteEdit::Heading(1),
     LineNoteEdit::Heading(2),
@@ -4110,7 +4112,7 @@ pub fn link_target_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
 /// Parse a complete ordinary or Wiki link without rewriting its destination.
 /// Explicit labels are returned verbatim; implicit Wiki display is shortened
 /// only when rendering. Images and unmatched opening brackets are not links.
-fn link_here<'a>(rest: &'a str, previous: Option<char>) -> Option<(&'a str, &'a str, &'a str)> {
+fn link_here(rest: &str, previous: Option<char>) -> Option<(&str, &str, &str)> {
     if previous == Some('!') {
         return None;
     }
@@ -4178,37 +4180,13 @@ pub fn link_target_at(source: &str, byte: usize) -> Option<(&str, bool)> {
     None
 }
 
-/// Resolve an explicit local path. Wiki names never trigger a folder search.
-pub fn link_path(
-    target: &str,
-    wiki: bool,
-    source_file: Option<&std::path::Path>,
-) -> Option<std::path::PathBuf> {
-    let target = target
-        .trim()
-        .strip_prefix('<')
-        .and_then(|s| s.strip_suffix('>'))
-        .unwrap_or(target.trim());
-    if target.is_empty() || target.contains(['\n', '\r', '#']) || target.contains("://") {
-        return None;
-    }
-    let path = std::path::Path::new(target);
-    if path.is_absolute() {
-        Some(path.to_path_buf())
-    } else if wiki || target.contains(':') || target.starts_with(['/', '\\']) {
-        None
-    } else {
-        Some(source_file?.parent()?.join(path))
-    }
-}
-
 /// The marker `rest` begins with, what it encloses and what follows it.
 ///
 /// `previous` is the character already written out, which decides the one rule
 /// that is not about the marker itself: **`_` inside a word is not a marker**,
 /// so `snake_case_name` keeps both of its underscores. `*` has no such rule,
 /// which is what Markdown itself does.
-fn opens_here<'a>(rest: &'a str, previous: Option<char>) -> Option<(Marks, &'a str, &'a str)> {
+fn opens_here(rest: &str, previous: Option<char>) -> Option<(Marks, &str, &str)> {
     for (marker, marks) in markers() {
         let Some(after_open) = rest.strip_prefix(marker) else {
             continue;
@@ -8891,22 +8869,10 @@ mod tests {
         assert_eq!(link_target_at("\\[説明](章.md)", 3), None);
     }
 
+    /// 絶対パスのWikiリンクは、解決済みのリンクとして組む。**行き先の解決そのものは
+    /// `workspace_links::resolve_link`の試験が見る。**
     #[test]
-    fn local_link_paths_do_not_guess_wiki_names_or_unsaved_bases() {
-        use std::path::{Path, PathBuf};
-        let source = Path::new(r"D:\原稿\本文.md");
-        assert_eq!(
-            link_path("章/次.md", false, Some(source)),
-            Some(source.parent().unwrap().join("章/次.md"))
-        );
-        assert_eq!(
-            link_path(r"D:\原稿\次.md", true, None),
-            Some(PathBuf::from(r"D:\原稿\次.md"))
-        );
-        assert_eq!(link_path("次", true, Some(source)), None);
-        assert_eq!(link_path("次.md", false, None), None);
-        assert_eq!(link_path("https://example.com", false, Some(source)), None);
-        assert_eq!(link_path("#見出し", false, Some(source)), None);
+    fn an_absolute_wiki_link_is_shown_as_a_resolved_link() {
         let preview = PreviewDocument::from_source(r"[[D:\原稿\次.md|次]]");
         assert!(
             preview.marks()[0]

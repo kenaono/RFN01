@@ -41,34 +41,11 @@ fn stamp_of(path: &Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// `%20`のような百分率符号を戻す。戻せない並びはそのまま残す。
-fn percent_decoded(target: &str) -> String {
-    let bytes = target.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let hex = bytes
-            .get(index + 1..index + 3)
-            .and_then(|pair| std::str::from_utf8(pair).ok())
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok());
-        match (bytes[index], hex) {
-            (b'%', Some(byte)) => {
-                out.push(byte);
-                index += 3;
-            }
-            (byte, _) => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| target.to_string())
-}
-
 /// 行き先をファイルへ。絶対パスはそのまま、相対パスは文書のフォルダから。**名前の無い文書**
 /// （フォルダが無い）では相対パスを解決しない。
 pub fn resolve(folder: Option<&Path>, target: &str) -> Option<PathBuf> {
-    let decoded = percent_decoded(target);
+    // **戻し方はリンクと同じ**（`%20`などを1回だけ戻す）。
+    let decoded = crate::link_completion::percent_decode(target);
     let path = Path::new(&decoded);
     if path.is_absolute() {
         return Some(path.to_path_buf());
@@ -279,7 +256,10 @@ mod tests {
             Some(PathBuf::from(r"C:\pictures\a.png"))
         );
         // 戻せない並びは字のまま。
-        assert_eq!(percent_decoded("100%.png"), "100%.png");
+        assert_eq!(
+            resolve(Some(folder), "100%.png"),
+            Some(folder.join("100%.png"))
+        );
     }
 
     #[test]

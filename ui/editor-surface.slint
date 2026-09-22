@@ -180,19 +180,23 @@ export component EditorSurface inherits Rectangle {
     /// 開いてから広げても枠は264pxのままで、右の面は描かれるのに押すと「外」と
     /// 見なされて閉じていた（書き手の報告 2026-09-22）。いちばん広い右の面に合わせる。
     private property <length> context-menu-width: 432px;
+    /// メニューそのものの幅（右へ開く面を除く）と、行の送り（`MenuRow`の28pxと
+    /// 行間の1px）。位置の計算はどれもこの2つから数える。
+    private property <length> context-menu-body: 264px;
+    private property <length> context-row-pitch: 29px;
     /// **端では左へ開く**（RFN01-47、Windowsのメニューと同じ）。右クリックした
     /// 点から面の右端までの残り——紙は横に流れて面より広いことがあるので、
     /// 画面の上の位置で測る。
     private property <length> context-room: root.absolute-position.x + root.width
         - editor.absolute-position.x - root.context-x;
     /// メニューが点の右に収まらなければ、右端を点に合わせて左へ出す。
-    private property <bool> context-flipped: root.context-room < 264px;
+    private property <bool> context-flipped: root.context-room < root.context-menu-body;
     /// 右へ開く面の場所が無ければ、面は左へ開く。枠もそのぶん左へ取る。
     private property <bool> flyouts-left: root.context-room < root.context-menu-width;
     /// 右へ開く面を出す高さ——乗せた行の、メニューの枠の上からの位置。
     private property <length> flyout-y;
     private property <length> context-menu-left: root.context-flipped
-        ? root.context-x - 264px
+        ? root.context-x - root.context-menu-body
         : root.context-x;
     callback open-file-requested();
     callback escaped() -> bool;
@@ -1221,7 +1225,7 @@ export component EditorSurface inherits Rectangle {
                             // 枠の幅は右へ開く面ぶんを含むので、面が左へ開くときは枠を
                             // そのぶん左から取り、メニューは枠の右端に寄せる。
                             x: root.flyouts-left
-                                ? root.context-menu-left - (root.context-menu-width - 264px)
+                                ? root.context-menu-left - (root.context-menu-width - root.context-menu-body)
                                 : root.context-menu-left;
                             y: root.context-y;
                             width: root.context-menu-width;
@@ -1240,9 +1244,9 @@ export component EditorSurface inherits Rectangle {
                             // メニューの内側の余白は押しても閉じない（今までどおり）
                             // ので、面の開く側からだけ取る。
                             TouchArea {
-                                x: root.flyouts-left ? 0px : 264px;
+                                x: root.flyouts-left ? 0px : root.context-menu-body;
                                 y: 0px;
-                                width: parent.width - 264px;
+                                width: parent.width - root.context-menu-body;
                                 height: parent.height;
                                 clicked => { context-menu.close(); }
                             }
@@ -1252,9 +1256,9 @@ export component EditorSurface inherits Rectangle {
                             // 釘を打っても枠が高さを失わない（2026-09-11の「透明」は、
                             // popupが中身から高さを読んでいたときの話）。
                             menu-frame := MenuFrame {
-                                x: root.flyouts-left ? root.context-menu-width - 264px : 0px;
+                                x: root.flyouts-left ? root.context-menu-width - root.context-menu-body : 0px;
                                 y: 0px;
-                                width: 264px;
+                                width: root.context-menu-body;
                                 height: parent.height;
 
                                 // **流すときだけ、上下に▲▼の帯を出す**（Windowsのメニューと同じ）。
@@ -1268,7 +1272,7 @@ export component EditorSurface inherits Rectangle {
                                     height: parent.arrow;
                                     visible: parent.overflows;
                                     clicked => {
-                                        menu-scroll.viewport-y = min(0px, menu-scroll.viewport-y + 29px);
+                                        menu-scroll.viewport-y = min(0px, menu-scroll.viewport-y + root.context-row-pitch);
                                     }
 
                                     Text {
@@ -1412,11 +1416,13 @@ export component EditorSurface inherits Rectangle {
                                                 shortcut: insert.flyout ? "▸" : "";
                                                 enabled: insert.enabled;
                                                 checked: insert.checked;
+                                                // 右へ開く面を出す高さ（区切りの下から数える）。
+                                                property <length> flyout-at: insert-block.absolute-position.y - menu-frame.absolute-position.y + 12px + index * root.context-row-pitch;
                                                 // **乗せれば開く。**押しても開く
                                                 // ——押した書き手を待たせない。
                                                 changed hovered => {
                                                     if (self.hovered) {
-                                                        root.flyout-y = insert-block.absolute-position.y - menu-frame.absolute-position.y + 12px + index * 29px;
+                                                        root.flyout-y = self.flyout-at;
                                                         root.insert-open = insert.flyout ? insert.group : -1;
                                                         // 右へ開くのは1つだけ。
                                                         root.bullet-rows-open = false;
@@ -1424,7 +1430,7 @@ export component EditorSurface inherits Rectangle {
                                                 }
                                                 activated => {
                                                     if (insert.flyout) {
-                                                        root.flyout-y = insert-block.absolute-position.y - menu-frame.absolute-position.y + 12px + index * 29px;
+                                                        root.flyout-y = self.flyout-at;
                                                         root.insert-open = root.insert-open == insert.group ? -1 : insert.group;
                                                     } else {
                                                         root.insert-chosen(insert.number);
@@ -1618,7 +1624,7 @@ export component EditorSurface inherits Rectangle {
                                     height: parent.arrow;
                                     visible: parent.overflows;
                                     clicked => {
-                                        menu-scroll.viewport-y = max(menu-frame.lowest, menu-scroll.viewport-y - 29px);
+                                        menu-scroll.viewport-y = max(menu-frame.lowest, menu-scroll.viewport-y - root.context-row-pitch);
                                     }
 
                                     Text {
@@ -1644,7 +1650,7 @@ export component EditorSurface inherits Rectangle {
                             // 出し、popupの中に収める（外にはみ出た所は押しても届かない）。
                             // **入れ子のpopupにはしない**（6.24・6.30）——同じ木の中に置く。
                             if root.insert-open >= 0: MenuFrame {
-                                x: root.flyouts-left ? menu-frame.x + 14px - self.width : menu-frame.x + 250px;
+                                x: root.flyouts-left ? menu-frame.x + 14px - self.width : menu-frame.x + root.context-menu-body - 14px;
                                 y: clamp(root.flyout-y - 6px, 0px, max(0px, parent.height - self.height));
                                 width: 176px;
                                 height: insert-flyout.preferred-height;
@@ -1671,7 +1677,7 @@ export component EditorSurface inherits Rectangle {
                             // 読む記号が1つも無ければ、開いても空である
                             // （書き手の言葉：「何も選ばれていなければ、空」）。
                             if root.bullet-rows-open: MenuFrame {
-                                x: root.flyouts-left ? menu-frame.x + 14px - self.width : menu-frame.x + 250px;
+                                x: root.flyouts-left ? menu-frame.x + 14px - self.width : menu-frame.x + root.context-menu-body - 14px;
                                 y: clamp(root.flyout-y - 6px, 0px, max(0px, parent.height - self.height));
                                 width: 136px;
                                 height: bullet-rows.preferred-height;

@@ -362,7 +362,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
                 save(window, live, &entry, true);
             }
         }
-        7 | 8 | 9 => {
+        7..=9 => {
             import(window, live, id, action);
             return;
         }

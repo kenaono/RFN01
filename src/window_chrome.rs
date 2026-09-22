@@ -194,7 +194,7 @@ impl Drop for Chrome {
 
 /// Pure hit testing, also used by tests at negative screen origins after mapping.
 fn title_hit(x: f32, y: f32, width: f32, interactive_end: f32) -> u32 {
-    if y < 0. || y >= TITLE_HEIGHT || x < 0. || x >= width {
+    if !(0. ..TITLE_HEIGHT).contains(&y) || x < 0. || x >= width {
         return HTCLIENT;
     }
     if x >= width - BUTTON_WIDTH {
@@ -203,9 +203,9 @@ fn title_hit(x: f32, y: f32, width: f32, interactive_end: f32) -> u32 {
         HTMAXBUTTON
     } else if x >= width - 3. * BUTTON_WIDTH {
         HTMINBUTTON
-    } else if x < 32. {
-        HTCLIENT // App icon opens the title menu; Alt+Space retains the system menu.
-    } else if x < interactive_end {
+    } else if x < 32. || x < interactive_end {
+        // The app icon (the first 32px) opens the title menu; Alt+Space retains
+        // the system menu. Past it, whatever the menu bar or a print view reaches.
         HTCLIENT
     } else {
         HTCAPTION

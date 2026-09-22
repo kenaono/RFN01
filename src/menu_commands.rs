@@ -46,7 +46,7 @@ enum Command {
     Kill(i32),
     Word(u32),
     List(i32, i32),
-    Insert(i32),
+    Insert(InsertShape),
     Direction(bool),
     Appearance(i32),
     Sidebar(i32),
@@ -99,39 +99,55 @@ pub enum InsertShape {
     PageBreak,
 }
 
-/// 挿入の番号（`Command::Insert`の番号）を引く。**並びを知っているのはここだけ。**
-fn insert_number(shape: InsertShape) -> Option<i32> {
-    let at = match shape {
-        InsertShape::Edit(what) => document::INSERT_EDITS
-            .iter()
-            .position(|edit| *edit == what)?,
-        InsertShape::Line(what) => {
-            document::INSERT_EDITS.len()
-                + document::LINE_NOTE_EDITS
-                    .iter()
-                    .position(|edit| *edit == what)?
-        }
-        InsertShape::PageBreak => document::INSERT_EDITS.len() + document::LINE_NOTE_EDITS.len(),
-    };
-    Some(at as i32)
+impl InsertShape {
+    /// 挿入の番号——右クリックメニュー（Slint）が押された行を言い返すときの言い方。
+    /// **並びを知っているのはここだけ**（[`INSERT_MENU`]を上から数えた位置）。
+    /// 番号は開くたびに組み直す行にしか書かないので、並びを変えても古い番号は残らない。
+    pub fn number(self) -> i32 {
+        insert_items()
+            .position(|(shape, _)| *shape == self)
+            .map_or(-1, |at| at as i32)
+    }
+
+    /// [`Self::number`]の逆。並びの外の番号は`None`。
+    pub fn from_number(number: i32) -> Option<Self> {
+        let at = usize::try_from(number).ok()?;
+        insert_items().nth(at).map(|(shape, _)| *shape)
+    }
+
+    /// メニューの文言（日本語・英語）。**タイトルバー・右クリック・キーの設定が
+    /// 同じ言葉を読む**——3か所に書くと、1か所だけ直して食い違う。
+    pub fn title(self) -> (&'static str, &'static str) {
+        insert_items()
+            .find(|(shape, _)| *shape == self)
+            .map_or(("", ""), |(_, title)| *title)
+    }
 }
 
-/// 右クリックメニューに出す挿入の並び（RFN01-47）。
+/// 日本語と英語の文言の対。
+type Title = (&'static str, &'static str);
+
+/// 挿入メニューの並び（RFN01-38・RFN01-47）。
 ///
-/// **1段目と、右へ開く組の中身を1つの表で持つ**——[`ContextEntry::Row`]はそのまま
-/// 入る行、[`ContextEntry::Group`]は右へ開く組である。並びと名前はタイトルバーの
-/// 挿入メニュー（[`insert_commands`]）と同じで、
-/// `the_right_click_rows_are_the_insert_menu`の試験が突き合わせる。
-enum ContextEntry {
-    Row(InsertShape, (&'static str, &'static str)),
-    Group(
-        (&'static str, &'static str),
-        &'static [(InsertShape, (&'static str, &'static str))],
-    ),
+/// **タイトルバーの挿入メニューも右クリックメニューも、この1つの表から組む**——
+/// [`InsertEntry::Row`]はそのまま入る行、[`InsertEntry::Group`]は右へ開く組である。
+/// タイトルバーだけは、段落注記の中を字下げと地付きへもう1段分ける
+/// （[`title_submenu`]）。
+enum InsertEntry {
+    Row((InsertShape, Title)),
+    Group(Title, &'static [(InsertShape, Title)]),
 }
 
-const CONTEXT_INSERT: &[ContextEntry] = &[
-    ContextEntry::Group(
+/// 表の行を、上から順に1つずつ（組の中身も含めて）。
+fn insert_items() -> impl Iterator<Item = &'static (InsertShape, Title)> {
+    INSERT_MENU.iter().flat_map(|entry| match entry {
+        InsertEntry::Row(item) => std::slice::from_ref(item),
+        InsertEntry::Group(_, items) => items,
+    })
+}
+
+const INSERT_MENU: &[InsertEntry] = &[
+    InsertEntry::Group(
         ("リンク", "Link"),
         &[
             (
@@ -156,11 +172,11 @@ const CONTEXT_INSERT: &[ContextEntry] = &[
             ),
         ],
     ),
-    ContextEntry::Row(
+    InsertEntry::Row((
         InsertShape::Edit(document::InsertEdit::Ruby),
         ("ルビ", "Ruby"),
-    ),
-    ContextEntry::Group(
+    )),
+    InsertEntry::Group(
         ("注記", "Annotation"),
         &[
             (
@@ -173,7 +189,7 @@ const CONTEXT_INSERT: &[ContextEntry] = &[
             ),
         ],
     ),
-    ContextEntry::Group(
+    InsertEntry::Group(
         ("傍点", "Emphasis Marks"),
         &[
             (
@@ -202,7 +218,7 @@ const CONTEXT_INSERT: &[ContextEntry] = &[
             ),
         ],
     ),
-    ContextEntry::Group(
+    InsertEntry::Group(
         ("傍線", "Emphasis Lines"),
         &[
             (
@@ -227,7 +243,7 @@ const CONTEXT_INSERT: &[ContextEntry] = &[
             ),
         ],
     ),
-    ContextEntry::Group(
+    InsertEntry::Group(
         ("文字注記", "Text Annotation"),
         &[
             (
@@ -248,7 +264,7 @@ const CONTEXT_INSERT: &[ContextEntry] = &[
             ),
         ],
     ),
-    ContextEntry::Group(
+    InsertEntry::Group(
         ("見出し", "Heading"),
         &[
             (
@@ -281,7 +297,7 @@ const CONTEXT_INSERT: &[ContextEntry] = &[
             ),
         ],
     ),
-    ContextEntry::Group(
+    InsertEntry::Group(
         ("段落注記", "Paragraph Annotation"),
         &[
             (
@@ -330,13 +346,13 @@ const CONTEXT_INSERT: &[ContextEntry] = &[
             ),
         ],
     ),
-    ContextEntry::Row(InsertShape::PageBreak, ("改ページ", "Page Break")),
+    InsertEntry::Row((InsertShape::PageBreak, ("改ページ", "Page Break"))),
 ];
 
 /// その形が押せるか、いま効いているか（RFN01-47）。
 ///
-/// **タイトルバーの挿入メニューと同じ規則**——[`insert_commands`]が行ごとに見ている
-/// ものを、同じ材料から決める。`editable`には矩形選択の断りまで含めて渡す。
+/// **タイトルバーの挿入メニューと右クリックメニューが、同じ規則で読む。**
+/// `editable`には矩形選択の断りまで含めて渡す。
 fn context_insert_state(
     shape: InsertShape,
     editable: bool,
@@ -386,7 +402,7 @@ fn context_insert_rows(
             title: pick(title.0, title.1).into(),
             flyout: false,
             group,
-            number: insert_number(shape).unwrap_or(-1),
+            number: shape.number(),
             enabled,
             checked,
         }
@@ -394,10 +410,10 @@ fn context_insert_rows(
     let mut top = Vec::new();
     let mut children = Vec::new();
     let mut group = 0;
-    for what in CONTEXT_INSERT {
+    for what in INSERT_MENU {
         match what {
-            ContextEntry::Row(shape, title) => top.push(entry(*shape, *title, -1)),
-            ContextEntry::Group((ja, en), rows) => {
+            InsertEntry::Row((shape, title)) => top.push(entry(*shape, *title, -1)),
+            InsertEntry::Group((ja, en), rows) => {
                 let opened = group;
                 group += 1;
                 let mut openable = false;
@@ -422,6 +438,23 @@ fn context_insert_rows(
     (top, children)
 }
 
+/// いまの選択で、行の体裁がどうなっているかと、改ページを入れられるか
+/// （RFN01-38）。**押せるのに何も起きない行を作らない**ため、メニューを組む側は
+/// 押したときと同じ答えを読む。
+fn insert_inputs(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    document: &OpenDocument,
+) -> (document::LineNoteState, bool) {
+    let source = document.text.borrow();
+    let (from, to) = chosen_source_range(&live.states.of(id).borrow(), source.len());
+    (
+        document::line_note_state(&source, from, to, reading_of(window)),
+        document::can_break_page_here(&source, from, to),
+    )
+}
+
 /// 本文の右クリックメニューの挿入の行を組み直す（RFN01-47）。
 ///
 /// **開いた時点の状態で組む**——選んだ字や、いまの行の体裁で押せる行が変わる。
@@ -441,24 +474,7 @@ pub fn publish_context_insert(window: &AppWindow, live: &Live, id: PaneId) {
     let editable = text && !screen.viewer && !document.read_only();
     let picked = !selected_runs(&live.cache, id).is_empty();
     let rectangular = live.states.of(id).borrow().rectangular;
-    let (notes, breakable) = {
-        let source = document.text.borrow();
-        let pane_state = live.states.of(id);
-        let (from, to) = {
-            let state = pane_state.borrow();
-            match selection_source_range(&state) {
-                Some((start, end)) => (start, end),
-                None => {
-                    let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
-                    (caret, caret)
-                }
-            }
-        };
-        (
-            document::line_note_state(&source, from, to, reading_of(window)),
-            document::can_break_page_here(&source, from, to),
-        )
-    };
+    let (notes, breakable) = insert_inputs(window, live, id, &document);
     let (top, children) = context_insert_rows(editable && !rectangular, picked, notes, breakable);
     window.set_insert_rows(slint::ModelRc::new(slint::VecModel::from(top)));
     window.set_insert_children(slint::ModelRc::new(slint::VecModel::from(children)));
@@ -596,9 +612,22 @@ fn menu_row(
     menu.row(&title, commands.len(), enabled, checked)
 }
 
-/// 挿入メニューの**実行できる項目**（RFN01-38）。子メニューの並びも行の並びも
-/// A案のままである。**番号は`document::INSERT_EDITS`の位置**——画面と本文のどちらも
-/// 同じ並びを読む。
+/// タイトルバーで、段落注記の中をもう1段分ける組（A案の並び）。右クリックの
+/// メニューは右へ開く1段しか持たないので、そちらは分けない。
+fn title_submenu(shape: InsertShape) -> Option<Title> {
+    match shape {
+        InsertShape::Line(document::LineNoteEdit::Indent(_) | document::LineNoteEdit::NoIndent) => {
+            Some(("字下げ", "Indent"))
+        }
+        InsertShape::Line(
+            document::LineNoteEdit::AlignToEnd(_) | document::LineNoteEdit::NoAlignToEnd,
+        ) => Some(("地付き", "End Alignment")),
+        _ => None,
+    }
+}
+
+/// 挿入メニューの**実行できる項目**（RFN01-38）。並び・文言・押せる条件は
+/// [`INSERT_MENU`]と[`context_insert_state`]——右クリックメニューと同じものを読む。
 #[allow(clippy::too_many_arguments)]
 fn insert_commands(
     window: &AppWindow,
@@ -610,307 +639,43 @@ fn insert_commands(
     notes: document::LineNoteState,
     breakable: bool,
 ) -> windows::core::Result<()> {
-    // **番号は並べた順**（`document::INSERT_EDITS`の後ろに`LINE_NOTE_EDITS`が続く）。
-    // `menu_row`が`commands`の長さを番号にするので、ここでは数え直さない。
     let row = |menu: &Popup,
                commands: &mut Vec<Command>,
-               ja: &str,
-               en: &str,
-               allowed: bool,
-               checked: bool|
+               (shape, (ja, en)): (InsertShape, Title)|
      -> windows::core::Result<()> {
-        let index = commands.len() as i32;
+        let (allowed, checked) = context_insert_state(shape, enabled, picked, &notes, breakable);
+        let command = Command::Insert(shape);
         menu_row(
-            window,
-            menu,
-            commands,
-            field,
-            ja,
-            en,
-            Command::Insert(index),
-            enabled && allowed,
-            checked,
+            window, menu, commands, field, ja, en, command, allowed, checked,
         )
     };
-    // **選んだ字を指す注記は、字が無ければ押せない**（書き手の合意 2026-09-21）。
-    // どの形がそうかは本文を持つ側が知っている——`document::InsertEdit`に聞く。
-    // **形そのもので聞く**——番号は挿入の並びが変わるたびに動くので、番号で聞くと
-    // 数え違えたときに別の形を押せるようにしてしまう（RFN01-48で画像が入ったとき、
-    // 実際にそうなった）。
-    let word = |what: document::InsertEdit| !what.needs_a_picked_word() || picked;
-    let link = Popup::new()?;
-    row(
-        &link,
-        commands,
-        "Markdownリンク",
-        "Markdown Link",
-        word(document::InsertEdit::MarkdownLink),
-        false,
-    )?;
-    row(
-        &link,
-        commands,
-        "Wikiリンク",
-        "Wiki Link",
-        word(document::InsertEdit::WikiLink),
-        false,
-    )?;
-    row(
-        &link,
-        commands,
-        "別名付きWikiリンク",
-        "Wiki Link with Alias",
-        word(document::InsertEdit::WikiLinkAlias),
-        false,
-    )?;
-    // **画像もリンクの一種**なので、同じ副メニューへ置く（RFN01-48）。行き先から
-    // 書く形で字は要らないので、選択が無くても押せる——`word`を通さない。
-    row(
-        &link,
-        commands,
-        "画像リンク(Markdown)",
-        "Image Link (Markdown)",
-        true,
-        false,
-    )?;
-    row(
-        &link,
-        commands,
-        "画像リンク(Wiki)",
-        "Image Link (Wiki)",
-        true,
-        false,
-    )?;
-    menu.child(pick("リンク", "Link"), link)?;
-    row(
-        menu,
-        commands,
-        "ルビ",
-        "Ruby",
-        word(document::InsertEdit::Ruby),
-        false,
-    )?;
-    let note = Popup::new()?;
-    row(
-        &note,
-        commands,
-        "左側の注記",
-        "Left-side Annotation",
-        word(document::InsertEdit::SideNote),
-        false,
-    )?;
-    row(
-        &note,
-        commands,
-        "ルビと左側の注記",
-        "Ruby and Left-side Annotation",
-        word(document::InsertEdit::RubyWithSideNote),
-        false,
-    )?;
-    menu.child(pick("注記", "Annotation"), note)?;
-    let dots = Popup::new()?;
-    row(
-        &dots,
-        commands,
-        "傍点",
-        "Emphasis Dots",
-        word(document::InsertEdit::EmphasisDots),
-        false,
-    )?;
-    row(
-        &dots,
-        commands,
-        "ゴマ傍点",
-        "Sesame Dots",
-        word(document::InsertEdit::SesameDotsNote),
-        false,
-    )?;
-    row(
-        &dots,
-        commands,
-        "丸傍点",
-        "Round Dots",
-        word(document::InsertEdit::RoundDotsNote),
-        false,
-    )?;
-    row(
-        &dots,
-        commands,
-        "白丸傍点",
-        "White Round Dots",
-        word(document::InsertEdit::WhiteRoundDotsNote),
-        false,
-    )?;
-    row(
-        &dots,
-        commands,
-        "二重丸傍点",
-        "Double Round Dots",
-        word(document::InsertEdit::DoubleRoundDotsNote),
-        false,
-    )?;
-    row(
-        &dots,
-        commands,
-        "×傍点",
-        "Cross Dots",
-        word(document::InsertEdit::CrossDotsNote),
-        false,
-    )?;
-    menu.child(pick("傍点", "Emphasis Marks"), dots)?;
-    let lines = Popup::new()?;
-    row(
-        &lines,
-        commands,
-        "傍線",
-        "Single Line",
-        word(document::InsertEdit::LineNote),
-        false,
-    )?;
-    row(
-        &lines,
-        commands,
-        "二重傍線",
-        "Double Line",
-        word(document::InsertEdit::DoubleLineNote),
-        false,
-    )?;
-    row(
-        &lines,
-        commands,
-        "波線",
-        "Wavy Line",
-        word(document::InsertEdit::WaveLineNote),
-        false,
-    )?;
-    row(
-        &lines,
-        commands,
-        "鎖線",
-        "Chain Line",
-        word(document::InsertEdit::ChainLineNote),
-        false,
-    )?;
-    row(
-        &lines,
-        commands,
-        "破線",
-        "Dashed Line",
-        word(document::InsertEdit::DashLineNote),
-        false,
-    )?;
-    menu.child(pick("傍線", "Emphasis Lines"), lines)?;
-    let marks = Popup::new()?;
-    row(
-        &marks,
-        commands,
-        "縦中横",
-        "Tate-chu-yoko",
-        word(document::InsertEdit::Upright),
-        false,
-    )?;
-    row(
-        &marks,
-        commands,
-        "割り注",
-        "Warichu",
-        word(document::InsertEdit::Warichu),
-        false,
-    )?;
-    row(
-        &marks,
-        commands,
-        "小さな文字",
-        "Small Text",
-        word(document::InsertEdit::SmallText),
-        false,
-    )?;
-    row(
-        &marks,
-        commands,
-        "大きな文字",
-        "Large Text",
-        word(document::InsertEdit::LargeText),
-        false,
-    )?;
-    menu.child(pick("文字注記", "Text Annotation"), marks)?;
-    // ここから行の体裁（I22〜I39）。**印は「全行が同じ指定か」を表す**
-    // ——混在していれば、どれにも印が付かない（書き手の合意 2026-09-21）。
-    let heading = Popup::new()?;
-    for level in 1..=6u8 {
-        let name = say!("見出し {level}", "Heading {level}");
-        row(
-            &heading,
-            commands,
-            &name,
-            &name,
-            notes.can_heading,
-            notes.level == Some(level),
-        )?;
+    for entry in INSERT_MENU {
+        match entry {
+            InsertEntry::Row(item) => row(menu, commands, *item)?,
+            InsertEntry::Group((ja, en), items) => {
+                let group = Popup::new()?;
+                let mut nested: Option<(Title, Popup)> = None;
+                for item in *items {
+                    let wanted = title_submenu(item.0);
+                    if nested.as_ref().map(|(title, _)| *title) != wanted {
+                        if let Some(((ja, en), popup)) = nested.take() {
+                            group.child(pick(ja, en), popup)?;
+                        }
+                        if let Some(title) = wanted {
+                            nested = Some((title, Popup::new()?));
+                        }
+                    }
+                    let into = nested.as_ref().map_or(&group, |(_, popup)| popup);
+                    row(into, commands, *item)?;
+                }
+                if let Some(((ja, en), popup)) = nested {
+                    group.child(pick(ja, en), popup)?;
+                }
+                menu.child(pick(ja, en), group)?;
+            }
+        }
     }
-    row(
-        &heading,
-        commands,
-        "見出しを解除",
-        "Remove Heading",
-        notes.can_heading && notes.level.is_some(),
-        false,
-    )?;
-    menu.child(pick("見出し", "Heading"), heading)?;
-    let paragraph = Popup::new()?;
-    let indent = Popup::new()?;
-    for count in 1..=4u8 {
-        let name = say!("{count}字下げ", "Indent {count} Characters");
-        row(
-            &indent,
-            commands,
-            &name,
-            &name,
-            notes.can_indent,
-            notes.indent == Some(count),
-        )?;
-    }
-    row(
-        &indent,
-        commands,
-        "字下げを解除",
-        "Remove Indent",
-        notes.can_indent && notes.indent.is_some(),
-        false,
-    )?;
-    paragraph.child(pick("字下げ", "Indent"), indent)?;
-    let tail = Popup::new()?;
-    row(
-        &tail,
-        commands,
-        "地付き",
-        "Align to End",
-        notes.can_tail,
-        notes.tail == Some(0),
-    )?;
-    for cells in 1..=4u8 {
-        let name = say!("地から{cells}字上げ", "{cells} Characters from End");
-        row(
-            &tail,
-            commands,
-            &name,
-            &name,
-            notes.can_tail,
-            notes.tail == Some(cells),
-        )?;
-    }
-    row(
-        &tail,
-        commands,
-        "地付きを解除",
-        "Remove End Alignment",
-        notes.can_tail && notes.tail.is_some(),
-        false,
-    )?;
-    paragraph.child(pick("地付き", "End Alignment"), tail)?;
-    menu.child(pick("段落注記", "Paragraph Annotation"), paragraph)?;
-    // **最後の1つは改ページ**（I40）。行ではなく、行と行のあいだへ入れる。
-    row(menu, commands, "改ページ", "Page Break", breakable, false)
+    Ok(())
 }
 
 struct Target {
@@ -1472,24 +1237,7 @@ fn build(
             let rectangular = live.states.of(t.id).borrow().rectangular;
             // **行の体裁は、いまの行が何かを読んでから出す**——押せるのに何も
             // 起きない行を作らないため、見る側と押す側が同じ答えを使う。
-            let (notes, breakable) = {
-                let source = t.document.text.borrow();
-                let pane_state = live.states.of(t.id);
-                let (from, to) = {
-                    let state = pane_state.borrow();
-                    match selection_source_range(&state) {
-                        Some((start, end)) => (start, end),
-                        None => {
-                            let caret = state.caret_source_byte.unwrap_or(0).min(source.len());
-                            (caret, caret)
-                        }
-                    }
-                };
-                (
-                    document::line_note_state(&source, from, to, reading_of(window)),
-                    document::can_break_page_here(&source, from, to),
-                )
-            };
+            let (notes, breakable) = insert_inputs(window, live, t.id, &t.document);
             insert_commands(
                 window,
                 &root,
@@ -2131,14 +1879,8 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         // 特定のシェルを結び付けない（書き手の合意 2026-09-21）。
         ShortcutAction::NewTerminal => Command::NewTerminal(window.get_default_shell()),
         ShortcutAction::FolderTerminal => Command::FolderTerminal,
-        // **番号はここで引く。**設定が持つのは形なので、挿入の並びが動いても指す先は
-        // 動かない。
-        ShortcutAction::Insert(shape) => {
-            let Some(index) = insert_number(shape) else {
-                return;
-            };
-            Command::Insert(index)
-        }
+        // **設定が持つのは形**なので、挿入の並びが動いても指す先は動かない。
+        ShortcutAction::Insert(shape) => Command::Insert(shape),
         ShortcutAction::Bullets(index) => Command::List(0, index),
         ShortcutAction::NumberedList => Command::List(1, -1),
         ShortcutAction::Renumber => Command::List(2, -1),
@@ -2268,7 +2010,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Kill(n) => window.invoke_pane_kill(p, n),
         Command::Word(n) => set_word_mode_of(window, live, t.id, n),
         Command::List(n, mark) => window.invoke_pane_list_edit(p, n, mark),
-        Command::Insert(n) => insert_in_pane(window, live, t.id, n),
+        Command::Insert(shape) => insert_in_pane(window, live, t.id, shape),
         Command::Direction(vertical) => {
             if t.id.vertical(window) != vertical {
                 window.invoke_pane_direction_toggled(p)
@@ -2469,8 +2211,38 @@ mod tests {
         }
     }
 
-    /// RFN01-38: **本文へ置ける項目は押せる。**番号は画面の並びと同じで、
-    /// `document::INSERT_EDITS`の後ろに`LINE_NOTE_EDITS`が続く。
+    /// 挿入の形を全部、メニューの並びで——`document::INSERT_EDITS`の後ろに
+    /// `LINE_NOTE_EDITS`、最後に改ページ。
+    fn every_shape() -> Vec<InsertShape> {
+        document::INSERT_EDITS
+            .iter()
+            .map(|what| InsertShape::Edit(*what))
+            .chain(
+                document::LINE_NOTE_EDITS
+                    .iter()
+                    .map(|what| InsertShape::Line(*what)),
+            )
+            .chain([InsertShape::PageBreak])
+            .collect()
+    }
+
+    /// **表には形が1つずつ、漏れなく並ぶ。**番号は行き来して同じ形に戻り、並びの
+    /// 外の番号はどの形も指さない。文言は空でない。
+    #[test]
+    fn the_insert_table_holds_every_shape_once() {
+        let listed: Vec<InsertShape> = insert_items().map(|(shape, _)| *shape).collect();
+        assert_eq!(listed, every_shape());
+        for (at, shape) in listed.iter().enumerate() {
+            assert_eq!(shape.number(), at as i32, "{shape:?}");
+            assert_eq!(InsertShape::from_number(at as i32), Some(*shape));
+            let (ja, en) = shape.title();
+            assert!(!ja.is_empty() && !en.is_empty(), "{shape:?}");
+        }
+        assert_eq!(InsertShape::from_number(-1), None);
+        assert_eq!(InsertShape::from_number(listed.len() as i32), None);
+    }
+
+    /// RFN01-38: **本文へ置ける項目は押せる。**並びは表（`INSERT_MENU`）のまま。
     #[test]
     fn the_insert_menu_offers_what_it_can_write_into_the_body() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
@@ -2488,14 +2260,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            commands.len(),
-            document::INSERT_EDITS.len() + document::LINE_NOTE_EDITS.len() + 1
-        );
-        for (index, command) in commands.iter().enumerate() {
+        let shapes = every_shape();
+        assert_eq!(commands.len(), shapes.len());
+        for (command, shape) in commands.iter().zip(&shapes) {
             assert!(
-                matches!(command, Command::Insert(n) if *n == index as i32),
-                "並びがそのまま番号になる"
+                matches!(command, Command::Insert(given) if given == shape),
+                "{shape:?}"
             );
         }
         let rows = leaves(menu.handle);
@@ -2597,14 +2367,14 @@ mod tests {
             let (top, children) = context_insert_rows(true, picked, notes, false);
             let mut ours: Vec<(&str, bool, bool)> = Vec::new();
             let (mut at_top, mut at_child) = (0, 0);
-            for what in CONTEXT_INSERT {
+            for what in INSERT_MENU {
                 match what {
-                    ContextEntry::Row(_, _) => {
+                    InsertEntry::Row(_) => {
                         let row = &top[at_top];
                         ours.push((row.title.as_str(), row.enabled, row.checked));
                         at_top += 1;
                     }
-                    ContextEntry::Group(_, rows) => {
+                    InsertEntry::Group(_, rows) => {
                         for row in &children[at_child..at_child + rows.len()] {
                             ours.push((row.title.as_str(), row.enabled, row.checked));
                         }
@@ -2621,8 +2391,8 @@ mod tests {
             }
             // 組の行は、中に押せる行があるかどうかで押せる（**空でも出す**）。
             let mut group = 0;
-            for what in CONTEXT_INSERT {
-                let ContextEntry::Group(_, rows) = what else {
+            for what in INSERT_MENU {
+                let InsertEntry::Group(_, rows) = what else {
                     continue;
                 };
                 let inside = children.iter().filter(|row| row.group == group).count();

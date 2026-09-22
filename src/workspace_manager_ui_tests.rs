@@ -282,7 +282,7 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
 
     // Explicit external startup paths opt out without changing the default.
     switch_workspace(&window, &live, Some(second));
-    open_startup_paths(&window, &live, id, &[outside_path.clone()]);
+    open_startup_paths(&window, &live, id, std::slice::from_ref(&outside_path));
     assert_eq!(runtime.borrow().active_workspace(), None);
     assert_eq!(
         runtime.borrow().registry().default_workspace(),

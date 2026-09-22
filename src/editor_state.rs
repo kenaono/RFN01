@@ -118,6 +118,15 @@ pub(crate) fn selection_source_range(state: &EditorState) -> Option<(usize, usiz
     (anchor != focus).then_some((anchor.min(focus), anchor.max(focus)))
 }
 
+/// 書き手が選んだ範囲。**選んでいなければキャレット1つ**（頭と尻が同じ所）で、
+/// 本文の長さ`len`を越えない。挿入・行の操作・メニューの有効条件が同じ答えを読む。
+pub(crate) fn chosen_source_range(state: &EditorState, len: usize) -> (usize, usize) {
+    selection_source_range(state).unwrap_or_else(|| {
+        let caret = state.caret_source_byte.unwrap_or(0).min(len);
+        (caret, caret)
+    })
+}
+
 pub(crate) fn update_selection_after_move(
     state: &mut EditorState,
     source_byte: usize,

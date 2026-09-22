@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(marks.marks_in(&"あ".repeat(500), 10).len(), 10);
         // **既定の上限は散文で届かない**（2026-09-08）。上限で黙って止まると、
         // そこから先が「打ち間違えた」ように見える。
-        assert!(MAX_MARKS_PER_BLOCK >= 2048);
+        const { assert!(MAX_MARKS_PER_BLOCK >= 2048) };
     }
 
     /// 文字の途中からは始めない。**畳むのはASCIIだけ**である。

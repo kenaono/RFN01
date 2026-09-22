@@ -626,6 +626,21 @@ fn default_extension(suggested_name: &str) -> &str {
     }
 }
 
+/// The chosen item's path in the filesystem.
+///
+/// # Safety
+///
+/// `item` must be an item a dialog has just returned. The shell allocated the
+/// string, so it is freed here and nowhere else.
+unsafe fn chosen_path(item: &IShellItem) -> Option<PathBuf> {
+    unsafe {
+        let wide = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = wide.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(wide.0 as *const core::ffi::c_void));
+        path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,20 +710,5 @@ mod tests {
         // 拡張子が無い（新しい文書）ときだけ、この編集器がふだん書く形。
         assert_eq!(default_extension("無題1"), "md");
         assert_eq!(default_extension("note."), "md");
-    }
-}
-
-/// The chosen item's path in the filesystem.
-///
-/// # Safety
-///
-/// `item` must be an item a dialog has just returned. The shell allocated the
-/// string, so it is freed here and nowhere else.
-unsafe fn chosen_path(item: &IShellItem) -> Option<PathBuf> {
-    unsafe {
-        let wide = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        let path = wide.to_string().ok().map(PathBuf::from);
-        CoTaskMemFree(Some(wide.0 as *const core::ffi::c_void));
-        path
     }
 }

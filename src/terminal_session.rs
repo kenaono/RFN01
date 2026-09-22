@@ -16,14 +16,12 @@
 //! about that lock is a window that stops. Bytes go over a channel and the
 //! window applies them where it already owns everything else.
 
-// Unwired until the pane exists, exactly as in [`crate::pty`].
-#![allow(dead_code)]
-
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
+#[cfg(test)]
 use std::time::Duration;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -64,6 +62,7 @@ impl TerminalSession {
     /// `wake` is called from the reading thread every time bytes arrive, and
     /// means only "there is something to collect". Applying it is
     /// [`Self::drain`], on the thread that owns the window.
+    #[cfg(test)]
     pub fn start(
         name: &str,
         command: &str,
@@ -257,6 +256,7 @@ impl TerminalSession {
 
     /// Wait for the shell to say something, then apply it. **For tests and for
     /// nothing else** — the window is woken, it does not wait.
+    #[cfg(test)]
     pub fn wait(&mut self, patience: Duration) -> bool {
         match self.output.recv_timeout(patience) {
             Ok(chunk) => {

@@ -130,7 +130,7 @@ fn startup_paths_reuse_a_tab_for_a_repeated_file_without_losing_other_dirty_text
     let original = r.memo.text.borrow().to_string();
     let path = r.directory.join("原稿.md");
     std::fs::write(&path, "最初の文書").unwrap();
-    open_startup_paths(&r.window, &r.live, r.id, &[path.clone()]);
+    open_startup_paths(&r.window, &r.live, r.id, std::slice::from_ref(&path));
     assert_eq!(r.live.tabs.borrow().of(r.id).tabs.len(), 2);
     assert_eq!(r.memo.text.borrow().to_string(), original);
     assert!(r.memo.text.edited());
@@ -139,7 +139,7 @@ fn startup_paths_reuse_a_tab_for_a_repeated_file_without_losing_other_dirty_text
         .find(|d| d.file.borrow().path() == Some(path.as_path()))
         .unwrap();
     append(&document, "編集中");
-    open_startup_paths(&r.window, &r.live, r.id, &[path.clone()]);
+    open_startup_paths(&r.window, &r.live, r.id, std::slice::from_ref(&path));
     let tabs = r.live.tabs.borrow();
     let strip = tabs.of(r.id);
     assert_eq!(strip.tabs.len(), 2);
@@ -160,7 +160,7 @@ fn startup_paths_empty_list_is_a_no_op_and_a_missing_path_does_not_block_a_later
     assert!(r.window.get_render_status().is_empty());
 
     let missing = r.directory.join("no-such-file.md");
-    open_startup_paths(&r.window, &r.live, r.id, &[missing.clone()]);
+    open_startup_paths(&r.window, &r.live, r.id, std::slice::from_ref(&missing));
     assert!(!missing.exists());
     assert!(
         !r.window.get_render_status().is_empty(),

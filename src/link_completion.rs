@@ -12,21 +12,15 @@
 //!
 //! `document::link_here`'s two grammars are both naive, first-match splits:
 //! `[[note]]` cuts at the *first* `]]` and the *first* `|`; `[shown](target)`
-//! cuts at the *first* `)`. Wrapping a target in `<...>` — what
-//! `document::link_path` strips back off — does **not** protect against any
-//! of that, because `link_here` finds its delimiter before `link_path` ever
-//! sees the text. The only thing that actually survives both grammars is not
-//! writing the delimiter byte at all: [`percent_encode_reserved`] substitutes
-//! `%XX` for the specific ASCII bytes each grammar treats specially, leaving
-//! every other byte — all of Japanese included — untouched, and
-//! [`percent_decode`]/[`split_target_heading`] are its inverse, ready for the
-//! resolver a later phase adds to `document.rs`. **`document.rs` is not
-//! touched here and does not yet understand `#` or `%XX` in a target at
-//! all** — `link_path` still rejects any `#` outright, and nothing decodes
-//! `%XX` back today. The round-trip tests below only check that
-//! `document::link_target_at` finds the right *boundaries* for a generated
-//! link, which it already does unconditionally; they are not a claim that
-//! the target resolves today.
+//! cuts at the *first* `)`. Wrapping a target in `<...>` does **not** protect
+//! against any of that, because `link_here` finds its delimiter before the
+//! resolver ever sees the text. The only thing that actually survives both
+//! grammars is not writing the delimiter byte at all: [`percent_encode_reserved`]
+//! substitutes `%XX` for the specific ASCII bytes each grammar treats
+//! specially, leaving every other byte — all of Japanese included — untouched,
+//! and [`percent_decode`] is its inverse, which `workspace_links::resolve_link`
+//! (and the picture resolver) apply exactly once before a `#` is read as the
+//! heading separator.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -239,10 +233,10 @@ pub struct Candidate {
 /// Bytes [`document::link_here`]'s `[[...]]` grammar reads specially:
 /// `|` splits the shown text off, `]` risks an early `]]`, `#` is this
 /// design's own heading separator, and `%` is the escape's own marker.
-const WIKI_RESERVED: [u8; 4] = [b'|', b']', b'#', b'%'];
+const WIKI_RESERVED: [u8; 4] = *b"|]#%";
 /// The same idea for `(...)`: `)` ends the target early, `#` is the heading
 /// separator, `%` is the escape's own marker.
-const MARKDOWN_RESERVED: [u8; 3] = [b')', b'#', b'%'];
+const MARKDOWN_RESERVED: [u8; 3] = *b")#%";
 
 /// Substitutes `%XX` (uppercase hex) for every reserved byte in `text`, plus
 /// any ASCII control byte and space — leaving every other byte, Japanese
@@ -262,10 +256,10 @@ pub fn percent_encode_reserved(text: &str, reserved: &[u8]) -> String {
         .expect("only ASCII bytes were substituted; multi-byte sequences are untouched")
 }
 
-/// The inverse of [`percent_encode_reserved`] — for a later resolver, not
-/// used by anything in this module today. Any `%` not followed by two valid
-/// hex digits is left exactly as written rather than treated as an error:
-/// there is no partial-decode failure to report here, only text.
+/// The inverse of [`percent_encode_reserved`] — the one decoder every link
+/// and picture resolver uses. Any `%` not followed by two valid hex digits is
+/// left exactly as written rather than treated as an error: there is no
+/// partial-decode failure to report here, only text.
 pub fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -289,7 +283,7 @@ pub fn percent_decode(text: &str) -> String {
 /// Splits a target at its first *literal* `#` — the file portion's own `#`
 /// bytes are percent-encoded by [`percent_encode_reserved`] before this ever
 /// sees them, so a bare `#` surviving in the text can only be the separator
-/// this design reserves it for. For a later resolver, not used here.
+/// this design reserves it for.
 pub fn split_target_heading(target: &str) -> (&str, Option<&str>) {
     match target.find('#') {
         Some(at) => (&target[..at], Some(&target[at + 1..])),
@@ -809,7 +803,10 @@ mod tests {
         assert!(valid_replacement_range(source, 0..source.len()));
         assert!(!valid_replacement_range(source, 0..1));
         assert!(!valid_replacement_range(source, 0..(source.len() + 1)));
-        assert!(!valid_replacement_range(source, 3..0));
+        // 頭と尻が逆の範囲も断る（わざと空の範囲を作る）。
+        #[allow(clippy::reversed_empty_ranges)]
+        let reversed = 3..0;
+        assert!(!valid_replacement_range(source, reversed));
     }
 
     #[test]

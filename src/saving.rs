@@ -1209,6 +1209,7 @@ fn save_all_native(window: &AppWindow, live: &Live, include_memos: bool) {
 }
 
 /// Keep the batch rules identical for the native dialog and recovery tests.
+#[cfg(test)]
 pub(crate) fn save_all_with_choice(
     window: &AppWindow,
     live: &Live,

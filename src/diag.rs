@@ -437,7 +437,7 @@ impl DiagLog {
         };
         let now = LocalTime::now();
         let stamp = now.file_stamp();
-        let _ = fs::create_dir_all(&directory);
+        let _ = fs::create_dir_all(directory);
         for serial in 1..=NAME_ATTEMPTS {
             let id = format!("{stamp}_{serial:03}");
             let name = format!("Diag_{id}.log");

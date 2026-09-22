@@ -4297,14 +4297,7 @@ fn draw_block(
     // puts under the words.
     if let Some(numbers) = task.numbers {
         let format = graphics.number_format(typography, numbers.size, mode)?;
-        draw_line_numbers(
-            &target,
-            &comment_brush,
-            &format,
-            task,
-            numbers,
-            block_origin,
-        );
+        draw_line_numbers(target, &comment_brush, &format, task, numbers, block_origin);
     }
     // 要件 7.3.2: **a table is drawn cell by cell.** It is not one layout, so
     // none of what follows applies to it: no block-wide text, no boxes, no
@@ -4322,7 +4315,7 @@ fn draw_block(
             font_size: typography.font_size,
         };
         draw_grid(
-            graphics, &target, &brush, grid, &task.text, typography, &page,
+            graphics, target, &brush, grid, &task.text, typography, &page,
         )?;
     } else {
         let layout = match cached {
@@ -4466,8 +4459,8 @@ fn draw_block(
             line_origin: cross_origin,
             font_size: typography.font_size,
         };
-        draw_text_decorations(&target, &brush, &task.block, &task.runs, typography, &page);
-        draw_line_ornaments(&target, &brush, &task.block, &task.lines, &page);
+        draw_text_decorations(target, &brush, &task.block, &task.runs, typography, &page);
+        draw_line_ornaments(target, &brush, &task.block, &task.lines, &page);
         // SAFETY: The layout outlives the draw call, and the underline is set
         // and cleared on the same layout.
         unsafe {
@@ -4493,7 +4486,7 @@ fn draw_block(
         }
         if typography.whitespace {
             draw_whitespace(
-                &target,
+                target,
                 &comment_brush,
                 &layout,
                 &task.text,
@@ -4512,7 +4505,7 @@ fn draw_block(
             let upright = graphics.upright_formats_for(typography, &task.runs, &task.text)?;
             draw_marker_ink(
                 &graphics.dwrite,
-                &target,
+                target,
                 &brush,
                 &format,
                 &heading_markers,
@@ -4535,7 +4528,7 @@ fn draw_block(
             {
                 let formats = graphics.warichu_formats_for(typography, mode, &task.runs)?;
                 draw_warichu(
-                    &target, &brush, &formats, &layout, &task.runs, &task.text, origin, mode,
+                    target, &brush, &formats, &layout, &task.runs, &task.text, origin, mode,
                     typography,
                 )?;
             }
@@ -4547,7 +4540,7 @@ fn draw_block(
             .any(|run| run.ornament.is_some_and(Ornament::is_image))
         {
             draw_pictures(
-                &target,
+                target,
                 &layout,
                 &task.runs,
                 origin,
@@ -4561,10 +4554,10 @@ fn draw_block(
         if task.runs.iter().any(run_rides_beside) {
             let ruby = graphics.ruby_formats_for(typography, mode, &task.runs)?;
             draw_ruby(
-                &target, &brush, &ruby, &layout, &task.runs, &task.text, origin, mode, typography,
+                target, &brush, &ruby, &layout, &task.runs, &task.text, origin, mode, typography,
             )?;
             draw_emphasis_dots(
-                &target, &brush, &ruby, &layout, &task.runs, &task.text, origin, mode, typography,
+                target, &brush, &ruby, &layout, &task.runs, &task.text, origin, mode, typography,
             )?;
         }
     }
@@ -5566,7 +5559,7 @@ impl TextEngine {
                 let key = measure_key(
                     block_layout,
                     keep_trailing_empty_line,
-                    table.then(|| block_styled.source_line).flatten(),
+                    table.then_some(block_styled.source_line).flatten(),
                 );
                 live_measure_keys.insert(key);
                 live_layout_keys.insert(block_layout);
@@ -6018,7 +6011,6 @@ impl TextEngine {
     /// 要件 7.8/7.10: このブロックの中で`［＃改ページ］`が立っている位置
     /// （ブロックの中のUTF-16）。**紙を切る側が読む**——画面ではこれが破線になり、
     /// 紙ではここでページが変わる。
-    #[allow(dead_code)] // 読むのは`print`（画面からの入口はまだ無い）。
     fn page_break_lines(&self, block_index: usize) -> Vec<u32> {
         if self.plan.blocks[block_index].grid.is_some() {
             return Vec::new();
@@ -11490,7 +11482,7 @@ mod tests {
         assert!(engine.block_count() > 2);
 
         let mut edited = text.clone();
-        edited.insert_str(0, "あ");
+        edited.insert(0, 'あ');
         let blocks = engine.block_count();
         let measured = update_plain(&mut engine, &edited).blocks;
 
@@ -11780,10 +11772,6 @@ mod tests {
 /// target and the pixels handed to Slint are the document's; what is not shared
 /// is the arrangement — a terminal has no blocks, no wrapping and no measuring,
 /// because every cell is exactly where its row and column say (技術検証 9.4).
-///
-/// Nothing in the binary calls this until the pane does, the same as
-/// [`crate::pty`]; the allow goes when the pane arrives.
-#[allow(dead_code)]
 pub mod cells {
     use super::*;
 
@@ -12430,7 +12418,8 @@ mod terminal_tests {
         .expect("draw");
         let ink_at = |column: usize| {
             let x = (column as f32 * cell.advance + cell.advance * 0.5) as u32;
-            let at = ((1 * width + x) * 4) as usize;
+            // 2行目（row 1）の真ん中。
+            let at = ((width + x) * 4) as usize;
             (pixels[at], pixels[at + 1], pixels[at + 2])
         };
         let (blue, green, red) = ink_at(3);
@@ -12490,7 +12479,8 @@ mod terminal_tests {
         let mut it = Terminal::new(8, 2);
         it.feed(b"\x1b[7m  \x1b[m");
         let (pixels, width, _) = draw(&it, &look, cell);
-        let corner = ((1 * width + 1) * 4) as usize;
+        // 2行目（row 1）の2画素目。
+        let corner = ((width + 1) * 4) as usize;
         let (blue, green, red) = (pixels[corner], pixels[corner + 1], pixels[corner + 2]);
         assert!(
             blue < 140 && green < 140 && red < 140,

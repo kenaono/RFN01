@@ -821,7 +821,7 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     window.invoke_colour_set(5, 0, yellow);
     window.invoke_colour_set(3, 0, blue);
     assert_eq!(chip().colour, yellow, "its own colour stays");
-    assert!(chip().dark == false);
+    assert!(!chip().dark);
     assert_eq!(paper(), channels(blue), "the tab colour is not the paper");
     window.invoke_colour_default(5, 0);
     assert_eq!(chip().colour, blue, "back to following the paper");

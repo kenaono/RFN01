@@ -10,12 +10,6 @@
 //! be killed, it can print anything at all; none of that is in this process. A
 //! pseudo console gives it a screen to write to and gives us the bytes it wrote.
 
-// **Nothing in the binary calls any of this yet.** The pane that will is 追加
-// 要件's Terminal; until it exists the module is reached only from its test and
-// every item here reads as unused. Delete this line when the pane arrives — the
-// warnings it hides are the ones that say what is still unwired.
-#![allow(dead_code)]
-
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -87,7 +81,6 @@ pub struct Pty {
     /// this is `None` once somebody has it.
     reader: Option<OwnedHandle>,
     process: OwnedHandle,
-    pid: u32,
 }
 
 impl Pty {
@@ -98,6 +91,7 @@ impl Pty {
     /// close our copies of them straight away** — they are duplicated into the
     /// console host, and a copy left open here would keep the pipe alive after
     /// the shell had gone, so nothing would ever read end-of-file.
+    #[cfg(test)]
     pub fn open(command: &str, columns: u16, rows: u16) -> windows::core::Result<Self> {
         Self::open_in(command, None, columns, rows)
     }
@@ -199,7 +193,6 @@ impl Pty {
                 writer: input_write,
                 reader: Some(output_read),
                 process: OwnedHandle(spawned.hProcess),
-                pid: spawned.dwProcessId,
             })
         }
     }
@@ -247,10 +240,7 @@ impl Pty {
         waited == windows::Win32::Foundation::WAIT_OBJECT_0
     }
 
-    pub fn pid(&self) -> u32 {
-        self.pid
-    }
-
+    #[cfg(test)]
     pub fn process(&self) -> HANDLE {
         self.process.raw()
     }
@@ -308,8 +298,6 @@ mod tests {
             started.elapsed().as_secs_f64() * 1000.0
         );
 
-        println!("child pid {}", pty.pid());
-
         let reader = pty.take_reader().expect("the reader is there once");
         let (post, collect) = mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
@@ -345,7 +333,11 @@ mod tests {
         }
 
         pty.write(b"echo RFN-PTY-OK\r").expect("write");
-        let marker = b"RFN-PTY-OK";
+        // **答えは行の頭に出る。**打鍵の反響にも同じ字が出るが、反響は`echo `の後ろで、
+        // しかもシェルの制御列（bracketed paste の`ESC[?2004l`など）が途中に挟まって
+        // 割れることがある（2026-09-22、wsl.exeで実際にそうなった）。回数で数えると、
+        // 答えているのに落ちる。
+        let marker = b"\nRFN-PTY-OK";
         let mut seen: Vec<u8> = Vec::new();
         let mut first = None;
         let waited = Instant::now();
@@ -360,13 +352,7 @@ mod tests {
                         first = Some(waited.elapsed());
                     }
                     seen.extend_from_slice(&chunk);
-                    // The echo of the typing counts too, so the marker has to
-                    // be found twice before it is the shell answering.
-                    let hits = seen
-                        .windows(marker.len())
-                        .filter(|window| *window == marker)
-                        .count();
-                    if hits >= 2 {
+                    if seen.windows(marker.len()).any(|window| window == marker) {
                         break;
                     }
                 }
@@ -399,15 +385,10 @@ mod tests {
         );
         pty.write(b"exit\r").expect("write");
 
-        // **打鍵の反響と、シェルの答えの両方。**片方しか出てこないなら、
-        // 繋がっているのは片道だけということになる。
-        let hits = seen
-            .windows(marker.len())
-            .filter(|window| *window == marker)
-            .count();
+        // **行の頭の答え。**無ければ、打鍵は届いても答えが戻っていない。
         assert!(
-            hits >= 2,
-            "{command} sent {} bytes and the marker appeared {hits} time(s); \
+            seen.windows(marker.len()).any(|window| window == marker),
+            "{command} sent {} bytes without answering at the start of a line; \
              the shell is not answering through the console",
             seen.len()
         );
