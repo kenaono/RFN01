@@ -33,7 +33,10 @@ struct FileLog {
 }
 
 use crate::pty::Pty;
-use crate::terminal::{Key, Modifiers, Screen, Terminal, encode_key, encode_paste};
+use crate::terminal::{
+    Key, Modifiers, MouseAction, MouseButton, MouseTracking, Screen, Terminal, encode_focus,
+    encode_key, encode_mouse, encode_paste,
+};
 
 /// How much is read at once. **A screenful of coloured text is a few KB**, and
 /// a program printing a large file will simply come back around the loop.
@@ -54,6 +57,9 @@ pub struct TerminalSession {
     /// The shell has exited. **The screen stays** — what it last said is often
     /// the reason it exited.
     finished: bool,
+    /// The cell the last pointer movement was reported from, so that moving
+    /// within one cell is not a report per pixel.
+    mouse_at: Option<(usize, usize)>,
 }
 
 impl TerminalSession {
@@ -120,6 +126,7 @@ impl TerminalSession {
             terminal: Terminal::new(columns, rows),
             output,
             finished: false,
+            mouse_at: None,
         })
     }
 
@@ -286,6 +293,80 @@ impl TerminalSession {
         if !replies.is_empty() {
             let _ = self.pty.write(&replies);
         }
+    }
+
+    /// Whether the program has asked for the pointer (全画面TUIの互換性、
+    /// 2026-09-22). **While it has, a press is its**, not the start of a
+    /// selection — Shift gives the pointer back to the pane.
+    pub fn wants_mouse(&self) -> bool {
+        self.terminal.screen.modes().mouse != MouseTracking::Off
+    }
+
+    /// A pointer event over the cell at `row`, `column` of the screen.
+    /// `true` when the program took it.
+    pub fn send_mouse(
+        &mut self,
+        action: MouseAction,
+        button: MouseButton,
+        row: usize,
+        column: usize,
+        modifiers: Modifiers,
+    ) -> bool {
+        if !self.wants_mouse() {
+            return false;
+        }
+        if action == MouseAction::Move {
+            if self.mouse_at == Some((row, column)) {
+                return true;
+            }
+            self.mouse_at = Some((row, column));
+        }
+        let modes = self.terminal.screen.modes();
+        if let Some(bytes) = encode_mouse(action, button, row, column, modifiers, modes) {
+            self.send(&bytes);
+        }
+        true
+    }
+
+    /// A turn of the wheel, `lines` rows' worth. `true` when it went to the
+    /// program rather than to the pane's own history.
+    ///
+    /// **On the alternate screen there is no history to move through**, so a
+    /// program that did not ask for the pointer gets arrow keys instead — the
+    /// way `less` and `man` scroll in every other terminal.
+    pub fn send_wheel(
+        &mut self,
+        up: bool,
+        lines: usize,
+        row: usize,
+        column: usize,
+        modifiers: Modifiers,
+    ) -> bool {
+        let button = if up {
+            MouseButton::WheelUp
+        } else {
+            MouseButton::WheelDown
+        };
+        if self.wants_mouse() {
+            for _ in 0..lines.max(1) {
+                self.send_mouse(MouseAction::Press, button, row, column, modifiers);
+            }
+            return true;
+        }
+        if self.terminal.screen.modes().alternate_screen {
+            let key = if up { Key::Up } else { Key::Down };
+            for _ in 0..lines.max(1) {
+                self.send_key(key, Modifiers::default());
+            }
+            return true;
+        }
+        false
+    }
+
+    /// The pane gained or lost the keyboard.
+    pub fn send_focus(&mut self, focused: bool) {
+        let bytes = encode_focus(focused, self.terminal.screen.modes());
+        self.send(&bytes);
     }
 
     pub fn send_key(&mut self, key: Key, modifiers: Modifiers) {
@@ -607,5 +688,66 @@ mod running_a_program {
         for (what, times) in session.screen().unhandled() {
             println!("  {what} ×{times}");
         }
+    }
+
+    fn settle(session: &mut TerminalSession, millis: u64) {
+        let waited = Instant::now();
+        while waited.elapsed() < Duration::from_millis(millis) {
+            session.wait(Duration::from_millis(100));
+        }
+    }
+
+    fn screen_contains(session: &TerminalSession, needle: &str) -> bool {
+        (0..session.screen().rows()).any(|row| session.screen().row_text(row).contains(needle))
+    }
+
+    /// 全画面TUIの互換性（2026-09-22）: ConPTYを越えて、クリック・ホイール・
+    /// フォーカスが本物のvimとlessに届く。WSLにvimとlessが要る。
+    ///
+    /// `cargo test --offline full_screen_programs_hear -- --ignored --nocapture`
+    #[test]
+    #[ignore = "starts vim and less in WSL; run explicitly"]
+    fn full_screen_programs_hear_the_pointer_and_the_focus() {
+        use crate::terminal::{MouseAction, MouseButton};
+        let none = Modifiers::none();
+
+        // vim, mouse=a: a click moves the cursor, and the ruler says where.
+        // **A file of short lines**, so that screen row 6 is line 6.
+        let mut vim = TerminalSession::start(
+            "vim",
+            "wsl.exe -- vim -N -u NONE -c \"set mouse=a ruler\" \
+             -c \"au FocusLost * echo 'RFN-LOST'\" /etc/passwd",
+            80,
+            24,
+            || {},
+        )
+        .expect("start vim");
+        settle(&mut vim, 3000);
+        assert!(vim.wants_mouse(), "vim asked for the pointer");
+        assert!(vim.send_mouse(MouseAction::Press, MouseButton::Left, 5, 19, none));
+        assert!(vim.send_mouse(MouseAction::Release, MouseButton::Left, 5, 19, none));
+        settle(&mut vim, 800);
+        assert!(screen_contains(&vim, "6,20"), "the click reached vim");
+        assert!(vim.send_wheel(false, 3, 5, 19, none));
+        settle(&mut vim, 800);
+        assert!(!screen_contains(&vim, "Top"), "the wheel scrolled vim");
+        vim.send_focus(false);
+        settle(&mut vim, 800);
+        assert!(screen_contains(&vim, "RFN-LOST"), "vim heard the focus go");
+        vim.type_text(":qa!\r");
+
+        // less asks for no pointer, but it is on the alternate screen: the
+        // wheel becomes arrow keys.
+        let mut less =
+            TerminalSession::start("less", "wsl.exe -- less /etc/services", 80, 24, || {})
+                .expect("start less");
+        settle(&mut less, 3000);
+        assert!(!less.wants_mouse());
+        assert!(less.screen().modes().alternate_screen);
+        let first = less.screen().row_text(0);
+        assert!(less.send_wheel(false, 3, 0, 0, none));
+        settle(&mut less, 800);
+        assert_ne!(less.screen().row_text(0), first, "the wheel scrolled less");
+        less.type_text("q");
     }
 }
