@@ -126,6 +126,8 @@ pub struct Typography {
     /// same way, one value per level. A level set to the body's ink simply
     /// looks like body text, which is what every level starts as.
     pub heading_ink: [[f32; 3]; MAX_HEADING_LEVEL],
+    /// 書き手の求め 2026-09-22: `==ハイライト==`の地の色（Text の面で選べる）。
+    pub highlight: [f32; 3],
     /// Whether the page carries its line numbers beside it (要件 9、2026-09-07
     /// 追加).
     ///
@@ -204,6 +206,8 @@ pub const DEFAULT_CODE_FONT: &str = "Consolas";
 /// **いままで描いていた字。**設定になったからといって、書き手の画面が動くいわれは
 /// ない（`DEFAULT_BODY_FONT`と同じ考え方）——**3つの記号とも同じ丸から始める**。
 pub const DEFAULT_BULLET: char = '•';
+/// 書き手の求め 2026-09-22: ハイライトの既定の地——淡い黄色、蛍光ペンの色。
+pub const DEFAULT_HIGHLIGHT: [f32; 3] = [1.0, 243.0 / 255.0, 163.0 / 255.0];
 
 /// The ink `doc-ink` in `ui/tokens.slint`: the one colour in the app with no
 /// purple in it, because it is the one a reader looks at for an hour.
@@ -246,6 +250,7 @@ impl Typography {
             paper: DEFAULT_PAPER,
             paper_painted: true,
             heading_ink: [DEFAULT_INK; MAX_HEADING_LEVEL],
+            highlight: DEFAULT_HIGHLIGHT,
             line_numbers: false,
             whitespace: false,
             // 要件 7.8: 書き手が何も書かなくても効く、が既定。
@@ -409,6 +414,13 @@ pub struct LineStyle {
     /// ブロックの切れ目も組み方も、そちらの仕組みがそのまま効く。字下げの範囲の中にある行は
     /// どれもこの値を持ち、注記の行そのものは[`LineKind::Note`]で隠れる。
     pub note_indent: u8,
+    /// 書き手の求め 2026-09-22: Calloutの中の行なら、その種類（[`callout_kind`]）。0は違う。
+    /// **引用の縦棒と地をその色で描く**——Calloutは引用が「何のための引用か」を言うもので、
+    /// 枠は引用のものをそのまま使う。
+    pub callout: u8,
+    /// 書き手の求め 2026-09-22: `%%`だけの行で挟んだコメントのブロックの行（挟む行も含む）。
+    /// **中は記法として読まない**（コードと同じく字のまま）で、全体を淡い色で描く。
+    pub comment_block: bool,
 }
 
 /// What begins a comment in one language, for the lines inside a fence
@@ -674,6 +686,52 @@ pub struct Marks {
     /// **こちらは幾何を動かす。**[`Beside`]と違って字そのものが小さく（大きく）なるので、
     /// 送りも折り返しも変わる——太字や斜体と同じ側にいて、同じように入れ子になれる。
     pub scale: TextScale,
+    /// 書き手の求め 2026-09-22: `==語==`——字の地を塗る（Obsidianのハイライト）。
+    /// **色であって寸法ではない**：地を塗るだけなので、送りも折り返しも変わらない。
+    pub highlight: bool,
+    /// 書き手の求め 2026-09-22: Calloutのラベル（`> [!NOTE]`の`NOTE`）を、その種類の色で描く。
+    /// 0は色を持たない。番号は[`callout_kind`]。
+    pub callout: u8,
+    /// 書き手の求め 2026-09-22: 淡い色で描く（脚注の定義の行）。**コメントとは別の旗**
+    /// ——コメントは本文の文字数に数えないが、脚注の中身は本文である。
+    pub faint: bool,
+}
+
+/// 書き手の求め 2026-09-22: Calloutの種類（Obsidianの既定の種類と別名）。**0は種類なし**
+/// ——知らない種類の語は、Obsidianと同じくNoteの色になる（[`callout_kind`]）。
+const CALLOUT_KINDS: [(&[&str], [u8; 3]); 13] = [
+    (&["note"], [8, 109, 221]),
+    (&["abstract", "summary", "tldr"], [0, 191, 188]),
+    (&["info"], [8, 109, 221]),
+    (&["todo"], [8, 109, 221]),
+    (&["tip", "hint", "important"], [0, 191, 188]),
+    (&["success", "check", "done"], [8, 185, 78]),
+    (&["question", "help", "faq"], [236, 117, 0]),
+    (&["warning", "caution", "attention"], [236, 117, 0]),
+    (&["failure", "fail", "missing"], [233, 49, 71]),
+    (&["danger", "error"], [233, 49, 71]),
+    (&["bug"], [233, 49, 71]),
+    (&["example"], [120, 82, 238]),
+    (&["quote", "cite"], [158, 158, 158]),
+];
+
+/// Calloutの語（大文字小文字は問わない）から種類の番号へ。1から数え、知らない語はNote（1）。
+pub fn callout_kind(label: &str) -> u8 {
+    let label = label.to_ascii_lowercase();
+    CALLOUT_KINDS
+        .iter()
+        .position(|(names, _)| names.contains(&label.as_str()))
+        .map_or(1, |at| at as u8 + 1)
+}
+
+/// 種類の色——Obsidianの既定の色。0（種類なし）には無い。
+pub fn callout_colour(kind: u8) -> Option<[f32; 3]> {
+    let (_, [r, g, b]) = CALLOUT_KINDS.get(usize::from(kind).checked_sub(1)?)?;
+    Some([
+        f32::from(*r) / 255.0,
+        f32::from(*g) / 255.0,
+        f32::from(*b) / 255.0,
+    ])
 }
 
 /// 字の脇に出る印の種類（要件 7.8、2026-09-16、書き手「組版の表現拡大」）。
@@ -807,6 +865,12 @@ pub fn warichu_halves(text: &str) -> (&str, &str) {
 ///
 /// **長いほうの行が決める。**2行は並んで走るので、短いほうが余白になる。半分の大きさで
 /// 組むので、枡目の数の半分がそのまま長さになる。
+/// 脚注の箱の長さ（[`Ornament::Superscript`]）——半分の大きさの1行と、前後の少しの空き。
+pub fn superscript_cells_x10(text: &str) -> u16 {
+    let cells = cells_of(text) * 0.5 + 0.2;
+    ((cells * 10.0).ceil() as u32).clamp(1, u16::MAX as u32) as u16
+}
+
 pub fn warichu_cells_x10(text: &str) -> u16 {
     let (first, second) = warichu_halves(text);
     let cells = cells_of(first).max(cells_of(second)) * 0.5;
@@ -953,6 +1017,9 @@ pub enum Ornament {
     /// 割り方（[`warichu_halves`]）は組むときと描くときで同じ答えを使うので、
     /// 長さは記法を読んだところで一度だけ決める。
     Warichu { cells_x10: u16 },
+    /// 書き手の求め 2026-09-22: 脚注の参照（`[^1]`）——**割注と同じ作り**で、箱が場所を取り、
+    /// 覆った字を半分の大きさで、行の前の側（横書きは上、縦書きは右）に1行だけ組む。
+    Superscript { cells_x10: u16 },
     /// 画像（追加要件 2026-09-15、書き手：ライブプレビューの本文中に、画像だけの行をブロックとして出す）。
     ///
     /// `key`は絵を指す（`document::image_key`）。`width`×`height`は描く大きさ（画面の画素、倍率込み、
@@ -1025,7 +1092,9 @@ impl Ornament {
             Self::Hidden => indent_step,
             Self::Upright => font_size,
             // 割注は中の字数で決まる（`Ornament::Warichu`）。
-            Self::Warichu { cells_x10 } => font_size * f32::from(cells_x10) / 10.0,
+            Self::Warichu { cells_x10 } | Self::Superscript { cells_x10 } => {
+                font_size * f32::from(cells_x10) / 10.0
+            }
             _ => 0.0,
         }
     }
@@ -1041,7 +1110,10 @@ impl Ornament {
     /// **Only the upright digits do.** A marker's ink stands before the text,
     /// ruby stands over it, and these stand exactly where the box is.
     pub fn stands_in_its_box(self) -> bool {
-        matches!(self, Self::Upright | Self::Warichu { .. })
+        matches!(
+            self,
+            Self::Upright | Self::Warichu { .. } | Self::Superscript { .. }
+        )
     }
 }
 
@@ -1127,6 +1199,7 @@ impl LineStyle {
     /// two have to agree about how long that line is.
     pub fn is_literal(&self) -> bool {
         self.kind.is_code()
+            || self.comment_block
             || matches!(
                 self.kind,
                 LineKind::Rule | LineKind::TableRule | LineKind::Note | LineKind::PageBreak
@@ -2678,7 +2751,7 @@ pub enum LineOrnament {
     /// are two shapes drawn over the same edge, and the pixel they share is
     /// composited twice — lighter or heavier than the rest of the bar, and the
     /// seam is visible.
-    Quote { depth: u8 },
+    Quote { depth: u8, callout: u8 },
     /// The stroke a `---` line is set as.
     Rule,
     /// 改ページの切れ目（`［＃改ページ］`、2026-09-16）。**破線**——`---`の罫線と同じ
@@ -2825,6 +2898,7 @@ pub fn line_runs(styled: StyledText<'_>) -> Vec<LineRun> {
         } else if style.quote_depth > 0 {
             Some(LineOrnament::Quote {
                 depth: style.quote_depth,
+                callout: style.callout,
             })
         } else {
             None
@@ -4223,7 +4297,10 @@ mod tests {
                 LineRun {
                     utf16_start: 0,
                     utf16_len: after("引用"),
-                    ornament: LineOrnament::Quote { depth: 1 },
+                    ornament: LineOrnament::Quote {
+                        depth: 1,
+                        callout: 0,
+                    },
                     own_ends: (true, true),
                 },
                 LineRun {
@@ -4282,7 +4359,13 @@ mod tests {
             .collect::<Vec<LineOrnament>>();
         assert_eq!(
             ornaments,
-            vec![LineOrnament::Rule, LineOrnament::Quote { depth: 1 }]
+            vec![
+                LineOrnament::Rule,
+                LineOrnament::Quote {
+                    depth: 1,
+                    callout: 0,
+                }
+            ]
         );
     }
 
@@ -4306,7 +4389,10 @@ mod tests {
         let expected = LineRun {
             utf16_start: 0,
             utf16_len: after("引用の一行目\n引用の二行目"),
-            ornament: LineOrnament::Quote { depth: 1 },
+            ornament: LineOrnament::Quote {
+                depth: 1,
+                callout: 0,
+            },
             own_ends: (true, true),
         };
         assert_eq!(runs, vec![expected]);

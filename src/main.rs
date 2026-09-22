@@ -2488,6 +2488,14 @@ fn main() -> Result<(), slint::PlatformError> {
             open_link_at(&window, &link_live, id, id.flow_x(&window, x), y)
         })
     });
+    let weak = window.as_weak();
+    let hover_live = live.clone();
+    window.on_pane_link_hover(move |pane, x, y| {
+        weak.upgrade().is_some_and(|window| {
+            let id = PaneId::from_index(pane);
+            link_hover_at(&window, &hover_live, id, id.flow_x(&window, x), y)
+        })
+    });
 
     // E3の②: 行そのものを動かす・写す・消す。**番号は窓と1対1**で、増えたときに
     // 片方だけ直すことがないよう、対応はここに1つだけ書く。
@@ -9530,9 +9538,16 @@ fn wire_workspace_links(window: &AppWindow, live: &Live) {
     });
 }
 
-fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> bool {
+/// 面の点が当たる原文の字——文書、その原文、字のバイト位置。本文の外と行番号は`None`。
+fn letter_at(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    x: f32,
+    y: f32,
+) -> Option<(Rc<OpenDocument>, String, usize)> {
     if live.cache.borrow_mut().pane(id).terminal.is_some() {
-        return false;
+        return None;
     }
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
@@ -9546,11 +9561,35 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
         revealed,
         x,
         y,
-    );
-    let Some(hit) = hit.filter(|hit| !hit.in_numbers && hit.is_inside) else {
+    )?;
+    if hit.in_numbers || !hit.is_inside {
+        return None;
+    }
+    Some((document, source, hit.letter))
+}
+
+/// 書き手の求め 2026-09-22: Ctrlを押したまま、Ctrl+クリックで開ける所（リンクと脚注）の上に
+/// いるか。**Ctrlが無ければ当たりを訊かない**——ポインタが動くたびに走るので。
+fn link_hover_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> bool {
+    if !input_platform::control_held() {
+        return false;
+    }
+    letter_at(window, live, id, x, y).is_some_and(|(_, source, letter)| {
+        document::footnote_jump(&source, letter).is_some()
+            || document::link_target_at(&source, letter).is_some()
+    })
+}
+
+fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> bool {
+    let Some((document, source, letter)) = letter_at(window, live, id, x, y) else {
         return false;
     };
-    let Some((target, wiki)) = document::link_target_at(&source, hit.letter) else {
+    // 書き手の求め 2026-09-22: 脚注は同じ文書の中を行き来する（参照→定義、定義→参照）。
+    if let Some(to) = document::footnote_jump(&source, letter) {
+        show_source_range(window, live, id, &source, to, to);
+        return true;
+    }
+    let Some((target, wiki)) = document::link_target_at(&source, letter) else {
         return false;
     };
     let held_index = workspace_link_ui(live);
@@ -13316,6 +13355,7 @@ fn typography_for(
         *ink = colour(level + 1);
     }
     spec.paper = colour(PAPER_SLOT);
+    spec.highlight = colour(HIGHLIGHT_SLOT);
     for slot in 0..7 {
         spec.decorations[slot] = (0..5).fold(0, |bits, kind| {
             bits | ((number(Setting::Decoration(slot, kind)) != 0) as u8) << kind
@@ -13390,7 +13430,10 @@ const WRAP_CHARACTERS: i32 = 1;
 /// And set to "do not wrap at all" (要件 9). The third value is `2`, the pane's
 /// own width.
 const WRAP_NEVER: i32 = 0;
-const SHEET_COLOURS: usize = 15;
+/// 書き手の求め 2026-09-22: 16番目はハイライトの地（[`HIGHLIGHT_SLOT`]）。
+const SHEET_COLOURS: usize = 16;
+/// ハイライトの地の色が、1枚の色の中のどこにあるか。
+const HIGHLIGHT_SLOT: usize = 15;
 const SHEET_FONTS: usize = 2 + MAX_HEADING_LEVEL;
 /// Where the paper sits among a sheet's colours: after the body ink and the six
 /// heading inks.
@@ -13954,6 +13997,7 @@ fn colour_name(slot: usize) -> &'static str {
         12 => "background-h4",
         13 => "background-h5",
         14 => "background-h6",
+        HIGHLIGHT_SLOT => "highlight",
         _ => "paper",
     }
 }
@@ -13985,6 +14029,9 @@ fn font_slot(name: &str) -> Option<usize> {
 /// The two papers differ by a shade so that the two panes answer 「どちらの向き
 /// で書いているか」 without a word being read; everything else starts the same.
 fn default_colour(sheet: usize, slot: usize) -> [f32; 3] {
+    if slot == HIGHLIGHT_SLOT {
+        return text_blocks::DEFAULT_HIGHLIGHT;
+    }
     if slot != PAPER_SLOT && slot < 8 {
         return DEFAULT_INK;
     }

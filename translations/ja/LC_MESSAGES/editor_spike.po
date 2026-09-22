@@ -1269,3 +1269,7 @@ msgstr "移動先"
 
 msgid "(Root)"
 msgstr "（Root）"
+
+# 書き手の求め 2026-09-22: Obsidianの記法。
+msgid "Highlight"
+msgstr "ハイライト"

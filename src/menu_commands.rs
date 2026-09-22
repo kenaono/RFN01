@@ -264,6 +264,50 @@ const INSERT_MENU: &[InsertEntry] = &[
             ),
         ],
     ),
+    // 書き手の求め 2026-09-22: Obsidianの記法。
+    InsertEntry::Row((
+        InsertShape::Edit(document::InsertEdit::Highlight),
+        ("ハイライト", "Highlight"),
+    )),
+    InsertEntry::Row((
+        InsertShape::Edit(document::InsertEdit::Comment),
+        ("コメント", "Comment"),
+    )),
+    InsertEntry::Row((
+        InsertShape::Edit(document::InsertEdit::Footnote),
+        ("脚注", "Footnote"),
+    )),
+    InsertEntry::Group(
+        ("Callout", "Callout"),
+        &[
+            (
+                InsertShape::Edit(document::InsertEdit::Callout(document::CalloutType::Note)),
+                ("Note", "Note"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::Callout(document::CalloutType::Tip)),
+                ("Tip", "Tip"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::Callout(
+                    document::CalloutType::Important,
+                )),
+                ("Important", "Important"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::Callout(
+                    document::CalloutType::Warning,
+                )),
+                ("Warning", "Warning"),
+            ),
+            (
+                InsertShape::Edit(document::InsertEdit::Callout(
+                    document::CalloutType::Caution,
+                )),
+                ("Caution", "Caution"),
+            ),
+        ],
+    ),
     InsertEntry::Group(
         ("見出し", "Heading"),
         &[

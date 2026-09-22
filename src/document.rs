@@ -4,7 +4,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text_blocks::{
     Beside, CommentSyntax, Emphasis, LineKind, LineMarker, LineStyle, Marks, Ornament, Picture,
-    Pictures, TextScale, is_table_row, table_alignments, warichu_cells_x10,
+    Pictures, TextScale, callout_kind, is_table_row, superscript_cells_x10, table_alignments,
+    warichu_cells_x10,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,7 +589,8 @@ impl DocumentStats {
     pub fn from_source(source: &str) -> Self {
         Self {
             logical_lines: logical_line_count(source),
-            body_characters: visible_markdown_text(source).graphemes(true).count(),
+            body_characters: visible_markdown_text(source).graphemes(true).count()
+                - comment_graphemes_in(source),
             ruby_characters: ruby_graphemes_in(source),
             source_characters: source.graphemes(true).count(),
             longest_line_characters: longest_logical_line(source),
@@ -635,7 +637,9 @@ impl LineCounts {
         push_visible_line_in(line, style, &mut visible, &mut marks, reading, &context);
         Self {
             source_graphemes: line.graphemes(true).count(),
-            body_graphemes: visible.graphemes(true).count(),
+            // 書き手の求め 2026-09-22: コメントは本文に数えない。
+            body_graphemes: visible.graphemes(true).count()
+                - comment_graphemes(&visible, &marks, style),
             ruby_graphemes: ruby_graphemes(&visible, &marks),
             characters: line.chars().count(),
             style,
@@ -1640,6 +1644,39 @@ pub enum InsertEdit {
     SmallText,
     /// `［＃大きな文字］本文［＃大きな文字終わり］`。
     LargeText,
+    /// 書き手の求め 2026-09-22: `==本文==`（Obsidianのハイライト）。囲む形なので字は要らない。
+    Highlight,
+    /// `%%本文%%`（Obsidianのコメント）。
+    Comment,
+    /// `[^n]`をキャレット（選んだ字の後ろ）に置き、文書の末尾に`[^n]: `を足してそこへ立つ。
+    /// nは文書にある数字の脚注の次。
+    Footnote,
+    /// `> [!NOTE]`で始まるCallout。選んだ行（無ければキャレットの行）を`> `で包む。
+    Callout(CalloutType),
+}
+
+/// 書き手の求め 2026-09-22: 挿入メニューが置くCalloutの種類（GitHubとObsidianに共通の5つ）。
+/// 読むほうはObsidianの種類を全部読む（`text_blocks::callout_kind`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CalloutType {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl CalloutType {
+    /// 記法に書く語。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Note => "NOTE",
+            Self::Tip => "TIP",
+            Self::Important => "IMPORTANT",
+            Self::Warning => "WARNING",
+            Self::Caution => "CAUTION",
+        }
+    }
 }
 
 impl InsertEdit {
@@ -1669,7 +1706,7 @@ impl InsertEdit {
 /// `menu_commands`の`INSERT_MENU`が持ち、そこに形が1つずつ漏れなく並ぶことを
 /// 試験がこの一覧と突き合わせる。
 #[cfg(test)]
-pub const INSERT_EDITS: [InsertEdit; 23] = [
+pub const INSERT_EDITS: [InsertEdit; 31] = [
     InsertEdit::MarkdownLink,
     InsertEdit::WikiLink,
     InsertEdit::WikiLinkAlias,
@@ -1693,6 +1730,14 @@ pub const INSERT_EDITS: [InsertEdit; 23] = [
     InsertEdit::Warichu,
     InsertEdit::SmallText,
     InsertEdit::LargeText,
+    InsertEdit::Highlight,
+    InsertEdit::Comment,
+    InsertEdit::Footnote,
+    InsertEdit::Callout(CalloutType::Note),
+    InsertEdit::Callout(CalloutType::Tip),
+    InsertEdit::Callout(CalloutType::Important),
+    InsertEdit::Callout(CalloutType::Warning),
+    InsertEdit::Callout(CalloutType::Caution),
 ];
 
 /// 挿入メニューのひな形を組む（RFN01-38）。
@@ -1722,6 +1767,12 @@ pub fn insert_edit(
     let picked = &source[start..end];
     if picked.is_empty() && what.needs_a_picked_word() {
         return None;
+    }
+    // 書き手の求め 2026-09-22: 本文の2か所に書く形と、行を包む形は置き換える範囲が違う。
+    match what {
+        InsertEdit::Footnote => return Some(footnote_edit(source, end)),
+        InsertEdit::Callout(kind) => return Some(callout_edit(source, start, end, kind)),
+        _ => {}
     }
     let (text, after) = match what {
         InsertEdit::MarkdownLink => {
@@ -1800,11 +1851,69 @@ pub fn insert_edit(
         InsertEdit::Warichu => range_note(picked, "［＃割り注］", "［＃割り注終わり］"),
         InsertEdit::SmallText => range_note(picked, "［＃小さな文字］", "［＃小さな文字終わり］"),
         InsertEdit::LargeText => range_note(picked, "［＃大きな文字］", "［＃大きな文字終わり］"),
+        InsertEdit::Highlight => range_note(picked, "==", "=="),
+        InsertEdit::Comment => range_note(picked, "%%", "%%"),
+        InsertEdit::Footnote | InsertEdit::Callout(_) => return None,
     };
     // **選び直す位置は新しい本文のものである**（[`line_edit`]と同じ）——置き換えた
     // 範囲の頭から数えるので、`apply_span_edit`がそのまま使える。
     let caret = start + after;
     Some((start..end, text, (caret, caret)))
+}
+
+/// 書き手の求め 2026-09-22: 脚注を足す——`at`に`[^n]`、文書の末尾に`[^n]: `。
+///
+/// **1回の置き換えにする**（`at`から末尾まで）ので、取り消しも1回で両方が戻る。定義は、
+/// 末尾がもう脚注の定義ならそのすぐ次の行に、そうでなければ空行を1つ挟んで置く。
+fn footnote_edit(source: &str, at: usize) -> (Range<usize>, String, (usize, usize)) {
+    let number = source
+        .split('\n')
+        .flat_map(footnotes_in)
+        .filter_map(|(name, ..)| name.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut text = format!("[^{number}]{}", &source[at..]);
+    let last = text
+        .trim_end_matches('\n')
+        .rsplit('\n')
+        .next()
+        .unwrap_or("");
+    let after_definition = footnotes_in(last)
+        .first()
+        .is_some_and(|(_, start, _, definition)| *start == 0 && *definition);
+    let wanted = if after_definition { "\n" } else { "\n\n" };
+    while !text.ends_with(wanted) && !text.trim_end_matches('\n').is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&format!("[^{number}]: "));
+    let caret = at + text.len();
+    (at..source.len(), text, (caret, caret))
+}
+
+/// 書き手の求め 2026-09-22: 選んだ行（無ければキャレットの行）をCalloutにする——頭に
+/// `> [!NOTE]`の行を足し、行ごとに`> `を付ける。キャレットはCalloutの終わり。
+fn callout_edit(
+    source: &str,
+    start: usize,
+    end: usize,
+    kind: CalloutType,
+) -> (Range<usize>, String, (usize, usize)) {
+    let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+    // 次の行の頭までを選んだときは、その行は選んでいない。
+    let end = if end > start && source[..end].ends_with('\n') {
+        end - 1
+    } else {
+        end
+    };
+    let line_end = source[end..].find('\n').map_or(source.len(), |at| end + at);
+    let mut text = format!("> [!{}]", kind.label());
+    for line in source[line_start..line_end].split('\n') {
+        text.push_str("\n> ");
+        text.push_str(line);
+    }
+    let caret = line_start + text.len();
+    (line_start..line_end, text, (caret, caret))
 }
 
 /// 注記の書き出し（`［＃「`）。**記法であって、画面の言葉ではない。**
@@ -2932,6 +3041,22 @@ fn push_visible_line(
         // Indented text is literal, markers and all.
         let start = visible.len();
         visible.push_str(content);
+        // 書き手の求め 2026-09-22: `%%`で挟んだコメントのブロックは、行ごと淡く。
+        if style.comment_block {
+            let length = visible[start..].encode_utf16().count() as u32;
+            if length > 0 {
+                marks.push(Emphasis {
+                    utf16_start: 0,
+                    utf16_len: length,
+                    marks: Marks {
+                        comment: true,
+                        ..Marks::default()
+                    },
+                    ornament: None,
+                });
+            }
+            return;
+        }
         // 要件 7.3.2: **the one thing said about the inside of code.** The line
         // is literal — nothing is taken off it and nothing stands over it — and
         // this only says which part of it the reader may skip.
@@ -2996,6 +3121,8 @@ fn push_visible_line(
                 utf16_len: at - start,
                 marks: Marks {
                     bold: true,
+                    // 書き手の求め 2026-09-22: ラベルは種類の色で（Obsidianの見え方）。
+                    callout: callout_kind(label),
                     ..Marks::default()
                 },
                 ornament: None,
@@ -3004,7 +3131,27 @@ fn push_visible_line(
         }
         None => content,
     };
+    let from = marks.len();
+    let line_start = at;
     push_marked(content, visible, marks, &mut at, reading);
+    // 書き手の求め 2026-09-22: 脚注の定義の行（`[^1]: 中身`）は、本文より小さく淡く。
+    // **中の走りにも配る**——大きさは走りごとに組むので（`RangeNote::Small`と同じ理由）。
+    if line_start == 0 && footnote_here(content).is_some_and(|(_, after)| after.starts_with(':')) {
+        for mark in &mut marks[from..] {
+            mark.marks.scale = TextScale::Small;
+            mark.marks.faint = true;
+        }
+        marks.push(Emphasis {
+            utf16_start: 0,
+            utf16_len: at,
+            marks: Marks {
+                scale: TextScale::Small,
+                faint: true,
+                ..Marks::default()
+            },
+            ornament: None,
+        });
+    }
 }
 
 /// The kind a callout announces on its first line, and what follows it
@@ -3037,7 +3184,7 @@ const MARKED_LINE_LIMIT: usize = 32_000;
 ///
 /// Longest first because `**` has to be tried before `*`: a two-character
 /// marker read one character at a time is two empty ones.
-fn markers() -> [(&'static str, Marks); 6] {
+fn markers() -> [(&'static str, Marks); 7] {
     let bold = Marks {
         bold: true,
         ..Marks::default()
@@ -3054,10 +3201,16 @@ fn markers() -> [(&'static str, Marks); 6] {
         code: true,
         ..Marks::default()
     };
+    // 書き手の求め 2026-09-22: Obsidianのハイライト。
+    let highlight = Marks {
+        highlight: true,
+        ..Marks::default()
+    };
     [
         ("**", bold),
         ("__", bold),
         ("~~", strike),
+        ("==", highlight),
         ("`", code),
         ("*", italic),
         ("_", italic),
@@ -3269,16 +3422,44 @@ fn push_marked_recording(
         // means something else. A link needs `](` after its text and a footnote
         // needs a caret before it, so the two never both match — but reading
         // the caret first is what says so at a glance.
+        // 書き手の求め 2026-09-22: Obsidianのコメント`%%…%%`。**記号ごと残して淡く**描く
+        // ——消さないので、何が書いてあるかは画面から分かる。中は記法として読まない。
+        if let Some((comment, after)) = comment_here(rest) {
+            let start = *at;
+            for character in comment.chars() {
+                visible.push(character);
+                *at += character.len_utf16() as u32;
+            }
+            marks.push(Emphasis {
+                utf16_start: start,
+                utf16_len: *at - start,
+                marks: Marks {
+                    comment: true,
+                    ..Marks::default()
+                },
+                ornament: None,
+            });
+            previous = comment.chars().next_back();
+            rest = after;
+            continue;
+        }
         if let Some((name, after)) = footnote_here(rest) {
             let start = *at;
-            visible.push('[');
-            *at += 1;
+            // 書き手の求め 2026-09-22: **本文の中の参照は上付きの小さな番号**（箱が覆った
+            // 字を半分の大きさで、行の前の側に組む）。行頭の`[^1]:`は定義なので括弧のまま。
+            let definition = start == 0 && after.starts_with(':');
+            if definition {
+                visible.push('[');
+                *at += 1;
+            }
             for character in name.chars() {
                 visible.push(character);
                 *at += character.len_utf16() as u32;
             }
-            visible.push(']');
-            *at += 1;
+            if definition {
+                visible.push(']');
+                *at += 1;
+            }
             marks.push(Emphasis {
                 utf16_start: start,
                 utf16_len: *at - start,
@@ -3286,7 +3467,9 @@ fn push_marked_recording(
                     link: true,
                     ..Marks::default()
                 },
-                ornament: None,
+                ornament: (!definition).then(|| Ornament::Superscript {
+                    cells_x10: superscript_cells_x10(name),
+                }),
             });
             previous = Some(']');
             rest = after;
@@ -3936,6 +4119,40 @@ fn ruby_graphemes(visible: &str, marks: &[Emphasis]) -> usize {
         .sum()
 }
 
+/// 書き手の求め 2026-09-22: 本文に数えないコメントの字——`%%…%%`とコメントのブロックの行。
+/// **コードの中のコメントは数える**：あちらはコードの字であって、書き手のメモではない。
+fn comment_graphemes(visible: &str, marks: &[Emphasis], style: LineStyle) -> usize {
+    if style.kind.is_code() {
+        return 0;
+    }
+    marks
+        .iter()
+        .filter(|mark| mark.marks.comment && mark.ornament.is_none())
+        .map(|mark| {
+            let start = byte_at_utf16_in(visible, mark.utf16_start);
+            let end = byte_at_utf16_in(visible, mark.utf16_start + mark.utf16_len);
+            visible[start..end].graphemes(true).count()
+        })
+        .sum()
+}
+
+/// 文書全体のコメントの字の数（[`ruby_graphemes_in`]と同じ、素朴なほうの実装）。
+#[cfg(test)]
+fn comment_graphemes_in(source: &str) -> usize {
+    let styles = line_styles(source);
+    source
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            let style = styles.get(index).copied().unwrap_or_default();
+            let mut visible = String::with_capacity(line.len());
+            let mut marks = Vec::new();
+            push_visible_line(line, style, &mut visible, &mut marks, Reading::all());
+            comment_graphemes(&visible, &marks, style)
+        })
+        .sum()
+}
+
 /// 文書全体のルビの読みの数（要件 7.8）。
 ///
 /// **[`DocumentStats::from_source`]と同じ立場**——1行ずつ数える
@@ -3982,6 +4199,20 @@ fn byte_at_utf16_in(visible: &str, position: u32) -> usize {
 ///
 /// The name may be anything without a space or a bracket, which is what
 /// Markdown allows: `[^あ]` and `[^note-1]` are both footnotes.
+/// 書き手の求め 2026-09-22: `rest`の頭の`%%…%%`（記号ごと）と、その後ろ。
+///
+/// **閉じるものだけがコメント**——`**`と同じ規則で、閉じない`%%`は字のまま。空の`%%%%`も
+/// コメントではない。
+fn comment_here(rest: &str) -> Option<(&str, &str)> {
+    let inner = rest.strip_prefix("%%")?;
+    let close = inner.find("%%")?;
+    if close == 0 {
+        return None;
+    }
+    let end = 2 + close + 2;
+    Some((&rest[..end], &rest[end..]))
+}
+
 fn footnote_here(rest: &str) -> Option<(&str, &str)> {
     let inner = rest.strip_prefix("[^")?;
     let (name, after) = inner.split_once(']')?;
@@ -4128,6 +4359,95 @@ fn link_here(rest: &str, previous: Option<char>) -> Option<(&str, &str, &str)> {
     // one closes the link, which is what Markdown itself does.
     let (target, after) = after_close.split_once(')')?;
     (!shown.is_empty()).then_some((shown, target, after))
+}
+
+/// 書き手の求め 2026-09-22: 1行の中の脚注——`(名前, 始まり, 終わり, 定義か)`、位置は行の中のバイト。
+fn footnotes_in(line: &str) -> Vec<(&str, usize, usize, bool)> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = line[from..].find("[^") {
+        let start = from + offset;
+        match footnote_here(&line[start..]) {
+            Some((name, after)) => {
+                let end = line.len() - after.len();
+                found.push((name, start, end, start == 0 && after.starts_with(':')));
+                from = end;
+            }
+            None => from = start + 2,
+        }
+    }
+    found
+}
+
+/// 書き手の求め 2026-09-22: Ctrl+クリックした所が脚注なら、行き先のバイト位置——**参照からは
+/// 定義の行の頭へ、定義からは最初の参照へ**。コードの中の`[^1]`は脚注ではない。
+pub fn footnote_jump(source: &str, byte: usize) -> Option<usize> {
+    let styles = line_styles_reading(source, Reading::all());
+    let mut starts = Vec::new();
+    let mut at = 0;
+    for line in source.split('\n') {
+        starts.push(at);
+        at += line.len() + 1;
+    }
+    let lines = source.split('\n').collect::<Vec<_>>();
+    let prose = |index: usize| !styles.get(index).is_some_and(LineStyle::is_literal);
+    let index = starts
+        .partition_point(|start| *start <= byte)
+        .checked_sub(1)?;
+    if !prose(index) {
+        return None;
+    }
+    let within = byte - starts[index];
+    let (name, _, _, definition) = footnotes_in(lines[index])
+        .into_iter()
+        .find(|(_, start, end, _)| (*start..*end).contains(&within))?;
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| prose(*at))
+        .find_map(|(at, line)| {
+            footnotes_in(line)
+                .into_iter()
+                .find(|(other, _, _, is_definition)| *other == name && *is_definition != definition)
+                .map(|(_, start, _, _)| starts[at] + start)
+        })
+}
+
+/// 書き手の求め 2026-09-22: **印刷する本文**——コメント（`%%…%%`とコメントのブロックの行）を
+/// 取り除いたもの。コードの中の`%%`は残す。
+pub fn without_comments(source: &str) -> String {
+    let styles = line_styles_reading(source, Reading::all());
+    let mut kept = Vec::new();
+    for (index, line) in source.split('\n').enumerate() {
+        let style = styles.get(index).copied().unwrap_or_default();
+        if style.comment_block {
+            continue;
+        }
+        if style.is_literal() || !line.contains("%%") {
+            kept.push(line.to_owned());
+            continue;
+        }
+        let mut out = String::with_capacity(line.len());
+        let mut rest = line;
+        while let Some(letter) = rest.chars().next() {
+            // インラインコードの中の`%%`はコードの字（`opens_here`と同じく中は読まない）。
+            if letter == '`'
+                && let Some(close) = rest[1..].find('`')
+            {
+                out.push_str(&rest[..close + 2]);
+                rest = &rest[close + 2..];
+                continue;
+            }
+            if let Some((_, after)) = comment_here(rest) {
+                rest = after;
+                continue;
+            }
+            out.push(letter);
+            rest = &rest[letter.len_utf8()..];
+        }
+        kept.push(out);
+    }
+    kept.join("\n")
 }
 
 /// A link at a source byte. Parsing shares the preview grammar and never reads disk.
@@ -4535,6 +4855,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
             list_indent: levels.depth_of(columns) + 1,
             note_indent: 0,
             tail_cells: None,
+            ..LineStyle::default()
         };
     }
     // 要件 7.3.2: a paragraph written under an item belongs to it and is set in
@@ -4552,6 +4873,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
             list_indent: indent,
             note_indent: 0,
             tail_cells: None,
+            ..LineStyle::default()
         };
     }
     // **The rule the preview reads a line by**: indented text that continues
@@ -4571,6 +4893,7 @@ fn outside_fence(line: &str, levels: &mut ListLevels, marks: BulletMarks) -> Lin
         list_indent: 0,
         note_indent: 0,
         tail_cells: None,
+        ..LineStyle::default()
     }
 }
 
@@ -5161,6 +5484,53 @@ fn line_style(
     }
 }
 
+/// 書き手の求め 2026-09-22: 行をまたいで続く、Obsidianの2つのブロック——`%%`だけの行で挟んだ
+/// コメントと、`> [!NOTE]`で始まったCalloutの種類。**フェンスと同じ道**で、上から順に持ち越す。
+#[derive(Debug, Default)]
+struct Carry {
+    comment: bool,
+    callout: u8,
+}
+
+/// [`line_style`]に、[`Carry`]の2つを足して読む。
+///
+/// **コメントのブロックは`line_style`より先に見る**：中の「```」がフェンスを開いたり、
+/// 表や箇条書きの続きを始めたりしてはいけない——中は字のままである。
+#[allow(clippy::too_many_arguments)]
+fn carried_style(
+    line: &str,
+    next: &str,
+    fence: &mut Option<Fence>,
+    levels: &mut ListLevels,
+    table: &mut Option<TablePlace>,
+    reading: Reading,
+    note_indent: &mut u8,
+    carry: &mut Carry,
+) -> LineStyle {
+    let marker = line.trim() == "%%";
+    if fence.is_none() && (carry.comment || marker) {
+        carry.comment = !(carry.comment && marker);
+        carry.callout = 0;
+        *table = None;
+        return LineStyle {
+            comment_block: true,
+            ..LineStyle::default()
+        };
+    }
+    let style = line_style(line, next, fence, levels, table, reading, note_indent);
+    if style.quote_depth == 0 {
+        carry.callout = 0;
+        return style;
+    }
+    if let Some((label, _)) = callout_label(quote_content(line), style) {
+        carry.callout = callout_kind(label);
+    }
+    LineStyle {
+        callout: carry.callout,
+        ..style
+    }
+}
+
 /// How every logical line of `source` is set (要件 7.3.2).
 ///
 /// **The one place a line's kind and its heading level are decided together**,
@@ -5199,6 +5569,7 @@ pub fn line_styles_reading(source: &str, reading: Reading) -> Vec<LineStyle> {
     let mut table = None;
     // 字下げの範囲は行をまたいで続く（フェンスと同じ道）。
     let mut note_indent = 0;
+    let mut carry = Carry::default();
     let mut lines = source.split('\n').peekable();
     let mut styles = Vec::new();
     while let Some(line) = lines.next() {
@@ -5206,7 +5577,7 @@ pub fn line_styles_reading(source: &str, reading: Reading) -> Vec<LineStyle> {
         // bars at the end of the document has no delimiter row under it and is
         // not a table.
         let next = lines.peek().copied().unwrap_or_default();
-        styles.push(line_style(
+        styles.push(carried_style(
             line,
             next,
             &mut fence,
@@ -5214,6 +5585,7 @@ pub fn line_styles_reading(source: &str, reading: Reading) -> Vec<LineStyle> {
             &mut table,
             reading,
             &mut note_indent,
+            &mut carry,
         ));
     }
     styles
@@ -5246,6 +5618,7 @@ pub fn outline(source: &str) -> Vec<Heading> {
     let mut levels = ListLevels::default();
     let mut table = None;
     let mut note_indent = 0;
+    let mut carry = Carry::default();
     let mut lines = source.split('\n').peekable();
     while let Some(line) = lines.next() {
         let next = lines.peek().copied().unwrap_or_default();
@@ -5253,7 +5626,8 @@ pub fn outline(source: &str) -> Vec<Heading> {
         // fenced block is as much not-a-heading here as it is in the pane.
         // **アウトラインは見出しだけを見る。**どの記号を印として読むかは、ここの
         // 答えを変えない（`- 項目`は見出しではない）ので、全部読む側で通す。
-        let style = line_style(
+        // コメントのブロックの中の`#`は見出しではない（書き手の求め 2026-09-22）。
+        let style = carried_style(
             line,
             next,
             &mut fence,
@@ -5261,6 +5635,7 @@ pub fn outline(source: &str) -> Vec<Heading> {
             &mut table,
             Reading::all(),
             &mut note_indent,
+            &mut carry,
         );
         let level = style.heading_level;
         if level > 0 {
@@ -8812,7 +9187,7 @@ mod tests {
         );
         assert_eq!(
             visible_markdown_text(source),
-            "表示名😀 通常 [注] [[コード]] ![[画像]]"
+            "表示名😀 通常 注 [[コード]] ![[画像]]"
         );
         assert!(
             !PreviewDocument::from_source("[[未完").marks()[0]
@@ -8937,15 +9312,32 @@ mod tests {
         assert_eq!(visible_markdown_text("> [!] と書いた"), "[!] と書いた");
     }
 
-    /// 要件 7.3.2: **the caret comes off and the brackets stay.** `1` on its own
-    /// would be a number nobody could tell from a number, and `[1]` is what a
-    /// footnote has looked like in print for as long as there have been
-    /// footnotes.
+    /// 要件 7.3.2、書き手の求め 2026-09-22: **本文の中の参照は上付きの小さな番号**——括弧も
+    /// `^`も落ち、名前だけが箱（`Ornament::Superscript`）に覆われて半分の大きさで組まれる。
+    /// 行頭の定義（`[^1]:`）は括弧を残し、行ごと小さく淡くなる。
     #[test]
-    fn a_footnote_keeps_its_brackets_and_loses_its_caret() {
-        assert_eq!(visible_markdown_text("本文[^1]です"), "本文[1]です");
+    fn a_footnote_reference_is_a_superscript_and_its_definition_keeps_its_brackets() {
+        assert_eq!(visible_markdown_text("本文[^1]です"), "本文1です");
+        let preview = PreviewDocument::from_source("本文[^1]です");
+        let reference = preview.marks()[0]
+            .iter()
+            .find(|mark| mark.ornament.is_some())
+            .expect("boxed");
+        assert_eq!((reference.utf16_start, reference.utf16_len), (2, 1));
+        assert!(matches!(
+            reference.ornament,
+            Some(Ornament::Superscript { .. })
+        ));
         assert_eq!(visible_markdown_text("[^note-1]: 中身"), "[note-1]: 中身");
-        assert_eq!(visible_markdown_text("[^あ]"), "[あ]");
+        let definition = PreviewDocument::from_source("[^note-1]: 中身");
+        assert!(
+            definition.marks()[0]
+                .iter()
+                .all(|mark| mark.ornament.is_none()
+                    && mark.marks.faint
+                    && mark.marks.scale == TextScale::Small)
+        );
+        assert_eq!(visible_markdown_text("[^あ]"), "あ");
         // Unclosed, or not a name: left as written, like every other marker.
         assert_eq!(visible_markdown_text("[^1"), "[^1");
         assert_eq!(visible_markdown_text("[^]"), "[^]");
@@ -8963,5 +9355,175 @@ mod tests {
                 "position {position} mapped into the middle of a source character"
             );
         }
+    }
+
+    // --- 書き手の求め 2026-09-22: Obsidianの記法 ---------------------------------
+
+    /// `==語==`は記号が隠れて地が塗られる。閉じない`==`と空の`====`は字のまま。
+    #[test]
+    fn a_highlight_hides_its_marks_and_paints_its_word() {
+        let (visible, marks) = preview_of("前==語==後");
+        assert_eq!(visible, "前語後");
+        assert!(
+            marks
+                .iter()
+                .any(|mark| mark.marks.highlight && (mark.utf16_start, mark.utf16_len) == (1, 1))
+        );
+        assert_eq!(preview_of("a==b").0, "a==b");
+        assert_eq!(preview_of("a====b").0, "a====b");
+        // 太字の中にも入る。
+        let (visible, marks) = preview_of("**太==字==**");
+        assert_eq!(visible, "太字");
+        assert!(marks.iter().any(|mark| mark.marks.highlight));
+    }
+
+    /// `%%メモ%%`は記号ごと残って淡くなり、中は記法として読まない。文字数に数えない。
+    #[test]
+    fn an_inline_comment_stays_faint_and_is_not_counted() {
+        let (visible, marks) = preview_of("本文%%**メモ**%%続き");
+        assert_eq!(visible, "本文%%**メモ**%%続き");
+        let comment = marks
+            .iter()
+            .find(|mark| mark.marks.comment)
+            .expect("marked");
+        assert_eq!((comment.utf16_start, comment.utf16_len), (2, 10));
+        assert!(!marks.iter().any(|mark| mark.marks.bold));
+        let source = "本文%%メモ%%続き\n";
+        let mut counts = DocumentCounts::default();
+        counts.refresh(source, Reading::all());
+        assert_eq!(counts.stats().body_characters, "本文続き\n".chars().count());
+        assert_eq!(counts.stats(), DocumentStats::from_source(source));
+        // 閉じないものと、コードの中のものは字のまま（コードのほうは数える）。
+        assert_eq!(preview_of("50%%の").1.len(), 0);
+        let (visible, _) = preview_of("`%%x%%`");
+        assert_eq!(visible, "%%x%%");
+    }
+
+    /// `%%`だけの行で挟んだブロックは、中の記法を読まない——見出しも、フェンスも。
+    #[test]
+    fn a_comment_block_reads_nothing_inside_and_ends_at_its_closing_line() {
+        let source = "前\n%%\n# 見出しではない\n```\n%%\n## 見出し\n本文\n";
+        let styles = line_styles(source);
+        let blocked = styles
+            .iter()
+            .map(|style| style.comment_block)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            blocked,
+            [false, true, true, true, true, false, false, false]
+        );
+        assert!(!styles[5].kind.is_code(), "中の```はフェンスを開かない");
+        let outline = outline(source);
+        assert_eq!(outline.len(), 1);
+        assert_eq!(outline[0].text, "見出し");
+        let (visible, marks) = preview_of_styled(source, 2);
+        assert_eq!(visible, "# 見出しではない");
+        assert!(marks.iter().all(|mark| mark.marks.comment));
+        let mut counts = DocumentCounts::default();
+        counts.refresh(source, Reading::all());
+        assert_eq!(counts.stats(), DocumentStats::from_source(source));
+        assert_eq!(
+            counts.stats().body_characters,
+            "前\n\n\n\n\n見出し\n本文\n".chars().count()
+        );
+    }
+
+    /// Calloutの種類は最初の行が決め、引用が続くあいだ続く。ラベルはその色の印を持つ。
+    #[test]
+    fn a_callout_kind_reaches_every_line_of_its_quote() {
+        let source = "> [!WARNING] 注意\n> 本文\n\n> 普通の引用\n> [!tip]\n> ヒント";
+        let kinds = line_styles(source)
+            .iter()
+            .map(|style| style.callout)
+            .collect::<Vec<_>>();
+        let warning = callout_kind("WARNING");
+        let tip = callout_kind("tip");
+        assert_eq!(kinds, [warning, warning, 0, 0, tip, tip]);
+        assert_ne!(warning, tip);
+        assert_eq!(callout_kind("caution"), warning);
+        assert_eq!(callout_kind("見出し"), callout_kind("note"));
+        let (_, marks) = preview_of_styled(source, 0);
+        assert!(
+            marks
+                .iter()
+                .any(|mark| mark.marks.callout == warning && mark.marks.bold)
+        );
+    }
+
+    /// Ctrl+クリックの行き先：参照から定義の行の頭へ、定義から最初の参照へ。
+    #[test]
+    fn a_footnote_jumps_between_its_reference_and_its_definition() {
+        let source = "本文[^1]と[^注]。\n\n```\n[^1]\n```\n[^1]: 一つ目\n[^注]: 二つ目";
+        let reference = source.find("[^1]").unwrap() + 2;
+        let definition = source.find("[^1]: ").unwrap();
+        assert_eq!(footnote_jump(source, reference), Some(definition));
+        assert_eq!(
+            footnote_jump(source, definition + 1),
+            Some(source.find("[^1]").unwrap())
+        );
+        let named = source.find("[^注]").unwrap();
+        assert_eq!(
+            footnote_jump(source, named),
+            Some(source.find("[^注]: ").unwrap())
+        );
+        assert_eq!(footnote_jump(source, 0), None);
+        // コードの中の`[^1]`は脚注ではない。
+        assert_eq!(
+            footnote_jump(source, source.find("```\n[^1]").unwrap() + 5),
+            None
+        );
+    }
+
+    /// 印刷する本文はコメントを取り除く。コードの中の`%%`は残す。
+    #[test]
+    fn printing_leaves_the_comments_out() {
+        let source = "前%%メモ%%後\n%%\n隠す\n%%\n`%%x%%`\n```\n%%y%%\n```";
+        assert_eq!(without_comments(source), "前後\n`%%x%%`\n```\n%%y%%\n```");
+    }
+
+    /// 挿入：ハイライトとコメントは囲む。脚注は次の番号で、定義を末尾に。Calloutは行を包む。
+    #[test]
+    fn the_obsidian_inserts_write_what_the_preview_reads() {
+        let (next, caret) = inserted("前後", (3, 3), InsertEdit::Highlight).expect("入る");
+        assert_eq!(next, "前====後");
+        assert_eq!(caret, "前==".len());
+        let (next, caret) = inserted("前語後", (3, 6), InsertEdit::Comment).expect("入る");
+        assert_eq!(next, "前%%語%%後");
+        assert_eq!(&next[caret..], "後");
+
+        let (next, caret) = inserted("本文です。", (6, 6), InsertEdit::Footnote).expect("入る");
+        assert_eq!(next, "本文[^1]です。\n\n[^1]: ");
+        assert_eq!(caret, next.len());
+        let source = "一[^1]二[^3]\n\n[^1]: a\n[^3]: b\n";
+        let at = "一".len();
+        let (next, _) = inserted(source, (at, at), InsertEdit::Footnote).expect("入る");
+        assert_eq!(next, "一[^4][^1]二[^3]\n\n[^1]: a\n[^3]: b\n[^4]: ");
+        assert_eq!(
+            footnote_jump(&next, at + 1),
+            Some(next.len() - "[^4]: ".len())
+        );
+
+        let kind = InsertEdit::Callout(CalloutType::Warning);
+        let (next, caret) = inserted("前\n一\n二\n後", (4, 11), kind).expect("入る");
+        assert_eq!(next, "前\n> [!WARNING]\n> 一\n> 二\n後");
+        assert_eq!(&next[caret..], "\n後");
+        let (next, _) = inserted("", (0, 0), InsertEdit::Callout(CalloutType::Note)).expect("入る");
+        assert_eq!(next, "> [!NOTE]\n> ");
+        assert!(line_styles(&next).iter().all(|style| style.callout > 0));
+    }
+
+    /// 文書の`index`行目を、文書の中の体裁で組む（試験）。
+    fn preview_of_styled(source: &str, index: usize) -> (String, Vec<Emphasis>) {
+        let line = source.split('\n').nth(index).expect("line");
+        let mut visible = String::new();
+        let mut marks = Vec::new();
+        push_visible_line(
+            line,
+            line_styles(source)[index],
+            &mut visible,
+            &mut marks,
+            Reading::all(),
+        );
+        (visible, marks)
     }
 }
