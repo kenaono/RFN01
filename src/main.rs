@@ -1527,6 +1527,12 @@ fn main() -> Result<(), slint::PlatformError> {
     // Either way the session is one from another build, and the editor opens
     // on one pane — with every tab the session held gathered into it, because
     // an arrangement that cannot be restored is still somebody's work.
+    // 閉じた時のWorkspace。`open_session`がセッションを持っていく前に取っておく。
+    let last_workspace = session
+        .as_ref()
+        .map_or(app_data::SessionWorkspace::Unknown, |session| {
+            session.workspace
+        });
     let restored_panes = session
         .as_ref()
         .map(|session| {
@@ -1854,13 +1860,13 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     publish_folder_history(&window, &live);
 
-    // Workspace設計.md: the ledger is opened, and its default (if any) becomes
-    // the active Workspace, **after** the session's own TABs have already
-    // been restored above and **before** `open_startup_paths` below acts on
-    // any command-line argument — a file-only launch must land in the
-    // default Workspace's scope, and an explicit folder argument (handled
-    // inside `open_work_folder`) must not have to guess which Workspace, if
-    // any, it belongs to.
+    // Workspace設計.md: the ledger is opened, and the Workspace the last run
+    // closed in (or, when that is not known, the default) becomes the active
+    // one, **after** the session's own TABs have already been restored above
+    // and **before** `open_startup_paths` below acts on any command-line
+    // argument — a file-only launch must land in that Workspace's scope, and
+    // an explicit folder argument (handled inside `open_work_folder`) must not
+    // have to guess which Workspace, if any, it belongs to.
     //
     // No AppData directory (`app_data::app_directory` returning `None`, the
     // same case every other AppData-backed feature already treats as
@@ -1868,16 +1874,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // are unavailable for this run, not silently reset to empty.
     if let Some(directory) = app_data::app_directory() {
         let runtime = workspace_ui::Runtime::open(directory);
-        let default = runtime.registry().default_workspace();
+        let starting = startup_workspace(runtime.registry(), last_workspace);
         live.folder.borrow_mut().workspace = Some(Rc::new(RefCell::new(runtime)));
-        if default.is_some() {
-            // 仕様: 通常起動はデフォルトを使う — `switch_workspace` restores its
-            // persisted tree state (仕様の実装依頼 "Default startup must
-            // restore that state") and points the tree at its roots. Only
-            // when a default is actually registered: with none, this must
-            // leave the legacy single-folder session restored above exactly
-            // as it is (仕様 "Workspaceなしは所属を推測しない").
-            switch_workspace(&window, &live, default);
+        if starting.is_some() {
+            // 2026-09-22: 閉じた時のWorkspaceで再開する。前回Workspace2で編集中の
+            // まま閉じても、TABと未保存文書はその範囲に収まり、Workspaceなしへ
+            // 逃がす必要も、開き直す時の保存確認も起きない。`switch_workspace`
+            // restores its persisted tree state and points the tree at its
+            // roots. With none, this must leave the legacy single-folder
+            // session restored above exactly as it is (仕様
+            // "Workspaceなしは所属を推測しない").
+            switch_workspace(&window, &live, starting);
         } else {
             publish_workspace_switcher(&window, &live);
         }
@@ -7661,6 +7668,22 @@ fn publish_workspace_manager(window: &AppWindow, live: &Live) {
     window.set_workspace_folder_rows(ModelRc::new(VecModel::from(folder_rows)));
     window.set_workspace_unused_folder_rows(ModelRc::new(VecModel::from(unused_rows)));
     observe_folder_autosave(window, live);
+}
+
+/// Which Workspace a normal start opens: **the one the last run closed in.**
+///
+/// A run closed with no Workspace comes back with none. Only when that is not
+/// known — a session from before it was kept, or a Workspace unregistered
+/// since — does the default Workspace stand in.
+fn startup_workspace(
+    registry: &workspace::Registry,
+    last: app_data::SessionWorkspace,
+) -> Option<workspace::WorkspaceId> {
+    match last {
+        app_data::SessionWorkspace::None => None,
+        app_data::SessionWorkspace::Some(id) if registry.workspace(id).is_some() => Some(id),
+        _ => registry.default_workspace(),
+    }
 }
 
 /// Switches which Workspace is active — 仕様 "手動で切り替えたWorkspaceをリンクの

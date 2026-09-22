@@ -173,6 +173,19 @@ pub struct SessionPane {
     pub paper: Paper,
 }
 
+/// Which Workspace the last run was in when it closed.
+///
+/// **Three answers, not two.** "No Workspace" is something the writer chose
+/// and comes back as it was; "not known" is a session from before this was
+/// kept, and falls back to the default Workspace.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionWorkspace {
+    #[default]
+    Unknown,
+    None,
+    Some(u64),
+}
+
 /// What was on screen when the editor was last closed (要件 8.5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Session {
@@ -226,6 +239,8 @@ pub struct Session {
     /// ためのもので、隣の面で探した語を持ってこられないなら、列が2つある意味が無い。
     pub needles: Vec<String>,
     pub replacements: Vec<String>,
+    /// 閉じた時のWorkspace。次の起動はデフォルトより先にこれを開く。
+    pub workspace: SessionWorkspace,
 }
 
 /// Write the session down.
@@ -266,6 +281,11 @@ pub fn encode_session(session: &Session) -> String {
         "shortcut-bindings: {}\n",
         session.shortcut_bindings.replace(['\n', '\r'], "")
     ));
+    match session.workspace {
+        SessionWorkspace::Unknown => {}
+        SessionWorkspace::None => out.push_str("workspace: none\n"),
+        SessionWorkspace::Some(id) => out.push_str(&format!("workspace: {id}\n")),
+    }
     for open in &session.expanded {
         out.push_str(&format!("expanded: {}\n", open.display()));
     }
@@ -378,6 +398,14 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "search" => session.search_folder = Some(PathBuf::from(value)),
             "shortcut-bindings" => session.shortcut_bindings = value.to_owned(),
             "search-exclusions" => session.search_exclusions = value.to_owned(),
+            "workspace" => {
+                session.workspace = match value {
+                    "none" => SessionWorkspace::None,
+                    id => id
+                        .parse()
+                        .map_or(SessionWorkspace::Unknown, SessionWorkspace::Some),
+                }
+            }
             "expanded" => session.expanded.push(PathBuf::from(value)),
             "recent" => session.recent.push(PathBuf::from(value)),
             "visited" => session.folders.push(PathBuf::from(value)),
@@ -1246,6 +1274,7 @@ mod tests {
             folders: vec![PathBuf::from("D:\\書きかけ"), PathBuf::from("D:\\古い原稿")],
             needles: vec!["白猫".to_owned(), "第[0-9]+章".to_owned()],
             replacements: vec!["黒猫".to_owned()],
+            workspace: SessionWorkspace::Some(2),
             panes: vec![
                 SessionPane {
                     active: 1,
@@ -1319,6 +1348,25 @@ mod tests {
         let written = encode_session(&session());
 
         assert_eq!(decode_session(&written), Some(session()));
+    }
+
+    /// 閉じた時のWorkspace：「なし」は選んだ答えとして戻り、書いていない
+    /// 古いセッションは「分からない」（起動はデフォルトへ）になる。
+    #[test]
+    fn a_session_keeps_the_workspace_it_closed_in() {
+        let none = Session {
+            workspace: SessionWorkspace::None,
+            ..session()
+        };
+        assert_eq!(decode_session(&encode_session(&none)), Some(none));
+
+        let unknown = Session {
+            workspace: SessionWorkspace::Unknown,
+            ..session()
+        };
+        let written = encode_session(&unknown);
+        assert!(!written.contains("workspace:"));
+        assert_eq!(decode_session(&written), Some(unknown));
     }
 
     /// A tab's own fields belong to the tab above them, however many panes

@@ -16,6 +16,44 @@ fn log_lines(from: usize, to: usize) -> String {
         .collect()
 }
 
+/// 2026-09-22: 起動は閉じた時のWorkspaceで再開する。デフォルトは、それが
+/// 分からない時（古いセッション、登録を解除したWorkspace）だけの補欠。
+#[test]
+fn startup_resumes_the_workspace_the_last_run_closed_in() {
+    let mut registry = workspace::Registry::new();
+    let first = registry.create_workspace("Workspace1".into()).unwrap();
+    let second = registry.create_workspace("Workspace2".into()).unwrap();
+    registry.set_default(Some(first)).unwrap();
+
+    assert_eq!(
+        startup_workspace(&registry, app_data::SessionWorkspace::Some(second)),
+        Some(second)
+    );
+    assert_eq!(
+        startup_workspace(&registry, app_data::SessionWorkspace::None),
+        None
+    );
+    assert_eq!(
+        startup_workspace(&registry, app_data::SessionWorkspace::Unknown),
+        Some(first)
+    );
+    // A Workspace unregistered since the last run is not known any more.
+    assert_eq!(
+        startup_workspace(&registry, app_data::SessionWorkspace::Some(99)),
+        Some(first)
+    );
+
+    registry.set_default(None).unwrap();
+    assert_eq!(
+        startup_workspace(&registry, app_data::SessionWorkspace::Unknown),
+        None
+    );
+    assert_eq!(
+        startup_workspace(&registry, app_data::SessionWorkspace::Some(second)),
+        Some(second)
+    );
+}
+
 /// Exercise management handlers against an isolated live window and registry.
 #[test]
 fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
@@ -282,6 +320,11 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
 
     // Explicit external startup paths opt out without changing the default.
     switch_workspace(&window, &live, Some(second));
+    // 閉じた時のWorkspaceがセッションに残る。
+    assert_eq!(
+        session::capture_session(&window, &live).workspace,
+        app_data::SessionWorkspace::Some(second)
+    );
     open_startup_paths(&window, &live, id, std::slice::from_ref(&outside_path));
     assert_eq!(runtime.borrow().active_workspace(), None);
     assert_eq!(

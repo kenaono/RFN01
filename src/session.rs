@@ -316,6 +316,14 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
             }
         })
         .collect();
+    // 閉じた時のWorkspace。Workspaceが使えない実行（AppDataが無い）は何も言わない。
+    let workspace = match &live.folder.borrow().workspace {
+        Some(runtime) => match runtime.borrow().active_workspace() {
+            Some(id) => app_data::SessionWorkspace::Some(id),
+            None => app_data::SessionWorkspace::None,
+        },
+        None => app_data::SessionWorkspace::Unknown,
+    };
     let folder = live.folder.borrow().explorer_location();
     app_data::Session {
         layout: live.layout.borrow().encode(),
@@ -350,6 +358,7 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         // 覚えるたびにセッションを書けば、F3のたびにファイルが1つ書かれる。
         needles: live.find_terms.borrow().kept().to_vec(),
         replacements: live.replace_terms.borrow().kept().to_vec(),
+        workspace,
     }
 }
 
