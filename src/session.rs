@@ -352,6 +352,15 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         tree_shown: window.get_tree_open(),
         // 追加要件 2026-09-06: and how wide the writer left it.
         tree_width: (window.get_tree_width() / 1.0) as u32,
+        format_toolbar: window.get_format_toolbar_open(),
+        format_palette: window.get_format_palette_open(),
+        // **動かしたことが無ければ覚えない**——窓が既定の場所（右上）を選び続ける。
+        palette_at: window.get_palette_placed().then(|| {
+            (
+                window.get_palette_x().round() as i32,
+                window.get_palette_y().round() as i32,
+            )
+        }),
         recent: live.recent.borrow().clone(),
         folders: live.recent_folders.borrow().clone(),
         // E1の④: 打ち直さないための短い列。**書き出すのはここだけ**——語を

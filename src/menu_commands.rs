@@ -68,6 +68,9 @@ enum Command {
     Panel(i32),
     Shell(i32),
     ZoomSet(i32),
+    /// 書式のツールバー・パレットを出す／しまう（2026-09-23）。
+    Toolbar,
+    Palette,
 }
 
 /// 設定から割り当てたキーで走らせる、メニューの操作（RFN01-18）。
@@ -524,6 +527,259 @@ pub fn publish_context_insert(window: &AppWindow, live: &Live, id: PaneId) {
     window.set_insert_children(slint::ModelRc::new(slint::VecModel::from(children)));
 }
 
+/// 書式のボタンの絵（2026-09-23）。16×16の線画で、`ui/controls.slint`の`Icons`と
+/// 同じ描き方（線幅1.5・丸い端）。**絵はこの表が持つ**——ボタンの並びも言葉も
+/// 挿入メニューの表から来るので、絵だけをSlintに置くと並びを2か所で数えることになる。
+mod face {
+    pub const LINK: &str =
+        "M6.5 9.5l3-3M7 4.5l1-1a2.5 2.5 0 0 1 3.5 3.5l-1 1M9 11.5l-1 1a2.5 2.5 0 0 1-3.5-3.5l1-1";
+    /// 親字（田の形）の上に、小さな読み。
+    pub const RUBY: &str = "M4.5 2.5h2.5M9 2.5h2.5M3 5.5h10v8H3zM8 5.5v8M3 9.5h10";
+    /// 縦に並ぶ親字の左に、小さな注記。
+    pub const SIDE_NOTE: &str = "M6.5 2.5h7v11h-7zM6.5 8h7M10 2.5v11M3.5 3.5v2.5M3.5 9v2.5";
+    /// 字の上に点。点は長さの無い線を丸い端で打つ（`Icons.more`と同じ）。
+    pub const DOTS: &str = "M4.5 3h.2M11.5 3h.2M2 6.5h5v6.5H2zM9 6.5h5v6.5H9z";
+    /// 字の下に線。
+    pub const LINES: &str = "M2 2.5h5v6.5H2zM9 2.5h5v6.5H9zM2 12.5h12";
+    /// 大きさの違う2つのA。
+    pub const TEXT: &str =
+        "M1.5 13.5 5 3l3.5 10.5M2.8 9.5h4.4M9.5 13.5l2.25-6 2.25 6M10.3 11.5h2.9";
+    pub const HIGHLIGHT: &str = "M10 2.5l3.5 3.5-6.5 6.5-3.5.5.5-3.5zM8.5 4l3.5 3.5M2.5 14.5h11";
+    pub const COMMENT: &str = "M2.5 3h11v8h-6l-3 2.5V11h-2z";
+    pub const FOOTNOTE: &str = "M2.5 3.5h7M2.5 6.5h9M12.5 2.5v3M2.5 10.5h4M2.5 13.5h9";
+    pub const CALLOUT: &str = "M2.5 2.5h11v11h-11zM8 5.5v3.5M8 11.3v.1";
+    pub const HEADING: &str = "M2.5 3v10M2.5 8h6M8.5 3v10M11.5 7.5 13 6.5V13";
+    pub const PARAGRAPH: &str = "M2.5 3h11M6.5 6.5h7M6.5 10h7M2.5 13.5h11M2.5 6.5l2 1.75-2 1.75";
+    pub const PAGE_BREAK: &str =
+        "M3.5 1.5v4h9v-4M3.5 14.5v-4h9v4M1.5 8h1.5M5.5 8h2M9.5 8h2M13.5 8h1";
+    pub const BULLETS: &str = "M3 4h.2M3 8h.2M3 12h.2M6 4h7.5M6 8h7.5M6 12h7.5";
+    pub const NUMBERED: &str = "M2.5 3.2 3.7 2.5V6.5M2.3 9.7c.3-1.2 2.4-1.1 2.4.2 0 1-2.4 1.8-2.4 3.1h2.5M7 4.5h6.5M7 11.5h6.5";
+    pub const RENUMBER: &str = "M2.5 3.2 3.7 2.5V6.5M2.3 9.7c.3-1.2 2.4-1.1 2.4.2 0 1-2.4 1.8-2.4 3.1h2.5M7 4.5h3M13.8 10.5a2.8 2.8 0 1 1-.9-2.1M13.3 6.2v2.4h-2.4";
+}
+
+/// 挿入メニューの1段目の絵と束（ツールバーの縦線・パレットの行で区切る単位）。
+///
+/// **組は先頭の形で見分ける**——表の並びを変えても、絵は項目に付いてくる。
+/// 知らない項目は`None`（試験が捕まえる）。
+fn format_face(first: InsertShape) -> Option<(&'static str, i32)> {
+    use document::{CalloutType, InsertEdit as E, LineNoteEdit as L};
+    Some(match first {
+        InsertShape::Edit(E::MarkdownLink) => (face::LINK, 0),
+        InsertShape::Edit(E::Ruby) => (face::RUBY, 0),
+        InsertShape::Edit(E::SideNote) => (face::SIDE_NOTE, 0),
+        InsertShape::Edit(E::EmphasisDots) => (face::DOTS, 1),
+        InsertShape::Edit(E::LineNote) => (face::LINES, 1),
+        InsertShape::Edit(E::Upright) => (face::TEXT, 1),
+        InsertShape::Edit(E::Highlight) => (face::HIGHLIGHT, 2),
+        InsertShape::Edit(E::Comment) => (face::COMMENT, 2),
+        InsertShape::Edit(E::Footnote) => (face::FOOTNOTE, 2),
+        InsertShape::Edit(E::Callout(CalloutType::Note)) => (face::CALLOUT, 2),
+        InsertShape::Line(L::Heading(1)) => (face::HEADING, 3),
+        InsertShape::Line(L::Indent(1)) => (face::PARAGRAPH, 3),
+        InsertShape::PageBreak => (face::PAGE_BREAK, 3),
+        _ => return None,
+    })
+}
+
+/// 箇条書きの束（挿入の束の次）。
+const LIST_BAND: i32 = 4;
+
+/// 箇条書きの操作を、書式のボタンの番号にしたときの始まり。**挿入の番号
+/// （[`InsertShape::number`]、数十まで）と重ならない所に置く。**
+const FORMAT_LIST: i32 = 1_000;
+
+/// `Command::List(what, mark)`を書式のボタンの番号へ。`mark`は-1（記号を選ばない）から。
+fn list_action(what: i32, mark: i32) -> i32 {
+    FORMAT_LIST + what * 10 + mark + 1
+}
+
+/// 書式のボタンの番号を、メニューと同じ操作へ戻す。並びの外なら`None`。
+fn format_command(action: i32) -> Option<Command> {
+    if action >= FORMAT_LIST {
+        let at = action - FORMAT_LIST;
+        return Some(Command::List(at / 10, at % 10 - 1));
+    }
+    InsertShape::from_number(action).map(Command::Insert)
+}
+
+/// 書式のボタンが読む、いまの行の体裁（[`insert_inputs`]の答え）を覚えておく所。
+///
+/// **本文も選択も動いていなければ読み直さない**——行の体裁は文書の頭から
+/// 読むので、長い原稿を刻みごとに読み直すと重い。本文の書き換えは必ず
+/// `changed_at`を進める（`SharedText::borrow_mut`）ので、それを目印にする。
+#[derive(Default)]
+pub struct FormatCache {
+    key: Option<FormatKey>,
+    inputs: (document::LineNoteState, bool),
+    shown: Option<(Vec<crate::FormatButton>, Vec<crate::InsertRow>)>,
+}
+
+type FormatKey = (
+    *const OpenDocument,
+    std::time::Instant,
+    usize,
+    (usize, usize),
+    document::Reading,
+);
+
+/// 書式のボタンと組の中身を、いま字を入れているPaneについて組み直す（2026-09-23）。
+///
+/// **押せる条件はタイトルバーの挿入メニューと同じ**（[`text_state`]・
+/// [`context_insert_state`]、箇条書きは記号を読むか）。出していない間は何もしない。
+/// 変わっていなければ画面へ渡さない——渡すたびにボタンが作り直され、指の下の
+/// 明るさや開いた行が消える。
+pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCache>) {
+    if !window.get_format_toolbar_open() && !window.get_format_palette_open() {
+        return;
+    }
+    let t = Target::for_shortcut(window, live);
+    let (_, editable) = text_state(window, live, &t);
+    let picked = !selected_runs(&live.cache, t.id).is_empty();
+    let rectangular = live.states.of(t.id).borrow().rectangular;
+    let inputs = {
+        let source = t.document.text.borrow();
+        let range = chosen_source_range(&live.states.of(t.id).borrow(), source.len());
+        let key = (
+            Rc::as_ptr(&t.document),
+            t.document.text.changed_at(),
+            source.len(),
+            range,
+            reading_of(window),
+        );
+        drop(source);
+        let mut cache = cache.borrow_mut();
+        if cache.key != Some(key) {
+            cache.inputs = insert_inputs(window, live, t.id, &t.document);
+            cache.key = Some(key);
+        }
+        cache.inputs
+    };
+    let rows = format_rows(
+        editable,
+        rectangular,
+        picked,
+        inputs,
+        bullet_marks_of(window),
+    );
+    let mut cache = cache.borrow_mut();
+    if cache.shown.as_ref() == Some(&rows) {
+        return;
+    }
+    window.set_format_buttons(slint::ModelRc::new(slint::VecModel::from(rows.0.clone())));
+    window.set_format_children(slint::ModelRc::new(slint::VecModel::from(rows.1.clone())));
+    cache.shown = Some(rows);
+}
+
+/// ボタンと組の中身。1段目は挿入メニューの表の順、そのあとに箇条書きの束。
+fn format_rows(
+    editable: bool,
+    rectangular: bool,
+    picked: bool,
+    (notes, breakable): (document::LineNoteState, bool),
+    marks: document::BulletMarks,
+) -> (Vec<crate::FormatButton>, Vec<crate::InsertRow>) {
+    let (top, mut children) =
+        context_insert_rows(editable && !rectangular, picked, notes, breakable);
+    let mut buttons: Vec<crate::FormatButton> = INSERT_MENU
+        .iter()
+        .zip(top)
+        .map(|(entry, row)| {
+            let first = match entry {
+                InsertEntry::Row((shape, _)) => *shape,
+                InsertEntry::Group(_, items) => items[0].0,
+            };
+            let (icon, band) = format_face(first).unwrap_or((face::CALLOUT, LIST_BAND - 1));
+            crate::FormatButton {
+                icon: icon.into(),
+                tip: row.title,
+                flyout: row.flyout,
+                group: if row.flyout { row.group } else { -1 },
+                action: row.number,
+                band,
+                offset: 0.0,
+                divided: false,
+                enabled: row.enabled,
+            }
+        })
+        .collect();
+    // **箇条書きは1つにまとめて、記号を組の中身にする**（書き手の合意 2026-09-23）
+    // ——右クリックメニューと同じ形。押せる条件はタイトルバーの行と同じ。
+    let group = children
+        .iter()
+        .map(|row| row.group)
+        .max()
+        .map_or(0, |at| at + 1);
+    let mut any = false;
+    for (i, mark) in document::BULLET_MARKS.iter().enumerate() {
+        let enabled = editable && marks.reads(*mark);
+        any |= enabled;
+        children.push(crate::InsertRow {
+            title: mark.to_string().into(),
+            flyout: false,
+            group,
+            number: list_action(0, i as i32),
+            enabled,
+            checked: false,
+        });
+    }
+    let numbered = editable && marks.first().is_some();
+    for (icon, title, action, flyout, enabled) in [
+        (face::BULLETS, ("箇条書き", "Bullet List"), -1, true, any),
+        (
+            face::NUMBERED,
+            ("番号付きリスト", "Numbered List"),
+            list_action(1, -1),
+            false,
+            numbered,
+        ),
+        (
+            face::RENUMBER,
+            ("番号を振り直す", "Renumber"),
+            list_action(2, -1),
+            false,
+            numbered,
+        ),
+    ] {
+        buttons.push(crate::FormatButton {
+            icon: icon.into(),
+            tip: pick(title.0, title.1).into(),
+            flyout,
+            group: if flyout { group } else { -1 },
+            action,
+            band: LIST_BAND,
+            offset: 0.0,
+            divided: false,
+            enabled,
+        });
+    }
+    // ツールバーでの左端。ボタンは26pxに間2px、束の切れ目は縦線の分11px足す。
+    let mut x = 0.0;
+    for at in 0..buttons.len() {
+        let divided = at > 0 && buttons[at - 1].band != buttons[at].band;
+        if divided {
+            x += 11.0;
+        }
+        buttons[at].divided = divided;
+        buttons[at].offset = x;
+        x += 28.0;
+    }
+    (buttons, children)
+}
+
+/// 書式のボタン（か、その組の行）が押された。**メニューと同じ操作を、同じ対象へ**
+/// ——いま字を入れているPane（[`Target::for_shortcut`]、キーで走らせるのと同じ）。
+/// 押せない条件は実行先が同じ判定を持っているので、ここでは断らない。
+pub fn run_format(window: &AppWindow, live: &Live, action: i32) {
+    let Some(command) = format_command(action) else {
+        return;
+    };
+    let target = Target::for_shortcut(window, live);
+    if !target.valid(window, live) {
+        return;
+    }
+    execute(window, live, &target, command);
+}
+
 struct Popup {
     handle: HMENU,
 }
@@ -919,6 +1175,24 @@ fn queue_group(
     });
 }
 
+/// 本文を出しているか（1つめ）、書き換えてよいか（2つめ）。
+///
+/// **タイトルバーのメニューと書式のボタンが同じ答えを使う**——片方だけが押せて、
+/// もう片方が灰色、ということが起きないように。
+fn text_state(window: &AppWindow, live: &Live, t: &Target) -> (bool, bool) {
+    let screen = t.id.screen(window);
+    let terminal = screen.terminal || matches!(t.spot, TerminalSpot::Below);
+    let empty = live
+        .tabs
+        .borrow()
+        .of(t.id)
+        .current()
+        .is_some_and(|tab| tab.empty);
+    let text = !screen.settings && !terminal && !empty;
+    let editable = text && !screen.viewer && !t.document.read_only() && t.field <= 0;
+    (text, editable)
+}
+
 /// 分類のメニューを組み立てる（RFN01-38）。
 ///
 /// **出す前に、押せる行があるかを見るのにも使う**——子が全部無効なら親も無効に
@@ -934,14 +1208,7 @@ fn build(
     let mut commands = Vec::new();
     let screen = t.id.screen(window);
     let terminal = screen.terminal || matches!(t.spot, TerminalSpot::Below);
-    let empty = live
-        .tabs
-        .borrow()
-        .of(t.id)
-        .current()
-        .is_some_and(|tab| tab.empty);
-    let text = !screen.settings && !terminal && !empty;
-    let editable = text && !screen.viewer && !t.document.read_only() && t.field <= 0;
+    let (text, editable) = text_state(window, live, t);
     let main = text && !t.id.is_panel();
     let parent_screen = t.parent.screen(window);
     let neighbours = [
@@ -1392,6 +1659,26 @@ fn build(
                 )?;
             }
             root.child(pick("サイドバー", "Sidebar"), side)?;
+            // 書き手の求め 2026-09-23: 挿入メニューの全部をアイコンで。**どちらか
+            // 片方でも、両方でもよい**ので、2つは別の行である。
+            row(
+                &root,
+                &mut commands,
+                "ツールバー",
+                "Toolbar",
+                Command::Toolbar,
+                true,
+                window.get_format_toolbar_open(),
+            )?;
+            row(
+                &root,
+                &mut commands,
+                "書式パレット",
+                "Format Palette",
+                Command::Palette,
+                true,
+                window.get_format_palette_open(),
+            )?;
             add!(
                 "Source・Preview切替",
                 "Toggle Source / Preview",
@@ -2061,6 +2348,8 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
             }
         }
         Command::Appearance(scope) => window.invoke_appearance_requested(parent, scope),
+        Command::Toolbar => window.set_format_toolbar_open(!window.get_format_toolbar_open()),
+        Command::Palette => window.set_format_palette_open(!window.get_format_palette_open()),
         Command::Sidebar(n) => {
             window.set_tree_open(!(window.get_tree_open() && window.get_left_tab() == n));
             window.set_left_tab(n);
@@ -2584,6 +2873,146 @@ mod tests {
         assert!(
             !menu_opens(&h.window, &h.live, &kills, 6),
             "Helpは押せる行が無い（未実装だけ）"
+        );
+    }
+
+    /// 書式のボタン（2026-09-23）：**挿入メニューの1段目の全部に絵があり**、束は
+    /// 挿入の並びのまま、箇条書きが最後の束である。
+    #[test]
+    fn every_insert_entry_has_a_format_button() {
+        for entry in INSERT_MENU {
+            let first = match entry {
+                InsertEntry::Row((shape, _)) => *shape,
+                InsertEntry::Group(_, items) => items[0].0,
+            };
+            assert!(format_face(first).is_some(), "{first:?}");
+        }
+        let (buttons, _) = format_rows(
+            true,
+            false,
+            true,
+            (bare_notes(), true),
+            document::BulletMarks::all(),
+        );
+        assert_eq!(buttons.len(), INSERT_MENU.len() + 3);
+        assert!(
+            buttons.windows(2).all(|pair| pair[0].band <= pair[1].band),
+            "束は前から順に"
+        );
+        assert_eq!(buttons.last().map(|button| button.band), Some(LIST_BAND));
+        let tips: Vec<_> = buttons
+            .iter()
+            .map(|button| button.tip.to_string())
+            .collect();
+        assert_eq!(
+            tips.first().map(String::as_str),
+            Some(pick("リンク", "Link"))
+        );
+        assert_eq!(
+            tips.last().map(String::as_str),
+            Some(pick("番号を振り直す", "Renumber"))
+        );
+    }
+
+    /// **押した番号は、メニューと同じ操作へ戻る**——組の中身も、箇条書きも。
+    #[test]
+    fn a_format_button_runs_the_menu_command() {
+        let (buttons, children) = format_rows(
+            true,
+            false,
+            true,
+            (bare_notes(), true),
+            document::BulletMarks::all(),
+        );
+        for button in &buttons {
+            assert_eq!(button.flyout, button.action == -1, "{}", button.tip);
+            assert_eq!(button.flyout, button.group >= 0, "{}", button.tip);
+            if button.flyout {
+                assert!(
+                    children.iter().any(|row| row.group == button.group),
+                    "{}の組は空ではない",
+                    button.tip
+                );
+            }
+        }
+        let inserts: Vec<_> = buttons
+            .iter()
+            .map(|button| button.action)
+            .chain(children.iter().map(|row| row.number))
+            .filter(|&action| (0..FORMAT_LIST).contains(&action))
+            .collect();
+        assert_eq!(
+            inserts.len(),
+            insert_items().count(),
+            "挿入の形はどれも1回ずつ"
+        );
+        for action in inserts {
+            let shape = InsertShape::from_number(action).unwrap();
+            assert!(
+                matches!(format_command(action), Some(Command::Insert(given)) if given == shape)
+            );
+        }
+        let bullets: Vec<_> = children
+            .iter()
+            .filter(|row| row.number >= FORMAT_LIST)
+            .map(|row| (row.title.to_string(), row.number))
+            .collect();
+        assert_eq!(
+            bullets,
+            [("-", 0), ("*", 1), ("+", 2)].map(|(mark, at)| (mark.to_owned(), list_action(0, at)))
+        );
+        for (at, _) in [0, 1, 2].iter().enumerate() {
+            let at = at as i32;
+            assert!(
+                matches!(format_command(list_action(0, at)), Some(Command::List(0, mark)) if mark == at)
+            );
+        }
+        assert!(matches!(
+            format_command(list_action(1, -1)),
+            Some(Command::List(1, -1))
+        ));
+        assert!(matches!(
+            format_command(list_action(2, -1)),
+            Some(Command::List(2, -1))
+        ));
+        assert!(format_command(FORMAT_LIST - 1).is_none());
+    }
+
+    /// 書けないとき、**ボタンも組の中身も押せない**（メニューと同じ）。
+    #[test]
+    fn no_format_button_is_pickable_when_the_body_cannot_be_written() {
+        let (buttons, children) = format_rows(
+            false,
+            false,
+            true,
+            (bare_notes(), true),
+            document::BulletMarks::all(),
+        );
+        assert!(buttons.iter().all(|button| !button.enabled));
+        assert!(children.iter().all(|row| !row.enabled));
+    }
+
+    /// 出していなければ組まない。出せば組み、**押せば本文へ入る**。
+    #[test]
+    fn the_palette_publishes_and_inserts_into_the_pane() {
+        let (h, document) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let cache = RefCell::new(FormatCache::default());
+        publish_format(&h.window, &h.live, &cache);
+        assert_eq!(h.window.get_format_buttons().row_count(), 0, "しまってある");
+
+        h.window.set_format_palette_open(true);
+        publish_format(&h.window, &h.live, &cache);
+        assert_eq!(
+            h.window.get_format_buttons().row_count(),
+            INSERT_MENU.len() + 3
+        );
+
+        let ruby = InsertShape::Edit(document::InsertEdit::Ruby).number();
+        run_format(&h.window, &h.live, ruby);
+        assert!(
+            document.text.borrow().contains('《'),
+            "{}",
+            document.text.borrow()
         );
     }
 }
