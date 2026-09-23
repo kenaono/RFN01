@@ -268,7 +268,12 @@ fn typography_settings_roundtrip_and_render() {
     window.on_pane_copy_body(move |_| received.set(received.get() + 1));
     // **紙の上で押す。**右クリックのメニューは本文のものなので、紙の外（縦書きの短い文書では
     // 左の余白）では出ない。戻る／進むは面のどこでも効くので、上ではその外を押している。
-    let position = slint::LogicalPosition::new(800.0, 200.0);
+    // **窓の上の方で開く**（2026-09-23）。メニューが窓の下端に収まらないと、Slintが上へ押し戻し、
+    // 行の位置が開いた点からずれる——`5043454`で「Add Bookmark…」が足されて40px高くなり、
+    // y=200では押し戻されて「Copy Text Only」の下の区切りを押していた。上の方で開けば、
+    // この行より下に行が増えても位置は変わらない。
+    let menu_top = 70.0;
+    let position = slint::LogicalPosition::new(800.0, menu_top);
     for event in [
         WindowEvent::PointerPressed {
             position,
@@ -290,7 +295,8 @@ fn typography_settings_roundtrip_and_render() {
         ppm.extend([pixel.r, pixel.g, pixel.b]);
     }
     std::fs::write(output.join("body-copy-menu.ppm"), ppm).unwrap();
-    click(840.0, 376.0);
+    // 「Copy Text Only」はメニューの上端から7行目（176px）。
+    click(840.0, menu_top + 176.0);
     assert_eq!(
         copied.get(),
         1,
@@ -329,7 +335,8 @@ fn typography_settings_roundtrip_and_render() {
     };
     assert!(!id.screen(&window).can_undo);
     open_menu();
-    click(840.0, 219.0);
+    // 「Undo」はメニューの上端から1行目（19px）。
+    click(840.0, menu_top + 19.0);
     assert_eq!(undo_calls.get(), 0, "disabled Undo must not dispatch");
     click(700.0, 700.0);
     insert_pane_text(&window, id, &document, &states, &cache, "追加", false);
@@ -341,12 +348,13 @@ fn typography_settings_roundtrip_and_render() {
     assert_ne!(edited, source);
     assert!(id.screen(&window).can_undo);
     open_menu();
-    click(840.0, 219.0);
+    click(840.0, menu_top + 19.0);
     assert_eq!(undo_calls.get(), 1);
     assert_eq!(&*document.text.borrow(), source);
     assert!(id.screen(&window).can_redo);
     open_menu();
-    click(840.0, 248.0);
+    // 「Redo」は2行目（48px）。
+    click(840.0, menu_top + 48.0);
     assert_eq!(undo_calls.get(), 2);
     assert_eq!(&*document.text.borrow(), &edited);
     undo_in_pane(&window, id, &document, &states, &cache, false);

@@ -284,6 +284,61 @@ mod tests {
     /// 終わる）。`cargo test -- --ignored --nocapture`で走らせると、シェルが
     /// 実際に送ってきたバイト列がそのまま出る——解析器はそれを見て書く。
     /// 相手は`PTY_SHELL`で選べる（既定は要件の既定と同じ`wsl.exe`）。
+    /// 行の頭に答えがあるか。**制御列を除いてから探す**（2026-09-23）：シェルが先にプロンプトを
+    /// 出した回では、答えの行の頭（改行の直後）に`ESC[?2004h`が挟まり、答えているのに落ちた
+    /// （他の試験やビルドと同時に走らせたときだけ起きる）。
+    fn answered(seen: &[u8], marker: &[u8]) -> bool {
+        let plain = without_controls(seen);
+        plain.windows(marker.len()).any(|window| window == marker)
+    }
+
+    /// CSI（`ESC [ … 終わりの字`）とOSC（`ESC ] … BEL`か`ESC \\`）を取り除く。
+    fn without_controls(bytes: &[u8]) -> Vec<u8> {
+        let mut plain = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] != 0x1b {
+                plain.push(bytes[at]);
+                at += 1;
+                continue;
+            }
+            match bytes.get(at + 1) {
+                Some(b'[') => {
+                    at += 2;
+                    while at < bytes.len() && !(0x40..=0x7e).contains(&bytes[at]) {
+                        at += 1;
+                    }
+                    at += 1;
+                }
+                Some(b']') => {
+                    at += 2;
+                    while at < bytes.len() {
+                        if bytes[at] == 0x07 {
+                            at += 1;
+                            break;
+                        }
+                        if bytes[at] == 0x1b && bytes.get(at + 1) == Some(&b'\\') {
+                            at += 2;
+                            break;
+                        }
+                        at += 1;
+                    }
+                }
+                _ => at += 2,
+            }
+        }
+        plain
+    }
+
+    #[test]
+    fn an_answer_behind_a_control_sequence_is_still_an_answer() {
+        // 2026-09-23に実際に届いた並び（負荷の下で落ちた回）。
+        let seen = b"$\x1b[1C\x1b]0;ken@KN01: /mnt\x07\x1b[?25h\x1b[?2004lecho RFN-PTY-OK\r\n\x1b[?2004hRFN-PTY-OK\x1b[32m\r\n";
+        assert!(answered(seen, b"\nRFN-PTY-OK"));
+        // 反響だけでは答えではない。
+        assert!(!answered(b"$ echo RFN-PTY-OK\r\n", b"\nRFN-PTY-OK"));
+    }
+
     #[test]
     #[ignore]
     fn conpty_runs_a_shell() {
@@ -352,7 +407,7 @@ mod tests {
                         first = Some(waited.elapsed());
                     }
                     seen.extend_from_slice(&chunk);
-                    if seen.windows(marker.len()).any(|window| window == marker) {
+                    if answered(&seen, marker) {
                         break;
                     }
                 }
@@ -387,7 +442,7 @@ mod tests {
 
         // **行の頭の答え。**無ければ、打鍵は届いても答えが戻っていない。
         assert!(
-            seen.windows(marker.len()).any(|window| window == marker),
+            answered(&seen, marker),
             "{command} sent {} bytes without answering at the start of a line; \
              the shell is not answering through the console",
             seen.len()
