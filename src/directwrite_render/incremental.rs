@@ -27,7 +27,11 @@ impl Cancellation {
 }
 
 struct Job {
+    /// The epoch the job was asked in ([`BackgroundLayout::generation`]).
     generation: u64,
+    /// Which request this is, counted per worker. The newest one is the only
+    /// one whose plan is shown; the others are kept for what they measured.
+    serial: u64,
     mode: WritingMode,
     text: String,
     styles: Vec<LineStyle>,
@@ -42,6 +46,7 @@ struct Job {
 
 struct Answer {
     generation: u64,
+    serial: u64,
     result: std::result::Result<Completed, String>,
 }
 
@@ -63,9 +68,16 @@ struct Mailbox {
     stopped: bool,
 }
 
+/// **打鍵では中止しない**（E17の改訂、2026-09-24）。`generation`は取り消しの
+/// 世代で、上がるのは行の長さや書式が変わって、組んだものが使えなくなるとき
+/// だけ。打鍵は新しい依頼（`latest`）を置くだけで、走っている仕事は最後まで
+/// 組む——その結果は中身の一致する段落とブロックとして使い回し、次の仕事にも
+/// 引き継ぐ。打鍵のたびに中止していた頃は、長い段落の続く100万字の文書で
+/// 裏の組版が打ち続けるかぎり終わらなかった（RFN01-6の測定）。
 pub(super) struct BackgroundLayout {
     mailbox: Arc<(Mutex<Mailbox>, Condvar)>,
     generation: Arc<AtomicU64>,
+    latest: u64,
     pending: bool,
 }
 
@@ -136,8 +148,17 @@ impl BackgroundLayout {
                     if token.check().is_ok() {
                         let mut slot = shared.0.lock().unwrap_or_else(|e| e.into_inner());
                         if !slot.stopped && token.check().is_ok() {
+                            // The request waiting behind this one starts from what
+                            // this one found, not from the snapshot it was asked
+                            // with — that snapshot predates all of it.
+                            if let (Ok(done), Some(next)) = (&result, slot.job.as_mut())
+                                && next.generation == job.generation
+                            {
+                                carry_over(&mut next.wraps, &mut next.measures, done);
+                            }
                             slot.answer = Some(Answer {
                                 generation: job.generation,
+                                serial: job.serial,
                                 result,
                             });
                         }
@@ -148,6 +169,7 @@ impl BackgroundLayout {
         Some(Self {
             mailbox,
             generation,
+            latest: 0,
             pending: false,
         })
     }
@@ -317,8 +339,7 @@ impl TextEngine {
             return self.update(styled, fit, typography);
         }
         let same = self.matches(styled, fit, typography);
-        if same && self.layout_ready() && self.background.is_some() {
-            let worker = self.background.as_mut().unwrap();
+        if let Some(worker) = self.background.as_mut() {
             let answer = worker
                 .mailbox
                 .0
@@ -326,29 +347,34 @@ impl TextEngine {
                 .unwrap_or_else(|e| e.into_inner())
                 .answer
                 .take();
-            if let Some(answer) = answer {
-                if answer.generation == worker.generation.load(Ordering::Relaxed) {
-                    worker.pending = false;
-                    match answer.result {
-                        Ok(done) => {
-                            self.plan = done.plan;
-                            self.wraps = done.wraps;
-                            self.measures = done.measures;
-                            self.block_lines = done.block_lines;
-                            self.page_extent = done.page_extent;
-                            self.margin = done.margin;
-                            self.numbers = done.numbers;
-                            self.wrapping_items = done.wrapping_items;
-                            self.deferred_blocks.clear();
-                            self.layouts.clear();
-                            return Ok(UpdateCost::default());
-                        }
-                        Err(_) => {
-                            // Retry in bounded foreground windows on subsequent
-                            // refreshes; never synchronously redo the whole tail.
-                            self.background = None;
-                        }
+            if let Some(answer) = answer
+                .filter(|answer| answer.generation == worker.generation.load(Ordering::Relaxed))
+            {
+                let newest = answer.serial == worker.latest;
+                match answer.result {
+                    Ok(done) if newest && same => {
+                        worker.pending = false;
+                        self.plan = done.plan;
+                        self.wraps = done.wraps;
+                        self.measures = done.measures;
+                        self.block_lines = done.block_lines;
+                        self.page_extent = done.page_extent;
+                        self.margin = done.margin;
+                        self.numbers = done.numbers;
+                        self.wrapping_items = done.wrapping_items;
+                        self.deferred_blocks.clear();
+                        self.layouts.clear();
+                        return Ok(UpdateCost::default());
                     }
+                    // An earlier text: what it measured is still true of every
+                    // paragraph and block the edits since have not touched.
+                    Ok(done) => carry_over(&mut self.wraps, &mut self.measures, &done),
+                    Err(_) if newest => {
+                        // Retry in bounded foreground windows on subsequent
+                        // refreshes; never synchronously redo the whole tail.
+                        self.background = None;
+                    }
+                    Err(_) => {}
                 }
             }
         }
@@ -368,7 +394,12 @@ impl TextEngine {
         {
             return Ok(UpdateCost::default());
         }
-        self.cancel_background();
+        let settled = settled(fit, typography);
+        // Only a change that makes what the worker is laying out useless stops
+        // it; an edit leaves it running (see [`BackgroundLayout`]).
+        if (self.fit, &self.typography) != (settled.0, &settled.1) {
+            self.cancel_background();
+        }
         let limit = advance_characters(styled.text, target, FOREGROUND_LOOKAHEAD);
         let cost = self.update_inner(styled, fit, typography, Some(limit))?;
         if self.layout_pending() {
@@ -376,9 +407,10 @@ impl TextEngine {
                 self.background = BackgroundLayout::new();
             }
             if let Some(worker) = &mut self.background {
-                let generation = worker.generation.fetch_add(1, Ordering::Relaxed) + 1;
+                worker.latest += 1;
                 let job = Job {
-                    generation,
+                    generation: worker.generation.load(Ordering::Relaxed),
+                    serial: worker.latest,
                     mode: self.mode,
                     text: self.text.clone(),
                     styles: self.line_styles.clone(),
@@ -401,6 +433,33 @@ impl TextEngine {
             }
         }
         Ok(cost)
+    }
+}
+
+/// Adds what a finished layout found to `wraps` and `measures`, where a later
+/// layout finds them by their contents: a paragraph's wraps by its text and how
+/// it is set ([`wrap_reuse`]), a block's measurement by its key and text. Only
+/// finished paragraphs are added, and none that is already there.
+fn carry_over(
+    wraps: &mut Vec<ParagraphWraps>,
+    measures: &mut HashMap<u64, MeasuredBlock>,
+    done: &Completed,
+) {
+    for found in done.wraps.iter().filter(|found| found.complete) {
+        let known = wraps.iter().any(|kept| {
+            kept.complete
+                && kept.text == found.text
+                && kept.style == found.style
+                && kept.indent_cells == found.indent_cells
+                && kept.marker == found.marker
+                && kept.marks == found.marks
+        });
+        if !known {
+            wraps.push(found.clone());
+        }
+    }
+    for (key, measured) in &done.measures {
+        measures.entry(*key).or_insert_with(|| measured.clone());
     }
 }
 
@@ -616,6 +675,92 @@ mod tests {
     }
 
     #[test]
+    fn a_keystroke_leaves_the_paragraphs_past_its_margin_to_the_background() {
+        // RFN01-6: the unfinished paragraphs after the caret used to be taken a
+        // window further on every keystroke, all of them.
+        let typography = Typography::default();
+        let paragraph = "先の段落は裏で組む。".repeat(1200);
+        let text = format!("{paragraph}\n").repeat(6);
+        let mut engine = TextEngine::new(WritingMode::Vertical);
+        engine
+            .update_interactive(
+                StyledText::plain(&text),
+                LineFit::Extent(700),
+                &typography,
+                0,
+            )
+            .unwrap();
+        engine.cancel_background();
+        let mut edited = text.clone();
+        edited.insert_str(0, "追");
+        let cost = engine
+            .update_interactive(
+                StyledText::plain(&edited),
+                LineFit::Extent(700),
+                &typography,
+                1,
+            )
+            .unwrap();
+        assert!(engine.layout_pending());
+        assert!(
+            cost.wrapped <= 3 * WINDOW_CHARACTERS as u32,
+            "wrapped {} units for one keystroke",
+            cost.wrapped
+        );
+        finish(&mut engine, &edited, &typography);
+        let mut full = TextEngine::new(WritingMode::Vertical);
+        full.update(
+            StyledText::plain(&edited),
+            LineFit::Extent(700),
+            &typography,
+        )
+        .unwrap();
+        assert_eq!(engine.plan, full.plan);
+    }
+
+    #[test]
+    fn the_background_keeps_going_while_the_writer_types() {
+        // RFN01-6: an edit used to stop the worker and throw away what it had
+        // laid out, so a writer who kept typing never let it finish.
+        let typography = Typography::default();
+        let paragraph = "打ち続けても裏は進む。".repeat(1200);
+        let text = format!("{paragraph}\n").repeat(6);
+        let mut engine = TextEngine::new(WritingMode::Vertical);
+        let mut edited = text.clone();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let finished = |engine: &TextEngine| engine.wraps.iter().filter(|w| w.complete).count();
+        let mut typed = 0;
+        while finished(&engine) < 5 {
+            assert!(
+                Instant::now() < deadline,
+                "only {} paragraphs finished while typing",
+                finished(&engine)
+            );
+            edited.insert_str(0, "追");
+            typed += 1;
+            engine
+                .update_interactive(
+                    StyledText::plain(&edited),
+                    LineFit::Extent(700),
+                    &typography,
+                    1,
+                )
+                .unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(typed > 1, "the first keystroke cannot have found them");
+        finish(&mut engine, &edited, &typography);
+        let mut full = TextEngine::new(WritingMode::Vertical);
+        full.update(
+            StyledText::plain(&edited),
+            LineFit::Extent(700),
+            &typography,
+        )
+        .unwrap();
+        assert_eq!(engine.plan, full.plan);
+    }
+
+    #[test]
     fn rapid_edits_and_geometry_changes_keep_only_latest_result() {
         let mut typography = Typography::default();
         let text = "連続入力の世代を確認する長い文章。".repeat(3000);
@@ -698,6 +843,7 @@ mod tests {
                 Mutex::new(Mailbox {
                     answer: Some(Answer {
                         generation: 6,
+                        serial: 3,
                         result: Ok(Completed {
                             plan: BlockLayoutPlan::default(),
                             wraps: Vec::new(),
@@ -714,6 +860,7 @@ mod tests {
                 Condvar::new(),
             )),
             generation: Arc::new(AtomicU64::new(7)),
+            latest: 3,
             pending: true,
         });
         engine
@@ -735,6 +882,7 @@ mod tests {
             .unwrap()
             .answer = Some(Answer {
             generation: 7,
+            serial: 3,
             result: Err("injected failure".into()),
         });
         engine

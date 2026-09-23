@@ -5626,14 +5626,7 @@ impl TextEngine {
         typography: &Typography,
         foreground_limit: Option<usize>,
     ) -> Result<UpdateCost> {
-        let fit = match fit {
-            LineFit::Extent(extent) => LineFit::Extent(extent.max(1)),
-            LineFit::Free => LineFit::Free,
-        };
-        let typography = Typography {
-            font_size: typography.font_size.max(1.0),
-            ..typography.clone()
-        };
+        let (fit, typography) = settled(fit, typography);
         if self.matches(styled, fit, &typography) && self.deferred_blocks.is_empty() {
             return Ok(UpdateCost::default());
         }
@@ -6076,6 +6069,20 @@ impl TextEngine {
                     let base = asked[task.at].byte_start;
                     let stop =
                         foreground_limit.map(|limit| limit.saturating_sub(base).max(task.from));
+                    // **手前の組版が届かない段落は、そのまま残す**（E17、2026-09-24）。
+                    // 入力位置の先の余白より後ろにある段落は推定のまま置き、裏の組版に
+                    // 任せる。`wrap_prefix`は止める位置が頭にあっても1窓は組むので、
+                    // ここで除かないと、組み終わっていない段落が1打鍵ごとに全部1窓ずつ
+                    // 組まれていた——3万2千字の段落が32ある100万字の縦書きで、1打鍵
+                    // 0.6〜1秒（RFN01-6の測定）。
+                    if stop == Some(task.from) {
+                        cost.wrapped = cost
+                            .wrapped
+                            .saturating_sub(line.text[task.from..].encode_utf16().count() as u32);
+                        answers[task.at] = std::mem::take(&mut kept[task.at]);
+                        complete[task.at] = false;
+                        continue;
+                    }
                     let found = incremental::wrap_prefix(
                         graphics,
                         &format,
@@ -7427,6 +7434,20 @@ struct ParagraphWraps {
     /// Byte offsets where each line after the first begins.
     starts: Vec<usize>,
     complete: bool,
+}
+
+/// The line fit and typography a layout is actually made at: an extent of at
+/// least one pixel and a font of at least one point.
+fn settled(fit: LineFit, typography: &Typography) -> (LineFit, Typography) {
+    let fit = match fit {
+        LineFit::Extent(extent) => LineFit::Extent(extent.max(1)),
+        LineFit::Free => LineFit::Free,
+    };
+    let typography = Typography {
+        font_size: typography.font_size.max(1.0),
+        ..typography.clone()
+    };
+    (fit, typography)
 }
 
 impl ParagraphWraps {
