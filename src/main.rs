@@ -432,6 +432,16 @@ const MIN_HORIZONTAL_WIDTH: u32 = 160;
 /// again. Every height change invalidates every block measurement, so following
 /// a drag pixel by pixel would remeasure the whole document on each frame.
 const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+/// How long after launch a pane is laid out again as soon as its size changes,
+/// without waiting for [`RESIZE_SETTLE`].
+///
+/// **Nobody is dragging an edge yet.** The sizes that arrive now are the window
+/// finding its own: the first real size, then the title bar this editor paints
+/// taking over the caption, then a restored maximise. Waiting out the settle
+/// made the first frame show the text wrapped for the placeholder size and
+/// re-wrap about 0.3s after launch; laid out at once, the first real size is
+/// done before the window is created (about 20ms, 2026-09-23の計測).
+const STARTUP_RESIZE: Duration = Duration::from_secs(2);
 /// How long a zoom or typography control must stop being pressed before the
 /// document is laid out again. One press re-measures every block in both panes
 /// and costs about 200ms on a 4万字 document (技術検証 6.8), so a run of presses
@@ -1511,6 +1521,7 @@ fn perf_log_header(window: &AppWindow) -> String {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let launched = Instant::now();
     let diagnostic_options = diag::Config::from_args(std::env::args_os().skip(1));
     let diagnostic_config = diagnostic_options.clone().unwrap_or_default();
     let diagnostic_mode = diagnostic_config.summary();
@@ -2493,7 +2504,12 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut timers = timers.borrow_mut();
             timers.entry(id.0).or_default().clone()
         };
-        timer.start(TimerMode::SingleShot, RESIZE_SETTLE, move || {
+        let settle = if launched.elapsed() < STARTUP_RESIZE {
+            Duration::ZERO
+        } else {
+            RESIZE_SETTLE
+        };
+        timer.start(TimerMode::SingleShot, settle, move || {
             if let Some(window) = weak.upgrade() {
                 if id.is_panel() && !states.panels.borrow().contains_key(&id.0) {
                     return;
