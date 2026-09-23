@@ -1,0 +1,229 @@
+// 書式のボタン——ツールバーとパレット（2026-09-23、書き手の求め）。
+//
+// **挿入メニューの全部を、アイコンで並べる。**ツールバーでもパレットでも、同じ
+// 並び・同じ絵・同じ押せる条件である（書き手：「パレットを使っても良いし、
+// ツールバーで使っても良い」）。中身はRustが挿入メニューの表から作るので、
+// こちらは並べて、押されたことを言い返すだけである。
+import { Tok } from "tokens.slint";
+import { IconButton, MenuFrame, MenuRow } from "controls.slint";
+import { InsertRow } from "editor-types.slint";
+
+// ボタン1つ。
+export struct FormatButton {
+    /// 16×16の線画（`Icon`の`commands`）。
+    icon: string,
+    /// ツールチップに出す名前。挿入メニューの行と同じ言葉。
+    tip: string,
+    /// 押すと行が開くボタンか（組）、押すと本文へ入るボタンか。
+    flyout: bool,
+    /// 開く組の番号。子の行（`InsertRow.group`）と同じ数え方。組でなければ-1。
+    group: int,
+    /// 押したときの操作の番号。組は-1。
+    action: int,
+    /// 何番目の束か。ツールバーでは束の間に縦線、パレットでは束ごとに1行。
+    band: int,
+    /// ツールバーでの左端（束の縦線の分も含む）。Slintの式は並びを足し上げ
+    /// られないので、Rustが数える。
+    offset: length,
+    /// ここから新しい束——ツールバーでは左に縦線を引く。
+    divided: bool,
+    enabled: bool,
+}
+
+// ボタンの1つ。組のボタンは右下に小さな三角を付ける——押すと開くことを言う。
+component FormatCell inherits Rectangle {
+    in property <FormatButton> button;
+    callback clicked();
+    width: 26px;
+    height: 26px;
+    IconButton {
+        icon: root.button.icon;
+        tip: root.button.tip;
+        enabled: root.button.enabled;
+        clicked => { root.clicked(); }
+    }
+    if root.button.flyout: Path {
+        x: 20px; y: 20px; width: 4px; height: 4px;
+        viewbox-width: 4; viewbox-height: 4;
+        commands: "M4 0V4H0Z";
+        fill: Tok.ink-faint;
+        opacity: root.button.enabled ? 1.0 : 0.4;
+    }
+}
+
+export component FormatButtons inherits Rectangle {
+    in property <[FormatButton]> buttons;
+    in property <[InsertRow]> children;
+    /// ツールバー（横1列）か、パレット（束ごとに1行）か。
+    in property <bool> across;
+    /// 窓の幅。パレットの行を右と左のどちらへ開くかを決めるのに使う。
+    in property <length> window-width;
+    /// 押された——`FormatButton.action`か`InsertRow.number`。
+    callback chosen(int);
+
+    /// 開いている組（`InsertRow.group`）。-2は「⋯」の中身。
+    private property <int> open: -1;
+    private property <length> open-x;
+    private property <length> open-y;
+    private property <length> flyout-width: 232px;
+    private property <int> bands: root.buttons.length == 0 ? 0 : root.buttons[root.buttons.length - 1].band + 1;
+    // ツールバーの並びの全幅と、そこに収まる右端（「⋯」の分を空けて）。
+    // **並びきらない分は末尾の「⋯」にまとめる**（書き手の合意 2026-09-23）。
+    private property <length> full: root.buttons.length == 0 ? 0px : root.buttons[root.buttons.length - 1].offset + 26px;
+    private property <bool> crowded: root.full > root.width;
+    private property <length> fits: root.crowded ? root.width - 30px : root.width;
+
+    // 押されたボタンが組なら、その横（パレット）か下（ツールバー）へ行を開く。
+    // **窓の右端では左へ**——右端に置いたパレットに行が重ならないように。窓の外へ
+    // はみ出す分はSlintが窓の中へ押し戻す（`place_popup`）ので、ここでは縮めない。
+    function press(button: FormatButton, cell-x: length, cell-y: length) {
+        if !button.flyout {
+            root.chosen(button.action);
+            return;
+        }
+        root.open = button.group;
+        if root.across {
+            root.open-x = cell-x;
+            root.open-y = cell-y + 28px;
+        } else {
+            root.open-x = root.absolute-position.x + root.width + 6px + root.flyout-width > root.window-width
+                ? -root.flyout-width - 6px
+                : root.width + 6px;
+            root.open-y = cell-y - 6px;
+        }
+        flyout.show();
+    }
+
+    preferred-width: layout.preferred-width;
+    preferred-height: layout.preferred-height;
+
+    layout := VerticalLayout {
+        spacing: 0px;
+        if root.across: Rectangle {
+            height: 26px;
+            for button in root.buttons: Rectangle {
+                x: button.offset;
+                width: 26px;
+                visible: button.offset + 26px <= root.fits;
+                if button.divided: Rectangle {
+                    x: -7px; y: 4px; width: 1px; height: 18px;
+                    background: Tok.rule;
+                }
+                FormatCell {
+                    button: button;
+                    clicked => {
+                        root.press(button, self.absolute-position.x - root.absolute-position.x, 0px);
+                    }
+                }
+            }
+            if root.crowded: IconButton {
+                x: root.width - 26px;
+                icon: "M3.9 8h0.2M7.9 8h0.2M11.9 8h0.2";
+                tip: @tr("More");
+                clicked => {
+                    root.open = -2;
+                    root.open-x = root.width - root.flyout-width;
+                    root.open-y = 28px;
+                    flyout.show();
+                }
+            }
+        }
+        if !root.across: VerticalLayout {
+            spacing: 0px;
+            for band in root.bands: VerticalLayout {
+                spacing: 0px;
+                if band > 0: Rectangle {
+                    height: 7px;
+                    Rectangle {
+                        y: 3px; height: 1px;
+                        background: Tok.chrome-sunken;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 0px;
+                    alignment: start;
+                    for button in root.buttons: HorizontalLayout {
+                        spacing: 0px;
+                        if button.band == band: HorizontalLayout {
+                            padding-right: 2px;
+                            FormatCell {
+                                button: button;
+                                clicked => {
+                                    root.press(button, self.absolute-position.x - root.absolute-position.x, self.absolute-position.y - root.absolute-position.y);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 組の行、または「⋯」の中身。**1つのpopupで中身を替える**——「⋯」の中で
+    // 組を押したら、閉じて別のpopupを開くのではなく、ここを組の行に替える
+    // （閉じたすぐ後に開いたpopupは出なかった。popupの中にpopupも開かない）。
+    flyout := PopupWindow {
+        x: root.open-x;
+        y: root.open-y;
+        width: root.flyout-width;
+        height: max(hidden.height, listed.height);
+        close-policy: close-on-click-outside;
+
+        // 並びきらなかったボタン。「⋯」の下へ右寄せで出す。
+        hidden := MenuFrame {
+            x: parent.width - self.width;
+            visible: root.open == -2;
+            width: hidden-row.preferred-width;
+            height: root.open == -2 ? hidden-row.preferred-height : 0px;
+
+            hidden-row := HorizontalLayout {
+                padding: 5px;
+                padding-right: 3px;
+                spacing: 0px;
+                for button in root.buttons: HorizontalLayout {
+                    if button.offset + 26px > root.fits: HorizontalLayout {
+                        padding-right: 2px;
+                        FormatCell {
+                            button: button;
+                            clicked => {
+                                if button.flyout {
+                                    root.open = button.group;
+                                } else {
+                                    root.chosen(button.action);
+                                    flyout.close();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        listed := MenuFrame {
+            visible: root.open >= 0;
+            width: root.flyout-width;
+            height: root.open >= 0 ? rows.preferred-height : 0px;
+
+            // **間隔は0**——開いていない組の行も空の枠として並ぶので、間隔を
+            // 置くとその数だけ上下が空く。
+            rows := VerticalLayout {
+                padding: 6px;
+                spacing: 0px;
+
+                for child in root.children: VerticalLayout {
+                    if child.group == root.open: MenuRow {
+                        title: child.title;
+                        enabled: child.enabled;
+                        checked: child.checked;
+                        // 知らせてから閉じる（開発ガイドライン5）——閉じると
+                        // この行が消え、知らせる元が無くなる。
+                        activated => {
+                            root.chosen(child.number);
+                            flyout.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

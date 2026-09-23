@@ -520,6 +520,10 @@ const EXTERNAL_CHECK_TICK: Duration = Duration::from_secs(2);
 /// ログが流れるのを2秒おきに見るのは遅い。ほかの文書は今までどおり
 /// `EXTERNAL_CHECK_TICK`ごとで、見回りの回数は増やさない。
 const READ_ONLY_CHECK_TICK: Duration = Duration::from_millis(500);
+
+/// 書式のボタンが、キャレットと選択に追いつくまで（2026-09-23）。選んで押しに
+/// 行くより短ければ、灰色が遅れて見えることは無い。
+const FORMAT_TICK: Duration = Duration::from_millis(120);
 /// ReadOnlyのあいだは縦書き・プレビューへ切り替えない（追加要件 2026-09-15）。
 fn read_only_stays() -> &'static str {
     pick(
@@ -1615,6 +1619,15 @@ fn main() -> Result<(), slint::PlatformError> {
         None => WorkFolder::default(),
     };
     window.set_tree_open(session.as_ref().is_none_or(|session| session.tree_shown));
+    if let Some(session) = &session {
+        window.set_format_toolbar_open(session.format_toolbar);
+        window.set_format_palette_open(session.format_palette);
+        if let Some((x, y)) = session.palette_at {
+            window.set_palette_x(x as f32);
+            window.set_palette_y(y as f32);
+            window.set_palette_placed(true);
+        }
+    }
     window.set_shortcut_bindings(
         session
             .as_ref()
@@ -1956,6 +1969,20 @@ fn main() -> Result<(), slint::PlatformError> {
             workspace_links_tick(&window, &timer_live);
             write_work_copy_if_due(&window, &timer_live);
             collect_write_results(&window, &timer_live);
+        }
+    });
+
+    // 書式のツールバーとパレット（2026-09-23）。**押せる／押せないはキャレットと
+    // 選択について回る**——右クリックメニューのように開く瞬間が無いので、刻みごとに
+    // 組み直す（変わっていなければ画面へは渡さない）。字を入れる面・文書・読み方の
+    // 替わる道は多く、1つずつ知らせを足すと、どれかを忘れる。
+    let format_timer = Timer::default();
+    let weak = window.as_weak();
+    let format_live = live.clone();
+    let format_cache = RefCell::new(menu_commands::FormatCache::default());
+    format_timer.start(TimerMode::Repeated, FORMAT_TICK, move || {
+        if let Some(window) = weak.upgrade() {
+            menu_commands::publish_format(&window, &format_live, &format_cache);
         }
     });
 
@@ -2563,6 +2590,14 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_menu_opened(move |pane| {
         if let Some(window) = weak.upgrade() {
             menu_commands::publish_context_insert(&window, &insert_live, PaneId::from_index(pane));
+        }
+    });
+    // 書式のボタン（2026-09-23）。**押された番号はメニューと同じ操作へ戻す。**
+    let weak = window.as_weak();
+    let format_live = live.clone();
+    window.on_format_chosen(move |action| {
+        if let Some(window) = weak.upgrade() {
+            menu_commands::run_format(&window, &format_live, action);
         }
     });
     let weak = window.as_weak();

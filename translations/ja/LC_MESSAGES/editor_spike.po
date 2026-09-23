@@ -264,6 +264,9 @@ msgstr "フォルダの色"
 msgid "Font"
 msgstr "フォント"
 
+msgid "Format"
+msgstr "書式"
+
 msgid "Forward"
 msgstr "進む"
 

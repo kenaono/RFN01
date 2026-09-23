@@ -221,6 +221,12 @@ pub struct Session {
     /// rule the zoom uses, and for the same reason: a pane 0 wide is not a
     /// width anybody chose.
     pub tree_width: u32,
+    /// 書式のツールバーとパレットを出しているか、パレットをどこに置いたか
+    /// （2026-09-23）。**位置は隠しても覚えておく**——出し直したら、前に置いた所へ出る。
+    /// 窓の中の論理ピクセル。`None`は置いたことが無い（窓が既定の場所を選ぶ）。
+    pub format_toolbar: bool,
+    pub format_palette: bool,
+    pub palette_at: Option<(i32, i32)>,
     /// The files opened most recently, newest first (要件 7.7). Kept with the
     /// session rather than with the work folder, because it is a list of what
     /// the writer did and not of what the folder holds.
@@ -267,6 +273,17 @@ pub fn encode_session(session: &Session) -> String {
     out.push_str(&format!("focused: {}\n", session.focused));
     out.push_str(&format!("tree: {}\n", u8::from(session.tree_shown)));
     out.push_str(&format!("tree-width: {}\n", session.tree_width));
+    out.push_str(&format!(
+        "format-toolbar: {}\n",
+        u8::from(session.format_toolbar)
+    ));
+    out.push_str(&format!(
+        "format-palette: {}\n",
+        u8::from(session.format_palette)
+    ));
+    if let Some((x, y)) = session.palette_at {
+        out.push_str(&format!("palette-at: {x} {y}\n"));
+    }
     if let Some(folder) = &session.folder {
         out.push_str(&format!("folder: {}\n", folder.display()));
     }
@@ -394,6 +411,9 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "zoom" => window_zoom = value.parse().ok()?,
             "tree" => session.tree_shown = value == "1",
             "tree-width" => session.tree_width = value.parse().unwrap_or(0),
+            "format-toolbar" => session.format_toolbar = value == "1",
+            "format-palette" => session.format_palette = value == "1",
+            "palette-at" => session.palette_at = decode_point(value),
             "folder" => session.folder = Some(PathBuf::from(value)),
             "search" => session.search_folder = Some(PathBuf::from(value)),
             "shortcut-bindings" => session.shortcut_bindings = value.to_owned(),
@@ -954,6 +974,12 @@ fn decode_place(value: &str) -> Option<WindowPlace> {
     (place.width > 0 && place.height > 0).then_some(place)
 }
 
+/// パレットの置き場所（`x y`）。読めなければ置いたことが無いのと同じにする。
+fn decode_point(value: &str) -> Option<(i32, i32)> {
+    let (x, y) = value.split_once(' ')?;
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
 /// Put the draft away where the next run will look for it (要件 12.4).
 pub fn write_draft(directory: &Path, draft: &Draft) -> io::Result<PathBuf> {
     fs::create_dir_all(directory)?;
@@ -1267,6 +1293,9 @@ mod tests {
             expanded: vec![PathBuf::from("D:\\書きかけ\\章")],
             tree_shown: true,
             tree_width: 260,
+            format_toolbar: true,
+            format_palette: true,
+            palette_at: Some((640, -12)),
             recent: vec![
                 PathBuf::from("D:\\書きかけ\\第一章.md"),
                 PathBuf::from("D:\\書きかけ\\年表.txt"),

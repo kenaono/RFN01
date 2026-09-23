@@ -6,6 +6,8 @@ import { InsertRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
 import { TitleMenuBar } from "title-menu-bar.slint";
+import { FormatButton, FormatButtons } from "format-bar.slint";
+export { FormatButton } from "format-bar.slint";
 import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
 // **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
 // 窓の外から見えない。
@@ -927,6 +929,21 @@ export component AppWindow inherits Window {
     /// 条件にするためで、メニューを開いた時点の状態で組み直す。
     in-out property <[InsertRow]> insert-rows;
     in-out property <[InsertRow]> insert-children;
+    /// 書式のツールバーとパレット（2026-09-23）。**どちらも挿入メニューの全部を
+    /// 同じ並びで出す**——出すかどうかは表示メニューで、それぞれ別に選ぶ。
+    /// ボタンと組の中身はRustが作り、キャレットや選択が動くと組み直す。
+    in-out property <bool> format-toolbar-open: false;
+    in-out property <bool> format-palette-open: false;
+    in property <[FormatButton]> format-buttons;
+    in property <[InsertRow]> format-children;
+    /// パレットの置き場所。**窓の中へ収めて出す**ので、置いたことが無いうちは
+    /// 右端（大きすぎる値が右端へ収まる）の上寄りに出る。
+    in-out property <length> palette-x: 100000px;
+    in-out property <length> palette-y: 80px;
+    /// 書き手がパレットを動かしたことがあるか。無ければ場所は覚えない。
+    in-out property <bool> palette-placed: false;
+    /// 押されたボタンか組の行——`FormatButton.action`か`InsertRow.number`。
+    callback format-chosen(int);
     /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
     callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
@@ -1252,11 +1269,15 @@ export component AppWindow inherits Window {
         return false;
     }
 
+    // タイトル行と、出ていれば書式のツールバー。その下から本文の側が始まる。
+    private property <length> title-height: root.custom-title ? 36px : 0px;
+    private property <length> chrome-height: root.title-height + (root.format-toolbar-open ? 34px : 0px);
+
     // The outer layout padding belongs to the chrome, not the transparent paper.
     Rectangle {
-        y: root.custom-title ? 36px : 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height - (root.custom-title ? 36px : 0px);
+        height: root.height - root.chrome-height;
         border-width: 8px;
         border-color: Tok.paper;
         background: transparent;
@@ -1280,9 +1301,34 @@ export component AppWindow inherits Window {
             else { root.title-menu-visible = true; }
         }
     }
+    // 書式のツールバー（2026-09-23）。メニューの下に窓の幅いっぱいで1本。
+    // 並びきらない分は末尾の「⋯」にまとめる（`FormatButtons`）。
+    if root.format-toolbar-open: Rectangle {
+        y: root.title-height;
+        width: root.width;
+        height: 34px;
+        background: Tok.chrome;
+        clip: true;
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Tok.rule;
+        }
+        FormatButtons {
+            x: 8px;
+            y: 4px;
+            width: parent.width - 16px;
+            height: 26px;
+            across: true;
+            window-width: root.width;
+            buttons: root.format-buttons;
+            children: root.format-children;
+            chosen(action) => { root.format-chosen(action); }
+        }
+    }
     VerticalBox {
-        y: root.custom-title ? 36px : 0px;
-        height: root.height - (root.custom-title ? 36px : 0px);
+        y: root.chrome-height;
+        height: root.height - root.chrome-height;
         spacing: 0px;
 
         // 要件 6.1: the left pane, the editing area and the status bar. The
@@ -5983,6 +6029,77 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // 書式のパレット（2026-09-23）。**本文の側の何よりも上**——書き手の求め
+    // 「アプリの最前面、裏に隠れないように」。問い・印刷・比較の幕はこの後に
+    // 書いてあるのでパレットの上に来て、メニューはpopupなのでさらに上に出る。
+    // 窓の外へは出ない。タイトル行へも入れない（そこはWindowsが窓を動かす所）。
+    if root.format-palette-open: palette := Rectangle {
+        x: clamp(root.palette-x, 0px, max(0px, root.width - self.width));
+        y: clamp(root.palette-y, root.title-height, max(root.title-height, root.height - self.height));
+        width: palette-body.preferred-width;
+        height: palette-body.preferred-height;
+        background: Tok.chrome;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: Tok.rule-strong;
+        drop-shadow-color: #17132130;
+        drop-shadow-blur: 24px;
+        drop-shadow-offset-y: 8px;
+
+        // パレットの中の空いた所を押しても、下の本文へ届かせない。
+        TouchArea {}
+
+        palette-body := VerticalLayout {
+            Rectangle {
+                height: 24px;
+                background: Tok.chrome-raised;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                // つかんで動かす。**窓の中へ収めた値を覚える**——窓を縮めて
+                // 押し戻された場所から動かしても、指の下からずれない。
+                TouchArea {
+                    mouse-cursor: move;
+                    moved => {
+                        root.palette-x = clamp(palette.x + self.mouse-x - self.pressed-x, 0px, max(0px, root.width - palette.width));
+                        root.palette-y = clamp(palette.y + self.mouse-y - self.pressed-y, root.title-height, max(root.title-height, root.height - palette.height));
+                        root.palette-placed = true;
+                    }
+                }
+                Text {
+                    x: 8px;
+                    text: @tr("Format");
+                    font-size: 11px;
+                    color: Tok.ink-muted;
+                    vertical-alignment: center;
+                }
+                IconButton {
+                    x: parent.width - self.width - 3px;
+                    y: 3px;
+                    size: 18px;
+                    icon: "M4.5 4.5l7 7M11.5 4.5l-7 7";
+                    tip: @tr("Close");
+                    clicked => { root.format-palette-open = false; }
+                }
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Tok.rule;
+                }
+            }
+            HorizontalLayout {
+                padding: 5px;
+                padding-right: 3px;
+                FormatButtons {
+                    across: false;
+                    window-width: root.width;
+                    buttons: root.format-buttons;
+                    children: root.format-children;
+                    chosen(action) => { root.format-chosen(action); }
                 }
             }
         }
