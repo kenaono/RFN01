@@ -511,6 +511,23 @@ pub struct Hit {
     pub at: usize,
     /// Full logical line; the UI elides it and shows the full text on hover.
     pub preview: String,
+    /// How many bytes matched from `at` — what opening the row selects.
+    pub len: usize,
+}
+
+/// A hit for the `len` bytes at `at` (書き手の求め 2026-09-23: a tag found by a
+/// `tag:` search, which is not a match of the needle).
+pub fn hit_at(source: &str, at: usize, len: usize) -> Hit {
+    let start = source[..at].rfind('\n').map_or(0, |found| found + 1);
+    let end = source[at..]
+        .find('\n')
+        .map_or(source.len(), |found| at + found);
+    Hit {
+        line: source[..start].matches('\n').count() + 1,
+        at,
+        preview: source[start..end].trim_end_matches('\r').to_owned(),
+        len,
+    }
 }
 
 /// Every match in one document, with the line each sits on (要件 7.7).
@@ -536,6 +553,7 @@ pub fn hits_in(source: &str, needle: &str, limit: usize) -> Vec<Hit> {
                 line: number + 1,
                 at: line_start + at,
                 preview: line.trim_end_matches('\r').to_owned(),
+                len: needle.len(),
             });
             if hits.len() >= limit {
                 return hits;

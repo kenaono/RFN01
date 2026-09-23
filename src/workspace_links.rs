@@ -400,6 +400,7 @@ mod validity_tests {
             canonical: path(name),
             fingerprint: stamp(),
             headings: Vec::new(),
+            tags: Vec::new(),
             headings_complete: true,
         }
     }
@@ -1254,6 +1255,13 @@ impl Completion {
             .is_some_and(|open| open.context.kind.is_heading())
     }
 
+    /// 書き手の求め 2026-09-23: whether the list is of tags.
+    pub fn is_tag(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_some_and(|open| open.context.kind == link_completion::TriggerKind::Tag)
+    }
+
     pub fn candidates(&self) -> &[Candidate] {
         self.open
             .as_ref()
@@ -1689,6 +1697,7 @@ mod tests {
                 length: 0,
             },
             headings,
+            tags: Vec::new(),
             headings_complete: true,
         }
     }
@@ -1799,6 +1808,7 @@ mod tests {
                     at: heading * 8,
                 })
                 .collect(),
+            tags: Vec::new(),
             headings_complete: true,
         };
 
@@ -2554,6 +2564,7 @@ mod tests {
                     length: 10,
                 },
                 headings: vec![],
+                tags: Vec::new(),
                 headings_complete: true,
             }];
             for typed in ["[[", "[link]("] {

@@ -187,6 +187,7 @@ fn layout_snapshot() {
         "24_編集中の見出し.md",
         "40_長い段落の入力応答.md",
         "50_Obsidian記法.md",
+        "51_タグ.md",
     ]
     .iter()
     .map(|name| PathBuf::from("testdata").join(name))

@@ -275,6 +275,17 @@ export component AppWindow inherits Window {
     callback bookmark-remove(int);
     callback bookmark-move-to(int, int);
     callback bookmark-dropped(int, int);
+
+    // 書き手の求め 2026-09-23: Tag View（left-tab 6）。行は`left-rows`を共有し（Outlineと同じ
+    // ▸／▾）、件数は行の番号でここから引く。行・畳み・絞り込みの結果はRustが決める。
+    in property <bool> tag-available;
+    in property <[string]> tag-counts;
+    in-out property <string> tag-filter;
+    in-out property <bool> tag-filter-visible;
+    callback tag-fold-toggled(int);
+    // true で全部畳む、false で全部開く。
+    callback tag-fold-all(bool);
+    callback tag-filter-changed();
     callback work-folder-requested();
 
     // Workspace pane state. Legacy switcher callbacks remain for callers/tests.
@@ -1400,6 +1411,21 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // 書き手の求め 2026-09-23: Tag View。
+                IconButton {
+                    x: 7px;
+                    y: root.custom-title ? 184px : 220px;
+                    icon: Icons.tag;
+                    tip: @tr("Tags");
+                    checked: root.tree-open && root.left-tab == 6;
+                    clicked => {
+                        root.tree-open = !(root.tree-open && root.left-tab == 6);
+                        root.left-tab = 6;
+                        root.left-tab-chosen(6);
+                        root.focus-generation += 1;
+                    }
+                }
+
                 // Declared here so its position is read against the rail. A popup is
                 // its own layer, so it is drawn over the panes without the window
                 // having to hold it last the way the question overlay does.
@@ -1724,6 +1750,54 @@ export component AppWindow inherits Window {
                         IconButton { icon: Icons.collapse-all; tip: @tr("Collapse All"); clicked => { root.outline-fold-all(true); } }
                         IconButton { icon: Icons.expand-all; tip: @tr("Expand All"); clicked => { root.outline-fold-all(false); } }
                     }
+                    // 書き手の求め 2026-09-23: Tag Viewの上。Outlineと同じ2つに、絞り込みを1つ。
+                    if root.left-tab == 6: HorizontalLayout {
+                        padding: 6px; spacing: 2px; vertical-stretch: 0;
+                        alignment: start;
+                        IconButton { icon: Icons.collapse-all; tip: @tr("Collapse All"); enabled: root.tag-available; clicked => { root.tag-fold-all(true); } }
+                        IconButton { icon: Icons.expand-all; tip: @tr("Expand All"); enabled: root.tag-available; clicked => { root.tag-fold-all(false); } }
+                        IconButton {
+                            icon: Icons.filter;
+                            tip: @tr("Filter Tags…");
+                            checked: root.tag-filter-visible;
+                            enabled: root.tag-available;
+                            clicked => {
+                                root.tag-filter-visible = !root.tag-filter-visible;
+                                if !root.tag-filter-visible && root.tag-filter != "" {
+                                    root.tag-filter = "";
+                                    root.tag-filter-changed();
+                                }
+                            }
+                        }
+                    }
+                    if root.left-tab == 6 && root.tag-available && root.tag-filter-visible: HorizontalLayout {
+                        padding-left: 6px; padding-right: 6px; vertical-stretch: 0;
+                        Field {
+                            height: 28px;
+                            placeholder: @tr("Filter tags…");
+                            text <=> root.tag-filter;
+                            init => { self.take-focus(); }
+                            edited => { root.tag-filter-changed(); }
+                            escaped => {
+                                root.tag-filter = "";
+                                root.tag-filter-visible = false;
+                                root.tag-filter-changed();
+                            }
+                        }
+                    }
+                    // 何も無いときの案内（Bookmarksと同じ）。
+                    if root.left-tab == 6 && (!root.tag-available || root.left-rows.length == 0): VerticalLayout {
+                        padding-left: 10px; padding-right: 10px; padding-top: 4px;
+                        vertical-stretch: 0;
+                        Text {
+                            text: !root.tag-available
+                                ? @tr("Open a workspace to use tags.")
+                                : (root.tag-filter != "" ? @tr("No tag matches.") : @tr("No tags yet. Write #tag in a note, or tags: in its front matter."));
+                            color: Tok.ink-muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
                     if root.left-tab == 0: tree-head := Rectangle {
                         height: 34px;
                         // 要件 5.2: the work folder itself is a place to let a
@@ -2026,7 +2100,8 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
-                        visible: (root.left-tab != 4 || root.workspace-active) && root.left-tab != 5;
+                        visible: (root.left-tab != 4 || root.workspace-active) && root.left-tab != 5
+                            && (root.left-tab != 6 || root.tag-available);
                         vertical-stretch: self.visible ? 1 : 0;
                         max-height: self.visible ? 100000px : 0px;
                         // 要件 5.2: the point being carried, but only while it
@@ -2314,17 +2389,35 @@ export component AppWindow inherits Window {
                                     // after the area that opens the row to take
                                     // a click at all.
                                     width: parent.width - self.x
-                                        - ((root.left-tab == 0 || root.left-tab == 4) ? 28px : 8px);
+                                        - ((root.left-tab == 0 || root.left-tab == 4) ? 28px : (root.left-tab == 6 ? 48px : 8px));
                                 }
 
                                 // 書き手の求め 2026-09-22: 見出しの▸／▾を押すと、その下を畳む・開く。
                                 // 行の他の場所は今までどおりその見出しへ行く。**`entry`より後に書く**
                                 // ——先に書くと下に敷かれて押せない。
-                                if root.left-tab == 3 && row.folder: TouchArea {
+                                if (root.left-tab == 3 || root.left-tab == 6) && row.folder: TouchArea {
                                     x: 4px + row.depth * root.left-size * 7px / 6;
                                     width: root.left-size * 1px + 8px;
                                     mouse-cursor: pointer;
-                                    clicked => { root.outline-fold-toggled(index); }
+                                    clicked => {
+                                        if root.left-tab == 3 {
+                                            root.outline-fold-toggled(index);
+                                        } else {
+                                            root.tag-fold-toggled(index);
+                                        }
+                                    }
+                                }
+                                // 書き手の求め 2026-09-23: タグを持つ文書の数（子を含む）。
+                                if root.left-tab == 6 && index < root.tag-counts.length: Text {
+                                    x: parent.width - self.width - 10px;
+                                    width: 40px;
+                                    height: parent.height;
+                                    text: root.tag-counts[index];
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    color: Tok.ink-muted;
+                                    font-size: root.left-size * 1px;
+                                    opacity: tree-row.label-opacity;
                                 }
 
                                 if root.left-tab == 4 && row.is-root: Rectangle {

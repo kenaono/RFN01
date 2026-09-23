@@ -325,8 +325,16 @@ impl PreviewDocument {
             })
             .collect::<Vec<_>>();
         let contexts = paragraph_contexts(&lines, style_at, &unclosed, reading);
+        // 書き手の求め 2026-09-23: **カーソルがフロントマターに入ったら、全体を原文で見せる。**
+        // 整形表示では畳まれていて、1行だけ開いても読めないので。
+        let in_front =
+            active_index.is_some_and(|index| style_at(index).kind == LineKind::FrontMatter);
+        let is_active = |index: usize| {
+            active_index == Some(index)
+                || (in_front && style_at(index).kind == LineKind::FrontMatter)
+        };
         let matches = |kept: &PreviewLine, index: usize, line: &str| {
-            let active = active_index == Some(index);
+            let active = is_active(index);
             kept.active == active
                 && kept.style == style_at(index)
                 && kept.context == contexts[index]
@@ -355,7 +363,7 @@ impl PreviewDocument {
         let rebuilt = changed
             .clone()
             .map(|index| {
-                let active = active_index == Some(index);
+                let active = is_active(index);
                 PreviewLine::build(
                     lines[index],
                     active,
@@ -2918,7 +2926,7 @@ pub fn plain_body_text(source: &str, ranges: &[(usize, usize)]) -> String {
             for (index, line) in preview.lines.iter().enumerate() {
                 if matches!(
                     line.style.kind,
-                    LineKind::Fence | LineKind::Rule | LineKind::TableRule
+                    LineKind::Fence | LineKind::Rule | LineKind::TableRule | LineKind::FrontMatter
                 ) {
                     continue;
                 }
@@ -3042,7 +3050,9 @@ fn push_visible_line(
         let start = visible.len();
         visible.push_str(content);
         // 書き手の求め 2026-09-22: `%%`で挟んだコメントのブロックは、行ごと淡く。
-        if style.comment_block {
+        // 書き手の求め 2026-09-23: フロントマターも同じ——本文ではないので数えない。
+        // 整形表示では行ごと畳まれる（`LineKind::FrontMatter`）ので、見えるのは開いたときだけ。
+        if style.comment_block || style.kind == LineKind::FrontMatter {
             let length = visible[start..].encode_utf16().count() as u32;
             if length > 0 {
                 marks.push(Emphasis {
@@ -3424,6 +3434,26 @@ fn push_marked_recording(
         // the caret first is what says so at a glance.
         // 書き手の求め 2026-09-22: Obsidianのコメント`%%…%%`。**記号ごと残して淡く**描く
         // ——消さないので、何が書いてあるかは画面から分かる。中は記法として読まない。
+        // 書き手の求め 2026-09-23: `#タグ`。**字は消さずに色だけ**。対になる記号より先に読む
+        // ——`#snake_case`の`_`は斜体の記号ではない。読み方は`tags::tag_here`の1か所。
+        if let Some((name, after)) = crate::tags::tag_here(rest, previous) {
+            let start = *at;
+            visible.push('#');
+            visible.push_str(name);
+            *at += 1 + name.encode_utf16().count() as u32;
+            marks.push(Emphasis {
+                utf16_start: start,
+                utf16_len: *at - start,
+                marks: Marks {
+                    tag: true,
+                    ..Marks::default()
+                },
+                ornament: None,
+            });
+            previous = name.chars().next_back();
+            rest = after;
+            continue;
+        }
         if let Some((comment, after)) = comment_here(rest) {
             let start = *at;
             for character in comment.chars() {
@@ -5308,7 +5338,12 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
         // measured cells say. It is built where they are measured, so that no
         // two places have an opinion about the box over that line (技術検証 7.7).
         // 要件 7.8（2026-09-16）: 体裁の注記だけの行も同じ——指示は本文ではない。
-        LineKind::Rule | LineKind::Fence | LineKind::Note | LineKind::PageBreak => Ornament::Hidden,
+        // 書き手の求め 2026-09-23: フロントマターの行も（整形表示では行ごと畳む）。
+        LineKind::Rule
+        | LineKind::Fence
+        | LineKind::Note
+        | LineKind::PageBreak
+        | LineKind::FrontMatter => Ornament::Hidden,
         // 要件 7.3.2: the white space a writer typed to line a continuation up
         // under its item. **The style is what says it is that** — the same
         // spaces under nothing are text, and shown as text.
@@ -5488,8 +5523,46 @@ fn line_style(
 /// コメントと、`> [!NOTE]`で始まったCalloutの種類。**フェンスと同じ道**で、上から順に持ち越す。
 #[derive(Debug, Default)]
 struct Carry {
+    /// 書き手の求め 2026-09-23: フロントマターの残りの行数（[`frontmatter_end`]）。
+    front: usize,
     comment: bool,
     callout: u8,
+}
+
+impl Carry {
+    /// 文書を頭から読むときの持ち越し——フロントマターがあれば、その行数から始まる。
+    fn reading(source: &str) -> Self {
+        Self {
+            front: frontmatter_lines(source),
+            ..Self::default()
+        }
+    }
+}
+
+/// 書き手の求め 2026-09-23: フロントマター（1行目の`---`から、次の`---`か`...`の行まで）の
+/// 終わり——閉じる行の次のバイト。**閉じていなければフロントマターではない**（Obsidianと同じ）。
+pub fn frontmatter_end(source: &str) -> Option<usize> {
+    let mut lines = source.split_inclusive('\n');
+    let first = lines.next()?;
+    if first.trim_end() != "---" {
+        return None;
+    }
+    let mut at = first.len();
+    for line in lines {
+        at += line.len();
+        if matches!(line.trim_end(), "---" | "...") {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// フロントマターの行数（閉じる行を含む）。無ければ0。
+fn frontmatter_lines(source: &str) -> usize {
+    frontmatter_end(source).map_or(0, |end| {
+        let head = &source[..end];
+        head.matches('\n').count() + usize::from(!head.ends_with('\n'))
+    })
 }
 
 /// [`line_style`]に、[`Carry`]の2つを足して読む。
@@ -5507,6 +5580,12 @@ fn carried_style(
     note_indent: &mut u8,
     carry: &mut Carry,
 ) -> LineStyle {
+    // 書き手の求め 2026-09-23: 文書の頭のフロントマター。**何よりも先に読む**——中は
+    // YAMLで、`# `はコメント、`---`は区切り線ではない。
+    if carry.front > 0 {
+        carry.front -= 1;
+        return LineStyle::of_kind(LineKind::FrontMatter);
+    }
     let marker = line.trim() == "%%";
     if fence.is_none() && (carry.comment || marker) {
         carry.comment = !(carry.comment && marker);
@@ -5569,7 +5648,7 @@ pub fn line_styles_reading(source: &str, reading: Reading) -> Vec<LineStyle> {
     let mut table = None;
     // 字下げの範囲は行をまたいで続く（フェンスと同じ道）。
     let mut note_indent = 0;
-    let mut carry = Carry::default();
+    let mut carry = Carry::reading(source);
     let mut lines = source.split('\n').peekable();
     let mut styles = Vec::new();
     while let Some(line) = lines.next() {
@@ -5618,7 +5697,7 @@ pub fn outline(source: &str) -> Vec<Heading> {
     let mut levels = ListLevels::default();
     let mut table = None;
     let mut note_indent = 0;
-    let mut carry = Carry::default();
+    let mut carry = Carry::reading(source);
     let mut lines = source.split('\n').peekable();
     while let Some(line) = lines.next() {
         let next = lines.peek().copied().unwrap_or_default();
@@ -9375,6 +9454,79 @@ mod tests {
         let (visible, marks) = preview_of("**太==字==**");
         assert_eq!(visible, "太字");
         assert!(marks.iter().any(|mark| mark.marks.highlight));
+    }
+
+    /// 書き手の求め 2026-09-23: 文書の頭のフロントマターは、閉じる行まで1つの種類。中の`# `は
+    /// 見出しではなく、`---`は区切り線ではない。閉じていなければフロントマターではない。
+    #[test]
+    fn frontmatter_is_its_own_kind_and_holds_no_headings() {
+        let source = "---\ntitle: 題\n# YAMLのコメント\n---\n# 本当の見出し\n---\n";
+        let kinds: Vec<_> = line_styles(source).iter().map(|style| style.kind).collect();
+        assert_eq!(&kinds[..4], [LineKind::FrontMatter; 4]);
+        assert_eq!(kinds[5], LineKind::Rule);
+        let headings = outline(source);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].text, "本当の見出し");
+        assert_eq!(
+            frontmatter_end(source),
+            Some("---\ntitle: 題\n# YAMLのコメント\n---\n".len())
+        );
+        assert_eq!(frontmatter_end("---\ntitle: 題\n"), None);
+        assert_eq!(frontmatter_end("本文\n---\na\n---\n"), None);
+        assert!(
+            line_styles("---\ntitle: 題\n")
+                .iter()
+                .all(|s| s.kind != LineKind::FrontMatter)
+        );
+    }
+
+    /// 整形表示では畳む行の箱が立ち（字は残り、数えない）、カーソルが中に入ると全体が原文になる。
+    #[test]
+    fn frontmatter_folds_in_the_preview_until_the_caret_enters_it() {
+        let source = "---\ntags: [a]\n---\n本文\n";
+        let preview = PreviewDocument::from_source_with_active_line(
+            source,
+            Some(source.find("本文").unwrap()),
+        );
+        let markers = preview.markers();
+        assert!(
+            markers[..3]
+                .iter()
+                .all(|marker| marker.is_some_and(|m| m.ornament == Ornament::Hidden))
+        );
+        assert!(markers[3].is_none());
+        let mut counts = DocumentCounts::default();
+        counts.refresh(source, Reading::all());
+        // 字は数えない（改行は、コメントのブロックと同じく1行1つ数える）。
+        let mut blank = DocumentCounts::default();
+        blank.refresh("\n\n\n本文\n", Reading::all());
+        assert_eq!(
+            counts.stats().body_characters,
+            blank.stats().body_characters
+        );
+        // 2行目にカーソル：3行とも原文（箱なし）。
+        let inside = PreviewDocument::from_source_with_active_line(source, Some(4));
+        assert!(inside.markers()[..3].iter().all(Option::is_none));
+    }
+
+    /// 書き手の求め 2026-09-23: `#タグ`は字のまま残って色が付く。`_`は斜体の記号にならない。
+    #[test]
+    fn a_tag_keeps_its_letters_and_is_marked() {
+        let (visible, marks) = preview_of("前 #小説/人物 と #snake_case_tag");
+        assert_eq!(visible, "前 #小説/人物 と #snake_case_tag");
+        let tagged: Vec<_> = marks
+            .iter()
+            .filter(|mark| mark.marks.tag)
+            .map(|mark| (mark.utf16_start, mark.utf16_len))
+            .collect();
+        assert_eq!(tagged, [(2, 6), (11, 15)]);
+        assert!(!marks.iter().any(|mark| mark.marks.italic));
+        // 語の途中の`#`と見出しの印はタグではない。
+        let (_, marks) = preview_of("語#中");
+        assert!(!marks.iter().any(|mark| mark.marks.tag));
+        let (visible, marks) = preview_of("## 見出し #タグ");
+        assert_eq!(visible, "見出し #タグ");
+        assert!(marks.iter().any(|mark| mark.marks.tag));
     }
 
     /// `%%メモ%%`は記号ごと残って淡くなり、中は記法として読まない。文字数に数えない。

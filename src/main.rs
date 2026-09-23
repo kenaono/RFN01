@@ -78,6 +78,9 @@ mod shortcuts;
 mod tab_position_ui_tests;
 #[cfg(test)]
 mod table_ui_tests;
+#[cfg(test)]
+mod tag_ui_tests;
+mod tags;
 mod terminal;
 mod terminal_appearance;
 mod terminal_panels;
@@ -1400,6 +1403,16 @@ struct RenderCache {
     outline_folds: HashMap<String, HashSet<Vec<String>>>,
     /// 書き手の求め 2026-09-22: the bookmark whose section is lit, while it is.
     bookmark_mark: Option<BookmarkMark>,
+    /// 書き手の求め 2026-09-23: the Tag View's open tags ([`tags::key`]).
+    /// **Closed until opened**, and kept across redraws of the index.
+    tag_open: HashSet<String>,
+    /// The tag each row of the Tag View stands for, in row order.
+    tag_paths: Vec<String>,
+    /// The tree those rows were drawn from — what Expand All opens.
+    tag_tree: Vec<tags::TagNode>,
+    /// The index revision the Tag View was drawn from, to redraw only when
+    /// the index has changed.
+    tag_revision: Option<u64>,
 }
 
 impl Default for RenderCache {
@@ -1421,6 +1434,10 @@ impl Default for RenderCache {
             outline_key: String::new(),
             outline_folds: HashMap::new(),
             bookmark_mark: None,
+            tag_open: HashSet::new(),
+            tag_paths: Vec::new(),
+            tag_tree: Vec::new(),
+            tag_revision: None,
         }
     }
 }
@@ -6463,6 +6480,22 @@ fn folder_autosave_tick(window: &AppWindow, live: &Live) {
 /// registered yet) falls back to `folder.root` — 仕様 "Workspaceなしは所属を
 /// 推測しない" — drawn through the classic [`file_tree::rows`], the same as
 /// before Workspaces existed.
+/// The roots an unscoped search walks: the tree's (`tree_roots`) — except
+/// that a `tag:` search walks the active Workspace's, whichever tree was shown
+/// last (書き手の合意 2026-09-23: タグはWorkspaceのもの). The Tag View counts
+/// the Workspace's tags, so a click on one must not search somewhere else.
+fn search_roots(folder: &WorkFolder, needle: &str) -> (Vec<PathBuf>, bool) {
+    if !tags::split_query(needle).0.is_empty()
+        && let Some(runtime) = folder.workspace.as_ref()
+    {
+        let runtime = runtime.borrow();
+        if runtime.active_workspace().is_some() {
+            return (runtime.active_roots(), true);
+        }
+    }
+    tree_roots(folder)
+}
+
 fn tree_roots(folder: &WorkFolder) -> (Vec<PathBuf>, bool) {
     if let Some(runtime) = folder.workspace.as_ref().filter(|_| folder.workspace_view) {
         let runtime = runtime.borrow();
@@ -6511,6 +6544,8 @@ enum LeftTab {
     Workspace,
     /// 書き手の求め 2026-09-22.
     Bookmarks,
+    /// 書き手の求め 2026-09-23.
+    Tags,
 }
 
 impl LeftTab {
@@ -6523,6 +6558,7 @@ impl LeftTab {
             Self::Outline => 3,
             Self::Workspace => 4,
             Self::Bookmarks => 5,
+            Self::Tags => 6,
         }
     }
 
@@ -6534,6 +6570,7 @@ impl LeftTab {
             3 => Self::Outline,
             4 => Self::Workspace,
             5 => Self::Bookmarks,
+            6 => Self::Tags,
             _ => Self::Explorer,
         }
     }
@@ -6575,6 +6612,120 @@ fn publish_left(window: &AppWindow, live: &Live) {
         LeftTab::Recent => publish_recent(window, live),
         LeftTab::Outline => publish_outline(window, live),
         LeftTab::Bookmarks => bookmark_ui::publish(window, live),
+        LeftTab::Tags => publish_tags(window, live),
+    }
+}
+
+/// 書き手の求め 2026-09-23: the Tag View — the active Workspace's tags as a
+/// tree (`tags::tree`), from the index the link completion already keeps.
+fn publish_tags(window: &AppWindow, live: &Live) {
+    let held = workspace_link_ui(live);
+    let Ok(ui) = held.try_borrow() else {
+        // Only the index's own tick holds it, and that tick draws the view
+        // itself once the index has changed.
+        return;
+    };
+    let entries = ui.index.entries_shared();
+    let revision = ui.index.revision();
+    drop(ui);
+    draw_tags(window, live, &entries, revision);
+}
+
+/// Put the Tag View's rows in the left pane.
+fn draw_tags(window: &AppWindow, live: &Live, entries: &[workspace_index::Entry], revision: u64) {
+    let available = window.get_workspace_active();
+    window.set_tag_available(available);
+    let filter = window.get_tag_filter().to_string();
+    let rows = {
+        let mut cache = live.cache.borrow_mut();
+        cache.tag_revision = Some(revision);
+        cache.tag_tree = if available {
+            tags::tree(entries.iter().map(|entry| entry.tags.as_slice()))
+        } else {
+            Vec::new()
+        };
+        let rows = tags::rows(&cache.tag_tree, &cache.tag_open, &filter);
+        cache.tag_paths = rows.iter().map(|row| row.path.clone()).collect();
+        rows
+    };
+    let counts = rows
+        .iter()
+        .map(|row| SharedString::from(row.files.to_string()))
+        .collect::<Vec<_>>();
+    let drawn = rows
+        .iter()
+        .map(|row| LeftRow {
+            name: row.name.clone().into(),
+            depth: row.depth as i32,
+            folder: row.parent,
+            open: row.open,
+            parent: -1,
+            is_root: false,
+        })
+        .collect::<Vec<_>>();
+    window.set_tag_counts(ModelRc::new(VecModel::from(counts)));
+    window.set_tree_selected(-1);
+    window.set_left_rows(ModelRc::new(VecModel::from(drawn)));
+}
+
+/// Draw the Tag View again if it is showing and the index has changed since.
+fn draw_tags_if_showing(window: &AppWindow, live: &Live, ui: &WorkspaceLinkUi) {
+    let showing =
+        window.get_tree_open() && LeftTab::from_index(window.get_left_tab()) == LeftTab::Tags;
+    let revision = ui.index.revision();
+    if !showing || live.cache.borrow().tag_revision == Some(revision) {
+        return;
+    }
+    draw_tags(window, live, ui.index.entries(), revision);
+}
+
+/// 書き手の求め 2026-09-23: ▸／▾ on a Tag View row.
+fn tag_fold_toggled(window: &AppWindow, live: &Live, row: i32) {
+    {
+        let mut cache = live.cache.borrow_mut();
+        let Some(path) = usize::try_from(row)
+            .ok()
+            .and_then(|row| cache.tag_paths.get(row))
+        else {
+            return;
+        };
+        let key = tags::key(path);
+        if !cache.tag_open.remove(&key) {
+            cache.tag_open.insert(key);
+        }
+    }
+    publish_tags(window, live);
+}
+
+/// 書き手の求め 2026-09-23: Collapse All / Expand All over the Tag View.
+fn fold_all_tags(window: &AppWindow, live: &Live, close: bool) {
+    {
+        let mut cache = live.cache.borrow_mut();
+        cache.tag_open = if close {
+            HashSet::new()
+        } else {
+            tags::all_parents(&cache.tag_tree)
+        };
+    }
+    publish_tags(window, live);
+}
+
+/// 書き手の求め 2026-09-23: search the work folder for a tag — a Tag View row
+/// or a Ctrl+click on a tag. **The search panel is the one place a search is
+/// shown**, so this is the same as typing `tag:#name` there.
+fn search_tag(window: &AppWindow, live: &Live, name: &str) {
+    window.set_folder_needle(format!("tag:#{name}").into());
+    window.set_left_tab(LeftTab::Search.index());
+    window.set_tree_open(true);
+    publish_left(window, live);
+    search_work_folder(window, live);
+}
+
+/// A Tag View row was clicked.
+fn search_tag_row(window: &AppWindow, live: &Live, index: usize) {
+    let path = live.cache.borrow().tag_paths.get(index).cloned();
+    if let Some(path) = path {
+        search_tag(window, live, &path);
     }
 }
 
@@ -6593,7 +6744,7 @@ fn show_searched_folder(window: &AppWindow, live: &Live) {
         window.set_search_folder_scoped(true);
         return;
     }
-    let (roots, multi) = tree_roots(&folder);
+    let (roots, multi) = search_roots(&folder, &window.get_folder_needle());
     let (told, path) = if roots.is_empty() {
         (no_work_folder().to_owned(), String::new())
     } else if multi && roots.len() > 1 {
@@ -6876,6 +7027,7 @@ fn activate_left_row(window: &AppWindow, live: &Live, index: usize) {
         LeftTab::Outline => go_to_heading(window, live, index),
         // The view answers its own rows (`bookmark_ui::activate`).
         LeftTab::Bookmarks => {}
+        LeftTab::Tags => search_tag_row(window, live, index),
     }
 }
 
@@ -6920,6 +7072,20 @@ fn open_result(window: &AppWindow, live: &Live, index: usize) {
     }
     let needle = window.get_folder_needle().to_string();
     let source = document.text.borrow().clone();
+    // 書き手の求め 2026-09-23: `tag:`の検索は、残りの語があればそれを、無ければタグを
+    // 探し直す（`searcher::tag_hits`と同じ分け方）。
+    let (tag_keys, words) = tags::split_query(&needle);
+    if !tag_keys.is_empty() && words.is_empty() {
+        let found_tag = tags::tags_in(&source).into_iter().find(|tag| {
+            tag.at + tag.len > found.at
+                && tag_keys.iter().any(|query| tags::matches(&tag.name, query))
+        });
+        if let Some(tag) = found_tag {
+            show_source_range(window, live, id, &source, tag.at, tag.at + tag.len);
+        }
+        return;
+    }
+    let needle = if tag_keys.is_empty() { needle } else { words };
     // **フォルダ全文検索は帯の切り替えを持たない**ので、既定の探し方で探し直す
     // ——`hits_in`がその規則で見つけたものを、同じ規則で指し直すのでなければ、
     // 一覧の行と本文の位置が食い違う。
@@ -7115,7 +7281,7 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
         // else is registered.
         match folder.searching.clone() {
             Some(scoped) => vec![scoped],
-            None => tree_roots(&folder).0,
+            None => search_roots(&folder, &needle).0,
         }
     };
     if roots.is_empty() {
@@ -9085,6 +9251,8 @@ fn publish_link_popup(window: &AppWindow, id: PaneId, ui: &WorkspaceLinkUi) {
         || status.cache_write_failed > 0
     {
         pick("索引は一部のみ", "Partial index")
+    } else if ui.completion.is_tag() {
+        pick("タグ候補", "Tag suggestions")
     } else {
         pick("リンク候補", "Link suggestions")
     };
@@ -9281,6 +9449,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     // from the worker's own scan and priority times (要件 4.5「UIへの反映待ち」
     // の内訳). Counts and times only — never a name or a path.
     let submit_ms = update_priority_index(window, live, &mut ui);
+    draw_tags_if_showing(window, live, &ui);
     let view = ui.index.take_view_metrics();
     if view.rebuilds > 0 || submit_ms > 0.0 {
         let line = format!("{} priority_submit_ms={:.3}", view.log(), submit_ms);
@@ -9601,6 +9770,7 @@ fn link_hover_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) ->
     letter_at(window, live, id, x, y).is_some_and(|(_, source, letter)| {
         document::footnote_jump(&source, letter).is_some()
             || document::link_target_at(&source, letter).is_some()
+            || tags::tag_at(&source, letter).is_some()
     })
 }
 
@@ -9611,6 +9781,11 @@ fn open_link_at(window: &AppWindow, live: &Live, id: PaneId, x: f32, y: f32) -> 
     // 書き手の求め 2026-09-22: 脚注は同じ文書の中を行き来する（参照→定義、定義→参照）。
     if let Some(to) = document::footnote_jump(&source, letter) {
         show_source_range(window, live, id, &source, to, to);
+        return true;
+    }
+    // 書き手の求め 2026-09-23: タグは、そのタグで検索する。
+    if let Some(name) = tags::tag_at(&source, letter) {
+        search_tag(window, live, &name);
         return true;
     }
     let Some((target, wiki)) = document::link_target_at(&source, letter) else {

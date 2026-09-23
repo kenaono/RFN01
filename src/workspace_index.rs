@@ -36,6 +36,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::document;
 use crate::file_io;
+use crate::tags;
 
 pub fn is_markdown(path: &Path) -> bool {
     path.extension()
@@ -115,6 +116,9 @@ pub struct Entry {
     /// published as a file-only stub), or when it is one but could not be
     /// read in full.
     pub headings: Vec<document::Heading>,
+    /// 書き手の求め 2026-09-23: the file's tags (`crate::tags::names`) — parsed
+    /// with the headings, so empty exactly when they are.
+    pub tags: Vec<String>,
     /// `false` for a file-only stub not parsed yet, for a file over
     /// [`ScanOptions::max_heading_bytes`], or one that failed to decode. A
     /// file left incomplete is retried on the *next* scan even if its
@@ -774,10 +778,10 @@ pub(crate) fn read_entry(path: &Path, roots: &[PathBuf]) -> Option<Entry> {
         return None;
     }
     let fingerprint = fingerprint_of(&metadata);
-    let (headings, headings_complete) = if is_markdown(&canonical) {
+    let (headings, tags, headings_complete) = if is_markdown(&canonical) {
         parse_headings(&canonical, fingerprint.length, 2 * 1024 * 1024)
     } else {
-        (Vec::new(), true)
+        (Vec::new(), Vec::new(), true)
     };
     Some(Entry {
         root,
@@ -785,38 +789,43 @@ pub(crate) fn read_entry(path: &Path, roots: &[PathBuf]) -> Option<Entry> {
         canonical,
         fingerprint,
         headings,
+        tags,
         headings_complete,
     })
 }
 
-/// Headings for a file already known to be `length` bytes, bounded to
-/// `max_bytes` — over that, or not decodable as text, and this is
-/// `(Vec::new(), false)` rather than an error.
+/// Headings and tags for a file already known to be `length` bytes, bounded
+/// to `max_bytes` — over that, or not decodable as text, and this is
+/// `(Vec::new(), Vec::new(), false)` rather than an error.
 ///
 /// Reads through `File::take(max_bytes + 1)` rather than [`fs::read`]:
 /// `length` is a metadata snapshot from moments earlier, and a file that grew
 /// past it in the meantime must not turn into an unbounded read here — the
 /// one extra byte is only so a file that lands *exactly* at the bound is not
 /// mistaken for one that is over it.
-fn parse_headings(path: &Path, length: u64, max_bytes: u64) -> (Vec<document::Heading>, bool) {
+fn parse_headings(path: &Path, length: u64, max_bytes: u64) -> Parsed {
+    let failed = || (Vec::new(), Vec::new(), false);
     if length > max_bytes {
-        return (Vec::new(), false);
+        return failed();
     }
     let Ok(file) = fs::File::open(path) else {
-        return (Vec::new(), false);
+        return failed();
     };
     let mut bytes = Vec::new();
     if file.take(max_bytes + 1).read_to_end(&mut bytes).is_err() {
-        return (Vec::new(), false);
+        return failed();
     }
     if bytes.len() as u64 > max_bytes {
-        return (Vec::new(), false);
+        return failed();
     }
     match file_io::decode(&bytes, max_bytes as usize) {
-        Ok((text, _form)) => (document::outline(&text), true),
-        Err(_) => (Vec::new(), false),
+        Ok((text, _form)) => (document::outline(&text), tags::names(&text), true),
+        Err(_) => failed(),
     }
 }
+
+/// What [`parse_headings`] reads: headings, tags and whether it read it all.
+type Parsed = (Vec<document::Heading>, Vec<String>, bool);
 
 /// A file Phase A found that needs (re-)parsing in Phase B.
 struct ToParse {
@@ -978,6 +987,7 @@ fn run_scan(
                 canonical: path,
                 fingerprint,
                 headings: Vec::new(),
+                tags: Vec::new(),
                 headings_complete: false,
             });
             if stub_batch.len() >= options.batch_size {
@@ -1012,14 +1022,14 @@ fn run_scan(
                         break;
                     };
                     let task_started = Instant::now();
-                    let (headings, headings_complete) = if is_markdown(&item.path) {
+                    let (headings, tags, headings_complete) = if is_markdown(&item.path) {
                         parse_headings(
                             &item.path,
                             item.fingerprint.length,
                             options.max_heading_bytes,
                         )
                     } else {
-                        (Vec::new(), true)
+                        (Vec::new(), Vec::new(), true)
                     };
                     parse_work
                         .fetch_add(task_started.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -1033,6 +1043,7 @@ fn run_scan(
                         canonical: item.path.clone(),
                         fingerprint: item.fingerprint,
                         headings,
+                        tags,
                         headings_complete,
                     };
                     if tx.send(entry).is_err() {
@@ -1116,7 +1127,9 @@ fn run_scan(
 
 // --- Cache: a small versioned std-only format, one file per root. ---------
 
-const CACHE_MAGIC: &str = "RFN-EDIT-WSINDEX 1";
+// 2: tags (書き手の求め 2026-09-23). A version-1 cache is not read, so the
+// first scan after the change parses every file again.
+const CACHE_MAGIC: &str = "RFN-EDIT-WSINDEX 2";
 const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// FNV-1a — small enough to write by hand and stable forever, unlike
@@ -1279,7 +1292,7 @@ fn encode_cache(root: &Path, entries: &[Entry]) -> String {
             None => (0u8, 0, 0),
         };
         out.push_str(&format!(
-            "entry: {} {} {} {} {} {} {}\n",
+            "entry: {} {} {} {} {} {} {} {}\n",
             relative_text.len(),
             has_modified,
             secs,
@@ -1287,6 +1300,7 @@ fn encode_cache(root: &Path, entries: &[Entry]) -> String {
             entry.fingerprint.length,
             entry.headings.len(),
             u8::from(entry.headings_complete),
+            entry.tags.len(),
         ));
         out.push_str(&relative_text);
         out.push('\n');
@@ -1298,6 +1312,11 @@ fn encode_cache(root: &Path, entries: &[Entry]) -> String {
                 heading.text.len()
             ));
             out.push_str(&heading.text);
+            out.push('\n');
+        }
+        for tag in &entry.tags {
+            out.push_str(&format!("tag: {}\n", tag.len()));
+            out.push_str(tag);
             out.push('\n');
         }
     }
@@ -1344,6 +1363,7 @@ fn decode_cache(raw: &str) -> Option<(PathBuf, Vec<Entry>)> {
         let length: u64 = parts.next()?.parse().ok()?;
         let heading_count: usize = parts.next()?.parse().ok()?;
         let complete: u8 = parts.next()?.parse().ok()?;
+        let tag_count: usize = parts.next()?.parse().ok()?;
         if parts.next().is_some() {
             return None;
         }
@@ -1380,6 +1400,18 @@ fn decode_cache(raw: &str) -> Option<(PathBuf, Vec<Entry>)> {
                 at: heading_at,
             });
         }
+        let mut tags = Vec::with_capacity(tag_count.min(256));
+        for _ in 0..tag_count {
+            let (tag_line, next_at) = split_line(raw, at)?;
+            let text_len: usize = tag_line.strip_prefix("tag: ")?.parse().ok()?;
+            let text_end = next_at.checked_add(text_len)?;
+            let text = raw.get(next_at..text_end)?;
+            if raw.get(text_end..text_end + 1)? != "\n" {
+                return None;
+            }
+            at = text_end + 1;
+            tags.push(text.to_owned());
+        }
 
         let relative = PathBuf::from(relative_text);
         let canonical = root.join(&relative);
@@ -1389,6 +1421,7 @@ fn decode_cache(raw: &str) -> Option<(PathBuf, Vec<Entry>)> {
             canonical,
             fingerprint: file_io::FileStamp { modified, length },
             headings,
+            tags,
             headings_complete: complete == 1,
         });
     }
@@ -1563,6 +1596,7 @@ mod tests {
                 length: 0,
             },
             headings: Vec::new(),
+            tags: Vec::new(),
             headings_complete: true,
         }
     }
@@ -1677,6 +1711,7 @@ mod tests {
                 text: "むかしの見出し".to_owned(),
                 at: 0,
             }],
+            tags: Vec::new(),
             headings_complete: true,
         };
         write_cache(&cache_dir, &canonical_root, std::slice::from_ref(&stale))
@@ -1756,6 +1791,7 @@ mod tests {
             canonical: canonical_root.join("大きい.md"),
             fingerprint: fingerprint_of(&metadata),
             headings: Vec::new(),
+            tags: Vec::new(),
             headings_complete: false,
         };
         write_cache(&cache_dir, &canonical_root, std::slice::from_ref(&stub))
@@ -2028,10 +2064,28 @@ mod tests {
         let path = root.join("育った.md");
         fs::write(&path, "あ".repeat(10_000)).expect("writes");
 
-        let (headings, complete) = parse_headings(&path, 10, 50);
+        let (headings, _tags, complete) = parse_headings(&path, 10, 50);
 
         assert!(!complete);
         assert!(headings.is_empty());
+    }
+
+    /// 書き手の求め 2026-09-23: a file's tags are read with its headings.
+    #[test]
+    fn parse_headings_reads_the_tags_too() {
+        let root = scratch_directory("tags-root");
+        let path = root.join("タグ.md");
+        fs::write(
+            &path,
+            "---\ntags: [小説]\n---\n# 見出し\n本文 #メモ #小説\n",
+        )
+        .expect("writes");
+
+        let (headings, tags, complete) = parse_headings(&path, 60, 1024);
+
+        assert!(complete);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(tags, ["小説", "メモ"]);
     }
 
     /// 仕様の実装依頼 #4: dropping the `Indexer` must cancel an in-flight
@@ -2432,6 +2486,7 @@ mod tests {
                 text: "改行\nを含む見出し".to_owned(),
                 at: 7,
             }],
+            tags: vec!["小説/人物".to_owned(), "Draft".to_owned()],
             headings_complete: true,
         }];
 

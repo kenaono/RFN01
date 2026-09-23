@@ -113,6 +113,7 @@ mod tests {
                 length: 0,
             },
             headings: vec![],
+            tags: Vec::new(),
             headings_complete: true,
         }
     }
