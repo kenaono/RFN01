@@ -12,7 +12,7 @@ impl slint::platform::Platform for Offscreen {
 }
 
 /// 1色塗りの24ビットBMP（WICが読む、いちばん簡単な形）。
-fn solid_bmp(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+pub(crate) fn solid_bmp(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
     let row = (width * 3).div_ceil(4) * 4;
     let size = 54 + row * height;
     let mut bytes = Vec::with_capacity(size as usize);

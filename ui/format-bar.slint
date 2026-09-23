@@ -7,6 +7,7 @@
 import { Tok } from "tokens.slint";
 import { IconButton, MenuFrame, MenuRow } from "controls.slint";
 import { InsertRow } from "editor-types.slint";
+import { TablePicker } from "table-picker.slint";
 
 // ボタン1つ。
 export struct FormatButton {
@@ -28,6 +29,8 @@ export struct FormatButton {
     /// ここから新しい束——ツールバーでは左に縦線を引く。
     divided: bool,
     enabled: bool,
+    /// 押すと表のマス目が開くボタン（RFN01-49）。
+    picker: bool,
 }
 
 // ボタンの1つ。組のボタンは右下に小さな三角を付ける——押すと開くことを言う。
@@ -42,7 +45,7 @@ component FormatCell inherits Rectangle {
         enabled: root.button.enabled;
         clicked => { root.clicked(); }
     }
-    if root.button.flyout: Path {
+    if root.button.flyout || root.button.picker: Path {
         x: 20px; y: 20px; width: 4px; height: 4px;
         viewbox-width: 4; viewbox-height: 4;
         commands: "M4 0V4H0Z";
@@ -60,8 +63,12 @@ export component FormatButtons inherits Rectangle {
     in property <length> window-width;
     /// 押された——`FormatButton.action`か`InsertRow.number`。
     callback chosen(int);
+    /// 字を入れているペインが縦書きか。表のマス目を縦書きの見え方で並べる（RFN01-49）。
+    in property <bool> vertical;
+    /// 表のマス目で選んだ——行の数（見出し行を含む）と列の数。
+    callback table-chosen(int, int);
 
-    /// 開いている組（`InsertRow.group`）。-2は「⋯」の中身。
+    /// 開いている組（`InsertRow.group`）。-2は「⋯」の中身、-3は表のマス目。
     private property <int> open: -1;
     private property <length> open-x;
     private property <length> open-y;
@@ -77,11 +84,11 @@ export component FormatButtons inherits Rectangle {
     // **窓の右端では左へ**——右端に置いたパレットに行が重ならないように。窓の外へ
     // はみ出す分はSlintが窓の中へ押し戻す（`place_popup`）ので、ここでは縮めない。
     function press(button: FormatButton, cell-x: length, cell-y: length) {
-        if !button.flyout {
+        if !button.flyout && !button.picker {
             root.chosen(button.action);
             return;
         }
-        root.open = button.group;
+        root.open = button.picker ? -3 : button.group;
         if root.across {
             root.open-x = cell-x;
             root.open-y = cell-y + 28px;
@@ -166,7 +173,7 @@ export component FormatButtons inherits Rectangle {
         x: root.open-x;
         y: root.open-y;
         width: root.flyout-width;
-        height: max(hidden.height, listed.height);
+        height: max(max(hidden.height, listed.height), root.open == -3 ? picked.height : 0px);
         close-policy: close-on-click-outside;
 
         // 並びきらなかったボタン。「⋯」の下へ右寄せで出す。
@@ -186,7 +193,9 @@ export component FormatButtons inherits Rectangle {
                         FormatCell {
                             button: button;
                             clicked => {
-                                if button.flyout {
+                                if button.picker {
+                                    root.open = -3;
+                                } else if button.flyout {
                                     root.open = button.group;
                                 } else {
                                     root.chosen(button.action);
@@ -195,6 +204,22 @@ export component FormatButtons inherits Rectangle {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // 表のマス目（RFN01-49）。組の行と同じ面に、中身を替えて出す。
+        picked := MenuFrame {
+            visible: root.open == -3;
+            width: table.width;
+            height: root.open == -3 ? table.height : 0px;
+
+            table := TablePicker {
+                vertical: root.vertical;
+                // 知らせてから閉じる（開発ガイドライン5）。
+                chosen(rows, columns) => {
+                    root.table-chosen(rows, columns);
+                    flyout.close();
                 }
             }
         }

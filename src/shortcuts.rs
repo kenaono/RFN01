@@ -381,6 +381,8 @@ const INSERT_ACTIONS: &[MenuAction] = &[
     insert(InsertEdit::Callout(CalloutType::Important)),
     insert(InsertEdit::Callout(CalloutType::Warning)),
     insert(InsertEdit::Callout(CalloutType::Caution)),
+    // 表（RFN01-49）。キーではマス目がキャレットの所に開く。同じく末尾へ。
+    insert_shape(InsertShape::Table),
 ];
 /// 変更できる操作の数——既存の46枠と、メニューから来た分。
 fn count() -> usize {
@@ -1097,15 +1099,13 @@ mod tests {
                 .count();
             assert_eq!(count, 1, "{what:?}");
         }
-        assert_eq!(
-            used.iter()
-                .filter(|shape| **shape == InsertShape::PageBreak)
-                .count(),
-            1
-        );
+        for shape in [InsertShape::Table, InsertShape::PageBreak] {
+            let count = used.iter().filter(|used| **used == shape).count();
+            assert_eq!(count, 1, "{shape:?}");
+        }
         assert_eq!(
             used.len(),
-            crate::document::INSERT_EDITS.len() + crate::document::LINE_NOTE_EDITS.len() + 1
+            crate::document::INSERT_EDITS.len() + crate::document::LINE_NOTE_EDITS.len() + 2
         );
     }
 

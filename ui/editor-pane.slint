@@ -308,6 +308,9 @@ export component EditorPane inherits Rectangle {
     in property <[PreviewSelectionRect]> picture-rects;
     in property <PreviewSelectionRect> picture-outline;
     in property <bool> picture-outline-shown;
+    in property <[PreviewSelectionRect]> table-edges;
+    in property <PreviewSelectionRect> table-guide;
+    in property <bool> table-guide-shown;
     // The laid-out document's size, in pixels.
     in property <int> content-width;
     in property <int> content-height;
@@ -377,6 +380,7 @@ export component EditorPane inherits Rectangle {
     callback selection-end(float, float);
     // 追加要件 2026-09-16: 絵の角を引く。何枚目の絵か、0押した・1引いている・2離した・3取りやめ、面の座標。
     callback picture-resize(int, int, float, float);
+    callback table-resize(int, int, float, float);
     callback select-all();
     /// Text arriving through the hidden field: what was typed, pasted, or
     /// committed out of a conversion. **The flag says which** — a conversion is
@@ -429,6 +433,12 @@ export component EditorPane inherits Rectangle {
     in property <[InsertRow]> insert-rows;
     in property <[InsertRow]> insert-children;
     callback insert-chosen(int);
+    // RFN01-49: 表のマス目と表の編集。
+    callback insert-table(int, int);
+    in property <[InsertRow]> table-rows;
+    callback table-edit(int);
+    in property <bool> table-picker-open;
+    callback table-picker-dismissed();
     callback preedit-changed(string);
     callback backspace-pressed();
     callback delete-pressed();
@@ -1785,6 +1795,9 @@ export component EditorPane inherits Rectangle {
             picture-rects: root.picture-rects;
             picture-outline: root.picture-outline;
             picture-outline-shown: root.picture-outline-shown;
+            table-edges: root.table-edges;
+            table-guide: root.table-guide;
+            table-guide-shown: root.table-guide-shown;
             content-width: root.content-width;
             content-height: root.content-height;
             caret-visible: root.caret-visible;
@@ -1823,6 +1836,7 @@ export component EditorPane inherits Rectangle {
             selection-update(a0, a1) => { root.selection-update(a0, a1); }
             selection-end(a0, a1) => { root.selection-end(a0, a1); }
             picture-resize(a0, a1, a2, a3) => { root.picture-resize(a0, a1, a2, a3); }
+            table-resize(a0, a1, a2, a3) => { root.table-resize(a0, a1, a2, a3); }
             select-all() => { root.select-all(); }
             text-input(a0, a1) => { root.text-input(a0, a1); }
             terminal-key(a0, a1, a2, a3, a4) => { root.terminal-key(a0, a1, a2, a3, a4); }
@@ -1835,6 +1849,11 @@ export component EditorPane inherits Rectangle {
             insert-rows: root.insert-rows;
             insert-children: root.insert-children;
             insert-chosen(a0) => { root.insert-chosen(a0); }
+            insert-table(a0, a1) => { root.insert-table(a0, a1); }
+            table-rows: root.table-rows;
+            table-edit(a0) => { root.table-edit(a0); }
+            table-picker-open: root.table-picker-open;
+            table-picker-dismissed => { root.table-picker-dismissed(); }
             tab-pressed(a0) => { root.tab-pressed(a0); }
             enter-pressed(a0) => { root.enter-pressed(a0); }
             line-edit(a0) => { root.line-edit(a0); }

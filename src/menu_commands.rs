@@ -98,6 +98,8 @@ pub enum InsertShape {
     Edit(document::InsertEdit),
     /// `document::LINE_NOTE_EDITS`の形（見出し・字下げ・地付き）。
     Line(document::LineNoteEdit),
+    /// 表（RFN01-49）。押すとマス目が開き、選んだ大きさの表を置く。
+    Table,
     /// 改ページ。並びの最後の1つである。
     PageBreak,
 }
@@ -393,6 +395,7 @@ const INSERT_MENU: &[InsertEntry] = &[
             ),
         ],
     ),
+    InsertEntry::Row((InsertShape::Table, ("表", "Table"))),
     InsertEntry::Row((InsertShape::PageBreak, ("改ページ", "Page Break"))),
 ];
 
@@ -405,7 +408,7 @@ fn context_insert_state(
     editable: bool,
     picked: bool,
     notes: &document::LineNoteState,
-    breakable: bool,
+    places: Places,
 ) -> (bool, bool) {
     match shape {
         InsertShape::Edit(what) => {
@@ -432,7 +435,8 @@ fn context_insert_state(
         InsertShape::Line(document::LineNoteEdit::NoAlignToEnd) => {
             (editable && notes.can_tail && notes.tail.is_some(), false)
         }
-        InsertShape::PageBreak => (editable && breakable, false),
+        InsertShape::PageBreak => (editable && places.page_break, false),
+        InsertShape::Table => (editable && places.table, false),
     }
 }
 
@@ -441,10 +445,10 @@ fn context_insert_rows(
     editable: bool,
     picked: bool,
     notes: document::LineNoteState,
-    breakable: bool,
+    places: Places,
 ) -> (Vec<crate::InsertRow>, Vec<crate::InsertRow>) {
     let entry = |shape: InsertShape, title: (&str, &str), group: i32| {
-        let (enabled, checked) = context_insert_state(shape, editable, picked, &notes, breakable);
+        let (enabled, checked) = context_insert_state(shape, editable, picked, &notes, places);
         crate::InsertRow {
             title: pick(title.0, title.1).into(),
             flyout: false,
@@ -452,6 +456,7 @@ fn context_insert_rows(
             number: shape.number(),
             enabled,
             checked,
+            picker: shape == InsertShape::Table,
         }
     };
     let mut top = Vec::new();
@@ -478,6 +483,7 @@ fn context_insert_rows(
                     number: -1,
                     enabled: openable,
                     checked: false,
+                    picker: false,
                 });
             }
         }
@@ -493,13 +499,28 @@ fn insert_inputs(
     live: &Live,
     id: PaneId,
     document: &OpenDocument,
-) -> (document::LineNoteState, bool) {
+) -> (document::LineNoteState, Places) {
     let source = document.text.borrow();
     let (from, to) = chosen_source_range(&live.states.of(id).borrow(), source.len());
     (
         document::line_note_state(&source, from, to, reading_of(window)),
-        document::can_break_page_here(&source, from, to),
+        Places {
+            page_break: document::can_break_page_here(&source, from, to),
+            table: {
+                let mut counts = document.counts.borrow_mut();
+                let styles = counts.get(&source, reading_of(window)).line_styles();
+                crate::table_edit::can_place_table(&source, styles, from, to)
+            },
+        },
     )
+}
+
+/// いまの位置に置けるもの（改ページ・表）。**押せるのに何も起きない行を作らない**ため、
+/// メニューを組む側は押したときと同じ答えを読む。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Places {
+    page_break: bool,
+    table: bool,
 }
 
 /// 本文の右クリックメニューの挿入の行を組み直す（RFN01-47）。
@@ -521,10 +542,50 @@ pub fn publish_context_insert(window: &AppWindow, live: &Live, id: PaneId) {
     let editable = text && !screen.viewer && !document.read_only();
     let picked = !selected_runs(&live.cache, id).is_empty();
     let rectangular = live.states.of(id).borrow().rectangular;
-    let (notes, breakable) = insert_inputs(window, live, id, &document);
-    let (top, children) = context_insert_rows(editable && !rectangular, picked, notes, breakable);
+    let (notes, places) = insert_inputs(window, live, id, &document);
+    let (top, children) = context_insert_rows(editable && !rectangular, picked, notes, places);
     window.set_insert_rows(slint::ModelRc::new(slint::VecModel::from(top)));
     window.set_insert_children(slint::ModelRc::new(slint::VecModel::from(children)));
+    let table = if editable && !rectangular {
+        table_rows(window, live, id, &document)
+    } else {
+        Vec::new()
+    };
+    window.set_table_rows(slint::ModelRc::new(slint::VecModel::from(table)));
+}
+
+/// 右クリックの「Edit Table ▸」の中身（RFN01-49 ②）。キャレットが表の中になければ空で、
+/// そのときは行そのものを出さない。押せる条件は押したときと同じ答え
+/// （`table_edit::table_edit_state`）。
+fn table_rows(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    document: &OpenDocument,
+) -> Vec<crate::InsertRow> {
+    let source = document.text.borrow();
+    let (from, to) = chosen_source_range(&live.states.of(id).borrow(), source.len());
+    let mut counts = document.counts.borrow_mut();
+    let styles = counts.get(&source, reading_of(window)).line_styles();
+    let Some(state) = crate::table_edit::table_edit_state(&source, styles, from.min(to)) else {
+        return Vec::new();
+    };
+    crate::table_edit::TableEdit::ALL
+        .iter()
+        .zip(state)
+        .map(|(what, enabled)| {
+            let (ja, en) = what.title(id.vertical(window));
+            crate::InsertRow {
+                title: pick(ja, en).into(),
+                flyout: false,
+                group: -1,
+                number: what.number(),
+                enabled,
+                checked: false,
+                picker: false,
+            }
+        })
+        .collect()
 }
 
 /// 書式のボタンの絵（2026-09-23）。16×16の線画で、`ui/controls.slint`の`Icons`と
@@ -550,6 +611,8 @@ mod face {
     pub const CALLOUT: &str = "M2.5 2.5h11v11h-11zM8 5.5v3.5M8 11.3v.1";
     pub const HEADING: &str = "M2.5 3v10M2.5 8h6M8.5 3v10M11.5 7.5 13 6.5V13";
     pub const PARAGRAPH: &str = "M2.5 3h11M6.5 6.5h7M6.5 10h7M2.5 13.5h11M2.5 6.5l2 1.75-2 1.75";
+    /// 3行3列のます目。
+    pub const TABLE: &str = "M2.5 2.5h11v11h-11zM2.5 6h11M2.5 9.8h11M6.2 2.5v11M9.8 2.5v11";
     pub const PAGE_BREAK: &str =
         "M3.5 1.5v4h9v-4M3.5 14.5v-4h9v4M1.5 8h1.5M5.5 8h2M9.5 8h2M13.5 8h1";
     pub const BULLETS: &str = "M3 4h.2M3 8h.2M3 12h.2M6 4h7.5M6 8h7.5M6 12h7.5";
@@ -576,6 +639,7 @@ fn format_face(first: InsertShape) -> Option<(&'static str, i32)> {
         InsertShape::Edit(E::Callout(CalloutType::Note)) => (face::CALLOUT, 2),
         InsertShape::Line(L::Heading(1)) => (face::HEADING, 3),
         InsertShape::Line(L::Indent(1)) => (face::PARAGRAPH, 3),
+        InsertShape::Table => (face::TABLE, 3),
         InsertShape::PageBreak => (face::PAGE_BREAK, 3),
         _ => return None,
     })
@@ -610,7 +674,7 @@ fn format_command(action: i32) -> Option<Command> {
 #[derive(Default)]
 pub struct FormatCache {
     key: Option<FormatKey>,
-    inputs: (document::LineNoteState, bool),
+    inputs: (document::LineNoteState, Places),
     shown: Option<(Vec<crate::FormatButton>, Vec<crate::InsertRow>)>,
 }
 
@@ -633,6 +697,7 @@ pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCac
         return;
     }
     let t = Target::for_shortcut(window, live);
+    window.set_format_vertical(t.id.vertical(window));
     let (_, editable) = text_state(window, live, &t);
     let picked = !selected_runs(&live.cache, t.id).is_empty();
     let rectangular = live.states.of(t.id).borrow().rectangular;
@@ -675,11 +740,10 @@ fn format_rows(
     editable: bool,
     rectangular: bool,
     picked: bool,
-    (notes, breakable): (document::LineNoteState, bool),
+    (notes, places): (document::LineNoteState, Places),
     marks: document::BulletMarks,
 ) -> (Vec<crate::FormatButton>, Vec<crate::InsertRow>) {
-    let (top, mut children) =
-        context_insert_rows(editable && !rectangular, picked, notes, breakable);
+    let (top, mut children) = context_insert_rows(editable && !rectangular, picked, notes, places);
     let mut buttons: Vec<crate::FormatButton> = INSERT_MENU
         .iter()
         .zip(top)
@@ -699,6 +763,7 @@ fn format_rows(
                 offset: 0.0,
                 divided: false,
                 enabled: row.enabled,
+                picker: row.picker,
             }
         })
         .collect();
@@ -720,6 +785,7 @@ fn format_rows(
             number: list_action(0, i as i32),
             enabled,
             checked: false,
+            picker: false,
         });
     }
     let numbered = editable && marks.first().is_some();
@@ -750,6 +816,7 @@ fn format_rows(
             offset: 0.0,
             divided: false,
             enabled,
+            picker: false,
         });
     }
     // ツールバーでの左端。ボタンは26pxに間2px、束の切れ目は縦線の分11px足す。
@@ -778,6 +845,15 @@ pub fn run_format(window: &AppWindow, live: &Live, action: i32) {
         return;
     }
     execute(window, live, &target, command);
+}
+
+/// 書式のボタンの表のマス目で選んだ（RFN01-49 ①）。**ボタンと同じ対象へ**置く。
+pub fn run_format_table(window: &AppWindow, live: &Live, rows: i32, columns: i32) {
+    let target = Target::for_shortcut(window, live);
+    if !target.valid(window, live) {
+        return;
+    }
+    crate::insert_table_in_pane(window, live, target.id, rows, columns);
 }
 
 struct Popup {
@@ -937,13 +1013,13 @@ fn insert_commands(
     enabled: bool,
     picked: bool,
     notes: document::LineNoteState,
-    breakable: bool,
+    places: Places,
 ) -> windows::core::Result<()> {
     let row = |menu: &Popup,
                commands: &mut Vec<Command>,
                (shape, (ja, en)): (InsertShape, Title)|
      -> windows::core::Result<()> {
-        let (allowed, checked) = context_insert_state(shape, enabled, picked, &notes, breakable);
+        let (allowed, checked) = context_insert_state(shape, enabled, picked, &notes, places);
         let command = Command::Insert(shape);
         menu_row(
             window, menu, commands, field, ja, en, command, allowed, checked,
@@ -1548,7 +1624,7 @@ fn build(
             let rectangular = live.states.of(t.id).borrow().rectangular;
             // **行の体裁は、いまの行が何かを読んでから出す**——押せるのに何も
             // 起きない行を作らないため、見る側と押す側が同じ答えを使う。
-            let (notes, breakable) = insert_inputs(window, live, t.id, &t.document);
+            let (notes, places) = insert_inputs(window, live, t.id, &t.document);
             insert_commands(
                 window,
                 &root,
@@ -1557,7 +1633,7 @@ fn build(
                 editable && !rectangular,
                 selected,
                 notes,
-                breakable,
+                places,
             )?;
             root.sep()?;
             let marks = bullet_marks_of(window);
@@ -2533,6 +2609,14 @@ mod tests {
     }
 
     /// 行の体裁を何も持たない文書の答え（試験の初期値）。
+    /// 改ページも表も置ける（`true`）か、どちらも置けない（`false`）。
+    fn places(open: bool) -> Places {
+        Places {
+            page_break: open,
+            table: open,
+        }
+    }
+
     fn bare_notes() -> document::LineNoteState {
         document::LineNoteState {
             can_heading: true,
@@ -2545,7 +2629,7 @@ mod tests {
     }
 
     /// 挿入の形を全部、メニューの並びで——`document::INSERT_EDITS`の後ろに
-    /// `LINE_NOTE_EDITS`、最後に改ページ。
+    /// `LINE_NOTE_EDITS`、表、最後に改ページ。
     fn every_shape() -> Vec<InsertShape> {
         document::INSERT_EDITS
             .iter()
@@ -2555,7 +2639,7 @@ mod tests {
                     .iter()
                     .map(|what| InsertShape::Line(*what)),
             )
-            .chain([InsertShape::PageBreak])
+            .chain([InsertShape::Table, InsertShape::PageBreak])
             .collect()
     }
 
@@ -2589,7 +2673,7 @@ mod tests {
             true,
             true,
             bare_notes(),
-            true,
+            places(true),
         )
         .unwrap();
 
@@ -2644,7 +2728,7 @@ mod tests {
             true,
             false,
             bare_notes(),
-            false,
+            places(false),
         )
         .unwrap();
 
@@ -2692,12 +2776,12 @@ mod tests {
                 true,
                 picked,
                 notes,
-                false,
+                places(false),
             )
             .unwrap();
             let native = titled_leaves(menu.handle);
 
-            let (top, children) = context_insert_rows(true, picked, notes, false);
+            let (top, children) = context_insert_rows(true, picked, notes, places(false));
             let mut ours: Vec<(&str, bool, bool)> = Vec::new();
             let (mut at_top, mut at_child) = (0, 0);
             for what in INSERT_MENU {
@@ -2761,7 +2845,7 @@ mod tests {
             true,
             true,
             notes,
-            true,
+            places(true),
         )
         .unwrap();
 
@@ -2797,7 +2881,7 @@ mod tests {
             false,
             true,
             bare_notes(),
-            true,
+            places(true),
         )
         .unwrap();
 
@@ -2891,7 +2975,7 @@ mod tests {
             true,
             false,
             true,
-            (bare_notes(), true),
+            (bare_notes(), places(true)),
             document::BulletMarks::all(),
         );
         assert_eq!(buttons.len(), INSERT_MENU.len() + 3);
@@ -2921,7 +3005,7 @@ mod tests {
             true,
             false,
             true,
-            (bare_notes(), true),
+            (bare_notes(), places(true)),
             document::BulletMarks::all(),
         );
         for button in &buttons {
@@ -2985,7 +3069,7 @@ mod tests {
             false,
             false,
             true,
-            (bare_notes(), true),
+            (bare_notes(), places(true)),
             document::BulletMarks::all(),
         );
         assert!(buttons.iter().all(|button| !button.enabled));

@@ -80,6 +80,7 @@ use windows::{
     core::{BOOL, Error, HSTRING, IUnknown, Interface, Ref, Result, implement, w},
 };
 
+use crate::table_edit::{FULL_WIDTH, table_widths};
 use crate::terminal::{Attrs as CellAttrs, Color as CellColor, Line as CellLine, character_width};
 use crate::text_blocks::{
     Align, AskedLine, BandSide, BesideRule, BlockLayoutPlan, BlockMeasure, BlockPlacement,
@@ -283,6 +284,32 @@ pub struct SelectionRect {
     pub right: f32,
     pub bottom: f32,
 }
+
+/// 見えている表の列の境目の1本（RFN01-49：引いて列の幅を変える）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableEdge {
+    /// 表のブロックの頭（UTF-16）。本文のどの表かを言う。
+    pub utf16: u32,
+    /// 何本目の境目か。`1..列の数`は列の間、列の数は表の外側の縁。
+    pub boundary: usize,
+    /// 当たりの箱（面の座標）。
+    pub rect: SelectionRect,
+    /// 境目が立つ行の軸の位置と、引ける範囲（面の座標、行の軸）。
+    pub at: f32,
+    pub low: f32,
+    pub high: f32,
+    /// 行の長さと表の長さ。
+    pub line_box: f32,
+    pub reach: f32,
+    /// 区切り行が名指す列の、いま見えている字の幅。
+    pub widths: Vec<f32>,
+}
+
+/// 境目の当たりの半分の幅（行の軸）。見える線より広く取る。
+const TABLE_EDGE_GRAB: f32 = 4.0;
+
+/// 引いて狭められる列の幅の下限（行の長さに対する割合、`-`3つ）。
+const TABLE_EDGE_LEAST: f32 = 0.03;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HitTest {
@@ -1878,9 +1905,42 @@ fn measure_table(
                 .fold(0.0_f32, |widest, cell| widest.max(cell.natural))
         })
         .collect::<Vec<f32>>();
+    // RFN01-49（書き手の報告 2026-09-23）: **区切り行が名指す列は、空でも場所を取る。**
+    // 幅0の列は隣と同じ所に重なり、置いたばかりの空の表が1列に見えた。入って書ける
+    // 広さとして、狭めるときの下限と同じだけ取る。字のある列は変えない。
+    let empty_room = typography.font_size * TABLE_MIN_COLUMN;
+    for width in widths.iter_mut().take(aligns.len()) {
+        if *width <= 0.0 {
+            *width = empty_room;
+        }
+    }
     let natural: f32 = widths.iter().sum();
     let (_, reach) = column_heads(&widths, pad, gutter);
-    if reach > line_box && natural > 0.0 {
+    // RFN01-49（書き手の合意 2026-09-23）: **区切り行の`-`の数が列の幅**——`-`1つが行の長さの
+    // 1%。すべての列で数が同じなら指定なしで、上の中身の幅のまま（`table_edit::table_widths`）。
+    // 指定のある列は、表の長さが合計の%になるよう字の幅を配る。余白と溝は字の幅の外。
+    let stated = table
+        .rule
+        .and_then(|rule| table_widths(&styled.text[rule.byte_start..rule.byte_end]))
+        .filter(|stated| stated.len() <= columns);
+    if let Some(stated) = &stated {
+        let named = stated.len();
+        let total: u32 = stated.iter().sum();
+        let whole = line_box * total.min(FULL_WIDTH) as f32 / FULL_WIDTH as f32;
+        // 名の無い列（区切り行より多いセル）は中身の幅のまま、名のある列は仮に1で数えて
+        // 余白と溝の分を知る。
+        let mut probe = widths.clone();
+        for width in &mut probe[..named] {
+            *width = 1.0;
+        }
+        let (_, probe_reach) = column_heads(&probe, pad, gutter);
+        let fixed = probe_reach - named as f32;
+        let room = (whole - fixed).max(named as f32);
+        for (width, count) in widths.iter_mut().zip(stated) {
+            *width = room * *count as f32 / total.max(1) as f32;
+        }
+    }
+    if stated.is_none() && reach > line_box && natural > 0.0 {
         let room = (line_box - (reach - natural)).max(0.0);
         let floor = typography.font_size * TABLE_MIN_COLUMN;
         let scale = (room / natural).clamp(0.0, 1.0);
@@ -1903,8 +1963,11 @@ fn measure_table(
 
     // How tall each cell is once it is set in its column, and so how tall each
     // row is.
+    // RFN01-49（書き手の報告 2026-09-23）: **空の行も字1行分の高さを取る**——置いたばかりの表は
+    // 行が細く、入って書くのに押しにくかった。字のある行はもともとこれ以上ある。
+    let one_line = cell_flow(graphics, &format, typography, mode, "\u{3000}", &[], reach)?;
     for plan in &mut plans {
-        let mut tallest = 0.0_f32;
+        let mut tallest = if plan.cells.is_empty() { 0.0 } else { one_line };
         // **The one cell a source row becomes is as wide as the table**, and
         // every other cell is as wide as its column.
         let whole = plan.cells.len() == 1 && widths.len() != 1;
@@ -1923,6 +1986,11 @@ fn measure_table(
                 &cell.marks,
                 width,
             )?;
+            // **空の升も字1行分の箱を持つ**（書き手の報告 2026-09-23）。縦書きは箱の右端から
+            // 1行目を置くので、幅0の箱では行が1行分左の外に出て、キャレットが隣の行に立った。
+            if cell.text.is_empty() {
+                cell.flow_size = one_line;
+            }
             tallest = tallest.max(cell.flow_size);
         }
         plan.flow_size = if plan.cells.is_empty() {
@@ -2016,6 +2084,7 @@ fn measure_table(
         rules,
         columns: column_rules,
         reach,
+        widths,
     };
     let measure = BlockMeasure {
         flow_size: total,
@@ -6939,6 +7008,74 @@ impl TextEngine {
         Ok(rects)
     }
 
+    /// 見えている表の列の境目（RFN01-49：境目を引いて列の幅を変える）。
+    ///
+    /// **描くときと同じ格子**（`measure_table`が組んだ`TableGrid`）から数えるので、面の座標の
+    /// まま返る。列の間の境目と、表の外側の縁（最後の列の後ろ）。1列の表には出さない——
+    /// 幅を書いても「指定なし」と読まれる（`table_edit::table_widths`）。
+    pub fn table_edges(&self, visible_flow: (f32, f32)) -> Vec<TableEdge> {
+        let view = self
+            .plan
+            .blocks_in_flow_range(visible_flow.0, visible_flow.1);
+        let gutter = self.typography.font_size * TABLE_GUTTER;
+        let pad = gutter * 0.5;
+        let mut edges = Vec::new();
+        for block_index in view {
+            if self.deferred_blocks.contains(&block_index) {
+                continue;
+            }
+            let block = &self.plan.blocks[block_index];
+            let Some(grid) = &block.grid else {
+                continue;
+            };
+            let named = grid
+                .widths
+                .iter()
+                .rposition(|width| *width > 0.0)
+                .map_or(0, |last| last + 1);
+            if named < 2 {
+                continue;
+            }
+            let (heads, _) = column_heads(&grid.widths, pad, gutter);
+            let line_box = self.block_line_box(&block.span);
+            let near = grid.rules.first().copied().unwrap_or(0.0);
+            let far = grid.rules.last().copied().unwrap_or(0.0);
+            let flow = (block.draw_origin() + near, block.draw_origin() + far);
+            let mut spots = (1..named)
+                .map(|column| heads[column] - gutter * 0.5)
+                .collect::<Vec<_>>();
+            spots.push(grid.reach);
+            let least = line_box * TABLE_EDGE_LEAST;
+            for (at, spot) in spots.iter().enumerate() {
+                let before = if at == 0 { 0.0 } else { spots[at - 1] };
+                let after = spots.get(at + 1).map_or(line_box, |next| next - least);
+                let (x0, y0) = self
+                    .mode
+                    .to_screen(flow.0, self.margin + spot - TABLE_EDGE_GRAB);
+                let (x1, y1) = self
+                    .mode
+                    .to_screen(flow.1, self.margin + spot + TABLE_EDGE_GRAB);
+                edges.push(TableEdge {
+                    utf16: block.span.utf16_start,
+                    boundary: at + 1,
+                    rect: SelectionRect {
+                        left: x0.min(x1),
+                        top: y0.min(y1),
+                        right: x0.max(x1),
+                        bottom: y0.max(y1),
+                    },
+                    at: self.margin + spot,
+                    low: self.margin + before + least,
+                    high: self.margin + after.max(before + least),
+                    line_box,
+                    reach: grid.reach,
+                    widths: grid.widths[..named].to_vec(),
+                });
+            }
+        }
+        edges
+    }
+
     /// この点は行番号の欄の中か（要件 9、E3）。
     ///
     /// **欄は余白の一部**（[`TextEngine::numbers`]）なので、行の軸で0から
@@ -9716,6 +9853,124 @@ mod tests {
             plain().font_size
         );
         let _ = short;
+    }
+
+    /// RFN01-49: **区切り行の`-`の数が列の幅**——`-`1つが行の長さの1%。縦書きでも同じ。
+    /// 合計が100を超えれば、比を保って行の長さに収まる。
+    #[test]
+    fn an_empty_column_keeps_its_room() {
+        // RFN01-49（書き手の報告 2026-09-23）: 置いたばかりの表はセルが空で、3列が1列に重なって見えた。
+        // **区切り行が名指す列は、空でも場所を取る**——入って書けなければならない。
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let source = "|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n";
+            let (preview, styles) = preview_of(source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let engine = engine_set(mode, styled, &plain());
+            let grid = grid_of(&engine);
+            assert_eq!(
+                grid.columns.len(),
+                4,
+                "{mode:?}: two edges and two boundaries, {:?}",
+                grid.columns
+            );
+            let heads = grid
+                .cells
+                .iter()
+                .filter(|cell| cell.row == 0)
+                .map(|cell| cell.line_start)
+                .collect::<Vec<_>>();
+            assert_eq!(heads.len(), 3, "{mode:?}");
+            assert!(
+                heads
+                    .windows(2)
+                    .all(|pair| pair[1] > pair[0] + plain().font_size),
+                "{mode:?}: the columns stand apart, {heads:?}"
+            );
+            // 空の行も字1行分の高さを取る——入って書けるように。
+            assert!(
+                grid.rules
+                    .windows(2)
+                    .all(|pair| pair[1] - pair[0] >= plain().font_size),
+                "{mode:?}: the rows are {:?}",
+                grid.rules
+            );
+        }
+        // 1列だけ空でも同じ。
+        let source = "| 名前 |  | 役割 |\n| --- | --- | --- |\n| 犬 |  | 相棒 |\n";
+        let (preview, styles) = preview_of(source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let engine = engine_set(WritingMode::Horizontal, styled, &plain());
+        assert_eq!(grid_of(&engine).columns.len(), 4);
+    }
+
+    /// 書き手の報告 2026-09-23: **縦書きで、空の升のキャレットが隣の行に立った。**縦書きは箱の
+    /// 右端から1行目を置くので、幅0の箱では行が外に出ていた。同じ行の字のある升と、同じ行に立つ。
+    #[test]
+    fn the_caret_in_an_empty_cell_stands_in_its_row() {
+        let source = "| 名前 |  |\n| --- | --- |\n| 犬 | 相棒 |\n";
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let (preview, styles) = preview_of(source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let mut engine = engine_set(mode, styled, &plain());
+            let grid = grid_of(&engine);
+            let empty = grid
+                .cells
+                .iter()
+                .find(|cell| cell.row == 0 && cell.column == 1)
+                .expect("the empty header cell")
+                .utf16_start;
+            let filled = cross_axis_at(&mut engine, mode, &preview.text, "名前");
+            let caret = engine.caret_geometry(empty).expect("DirectWrite hit test");
+            let row = mode.to_axes(caret.x, caret.y).0;
+            assert!(
+                (row - filled).abs() < 1.0,
+                "{mode:?}: the empty cell's caret stands at {row}, its row at {filled}"
+            );
+        }
+    }
+
+    #[test]
+    fn dashes_set_the_width_of_their_column() {
+        let narrow = "-".repeat(10);
+        let wide = "-".repeat(20);
+        let page = LINE_EXTENT as f32 - margin_for(plain().font_size) * 2.0;
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let source = format!("| 短 | いろは |\n| {narrow} | {wide} |\n| 狭 | にほへ |\n");
+            let (preview, styles) = preview_of(&source);
+            let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                .with_markers(preview.markers());
+            let engine = engine_set(mode, styled, &plain());
+            let grid = grid_of(&engine);
+            assert!(
+                (grid.reach - page * 0.3).abs() < 1.0,
+                "{mode:?}: the table reaches {} on a page of {page}",
+                grid.reach
+            );
+            assert!(
+                (grid.widths[1] - grid.widths[0] * 2.0).abs() < 0.5,
+                "{mode:?}: the columns are {:?}",
+                grid.widths
+            );
+        }
+
+        let source = format!(
+            "| 短 | いろは |\n| {} | {} |\n",
+            "-".repeat(90),
+            "-".repeat(50)
+        );
+        let (preview, styles) = preview_of(&source);
+        let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+            .with_markers(preview.markers());
+        let engine = engine_set(WritingMode::Horizontal, styled, &plain());
+        let grid = grid_of(&engine);
+        assert!(
+            (grid.reach - page).abs() < 1.0,
+            "140% is held to the page: {} on {page}",
+            grid.reach
+        );
     }
 
     /// 要件 7.3.2: **a keystroke somewhere else does not re-measure a table**

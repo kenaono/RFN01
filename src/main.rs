@@ -76,6 +76,7 @@ mod shell;
 mod shortcuts;
 #[cfg(test)]
 mod tab_position_ui_tests;
+mod table_edit;
 #[cfg(test)]
 mod table_ui_tests;
 #[cfg(test)]
@@ -1017,6 +1018,8 @@ struct PaneView {
     /// 見えている絵：箱が立つUTF-16の位置、面の座標の矩形、絵が縮む行の長さ（追加要件 2026-09-16）。
     /// **Slintへ渡した`picture-rects`と同じ並び**で、つまみは何枚目かで名指す。
     pictures: Vec<(u32, SelectionRect, f32)>,
+    /// 見えている表の列の境目（RFN01-49）。**Slintへ渡した`table-edges`と同じ並び**で、何本目かで名指す。
+    tables: Vec<directwrite_render::TableEdge>,
 }
 
 /// A place in the text that a pane is holding its view on (要件 8.5).
@@ -2609,6 +2612,38 @@ fn main() -> Result<(), slint::PlatformError> {
             insert_in_pane(&window, &chosen_live, PaneId::from_index(pane), shape);
         }
     });
+    // RFN01-49: 表のマス目で選んだ（右クリック・キャレットの所）、書式ボタンのマス目で選んだ、
+    // 表の編集の行が押された、キャレットの所のマス目を閉じた。
+    let weak = window.as_weak();
+    let table_live = live.clone();
+    window.on_pane_insert_table(move |pane, rows, columns| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            insert_table_in_pane(&window, &table_live, id, rows, columns);
+        }
+    });
+    let weak = window.as_weak();
+    let table_live = live.clone();
+    window.on_format_table_chosen(move |rows, columns| {
+        if let Some(window) = weak.upgrade() {
+            menu_commands::run_format_table(&window, &table_live, rows, columns);
+        }
+    });
+    let weak = window.as_weak();
+    let table_live = live.clone();
+    window.on_pane_table_edit(move |pane, number| {
+        if let Some(window) = weak.upgrade()
+            && let Some(what) = table_edit::TableEdit::from_number(number)
+        {
+            table_edit_in_pane(&window, &table_live, PaneId::from_index(pane), what);
+        }
+    });
+    let weak = window.as_weak();
+    window.on_table_picker_dismissed(move || {
+        if let Some(window) = weak.upgrade() {
+            window.set_table_picker_pane(-1);
+        }
+    });
 
     // E3の③: Enter。**継ぐものはRustが決める**——画面と同じ行の見方を使うため。
     let weak = window.as_weak();
@@ -2642,6 +2677,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let index = usize::try_from(index).unwrap_or(usize::MAX);
             let x = id.flow_x(&window, x);
             resize_picture(&window, &picture_live, id, index, phase, (x, y));
+        }
+    });
+    // RFN01-49: 表の列の境目を引く。
+    let weak = window.as_weak();
+    let table_live = live.clone();
+    window.on_pane_table_resize(move |pane, index, phase, x, y| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let index = usize::try_from(index).unwrap_or(usize::MAX);
+            let x = id.flow_x(&window, x);
+            resize_table(&window, &table_live, id, index, phase, (x, y));
         }
     });
 
@@ -17091,6 +17137,22 @@ impl RenderCache {
         self.pane(id).view.pictures = pictures;
     }
 
+    /// 見えている表の列の境目を、引くために渡す（RFN01-49）。**描いたときと同じ格子**から数えるので、
+    /// 絵のつまみと同じ2か所（組み直しとスクロール）で呼ぶ。閲覧の面は書き換えないので出さない。
+    fn refresh_pane_tables(&mut self, window: &AppWindow, id: PaneId) {
+        let edges = if id.screen(window).viewer {
+            Vec::new()
+        } else {
+            let engine = &mut self.pane(id).graphics.engine;
+            let visible = id.flow_range(window, engine.total_flow_size() as f32);
+            engine.table_edges(visible)
+        };
+        let rects = edges.iter().map(|edge| edge.rect).collect::<Vec<_>>();
+        let model = ModelRc::new(VecModel::from(id.preview_rects(window, &rects)));
+        id.update_screen(window, |screen| screen.table_edges = model);
+        self.pane(id).view.tables = edges;
+    }
+
     fn refresh_pane_differences(
         &mut self,
         window: &AppWindow,
@@ -17148,6 +17210,7 @@ impl RenderCache {
     ) -> windows::core::Result<()> {
         self.refresh_pane_differences(window, id)?;
         self.refresh_pane_pictures(window, id);
+        self.refresh_pane_tables(window, id);
         let selection = self.pane(id).view.selection_utf16.clone();
         if selection.is_empty() {
             return Ok(());
@@ -18947,6 +19010,7 @@ fn refresh_pane(
     };
     id.set_bookmark_rects(window, &mark_rects);
     cache.refresh_pane_pictures(window, id);
+    cache.refresh_pane_tables(window, id);
     let rects = selection_rects.len();
     if cache.pane(id).view.direction_caret_source != caret_source_byte {
         cache.pane(id).view.direction_fraction = None;
@@ -20309,6 +20373,118 @@ fn resize_picture(
     );
 }
 
+/// 表の列の境目を引いて、列の幅を変える（RFN01-49 ③、書き手の合意 2026-09-23）。
+///
+/// **引いているあいだはガイド線だけ**で、組み直さない。離したら区切り行の`-`を書き換える——
+/// 編集の道は1本（[`apply_span_edit`]）なので、取り消しは1回で戻る。**カーソルは動かさない。**
+/// 幅の指定が無い表は、いま見えている幅を行の長さに対する割合にしてから動かす
+/// （[`table_edit::dragged_widths`]）。**押して離しただけなら何も書かない**——境目の近くを押して
+/// キャレットを置こうとしただけで、表の幅が中身で決まらなくなるのを避ける。
+///
+/// `phase`は0押した・1引いている・2離した・3取りやめ（Slintの`table-resize`）。
+fn resize_table(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    index: usize,
+    phase: i32,
+    to: (f32, f32),
+) {
+    let edge = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .view
+        .tables
+        .get(index)
+        .cloned();
+    let Some(edge) = edge else {
+        live.cache.borrow_mut().log_diag(
+            &format!("table.{}", id.diag_suffix()),
+            &format!(
+                "resize pane={} index={index} phase={phase} missing",
+                id.log_name()
+            ),
+        );
+        return;
+    };
+    let vertical = id.vertical(window);
+    let along = if vertical { to.1 } else { to.0 };
+    let spot = along.clamp(edge.low, edge.high.max(edge.low));
+    if phase < 2 {
+        let shift = id.page_shift(window);
+        let rect = edge.rect;
+        let guide = if vertical {
+            PreviewSelectionRect {
+                x: rect.left + shift,
+                y: spot - 1.0,
+                width: rect.right - rect.left,
+                height: 2.0,
+            }
+        } else {
+            PreviewSelectionRect {
+                x: spot - 1.0 + shift,
+                y: rect.top,
+                width: 2.0,
+                height: rect.bottom - rect.top,
+            }
+        };
+        id.update_screen(window, |screen| {
+            screen.table_guide = guide;
+            screen.table_guide_shown = true;
+        });
+        return;
+    }
+    id.update_screen(window, |screen| screen.table_guide_shown = false);
+    if phase != 2 || (spot - edge.at).abs() < 1.0 {
+        return;
+    }
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let byte = {
+        let active = PaneId::revealed_line(vertical, &state, &source);
+        let mut borrowed = live.cache.borrow_mut();
+        let slot = &mut borrowed.pane(id).view.preview_slot;
+        pane_text(window, &document, id, slot, &source, active)
+            .source_byte_at_utf16(edge.utf16 as usize)
+    };
+    let styles = document
+        .counts
+        .borrow_mut()
+        .get(&source, reading_of(window))
+        .line_styles()
+        .to_vec();
+    let stated = table_edit::stated_widths(&source, &styles, byte);
+    let widths = table_edit::dragged_widths(
+        stated.as_deref(),
+        &edge.widths,
+        edge.reach,
+        edge.line_box,
+        edge.boundary,
+        spot - edge.at,
+    );
+    let told = format!(
+        "table boundary={} at={} to={spot} widths={widths:?}",
+        edge.boundary, edge.at
+    );
+    let caret = state
+        .borrow()
+        .caret_source_byte
+        .unwrap_or(0)
+        .min(source.len());
+    let edit =
+        widths.and_then(|widths| table_edit::widths_edit(&source, &styles, byte, &widths, caret));
+    let Some((region, text, chosen)) = edit else {
+        live.cache.borrow_mut().log_diag(
+            &format!("table.{}", id.diag_suffix()),
+            &format!("resize pane={} {told} unchanged", id.log_name()),
+        );
+        return;
+    };
+    apply_span_edit(window, live, id, &source, region, &text, chosen, &told);
+}
+
 /// Move the caret and re-cut the selection without laying the document out.
 ///
 /// Mid-drag the text has not changed, so no tile is regenerated: only the caret
@@ -20869,6 +21045,35 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
 /// 押された行を言い返すための言い方で、境目（`on_pane_insert_chosen`）で形に戻す。
 fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_commands::InsertShape) {
     use menu_commands::InsertShape;
+    // RFN01-49: **表は大きさを選んでから置く。**タイトルバーの挿入とキーからは、
+    // キャレットの所にマス目を開く（右クリックと書式ボタンは、その場の面に開く）。
+    if shape == InsertShape::Table {
+        // **置けない所では開かない**——キーはメニューの灰色を通らずに来る。
+        let document = live.states.document(id);
+        if document.read_only() || id.screen(window).viewer {
+            window.tell_tab(viewer_cannot_edit().into());
+            return;
+        }
+        let source = document.text.borrow().clone();
+        let (from, to) = chosen_source_range(&live.states.of(id).borrow(), source.len());
+        let placeable = {
+            let mut counts = document.counts.borrow_mut();
+            let styles = counts.get(&source, reading_of(window)).line_styles();
+            table_edit::can_place_table(&source, styles, from, to)
+        };
+        if placeable {
+            window.set_table_picker_pane(id.index());
+        } else {
+            live.cache.borrow_mut().log_diag(
+                "lines",
+                &format!(
+                    "pane={} table picker at={from}..{to} not here",
+                    id.log_name()
+                ),
+            );
+        }
+        return;
+    }
     // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
     answer_new_tab(window, live, id, None);
     let document = live.states.document(id);
@@ -20881,6 +21086,7 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_comma
             document::line_note_edit(&source, from, to, what, reading_of(window))
         }
         InsertShape::PageBreak => document::page_break_edit(&source, from, to),
+        InsertShape::Table => None,
     };
     let Some((region, text, chosen)) = edit else {
         // **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）——理由を言う。
@@ -20921,6 +21127,59 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_comma
         chosen,
         &format!("Insert {shape:?} asked={from}..{to}"),
     );
+}
+
+/// 表を置く（RFN01-49 ①）。マス目で選んだ大きさ（行の数は見出し行を含む）で、キャレットの所へ。
+///
+/// 編集の道は1本（[`apply_span_edit`]）——取り消しは1回で戻る。
+fn insert_table_in_pane(window: &AppWindow, live: &Live, id: PaneId, rows: i32, columns: i32) {
+    window.set_table_picker_pane(-1);
+    let (Ok(rows), Ok(columns)) = (usize::try_from(rows), usize::try_from(columns)) else {
+        return;
+    };
+    answer_new_tab(window, live, id, None);
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let (from, to) = chosen_source_range(&state.borrow(), source.len());
+    let styles = document
+        .counts
+        .borrow_mut()
+        .get(&source, reading_of(window))
+        .line_styles()
+        .to_vec();
+    let told = format!("Insert table {rows}x{columns} asked={from}..{to}");
+    let edit = table_edit::insert_table(&source, &styles, from, to, rows, columns);
+    let Some((region, text, chosen)) = edit else {
+        live.cache
+            .borrow_mut()
+            .log_diag("lines", &format!("pane={} {told} nothing", id.log_name()));
+        return;
+    };
+    apply_span_edit(window, live, id, &source, region, &text, chosen, &told);
+}
+
+/// 右クリックの「Edit Table ▸」の操作を、キャレットのある表へ（RFN01-49 ②）。
+fn table_edit_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: table_edit::TableEdit) {
+    let document = live.states.document(id);
+    let source = document.text.borrow().clone();
+    let state = live.states.of(id);
+    let (from, to) = chosen_source_range(&state.borrow(), source.len());
+    let styles = document
+        .counts
+        .borrow_mut()
+        .get(&source, reading_of(window))
+        .line_styles()
+        .to_vec();
+    let told = format!("Table {what:?} at={}", from.min(to));
+    let Some((region, text, chosen)) = table_edit::table_edit(&source, &styles, from.min(to), what)
+    else {
+        live.cache
+            .borrow_mut()
+            .log_diag("lines", &format!("pane={} {told} nothing", id.log_name()));
+        return;
+    };
+    apply_span_edit(window, live, id, &source, region, &text, chosen, &told);
 }
 
 /// 本文のひと続きを、別の字で置き換える——1回の編集として（E3）。
