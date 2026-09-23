@@ -683,6 +683,13 @@ export component AppWindow inherits Window {
     callback pane-list-edit(int, int, int);
     /// RFN01-47: 右クリックメニューの挿入の行。2つめは挿入の番号。
     callback pane-insert-chosen(int, int);
+    // RFN01-49: 表のマス目で選んだ（ペイン、行の数、列の数）と、表の編集の行（ペイン、番号）。
+    callback pane-insert-table(int, int, int);
+    callback pane-table-edit(int, int);
+    in-out property <[InsertRow]> table-rows;
+    // キャレットの所の表のマス目が開いているペイン（-1は閉じている）。
+    in-out property <int> table-picker-pane: -1;
+    callback table-picker-dismissed();
     /// 右クリックメニューが開いた——**そのPaneの挿入の行を組み直す**。
     callback pane-menu-opened(int);
     // 書き手の求め 2026-09-22: 本文の右クリック「Add Bookmark…」。
@@ -692,6 +699,7 @@ export component AppWindow inherits Window {
     callback pane-selection-update(int, float, float);
     callback pane-selection-end(int, float, float);
     callback pane-picture-resize(int, int, int, float, float);
+    callback pane-table-resize(int, int, int, float, float);
     callback pane-select-all(int);
     callback pane-scroll-changed(int, float);
     callback pane-across-scroll-changed(int, float);
@@ -944,6 +952,9 @@ export component AppWindow inherits Window {
     in-out property <bool> palette-placed: false;
     /// 押されたボタンか組の行——`FormatButton.action`か`InsertRow.number`。
     callback format-chosen(int);
+    // RFN01-49: 書式ボタンの表のマス目で選んだ。字を入れているペインが縦書きか。
+    callback format-table-chosen(int, int);
+    in-out property <bool> format-vertical;
     /// E3の④: `Tab`／`Shift+Tab`。2つめはShiftが押されているか。
     callback pane-tab(int, bool);
     callback pane-preedit-changed(int, string);
@@ -1324,6 +1335,8 @@ export component AppWindow inherits Window {
             buttons: root.format-buttons;
             children: root.format-children;
             chosen(action) => { root.format-chosen(action); }
+            vertical: root.format-vertical;
+            table-chosen(rows, columns) => { root.format-table-chosen(rows, columns); }
         }
     }
     VerticalBox {
@@ -2729,7 +2742,11 @@ export component AppWindow inherits Window {
                         picture-rects: pane.picture-rects;
                         picture-outline: pane.picture-outline;
                         picture-outline-shown: pane.picture-outline-shown;
+                        table-edges: pane.table-edges;
+                        table-guide: pane.table-guide;
+                        table-guide-shown: pane.table-guide-shown;
                         picture-resize(index, phase, x, y) => { root.pane-picture-resize(pane.id, index, phase, x, y); }
+                        table-resize(index, phase, x, y) => { root.pane-table-resize(pane.id, index, phase, x, y); }
                         content-width: pane.content-width;
                         content-height: pane.content-height;
                         caret-visible: pane.caret-visible;
@@ -2914,6 +2931,11 @@ export component AppWindow inherits Window {
                         insert-rows: root.insert-rows;
                         insert-children: root.insert-children;
                         insert-chosen(number) => { root.pane-insert-chosen(pane.id, number); }
+                        insert-table(rows, columns) => { root.pane-insert-table(pane.id, rows, columns); }
+                        table-rows: root.table-rows;
+                        table-edit(number) => { root.pane-table-edit(pane.id, number); }
+                        table-picker-open: root.table-picker-pane == pane.id;
+                        table-picker-dismissed => { root.table-picker-dismissed(); }
                         shortcut-key(text, control, alt, shift) => { root.focused-pane = pane.id; root.focused-pane-row = index; return root.shortcut-key(text, control, alt, shift); }
                         reopen-closed-requested => { root.focused-pane = pane.id; root.focused-pane-row = index; root.reopen-closed-requested(); }
                         compare-saved-requested => {
@@ -6100,6 +6122,8 @@ export component AppWindow inherits Window {
                     buttons: root.format-buttons;
                     children: root.format-children;
                     chosen(action) => { root.format-chosen(action); }
+                    vertical: root.format-vertical;
+                    table-chosen(rows, columns) => { root.format-table-chosen(rows, columns); }
                 }
             }
         }

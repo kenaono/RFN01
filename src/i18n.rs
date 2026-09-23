@@ -102,6 +102,7 @@ mod tests {
             include_str!("../ui/quick-draft.slint"),
             include_str!("../ui/workspace-manager.slint"),
             include_str!("../ui/panel-style-editor.slint"),
+            include_str!("../ui/table-picker.slint"),
         ];
         let mut used = HashSet::new();
         for source in sources {

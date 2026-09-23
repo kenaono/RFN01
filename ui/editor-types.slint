@@ -96,6 +96,8 @@ export struct InsertRow {
     number: int,
     enabled: bool,
     checked: bool,
+    /// 押すと表のマス目が開く行（RFN01-49）。右へ開く面の中身が、行ではなくマス目になる。
+    picker: bool,
 }
 
 export struct PreviewSelectionRect {
@@ -153,6 +155,10 @@ export struct PaneScreen {
     picture-rects: [PreviewSelectionRect],
     picture-outline: PreviewSelectionRect,
     picture-outline-shown: bool,
+    /// RFN01-49: 見えている表の列の境目（引いて列の幅を変える）と、引いているあいだのガイド線。
+    table-edges: [PreviewSelectionRect],
+    table-guide: PreviewSelectionRect,
+    table-guide-shown: bool,
     /// E1: 見えている一致（書き手の求め 2026-09-09）。**選択より薄い**——
     /// 「どこにあるか」を出しつつ、「いまどれにいるか」を選択に譲る。
     match-rects: [PreviewSelectionRect],

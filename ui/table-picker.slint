@@ -1,0 +1,82 @@
+// 表のマス目（RFN01-49、書き手の合意 2026-09-23）。
+//
+// **なぞった範囲が置く表の大きさ**で、押すと置く。数える行には見出し行を含む。
+// 縦書きのペインでは縦書きの見え方で並べる——行は右から左へ、列は上から下へ。
+// 置いたときの表と同じ形を見て選べるように。
+//
+// 書式ボタンの面・右クリックの挿入の横の面・キャレットの所の3か所がこれを使う。
+import { Tok } from "tokens.slint";
+
+export component TablePicker inherits Rectangle {
+    in property <bool> vertical;
+    // 選んだ——行の数（見出し行を含む）と列の数。
+    callback chosen(int, int);
+
+    private property <int> size: 8;
+    private property <length> cell: 18px;
+    private property <length> pad: 8px;
+    private property <length> label-height: 24px;
+    // 指の下の大きさ。0は何も指していない。
+    private property <int> rows: 0;
+    private property <int> columns: 0;
+
+    width: root.size * root.cell + root.pad * 2;
+    height: root.size * root.cell + root.pad * 2 + root.label-height;
+
+    Text {
+        x: root.pad;
+        y: root.pad;
+        width: parent.width - root.pad * 2;
+        height: root.label-height - 4px;
+        text: root.rows == 0 ? @tr("Table") : @tr("{} rows × {} columns", root.rows, root.columns);
+        color: root.rows == 0 ? Tok.ink-muted : Tok.ink;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+
+    grid := Rectangle {
+        x: root.pad;
+        y: root.pad + root.label-height;
+        width: root.size * root.cell;
+        height: root.size * root.cell;
+
+        // `down-at`は表の何行目か、`across-at`は何列目か（0から）。
+        for index in root.size * root.size: Rectangle {
+            property <int> down-at: floor(index / root.size);
+            property <int> across-at: mod(index, root.size);
+            property <bool> lit: self.down-at < root.rows && self.across-at < root.columns;
+            x: (root.vertical ? root.size - 1 - self.down-at : self.across-at) * root.cell + 1px;
+            y: (root.vertical ? self.across-at : self.down-at) * root.cell + 1px;
+            width: root.cell - 2px;
+            height: root.cell - 2px;
+            border-width: 1px;
+            border-radius: 2px;
+            border-color: self.lit ? Tok.accent : Tok.rule-strong;
+            background: self.lit ? Tok.accent-soft : transparent;
+        }
+
+        // **乗せただけで数える**——`moved`は押している間しか来ないので、位置の変化で読む。
+        touch := TouchArea {
+            function point() {
+                if !self.has-hover {
+                    root.rows = 0;
+                    root.columns = 0;
+                    return;
+                }
+                let along = clamp(floor(self.mouse-x / root.cell), 0, root.size - 1);
+                let down = clamp(floor(self.mouse-y / root.cell), 0, root.size - 1);
+                root.rows = root.vertical ? root.size - along : down + 1;
+                root.columns = root.vertical ? down + 1 : along + 1;
+            }
+            changed mouse-x => { self.point(); }
+            changed mouse-y => { self.point(); }
+            changed has-hover => { self.point(); }
+            clicked => {
+                self.point();
+                if root.rows > 0 {
+                    root.chosen(root.rows, root.columns);
+                }
+            }
+        }
+    }
+}

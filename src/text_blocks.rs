@@ -1507,6 +1507,9 @@ pub struct TableGrid {
     pub columns: Vec<f32>,
     /// How far the table reaches along the line axis.
     pub reach: f32,
+    /// 各列の字の幅（余白と溝を除く）。行を閉じる`|`が残す空の列は0。
+    /// **境目を引くときの「いま見えている幅」**（RFN01-49）。
+    pub widths: Vec<f32>,
 }
 
 /// One cell of a table, and the box it is set in (要件 7.3.2).

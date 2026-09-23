@@ -1301,3 +1301,12 @@ msgstr "一致するタグはありません。"
 
 msgid "No tags yet. Write #tag in a note, or tags: in its front matter."
 msgstr "タグはまだありません。本文に #タグ、またはフロントマターに tags: と書くと出ます。"
+
+msgid "Table"
+msgstr "表"
+
+msgid "{} rows × {} columns"
+msgstr "{}行 × {}列"
+
+msgid "Edit Table"
+msgstr "表の編集"
