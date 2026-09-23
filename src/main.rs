@@ -450,25 +450,29 @@ struct FirstSize(slint::Weak<AppWindow>, Live);
 
 impl Drop for FirstSize {
     fn drop(&mut self) {
-        if !AWAITING_FIRST_SIZE.replace(false) {
-            return;
+        if let Some(window) = self.0.upgrade() {
+            lay_out_first(&window, &self.1);
         }
-        let Some(window) = self.0.upgrade() else {
-            return;
-        };
-        let live = &self.1;
-        for id in PaneId::all(&window) {
-            let showing = live.states.document(id);
-            let source = showing.text.borrow().clone();
-            refresh_pane_from_state(
-                &window,
-                &live.cache,
-                &showing,
-                id,
-                &live.states.of(id),
-                &source,
-            );
-        }
+    }
+}
+
+/// Lays every pane out for the first time, if nothing has yet
+/// ([`AWAITING_FIRST_SIZE`]).
+fn lay_out_first(window: &AppWindow, live: &Live) {
+    if !AWAITING_FIRST_SIZE.replace(false) {
+        return;
+    }
+    for id in PaneId::all(window) {
+        let showing = live.states.document(id);
+        let source = showing.text.borrow().clone();
+        refresh_pane_from_state(
+            window,
+            &live.cache,
+            &showing,
+            id,
+            &live.states.of(id),
+            &source,
+        );
     }
 }
 
@@ -478,10 +482,14 @@ thread_local! {
     /// 仮のもので、`main`はそこで何度も組んでいた——200KBの縦書きの文書を仮の
     /// 長さで約430ms組み、窓ができてから組み直していた。
     ///
-    /// `main`が立て、**窓が出てからの**最初の`resized`が下ろし、その`resized`が
-    /// 最初の組版をする。来なければタイトル行の支度の終わり（[`FirstSize`]）が
-    /// 下ろして組む。**起動の間だけ**：画面を描かずに組版を確かめる試験は立てない。
+    /// `main`が立て、**窓を出す前に整えた後**（[`WINDOW_SHAPED`]）に下ろして組む：
+    /// 整えても大きさが変わらなければその場で、変われば新しい大きさの`resized`で。
+    /// 窓が無いうちの`resized`は仮の大きさなので、下ろさない。どちらも来なければ
+    /// タイトル行の支度の終わり（[`FirstSize`]）が組む。**起動の間だけ**：画面を
+    /// 描かずに組版を確かめる試験は立てない。
     static AWAITING_FIRST_SIZE: Cell<bool> = const { Cell::new(false) };
+    /// winitの窓ができ、出す前のフックが通ったか。
+    static WINDOW_SHAPED: Cell<bool> = const { Cell::new(false) };
 }
 /// How long a zoom or typography control must stop being pressed before the
 /// document is laid out again. One press re-measures every block in both panes
@@ -2541,10 +2549,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     window.on_pane_resized(move |pane| {
-        if weak
-            .upgrade()
-            .is_some_and(|window| window.window().is_visible())
-        {
+        if WINDOW_SHAPED.get() {
             AWAITING_FIRST_SIZE.set(false);
         }
         let id = PaneId::from_index(pane);
@@ -3937,6 +3942,60 @@ fn main() -> Result<(), slint::PlatformError> {
             );
         }
     });
+    // **窓は出る前に整える**（2026-09-23）。winitは窓を隠したまま作り、最初の絵を
+    // 描いてから出す。その間にタイトル行を入れ、覚えている位置に置き、中の大きさを
+    // Slintへ知らせる——出てからでは、Windowsのタイトル行が付いた窓が一度見えて
+    // から中身が上へずれ、最大化で終わったセッションは通常の大きさで組んでから
+    // 最大化の大きさで組み直していた。できなかったときは、下の出た後の支度がする。
+    let hook_weak = window.as_weak();
+    let hook_chrome = chrome.clone();
+    let hook_live = live.clone();
+    i_slint_backend_winit::set_window_created_hook(move |native| {
+        let Some(window) = hook_weak.upgrade() else {
+            return;
+        };
+        WINDOW_SHAPED.set(true);
+        if hook_chrome.borrow().is_some() {
+            return;
+        }
+        let Some(hwnd) = window_chrome::hwnd_of(native) else {
+            return;
+        };
+        let Ok(chrome) = window_chrome::Chrome::install(hwnd, window.as_weak()) else {
+            return;
+        };
+        *hook_chrome.borrow_mut() = Some(chrome);
+        window.set_custom_title(true);
+        window_chrome::restore_place(hwnd, saved_place);
+        let before = window.window().size();
+        let size = native.inner_size();
+        let scale = native.scale_factor() as f32;
+        hook_live.cache.borrow_mut().log_diag(
+            "window",
+            &format!(
+                "shaped size={}x{} was={}x{} maximized={}",
+                size.width,
+                size.height,
+                before.width,
+                before.height,
+                native.is_maximized()
+            ),
+        );
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::Resized {
+                size: slint::LogicalSize::new(
+                    size.width as f32 / scale,
+                    size.height as f32 / scale,
+                ),
+            });
+        // 大きさが変わらなければ、ペインが報告済みの大きさがそのまま最後のもの——
+        // ここで組めば最初の絵に本文が間に合う。変われば、新しい大きさの報告
+        // （`resized`）を待つ。
+        if (before.width, before.height) == (size.width, size.height) {
+            lay_out_first(&window, &hook_live);
+        }
+    });
     let weak = window.as_weak();
     let held = chrome.clone();
     let first_live = live.clone();
@@ -3970,6 +4029,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 );
                 return;
             };
+            // 出る前に入っていれば（上のフック）、残るのは最大化の頼み直しだけ。
+            if held.borrow().is_some() {
+                if saved_maximized {
+                    window.window().set_maximized(true);
+                }
+                return;
+            }
             match window_chrome::Chrome::install(hwnd, window.as_weak()) {
                 Ok(chrome) => {
                     *held.borrow_mut() = Some(chrome);

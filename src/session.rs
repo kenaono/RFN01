@@ -395,7 +395,20 @@ pub fn restore_window_place(
     {
         let handle = window.window();
         handle.set_position(PhysicalPosition::new(place.x, place.y));
-        handle.set_size(PhysicalSize::new(place.width, place.height));
+        // **最大化のときは、Windowsのタイトル行の分を引いて頼む**（2026-09-23）。
+        // winitはこの大きさをWindowsのタイトル行が付いた窓の中身として覚え、
+        // そのタイトル行はこの後、窓を出す前にこの編集器の行に替わって中身に
+        // なる。通常の窓は`window_chrome::restore_place`が中身を置き直すが、
+        // 最大化している窓には触れない——元に戻したとき、中身がタイトル行の
+        // 分（96dpiで31px）だけ高くなっていた。
+        let height = if maximized {
+            place
+                .height
+                .saturating_sub(super::window_chrome::caption_inset_at(place.x, place.y))
+        } else {
+            place.height
+        };
+        handle.set_size(PhysicalSize::new(place.width, height));
     }
     if maximized {
         window.window().set_maximized(true);

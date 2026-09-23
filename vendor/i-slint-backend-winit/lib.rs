@@ -38,6 +38,27 @@ mod ios;
 /// Re-export of the winit crate.
 pub use winit;
 
+// RFN Edit: a hook run on each new winit window after it is created and before
+// it is first shown, so the application can put its own frame and place on the
+// window it will show rather than change them in front of the user.
+std::thread_local! {
+    static WINDOW_CREATED: std::cell::RefCell<Option<Box<dyn Fn(&winit::window::Window)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Sets the hook run on each new winit window before it is first shown.
+pub fn set_window_created_hook(hook: impl Fn(&winit::window::Window) + 'static) {
+    WINDOW_CREATED.with(|held| *held.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_window_created_hook(window: &winit::window::Window) {
+    WINDOW_CREATED.with(|held| {
+        if let Some(hook) = held.borrow().as_ref() {
+            hook(window);
+        }
+    });
+}
+
 /// Internal type used by the winit backend for thread communication and window system updates.
 ///
 /// See also [`EventLoopBuilder`]

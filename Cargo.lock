@@ -3901,6 +3901,7 @@ dependencies = [
 name = "rfnedit"
 version = "0.1.0"
 dependencies = [
+ "i-slint-backend-winit",
  "raw-window-handle",
  "regex",
  "slint",

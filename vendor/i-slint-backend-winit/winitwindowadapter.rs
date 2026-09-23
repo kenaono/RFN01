@@ -474,6 +474,8 @@ impl WinitWindowAdapter {
         }
 
         let winit_window = self.renderer.resume(active_event_loop, window_attributes)?;
+        // RFN Edit: still hidden here (see `show_after_creation` above).
+        crate::run_window_created_hook(&winit_window);
 
         // Push the host shell's color scheme and accent color to the SlintContext.
         // With `xdg_desktop_settings` the backend-wide portal watcher (spawned in
