@@ -9230,6 +9230,8 @@ struct WorkspaceLinkUi {
     generation: u64,
     dirty_headings: BTreeMap<usize, (Instant, Vec<document::Heading>)>,
     notified_maintenance: Option<String>,
+    /// Reads a running scan between ticks ([`follow_index_scan`]).
+    catch_up: Rc<Timer>,
 }
 
 fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
@@ -9257,6 +9259,7 @@ fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
                 generation: 0,
                 dirty_headings: BTreeMap::new(),
                 notified_maintenance: None,
+                catch_up: Rc::default(),
             }))
         })
         .clone()
@@ -9523,6 +9526,57 @@ fn update_link_validity(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkU
     }
 }
 
+/// What the index worker has sent so far, folded into the snapshot, and its
+/// timings written to the log.
+fn take_index_events(live: &Live, ui: &mut WorkspaceLinkUi) {
+    ui.index.poll();
+    for measured in ui.index.take_metrics() {
+        let line = measured.log();
+        let mut cache = live.cache.borrow_mut();
+        cache.log_diag("work.index", &line);
+        cache.log_perf(&line);
+    }
+}
+
+/// How often a running scan is read while it lasts.
+///
+/// **Only the reading.** The worker hands its results over a channel of 8 and
+/// waits while it is full, so read every [`WORK_COPY_TICK`] a scan of 675 files
+/// spent about 0.5s of its 0.54s waiting (2026-09-23の計測). The rest of
+/// [`workspace_links_tick`] copies every open document for the link check and
+/// stays on its own clock; it runs once as soon as the scan ends.
+const INDEX_CATCH_UP: Duration = Duration::from_millis(30);
+
+/// Reads the index at [`INDEX_CATCH_UP`] until the running scan ends. Every
+/// scan is started inside [`workspace_links_tick`], which calls this when one
+/// is running — the first one from `main`, before the tick has a clock.
+fn follow_index_scan(window: &AppWindow, live: &Live, timer: &Rc<Timer>) {
+    if timer.running() {
+        return;
+    }
+    let weak = window.as_weak();
+    let live = live.clone();
+    let held = Rc::downgrade(timer);
+    timer.start(TimerMode::Repeated, INDEX_CATCH_UP, move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let busy = {
+            let links = workspace_link_ui(&live);
+            let mut ui = links.borrow_mut();
+            take_index_events(&live, &mut ui);
+            draw_tags_if_showing(&window, &live, &ui);
+            ui.index.status().busy
+        };
+        if !busy {
+            if let Some(timer) = held.upgrade() {
+                timer.stop();
+            }
+            workspace_links_tick(&window, &live);
+        }
+    });
+}
+
 fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let runtime = live.folder.borrow().workspace.clone();
     let (active, roots, reset) = runtime
@@ -9540,13 +9594,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let held = workspace_link_ui(live);
     let mut ui = held.borrow_mut();
     ui.index.sync_scope(active, roots, reset);
-    ui.index.poll();
-    for measured in ui.index.take_metrics() {
-        let line = measured.log();
-        let mut cache = live.cache.borrow_mut();
-        cache.log_diag("work.index", &line);
-        cache.log_perf(&line);
-    }
+    take_index_events(live, &mut ui);
     // 2026-09-21: the view rebuild and the request build are the two costs a
     // tick can add on the UI thread itself, so they are measured separately
     // from the worker's own scan and priority times (要件 4.5「UIへの反映待ち」
@@ -9577,6 +9625,9 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     }
     ui.index
         .maybe_rescan(Duration::from_secs(30), Instant::now());
+    if ui.index.status().busy {
+        follow_index_scan(window, live, &ui.catch_up);
+    }
     update_link_validity(window, live, &mut ui);
     let id = focused_pane(window);
     let doc = live.states.document(id);
