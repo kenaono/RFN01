@@ -130,6 +130,10 @@ export struct LeftRow {
 
 export component AppWindow inherits Window {
     in property <bool> custom-title: false;
+    // タイトル行の高さを、タイトル行が入る前から取っておく（2026-09-23）。起動時は
+    // 窓ができる前に本文を組むので、ここで36pxを引いておかないと、タイトル行が
+    // 入ったときに縦書きの行の長さが変わり、文書を組み直すことになる。
+    in property <bool> title-reserved: false;
     in property <bool> title-maximized: false;
     // Windows owns the caption hit regions, so the frame reports which of the
     // three buttons the pointer is over (1 minimise, 2 maximise, 3 close, 0
@@ -1281,7 +1285,7 @@ export component AppWindow inherits Window {
     }
 
     // タイトル行と、出ていれば書式のツールバー。その下から本文の側が始まる。
-    private property <length> title-height: root.custom-title ? 36px : 0px;
+    private property <length> title-height: root.custom-title || root.title-reserved ? 36px : 0px;
     private property <length> chrome-height: root.title-height + (root.format-toolbar-open ? 34px : 0px);
 
     // The outer layout padding belongs to the chrome, not the transparent paper.

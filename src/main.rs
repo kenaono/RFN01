@@ -442,6 +442,47 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 /// re-wrap about 0.3s after launch; laid out at once, the first real size is
 /// done before the window is created (about 20ms, 2026-09-23の計測).
 const STARTUP_RESIZE: Duration = Duration::from_secs(2);
+
+/// Lets the panes be laid out when it is dropped, if nothing has yet
+/// ([`AWAITING_FIRST_SIZE`]). Held by the title bar's setup, which ends — by
+/// every one of its ways out — only once the window exists.
+struct FirstSize(slint::Weak<AppWindow>, Live);
+
+impl Drop for FirstSize {
+    fn drop(&mut self) {
+        if !AWAITING_FIRST_SIZE.replace(false) {
+            return;
+        }
+        let Some(window) = self.0.upgrade() else {
+            return;
+        };
+        let live = &self.1;
+        for id in PaneId::all(&window) {
+            let showing = live.states.document(id);
+            let source = showing.text.borrow().clone();
+            refresh_pane_from_state(
+                &window,
+                &live.cache,
+                &showing,
+                id,
+                &live.states.of(id),
+                &source,
+            );
+        }
+    }
+}
+
+thread_local! {
+    /// **起動時、窓が出るまでは本文を組まない**（2026-09-23、書き手の報告「縦書きで
+    /// 起動すると、行の高さの調整が見えます」）。窓ができるまでペインの大きさは
+    /// 仮のもので、`main`はそこで何度も組んでいた——200KBの縦書きの文書を仮の
+    /// 長さで約430ms組み、窓ができてから組み直していた。
+    ///
+    /// `main`が立て、**窓が出てからの**最初の`resized`が下ろし、その`resized`が
+    /// 最初の組版をする。来なければタイトル行の支度の終わり（[`FirstSize`]）が
+    /// 下ろして組む。**起動の間だけ**：画面を描かずに組版を確かめる試験は立てない。
+    static AWAITING_FIRST_SIZE: Cell<bool> = const { Cell::new(false) };
+}
 /// How long a zoom or typography control must stop being pressed before the
 /// document is laid out again. One press re-measures every block in both panes
 /// and costs about 200ms on a 4万字 document (技術検証 6.8), so a run of presses
@@ -1681,6 +1722,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // 要件 8.5: and where the window itself was. **Before it is shown**, so it
     // opens where it belongs rather than moving there in front of the writer.
+    // タイトル行はこの後、窓ができてから入る（`window_chrome::Chrome::install`）。
+    // その高さを先に取っておき、最初の組版から本文の大きさを最後のものにする。
+    window.set_title_reserved(true);
+    AWAITING_FIRST_SIZE.set(true);
     if let Some(session) = &session {
         restore_window_place(&window, session.place, session.maximized);
     }
@@ -2496,6 +2541,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     window.on_pane_resized(move |pane| {
+        if weak
+            .upgrade()
+            .is_some_and(|window| window.window().is_visible())
+        {
+            AWAITING_FIRST_SIZE.set(false);
+        }
         let id = PaneId::from_index(pane);
         let weak = weak.clone();
         let states = states.clone();
@@ -3888,13 +3939,17 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     let weak = window.as_weak();
     let held = chrome.clone();
+    let first_live = live.clone();
     Timer::single_shot(Duration::ZERO, move || {
         let Some(window) = weak.upgrade() else {
             return;
         };
+        let first_size = FirstSize(window.as_weak(), first_live);
         let _ = slint::spawn_local(async move {
+            let _first_size = first_size;
             use slint::winit_030::WinitWindowAccessor;
             if let Err(error) = window.window().winit_window().await {
+                window.set_title_reserved(false);
                 window.tell(
                     say!(
                         "タイトルバーを初期化できません: {error}",
@@ -3905,6 +3960,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             let Some(hwnd) = window_chrome::window_handle(&window) else {
+                window.set_title_reserved(false);
                 window.tell(
                     pick(
                         "タイトルバーのウィンドウを取得できません",
@@ -3929,13 +3985,16 @@ fn main() -> Result<(), slint::PlatformError> {
                         window.window().set_maximized(true);
                     }
                 }
-                Err(error) => window.tell(
-                    say!(
-                        "タイトルバーを初期化できません: {error}",
-                        "Cannot initialize the title bar: {error}"
-                    )
-                    .into(),
-                ),
+                Err(error) => {
+                    window.set_title_reserved(false);
+                    window.tell(
+                        say!(
+                            "タイトルバーを初期化できません: {error}",
+                            "Cannot initialize the title bar: {error}"
+                        )
+                        .into(),
+                    );
+                }
             }
         });
     });
@@ -18887,6 +18946,10 @@ fn refresh_pane(
             "terminal",
             &format!("below pane={} lost its shell", id.log_name()),
         );
+    }
+    // 起動時、窓が出てペインが大きさを報告するまでは組まない（[`AWAITING_FIRST_SIZE`]）。
+    if AWAITING_FIRST_SIZE.get() {
+        return;
     }
     let refresh_started = Instant::now();
     // Read once and logged: how far this pane is magnified is half of why a
