@@ -4,9 +4,9 @@ use std::cell::Cell;
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Dwm::DwmDefWindowProc,
-    Graphics::Gdi::ScreenToClient,
+    Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint, ScreenToClient},
     UI::{
-        HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
+        HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI},
         Input::KeyboardAndMouse::{
             ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
         },
@@ -23,6 +23,30 @@ pub const BUTTON_WIDTH: f32 = 46.;
 /// call Slint itself (resizing reenters), so the state travels the same way the
 /// system commands do and the UI is set from the message queue instead.
 const WM_CAPTION_STATE: u32 = WM_APP + 1;
+
+/// How much taller the client becomes when this chrome takes over the caption
+/// of a window whose corner is at `(x, y)`: Windows' caption and its top frame,
+/// which [`frame_proc`] gives to the client (`WM_NCCALCSIZE`).
+pub fn caption_inset_at(x: i32, y: i32) -> u32 {
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let (mut dpi, mut unused) = (96, 96);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
+        let inset = GetSystemMetricsForDpi(SM_CYCAPTION, dpi)
+            + GetSystemMetricsForDpi(SM_CYFRAME, dpi)
+            + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        inset.max(0) as u32
+    }
+}
+
+/// The HWND of a winit window, before Slint has one to hand out.
+pub fn hwnd_of(window: &slint::winit_030::winit::window::Window) -> Option<HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(HWND(handle.hwnd.get() as *mut _)),
+        _ => None,
+    }
+}
 
 pub fn window_handle(window: &super::AppWindow) -> Option<HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};

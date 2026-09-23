@@ -67,7 +67,37 @@ struct Surface {
     width: u32,
     height: u32,
     pixels: Vec<Pixel>,
+    // RFN Edit: what the last present changed, and how many back buffers still
+    // hold nothing usable. A flip-sequential buffer comes back holding the frame
+    // from two presents ago, so bringing it up to date takes this frame's change
+    // and the previous one's; a buffer that was never filled takes everything.
+    previous: Area,
+    stale: u8,
 }
+
+/// A rectangle of the surface in pixels: left, top, right, bottom (exclusive).
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct Area(u32, u32, u32, u32);
+impl Area {
+    fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        Self(
+            self.0.min(other.0),
+            self.1.min(other.1),
+            self.2.max(other.2),
+            self.3.max(other.3),
+        )
+    }
+    fn is_empty(self) -> bool {
+        self.0 >= self.2 || self.1 >= self.3
+    }
+}
+
 impl Surface {
     fn new(hwnd: HWND, width: u32, height: u32) -> windows::core::Result<Self> {
         unsafe {
@@ -128,6 +158,8 @@ impl Surface {
                 width,
                 height,
                 pixels: vec![Pixel::default(); width as usize * height as usize],
+                previous: Area::default(),
+                stale: 2,
             })
         }
     }
@@ -145,20 +177,53 @@ impl Surface {
         self.height = height;
         self.pixels
             .resize(width as usize * height as usize, Pixel::default());
+        self.stale = 2;
         Ok(())
     }
-    fn present(&self) -> windows::core::Result<()> {
+    fn whole(&self) -> Area {
+        Area(0, 0, self.width, self.height)
+    }
+    /// Presents `changed`, the part of `pixels` this frame drew.
+    ///
+    /// RFN Edit: only the part that differs from the back buffer is uploaded.
+    /// The whole image is about 15MB at 2219×1726 and took 1.3–3.5ms a frame,
+    /// even for a caret blink of 1×22 pixels (2026-09-23の計測).
+    fn present(&mut self, changed: Area) -> windows::core::Result<()> {
+        let whole = self.whole();
+        let changed = Area(
+            changed.0.min(whole.2),
+            changed.1.min(whole.3),
+            changed.2.min(whole.2),
+            changed.3.min(whole.3),
+        );
+        let upload = if self.stale > 0 {
+            self.stale -= 1;
+            whole
+        } else {
+            changed.union(self.previous)
+        };
+        self.previous = changed;
         unsafe {
             let texture: ID3D11Texture2D = self.chain.GetBuffer(0)?;
-            // Upload the complete image: the flip-chain back buffer can be two frames old.
-            self.context.UpdateSubresource(
-                &texture,
-                0,
-                None,
-                self.pixels.as_ptr().cast(),
-                self.width * 4,
-                0,
-            );
+            if !upload.is_empty() {
+                let Area(left, top, right, bottom) = upload;
+                let start = top as usize * self.width as usize + left as usize;
+                self.context.UpdateSubresource(
+                    &texture,
+                    0,
+                    Some(&D3D11_BOX {
+                        left,
+                        top,
+                        front: 0,
+                        right,
+                        bottom,
+                        back: 1,
+                    }),
+                    self.pixels[start..].as_ptr().cast(),
+                    self.width * 4,
+                    0,
+                );
+            }
             self.chain.Present(0, DXGI_PRESENT(0)).ok()
         }
     }
@@ -199,8 +264,14 @@ impl WinitSoftwareRenderer {
             RepaintBufferType::ReusedBuffer
         });
         let region = self.renderer.render(&mut surface.pixels, width as usize);
-        if full || region.bounding_box_size().width > 0 {
-            surface.present()?;
+        let size = region.bounding_box_size();
+        if full {
+            let whole = surface.whole();
+            surface.present(whole)?;
+        } else if size.width > 0 && size.height > 0 {
+            let origin = region.bounding_box_origin();
+            let (x, y) = (origin.x.max(0) as u32, origin.y.max(0) as u32);
+            surface.present(Area(x, y, x + size.width, y + size.height))?;
         }
         Ok(())
     }

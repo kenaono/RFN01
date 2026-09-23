@@ -432,6 +432,65 @@ const MIN_HORIZONTAL_WIDTH: u32 = 160;
 /// again. Every height change invalidates every block measurement, so following
 /// a drag pixel by pixel would remeasure the whole document on each frame.
 const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+/// How long after launch a pane is laid out again as soon as its size changes,
+/// without waiting for [`RESIZE_SETTLE`].
+///
+/// **Nobody is dragging an edge yet.** The sizes that arrive now are the window
+/// finding its own: the first real size, then the title bar this editor paints
+/// taking over the caption, then a restored maximise. Waiting out the settle
+/// made the first frame show the text wrapped for the placeholder size and
+/// re-wrap about 0.3s after launch; laid out at once, the first real size is
+/// done before the window is created (about 20ms, 2026-09-23の計測).
+const STARTUP_RESIZE: Duration = Duration::from_secs(2);
+
+/// Lets the panes be laid out when it is dropped, if nothing has yet
+/// ([`AWAITING_FIRST_SIZE`]). Held by the title bar's setup, which ends — by
+/// every one of its ways out — only once the window exists.
+struct FirstSize(slint::Weak<AppWindow>, Live);
+
+impl Drop for FirstSize {
+    fn drop(&mut self) {
+        if let Some(window) = self.0.upgrade() {
+            lay_out_first(&window, &self.1);
+        }
+    }
+}
+
+/// Lays every pane out for the first time, if nothing has yet
+/// ([`AWAITING_FIRST_SIZE`]).
+fn lay_out_first(window: &AppWindow, live: &Live) {
+    if !AWAITING_FIRST_SIZE.replace(false) {
+        return;
+    }
+    for id in PaneId::all(window) {
+        let showing = live.states.document(id);
+        let source = showing.text.borrow().clone();
+        refresh_pane_from_state(
+            window,
+            &live.cache,
+            &showing,
+            id,
+            &live.states.of(id),
+            &source,
+        );
+    }
+}
+
+thread_local! {
+    /// **起動時、窓が出るまでは本文を組まない**（2026-09-23、書き手の報告「縦書きで
+    /// 起動すると、行の高さの調整が見えます」）。窓ができるまでペインの大きさは
+    /// 仮のもので、`main`はそこで何度も組んでいた——200KBの縦書きの文書を仮の
+    /// 長さで約430ms組み、窓ができてから組み直していた。
+    ///
+    /// `main`が立て、**窓を出す前に整えた後**（[`WINDOW_SHAPED`]）に下ろして組む：
+    /// 整えても大きさが変わらなければその場で、変われば新しい大きさの`resized`で。
+    /// 窓が無いうちの`resized`は仮の大きさなので、下ろさない。どちらも来なければ
+    /// タイトル行の支度の終わり（[`FirstSize`]）が組む。**起動の間だけ**：画面を
+    /// 描かずに組版を確かめる試験は立てない。
+    static AWAITING_FIRST_SIZE: Cell<bool> = const { Cell::new(false) };
+    /// winitの窓ができ、出す前のフックが通ったか。
+    static WINDOW_SHAPED: Cell<bool> = const { Cell::new(false) };
+}
 /// How long a zoom or typography control must stop being pressed before the
 /// document is laid out again. One press re-measures every block in both panes
 /// and costs about 200ms on a 4万字 document (技術検証 6.8), so a run of presses
@@ -1511,6 +1570,7 @@ fn perf_log_header(window: &AppWindow) -> String {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let launched = Instant::now();
     let diagnostic_options = diag::Config::from_args(std::env::args_os().skip(1));
     let diagnostic_config = diagnostic_options.clone().unwrap_or_default();
     let diagnostic_mode = diagnostic_config.summary();
@@ -1670,6 +1730,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // 要件 8.5: and where the window itself was. **Before it is shown**, so it
     // opens where it belongs rather than moving there in front of the writer.
+    // タイトル行はこの後、窓ができてから入る（`window_chrome::Chrome::install`）。
+    // その高さを先に取っておき、最初の組版から本文の大きさを最後のものにする。
+    window.set_title_reserved(true);
+    AWAITING_FIRST_SIZE.set(true);
     if let Some(session) = &session {
         restore_window_place(&window, session.place, session.maximized);
     }
@@ -2485,6 +2549,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     window.on_pane_resized(move |pane| {
+        if WINDOW_SHAPED.get() {
+            AWAITING_FIRST_SIZE.set(false);
+        }
         let id = PaneId::from_index(pane);
         let weak = weak.clone();
         let states = states.clone();
@@ -2493,7 +2560,12 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut timers = timers.borrow_mut();
             timers.entry(id.0).or_default().clone()
         };
-        timer.start(TimerMode::SingleShot, RESIZE_SETTLE, move || {
+        let settle = if launched.elapsed() < STARTUP_RESIZE {
+            Duration::ZERO
+        } else {
+            RESIZE_SETTLE
+        };
+        timer.start(TimerMode::SingleShot, settle, move || {
             if let Some(window) = weak.upgrade() {
                 if id.is_panel() && !states.panels.borrow().contains_key(&id.0) {
                     return;
@@ -3870,15 +3942,73 @@ fn main() -> Result<(), slint::PlatformError> {
             );
         }
     });
+    // **窓は出る前に整える**（2026-09-23）。winitは窓を隠したまま作り、最初の絵を
+    // 描いてから出す。その間にタイトル行を入れ、覚えている位置に置き、中の大きさを
+    // Slintへ知らせる——出てからでは、Windowsのタイトル行が付いた窓が一度見えて
+    // から中身が上へずれ、最大化で終わったセッションは通常の大きさで組んでから
+    // 最大化の大きさで組み直していた。できなかったときは、下の出た後の支度がする。
+    let hook_weak = window.as_weak();
+    let hook_chrome = chrome.clone();
+    let hook_live = live.clone();
+    i_slint_backend_winit::set_window_created_hook(move |native| {
+        let Some(window) = hook_weak.upgrade() else {
+            return;
+        };
+        WINDOW_SHAPED.set(true);
+        if hook_chrome.borrow().is_some() {
+            return;
+        }
+        let Some(hwnd) = window_chrome::hwnd_of(native) else {
+            return;
+        };
+        let Ok(chrome) = window_chrome::Chrome::install(hwnd, window.as_weak()) else {
+            return;
+        };
+        *hook_chrome.borrow_mut() = Some(chrome);
+        window.set_custom_title(true);
+        window_chrome::restore_place(hwnd, saved_place);
+        let before = window.window().size();
+        let size = native.inner_size();
+        let scale = native.scale_factor() as f32;
+        hook_live.cache.borrow_mut().log_diag(
+            "window",
+            &format!(
+                "shaped size={}x{} was={}x{} maximized={}",
+                size.width,
+                size.height,
+                before.width,
+                before.height,
+                native.is_maximized()
+            ),
+        );
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::Resized {
+                size: slint::LogicalSize::new(
+                    size.width as f32 / scale,
+                    size.height as f32 / scale,
+                ),
+            });
+        // 大きさが変わらなければ、ペインが報告済みの大きさがそのまま最後のもの——
+        // ここで組めば最初の絵に本文が間に合う。変われば、新しい大きさの報告
+        // （`resized`）を待つ。
+        if (before.width, before.height) == (size.width, size.height) {
+            lay_out_first(&window, &hook_live);
+        }
+    });
     let weak = window.as_weak();
     let held = chrome.clone();
+    let first_live = live.clone();
     Timer::single_shot(Duration::ZERO, move || {
         let Some(window) = weak.upgrade() else {
             return;
         };
+        let first_size = FirstSize(window.as_weak(), first_live);
         let _ = slint::spawn_local(async move {
+            let _first_size = first_size;
             use slint::winit_030::WinitWindowAccessor;
             if let Err(error) = window.window().winit_window().await {
+                window.set_title_reserved(false);
                 window.tell(
                     say!(
                         "タイトルバーを初期化できません: {error}",
@@ -3889,6 +4019,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             let Some(hwnd) = window_chrome::window_handle(&window) else {
+                window.set_title_reserved(false);
                 window.tell(
                     pick(
                         "タイトルバーのウィンドウを取得できません",
@@ -3898,6 +4029,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 );
                 return;
             };
+            // 出る前に入っていれば（上のフック）、残るのは最大化の頼み直しだけ。
+            if held.borrow().is_some() {
+                if saved_maximized {
+                    window.window().set_maximized(true);
+                }
+                return;
+            }
             match window_chrome::Chrome::install(hwnd, window.as_weak()) {
                 Ok(chrome) => {
                     *held.borrow_mut() = Some(chrome);
@@ -3913,13 +4051,16 @@ fn main() -> Result<(), slint::PlatformError> {
                         window.window().set_maximized(true);
                     }
                 }
-                Err(error) => window.tell(
-                    say!(
-                        "タイトルバーを初期化できません: {error}",
-                        "Cannot initialize the title bar: {error}"
-                    )
-                    .into(),
-                ),
+                Err(error) => {
+                    window.set_title_reserved(false);
+                    window.tell(
+                        say!(
+                            "タイトルバーを初期化できません: {error}",
+                            "Cannot initialize the title bar: {error}"
+                        )
+                        .into(),
+                    );
+                }
             }
         });
     });
@@ -9214,6 +9355,8 @@ struct WorkspaceLinkUi {
     generation: u64,
     dirty_headings: BTreeMap<usize, (Instant, Vec<document::Heading>)>,
     notified_maintenance: Option<String>,
+    /// Reads a running scan between ticks ([`follow_index_scan`]).
+    catch_up: Rc<Timer>,
 }
 
 fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
@@ -9241,6 +9384,7 @@ fn workspace_link_ui(live: &Live) -> Rc<RefCell<WorkspaceLinkUi>> {
                 generation: 0,
                 dirty_headings: BTreeMap::new(),
                 notified_maintenance: None,
+                catch_up: Rc::default(),
             }))
         })
         .clone()
@@ -9507,6 +9651,57 @@ fn update_link_validity(window: &AppWindow, live: &Live, ui: &mut WorkspaceLinkU
     }
 }
 
+/// What the index worker has sent so far, folded into the snapshot, and its
+/// timings written to the log.
+fn take_index_events(live: &Live, ui: &mut WorkspaceLinkUi) {
+    ui.index.poll();
+    for measured in ui.index.take_metrics() {
+        let line = measured.log();
+        let mut cache = live.cache.borrow_mut();
+        cache.log_diag("work.index", &line);
+        cache.log_perf(&line);
+    }
+}
+
+/// How often a running scan is read while it lasts.
+///
+/// **Only the reading.** The worker hands its results over a channel of 8 and
+/// waits while it is full, so read every [`WORK_COPY_TICK`] a scan of 675 files
+/// spent about 0.5s of its 0.54s waiting (2026-09-23の計測). The rest of
+/// [`workspace_links_tick`] copies every open document for the link check and
+/// stays on its own clock; it runs once as soon as the scan ends.
+const INDEX_CATCH_UP: Duration = Duration::from_millis(30);
+
+/// Reads the index at [`INDEX_CATCH_UP`] until the running scan ends. Every
+/// scan is started inside [`workspace_links_tick`], which calls this when one
+/// is running — the first one from `main`, before the tick has a clock.
+fn follow_index_scan(window: &AppWindow, live: &Live, timer: &Rc<Timer>) {
+    if timer.running() {
+        return;
+    }
+    let weak = window.as_weak();
+    let live = live.clone();
+    let held = Rc::downgrade(timer);
+    timer.start(TimerMode::Repeated, INDEX_CATCH_UP, move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let busy = {
+            let links = workspace_link_ui(&live);
+            let mut ui = links.borrow_mut();
+            take_index_events(&live, &mut ui);
+            draw_tags_if_showing(&window, &live, &ui);
+            ui.index.status().busy
+        };
+        if !busy {
+            if let Some(timer) = held.upgrade() {
+                timer.stop();
+            }
+            workspace_links_tick(&window, &live);
+        }
+    });
+}
+
 fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let runtime = live.folder.borrow().workspace.clone();
     let (active, roots, reset) = runtime
@@ -9524,13 +9719,7 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     let held = workspace_link_ui(live);
     let mut ui = held.borrow_mut();
     ui.index.sync_scope(active, roots, reset);
-    ui.index.poll();
-    for measured in ui.index.take_metrics() {
-        let line = measured.log();
-        let mut cache = live.cache.borrow_mut();
-        cache.log_diag("work.index", &line);
-        cache.log_perf(&line);
-    }
+    take_index_events(live, &mut ui);
     // 2026-09-21: the view rebuild and the request build are the two costs a
     // tick can add on the UI thread itself, so they are measured separately
     // from the worker's own scan and priority times (要件 4.5「UIへの反映待ち」
@@ -9561,6 +9750,9 @@ fn workspace_links_tick(window: &AppWindow, live: &Live) {
     }
     ui.index
         .maybe_rescan(Duration::from_secs(30), Instant::now());
+    if ui.index.status().busy {
+        follow_index_scan(window, live, &ui.catch_up);
+    }
     update_link_validity(window, live, &mut ui);
     let id = focused_pane(window);
     let doc = live.states.document(id);
@@ -18820,6 +19012,10 @@ fn refresh_pane(
             "terminal",
             &format!("below pane={} lost its shell", id.log_name()),
         );
+    }
+    // 起動時、窓が出てペインが大きさを報告するまでは組まない（[`AWAITING_FIRST_SIZE`]）。
+    if AWAITING_FIRST_SIZE.get() {
+        return;
     }
     let refresh_started = Instant::now();
     // Read once and logged: how far this pane is magnified is half of why a

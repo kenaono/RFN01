@@ -31,3 +31,21 @@ focus notifications are deferred rather than silently discarded.
 On upgrade, check whether upstream handles this reentrancy and remove this patch
 if superseded. Verify opening, cancelling, and reopening lazy input dialogs from
 menus with accessibility active, plus keyboard focus and screen-reader focus.
+
+## Partial upload on present
+
+`sw_composition.rs::Surface::present` uploads only the rectangle that differs
+from the back buffer instead of the whole image. The flip-sequential back buffer
+holds the frame from two presents ago, so the upload is the bounding box of this
+frame's dirty region and the previous presented one; after creation or
+`ResizeBuffers` both buffers are filled in full (`stale`). A caret blink went
+from 1.3–1.7ms to under 1ms at 2219×1726 (2026-09-23).
+
+## Window-created hook
+
+`lib.rs::set_window_created_hook` registers a closure that `ensure_window` runs on
+each new winit window right after it is created and before it is first shown
+(Slint creates windows hidden and shows them after pre-rendering the first
+frame). RFN Edit installs its title bar, restores the window place and reports
+the resulting client size there, so the first visible frame already has its
+final frame, place and layout (2026-09-23).

@@ -5,7 +5,23 @@ edition = "2024"
 publish = false
 
 [dependencies]
-slint = { version = "1.17.1", features = ["raw-window-handle-06", "unstable-winit-030", "software-renderer-path"] }
+# 既定の機能は使わない（2026-09-23）。既定はOpenGLの描画系（femtovg）とシステム
+# トレイも連れてくるが、この編集器はwinitとソフトウェア描画しか選ばない
+# （`main`の`BackendSelector`）。外すと実行ファイルが小さくなり、起動時に読み込む
+# ものが減る。アクセシビリティは既定と同じく残す。
+slint = { version = "1.17.1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "accessibility",
+    "backend-winit",
+    "renderer-software",
+    "raw-window-handle-06",
+    "unstable-winit-030",
+    "software-renderer-path",
+] }
+# 窓が作られてから出るまでの間に、タイトル行と位置を整えるため（2026-09-23）。
+# Slintがすでに使っている版（`vendor/`のもの）を直に指すので、増えるものは無い。
+i-slint-backend-winit = { version = "=1.17.1", default-features = false }
 # Only to reach the window's own handle, which the IME calls need. The version
 # must match the one Slint's `raw-window-handle-06` feature exposes.
 raw-window-handle = "0.6"
