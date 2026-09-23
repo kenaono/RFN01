@@ -11,7 +11,7 @@ fn main() {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
             // 追加要件 2026-09-15（書き手）: 表示の国際化。`@tr("English")`の訳を
-            // `translations/<言語>/LC_MESSAGES/editor_spike.po`から実行ファイルへ埋め込む。
+            // `translations/<言語>/LC_MESSAGES/rfnedit.po`から実行ファイルへ埋め込む。
             // **文脈は使わない**——同じ英語は同じ訳でよく、訳ファイルを部品の名前で割らない。
             let config = slint_build::CompilerConfiguration::new()
                 .with_bundled_translations("translations")

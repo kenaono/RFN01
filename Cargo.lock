@@ -1135,21 +1135,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
-name = "editor_spike"
-version = "0.1.0"
-dependencies = [
- "raw-window-handle",
- "regex",
- "slint",
- "slint-build",
- "unicode-segmentation",
- "unicode-width",
- "windows",
- "windows-core",
- "windows-numerics",
-]
-
-[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4012,6 +3997,21 @@ dependencies = [
  "tiny-skia 0.12.0",
  "usvg",
  "zune-jpeg",
+]
+
+[[package]]
+name = "rfnedit"
+version = "0.1.0"
+dependencies = [
+ "raw-window-handle",
+ "regex",
+ "slint",
+ "slint-build",
+ "unicode-segmentation",
+ "unicode-width",
+ "windows",
+ "windows-core",
+ "windows-numerics",
 ]
 
 [[package]]

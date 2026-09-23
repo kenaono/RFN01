@@ -1,7 +1,7 @@
 //! 表示の言語（追加要件 2026-09-15「表示の国際化対応」、書き手）。
 //!
 //! **画面（`.slint`）の文言は`@tr("English")`**で書き、日本語の訳は
-//! `translations/ja/LC_MESSAGES/editor_spike.po`から実行ファイルへ埋め込む（`build.rs`）。
+//! `translations/ja/LC_MESSAGES/rfnedit.po`から実行ファイルへ埋め込む（`build.rs`）。
 //! **Rustが画面へ渡す文言**（Keysの操作名など）は、ここの[`pick`]で日本語と英語の対から選ぶ。
 //!
 //! 設定は「System」「日本語」「English」。**Systemは Windows の表示言語が日本語なら日本語、
@@ -126,7 +126,7 @@ mod tests {
                 }
             }
         }
-        let po = include_str!("../translations/ja/LC_MESSAGES/editor_spike.po");
+        let po = include_str!("../translations/ja/LC_MESSAGES/rfnedit.po");
         let mut translated = HashSet::new();
         let mut id: Option<String> = None;
         for line in po.lines() {

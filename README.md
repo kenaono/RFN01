@@ -47,18 +47,34 @@ Workspace内の文書では `[[` でファイル候補、続けて `#` で見出
 
 ```powershell
 # 今いるフォルダを作業フォルダにする
-& .\target\release\editor_spike.exe .
+& .\target\release\rfnedit.exe .
 
 # フォルダと原稿を同時に開く。空白を含むパスは引用符で囲む
-& .\target\release\editor_spike.exe "D:\原稿 フォルダ" "D:\原稿 フォルダ\第一章.md"
+& .\target\release\rfnedit.exe "D:\原稿 フォルダ" "D:\原稿 フォルダ\第一章.md"
 
 # 診断モードとの併用
-& .\target\release\editor_spike.exe --diagnostics=ui .
+& .\target\release\rfnedit.exe --diagnostics=ui .
 ```
 
 相対パスはすべてコマンドを実行したフォルダが基準です。複数のフォルダを指定すると最後のフォルダを表示します。前回のTABを復元してから指定内容を開くため、作業フォルダを指定しても未保存のTABは残ります。指定なしでは従来どおり復元します。
 
-`--` の後はすべてパスとして扱います（例：`editor_spike.exe -- -memo.md`）。存在しないファイルは新規作成せず、読込エラーを通知します。確認手順は[起動引数](testdata/42_起動引数.md)にあります。
+`--` の後はすべてパスとして扱います（例：`rfnedit.exe -- -memo.md`）。存在しないファイルは新規作成せず、読込エラーを通知します。確認手順は[起動引数](testdata/42_起動引数.md)にあります。
+
+### WSLから起動する（RFN01-10）
+
+VS Codeの`code .`と同じように、WSLのシェルから`rfnedit`で開けます。引数の意味は上の起動引数と同じです。Linux側のフォルダ（`/home/…`）は`\\wsl.localhost\<ディストリビューション>\…`として、`/mnt/d/…`は`D:\…`として開きます。プロンプトはすぐに戻ります。
+
+```sh
+# 一度だけ、PATHの通った場所へリンクを張る
+ln -s /mnt/d/Projects/10_Creation/50_Dev/10_Editor/wsl/rfnedit ~/.local/bin/rfnedit
+
+rfnedit .              # 今のフォルダを作業フォルダにする
+rfnedit memo.md ~/原稿  # ファイルはTABで、フォルダは作業フォルダとして
+```
+
+実行ファイルは`target/release/rfnedit.exe`を使います。別の場所のものを使う場合は、環境変数`RFN_EDIT_EXE`にLinuxのパスで指定します。エディタが既に起動していれば、新しい窓で開きます。
+
+エディタはWindowsのウィンドウアプリとして作ってあるので、ExplorerやWSLから起動してもコマンドプロンプトの窓は開きません。
 
 ### Explorerからファイルを開く
 
@@ -895,7 +911,7 @@ Insertメニューの全項目を、アイコンで並べて押せるように�
 - **表示の言語**（2026-09-15）。Settings → General「LANGUAGE」のプルダウンで「System」（Windowsの表示言語が日本語なら日本語、それ以外は英語）
   「日本語」「English」を選ぶ。メニュー・設定画面・ツールチップ・Keysの操作名、ステータスバーの知らせと字数表示、問いの文とボタン、
   ファイルダイアログの題がすぐ切り替わる。訳を足すときは、画面は`ui/*.slint`に`@tr("English")`と書いて
-  `translations/ja/LC_MESSAGES/editor_spike.po`に訳を足し、Rustは`i18n::pick("日本語", "English")`か
+  `translations/ja/LC_MESSAGES/rfnedit.po`に訳を足し、Rustは`i18n::pick("日本語", "English")`か
   `say!("日本語{x}", "English {x}")`（`format!`の代わり）で対にする（どちらも足し忘れは`i18n`の試験が落ちる）
 - **背景の実透過**（2026-09-17）。設定 → ページ →「透過」の「背景の透過度」で0〜100%を調整する。0%は不透明（既定）、値を上げるほど背後のアプリが見える。縦書き・横書きの本文背景に適用し、文字・メニュー・設定・Terminalは不透明のまま。変更は即時反映・保存され、再起動後も復元する。透過中は壁紙を一時的に隠し、0%で元の壁紙設定に戻る。ページのリセットでも0%に戻る。
 - **背景の壁紙**（2026-09-15）。Settings → Page「BACKGROUND IMAGE」で、本文の紙の後ろに画像を敷く（全体の設定）。
@@ -1095,7 +1111,7 @@ Insertメニューの全項目を、アイコンで並べて押せるように�
 | `src/kill_ring.rs` | Kill Ring（要件 11.6）。文字列の並びと、そのどこを読んでいるか。**どこまでが1回のKillかは編集器の話**なのでここには無い。純Rust |
 | `src/wallpaper.rs` | 背景の壁紙（追加要件 2026-09-15）。Windowsの壁紙（`IDesktopWallpaper`）と指定の画像をWICで読み、**何をどこに敷くか**を決めて窓へ置く。敷くのは面（Slint）。`place`がWindowsの6つの配置 |
 | `src/pictures.rs` | 本文の画像（要件 7.3.3）。画像だけの行の行き先を文書のフォルダから解決し、WICで読み（更新時刻と長さが同じなら読み直さない）、描く大きさ（元の画素数×倍率、`|幅`）を決める。箱を立てるのは`document.rs`、描くのは`directwrite_render.rs`の`draw_pictures` |
-| `src/i18n.rs` | 表示の言語（追加要件 2026-09-15）。設定（System／日本語／English）から言語を決め、画面の`@tr`の訳（`translations/ja/LC_MESSAGES/editor_spike.po`、`build.rs`で埋め込み）を選ぶ。Rustが画面へ渡す文言は`pick(日本語, 英語)`、書式付きは`say!`。画面の訳し漏れと、Rustの文の英語の対の抜けは試験が数える |
+| `src/i18n.rs` | 表示の言語（追加要件 2026-09-15）。設定（System／日本語／English）から言語を決め、画面の`@tr`の訳（`translations/ja/LC_MESSAGES/rfnedit.po`、`build.rs`で埋め込み）を選ぶ。Rustが画面へ渡す文言は`pick(日本語, 英語)`、書式付きは`say!`。画面の訳し漏れと、Rustの文の英語の対の抜けは試験が数える |
 | `src/clipboard.rs` | クリップボードへ渡す（要件 11.2）。**出す向きだけ**——貼り付けはIME用の欄に落ちて打鍵と同じ道で入るので、取りにいく必要が無い |
 | `ui/tokens.slint` | 画面が使ってよい色の全部（`global Tok`）。**ここ以外に色を書かない。**UIは紫（色相295）、紙はアイボリー（色相92）で、この2つの色相を混ぜない。本文の墨`doc-ink`だけは紫を含まない |
 | `ui/controls.slint` | 画面の部品。アイコンの形（`Icons`＝SVGのパス文字列）、`IconButton`（ホバー・入・ツールチップ）、`StepRow`、メニューの行と枠 |
@@ -1227,11 +1243,11 @@ E14①では、プレビューで見出しを編集するときも文字サイ�
 
 ```powershell
 # 全分野の詳細と性能ログ
-.\editor_spike.exe --diagnostics
+.\rfnedit.exe --diagnostics
 # 描画と入力だけを詳しく調べる（保存などの通常記録も残る）
-.\editor_spike.exe --diagnostics=render,input
+.\rfnedit.exe --diagnostics=render,input
 # ファイル指定との併用
-.\editor_spike.exe --diagnostics=terminal "D:\原稿\第一章.md"
+.\rfnedit.exe --diagnostics=terminal "D:\原稿\第一章.md"
 ```
 
 | 指定 | 詳細記録の対象 |

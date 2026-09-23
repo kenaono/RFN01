@@ -1,3 +1,9 @@
+// RFN01-10: a window program, not a console one. Started from Explorer or
+// from WSL, a console program opens a prompt window first, and the prompt
+// it was typed into waits for it. Nothing is written to a console: the
+// diagnostics and panics go to the log beside the executable. The test
+// build stays a console program so that its output can be read.
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 mod draft_editor;
 mod editor_interaction;
 mod editor_render;

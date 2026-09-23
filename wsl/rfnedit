@@ -1,0 +1,49 @@
+#!/bin/sh
+# RFN EditをWSLから開く（RFN01-10）。`code .`と同じ使い方：
+#
+#   rfnedit .             今のフォルダを作業フォルダとして開く
+#   rfnedit memo.md ~/x   ファイルはTABで、フォルダは作業フォルダとして
+#
+# 引数の意味はエディタの起動引数（要件定義 5.1「起動引数」）そのまま。この
+# スクリプトがするのは2つだけ：
+#
+# - パスをWindowsのパスに書き換える。`/home/…`は`\\wsl.localhost\<distro>\…`、
+#   `/mnt/d/…`は`D:\…`になる。相対パスと`~`はここで今のフォルダから解く——
+#   エディタに渡したあとでは、Linuxの絶対パスを読める者がいない。
+# - エディタを切り離して起動し、プロンプトをすぐ返す。
+#
+# 使えるようにするには、一度だけPATHの通った場所へリンクを張る：
+#
+#   ln -s /mnt/d/…/10_Editor/wsl/rfnedit ~/.local/bin/rfnedit
+#
+# 実行ファイルは、このスクリプトの実体から見た`../target/release/rfnedit.exe`。
+# 別の場所のものを使うなら`RFN_EDIT_EXE`にLinuxのパスで指定する。
+
+exe=${RFN_EDIT_EXE:-$(dirname -- "$(readlink -f -- "$0")")/../target/release/rfnedit.exe}
+if [ ! -f "$exe" ]; then
+    echo "rfnedit: 実行ファイルが見つかりません: $exe" >&2
+    echo "rfnedit: RFN_EDIT_EXE に実行ファイルのパスを指定してください。" >&2
+    exit 1
+fi
+
+# `-`で始まるものは診断などのオプションとしてそのまま渡す。`--`から後は
+# すべてパス（エディタの読み方と同じ）。
+options=true
+count=$#
+while [ "$count" -gt 0 ]; do
+    arg=$1
+    shift
+    count=$((count - 1))
+    if [ "$options" = true ] && [ "$arg" = "--" ]; then
+        options=false
+    elif [ -n "$arg" ] && { [ "$options" = false ] || [ "${arg#-}" = "$arg" ]; }; then
+        # `realpath -m`は無いパスも解く。無いものを知らせるのはエディタの役目。
+        arg=$(wslpath -w "$(realpath -m -- "$arg")")
+    fi
+    set -- "$@" "$arg"
+done
+
+# 今のフォルダを実行ファイルの場所へ移してから起動する。Windowsのプロセスは
+# 起動したフォルダを掴んだままになるので、書き手のフォルダを掴ませない。
+cd -- "$(dirname -- "$exe")" || exit 1
+setsid "./$(basename -- "$exe")" "$@" </dev/null >/dev/null 2>&1 &
