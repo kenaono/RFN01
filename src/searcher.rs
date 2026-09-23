@@ -31,6 +31,8 @@ use std::time::Instant;
 use crate::file_io;
 use crate::file_tree;
 use crate::find::{self, Hit};
+use crate::tags;
+use crate::workspace_index;
 
 /// One folder-wide search, with everything it is allowed to spend.
 ///
@@ -125,6 +127,9 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         job.files,
         &mut || stop.superseded(),
     )?;
+    // 書き手の求め 2026-09-23: `tag:#小説`は、そのタグ（子を含む）を持つ文書に絞る。
+    // 残りの語があれば、その中で語を探す。無ければタグの場所を並べる。
+    let (tag_keys, words) = tags::split_query(&job.needle);
     let mut files: Vec<FileHits> = Vec::new();
     let mut total = 0usize;
     for path in paths {
@@ -134,14 +139,19 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         if stop.superseded() {
             return None;
         }
+        // タグはMarkdownだけのもの（索引と同じ）。読む前に落とす。
+        if !tag_keys.is_empty() && !workspace_index::is_markdown(&path) {
+            continue;
+        }
         let Ok(loaded) = file_io::read(&path, job.characters) else {
             continue;
         };
-        let hits = find::hits_in(
-            &loaded.text,
-            &job.needle,
-            job.hits_per_file.min(job.hits_in_all - total),
-        );
+        let limit = job.hits_per_file.min(job.hits_in_all - total);
+        let hits = if tag_keys.is_empty() {
+            find::hits_in(&loaded.text, &job.needle, limit)
+        } else {
+            tag_hits(&loaded.text, &tag_keys, &words, limit)
+        };
         if hits.is_empty() {
             continue;
         }
@@ -155,6 +165,24 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         total,
         ms: started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+/// `tag:`の検索の、1つの文書の当たり。**タグをすべて持つ文書だけ**が当たる。
+fn tag_hits(text: &str, tag_keys: &[String], words: &str, limit: usize) -> Vec<Hit> {
+    let found = tags::tags_in(text);
+    let has = |query: &String| found.iter().any(|tag| tags::matches(&tag.name, query));
+    if !tag_keys.iter().all(has) {
+        return Vec::new();
+    }
+    if !words.is_empty() {
+        return find::hits_in(text, words, limit);
+    }
+    found
+        .iter()
+        .filter(|tag| tag_keys.iter().any(|query| tags::matches(&tag.name, query)))
+        .take(limit)
+        .map(|tag| find::hit_at(text, tag.at, tag.len))
+        .collect()
 }
 
 fn exclusion_patterns(value: &str) -> Vec<(regex::Regex, bool)> {
@@ -482,6 +510,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![10, 10, 5]
         );
+        let _ = fs::remove_dir_all(&folder);
+    }
+
+    /// 書き手の求め 2026-09-23: `tag:`は子のタグも拾い、語と並べればAND。
+    /// Markdownでない文書と、タグが本文の途中（語の中）にあるだけの文書は当たらない。
+    #[test]
+    fn a_tag_query_narrows_to_the_documents_that_carry_it() {
+        let folder = scratch_folder("tags");
+        write(&folder, "a.md", "前書き\n本文 #小説/人物 主人公\n");
+        write(&folder, "b.md", "---\ntags: [小説]\n---\n脇役\n");
+        write(&folder, "c.md", "語#小説 主人公\n");
+        write(&folder, "d.txt", "#小説 主人公\n");
+
+        let found = search(&job(&folder, "tag:#小説"), &mut NeverSuperseded).unwrap();
+        let mut names: Vec<_> = found
+            .files
+            .iter()
+            .map(|file| {
+                file.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.md", "b.md"]);
+        let a = found
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("a.md"))
+            .unwrap();
+        assert_eq!(a.hits[0].line, 2);
+        assert_eq!(a.hits[0].len, "#小説/人物".len());
+        assert_eq!(a.hits[0].preview, "本文 #小説/人物 主人公");
+
+        let found = search(&job(&folder, "tag:小説 主人公"), &mut NeverSuperseded).unwrap();
+        assert_eq!(found.files.len(), 1);
+        assert!(found.files[0].path.ends_with("a.md"));
+        assert_eq!(found.files[0].hits[0].len, "主人公".len());
+
+        let found = search(&job(&folder, "tag:小説/人物"), &mut NeverSuperseded).unwrap();
+        assert_eq!(found.files.len(), 1);
         let _ = fs::remove_dir_all(&folder);
     }
 

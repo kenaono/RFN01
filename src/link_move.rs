@@ -130,6 +130,7 @@ fn plan(
             canonical: before,
             fingerprint,
             headings: Vec::new(),
+            tags: Vec::new(),
             headings_complete: false,
         });
     }

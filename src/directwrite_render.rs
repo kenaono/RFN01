@@ -1516,6 +1516,24 @@ fn apply_marker_boxes(
         // and both objects outlive the call.
         unsafe { layout.SetInlineObject(&object, range)? };
     }
+    // 書き手の求め 2026-09-23: **畳む行のブロックは場所を取らない**（フロントマター、整形表示）。
+    // 字は上で箱に隠れ、行送りをほぼ0にする。そのブロックは畳む行だけでできている
+    // （`split_blocks`）ので、本文の行送りには効かない。0は受け付けない版があるので僅かに残す。
+    if runs.iter().any(|run| run.marks.collapsed) {
+        let spacing = DWRITE_LINE_SPACING {
+            method: DWRITE_LINE_SPACING_METHOD_UNIFORM,
+            height: 0.01,
+            baseline: 0.0,
+            leadingBefore: 0.0,
+            fontLineGapUsage: DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
+        };
+        // SAFETY: The layout is alive for this call, and the struct is read before it returns.
+        unsafe {
+            layout
+                .cast::<IDWriteTextLayout3>()?
+                .SetLineSpacing(&spacing)?
+        };
+    }
     Ok(())
 }
 
@@ -4493,6 +4511,25 @@ fn draw_block(
                 for run in task.runs.iter().filter(|run| run.marks.link) {
                     layout.SetDrawingEffect(
                         &link_brush,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: run.utf16_start,
+                            length: run.utf16_len,
+                        },
+                    )?;
+                }
+            }
+            // 書き手の求め 2026-09-23: `#タグ`はリンクと同じく字の色だけ。紫はUIの色に揃える。
+            if task.runs.iter().any(|run| run.marks.tag) {
+                let [r, g, b] = typography.paper;
+                let ink = if 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5 {
+                    [0.78, 0.66, 1.0]
+                } else {
+                    [0.48, 0.28, 0.72]
+                };
+                let tag_brush = target.CreateSolidColorBrush(&colour(ink), None)?;
+                for run in task.runs.iter().filter(|run| run.marks.tag) {
+                    layout.SetDrawingEffect(
+                        &tag_brush,
                         DWRITE_TEXT_RANGE {
                             startPosition: run.utf16_start,
                             length: run.utf16_len,

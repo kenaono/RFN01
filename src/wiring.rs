@@ -2135,6 +2135,16 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
         crate::fold_whole_outline,
         close
     );
+    // 書き手の求め 2026-09-23: Tag View.
+    deferred_with!(
+        window,
+        on_tag_fold_toggled,
+        live,
+        crate::tag_fold_toggled,
+        row
+    );
+    deferred_with!(window, on_tag_fold_all, live, crate::fold_all_tags, close);
+    deferred_with!(window, on_tag_filter_changed, live, crate::publish_tags);
     deferred_with!(
         window,
         on_outline_bookmark_requested,

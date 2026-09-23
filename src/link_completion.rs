@@ -47,6 +47,10 @@ pub enum TriggerKind {
     /// `[shown](file#` — the same file/heading split as [`WikiHeading`], for
     /// an ordinary Markdown link instead of a wiki one.
     MarkdownHeading { file: String },
+    /// 書き手の求め 2026-09-23: `#tag` in the body (`crate::tags::tag_here`'s
+    /// rule: at a line's start or after a space). The candidates are the
+    /// Workspace's tags.
+    Tag,
 }
 
 impl TriggerKind {
@@ -134,7 +138,7 @@ pub fn detect(source: &str, caret: usize) -> Option<Context> {
         }
         (Some(wiki), None) => (wiki, true),
         (None, Some(markdown)) => (markdown, false),
-        (None, None) => return None,
+        (None, None) => return tag_context(source, caret, line_start),
     };
     let trigger_at = line_start + relative_trigger;
     let after_open = &prefix[relative_trigger + 2..];
@@ -193,6 +197,81 @@ pub fn detect(source: &str, caret: usize) -> Option<Context> {
         already_closed,
         target_end,
     })
+}
+
+/// 書き手の求め 2026-09-23: a tag being typed — `#` at the line's start or
+/// after a space, then tag letters up to the caret. **A bare `#` at the line's
+/// start is not one yet**: it is how a heading begins, and a list opening on it
+/// would take the Enter meant for the next line. One letter more and it is.
+fn tag_context(source: &str, caret: usize, line_start: usize) -> Option<Context> {
+    let prefix = &source[line_start..caret];
+    let query_start = prefix
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| crate::tags::is_tag_char(*c))
+        .last()
+        .map_or(prefix.len(), |(at, _)| at);
+    let hash = query_start.checked_sub(1)?;
+    if prefix.as_bytes()[hash] != b'#' {
+        return None;
+    }
+    let before = prefix[..hash].chars().next_back();
+    if before.is_some_and(|c| !c.is_whitespace())
+        || (before.is_none() && query_start == caret - line_start)
+    {
+        return None;
+    }
+    let rest = &source[caret..];
+    let tail = rest
+        .find(|c: char| !crate::tags::is_tag_char(c))
+        .unwrap_or(rest.len());
+    Some(Context {
+        kind: TriggerKind::Tag,
+        image: false,
+        trigger_at: line_start + hash,
+        query_at: line_start + query_start,
+        query: prefix[query_start..].to_owned(),
+        already_closed: false,
+        target_end: (tail > 0).then_some(caret + tail),
+    })
+}
+
+/// 書き手の求め 2026-09-23: the Workspace's tags (and the document's own, which
+/// may not be saved yet) that contain what has been typed. **The tag already
+/// typed in full is not offered**: accepting it would change nothing, and the
+/// list would take the Enter that ends the line.
+fn tag_candidates(
+    entries: &[Entry],
+    source_file: Option<&Path>,
+    current_source: &str,
+    context: &Context,
+    limit: usize,
+) -> Vec<Candidate> {
+    let query = crate::tags::key(&context.query);
+    let own = crate::tags::names(current_source);
+    let mut seen = std::collections::HashSet::new();
+    let mut found: Vec<&String> = entries
+        .iter()
+        .flat_map(|entry| &entry.tags)
+        .chain(&own)
+        .filter(|name| {
+            let key = crate::tags::key(name);
+            key != query && key.contains(&query) && seen.insert(key)
+        })
+        .collect();
+    found.sort_by_key(|name| crate::tags::key(name));
+    found
+        .into_iter()
+        .take(limit)
+        .map(|name| Candidate {
+            path: source_file.map(Path::to_path_buf).unwrap_or_default(),
+            heading: None,
+            heading_at: None,
+            display: format!("#{name}"),
+            insert: name.clone(),
+            caret_after_insert: name.len(),
+        })
+        .collect()
 }
 
 /// One thing a caller could offer in a completion list.
@@ -305,6 +384,9 @@ pub fn candidates(
     let limit = limit.min(DEFAULT_CANDIDATE_LIMIT);
     if limit == 0 {
         return Vec::new();
+    }
+    if context.kind == TriggerKind::Tag {
+        return tag_candidates(entries, source_file, current_source, context, limit);
     }
     if context.kind.is_heading() {
         // **画像に見出しは無い**（RFN01-48）。`![[画像.png#`に候補を出さない。
@@ -697,6 +779,7 @@ mod tests {
                 length: 0,
             },
             headings,
+            tags: Vec::new(),
             headings_complete: true,
         }
     }
@@ -707,6 +790,45 @@ mod tests {
             text: text.to_owned(),
             at: 0,
         }
+    }
+
+    /// 書き手の求め 2026-09-23: `#`の補完。空白の後なら`#`だけで、行頭は1字打ってから。
+    #[test]
+    fn a_tag_trigger_follows_a_space_or_one_letter_at_the_line_start() {
+        let source = "本文 #小";
+        let context = detect(source, source.len()).expect("finds a tag");
+        assert_eq!(context.kind, TriggerKind::Tag);
+        assert_eq!(context.query, "小");
+        assert_eq!(&source[context.trigger_at..context.query_at], "#");
+        assert_eq!(detect("本文 #", "本文 #".len()).unwrap().query, "");
+        assert!(detect("#", 1).is_none(), "a heading is being typed");
+        assert_eq!(detect("#メ", "#メ".len()).unwrap().kind, TriggerKind::Tag);
+        assert!(detect("語#小", "語#小".len()).is_none());
+        assert!(detect("# 見出し", "# 見出し".len()).is_none());
+        // 書いてあるタグの途中なら、タグの終わりまでを置き換える。
+        let source = "#小説/人物 続き";
+        let context = detect(source, "#小".len()).unwrap();
+        assert_eq!(context.target_end, Some("#小説/人物".len()));
+    }
+
+    #[test]
+    fn tag_candidates_come_from_the_index_and_the_document() {
+        let mut one = entry("/r", "a.md", Vec::new());
+        one.tags = vec!["小説/人物".to_owned(), "メモ".to_owned()];
+        let mut two = entry("/r", "b.md", Vec::new());
+        two.tags = vec!["小説".to_owned()];
+        let source = "#小説草稿 本文 #小";
+        let context = detect(source, source.len()).unwrap();
+        let found = candidates(&[one, two], None, source, &context, 100);
+        let shown: Vec<_> = found.iter().map(|c| c.display.as_str()).collect();
+        assert_eq!(shown, ["#小説", "#小説/人物", "#小説草稿"]);
+        assert_eq!(found[1].insert, "小説/人物");
+        // 打ち終えたタグそのものは出さない（Enterは改行のまま）。
+        let source = "本文 #メモ";
+        let mut three = entry("/r", "c.md", Vec::new());
+        three.tags = vec!["メモ".to_owned()];
+        let context = detect(source, source.len()).unwrap();
+        assert!(candidates(&[three], None, source, &context, 100).is_empty());
     }
 
     #[test]

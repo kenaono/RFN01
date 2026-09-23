@@ -112,6 +112,7 @@ fn build(request: Request, current: &impl Fn() -> bool) -> (Vec<Entry>, Vec<Path
         }
         if let Some(mut entry) = workspace_index::read_entry(path, &roots) {
             entry.headings = document::outline(&doc.text);
+            entry.tags = crate::tags::names(&doc.text);
             entry.headings_complete = true;
             entries.insert(entry.canonical.clone(), entry);
         }

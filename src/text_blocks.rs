@@ -503,6 +503,10 @@ pub enum LineKind {
     /// **画面では紙を切らない**（編集面は続いた1枚である、要件 7.10）ので、ここに切れ目が
     /// あることを破線で見せるだけ。紙にするとき（PDF）はこの行でページを改める。
     PageBreak,
+    /// 書き手の求め 2026-09-23: フロントマターの行（文書の頭の`---`から閉じる`---`まで）。
+    /// **整形表示では行ごと畳む**（字を箱で隠し、そのブロックの行送りを詰める——
+    /// `Marks::collapsed`）。カーソルが入ると全体を原文で見せる。原文の面ではそのまま。
+    FrontMatter,
 }
 
 impl LineKind {
@@ -695,6 +699,12 @@ pub struct Marks {
     /// 書き手の求め 2026-09-22: 淡い色で描く（脚注の定義の行）。**コメントとは別の旗**
     /// ——コメントは本文の文字数に数えないが、脚注の中身は本文である。
     pub faint: bool,
+    /// 書き手の求め 2026-09-23: `#タグ`（Obsidian互換、[`crate::tags`]）。**色であって寸法ではない**
+    /// ——字はそのまま（`#`も）見せ、リンクと同じく字の色だけを変える。
+    pub tag: bool,
+    /// 書き手の求め 2026-09-23: この行を畳む（フロントマター、整形表示だけ）。行頭の箱の
+    /// 走りに立ち、それを持つブロックは行送りを詰めて場所を取らない（`apply_marker_boxes`）。
+    pub collapsed: bool,
 }
 
 /// 書き手の求め 2026-09-22: Calloutの種類（Obsidianの既定の種類と別名）。**0は種類なし**
@@ -1202,7 +1212,11 @@ impl LineStyle {
             || self.comment_block
             || matches!(
                 self.kind,
-                LineKind::Rule | LineKind::TableRule | LineKind::Note | LineKind::PageBreak
+                LineKind::Rule
+                    | LineKind::TableRule
+                    | LineKind::Note
+                    | LineKind::PageBreak
+                    | LineKind::FrontMatter
             )
     }
 
@@ -2070,10 +2084,14 @@ pub fn split_blocks(
         // 追加要件 2026-09-15: **画像だけの行も自分だけのブロックを持つ**。絵の行は行の高さが絵の
         // 大きさで決まる（`apply_marker_boxes`）ので、本文と同じブロックに入れると本文の行まで
         // その決め方で組むことになる。
+        // 書き手の求め 2026-09-23: フロントマターも自分だけのブロック——畳むときは
+        // ブロックの行送りを詰めるので、本文と同じブロックにいると本文まで畳まれる。
         let table = if style.kind.is_table() {
             1
         } else if style.kind == LineKind::Image {
             2
+        } else if style.kind == LineKind::FrontMatter {
+            3
         } else {
             0
         };
@@ -3012,7 +3030,10 @@ pub fn style_runs(styled: StyledText<'_>, upright: UprightRules) -> Vec<StyleRun
                 utf16_start,
                 utf16_len: marker.utf16_len,
                 heading_level,
-                marks: Marks::default(),
+                marks: Marks {
+                    collapsed: kind == LineKind::FrontMatter,
+                    ..Marks::default()
+                },
                 ornament: Some(marker.ornament),
             });
         }
