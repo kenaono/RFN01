@@ -417,6 +417,9 @@ pub(crate) fn save_as(window: &AppWindow, live: &Live, kind: PresetKind, name: &
 
 /// 選んでいるプリセットを、いまの値で上書きする（「Save」）。
 fn overwrite(window: &AppWindow, live: &Live, kind: PresetKind) {
+    live.cache
+        .borrow_mut()
+        .log_diag("spec.preset", &format!("overwrite kind={}", kind.written()));
     let chosen = window
         .get_preset_current()
         .row_data(kind.number())
@@ -438,6 +441,10 @@ fn delete(window: &AppWindow, live: &Live, kind: PresetKind, name: &str) {
 
 /// そのプリセットの値を当てる。
 fn choose(window: &AppWindow, live: &Live, kind: PresetKind, name: &str) {
+    live.cache.borrow_mut().log_diag(
+        "spec.preset",
+        &format!("chosen kind={} name={name:?}", kind.written()),
+    );
     let mut book = presets_now();
     let Some(preset) = book.find(kind, name).cloned() else {
         return;
