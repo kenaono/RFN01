@@ -1186,6 +1186,10 @@ Slintのレイアウトで2回はまっているので、部品を足す前に�
 - Slint 1.17.1
 - windows-rs 0.62.2
 
+実行ファイルのアイコンは`ui/icon.ico`です。`ui/make-icon.ps1`が`ui/icon.png`から作り
+（絵を差し替えたときだけ手で動かします）、`build.rs`がWindows SDKの`rc.exe`で実行ファイルへ
+埋め込みます。**`rc.exe`が無い機械でもビルドは通ります**——アイコンが付かず、警告が出るだけです。
+
 `run_check.bat`が`cargo fmt --check`・`cargo check`・`cargo test`を順に走らせ、結果を`check_output.txt`へ書きます。
 **テストは並列で3秒**です。2026-08-25までは`--test-threads=1`で52秒かけていました——タイル描画のテスト2件が
 スイート全体と並んで走ると返らなくなるためで、原因は**プロセスで1つしか無い共有DirectWriteファクトリ**でした
