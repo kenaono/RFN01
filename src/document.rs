@@ -462,6 +462,11 @@ impl PreviewDocument {
     /// Apply verified source destinations to both active paths and inactive labels.
     pub fn set_invalid_link_targets(&mut self, invalid: &[Range<usize>]) {
         for (index, (line, marks)) in self.lines.iter().zip(self.marks.iter_mut()).enumerate() {
+            // **リンクの印が無い行は読まない**（RFN01-6、2026-09-24）。これは打鍵のたびに
+            // 全行を通る道で、行ごとに記法を読み直すと95万字で1打鍵26msかかっていた。
+            if !marks.iter().any(|mark| mark.marks.link) {
+                continue;
+            }
             let offset = self.source_starts[index];
             let tokens = line_link_ranges(&line.source);
             for mark in marks.iter_mut().filter(|mark| mark.marks.link) {
