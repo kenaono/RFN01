@@ -168,10 +168,10 @@ export component AppWindow inherits Window {
     // (`%LOCALAPPDATA%\RFN Edit\`, `RFN-EDIT-SESSION`).
     title: root.document-title + " - RFN Edit";
     // 追加要件 2026-09-06: 紫背景に編集器の頭文字（`RE` — RFN Edit）。
-    // The title bar and the task bar
-    // read this. **Not the file's icon in Explorer** — that is a resource
-    // compiled into the executable, which needs a build dependency this
-    // repository does not vendor; `ui/icon.png` is the drawing either would use.
+    // The task bar reads this. The title bar draws the same mark itself
+    // (`AppMark` in `controls.slint`), so it stays sharp at any screen scale,
+    // and the file's icon in Explorer is the same drawing embedded as a
+    // Windows resource from `ui/icon.ico` (追加要件 C3、2026-09-24).
     icon: @image-url("icon.png");
     // preferred-*, not width/height: setting width and height on a Window makes
     // it a fixed size the window manager enforces, which is why the window could

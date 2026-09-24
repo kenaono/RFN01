@@ -1,3 +1,4 @@
+import { AppMark } from "controls.slint";
 import { Tok } from "tokens.slint";
 export component TitleMenuBar inherits Rectangle {
     in property <bool> menu-visible;
@@ -40,7 +41,8 @@ export component TitleMenuBar inherits Rectangle {
     changed focus-generation => { keys.focus(); }
     height: 36px;
     background: Tok.chrome;
-    Image { x: 8px; y: 10px; width: 16px; height: 16px; source: @image-url("icon.png"); }
+    // 追加要件 C3（2026-09-24）：16pxの画像を引き伸ばすとぼけるので、印は画面が描く。
+    AppMark { x: 8px; y: 10px; }
     TouchArea {
         x: 0px; y: 0px; width: 32px; height: root.height;
         enabled: !root.blocked;
