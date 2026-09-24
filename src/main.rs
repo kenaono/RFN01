@@ -78,6 +78,9 @@ mod rectangle_ui_tests;
 mod saving;
 mod searcher;
 mod session;
+mod settings_transfer;
+#[cfg(test)]
+mod settings_transfer_ui_tests;
 #[cfg(test)]
 mod settings_ui_tests;
 mod shell;
@@ -3051,6 +3054,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
     // 色しか覚えていないので、語はここで初めて手に入る。
     open_word_modes(&window, &live);
+    // RFN01-31・56: プリセットは設定を読んだあと——いまの値に合うものを出すので。
+    settings_transfer::wire(&window, &live);
 
     wiring::wire_colours(
         &window,
@@ -12245,6 +12250,10 @@ enum Question {
     RenameBookmark(bookmarks::Place),
     /// A group goes with its bookmarks, so it is confirmed.
     DeleteBookmarkGroup(usize),
+    /// RFN01-31: いまの値を残すプリセットの名前。
+    SavePreset(settings_transfer::PresetKind),
+    /// RFN01-56: 読めた書き出しで、設定の全体を置き換えてよいか。
+    ImportSettings(Rc<settings_transfer::Export>),
 }
 
 impl Question {
@@ -12286,6 +12295,8 @@ impl Question {
             Self::NewBookmarkGroup => "NewBookmarkGroup",
             Self::RenameBookmark(..) => "RenameBookmark",
             Self::DeleteBookmarkGroup(..) => "DeleteBookmarkGroup",
+            Self::SavePreset(..) => "SavePreset",
+            Self::ImportSettings(..) => "ImportSettings",
         }
     }
 }
@@ -12819,6 +12830,13 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             cancel_close_run(live);
         }
         (Question::ResetAll, 0) => reset_all_settings(window, live),
+        (Question::SavePreset(kind), 0) => {
+            let name = window.get_question_name().to_string();
+            settings_transfer::save_as(window, live, kind, &name);
+        }
+        (Question::ImportSettings(export), 0) => {
+            settings_transfer::import_answered(window, live, &export);
+        }
         (Question::CreateWorkspace, 0) => {
             let name = window.get_question_name().to_string();
             workspace_create(window, live, name);
@@ -14876,6 +14894,29 @@ fn hold_word_modes(window: &AppWindow, live: &Live, modes: Vec<word_marks::WordM
 }
 
 /// いまのモードぜんぶ（画面の操作が手を入れる元）。
+/// いまの単語帳を、ファイルと同じ形で（RFN01-56の書き出し）。**表が読めずに書くのを
+/// 止めているときは`None`**——その表は取り込めなかったもので、いまの姿ではない。
+fn words_now_encoded() -> Option<String> {
+    WORD_STORING.with(std::cell::Cell::get).then(|| {
+        app_data::encode_words(&app_data::StoredWords {
+            modes: word_modes_now().iter().map(stored_from_mode).collect(),
+            next_id: WORD_NEXT_ID.with(std::cell::Cell::get),
+            notes: WORD_NOTES.with(|notes| notes.borrow().clone()),
+        })
+    })
+}
+
+/// 取り込んだ単語帳で置き換える（RFN01-56）。**書き手が選んで置き換えるので、読めずに
+/// 止めていた書き込みも再開する。**文書ごとのモードは番号で指しているので、出し直す。
+fn take_word_modes(window: &AppWindow, live: &Live, stored: app_data::StoredWords) {
+    WORD_STORING.with(|storing| storing.set(true));
+    WORD_NEXT_ID.with(|next| next.set(stored.next_id.max(1)));
+    WORD_NOTES.with(|notes| *notes.borrow_mut() = stored.notes.clone());
+    let modes = stored.modes.iter().map(mode_from_stored).collect();
+    hold_word_modes(window, live, modes, true);
+    publish_word_mode_of(window, live);
+}
+
 fn word_modes_now() -> Vec<word_marks::WordMode> {
     word_modes()
         .iter()
@@ -16059,6 +16100,8 @@ fn save_settings(window: &AppWindow, cache: &Rc<RefCell<RenderCache>>) {
             .borrow_mut()
             .log_diag("spec", &format!("settings not saved error={error}"));
     }
+    // 値が替わったら、どのプリセットに合うかも替わる（RFN01-31）。
+    settings_transfer::publish(window);
 }
 
 /// Ask for a relayout once the controls stop being pressed.

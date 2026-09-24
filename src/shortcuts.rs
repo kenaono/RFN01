@@ -718,6 +718,8 @@ pub fn publish(app: &AppWindow) {
             .map(Into::into)
             .collect::<Vec<slint::SharedString>>(),
     )));
+    // キーのプリセット（RFN01-31）がいまの割り当てに合うか。
+    crate::settings_transfer::publish(app);
 }
 pub fn wire(app: &AppWindow, live: &Live) {
     publish(app);

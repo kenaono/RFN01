@@ -1,0 +1,103 @@
+// RFN01-31（書き手と決めた 2026-09-24）: 設定の面（Editor・Terminal・Keys）の上に置くプリセット。
+//
+// **選べばその場で効く**（文字色のセットと同じ）。選んだプリセットは値を替えても名前が残り、
+// 「（変更あり）」が付く——「Save」でそのプリセットを上書きする（書き手の報告 2026-09-24：
+// 内容を変える導線が無かった）。「Save As…」は新しい名前で残す（同じ名前なら上書き）。
+// 「Delete」は選んでいるプリセットを消す。
+import { Tok } from "tokens.slint";
+import { MenuFrame, MenuRow, TextButton } from "controls.slint";
+
+export component PresetRow inherits VerticalLayout {
+    in property <[string]> names;
+    /// 選んでいるプリセットの名前（無ければ空）。
+    in property <string> current;
+    /// 選んでいるプリセットから値を変えたか。
+    in property <bool> modified;
+    callback chosen(string);
+    callback overwrite-requested();
+    callback save-requested();
+    callback delete-requested(string);
+
+    spacing: 8px;
+
+    Text {
+        text: @tr("PRESET");
+        color: Tok.ink-faint;
+        font-size: 11px;
+        letter-spacing: 0.9px;
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+
+        Rectangle {
+            width: 180px;
+            height: 28px;
+
+            TextButton {
+                width: parent.width;
+                wide: true;
+                title: root.current == "" ? @tr("None")
+                    : root.modified ? @tr("{} (changed)", root.current) : root.current;
+                enabled: root.names.length > 0;
+                clicked => {
+                    preset-menu.show();
+                }
+            }
+
+            // 押した釦と同じ箱に置き、その下に出す（技術検証 6.30）。
+            preset-menu := PopupWindow {
+                x: 0px;
+                y: 32px;
+                width: 220px;
+                close-policy: close-on-click-outside;
+
+                MenuFrame {
+                    width: 220px;
+
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 1px;
+
+                        // 頼んでから閉じる（技術検証 6.24）。
+                        for name in root.names: MenuRow {
+                            title: name;
+                            checked: name == root.current;
+                            activated => {
+                                root.chosen(name);
+                                preset-menu.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        TextButton {
+            title: @tr("Save");
+            enabled: root.current != "" && root.modified;
+            clicked => {
+                root.overwrite-requested();
+            }
+        }
+        TextButton {
+            title: @tr("Save As…");
+            clicked => {
+                root.save-requested();
+            }
+        }
+        TextButton {
+            title: @tr("Delete");
+            enabled: root.current != "";
+            clicked => {
+                root.delete-requested(root.current);
+            }
+        }
+    }
+    Text {
+        text: @tr("Choosing a preset applies it at once. Save overwrites the chosen preset; Save As keeps a new one.");
+        color: Tok.ink-faint;
+        font-size: 11px;
+        wrap: word-wrap;
+    }
+}

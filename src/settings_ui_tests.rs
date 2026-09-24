@@ -322,8 +322,8 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
             });
         };
         draw();
-        // H1 の大きさの欄（上に COLOR SETS の行がある）。
-        let position = slint::LogicalPosition::new(322.0, 248.0);
+        // H1 の大きさの欄（上に PRESET と COLOR SETS の行がある）。
+        let position = slint::LogicalPosition::new(322.0, 340.0);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
             button: PointerEventButton::Left,

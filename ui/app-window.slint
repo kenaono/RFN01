@@ -6,6 +6,7 @@ import { InsertRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
 import { Tok } from "tokens.slint";
 import { TitleMenuBar } from "title-menu-bar.slint";
+import { PresetRow } from "preset-row.slint";
 import { FormatButton, FormatButtons } from "format-bar.slint";
 export { FormatButton } from "format-bar.slint";
 import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
@@ -1115,6 +1116,20 @@ export component AppWindow inherits Window {
     callback shortcut-fold(int);
     callback shortcut-key-search(string, bool, bool, bool);
     in-out property <string> shortcut-bindings;
+    // RFN01-31: 面ごとのプリセットの名前と、いまの値に合う名前（0 Editor・1 Terminal・2 Keys）。
+    in property <[string]> editor-presets;
+    in property <[string]> terminal-presets;
+    in property <[string]> keys-presets;
+    in property <[string]> preset-current: ["", "", ""];
+    /// 選んでいるプリセットから値を変えたか（面ごと）。変えていれば「Save」が押せる。
+    in property <[bool]> preset-modified: [false, false, false];
+    callback preset-chosen(int, string);
+    callback preset-overwrite-requested(int);
+    callback preset-save-requested(int);
+    callback preset-delete-requested(int, string);
+    // RFN01-56: 設定の全体を1つのファイルへ書き出す、取り込む。
+    callback settings-export-requested();
+    callback settings-import-requested();
     in-out property <string> shortcut-query;
     /// 設定を探す語（書き手の求め 2026-09-15：「Settingで検索欄が開いていても検索が効きません。可能なら、
     /// 検索した文字の含まれる設定のみがリストされると良い」）。**設定のTABで開いたCtrl+Fの欄の語**で、
@@ -3282,6 +3297,22 @@ export component AppWindow inherits Window {
                                             spacing: 8px;
                                             alignment: start;
 
+                                        // RFN01-31: 面の上にプリセット（Editor・Terminal・Keys）。探しているあいだは出さない。
+                                        if !root.settings-searching && (root.settings-tab == 3 || root.settings-tab == 1 || root.settings-tab == 6): VerticalLayout {
+                                            property <int> kind: root.settings-tab == 3 ? 0 : root.settings-tab == 1 ? 1 : 2;
+                                            spacing: 12px;
+                                            PresetRow {
+                                                names: parent.kind == 0 ? root.editor-presets : parent.kind == 1 ? root.terminal-presets : root.keys-presets;
+                                                current: root.preset-current[parent.kind];
+                                                modified: root.preset-modified[parent.kind];
+                                                chosen(name) => { root.preset-chosen(parent.kind, name); }
+                                                overwrite-requested => { root.preset-overwrite-requested(parent.kind); }
+                                                save-requested => { root.preset-save-requested(parent.kind); }
+                                                delete-requested(name) => { root.preset-delete-requested(parent.kind, name); }
+                                            }
+                                            Rectangle { height: 1px; background: Tok.rule; }
+                                        }
+
                                         if root.settings-searching ? root.shortcut-rows.length > 0 : root.settings-tab == 6: VerticalLayout {
                                             spacing: 10px;
                                             Text { text: @tr("Shortcuts"); color: Tok.ink; font-size: 16px; }
@@ -3546,6 +3577,38 @@ export component AppWindow inherits Window {
                                                             }
                                                         }
                                                     }
+                                                }
+                                            }
+                                            if !root.settings-searching: Rectangle { height: 12px; }
+
+                                            // RFN01-56: **設定の全体を1つのファイルへ。**設定・キー・プリセット・単語帳。
+                                            // 取り込みは全体を置き換え、その前にいまの姿を控える。
+                                            if !root.settings-searching: Rectangle { height: 1px; background: Tok.rule; }
+                                            if !root.settings-searching: VerticalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: @tr("ALL SETTINGS");
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    letter-spacing: 0.9px;
+                                                }
+                                                HorizontalLayout {
+                                                    alignment: start;
+                                                    spacing: 6px;
+                                                    TextButton {
+                                                        title: @tr("Export…");
+                                                        clicked => { root.settings-export-requested(); }
+                                                    }
+                                                    TextButton {
+                                                        title: @tr("Import…");
+                                                        clicked => { root.settings-import-requested(); }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: @tr("Writes settings, keys, presets and word sets to one file. Import replaces them all and keeps the current ones in before-import.rfnexport.");
+                                                    color: Tok.ink-faint;
+                                                    font-size: 11px;
+                                                    wrap: word-wrap;
                                                 }
                                             }
                                             if !root.settings-searching: Rectangle { height: 12px; }
