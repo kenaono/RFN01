@@ -68,7 +68,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
     // 書き手の報告 2026-09-24（引数を変えてもApplyできない）：押された操作と、どのプロファイルに
     // 効いたかを残す。手元の試験では再現しなかったので、実際の実行の記録で確かめる。
     live.cache.borrow_mut().log_diag(
-        "shell",
+        "spec.shell",
         &format!(
             "profile action={what} at={at} index={index} count={}",
             shells.len()
@@ -84,6 +84,10 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
             let exe = window.get_shell_profile_executable().trim().to_owned();
             let args = window.get_shell_profile_arguments().trim().to_owned();
             let directory = window.get_shell_profile_directory().trim().to_owned();
+            live.cache.borrow_mut().log_diag(
+                "spec.shell",
+                &format!("profile apply name={name:?} exe={exe:?} args={args:?} dir={directory:?}"),
+            );
             if name.is_empty()
                 || exe.is_empty()
                 || name.contains(['|', '\r', '\n', '\t'])
@@ -96,7 +100,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
                     .any(|(i, s)| i != index && s.name == name)
             {
                 live.cache.borrow_mut().log_diag(
-                    "shell",
+                    "spec.shell",
                     &format!(
                         "profile refused name_empty={} exe_empty={} name_bad={} exe_bad={} args_bad={} dir_bad={}",
                         name.is_empty(),
@@ -174,7 +178,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
     publish(window, index);
     save_settings(window, &live.cache);
     live.cache.borrow_mut().log_diag(
-        "shell",
+        "spec.shell",
         &format!("profile saved action={what} index={index}"),
     );
 }
