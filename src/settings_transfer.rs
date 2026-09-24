@@ -8,8 +8,7 @@
 //! 置き換え、その直前にいまの姿を同じ形で控える（`before-import.rfnexport`）。
 //!
 //! 入れないもの：作業コピーを残すかどうか（`work.autosave`、守りのための設定をプリセットで
-//! 切らない）、シェルのプロファイルの一覧（その機械に入っているプログラムで、切り替えるたびに置き換えると
-//! 作ったプロファイルが消える。既定のシェルは入れる）、最近使った色（使った履歴で、いまの姿ではない）。
+//! 切らない）、最近使った色（使った履歴で、いまの姿ではない）。
 //! **単語帳と文書ごとのモードもプリセットは触らない**
 //! （RFN01-31の本文）。
 
@@ -85,10 +84,11 @@ pub(crate) fn kind_of(name: &str) -> Option<PresetKind> {
     if name.starts_with("h.") || name.starts_with("v.") || EDITOR_SETTINGS.contains(&name) {
         return Some(PresetKind::Editor);
     }
-    // 既定のシェルは入れる（書き手の報告 2026-09-24：WSLからPowerShell 7へ変えても
-    // 「変更あり」にならなかった）。名前で持つので、その名前のシェルが無い機械では
-    // 最初のシェルになる（`apply_settings`）。
-    if name.starts_with("terminal.") && !name.starts_with("terminal.shell.") {
+    // **Terminalのページにあるものは全部**（書き手の報告 2026-09-24：既定のシェルも、
+    // プロファイルのコマンドや引数も、変えても「変更あり」にならなかった）。切り替えれば
+    // プロファイルの一覧もそのプリセットの中身に置き換わる。既定は名前で持つので、その
+    // 名前のプロファイルが無ければ最初のものになる（`apply_settings`）。
+    if name.starts_with("terminal.") {
         return Some(PresetKind::Terminal);
     }
     None
@@ -482,6 +482,9 @@ fn apply_values(window: &AppWindow, live: &Live, values: &[(String, String)]) {
     };
     let language = window.get_language();
     crate::apply_settings(window, numbers, palette, fonts, values);
+    // シェルの一覧と、開いているプロファイルの欄を出し直す（既定を選んだときと同じ）。
+    crate::publish_shells(window);
+    window.invoke_shell_profile_action(0, window.get_shell_profile_index());
     // 言語は**変わったときだけ**当て直す——翻訳はプロセスで1つなので、同じ値でも当て直せば
     // 「System」の解決をやり直すことになる。
     if window.get_language() != language {
@@ -702,7 +705,7 @@ mod tests {
         assert_eq!(kind_of(KEYS_SETTING), Some(PresetKind::Keys));
         // 守りの設定・この機械のもの・General。
         assert_eq!(kind_of("work.autosave"), None);
-        assert_eq!(kind_of("terminal.shell.0"), None);
+        assert_eq!(kind_of("terminal.shell.0"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("terminal.default"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("language"), None);
         assert_eq!(kind_of("left.size"), None);
