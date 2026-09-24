@@ -186,3 +186,34 @@ fn terminal_and_key_changes_mark_their_presets_changed() {
     window.invoke_preset_overwrite_requested(2);
     assert!(!modified(window, 2));
 }
+
+/// 書き手の報告 2026-09-24（プロファイルの引数を変えても保存できない）：**シェルのプロファイルも
+/// Terminalのプリセットに入る。**変えれば「変更あり」になり、選べば一覧ごと戻る。
+#[test]
+fn a_terminal_preset_carries_the_shell_profiles() {
+    let r = rig("本文。\n", (900, 500));
+    let window = &r.window;
+    settings_transfer::wire(window, &r.live);
+    crate::terminal_shells::install(window, &r.live);
+    let before = configured_shells(window);
+    settings_transfer::save_as(window, &r.live, PresetKind::Terminal, "T");
+
+    let mut changed = before.clone();
+    changed[0].command.push_str(" -NoLogo");
+    hold_shells(window, &changed);
+    save_settings(window, &r.live.cache);
+    assert!(modified(window, 1));
+
+    window.invoke_preset_chosen(1, "T".into());
+    assert_eq!(
+        configured_shells(window)
+            .iter()
+            .map(|shell| shell.command.clone())
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .map(|shell| shell.command.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(!modified(window, 1));
+}
