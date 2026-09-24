@@ -39,7 +39,7 @@ pub struct DocumentStats {
 /// a line's table survives every edit that is not in that line, and the absolute
 /// bases are a running total over lines — a few hundred additions rather than a
 /// pass over every character (技術検証 7.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PreviewLine {
     /// The source line, including its trailing break, kept so the next update
     /// can tell what changed.
@@ -220,6 +220,15 @@ pub struct PreviewDocument {
     reading: Reading,
     /// 追加要件 2026-09-15: 画像の行に描く絵（鍵 → 画素）。`size_images`が入れる。
     pictures: Pictures,
+    /// The source the preview is of, with where each line begins (RFN01-6 C).
+    source: TrackedSource,
+    /// How each source line is set, kept so an edit sets only its own stretch.
+    styles: StyleTrack,
+    /// The line shown as its own source when the preview was last brought up
+    /// to date.
+    active: Option<usize>,
+    /// Whether anything has been built yet: an empty text is still a line.
+    built: bool,
 }
 
 impl PreviewDocument {
@@ -249,135 +258,231 @@ impl PreviewDocument {
         preview
     }
 
-    /// 記法の読み方が前回と違えば、取っておいた行を捨てる（要件 E9）。
+    /// Bring the preview up to date, rebuilding only the lines that changed,
+    /// and say whether anything did.
     ///
-    /// **本文でも組み方でもない3つ目の理由。**行を取っておく条件（`matches`）は
-    /// 本文と組み方と活性行を見ているので、旗が変わったことには気づけない
-    /// ——気づけないまま使えば、切り替えても画面が変わらない。
-    fn forget_if_read_differently(&mut self, reading: Reading) {
-        if self.reading != reading {
-            self.lines.clear();
+    /// A line is rebuilt when its text changed, when it is set differently
+    /// now, when the paragraph around it changed what it carries across its
+    /// lines, and when it became or stopped being the active line — moving the
+    /// caret to another line changes the form of exactly two lines.
+    ///
+    /// RFN01-6 C: **the lines that changed are found from the edit**. This
+    /// used to split the whole source into lines, set every one of them, work
+    /// out every paragraph's markers and compare every line from both ends,
+    /// and then join all the lines into the text again — 27ms of every
+    /// keystroke at ten million characters, twice when the keystroke also
+    /// asked where to insert. Now the source is compared once, the lines are
+    /// set again from the edit to where their setting settles, and the text
+    /// and the running totals are patched from the first line that changed.
+    ///
+    /// 要件 E9: **記法の読み方が前回と違えば、取っておいた行は全部使えない**
+    /// ——本文でも組み方でもない3つ目の理由で、行を見比べても気づけない。
+    pub fn refresh(
+        &mut self,
+        source: &str,
+        active_line_start: Option<usize>,
+        reading: Reading,
+    ) -> bool {
+        if !self.built || self.reading != reading {
+            self.source = TrackedSource::of(source);
+            self.styles = StyleTrack::of(&self.source, reading);
             self.reading = reading;
+            self.built = true;
+            let all = self.source.lines();
+            let active = self.active_index(active_line_start);
+            let plan = RebuildPlan::of(
+                &self.source,
+                &self.styles.styles,
+                reading,
+                LinesChanged::everything(all),
+                0..all,
+                |_| Vec::new(),
+            );
+            let lines = (0..all)
+                .map(|index| {
+                    self.build_line(
+                        index,
+                        active,
+                        plan.contexts[index].clone(),
+                        plan.unclosed[index].clone(),
+                    )
+                })
+                .collect();
+            self.lines = lines;
+            self.active = active;
+            self.rejoin();
+            return true;
+        }
+        let old_active = self.active;
+        let old_in_front = old_active.is_some_and(|index| {
+            self.lines
+                .get(index)
+                .is_some_and(|line| line.style.kind == LineKind::FrontMatter)
+        });
+        let edit = self.source.advance(source);
+        let active = self.active_index(active_line_start);
+        if edit.is_none() && active == old_active {
+            return false;
+        }
+        let mut region = 0..0;
+        if let Some(edit) = edit {
+            let restyled = self.styles.update(&self.source, reading, edit);
+            let old = std::mem::take(&mut self.lines);
+            let plan = RebuildPlan::of(
+                &self.source,
+                &self.styles.styles,
+                reading,
+                edit,
+                restyled,
+                |was| old[was].unclosed.clone(),
+            );
+            let keeps = |index: usize, was: usize, context: &LineContext| {
+                self.line_matches(&old[was], index, active) && old[was].context == *context
+            };
+            let (run, old_to) = plan.narrowed(edit, keeps);
+            let mut old = old;
+            let rebuilt = run
+                .clone()
+                .map(|index| {
+                    let offset = index - plan.from;
+                    let context = &plan.contexts[offset];
+                    match edit.was(index) {
+                        Some(was)
+                            if self.line_matches(&old[was], index, active)
+                                && old[was].context == *context =>
+                        {
+                            std::mem::take(&mut old[was])
+                        }
+                        _ => self.build_line(
+                            index,
+                            active,
+                            context.clone(),
+                            plan.unclosed[offset].clone(),
+                        ),
+                    }
+                })
+                .collect::<Vec<PreviewLine>>();
+            self.lines = old;
+            self.replace_lines(run.start, old_to, rebuilt);
+            region = run;
+        }
+        // The lines whose form the caret changed outside that stretch: where it
+        // was, where it is, and the front matter it opens as a whole.
+        let moved = |line: usize| match edit {
+            Some(edit) => edit.moved(line),
+            None => Some(line),
+        };
+        let mut toggled = old_active
+            .and_then(moved)
+            .into_iter()
+            .collect::<Vec<usize>>();
+        toggled.extend(active);
+        if old_in_front || self.in_front(active) {
+            toggled.extend(
+                (0..self.source.lines())
+                    .take_while(|index| self.styles.styles[*index].kind == LineKind::FrontMatter),
+            );
+        }
+        toggled.sort_unstable();
+        toggled.dedup();
+        for index in toggled {
+            if region.contains(&index) || index >= self.lines.len() {
+                continue;
+            }
+            if self.lines[index].active == self.is_active(index, active) {
+                continue;
+            }
+            let line = &self.lines[index];
+            let (context, unclosed) = (line.context.clone(), line.unclosed.clone());
+            let rebuilt = self.build_line(index, active, context, unclosed);
+            self.replace_lines(index, index + 1, vec![rebuilt]);
+        }
+        self.active = active;
+        debug_assert_eq!(self.lines.len(), self.source.lines());
+        true
+    }
+
+    /// The line that begins at `start`, if one does.
+    fn active_index(&self, start: Option<usize>) -> Option<usize> {
+        start.and_then(|start| self.source.starts.binary_search(&start).ok())
+    }
+
+    /// 書き手の求め 2026-09-23: **カーソルがフロントマターに入ったら、全体を原文で見せる。**
+    /// 整形表示では畳まれていて、1行だけ開いても読めないので。
+    fn in_front(&self, active: Option<usize>) -> bool {
+        active.is_some_and(|index| {
+            self.styles.styles.get(index).map(|style| style.kind) == Some(LineKind::FrontMatter)
+        })
+    }
+
+    fn is_active(&self, index: usize, active: Option<usize>) -> bool {
+        active == Some(index)
+            || (self.in_front(active) && self.styles.styles[index].kind == LineKind::FrontMatter)
+    }
+
+    /// Whether a kept line is still what line `index` would be built as, but
+    /// for its paragraph's context.
+    /// Only for a line the edit did not touch, whose text is the same
+    /// ([`RebuildPlan::narrowed`]).
+    fn line_matches(&self, kept: &PreviewLine, index: usize, active: Option<usize>) -> bool {
+        kept.active == self.is_active(index, active) && kept.style == self.styles.styles[index]
+    }
+
+    fn build_line(
+        &self,
+        index: usize,
+        active: Option<usize>,
+        context: LineContext,
+        unclosed: Vec<(usize, &'static str)>,
+    ) -> PreviewLine {
+        PreviewLine::build(
+            self.source.line(index),
+            self.is_active(index, active),
+            self.styles.styles[index],
+            index + 1 != self.source.lines(),
+            self.reading,
+            context,
+            unclosed,
+        )
+    }
+
+    /// Put `rebuilt` in place of lines `from..old_to`, and patch the text, the
+    /// marks and the running totals from `from` on.
+    fn replace_lines(&mut self, from: usize, old_to: usize, rebuilt: Vec<PreviewLine>) {
+        let bytes = self.preview_starts[from]..self.preview_starts[old_to];
+        let joined = rebuilt
+            .iter()
+            .map(|line| line.visible.as_str())
+            .collect::<String>();
+        self.text.replace_range(bytes, &joined);
+        self.marks
+            .splice(from..old_to, rebuilt.iter().map(|line| line.marks.clone()));
+        self.markers
+            .splice(from..old_to, rebuilt.iter().map(|line| line.marker));
+        self.lines.splice(from..old_to, rebuilt);
+        self.total_from(from);
+    }
+
+    /// The running totals again from line `from`, whose own start is unchanged.
+    fn total_from(&mut self, from: usize) {
+        self.utf16_starts.truncate(from + 1);
+        self.source_starts.truncate(from + 1);
+        self.preview_starts.truncate(from + 1);
+        let mut utf16 = self.utf16_starts[from];
+        let mut source_byte = self.source_starts[from];
+        let mut preview_byte = self.preview_starts[from];
+        for line in &self.lines[from..] {
+            utf16 += line.utf16_len();
+            source_byte += line.source.len();
+            preview_byte += line.visible.len();
+            self.utf16_starts.push(utf16);
+            self.source_starts.push(source_byte);
+            self.preview_starts.push(preview_byte);
         }
     }
 
-    /// Bring the preview up to date, rebuilding only the lines that changed.
-    ///
-    /// A line is rebuilt when its text changed, and when it became or stopped
-    /// being the active line — moving the caret to another line changes the form
-    /// of exactly two lines, and leaves every other line's table alone.
-    pub fn refresh(&mut self, source: &str, active_line_start: Option<usize>, reading: Reading) {
-        self.forget_if_read_differently(reading);
-        let lines = source.split('\n').collect::<Vec<&str>>();
-        let mut active_index = None;
-        let mut line_start = 0;
-        for (index, line) in lines.iter().enumerate() {
-            if active_line_start == Some(line_start) {
-                active_index = Some(index);
-            }
-            line_start += line.len() + 1;
-        }
-
-        // 要件 7.3.2: how every line is set, which is where a fence reaches
-        // past its own line (`line_styles`).
-        //
-        // 書き手の決定 2026-09-11: **読むと決めた記号だけが印**——切った記号の行は
-        // プレビューでも本文の1行で、記号は字として出る。
-        let styles = line_styles_reading(source, reading);
-        let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
-        let last = lines.len() - 1;
-        let same_text = |kept: &PreviewLine, index: usize, line: &str| {
-            let has_break = index != last;
-            kept.source.len() == line.len() + usize::from(has_break)
-                && kept.source.starts_with(line)
-        };
-        // 書き手の判断 2026-09-15: 段落の中で改行をまたぐ記号。1行だけで読んだ閉じない記号は、
-        // 字の変わらない行なら取っておいたものを使う（前後から揃っているところまで）。
-        let text_head = self
-            .lines
-            .iter()
-            .enumerate()
-            .zip(&lines)
-            .take_while(|((index, kept), line)| same_text(kept, *index, line))
-            .count();
-        let text_rest = lines.len().min(self.lines.len()) - text_head;
-        let text_tail = (0..text_rest)
-            .take_while(|back| {
-                let index = lines.len() - 1 - back;
-                same_text(
-                    &self.lines[self.lines.len() - 1 - back],
-                    index,
-                    lines[index],
-                )
-            })
-            .count();
-        let unclosed = (0..lines.len())
-            .map(|index| {
-                if index < text_head {
-                    self.lines[index].unclosed.clone()
-                } else if index >= lines.len() - text_tail {
-                    self.lines[self.lines.len() - (lines.len() - index)]
-                        .unclosed
-                        .clone()
-                } else {
-                    standalone_unclosed(lines[index], reading)
-                }
-            })
-            .collect::<Vec<_>>();
-        let contexts = paragraph_contexts(&lines, style_at, &unclosed, reading);
-        // 書き手の求め 2026-09-23: **カーソルがフロントマターに入ったら、全体を原文で見せる。**
-        // 整形表示では畳まれていて、1行だけ開いても読めないので。
-        let in_front =
-            active_index.is_some_and(|index| style_at(index).kind == LineKind::FrontMatter);
-        let is_active = |index: usize| {
-            active_index == Some(index)
-                || (in_front && style_at(index).kind == LineKind::FrontMatter)
-        };
-        let matches = |kept: &PreviewLine, index: usize, line: &str| {
-            let active = is_active(index);
-            kept.active == active
-                && kept.style == style_at(index)
-                && kept.context == contexts[index]
-                && same_text(kept, index, line)
-        };
-
-        let shared_head = self
-            .lines
-            .iter()
-            .enumerate()
-            .zip(&lines)
-            .take_while(|((index, kept), line)| matches(kept, *index, line))
-            .count();
-        // Compared from the far end as well, so inserting or removing a line
-        // leaves the lines after it recognised rather than shifted out of place.
-        let rest = lines.len().min(self.lines.len()) - shared_head;
-        let shared_tail = (0..rest)
-            .take_while(|back| {
-                let index = lines.len() - 1 - back;
-                let kept = &self.lines[self.lines.len() - 1 - back];
-                matches(kept, index, lines[index])
-            })
-            .count();
-
-        let changed = shared_head..lines.len() - shared_tail;
-        let rebuilt = changed
-            .clone()
-            .map(|index| {
-                let active = is_active(index);
-                PreviewLine::build(
-                    lines[index],
-                    active,
-                    style_at(index),
-                    index != last,
-                    reading,
-                    contexts[index].clone(),
-                    unclosed[index].clone(),
-                )
-            })
-            .collect::<Vec<PreviewLine>>();
-        let removed = shared_head..self.lines.len() - shared_tail;
-        self.lines.splice(removed, rebuilt);
-
+    /// The text, the marks and the running totals from nothing.
+    fn rejoin(&mut self) {
         self.text.clear();
         self.marks.clear();
         self.markers.clear();
@@ -462,6 +567,11 @@ impl PreviewDocument {
     /// Apply verified source destinations to both active paths and inactive labels.
     pub fn set_invalid_link_targets(&mut self, invalid: &[Range<usize>]) {
         for (index, (line, marks)) in self.lines.iter().zip(self.marks.iter_mut()).enumerate() {
+            // **リンクの印が無い行は読まない**（RFN01-6、2026-09-24）。これは打鍵のたびに
+            // 全行を通る道で、行ごとに記法を読み直すと95万字で1打鍵26msかかっていた。
+            if !marks.iter().any(|mark| mark.marks.link) {
+                continue;
+            }
             let offset = self.source_starts[index];
             let tokens = line_link_ranges(&line.source);
             for mark in marks.iter_mut().filter(|mark| mark.marks.link) {
@@ -607,7 +717,7 @@ impl DocumentStats {
 }
 
 /// One logical line's contribution to everything counted across the document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LineCounts {
     /// The source line, kept so the next update can tell what changed.
     text: String,
@@ -671,9 +781,13 @@ impl LineCounts {
 #[derive(Debug, Default)]
 pub struct DocumentCounts {
     lines: Vec<LineCounts>,
-    /// One entry per line, in step with `lines`, so the engine can be handed a
-    /// slice without building one each time.
-    line_styles: Vec<LineStyle>,
+    /// The text the counts are of, with where each line begins (RFN01-6 C).
+    source: TrackedSource,
+    /// How each line is set, one entry per line in step with `lines`, so the
+    /// engine can be handed a slice without building one each time.
+    styles: StyleTrack,
+    /// Whether anything has been counted yet: an empty text is still a line.
+    counted: bool,
     /// 前回どちらで組んだか（要件 E9）。
     ///
     /// **旗が変われば、取っておいた行は全部使えない。**行を取っておく条件は
@@ -685,91 +799,76 @@ pub struct DocumentCounts {
 
 impl DocumentCounts {
     /// Bring the counts up to date with `source`, recounting only what changed.
+    ///
+    /// RFN01-6 C: **what changed is found from the edit, not from the lines.**
+    /// This used to split the whole text into lines, set every one of them and
+    /// compare them all from both ends — 19ms of every keystroke at ten
+    /// million characters, before anything was counted. Now the text is
+    /// compared once ([`TrackedSource::advance`]), the lines are set again
+    /// from the edit to where their setting settles ([`StyleTrack::update`]),
+    /// and counted again are only those and the paragraphs around them, where
+    /// a marker left open on one line reaches the next.
     pub fn refresh(&mut self, source: &str, reading: Reading) {
         // 要件 E9: **旗が変われば取っておいた行は全部使えない**（`PreviewDocument`の
         // ほうに同じ一文がある）。
-        if self.reading != reading {
-            self.lines.clear();
+        let (edit, restyled) = if !self.counted || self.reading != reading {
+            self.source = TrackedSource::of(source);
+            self.styles = StyleTrack::of(&self.source, reading);
             self.reading = reading;
-        }
-        let lines = source.split('\n').collect::<Vec<&str>>();
-        // 要件 7.3.2: how every line is set, which is where a fence reaches
-        // past its own line. A line whose text did not change may still be
-        // counted differently because a fence opened above it, so the flag is
-        // part of what makes a kept line still usable.
-        let styles = line_styles_reading(source, reading);
-        let style_at = |index: usize| styles.get(index).copied().unwrap_or_default();
-        // 書き手の判断 2026-09-15: 段落の中で改行をまたぐ記号（`PreviewDocument::refresh`と同じ）。
-        let same_text = |kept: &LineCounts, line: &str| kept.text == *line;
-        let text_head = self
-            .lines
-            .iter()
-            .zip(&lines)
-            .take_while(|(kept, line)| same_text(kept, line))
-            .count();
-        let text_rest = lines.len().min(self.lines.len()) - text_head;
-        let text_tail = (0..text_rest)
-            .take_while(|back| {
-                same_text(
-                    &self.lines[self.lines.len() - 1 - back],
-                    lines[lines.len() - 1 - back],
-                )
-            })
-            .count();
-        let unclosed = (0..lines.len())
-            .map(|index| {
-                if index < text_head {
-                    self.lines[index].unclosed.clone()
-                } else if index >= lines.len() - text_tail {
-                    self.lines[self.lines.len() - (lines.len() - index)]
-                        .unclosed
-                        .clone()
-                } else {
-                    standalone_unclosed(lines[index], reading)
-                }
-            })
-            .collect::<Vec<_>>();
-        let contexts = paragraph_contexts(&lines, style_at, &unclosed, reading);
-        let matches = |kept: &LineCounts, index: usize, line: &str| {
-            kept.text == *line && kept.style == style_at(index) && kept.context == contexts[index]
+            self.counted = true;
+            self.lines.clear();
+            let all = self.source.lines();
+            (LinesChanged::everything(all), 0..all)
+        } else {
+            let Some(edit) = self.source.advance(source) else {
+                return;
+            };
+            let restyled = self.styles.update(&self.source, reading, edit);
+            (edit, restyled)
         };
-        let shared_head = self
-            .lines
-            .iter()
-            .enumerate()
-            .zip(&lines)
-            .take_while(|((index, kept), line)| matches(kept, *index, line))
-            .count();
-        let rest = lines.len().min(self.lines.len()) - shared_head;
-        let shared_tail = (0..rest)
-            .take_while(|back| {
-                let index = lines.len() - 1 - back;
-                let kept = &self.lines[self.lines.len() - 1 - back];
-                matches(kept, index, lines[index])
-            })
-            .count();
-
-        let changed = shared_head..lines.len() - shared_tail;
-        let replacement = changed
-            .map(|index| {
-                LineCounts::of(
-                    lines[index],
-                    style_at(index),
+        let old = std::mem::take(&mut self.lines);
+        let plan = RebuildPlan::of(
+            &self.source,
+            &self.styles.styles,
+            reading,
+            edit,
+            restyled,
+            |was| old[was].unclosed.clone(),
+        );
+        // A line the edit did not touch has its text; whether it is kept is
+        // its setting and its context (`RebuildPlan::narrowed`).
+        let styles = &self.styles.styles;
+        let keeps = |index: usize, was: usize, context: &LineContext| {
+            old[was].style == styles[index] && old[was].context == *context
+        };
+        let (run, old_to) = plan.narrowed(edit, keeps);
+        let mut old = old;
+        let mut rebuilt = Vec::with_capacity(run.len());
+        for index in run.clone() {
+            let offset = index - plan.from;
+            let style = styles[index];
+            let context = &plan.contexts[offset];
+            rebuilt.push(match edit.was(index) {
+                Some(was) if old[was].style == style && old[was].context == *context => {
+                    std::mem::take(&mut old[was])
+                }
+                _ => LineCounts::of(
+                    self.source.line(index),
+                    style,
                     reading,
-                    contexts[index].clone(),
-                    unclosed[index].clone(),
-                )
-            })
-            .collect::<Vec<LineCounts>>();
-        let removed = shared_head..self.lines.len() - shared_tail;
-        self.lines.splice(removed, replacement);
-
-        self.line_styles = styles;
+                    context.clone(),
+                    plan.unclosed[offset].clone(),
+                ),
+            });
+        }
+        old.splice(run.start..old_to, rebuilt);
+        self.lines = old;
+        debug_assert_eq!(self.lines.len(), self.source.lines());
     }
 
     /// How each logical line is set, one entry per line of `split('\n')`.
     pub fn line_styles(&self) -> &[LineStyle] {
-        &self.line_styles
+        &self.styles.styles
     }
 
     /// The counts the status bar shows.
@@ -4654,7 +4753,7 @@ fn fence_marker(line: &str) -> Option<char> {
 }
 
 /// A fence that is open, and what it said the block is (要件 7.3.2).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Fence {
     /// Which of the two markers opened it; only the same one closes it.
     marker: char,
@@ -4826,7 +4925,7 @@ const MAX_LIST_DEPTH: usize = 6;
 /// mean the same thing by it, and a rule that fixed on one of those would set
 /// the other two at the wrong depth. Comparing with the level above needs to
 /// know what that level was.
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ListLevels(Vec<usize>);
 
 impl ListLevels {
@@ -5382,7 +5481,7 @@ fn line_marker(line: &str, style: LineStyle) -> Option<LineMarker> {
 /// (技術検証 7.1). A row of bars is a table only when a delimiter row follows
 /// the first one — otherwise it is a sentence with bars in it — and the rows
 /// after that one are rows because the delimiter row said so.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TablePlace {
     /// The header row has been read and the delimiter row comes next.
     Delimiter,
@@ -5521,7 +5620,7 @@ fn line_style(
 
 /// 書き手の求め 2026-09-22: 行をまたいで続く、Obsidianの2つのブロック——`%%`だけの行で挟んだ
 /// コメントと、`> [!NOTE]`で始まったCalloutの種類。**フェンスと同じ道**で、上から順に持ち越す。
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Carry {
     /// 書き手の求め 2026-09-23: フロントマターの残りの行数（[`frontmatter_end`]）。
     front: usize,
@@ -5670,6 +5769,387 @@ pub fn line_styles_reading(source: &str, reading: Reading) -> Vec<LineStyle> {
     styles
 }
 
+/// Where two texts differ: the same up to the first number, and the same again
+/// from the second in the old text and the third in the new one (RFN01-6 C).
+/// All three are character boundaries; an identical text is an empty change at
+/// its end.
+///
+/// **Compared a page at a time**, which is `memcmp` and a few milliseconds for
+/// the largest document the editor opens — against the tens of milliseconds a
+/// pass that looks at each character or line costs.
+pub(crate) fn changed_span(old: &str, new: &str) -> (usize, usize, usize) {
+    const PAGE: usize = 4096;
+    let (a, b) = (old.as_bytes(), new.as_bytes());
+    let shorter = a.len().min(b.len());
+    let mut prefix = 0;
+    while prefix + PAGE <= shorter && a[prefix..prefix + PAGE] == b[prefix..prefix + PAGE] {
+        prefix += PAGE;
+    }
+    while prefix < shorter && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    while !old.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let room = shorter - prefix;
+    let mut suffix = 0;
+    while suffix + PAGE <= room
+        && a[a.len() - suffix - PAGE..a.len() - suffix]
+            == b[b.len() - suffix - PAGE..b.len() - suffix]
+    {
+        suffix += PAGE;
+    }
+    while suffix < room && a[a.len() - suffix - 1] == b[b.len() - suffix - 1] {
+        suffix += 1;
+    }
+    // The same bytes follow in both, so a boundary in one is a boundary in the
+    // other; only a character cut in half has to be given back.
+    while !old.is_char_boundary(a.len() - suffix) || !new.is_char_boundary(b.len() - suffix) {
+        suffix -= 1;
+    }
+    (prefix, a.len() - suffix, b.len() - suffix)
+}
+
+/// Which logical lines an edit replaced: `first..old_end` of the old text by
+/// `first..new_end` of the new one (RFN01-6 C).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LinesChanged {
+    first: usize,
+    old_end: usize,
+    new_end: usize,
+}
+
+impl LinesChanged {
+    /// Where an old line that the edit did not touch is now.
+    fn moved(&self, old_line: usize) -> Option<usize> {
+        if old_line < self.first {
+            Some(old_line)
+        } else if old_line >= self.old_end {
+            Some(old_line + self.new_end - self.old_end)
+        } else {
+            None
+        }
+    }
+
+    /// Where a new line that the edit did not make was before it.
+    fn was(&self, new_line: usize) -> Option<usize> {
+        if new_line < self.first {
+            Some(new_line)
+        } else if new_line >= self.new_end {
+            Some(new_line + self.old_end - self.new_end)
+        } else {
+            None
+        }
+    }
+}
+
+impl LinesChanged {
+    /// Every line new: the first refresh, or one after the reading changed.
+    fn everything(lines: usize) -> Self {
+        Self {
+            first: 0,
+            old_end: 0,
+            new_end: lines,
+        }
+    }
+}
+
+/// Which lines a refresh builds again after an edit, and what they are built
+/// with (RFN01-6 C): the edited lines, the ones set differently now, and the
+/// paragraphs around both — a marker left open on one line of a paragraph
+/// reaches the others ([`paragraph_contexts`]), so a paragraph is taken whole,
+/// and so is one next to the stretch, which may have joined it or left it.
+///
+/// `from..to` are new lines. A line in the stretch that is set the same way
+/// in the same context as before can still be kept ([`Self::narrowed`]).
+struct RebuildPlan {
+    from: usize,
+    to: usize,
+    unclosed: Vec<Vec<(usize, &'static str)>>,
+    contexts: Vec<LineContext>,
+}
+
+impl RebuildPlan {
+    /// The lines of the stretch that have to be built, as the smallest run
+    /// holding all of them, and where that run was: every line outside it is
+    /// the same line it was, left where it is rather than copied.
+    ///
+    /// **A line the edit did not touch has the same text** — that is what the
+    /// edit's line range says — so whether it can be kept is its setting and
+    /// its context, never a comparison of its text. A document whose
+    /// paragraphs follow each other without a blank line is one long run of
+    /// joined lines, and comparing or copying every line of it on every
+    /// keystroke was thirty megabytes of work at ten million characters.
+    fn narrowed(
+        &self,
+        edit: LinesChanged,
+        keeps: impl Fn(usize, usize, &LineContext) -> bool,
+    ) -> (Range<usize>, usize) {
+        let needed = |index: &usize| match edit.was(*index) {
+            Some(was) => !keeps(*index, was, &self.contexts[*index - self.from]),
+            None => true,
+        };
+        // The edited lines are always built, so the run begins at or before
+        // the first of them and ends at or after the last — and a line before
+        // the edit is where it was, one after it is moved by the edit.
+        let first = (self.from..self.to).find(needed).unwrap_or(edit.first);
+        let last = (first..self.to).rev().find(needed).unwrap_or(first);
+        let end = (last + 1).max(edit.new_end);
+        (first..end, end + edit.old_end - edit.new_end)
+    }
+
+    fn of(
+        source: &TrackedSource,
+        styles: &[LineStyle],
+        reading: Reading,
+        edit: LinesChanged,
+        restyled: Range<usize>,
+        unclosed_before: impl Fn(usize) -> Vec<(usize, &'static str)>,
+    ) -> Self {
+        let lines = source.lines();
+        let joins = |index: usize| joins_paragraph(source.line(index), styles[index]);
+        let mut from = edit.first.min(restyled.start);
+        let mut to = edit.new_end.max(restyled.end).min(lines);
+        while from > 0 && joins(from - 1) {
+            from -= 1;
+        }
+        while to < lines && joins(to) {
+            to += 1;
+        }
+        let texts = (from..to)
+            .map(|index| source.line(index))
+            .collect::<Vec<&str>>();
+        let unclosed = (from..to)
+            .map(|index| match edit.was(index) {
+                Some(was) => unclosed_before(was),
+                None => standalone_unclosed(source.line(index), reading),
+            })
+            .collect::<Vec<_>>();
+        let contexts = paragraph_contexts(
+            &texts,
+            |offset| styles.get(from + offset).copied().unwrap_or_default(),
+            &unclosed,
+            reading,
+        );
+        Self {
+            from,
+            to,
+            unclosed,
+            contexts,
+        }
+    }
+}
+
+/// A copy of the text last worked from, with where each of its logical lines
+/// begins, brought up to date an edit at a time (RFN01-6 C).
+///
+/// **What makes the rest of a refresh proportional to the edit.** Finding out
+/// which lines changed used to take splitting the whole text into lines and
+/// comparing every one of them from both ends; with the copy and the line
+/// starts, it is one comparison of the text and a binary search.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TrackedSource {
+    text: String,
+    /// The byte each logical line begins at; as many as `split('\n')` gives.
+    starts: Vec<usize>,
+}
+
+impl TrackedSource {
+    fn of(source: &str) -> Self {
+        let mut starts = vec![0];
+        starts.extend(source.match_indices('\n').map(|(at, _)| at + 1));
+        Self {
+            text: source.to_owned(),
+            starts,
+        }
+    }
+
+    fn lines(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// Logical line `index`, without its break.
+    fn line(&self, index: usize) -> &str {
+        let start = self.starts[index];
+        let end = self
+            .starts
+            .get(index + 1)
+            .map_or(self.text.len(), |next| next - 1);
+        &self.text[start..end]
+    }
+
+    /// The line after `index`, or an empty one past the last.
+    fn next_line(&self, index: usize) -> &str {
+        if index + 1 < self.lines() {
+            self.line(index + 1)
+        } else {
+            ""
+        }
+    }
+
+    /// Take `source` as the text now, and say which lines changed — `None`
+    /// when nothing did.
+    fn advance(&mut self, source: &str) -> Option<LinesChanged> {
+        let (prefix, old_end, new_end) = changed_span(&self.text, source);
+        if prefix == old_end && prefix == new_end && self.text.len() == source.len() {
+            return None;
+        }
+        let line_of = |byte: usize| self.starts.partition_point(|start| *start <= byte) - 1;
+        let first = line_of(prefix);
+        let old_last = line_of(old_end);
+        let added = source[prefix..new_end].matches('\n').count();
+        let edit = LinesChanged {
+            first,
+            old_end: old_last + 1,
+            new_end: first + added + 1,
+        };
+        let delta = source.len() as isize - self.text.len() as isize;
+        let mut fresh = Vec::with_capacity(added);
+        fresh.extend(
+            source[prefix..new_end]
+                .match_indices('\n')
+                .map(|(at, _)| prefix + at + 1),
+        );
+        let tail = self.starts[edit.old_end..]
+            .iter()
+            .map(|start| (*start as isize + delta) as usize)
+            .collect::<Vec<usize>>();
+        self.starts.truncate(first + 1);
+        self.starts.extend(fresh);
+        self.starts.extend(tail);
+        self.text
+            .replace_range(prefix..old_end, &source[prefix..new_end]);
+        debug_assert_eq!(self.text, source);
+        debug_assert_eq!(
+            self.starts.len(),
+            edit.new_end + self.lines() - edit.new_end
+        );
+        Some(edit)
+    }
+}
+
+/// What [`carried_style`] carries from one line to the next.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StyleCarry {
+    fence: Option<Fence>,
+    levels: ListLevels,
+    table: Option<TablePlace>,
+    note_indent: u8,
+    carry: Carry,
+}
+
+impl StyleCarry {
+    fn at_head(source: &str) -> Self {
+        Self {
+            carry: Carry::reading(source),
+            ..Self::default()
+        }
+    }
+
+    fn style(&mut self, line: &str, next: &str, reading: Reading) -> LineStyle {
+        carried_style(
+            line,
+            next,
+            &mut self.fence,
+            &mut self.levels,
+            &mut self.table,
+            reading,
+            &mut self.note_indent,
+            &mut self.carry,
+        )
+    }
+}
+
+/// How each logical line is set, kept with the state each line began in, so
+/// that an edit sets again only from the line before it to where the state
+/// comes back to what it was (RFN01-6 C). The same answers
+/// [`line_styles_reading`] gives for the whole text.
+///
+/// **A line is set by the lines around it** — the fence it is inside, the
+/// table and list it belongs to, a note's indent — which is why the whole text
+/// was read again on every keystroke. What a line leaves behind for the next
+/// one is small, and once it is what it was before the edit, every line after
+/// is set as it was.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StyleTrack {
+    styles: Vec<LineStyle>,
+    /// The state each line began in, and one more for after the last.
+    before: Vec<StyleCarry>,
+}
+
+impl StyleTrack {
+    fn of(source: &TrackedSource, reading: Reading) -> Self {
+        let mut state = StyleCarry::at_head(&source.text);
+        let mut track = Self {
+            styles: Vec::with_capacity(source.lines()),
+            before: Vec::with_capacity(source.lines() + 1),
+        };
+        track.before.push(state.clone());
+        for index in 0..source.lines() {
+            let style = state.style(source.line(index), source.next_line(index), reading);
+            track.styles.push(style);
+            track.before.push(state.clone());
+        }
+        track
+    }
+
+    /// Set again after `edit`, and say which new lines were — the only ones
+    /// whose setting can differ from before.
+    fn update(
+        &mut self,
+        source: &TrackedSource,
+        reading: Reading,
+        edit: LinesChanged,
+    ) -> Range<usize> {
+        // The line before the edit is set by the first line of it (a table's
+        // header row is one because of the row under it).
+        let mut from = edit.first.saturating_sub(1);
+        let head = StyleCarry::at_head(&source.text);
+        if head != self.before[0] {
+            from = 0;
+        }
+        let mut state = if from == 0 {
+            head
+        } else {
+            self.before[from].clone()
+        };
+        let mut styles = Vec::new();
+        let mut after = Vec::new();
+        let mut line = from;
+        loop {
+            if line >= edit.new_end
+                && let Some(was) = edit.was(line)
+                && self.before.get(was) == Some(&state)
+            {
+                break;
+            }
+            if line == source.lines() {
+                break;
+            }
+            styles.push(state.style(source.line(line), source.next_line(line), reading));
+            after.push(state.clone());
+            line += 1;
+        }
+        let old_stop = edit
+            .was(line)
+            .unwrap_or(self.styles.len())
+            .min(self.styles.len());
+        let old_stop = if line == source.lines() {
+            self.styles.len()
+        } else {
+            old_stop
+        };
+        if from == 0 {
+            self.before[0] = StyleCarry::at_head(&source.text);
+        }
+        self.styles.splice(from..old_stop, styles);
+        self.before.splice(from + 1..old_stop + 1, after);
+        debug_assert_eq!(self.styles.len(), source.lines());
+        debug_assert_eq!(self.before.len(), source.lines() + 1);
+        from..line
+    }
+}
+
 /// One heading of a document's outline (要件 7.7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Heading {
@@ -5761,6 +6241,181 @@ pub fn heading_levels(source: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFN01-6 C: a document with every kind of line the setting carries from
+    /// one line to the next — a fence, a table, nested lists, a quote with a
+    /// callout, a comment block, front matter — and paragraphs whose markers
+    /// reach across their lines.
+    fn carried_document() -> String {
+        let mut text = String::from("---\ntitle: 試験\n---\n");
+        for index in 0..30 {
+            match index % 10 {
+                0 => text.push_str(&format!("# 見出し{index}\n\n")),
+                1 => text.push_str(&format!("段落{index}の**太字が\n次の行まで**続く。\n")),
+                2 => text.push_str(&format!("```\ncode {index}\n# not a heading\n```\n")),
+                3 => text.push_str(&format!("| 表{index} | 値 |\n| --- | --- |\n| a | b |\n")),
+                4 => text.push_str(&format!("- 項目{index}\n  - 入れ子\n- 次\n")),
+                5 => text.push_str(&format!("> [!note] 注{index}\n> 続き\n")),
+                6 => text.push_str(&format!("%%\nコメント{index}\n%%\n")),
+                7 => text.push_str(&format!("{index}番目の段落。*斜体が\n閉じる*。\n")),
+                8 => text.push_str(&format!("｜漢字《かんじ》{index}\n")),
+                // Paragraph lines one after another with no blank line, the
+                // way a long work often is: one run of joined lines.
+                _ => {
+                    for line in 0..8 {
+                        text.push_str(&format!("続く段落{index}の{line}行目。"));
+                        if line == 3 {
+                            text.push_str("~~打ち消しが");
+                        }
+                        if line == 5 {
+                            text.push_str("ここまで~~");
+                        }
+                        text.push('\n');
+                    }
+                    text.push('\n');
+                }
+            }
+        }
+        text
+    }
+
+    struct Pick(u64);
+
+    impl Pick {
+        fn below(&mut self, below: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % below.max(1)
+        }
+    }
+
+    /// An edit of the kind that moves how lines are set: text, breaks, fences,
+    /// table rows, list and quote markers, comment markers, emphasis markers,
+    /// front matter, and deletions across all of them.
+    fn carried_edit(source: &mut String, pick: &mut Pick, step: usize) -> usize {
+        let characters = source.chars().count();
+        let at = |index: usize, source: &str| {
+            source
+                .char_indices()
+                .nth(index)
+                .map_or(source.len(), |(byte, _)| byte)
+        };
+        let position = pick.below(characters + 1);
+        let byte = at(position, source);
+        let line = source[..byte].rfind('\n').map_or(0, |at| at + 1);
+        let insert = |source: &mut String, at: usize, text: &str| {
+            source.insert_str(at, text);
+            at + text.len()
+        };
+        match pick.below(12) {
+            0 | 1 => insert(source, byte, "あ"),
+            2 => insert(source, byte, "\n"),
+            3 => insert(source, line, "```\n"),
+            4 => insert(source, line, "| x | y |\n| - | - |\n"),
+            5 => insert(source, line, "  - "),
+            6 => insert(source, line, "> "),
+            7 => insert(source, line, "%%\n"),
+            8 => insert(source, byte, "**"),
+            9 if step % 7 == 0 => insert(source, 0, "---\n"),
+            _ => {
+                let end = at(position + pick.below(40), source);
+                source.replace_range(byte..end, "");
+                byte
+            }
+        }
+    }
+
+    /// RFN01-6 C: the preview patched edit by edit is the preview built
+    /// afresh — its text, every line's form, its marks and boxes, and every
+    /// mapping between the source and what is shown — with the caret moving
+    /// among the lines, into the front matter and out of it.
+    #[test]
+    fn the_preview_follows_an_edit_as_building_afresh_would() {
+        for (seed, reading) in [
+            (7_u64, Reading::all()),
+            (
+                9,
+                Reading {
+                    ruby: false,
+                    bullets: BulletMarks::all(),
+                },
+            ),
+        ] {
+            let mut source = carried_document();
+            let mut pick = Pick(seed);
+            let mut preview = PreviewDocument::default();
+            preview.refresh(&source, None, reading);
+            for step in 0..150 {
+                let caret = carried_edit(&mut source, &mut pick, step);
+                // The caret after the edit, or somewhere else, or nowhere.
+                let caret = match pick.below(5) {
+                    0 => None,
+                    1 => Some(pick.below(source.len() + 1)),
+                    _ => Some(caret.min(source.len())),
+                };
+                let active = caret.map(|at| {
+                    let at = (0..=at)
+                        .rev()
+                        .find(|at| source.is_char_boundary(*at))
+                        .unwrap();
+                    source[..at].rfind('\n').map_or(0, |line| line + 1)
+                });
+                preview.refresh(&source, active, reading);
+                let afresh = PreviewDocument::from_source_as(&source, active, reading);
+                assert_eq!(preview.text, afresh.text, "step {step}: text");
+                assert_eq!(preview.lines, afresh.lines, "step {step}: lines");
+                assert_eq!(preview.marks, afresh.marks, "step {step}: marks");
+                assert_eq!(preview.markers, afresh.markers, "step {step}: markers");
+                assert_eq!(
+                    preview.utf16_starts, afresh.utf16_starts,
+                    "step {step}: utf16"
+                );
+                assert_eq!(
+                    preview.source_starts, afresh.source_starts,
+                    "step {step}: source"
+                );
+                assert_eq!(
+                    preview.preview_starts, afresh.preview_starts,
+                    "step {step}: shown"
+                );
+                assert_eq!(preview, afresh, "step {step}: the whole");
+            }
+        }
+    }
+
+    #[test]
+    fn the_counts_follow_an_edit_as_counting_afresh_would() {
+        for (seed, reading) in [
+            (3_u64, Reading::all()),
+            (
+                5,
+                Reading {
+                    ruby: false,
+                    bullets: BulletMarks::all(),
+                },
+            ),
+        ] {
+            let mut source = carried_document();
+            let mut pick = Pick(seed);
+            let mut counts = DocumentCounts::default();
+            counts.refresh(&source, reading);
+            for step in 0..150 {
+                carried_edit(&mut source, &mut pick, step);
+                counts.refresh(&source, reading);
+                let mut afresh = DocumentCounts::default();
+                afresh.refresh(&source, reading);
+                assert_eq!(
+                    counts.line_styles(),
+                    line_styles_reading(&source, reading),
+                    "step {step}: styles"
+                );
+                assert_eq!(counts.lines, afresh.lines, "step {step}: lines");
+                assert_eq!(counts.stats(), afresh.stats(), "step {step}: stats");
+            }
+        }
+    }
 
     /// 要件 7.3.2: what the fence says the block is, and how little of it is
     /// read. The language is the first word, whatever follows it.

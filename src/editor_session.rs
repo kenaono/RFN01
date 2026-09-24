@@ -25,27 +25,36 @@ impl EditorSession {
         self.showing.borrow().clone()
     }
 
-    /// Commit typed text into the source snapshot used by the synchronous hit /
-    /// preview resolver. The host must not retain this snapshot across events.
+    /// Put typed text in place of `start..end` of the document, and say where
+    /// the caret went and what changed.
+    ///
+    /// RFN01-6 D: **the document's own text is edited where it is.** This
+    /// used to be handed a copy of the whole text, edit the copy and then copy
+    /// it back into the document — two copies of the document for every
+    /// keystroke, 16ms at ten million characters. The caller borrows the
+    /// document's text afterwards for whatever it draws.
     pub(crate) fn insert_at(
         &self,
-        mut source: String,
         start: usize,
         end: usize,
         input: String,
-    ) -> Option<(String, usize, Change)> {
+    ) -> Option<(usize, Change)> {
         let document = self.document();
         if document.read_only() || self.state.borrow().viewer {
             return None;
         }
-        let removed = source.get(start..end)?.to_owned();
-        source.replace_range(start..end, &input);
+        let removed = document.text.borrow().get(start..end)?.to_owned();
+        let characters = document.text.character_count();
+        document.text.borrow_mut().replace_range(start..end, &input);
+        document
+            .text
+            .set_character_count(characters - removed.chars().count() + input.chars().count());
         let next = start + input.len();
         {
             let mut state = self.state.borrow_mut();
             state.caret_source_byte = Some(next);
             state.selection_anchor_source_byte = Some(next);
-            state.active_line_start = Some(source_line_start(&source, next));
+            state.active_line_start = Some(source_line_start(&document.text.borrow(), next));
             state.preedit.clear();
             state.preferred_line = None;
             state.mark = false;
@@ -56,8 +65,7 @@ impl EditorSession {
             inserted: input.len(),
         };
         document.record(start, removed, input);
-        *document.text.borrow_mut() = source.clone();
-        Some((source, next, change))
+        Some((next, change))
     }
 
     /// Replace an already resolved source span. Hit testing and preview mapping

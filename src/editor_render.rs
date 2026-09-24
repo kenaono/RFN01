@@ -214,11 +214,12 @@ pub(crate) fn layout(
     engine.set_words(options.words.clone());
     // 追加要件 2026-09-15: 画像の行に描く絵。これも幾何の外（大きさは箱が持つ）。
     engine.set_pictures(shown.pictures());
-    let through = engine
-        .viewport_end_utf16(options.scroll, options.viewport)
-        .max(render_caret.unwrap_or(0))
-        .max(anchor_utf16.unwrap_or(0));
-    let measured = engine.update_interactive(styled, line_fit, typography, through)?;
+    let needed = engine.needed_utf16(
+        options.scroll,
+        options.viewport,
+        &[render_caret, anchor_utf16],
+    );
+    let measured = engine.update_interactive(styled, line_fit, typography, &needed)?;
     let layout_ms = elapsed_ms(layout_started);
 
     // **Cut into runs only now.** A rectangle's runs are one per *layout* line,

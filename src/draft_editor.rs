@@ -170,15 +170,16 @@ impl Editor {
                 self.session.splice(start, end, &kept, start);
             }
         }
-        let source = document.text.borrow().clone();
-        if !fits_document_limit(&source, &input) {
+        if !fits_document_limit(document.text.character_count(), &input) {
             return;
         }
+        let source = document.text.borrow();
         let state = self.session.state.borrow();
         let caret = floor_char_boundary(&source, state.caret_source_byte.unwrap_or(source.len()));
         let (start, end) = selection_source_range(&state).unwrap_or((caret, caret));
         drop(state);
-        self.session.insert_at(source, start, end, input);
+        drop(source);
+        self.session.insert_at(start, end, input);
     }
 
     fn remove(&mut self, backwards: bool) {
