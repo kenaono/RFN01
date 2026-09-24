@@ -156,3 +156,33 @@ fn an_export_brings_everything_back() {
     let saved = app_data::read_settings(&directory).unwrap();
     assert!(saved.contains(&("paper.random".into(), "1".into())));
 }
+
+/// 書き手の報告 2026-09-24（Terminal・Keysで変えてもSaveできない）の確かめ：設定の画面と同じ
+/// 配線で変えれば、Terminal・Keysのプリセットも「変更あり」になる。
+#[test]
+fn terminal_and_key_changes_mark_their_presets_changed() {
+    let r = rig("本文。\n", (1000, 740));
+    let window = &r.window;
+    settings_transfer::wire(window, &r.live);
+    crate::terminal_appearance::install(window, &r.live);
+    crate::shortcuts::wire(window, &r.live);
+    settings_transfer::save_as(window, &r.live, PresetKind::Terminal, "T");
+    settings_transfer::save_as(window, &r.live, PresetKind::Keys, "K");
+    open_settings(window, &r.live);
+    window.set_settings_tab(1);
+    // 画面の入切と同じ：変わったら200ms待って書く。
+    window.set_terminal_confirm_paste(false);
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        slint::platform::update_timers_and_animations();
+    }
+    assert_eq!(current(window, 1), "T");
+    assert!(modified(window, 1));
+    window.set_shortcut_selected(1);
+    window.set_shortcut_edit("Ctrl+Alt+S".into());
+    window.invoke_shortcut_save(false);
+    assert_eq!(current(window, 2), "K");
+    assert!(modified(window, 2));
+    window.invoke_preset_overwrite_requested(2);
+    assert!(!modified(window, 2));
+}
