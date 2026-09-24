@@ -8,8 +8,9 @@
 //! 置き換え、その直前にいまの姿を同じ形で控える（`before-import.rfnexport`）。
 //!
 //! 入れないもの：作業コピーを残すかどうか（`work.autosave`、守りのための設定をプリセットで
-//! 切らない）、シェルの一覧と既定（その機械に入っているプログラム）、最近使った色
-//! （使った履歴で、いまの姿ではない）。**単語帳と文書ごとのモードもプリセットは触らない**
+//! 切らない）、シェルのプロファイルの一覧（その機械に入っているプログラムで、切り替えるたびに置き換えると
+//! 作ったプロファイルが消える。既定のシェルは入れる）、最近使った色（使った履歴で、いまの姿ではない）。
+//! **単語帳と文書ごとのモードもプリセットは触らない**
 //! （RFN01-31の本文）。
 
 use std::cell::RefCell;
@@ -84,10 +85,10 @@ pub(crate) fn kind_of(name: &str) -> Option<PresetKind> {
     if name.starts_with("h.") || name.starts_with("v.") || EDITOR_SETTINGS.contains(&name) {
         return Some(PresetKind::Editor);
     }
-    if name.starts_with("terminal.")
-        && !name.starts_with("terminal.shell.")
-        && name != "terminal.default"
-    {
+    // 既定のシェルは入れる（書き手の報告 2026-09-24：WSLからPowerShell 7へ変えても
+    // 「変更あり」にならなかった）。名前で持つので、その名前のシェルが無い機械では
+    // 最初のシェルになる（`apply_settings`）。
+    if name.starts_with("terminal.") && !name.starts_with("terminal.shell.") {
         return Some(PresetKind::Terminal);
     }
     None
@@ -702,7 +703,7 @@ mod tests {
         // 守りの設定・この機械のもの・General。
         assert_eq!(kind_of("work.autosave"), None);
         assert_eq!(kind_of("terminal.shell.0"), None);
-        assert_eq!(kind_of("terminal.default"), None);
+        assert_eq!(kind_of("terminal.default"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("language"), None);
         assert_eq!(kind_of("left.size"), None);
     }
