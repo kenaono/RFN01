@@ -901,6 +901,10 @@ Insertメニューの全項目を、アイコンで並べて押せるように�
   **Save to…**で保存先を選んで今の文字色を保存、**Delete**で選んでいるセットを空にする。
   一覧の表示は今の文字色と同じセットで、どれとも違えば「Custom」になる。1セットはBody・H1〜H6の文字色を**横書き・縦書きまとめて**持つ（紙の色・文字の背景色は含めない）。
   背景を明るくしたり暗くしたりしたときに、文字色を一度で替えるためのもの。Reset・Reset Allでは消えない
+- **プリセット**（2026-09-24、RFN01-31）。Editor・Terminal・Keys の各ページの上の「PRESET」で、名前を付けて残した値に
+  その場で切り替える。「Save As…」で残し（同じ名前なら上書き）、「Delete」で消す。値を替えれば「None」になる
+- **設定の書き出し・取り込み**（2026-09-24、RFN01-56）。Generalの「ALL SETTINGS」の Export…／Import… で、設定・キー・プリセット・
+  単語帳をまとめて1ファイル（`.rfnexport`）にする。取り込みは全体を置き換え、直前の姿を`before-import.rfnexport`に控える
 - **TAB毎・Pane毎の紙の色**（2026-09-15）。本文の紙の上で右クリック →「Background…」、Paneの ⋮ →「Pane Background…」で、
   そのTAB／Paneだけ紙の色を変えられる。**TABの色 > Paneの色 > 全体の設定（Page）**の順に効き、横書き・縦書きで別々に持つ
   （いま見えている向きに付く）。パレットの「既定の色」で外す。Settings → Page「Random Background」を Light／Dark にすると、

@@ -149,12 +149,12 @@ fn a_table_is_edited_as_a_table() {
 
 /// 試験の窓と1枚の文書（RFN01-49）。文書は`原稿.md`としてディスクに置く——画像の行の
 /// 行き先を、文書のフォルダから読めるように。
-struct Rig {
-    surface: Rc<MinimalSoftwareWindow>,
-    window: AppWindow,
-    document: Rc<OpenDocument>,
-    live: Live,
-    id: PaneId,
+pub(crate) struct Rig {
+    pub(crate) surface: Rc<MinimalSoftwareWindow>,
+    pub(crate) window: AppWindow,
+    pub(crate) document: Rc<OpenDocument>,
+    pub(crate) live: Live,
+    pub(crate) id: PaneId,
     _reset: ResetDirectory,
 }
 
@@ -165,7 +165,7 @@ impl Drop for ResetDirectory {
     }
 }
 
-fn rig(text: &str, size: (u32, u32)) -> Rig {
+pub(crate) fn rig(text: &str, size: (u32, u32)) -> Rig {
     let directory = std::env::temp_dir().join(format!(
         "editor-table-rig-{}-{}",
         std::process::id(),

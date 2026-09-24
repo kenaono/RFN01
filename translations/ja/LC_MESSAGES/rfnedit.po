@@ -1310,3 +1310,15 @@ msgstr "{}行 × {}列"
 
 msgid "Edit Table"
 msgstr "表の編集"
+
+msgid "PRESET"
+msgstr "プリセット"
+
+msgid "Choose a preset to apply it to this page at once. Save As keeps this page's current values under a name."
+msgstr "選ぶと、このページの設定にすぐ当たります。「名前を付けて保存」は、このページのいまの値を名前を付けて残します。"
+
+msgid "ALL SETTINGS"
+msgstr "すべての設定"
+
+msgid "Writes settings, keys, presets and word sets to one file. Import replaces them all and keeps the current ones in before-import.rfnexport."
+msgstr "設定・キー・プリセット・単語帳を1つのファイルに書き出します。取り込むとすべて置き換わり、いまの設定は before-import.rfnexport に控えます。"
