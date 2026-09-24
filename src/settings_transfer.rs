@@ -101,14 +101,42 @@ pub(crate) struct Preset {
     pub(crate) values: Vec<(String, String)>,
 }
 
+/// プリセットの一覧と、面ごとに選んでいるプリセット（書き手の報告 2026-09-24）。
+///
+/// **選んだものを覚える**のは、値だけでは答えが決まらないから：同じ値を別の名前で残すと、
+/// 値から探せばいつも上のほうが出て、下のほうを選べなかった。値を替えたあとも名前が残るので、
+/// 「Save」でそのプリセットを直せる。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PresetBook {
+    pub(crate) presets: Vec<Preset>,
+    /// `PresetKind`の番号ごと。
+    pub(crate) chosen: [Option<String>; 3],
+}
+
+impl PresetBook {
+    fn find(&self, kind: PresetKind, name: &str) -> Option<&Preset> {
+        self.presets
+            .iter()
+            .find(|preset| preset.kind == kind && preset.name == name)
+    }
+}
+
 const PRESETS_FILE: &str = "presets.rfnpresets";
 const PRESETS_MAGIC: &str = "RFN-EDIT-PRESETS 1";
 /// プリセットの頭の行。**これで始まる行だけが見出し**で、面と名前をタブで分ける。
 const PRESET_KEY: &str = "preset: ";
+/// 選んでいるプリセットの行（面と名前をタブで分ける）。プリセットの外、先頭に書く。
+const CHOSEN_KEY: &str = "chosen: ";
 
-pub(crate) fn encode_presets(presets: &[Preset]) -> String {
+pub(crate) fn encode_presets(book: &PresetBook) -> String {
     let mut out = format!("{PRESETS_MAGIC}\n");
-    for preset in presets {
+    for kind in PresetKind::ALL {
+        if let Some(name) = &book.chosen[kind.number()] {
+            let name = name.replace(['\n', '\r', '\t'], " ");
+            out.push_str(&format!("{CHOSEN_KEY}{}\t{name}\n", kind.written()));
+        }
+    }
+    for preset in &book.presets {
         let name = preset.name.replace(['\n', '\r', '\t'], " ");
         out.push_str(&format!("{PRESET_KEY}{}\t{name}\n", preset.kind.written()));
         for (name, value) in &preset.values {
@@ -119,15 +147,25 @@ pub(crate) fn encode_presets(presets: &[Preset]) -> String {
 }
 
 /// 読めない行は飛ばす——設定ファイルと同じ寛容さ。先頭の1行が合わなければ`None`。
-pub(crate) fn decode_presets(raw: &str) -> Option<Vec<Preset>> {
+pub(crate) fn decode_presets(raw: &str) -> Option<PresetBook> {
     let mut lines = raw.split('\n').map(|line| line.trim_end_matches('\r'));
     if lines.next()? != PRESETS_MAGIC {
         return None;
     }
     let mut presets: Vec<Preset> = Vec::new();
+    let mut chosen: [Option<String>; 3] = Default::default();
     // 読めない見出しの下の値は、どのプリセットにも入れない。
     let mut open = false;
     for line in lines {
+        if let Some(head) = line.strip_prefix(CHOSEN_KEY) {
+            open = false;
+            if let Some((kind, name)) = head.split_once('\t')
+                && let Some(kind) = PresetKind::read(kind)
+            {
+                chosen[kind.number()] = Some(name.trim().to_owned());
+            }
+            continue;
+        }
         if let Some(head) = line.strip_prefix(PRESET_KEY) {
             open = false;
             if let Some((kind, name)) = head.split_once('\t')
@@ -150,7 +188,16 @@ pub(crate) fn decode_presets(raw: &str) -> Option<Vec<Preset>> {
             preset.values.push((name.to_owned(), value.to_owned()));
         }
     }
-    Some(presets)
+    let mut book = PresetBook { presets, chosen };
+    // 無くなったプリセットを指していたら忘れる。
+    for kind in PresetKind::ALL {
+        if let Some(name) = book.chosen[kind.number()].clone()
+            && book.find(kind, &name).is_none()
+        {
+            book.chosen[kind.number()] = None;
+        }
+    }
+    Some(book)
 }
 
 /// 書き出しの1ファイル。
@@ -158,7 +205,7 @@ pub(crate) fn decode_presets(raw: &str) -> Option<Vec<Preset>> {
 pub(crate) struct Export {
     pub(crate) settings: Vec<(String, String)>,
     pub(crate) keys: Option<String>,
-    pub(crate) presets: Vec<Preset>,
+    pub(crate) presets: PresetBook,
     /// 単語帳のファイルの中身そのまま（`app_data::encode_words`の形）。
     pub(crate) words: Option<String>,
 }
@@ -232,33 +279,33 @@ pub(crate) fn decode_export(raw: &str) -> Option<Export> {
     Some(export)
 }
 
-pub(crate) fn read_presets(directory: &Path) -> Vec<Preset> {
+pub(crate) fn read_presets(directory: &Path) -> PresetBook {
     std::fs::read_to_string(directory.join(PRESETS_FILE))
         .ok()
         .and_then(|raw| decode_presets(&raw))
         .unwrap_or_default()
 }
 
-fn write_presets(directory: &Path, presets: &[Preset]) -> io::Result<PathBuf> {
+fn write_presets(directory: &Path, book: &PresetBook) -> io::Result<PathBuf> {
     std::fs::create_dir_all(directory)?;
     let path = directory.join(PRESETS_FILE);
-    file_io::write_atomically(&path, encode_presets(presets).as_bytes())?;
+    file_io::write_atomically(&path, encode_presets(book).as_bytes())?;
     Ok(path)
 }
 
 thread_local! {
     /// 読んだプリセット。**窓は1つ**なので、単語帳（`WORD_MODES`）と同じくここに持つ。
-    static PRESETS: RefCell<Vec<Preset>> = const { RefCell::new(Vec::new()) };
+    static PRESETS: RefCell<PresetBook> = RefCell::new(PresetBook::default());
 }
 
-fn presets_now() -> Vec<Preset> {
+fn presets_now() -> PresetBook {
     PRESETS.with(|held| held.borrow().clone())
 }
 
 /// 置き換えて、書いて、画面へ出す。
-fn hold_presets(window: &AppWindow, live: &Live, presets: Vec<Preset>) {
+fn hold_presets(window: &AppWindow, live: &Live, book: PresetBook) {
     if let Some(directory) = app_data::app_directory()
-        && let Err(error) = write_presets(&directory, &presets)
+        && let Err(error) = write_presets(&directory, &book)
     {
         live.cache
             .borrow_mut()
@@ -271,7 +318,7 @@ fn hold_presets(window: &AppWindow, live: &Live, presets: Vec<Preset>) {
             .into(),
         );
     }
-    PRESETS.with(|held| *held.borrow_mut() = presets);
+    PRESETS.with(|held| *held.borrow_mut() = book);
     publish(window);
 }
 
@@ -289,27 +336,41 @@ pub(crate) fn current_values(window: &AppWindow, kind: PresetKind) -> Vec<(Strin
         .collect()
 }
 
-/// 名前の一覧と、いまの値に合うプリセットの名前を画面へ出す。
+/// 名前の一覧、選んでいるプリセット、その値から変えたかを画面へ出す。
 ///
-/// **合うものが無ければ空**（画面は「なし」と出す）。選んだあとで値を1つ替えれば、
-/// もうそのプリセットではない——文字色のセット（`match_ink_set`）と同じ見方。
+/// **選んでいるものが無ければ、いまの値に合うものを出す**（取り込んだあとや、選ぶ前に
+/// 残したファイル）。それも無ければ空で、画面は「None」と出す。
 pub(crate) fn publish(window: &AppWindow) {
-    let presets = presets_now();
+    let book = presets_now();
     let mut current = Vec::new();
+    let mut modified = Vec::new();
     for kind in PresetKind::ALL {
         let now: BTreeMap<String, String> = current_values(window, kind).into_iter().collect();
-        let names: Vec<SharedString> = presets
+        let same =
+            |preset: &Preset| preset.values.iter().cloned().collect::<BTreeMap<_, _>>() == now;
+        let names: Vec<SharedString> = book
+            .presets
             .iter()
             .filter(|preset| preset.kind == kind)
             .map(|preset| SharedString::from(preset.name.as_str()))
             .collect();
-        let matched = presets
-            .iter()
-            .filter(|preset| preset.kind == kind)
-            .find(|preset| preset.values.iter().cloned().collect::<BTreeMap<_, _>>() == now)
-            .map(|preset| SharedString::from(preset.name.as_str()))
-            .unwrap_or_default();
-        current.push(matched);
+        let chosen = book.chosen[kind.number()]
+            .as_deref()
+            .and_then(|name| book.find(kind, name));
+        let (name, changed) = match chosen {
+            Some(preset) => (preset.name.clone(), !same(preset)),
+            None => (
+                book.presets
+                    .iter()
+                    .filter(|preset| preset.kind == kind)
+                    .find(|preset| same(preset))
+                    .map(|preset| preset.name.clone())
+                    .unwrap_or_default(),
+                false,
+            ),
+        };
+        current.push(SharedString::from(name));
+        modified.push(changed);
         let model = ModelRc::new(VecModel::from(names));
         match kind {
             PresetKind::Editor => window.set_editor_presets(model),
@@ -318,6 +379,7 @@ pub(crate) fn publish(window: &AppWindow) {
         }
     }
     window.set_preset_current(ModelRc::new(VecModel::from(current)));
+    window.set_preset_modified(ModelRc::new(VecModel::from(modified)));
 }
 
 /// いまの値を、その名前のプリセットとして残す。**同じ面に同じ名前があれば上書き**。
@@ -327,19 +389,22 @@ pub(crate) fn save_as(window: &AppWindow, live: &Live, kind: PresetKind, name: &
         return;
     }
     let values = current_values(window, kind);
-    let mut presets = presets_now();
-    match presets
+    let mut book = presets_now();
+    match book
+        .presets
         .iter_mut()
         .find(|preset| preset.kind == kind && preset.name == name)
     {
         Some(preset) => preset.values = values,
-        None => presets.push(Preset {
+        None => book.presets.push(Preset {
             kind,
             name: name.clone(),
             values,
         }),
     }
-    hold_presets(window, live, presets);
+    // 残したものが、選んでいるものになる。
+    book.chosen[kind.number()] = Some(name.clone());
+    hold_presets(window, live, book);
     window.tell(
         say!(
             "プリセット「{name}」を保存しました",
@@ -349,18 +414,31 @@ pub(crate) fn save_as(window: &AppWindow, live: &Live, kind: PresetKind, name: &
     );
 }
 
+/// 選んでいるプリセットを、いまの値で上書きする（「Save」）。
+fn overwrite(window: &AppWindow, live: &Live, kind: PresetKind) {
+    let chosen = window
+        .get_preset_current()
+        .row_data(kind.number())
+        .unwrap_or_default();
+    if !chosen.is_empty() {
+        save_as(window, live, kind, &chosen);
+    }
+}
+
 fn delete(window: &AppWindow, live: &Live, kind: PresetKind, name: &str) {
-    let mut presets = presets_now();
-    presets.retain(|preset| !(preset.kind == kind && preset.name == name));
-    hold_presets(window, live, presets);
+    let mut book = presets_now();
+    book.presets
+        .retain(|preset| !(preset.kind == kind && preset.name == name));
+    if book.chosen[kind.number()].as_deref() == Some(name) {
+        book.chosen[kind.number()] = None;
+    }
+    hold_presets(window, live, book);
 }
 
 /// そのプリセットの値を当てる。
 fn choose(window: &AppWindow, live: &Live, kind: PresetKind, name: &str) {
-    let Some(preset) = presets_now()
-        .into_iter()
-        .find(|preset| preset.kind == kind && preset.name == name)
-    else {
+    let mut book = presets_now();
+    let Some(preset) = book.find(kind, name).cloned() else {
         return;
     };
     // **その面のものだけ**：手で書き換えられたファイルに他の面の値があっても当てない。
@@ -376,7 +454,9 @@ fn choose(window: &AppWindow, live: &Live, kind: PresetKind, name: &str) {
     } else {
         apply_values(window, live, &values);
     }
-    publish(window);
+    // 選んだことを覚える——同じ値のプリセットが他にあっても、選んだほうを出す。
+    book.chosen[kind.number()] = Some(name.to_owned());
+    hold_presets(window, live, book);
 }
 
 fn apply_keys(window: &AppWindow, live: &Live, keys: &str) {
@@ -399,8 +479,14 @@ fn apply_values(window: &AppWindow, live: &Live, values: &[(String, String)]) {
     ) else {
         return;
     };
+    let language = window.get_language();
     crate::apply_settings(window, numbers, palette, fonts, values);
-    crate::i18n::apply(window.get_language());
+    // 言語は**変わったときだけ**当て直す——翻訳はプロセスで1つなので、同じ値でも当て直せば
+    // 「System」の解決をやり直すことになる。
+    if window.get_language() != language {
+        crate::i18n::apply(window.get_language());
+        crate::publish_word_modes(window);
+    }
     crate::shortcuts::publish(window);
     crate::match_ink_set(window);
     crate::show_wallpaper(window, &live.cache);
@@ -458,6 +544,13 @@ pub(crate) fn wire(window: &AppWindow, live: &Live) {
     PRESETS.with(|held| *held.borrow_mut() = presets);
     publish(window);
 
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_preset_overwrite_requested(move |kind| {
+        if let (Some(window), Some(kind)) = (weak.upgrade(), PresetKind::from_number(kind)) {
+            overwrite(&window, &held, kind);
+        }
+    });
     let weak = window.as_weak();
     let held = live.clone();
     window.on_preset_chosen(move |kind, name| {
@@ -616,8 +709,8 @@ mod tests {
         assert_eq!(kind_of("left.size"), None);
     }
 
-    fn sample() -> Vec<Preset> {
-        vec![
+    fn sample() -> PresetBook {
+        let presets = vec![
             Preset {
                 kind: PresetKind::Editor,
                 name: "執筆用".into(),
@@ -631,14 +724,21 @@ mod tests {
                 name: "Emacs風".into(),
                 values: vec![(KEYS_SETTING.into(), "0=Ctrl+Alt+O;3=Ctrl+Q".into())],
             },
-        ]
+        ];
+        PresetBook {
+            presets,
+            chosen: [Some("執筆用".into()), None, None],
+        }
     }
 
     #[test]
     fn presets_come_back_as_written() {
-        let presets = sample();
-        assert_eq!(decode_presets(&encode_presets(&presets)), Some(presets));
+        let book = sample();
+        assert_eq!(decode_presets(&encode_presets(&book)), Some(book));
         assert_eq!(decode_presets("something else\n"), None);
+        // 無いプリセットを指す「選んでいる」は忘れる。
+        let raw = format!("{PRESETS_MAGIC}\nchosen: terminal\t黒\n");
+        assert_eq!(decode_presets(&raw).unwrap().chosen, [None, None, None]);
     }
 
     #[test]
@@ -646,7 +746,7 @@ mod tests {
         let raw = format!(
             "{PRESETS_MAGIC}\npreset: nowhere\tx\nh.size: 1\npreset: editor\t読み返し用\nh.size: 20\n"
         );
-        let presets = decode_presets(&raw).unwrap();
+        let presets = decode_presets(&raw).unwrap().presets;
         assert_eq!(presets.len(), 1);
         assert_eq!(presets[0].values, vec![("h.size".into(), "20".into())]);
     }

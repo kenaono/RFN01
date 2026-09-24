@@ -1,16 +1,20 @@
 // RFN01-31（書き手と決めた 2026-09-24）: 設定の面（Editor・Terminal・Keys）の上に置くプリセット。
 //
-// **選べばその場で効く**（文字色のセットと同じ）。「Save As…」はいまの値を名前を付けて残し、
-// 同じ名前があれば上書きする。「Delete」はいま合っているプリセットを消す。値を1つでも
-// 替えれば、どのプリセットにも合わなくなり「None」と出る。
+// **選べばその場で効く**（文字色のセットと同じ）。選んだプリセットは値を替えても名前が残り、
+// 「（変更あり）」が付く——「Save」でそのプリセットを上書きする（書き手の報告 2026-09-24：
+// 内容を変える導線が無かった）。「Save As…」は新しい名前で残す（同じ名前なら上書き）。
+// 「Delete」は選んでいるプリセットを消す。
 import { Tok } from "tokens.slint";
 import { MenuFrame, MenuRow, TextButton } from "controls.slint";
 
 export component PresetRow inherits VerticalLayout {
     in property <[string]> names;
-    /// いまの値に合うプリセットの名前（無ければ空）。
+    /// 選んでいるプリセットの名前（無ければ空）。
     in property <string> current;
+    /// 選んでいるプリセットから値を変えたか。
+    in property <bool> modified;
     callback chosen(string);
+    callback overwrite-requested();
     callback save-requested();
     callback delete-requested(string);
 
@@ -33,7 +37,8 @@ export component PresetRow inherits VerticalLayout {
             TextButton {
                 width: parent.width;
                 wide: true;
-                title: root.current == "" ? @tr("None") : root.current;
+                title: root.current == "" ? @tr("None")
+                    : root.modified ? @tr("{} (changed)", root.current) : root.current;
                 enabled: root.names.length > 0;
                 clicked => {
                     preset-menu.show();
@@ -69,6 +74,13 @@ export component PresetRow inherits VerticalLayout {
         }
 
         TextButton {
+            title: @tr("Save");
+            enabled: root.current != "" && root.modified;
+            clicked => {
+                root.overwrite-requested();
+            }
+        }
+        TextButton {
             title: @tr("Save As…");
             clicked => {
                 root.save-requested();
@@ -83,7 +95,7 @@ export component PresetRow inherits VerticalLayout {
         }
     }
     Text {
-        text: @tr("Choose a preset to apply it to this page at once. Save As keeps this page's current values under a name.");
+        text: @tr("Choosing a preset applies it at once. Save overwrites the chosen preset; Save As keeps a new one.");
         color: Tok.ink-faint;
         font-size: 11px;
         wrap: word-wrap;

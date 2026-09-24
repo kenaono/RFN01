@@ -1121,7 +1121,10 @@ export component AppWindow inherits Window {
     in property <[string]> terminal-presets;
     in property <[string]> keys-presets;
     in property <[string]> preset-current: ["", "", ""];
+    /// 選んでいるプリセットから値を変えたか（面ごと）。変えていれば「Save」が押せる。
+    in property <[bool]> preset-modified: [false, false, false];
     callback preset-chosen(int, string);
+    callback preset-overwrite-requested(int);
     callback preset-save-requested(int);
     callback preset-delete-requested(int, string);
     // RFN01-56: 設定の全体を1つのファイルへ書き出す、取り込む。
@@ -3301,7 +3304,9 @@ export component AppWindow inherits Window {
                                             PresetRow {
                                                 names: parent.kind == 0 ? root.editor-presets : parent.kind == 1 ? root.terminal-presets : root.keys-presets;
                                                 current: root.preset-current[parent.kind];
+                                                modified: root.preset-modified[parent.kind];
                                                 chosen(name) => { root.preset-chosen(parent.kind, name); }
+                                                overwrite-requested => { root.preset-overwrite-requested(parent.kind); }
                                                 save-requested => { root.preset-save-requested(parent.kind); }
                                                 delete-requested(name) => { root.preset-delete-requested(parent.kind, name); }
                                             }
