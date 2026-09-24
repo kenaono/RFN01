@@ -521,25 +521,26 @@ fn terminal_panel_long_text_click_and_end_render() {
     });
     let weak = h.window.as_weak();
     let live = h.live.clone();
-    h.window.on_pane_selection_start(move |pane, x, y, extend| {
-        if let Some(window) = weak.upgrade() {
-            let id = PaneId::from_index(pane);
-            update_pane_selection(
-                &window,
-                &live.states.document(id),
-                &live.states.of(id),
-                &live.cache,
-                id,
-                id.flow_x(&window, x),
-                y,
-                if extend {
-                    SelectionPhase::Extend
-                } else {
-                    SelectionPhase::Begin
-                },
-            );
-        }
-    });
+    h.window
+        .on_pane_selection_start(move |pane, x, y, extend, _| {
+            if let Some(window) = weak.upgrade() {
+                let id = PaneId::from_index(pane);
+                update_pane_selection(
+                    &window,
+                    &live.states.document(id),
+                    &live.states.of(id),
+                    &live.cache,
+                    id,
+                    id.flow_x(&window, x),
+                    y,
+                    if extend {
+                        SelectionPhase::Extend
+                    } else {
+                        SelectionPhase::Begin
+                    },
+                );
+            }
+        });
     h.window.show().unwrap();
     let render = || {
         h.window.window().request_redraw();

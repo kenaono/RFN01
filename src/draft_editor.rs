@@ -316,6 +316,9 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
                         0 => SelectionPhase::Begin,
                         1 => SelectionPhase::Update,
                         2 => SelectionPhase::End,
+                        // RFN01-58: Altを押して押した。旗はWindowsの答えと突き合わせる。
+                        4 if crate::input_platform::alt_held() => SelectionPhase::Rectangle,
+                        4 => SelectionPhase::Begin,
                         _ => SelectionPhase::Extend,
                     };
                     let hit = PaneHit {

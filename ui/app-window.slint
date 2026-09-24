@@ -669,7 +669,7 @@ export component AppWindow inherits Window {
     // its row of `panes`, counted from 0. Rust turns it back into a `PaneId`
     // and nothing else tells the panes apart, so a repeater only has to pass
     // its `index` here instead of a literal (ペイン分割設計 5).
-    callback pane-selection-start(int, float, float, bool);
+    callback pane-selection-start(int, float, float, bool, bool);
     callback pane-link-open(int, float, float) -> bool;
     // 書き手の求め 2026-09-22: Ctrl+クリックで開ける所の上か（ポインタを手の形にする）。
     callback pane-link-hover(int, float, float) -> bool;
@@ -2789,8 +2789,8 @@ export component AppWindow inherits Window {
                         resized => { root.pane-resized(pane.id); }
                         scrolled(offset) => { root.pane-scroll-changed(pane.id, offset); }
                         across-scrolled(offset) => { root.pane-across-scroll-changed(pane.id, offset); }
-                        selection-start(x, y, extend) => {
-                            root.pane-selection-start(pane.id, x, y, extend);
+                        selection-start(x, y, extend, rectangle) => {
+                            root.pane-selection-start(pane.id, x, y, extend, rectangle);
                         }
                         link-open(x, y) => { root.pane-link-open(pane.id, x, y) }
                         link-hover(x, y) => { root.pane-link-hover(pane.id, x, y) }

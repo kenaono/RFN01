@@ -186,7 +186,7 @@ export component QuickDraft inherits Window {
                 delete-pressed => { root.editor-delete(false); }
                 move-caret(direction, extend) => { root.editor-move(direction, extend); }
                 home-end(to-end, whole, extend) => { root.editor-edge(to-end, whole, extend); }
-                selection-start(x, y, extend) => { root.editor-pointer(x, y, extend ? 3 : 0); }
+                selection-start(x, y, extend, rectangle) => { root.editor-pointer(x, y, rectangle ? 4 : extend ? 3 : 0); }
                 selection-update(x, y) => { root.editor-pointer(x, y, 1); }
                 selection-end(x, y) => { root.editor-pointer(x, y, 2); }
                 select-all => { root.editor-select-all(); }
