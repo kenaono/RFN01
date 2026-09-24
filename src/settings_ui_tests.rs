@@ -322,8 +322,8 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
             });
         };
         draw();
-        // H1 の大きさの欄（上に PRESET と COLOR SETS の行がある）。
-        let position = slint::LogicalPosition::new(322.0, 340.0);
+        // H1 の大きさの欄（上に PRESET の行がある）。
+        let position = slint::LogicalPosition::new(322.0, 250.0);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
             button: PointerEventButton::Left,
@@ -355,30 +355,6 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
         draw();
         assert_eq!(&*typed.borrow(), &[(0, 4, "250".to_owned())]);
 
-        // 一覧が指すセットは、覚えた番号ではなく今の文字色から決まる（書き手の報告 2026-09-15）。
-        let sets = VecModel::from(vec![SharedString::new(); 10]);
-        window.set_ink_sets(ModelRc::new(sets));
-        crate::match_ink_set(&window);
-        assert_eq!(
-            window.get_ink_set_chosen(),
-            -1,
-            "no set holds these colours"
-        );
-        let now = crate::ink_set_of(&*palette);
-        window.get_ink_sets().set_row_data(3, now.as_str().into());
-        window.get_ink_sets().set_row_data(6, now.as_str().into());
-        crate::match_ink_set(&window);
-        assert_eq!(window.get_ink_set_chosen(), 3);
-        window.set_ink_set_chosen(6);
-        crate::match_ink_set(&window);
-        assert_eq!(window.get_ink_set_chosen(), 6, "the one pointed at is kept");
-        palette.set_row_data(0, Color::from_rgb_u8(1, 2, 3));
-        crate::match_ink_set(&window);
-        assert_eq!(
-            window.get_ink_set_chosen(),
-            -1,
-            "a colour changed by hand is Custom"
-        );
         window.hide().unwrap();
     }
 

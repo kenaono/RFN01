@@ -8,8 +8,8 @@
 //! 置き換え、その直前にいまの姿を同じ形で控える（`before-import.rfnexport`）。
 //!
 //! 入れないもの：作業コピーを残すかどうか（`work.autosave`、守りのための設定をプリセットで
-//! 切らない）、シェルの一覧と既定（その機械に入っているプログラム）、文字色のセットと最近の色
-//! （セットの置き場で、いまの姿ではない）。**単語帳と文書ごとのモードもプリセットは触らない**
+//! 切らない）、シェルの一覧と既定（その機械に入っているプログラム）、最近使った色
+//! （使った履歴で、いまの姿ではない）。**単語帳と文書ごとのモードもプリセットは触らない**
 //! （RFN01-31の本文）。
 
 use std::cell::RefCell;
@@ -488,7 +488,6 @@ fn apply_values(window: &AppWindow, live: &Live, values: &[(String, String)]) {
         crate::publish_word_modes(window);
     }
     crate::shortcuts::publish(window);
-    crate::match_ink_set(window);
     crate::show_wallpaper(window, &live.cache);
     crate::publish_tabs(window, live);
     crate::publish_left(window, live);
@@ -705,7 +704,6 @@ mod tests {
         assert_eq!(kind_of("terminal.shell.0"), None);
         assert_eq!(kind_of("terminal.default"), None);
         assert_eq!(kind_of("language"), None);
-        assert_eq!(kind_of("ink.set.1"), None);
         assert_eq!(kind_of("left.size"), None);
     }
 
