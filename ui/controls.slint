@@ -94,6 +94,37 @@ export component Icon inherits Rectangle {
     }
 }
 
+// アプリの印。紫の角丸にアイボリーの`RE`（追加要件 C3、2026-09-24）。
+//
+// **画像ではなく`Path`で描く。**タイトル行の16pxは画面の倍率で20pxや24pxにもなるので、
+// 16pxの画像を引き伸ばすと輪郭がぼける。`Icons`と同じ16×16の箱に置いて、どの倍率でも
+// その大きさで描き直す。形は`ui/icon.ico`の32px以下と同じ簡略版——元の絵は16pxで画が
+// 1pxほどになり`RE`が潰れるので、画を2pxに太らせ、文字を大きくし、Rの脚を長く、
+// Eの横棒の間隔を2pxに揃えてある。
+export component AppMark inherits Rectangle {
+    width: 16px;
+    height: 16px;
+
+    // 下地の角丸。`ui/icon.png`の角の丸み（256pxで半径49px）に合わせている。
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M3 0h10c1.66 0 3 1.34 3 3v10c0 1.66-1.34 3-3 3H3c-1.66 0-3-1.34-3-3V3c0-1.66 1.34-3 3-3z";
+        fill: Tok.accent-strong;
+    }
+    // R：縦棒、上の横棒、椀の右側、椀の下の横棒、脚。E：縦棒と3本の横棒。
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M2 3h2v10h-2zM2 3h6v2h-6zM6 3h2v4h-2zM2 7h6v2h-6zM4 9h2l2 4h-2zM9 3h2v10h-2zM9 3h5v2h-5zM9 7h5v2h-5zM9 11h5v2h-5z";
+        fill: Tok.mark-ink;
+    }
+}
+
 // A button that is an icon and a tooltip, and nothing else.
 //
 // `checked` is for the buttons that report a state rather than doing something

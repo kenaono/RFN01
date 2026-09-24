@@ -44,6 +44,12 @@ export global Tok {
     out property <color> accent-soft: #dad0fd; // oklch(.880 .062 295)
     out property <color> accent-faint: #f2efff; // oklch(.960 .024 295)
 
+    // アプリの印（`ui/icon.png`、追加要件 C3）の文字の色。**絵から取った値**であって
+    // oklchで決めたものではない——タイトル行の印（`AppMark`）と、実行ファイルへ
+    // 埋め込む`ui/icon.ico`を同じ色にそろえるため。下地は`accent-strong`と同じ紫なので
+    // そちらを使う。**絵を描き直したらこの値も見直す。**
+    out property <color> mark-ink: #fcf9ef;
+
     // Paper. The two differ only enough to answer "which way am I writing?"
     // without reading a word. `doc-ink` matches BACKGROUND/FOREGROUND in
     // directwrite_render.rs — the tiles are drawn there, not here, so the two
