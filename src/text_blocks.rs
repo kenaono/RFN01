@@ -2016,23 +2016,77 @@ pub fn split_blocks(
     typography: &Typography,
     wraps: &mut dyn WrapPoints,
 ) -> Vec<BlockSpan> {
+    split_blocks_from(
+        styled,
+        cells_per_line,
+        typography,
+        wraps,
+        SplitAt::default(),
+        &mut |_| false,
+    )
+    .0
+}
+
+/// A place a split can start from or stop at: a block boundary at the head of
+/// a logical line, as a byte, a UTF-16 position and a line index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SplitAt {
+    pub byte: usize,
+    pub utf16: u32,
+    pub line: usize,
+}
+
+/// [`split_blocks`] from a block boundary rather than from the head, stopping
+/// at the first later boundary `stop` accepts (RFN01-6 B).
+///
+/// **A boundary at the head of a line carries nothing forward.** The block
+/// being gathered is empty there, and what is left of the last one's indent,
+/// tail and table flags is overwritten by the next line without cutting
+/// anything — so a split started at such a boundary makes exactly the blocks a
+/// split from the head makes past it. That is what lets an edit re-split only
+/// the stretch around itself: start at the boundary before it, stop at the
+/// first boundary after it that an earlier split also made.
+///
+/// `stop` is asked only at those boundaries, never at `start` itself, and the
+/// place it accepted comes back with the blocks before it. **Which places are
+/// asked does not depend on the wrap answers**: a cut inside a long line is not
+/// at the head of a line, and the boundary after a long line is there whatever
+/// was answered — so an asking pass and an answering pass stop at one place.
+pub fn split_blocks_from(
+    styled: StyledText<'_>,
+    cells_per_line: u32,
+    typography: &Typography,
+    wraps: &mut dyn WrapPoints,
+    start: SplitAt,
+    stop: &mut dyn FnMut(&SplitAt) -> bool,
+) -> (Vec<BlockSpan>, Option<SplitAt>) {
     let text = styled.text;
     // 要件 7.3.1: a source pane is not indented, for the reason it gets no
     // boxes — the markers are its text.
     let indents = styled.is_preview();
     let cells_per_line = cells_per_line.max(1);
     let mut blocks = Vec::new();
-    let mut byte_cursor = 0;
-    let mut utf16_cursor = 0_u32;
-    let mut line_index = 0_usize;
-    let mut block_byte_start = 0;
-    let mut block_utf16_start = 0_u32;
+    let mut byte_cursor = start.byte;
+    let mut utf16_cursor = start.utf16;
+    let mut line_index = start.line;
+    let mut block_byte_start = start.byte;
+    let mut block_utf16_start = start.utf16;
     let mut block_cells = 0_u32;
     let mut block_indent = 0_u8;
     let mut block_tail: Option<u8> = None;
     let mut block_table = 0_u8;
 
     while byte_cursor < text.len() {
+        if block_byte_start == byte_cursor && byte_cursor > start.byte {
+            let here = SplitAt {
+                byte: byte_cursor,
+                utf16: utf16_cursor,
+                line: line_index,
+            };
+            if stop(&here) {
+                return (blocks, Some(here));
+            }
+        }
         let line_end = match text[byte_cursor..].find('\n') {
             Some(relative) => byte_cursor + relative + 1,
             None => text.len(),
@@ -2244,7 +2298,7 @@ pub fn split_blocks(
         });
     }
 
-    blocks
+    (blocks, None)
 }
 
 /// Byte offsets inside `body` where the long line should be cut, relative to its

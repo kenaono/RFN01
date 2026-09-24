@@ -86,10 +86,10 @@ use crate::text_blocks::{
     Align, AskedLine, BandSide, BesideRule, BlockLayoutPlan, BlockMeasure, BlockPlacement,
     BlockSpan, CrossSlices, DEFAULT_CODE_FONT, DEFAULT_INK, Emphasis, FlowOrder, GridCell,
     LineInfo, LineKind, LineMarker, LineOrnament, LineRun, LineStyle, LongLine, MAX_HEADING_LEVEL,
-    Marks, Ornament, Pictures, PreparedWraps, RecordedWraps, StyleRun, StyledText, TableGrid,
-    TileSpan, Typography, UprightRules, block_flow_bound, callout_colour, cells_of, cells_per_line,
-    line_runs, place_blocks, split_blocks, style_runs, table_alignments, table_cells, tables,
-    warichu_halves, wrapping_list_lines,
+    Marks, Ornament, Pictures, PreparedWraps, RecordedWraps, SplitAt, StyleRun, StyledText,
+    TableGrid, TileSpan, Typography, UprightRules, block_flow_bound, callout_colour, cells_of,
+    cells_per_line, line_runs, place_blocks, split_blocks, split_blocks_from, style_runs,
+    table_alignments, table_cells, tables, warichu_halves, wrapping_list_lines,
 };
 
 /// Which way the text runs.
@@ -1575,8 +1575,14 @@ fn apply_marker_boxes(
 /// Counted forwards once for the whole document rather than looked up per
 /// block, which costs one pass over the text and not one scan per block.
 fn block_line_ranges(text: &str, spans: &[BlockSpan]) -> Vec<Range<usize>> {
+    block_line_ranges_from(text, spans, 0)
+}
+
+/// The same for a run of blocks whose first begins logical line `first_line`
+/// (RFN01-6 B).
+fn block_line_ranges_from(text: &str, spans: &[BlockSpan], first_line: usize) -> Vec<Range<usize>> {
     let mut ranges = Vec::with_capacity(spans.len());
-    let mut cursor = 0;
+    let mut cursor = first_line;
     for span in spans {
         let block_text = &text[span.byte_start..span.byte_end];
         let breaks = block_text.matches('\n').count();
@@ -4246,6 +4252,64 @@ struct PendingBlock {
     keep_trailing_empty_line: bool,
 }
 
+/// What every block of one update is judged against (RFN01-6 B: the whole
+/// update and the near one judge a block the same way, by one function).
+struct BlockPass<'a> {
+    styled: StyledText<'a>,
+    typography: &'a Typography,
+    spec: Arc<Typography>,
+    mode: WritingMode,
+    cells: u32,
+    charged_extent: u32,
+    margin: f32,
+    fit: LineFit,
+    last_index: usize,
+    /// The unwrapped tails of long paragraphs, which stay estimated.
+    deferred_wraps: Vec<Range<usize>>,
+    foreground: Option<&'a incremental::Window>,
+}
+
+/// What judging and measuring one update's blocks produced. One slot per
+/// block, filled in whatever order the answers arrive: a block measured on
+/// another thread comes back when it comes back, so the order of the document
+/// is kept here rather than in the measuring.
+struct BlockWork {
+    measures: Vec<Option<BlockMeasure>>,
+    keys: Vec<Option<(u64, u64)>>,
+    tasks: Vec<MeasureTask>,
+    pending: HashMap<usize, PendingBlock>,
+    table_tasks: Vec<usize>,
+    fresh_measures: Vec<(u64, MeasuredBlock)>,
+    fresh_layouts: Vec<(u64, IDWriteTextLayout)>,
+    cost: UpdateCost,
+}
+
+impl BlockWork {
+    fn sized(blocks: usize, cost: UpdateCost) -> Self {
+        Self {
+            measures: vec![None; blocks],
+            keys: vec![None; blocks],
+            tasks: Vec::new(),
+            pending: HashMap::new(),
+            table_tasks: Vec::new(),
+            fresh_measures: Vec::new(),
+            fresh_layouts: Vec::new(),
+            cost,
+        }
+    }
+}
+
+/// The line extent a split is charged in, with its nominal padding, and the
+/// cells per line that follow from it. The same pane at a different line
+/// extent wraps differently and cuts elsewhere.
+fn charged_geometry(fit: LineFit, margin: f32, typography: &Typography) -> (u32, u32) {
+    let line_box = fit.line_box(margin, 0.0);
+    // The splitting helpers accept an extent with their nominal padding.
+    // Translate the actual measured text area to that convention.
+    let charged_extent = (line_box + typography.font_size * 13.0).ceil() as u32;
+    (charged_extent, cells_per_line(charged_extent, typography))
+}
+
 /// How many long paragraphs make it worth waking the other threads (要件 2).
 ///
 /// **Two, because a long paragraph is never small.** The cheapest one here is
@@ -5175,6 +5239,21 @@ pub struct TextEngine {
     deferred_blocks: HashSet<usize>,
     background: Option<incremental::BackgroundLayout>,
     work_cancel: Option<incremental::Cancellation>,
+    /// Per block of the plan, the measure and layout keys it was judged under,
+    /// if it was (RFN01-6 B). A kept block keeps its keys, so the cache can be
+    /// told what the plan still names without hashing every block again.
+    block_keys: Vec<Option<(u64, u64)>>,
+    /// Per block of the plan, its measurement as the plan was placed from.
+    block_measures: Vec<BlockMeasure>,
+    /// How many blocks of the plan name each measure key, so that the entries
+    /// a near update stops naming leave the cache.
+    measure_refs: HashMap<u64, u32>,
+    /// Logical lines in `text`, counted once by the whole update and kept by
+    /// the near one.
+    line_count: usize,
+    /// Tests only: take the whole update every time, to compare the near one
+    /// against.
+    whole_only: bool,
 }
 
 mod incremental;
@@ -5423,11 +5502,21 @@ fn heading_margin_in(
 /// at 100, 1000 and 10000 — three times in a document's life — and that costs a
 /// full relayout, because the line box every block was measured in is the page
 /// less this.
+#[cfg(test)]
 fn number_column(typography: &Typography, mode: WritingMode, text: &str) -> Option<NumberColumn> {
+    number_column_for(typography, mode, text.matches('\n').count() + 1)
+}
+
+/// The same, for a document of `lines` logical lines (RFN01-6 B: counting
+/// them is a walk over the whole text, so the near update carries the count).
+fn number_column_for(
+    typography: &Typography,
+    mode: WritingMode,
+    lines: usize,
+) -> Option<NumberColumn> {
     if !typography.line_numbers {
         return None;
     }
-    let lines = text.matches('\n').count() + 1;
     // Two digits at least: a document of nine lines still wants its numbers to
     // sit under one another rather than against the text.
     let digits = lines.to_string().len().max(2) as f32;
@@ -5598,13 +5687,23 @@ impl TextEngine {
     /// True when the input text and geometry match. `layout_pending` separately
     /// says whether any offscreen placements are still estimates.
     pub fn matches(&self, styled: StyledText<'_>, fit: LineFit, typography: &Typography) -> bool {
+        self.text == styled.text && self.same_setting(styled, fit, typography)
+    }
+
+    /// Everything [`Self::matches`] compares but the text.
+    fn same_setting(&self, styled: StyledText<'_>, fit: LineFit, typography: &Typography) -> bool {
         self.fit == fit
             && self.typography == *typography
-            && self.text == styled.text
             && self.line_styles == styled.lines
             && self.line_spans == styled.spans
             && self.line_markers == styled.markers
             && self.source_line == styled.source_line
+    }
+
+    /// Tests only: never take the near update (RFN01-6 B).
+    #[cfg(test)]
+    pub(crate) fn take_whole_updates(&mut self) {
+        self.whole_only = true;
     }
 
     /// Re-split and re-measure the document, reusing every block whose text and
@@ -5616,7 +5715,7 @@ impl TextEngine {
         typography: &Typography,
     ) -> Result<UpdateCost> {
         self.cancel_background();
-        self.update_inner(styled, fit, typography, None)
+        self.update_inner(styled, fit, typography, None, None)
     }
 
     fn update_inner(
@@ -5625,13 +5724,16 @@ impl TextEngine {
         fit: LineFit,
         typography: &Typography,
         foreground: Option<&incremental::Window>,
+        near: Option<&incremental::TextDiff>,
     ) -> Result<UpdateCost> {
         let (fit, typography) = settled(fit, typography);
-        if self.matches(styled, fit, &typography) && self.deferred_blocks.is_empty() {
+        if near.is_none()
+            && self.matches(styled, fit, &typography)
+            && self.deferred_blocks.is_empty()
+        {
             return Ok(UpdateCost::default());
         }
         self.check_cancelled()?;
-        self.deferred_blocks.clear();
         if self.fit != fit || self.typography != typography {
             // Both feed into every measurement, so nothing cached survives. The
             // wrap positions go too: they are keyed by the geometry, so the old
@@ -5640,32 +5742,38 @@ impl TextEngine {
             self.layouts.clear();
             self.wraps.clear();
         }
+        // RFN01-6 B: **a keystroke re-splits and re-judges only the stretch
+        // around itself** when it can; the whole document below is for when
+        // it cannot, and for the background worker.
+        if let (Some(window), Some(diff)) = (foreground, near)
+            && let Some(cost) = self.update_near(styled, fit, &typography, window, diff)?
+        {
+            return Ok(cost);
+        }
+        self.deferred_blocks.clear();
 
         let text = styled.text;
         let mode = self.mode;
+        let lines = text.matches('\n').count() + 1;
         // 要件 9（2026-09-07追加）: **the numbers live in the margin**, so the
         // margin grows to hold them. Both sides grow, which keeps the page
         // centred and — far more to the point — keeps every one of the forty
         // places that turn a line coordinate into a screen one reading a single
         // number, exactly as it did before.
-        let numbers = number_column(&typography, mode, text);
+        let numbers = number_column_for(&typography, mode, lines);
         let heading_margin = if self.typography == typography && self.margin > 0.0 {
             self.margin - self.numbers.map_or(0.0, |column| column.gutter)
         } else {
             heading_margin(&typography, mode)?
         };
         let margin = heading_margin + numbers.map_or(0.0, |column| column.gutter);
-        let line_box = fit.line_box(margin, 0.0);
-        // The splitting helpers accept an extent with their nominal padding.
-        // Translate the actual measured text area to that convention.
-        let charged_extent = (line_box + typography.font_size * 13.0).ceil() as u32;
-        // The split is charged in line space, so it needs the geometry: the same
-        // pane at a different line extent wraps differently and cuts elsewhere.
-        let cells = cells_per_line(charged_extent, &typography);
-        // The same spec, in a form a task can carry. One spec covers the whole
-        // update and holds a family name for the body, one for code and one per
-        // heading level, so it is shared rather than cloned per task.
-        let spec = Arc::new(typography.clone());
+        let (charged_extent, cells) = charged_geometry(fit, margin, &typography);
+        let page = WrapPage {
+            typography: Arc::new(typography.clone()),
+            mode,
+            line_extent: charged_extent,
+            line_box: fit.line_box(margin, 0.0),
+        };
         // **Ask first, answer afterwards** (要件 2). A logical line longer than
         // one block is cut at the positions DirectWrite wraps it, and finding
         // those is the one piece of laying out the split itself does. So the
@@ -5678,271 +5786,63 @@ impl TextEngine {
         // blocks are already the right ones, and the second one never runs.
         let mut asking = RecordedWraps::for_text(text);
         let spans = split_blocks(styled, cells, &typography, &mut asking);
-        let page = WrapPage {
-            typography: spec.clone(),
-            mode,
-            line_extent: charged_extent,
-            line_box,
-        };
         let answered =
             self.wrap_answers(&asking.asked, &page, styled, cells, &typography, foreground)?;
         let (spans, fresh_wraps, wrap_cost) = match answered {
-            Some(done) => done,
+            Some((answers, current, cost)) => (
+                split_blocks(styled, cells, &typography, &mut PreparedWraps::new(answers)),
+                current,
+                cost,
+            ),
             None => (spans, Vec::new(), UpdateCost::default()),
         };
         self.wraps = fresh_wraps;
-        let deferred = incremental::deferred_ranges(styled.text, &self.wraps);
-        // **One slot per block, filled in whatever order the answers arrive.**
-        // A block measured on another thread comes back when it comes back, so
-        // the order of the document is kept here rather than in the measuring.
-        let mut measures: Vec<Option<BlockMeasure>> = vec![None; spans.len()];
-        let mut live_measure_keys = HashSet::with_capacity(spans.len());
-        let mut live_layout_keys = HashSet::with_capacity(spans.len());
-        let mut fresh_measures = Vec::new();
-        let mut fresh_layouts = Vec::new();
-        let mut measured = wrap_cost;
-        // The blocks the cache had nothing for, and where each answer belongs.
-        let mut tasks: Vec<MeasureTask> = Vec::new();
-        let mut pending: HashMap<usize, PendingBlock> = HashMap::new();
-
         let block_lines = block_line_ranges(text, &spans);
-        // 要件 7.3.2: this block's own box, narrowed by its indent. **The
-        // measurement has to be taken in it**, or the block is placed at a size
-        // it is not drawn at — and a table has to be brought inside the same
-        // one.
-        let block_boxes = spans
-            .iter()
-            .map(|span| fit.line_box(margin, block_inset(span, &typography)))
-            .collect::<Vec<f32>>();
-        // 要件 7.3.2: **the one thing here that text and arithmetic cannot
-        // decide.** A table's column is as wide as the widest cell anywhere in
-        // it, and how wide a cell is only DirectWrite knows — so the tables are
-        // measured first, in one pass, and what comes back is ordinary style
-        // runs. A document with no table in it asks for nothing and never wakes
-        // the graphics at all (技術検証 7.7).
-        // The tables the cache has nothing for, gathered in the pass below and
-        // measured together afterwards — **one `with_graphics` for all of
-        // them**, which is what the pre-pass this replaced was for.
-        let last_index = spans.len().saturating_sub(1);
-        let mut table_tasks: Vec<usize> = Vec::new();
-
+        let pass = BlockPass {
+            styled,
+            typography: &typography,
+            spec: page.typography.clone(),
+            mode,
+            cells,
+            charged_extent,
+            margin,
+            fit,
+            last_index: spans.len().saturating_sub(1),
+            deferred_wraps: incremental::deferred_ranges(text, &self.wraps),
+            foreground,
+        };
+        let mut work = BlockWork::sized(spans.len(), wrap_cost);
         // **Deciding what to measure needs no graphics at all.** Which blocks
         // the cache already answers, what ranges each one sets, how wide its box
         // is — all of it is text and arithmetic, and separating it from the
         // measuring is what lets the measuring go somewhere else.
-        {
-            for (index, span) in spans.iter().enumerate() {
-                self.check_cancelled()?;
-                if deferred
-                    .iter()
-                    .any(|range| span.byte_start < range.end && span.byte_end > range.start)
-                {
-                    self.deferred_blocks.insert(index);
-                    measures[index] = Some(incremental::estimate(span, cells, &typography));
-                    continue;
-                }
-                let block_text = &text[span.byte_start..span.byte_end];
-                let block_styled = block_styling(styled, span, &block_lines[index]);
-
-                let runs = style_runs(block_styled, mode.upright_rules(&typography));
-                let keep_trailing_empty_line = index == last_index;
-                let block_box = block_boxes[index];
-                // 要件 7.3.2: **a table is measured like every other block, and
-                // that is the point** (2026-09-06). It used to be measured
-                // ahead of this loop, outside the cache, so **every table in
-                // the document was re-measured on every keystroke** — a cell
-                // laid out per cell per table per key, wherever the writer was
-                // typing. Measured: 1.13ms per 25-row table, so a plan with 16
-                // of them cost 19.3ms of a keystroke against 1.3ms with none.
-                // A table's columns are a function of its own block's text,
-                // the spec, the mode and the box — the same four the key
-                // already carries — plus the row the caret is on, which is why
-                // `measure_key` takes it.
-                // **The same test `tables` makes**, both halves of it: a
-                // source pane sets a table as text, bars and all (要件 7.3.1),
-                // so there is no grid there to measure.
-                // **組む範囲の外で、まだ測っていないブロックは推定で置く**（RFN01-6のA）。
-                // 何も測っていない最初の組版では、控えを引く鍵も作らない——作るだけで
-                // 全ブロックの本文をなめることになる。
-                let outside = foreground
-                    .is_some_and(|window| !window.touches(span.byte_start..span.byte_end));
-                if outside && self.measures.is_empty() {
-                    self.deferred_blocks.insert(index);
-                    measures[index] = Some(incremental::estimate(span, cells, &typography));
-                    continue;
-                }
-                let table = block_styled.is_preview()
-                    && block_styled.lines.iter().any(|line| line.kind.is_table());
-                let block_layout = layout_key(block_text, &runs, &typography, block_box);
-                let key = measure_key(
-                    block_layout,
-                    keep_trailing_empty_line,
-                    table.then_some(block_styled.source_line).flatten(),
-                );
-                live_measure_keys.insert(key);
-                live_layout_keys.insert(block_layout);
-                if let Some(cached) = self.measures.get(&key)
-                    && cached.text == block_text
-                    && cached.keep_trailing_empty_line == keep_trailing_empty_line
-                {
-                    // Cheap now that the line table is shared, and the entry
-                    // itself stays put rather than being copied into a new map.
-                    measures[index] = Some(cached.measure.clone());
-                    continue;
-                }
-                if outside {
-                    self.deferred_blocks.insert(index);
-                    measures[index] = Some(incremental::estimate(span, cells, &typography));
-                    continue;
-                }
-
-                measured.blocks += 1;
-                measured.utf16 += span.utf16_len();
-                pending.insert(
-                    index,
-                    PendingBlock {
-                        measure_key: key,
-                        layout_key: block_layout,
-                        keep_trailing_empty_line,
-                    },
-                );
-                // **A table is not one layout**, so there is no `MeasureTask`
-                // it could be and nothing to hand a thread: its cells are laid
-                // out one at a time, and only DirectWrite on this thread can
-                // say how wide a cell is (技術検証 7.7).
-                if table {
-                    table_tasks.push(index);
-                    continue;
-                }
-                let extent = block_extent(span, charged_extent, &typography);
-                let max_flow_size = block_flow_bound(block_styled, extent, &typography);
-                tasks.push(MeasureTask {
-                    index,
-                    text: block_text.to_owned(),
-                    runs,
-                    typography: spec.clone(),
-                    mode,
-                    block_box,
-                    max_flow_size,
-                    keep_trailing_empty_line,
-                    tail_aligned: span.tail_cells.is_some(),
-                });
-            }
+        for (index, span) in spans.iter().enumerate() {
+            self.judge_block(&pass, &mut work, index, span, &block_lines[index])?;
         }
-
-        // 要件 7.3.2: **the tables that changed, and only those.** One
-        // `with_graphics` for all of them, and a document whose tables are
-        // where they were never wakes the graphics at all — which is what a
-        // keystroke somewhere else in the document is.
-        if !table_tasks.is_empty() {
-            with_graphics(|graphics| {
-                for index in &table_tasks {
-                    self.check_cancelled()?;
-                    let index = *index;
-                    let span = &spans[index];
-                    let block_styled = block_styling(styled, span, &block_lines[index]);
-                    let (grid, mut measure) = measure_table(
-                        graphics,
-                        block_styled,
-                        &typography,
-                        mode,
-                        block_boxes[index],
-                        index == last_index,
-                    )?
-                    .expect("a block whose lines are a table holds one (`tables`)");
-                    measure.grid = Some(Arc::new(grid));
-                    if let Some(slot) = pending.get(&index) {
-                        fresh_measures.push((
-                            slot.measure_key,
-                            MeasuredBlock {
-                                text: text[span.byte_start..span.byte_end].to_owned(),
-                                keep_trailing_empty_line: slot.keep_trailing_empty_line,
-                                measure: measure.clone(),
-                            },
-                        ));
-                    }
-                    measures[index] = Some(measure);
-                }
-                Ok(())
-            })?;
-        }
-
-        // **On the threads only when there is enough to divide** (要件 2). A
-        // keystroke leaves one block to measure, and handing one block over
-        // costs more than measuring it; a change of width leaves the whole
-        // document, and that is what this is for.
-        //
-        // The threads bring back measurements and no layouts — a DirectWrite
-        // layout belongs to the thread that made it. What that costs is the few
-        // blocks on screen, whose layouts `layout_for` builds again when the
-        // tiles are drawn; measuring them all again is what it saves.
-        let divide = tasks.len() >= PARALLEL_MEASURE_MIN
-            && self.work_cancel.is_none()
-            && foreground.is_none();
-        let handed = divide.then(|| {
-            let queued = tasks.iter().cloned().map(PoolTask::Measure).collect();
-            on_layout_threads(queued)
-        });
-        if let Some(answered) = handed.flatten() {
-            let answered = answered?;
-            measured.divided = answered.len() as u32;
-            for (index, measure) in answered.into_iter().filter_map(measured_answer) {
-                if let Some(slot) = pending.get(&index) {
-                    let span = &spans[index];
-                    fresh_measures.push((
-                        slot.measure_key,
-                        MeasuredBlock {
-                            text: text[span.byte_start..span.byte_end].to_owned(),
-                            keep_trailing_empty_line: slot.keep_trailing_empty_line,
-                            measure: measure.clone(),
-                        },
-                    ));
-                }
-                measures[index] = Some(measure);
-            }
-        }
-
-        // **Whatever is left, which is all of it when there are no threads.**
-        // A block the threads did not answer for is not a special case here: it
-        // is a block that still has no measurement, and this is where a block
-        // without one gets measured.
-        let left = tasks
-            .iter()
-            .filter(|task| measures[task.index].is_none())
-            .collect::<Vec<&MeasureTask>>();
-        if !left.is_empty() {
-            with_graphics(|graphics| {
-                for task in left {
-                    self.check_cancelled()?;
-                    let (measure, layout) = measure_task(graphics, task)?;
-                    if let Some(slot) = pending.get(&task.index) {
-                        fresh_measures.push((
-                            slot.measure_key,
-                            MeasuredBlock {
-                                text: task.text.clone(),
-                                keep_trailing_empty_line: slot.keep_trailing_empty_line,
-                                measure: measure.clone(),
-                            },
-                        ));
-                        // Keep the layout that was just built. The caret hit
-                        // test and the tile render both want this exact block
-                        // moments from now, and building it again is one of the
-                        // more expensive things here. **Only here** — a layout
-                        // made on another thread belongs to that thread, so a
-                        // block measured there is laid out again when it is
-                        // drawn (`layout_for`).
-                        fresh_layouts.push((slot.layout_key, layout));
-                    }
-                    measures[task.index] = Some(measure);
-                }
-                Ok(())
-            })?;
-        }
+        self.measure_judged(&pass, &mut work, &spans, &block_lines)?;
+        let BlockWork {
+            measures,
+            keys,
+            fresh_measures,
+            fresh_layouts,
+            cost: measured,
+            ..
+        } = work;
         let measures = measures
             .into_iter()
             .map(|measure| measure.expect("every block is measured or cached"))
             .collect::<Vec<BlockMeasure>>();
 
+        let live_measure_keys = keys
+            .iter()
+            .flatten()
+            .map(|(key, _)| *key)
+            .collect::<HashSet<u64>>();
+        let live_layout_keys = keys
+            .iter()
+            .flatten()
+            .map(|(_, key)| *key)
+            .collect::<HashSet<u64>>();
         self.measures
             .retain(|key, _| live_measure_keys.contains(key));
         self.measures.extend(fresh_measures);
@@ -5951,12 +5851,11 @@ impl TextEngine {
         // every update, and every caret move then rebuilt its block's layout.
         self.layouts
             .retain(|(key, _)| live_layout_keys.contains(key));
-        for (key, layout) in fresh_layouts {
-            if !self.layouts.iter().any(|(cached, _)| *cached == key) {
-                self.layouts.insert(0, (key, layout));
-            }
+        self.keep_layouts(fresh_layouts);
+        self.measure_refs.clear();
+        for (key, _) in keys.iter().flatten() {
+            *self.measure_refs.entry(*key).or_default() += 1;
         }
-        self.layouts.truncate(LAYOUT_CACHE_LIMIT);
         self.plan = place_blocks(&spans, &measures, margin, mode.flow_order());
         self.text = text.to_owned();
         self.wrapping_items = wrapping_list_lines(styled, cells, &typography);
@@ -5965,6 +5864,8 @@ impl TextEngine {
         self.line_markers = styled.markers.to_vec();
         self.source_line = styled.source_line;
         self.block_lines = block_lines;
+        self.block_keys = keys;
+        self.line_count = lines;
         self.fit = fit;
         self.numbers = numbers;
         // 要件 9: how wide the page came out. A wrapped line makes it the extent
@@ -5984,9 +5885,649 @@ impl TextEngine {
                 (reach + margin * 2.0).ceil().max(1.0) as u32
             }
         };
+        self.block_measures = measures;
         self.typography = typography;
         self.margin = margin;
         Ok(measured)
+    }
+
+    /// Re-split and re-judge only the stretch an edit touched, and keep every
+    /// other block as it was — moved, not measured (RFN01-6 B).
+    ///
+    /// **Why the rest can be kept.** A split started at the boundary before
+    /// the edit makes the blocks a whole split makes past it
+    /// ([`split_blocks_from`]); once it reaches a boundary past the edit where
+    /// the text, every line's setting and the boundary itself are what they
+    /// were, everything after is the old split shifted by the edit's length.
+    /// A kept block's text and setting are unchanged, so what the whole update
+    /// would have found for it in the cache is what it already has.
+    ///
+    /// Besides the edited stretch, a kept block is judged again when the line
+    /// shown as its own source moved into or out of it, or when it is still
+    /// estimated and the window now reaches it; a long paragraph whose
+    /// estimated tail the window reaches is split again with the stretch, so
+    /// its wrap search goes on as the whole update's would. `None` sends the
+    /// caller to the whole update: a different geometry or line-number column,
+    /// or attributes that do not cover the text line for line.
+    ///
+    /// Nothing on `self` changes before the last of those answers is known.
+    fn update_near(
+        &mut self,
+        styled: StyledText<'_>,
+        fit: LineFit,
+        typography: &Typography,
+        window: &incremental::Window,
+        diff: &incremental::TextDiff,
+    ) -> Result<Option<UpdateCost>> {
+        let blocks = self.plan.blocks.len();
+        if self.whole_only
+            || blocks == 0
+            || self.block_keys.len() != blocks
+            || self.block_measures.len() != blocks
+            || self.block_lines.len() != blocks
+            || self.fit != fit
+            || self.typography != *typography
+            || diff.old_end > self.text.len()
+            || diff.new_end > styled.text.len()
+        {
+            return Ok(None);
+        }
+        let old = self.text.as_str();
+        let text = styled.text;
+        let old_lines = self.line_count;
+        let removed_breaks = old[diff.prefix..diff.old_end].matches('\n').count();
+        let added_breaks = text[diff.prefix..diff.new_end].matches('\n').count();
+        let Some(new_lines) = (old_lines + added_breaks).checked_sub(removed_breaks) else {
+            return Ok(None);
+        };
+        // The attributes have to say something about every line on both sides
+        // for a line-by-line comparison to mean anything.
+        let covers =
+            |len: usize, lines: usize, optional: bool| len == lines || (optional && len == 0);
+        if self.line_styles.len() != old_lines
+            || styled.lines.len() != new_lines
+            || !covers(self.line_spans.len(), old_lines, true)
+            || !covers(self.line_markers.len(), old_lines, true)
+            || styled.spans.len()
+                != if self.line_spans.is_empty() {
+                    0
+                } else {
+                    new_lines
+                }
+            || styled.markers.len()
+                != if self.line_markers.is_empty() {
+                    0
+                } else {
+                    new_lines
+                }
+        {
+            return Ok(None);
+        }
+        let numbers = number_column_for(typography, self.mode, new_lines);
+        if numbers.map(|column| column.gutter.to_bits())
+            != self.numbers.map(|column| column.gutter.to_bits())
+            || numbers.map(|column| column.size.to_bits())
+                != self.numbers.map(|column| column.size.to_bits())
+        {
+            return Ok(None);
+        }
+
+        let old_blocks = &self.plan.blocks;
+        let at = old_blocks
+            .partition_point(|block| block.span.byte_start <= diff.prefix)
+            .saturating_sub(1);
+        let first_line = self.block_lines[at].start
+            + old[old_blocks[at].span.byte_start.min(diff.prefix)..diff.prefix]
+                .matches('\n')
+                .count();
+        let same_line = |old_line: usize, new_line: usize| {
+            self.line_styles[old_line] == styled.lines[new_line]
+                && self.line_spans.get(old_line) == styled.spans.get(new_line)
+                && self.line_markers.get(old_line) == styled.markers.get(new_line)
+        };
+        // The first line whose setting changed, which can be above the edit: a
+        // table row becomes a header when the line under it becomes a rule.
+        let from_line = (0..first_line)
+            .find(|line| !same_line(*line, *line))
+            .unwrap_or(first_line);
+        let old_last = first_line + removed_breaks;
+        let new_last = first_line + added_breaks;
+        let room = (old_lines - old_last - 1).min(new_lines - new_last - 1);
+        // The last lines, counted from the end, that are the same text set the
+        // same way — below them a fence opened by the edit reaches on.
+        let tail = (0..room)
+            .take_while(|back| same_line(old_lines - 1 - back, new_lines - 1 - back))
+            .count();
+        let settled_from = new_lines - tail;
+
+        let delta = text.len() as isize - old.len() as isize;
+        let moved = |byte: usize| (byte as isize + delta) as usize;
+        // An estimated tail of a long paragraph the window now reaches is moved
+        // on by the wrap search, as the whole update would move it: so its
+        // paragraph joins the stretch that is split again.
+        let tails = incremental::deferred_ranges(old, &self.wraps);
+        let mut changed_line = from_line.min(first_line);
+        let mut reach_end = 0;
+        for index in &self.deferred_blocks {
+            let span = &old_blocks[*index].span;
+            if !tails
+                .iter()
+                .any(|tail| span.byte_start < tail.end && span.byte_end > tail.start)
+            {
+                continue;
+            }
+            let shown = if span.byte_end <= diff.prefix {
+                span.byte_start..span.byte_end
+            } else if span.byte_start >= diff.old_end {
+                moved(span.byte_start)..moved(span.byte_end)
+            } else {
+                // Inside the change, and split again with it.
+                continue;
+            };
+            if window.touches(shown.clone()) {
+                changed_line = changed_line.min(self.block_lines[*index].start);
+                reach_end = reach_end.max(shown.end);
+            }
+        }
+        // **Before the first changed line, never at its head**: a boundary at
+        // the head of a line is also made by that line's own setting (an
+        // indent, a table, a picture beginning there), so it is only known to
+        // stand when the line after it did not change.
+        let mut restart = self
+            .block_lines
+            .partition_point(|lines| lines.start < changed_line)
+            .saturating_sub(1);
+        while restart > 0 && old.as_bytes()[old_blocks[restart].span.byte_start - 1] != b'\n' {
+            restart -= 1;
+        }
+
+        let mode = self.mode;
+        let margin = self.margin;
+        let (charged_extent, cells) = charged_geometry(fit, margin, typography);
+        let page = WrapPage {
+            typography: Arc::new(typography.clone()),
+            mode,
+            line_extent: charged_extent,
+            line_box: fit.line_box(margin, 0.0),
+        };
+        let start = SplitAt {
+            byte: old_blocks[restart].span.byte_start,
+            utf16: old_blocks[restart].span.utf16_start,
+            line: self.block_lines[restart].start,
+        };
+        let mut resync = |here: &SplitAt| {
+            if here.byte < diff.new_end
+                || here.byte < reach_end
+                || here.line <= new_last
+                || here.line < settled_from
+            {
+                return false;
+            }
+            let was = (here.byte as isize - delta) as usize;
+            let index = old_blocks.partition_point(|block| block.span.byte_start < was);
+            index < blocks && old_blocks[index].span.byte_start == was
+        };
+        let mut asking = RecordedWraps::for_text(text);
+        let (region, stopped) =
+            split_blocks_from(styled, cells, typography, &mut asking, start, &mut resync);
+        let answered = self.wrap_answers(
+            &asking.asked,
+            &page,
+            styled,
+            cells,
+            typography,
+            Some(window),
+        )?;
+        let (region, region_wraps, wrap_cost) = match answered {
+            Some((answers, current, cost)) => {
+                let (region, again) = split_blocks_from(
+                    styled,
+                    cells,
+                    typography,
+                    &mut PreparedWraps::new(answers),
+                    start,
+                    &mut resync,
+                );
+                debug_assert_eq!(stopped, again, "both passes stop at one boundary");
+                (region, current, cost)
+            }
+            None => (region, Vec::new(), UpdateCost::default()),
+        };
+        // A split that found nothing left to cut would make the empty block a
+        // whole split makes only for an empty document.
+        if region.is_empty() || region.iter().any(|span| span.byte_start == span.byte_end) {
+            return Ok(None);
+        }
+        let (kept_from, utf16_delta, resync_byte) = match stopped {
+            Some(here) => {
+                let was = (here.byte as isize - delta) as usize;
+                let index = old_blocks.partition_point(|block| block.span.byte_start < was);
+                (
+                    index,
+                    here.utf16 as i64 - old_blocks[index].span.utf16_start as i64,
+                    was,
+                )
+            }
+            None => (blocks, 0, usize::MAX),
+        };
+        let line_delta = new_lines as isize - old_lines as isize;
+        let shift = |span: &BlockSpan| BlockSpan {
+            byte_start: moved(span.byte_start),
+            byte_end: moved(span.byte_end),
+            utf16_start: (span.utf16_start as i64 + utf16_delta) as u32,
+            utf16_end: (span.utf16_end as i64 + utf16_delta) as u32,
+            ..*span
+        };
+        let region_len = region.len();
+        let mut spans = Vec::with_capacity(restart + region_len + blocks - kept_from);
+        spans.extend(old_blocks[..restart].iter().map(|block| block.span));
+        spans.extend(region.iter().copied());
+        spans.extend(
+            old_blocks[kept_from..]
+                .iter()
+                .map(|block| shift(&block.span)),
+        );
+        let mut block_lines = Vec::with_capacity(spans.len());
+        block_lines.extend_from_slice(&self.block_lines[..restart]);
+        block_lines.extend(block_line_ranges_from(text, &region, start.line));
+        block_lines.extend(self.block_lines[kept_from..].iter().map(|lines| {
+            (lines.start as isize + line_delta) as usize..(lines.end as isize + line_delta) as usize
+        }));
+        // The source line, where it was and where it is now.
+        let source_moved = self.source_line != styled.source_line;
+        let old_source = self.source_line;
+        let new_source = styled.source_line;
+
+        // **From here on `self` changes**; every way back to the whole update
+        // is behind.
+        let old_wraps = std::mem::take(&mut self.wraps);
+        let mut wraps = Vec::with_capacity(old_wraps.len() + region_wraps.len());
+        let mut after = Vec::new();
+        for wrap in old_wraps {
+            if wrap.byte_start < start.byte {
+                wraps.push(wrap);
+            } else if wrap.byte_start >= resync_byte {
+                after.push(ParagraphWraps {
+                    byte_start: moved(wrap.byte_start),
+                    ..wrap
+                });
+            }
+        }
+        wraps.extend(region_wraps);
+        wraps.extend(after);
+        self.wraps = wraps;
+
+        let pass = BlockPass {
+            styled,
+            typography,
+            spec: page.typography.clone(),
+            mode,
+            cells,
+            charged_extent,
+            margin,
+            fit,
+            last_index: spans.len() - 1,
+            deferred_wraps: incremental::deferred_ranges(text, &self.wraps),
+            foreground: Some(window),
+        };
+        let mut work = BlockWork::sized(spans.len(), wrap_cost);
+        let old_deferred = std::mem::take(&mut self.deferred_blocks);
+        let old_keys = std::mem::take(&mut self.block_keys);
+        let old_measures = std::mem::take(&mut self.block_measures);
+        let old_block_lines = std::mem::take(&mut self.block_lines);
+        let mut released = old_keys[restart..kept_from]
+            .iter()
+            .flatten()
+            .map(|(key, _)| *key)
+            .collect::<Vec<u64>>();
+        let mut judged = (restart..restart + region_len).collect::<Vec<usize>>();
+        let kept = (0..restart)
+            .map(|old| (old, old))
+            .chain((kept_from..blocks).map(|old| (old, old - kept_from + restart + region_len)));
+        for (old_index, index) in kept {
+            let span = &spans[index];
+            let holds = |lines: &Range<usize>, line: Option<usize>| {
+                line.is_some_and(|line| lines.contains(&line))
+            };
+            let source = source_moved
+                && (holds(&old_block_lines[old_index], old_source)
+                    || holds(&block_lines[index], new_source));
+            let reached =
+                old_deferred.contains(&old_index) && window.touches(span.byte_start..span.byte_end);
+            if source || reached {
+                released.extend(old_keys[old_index].map(|(key, _)| key));
+                judged.push(index);
+                continue;
+            }
+            work.measures[index] = Some(old_measures[old_index].clone());
+            work.keys[index] = old_keys[old_index];
+            if old_deferred.contains(&old_index) {
+                self.deferred_blocks.insert(index);
+            }
+        }
+        for index in &judged {
+            self.judge_block(
+                &pass,
+                &mut work,
+                *index,
+                &spans[*index],
+                &block_lines[*index],
+            )?;
+        }
+        self.measure_judged(&pass, &mut work, &spans, &block_lines)?;
+        let BlockWork {
+            measures,
+            keys,
+            fresh_measures,
+            fresh_layouts,
+            cost,
+            ..
+        } = work;
+        let measures = measures
+            .into_iter()
+            .map(|measure| measure.expect("every block is measured, cached or kept"))
+            .collect::<Vec<BlockMeasure>>();
+        // The cache keeps what some block of the plan still names: what the
+        // judged blocks name now is taken before what they named is let go, so
+        // a block judged back to its own key keeps its entry.
+        self.measures.extend(fresh_measures);
+        for index in &judged {
+            if let Some((key, _)) = keys[*index] {
+                *self.measure_refs.entry(key).or_default() += 1;
+            }
+        }
+        for key in released {
+            if let Some(count) = self.measure_refs.get_mut(&key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.measure_refs.remove(&key);
+                    self.measures.remove(&key);
+                }
+            }
+        }
+        self.keep_layouts(fresh_layouts);
+        self.plan = place_blocks(&spans, &measures, margin, mode.flow_order());
+        self.text
+            .replace_range(diff.prefix..diff.old_end, &text[diff.prefix..diff.new_end]);
+        debug_assert_eq!(self.text, text);
+        // The lines from the first changed setting to the settled tail.
+        let lines_from = from_line.min(first_line);
+        let (old_to, new_to) = (old_lines - tail, new_lines - tail);
+        self.line_styles.splice(
+            lines_from..old_to,
+            styled.lines[lines_from..new_to].iter().copied(),
+        );
+        if !self.line_spans.is_empty() {
+            self.line_spans.splice(
+                lines_from..old_to,
+                styled.spans[lines_from..new_to].iter().cloned(),
+            );
+        }
+        if !self.line_markers.is_empty() {
+            self.line_markers.splice(
+                lines_from..old_to,
+                styled.markers[lines_from..new_to].iter().copied(),
+            );
+        }
+        self.source_line = styled.source_line;
+        self.block_lines = block_lines;
+        self.block_keys = keys;
+        self.block_measures = measures;
+        self.line_count = new_lines;
+        // `wrapping_items` is left as the last whole update counted it: it is
+        // a number for the log, and counting it walks the whole document.
+        if let LineFit::Extent(extent) = fit {
+            self.page_extent = extent;
+        }
+        Ok(Some(cost))
+    }
+
+    /// Keep the layouts an update just built, newest first, within the limit.
+    fn keep_layouts(&mut self, fresh: Vec<(u64, IDWriteTextLayout)>) {
+        for (key, layout) in fresh {
+            if !self.layouts.iter().any(|(cached, _)| *cached == key) {
+                self.layouts.insert(0, (key, layout));
+            }
+        }
+        self.layouts.truncate(LAYOUT_CACHE_LIMIT);
+    }
+
+    /// Decide what one block's measurement comes from: an estimate, the cache,
+    /// or a measuring still to be done (`work.pending`). Text and arithmetic
+    /// only — the measuring itself is [`Self::measure_judged`].
+    fn judge_block(
+        &mut self,
+        pass: &BlockPass<'_>,
+        work: &mut BlockWork,
+        index: usize,
+        span: &BlockSpan,
+        lines: &Range<usize>,
+    ) -> Result<()> {
+        self.check_cancelled()?;
+        let typography = pass.typography;
+        if pass
+            .deferred_wraps
+            .iter()
+            .any(|range| span.byte_start < range.end && span.byte_end > range.start)
+        {
+            self.deferred_blocks.insert(index);
+            work.measures[index] = Some(incremental::estimate(span, pass.cells, typography));
+            return Ok(());
+        }
+        let block_text = &pass.styled.text[span.byte_start..span.byte_end];
+        let block_styled = block_styling(pass.styled, span, lines);
+        // **組む範囲の外で、まだ測っていないブロックは推定で置く**（RFN01-6のA）。
+        // 何も測っていない最初の組版では、控えを引く鍵も作らない——作るだけで
+        // 全ブロックの本文をなめることになる。
+        let outside = pass
+            .foreground
+            .is_some_and(|window| !window.touches(span.byte_start..span.byte_end));
+        if outside && self.measures.is_empty() {
+            self.deferred_blocks.insert(index);
+            work.measures[index] = Some(incremental::estimate(span, pass.cells, typography));
+            return Ok(());
+        }
+        let runs = style_runs(block_styled, pass.mode.upright_rules(typography));
+        let keep_trailing_empty_line = index == pass.last_index;
+        // 要件 7.3.2: this block's own box, narrowed by its indent. **The
+        // measurement has to be taken in it**, or the block is placed at a size
+        // it is not drawn at — and a table has to be brought inside the same
+        // one.
+        let block_box = pass
+            .fit
+            .line_box(pass.margin, block_inset(span, typography));
+        // 要件 7.3.2: **a table is measured like every other block, and that
+        // is the point** (2026-09-06). It used to be measured ahead of this
+        // loop, outside the cache, so **every table in the document was
+        // re-measured on every keystroke** — a cell laid out per cell per table
+        // per key, wherever the writer was typing. Measured: 1.13ms per 25-row
+        // table, so a plan with 16 of them cost 19.3ms of a keystroke against
+        // 1.3ms with none. A table's columns are a function of its own block's
+        // text, the spec, the mode and the box — the same four the key already
+        // carries — plus the row the caret is on, which is why `measure_key`
+        // takes it. **The same test `tables` makes**, both halves of it: a
+        // source pane sets a table as text, bars and all (要件 7.3.1), so there
+        // is no grid there to measure.
+        let table =
+            block_styled.is_preview() && block_styled.lines.iter().any(|line| line.kind.is_table());
+        let block_layout = layout_key(block_text, &runs, typography, block_box);
+        let key = measure_key(
+            block_layout,
+            keep_trailing_empty_line,
+            table.then_some(block_styled.source_line).flatten(),
+        );
+        work.keys[index] = Some((key, block_layout));
+        if let Some(cached) = self.measures.get(&key)
+            && cached.text == block_text
+            && cached.keep_trailing_empty_line == keep_trailing_empty_line
+        {
+            // Cheap now that the line table is shared, and the entry itself
+            // stays put rather than being copied into a new map.
+            work.measures[index] = Some(cached.measure.clone());
+            return Ok(());
+        }
+        if outside {
+            self.deferred_blocks.insert(index);
+            work.measures[index] = Some(incremental::estimate(span, pass.cells, typography));
+            return Ok(());
+        }
+        work.cost.blocks += 1;
+        work.cost.utf16 += span.utf16_len();
+        work.pending.insert(
+            index,
+            PendingBlock {
+                measure_key: key,
+                layout_key: block_layout,
+                keep_trailing_empty_line,
+            },
+        );
+        // **A table is not one layout**, so there is no `MeasureTask` it could
+        // be and nothing to hand a thread: its cells are laid out one at a
+        // time, and only DirectWrite on this thread can say how wide a cell is
+        // (技術検証 7.7).
+        if table {
+            work.table_tasks.push(index);
+            return Ok(());
+        }
+        let extent = block_extent(span, pass.charged_extent, typography);
+        let max_flow_size = block_flow_bound(block_styled, extent, typography);
+        work.tasks.push(MeasureTask {
+            index,
+            text: block_text.to_owned(),
+            runs,
+            typography: pass.spec.clone(),
+            mode: pass.mode,
+            block_box,
+            max_flow_size,
+            keep_trailing_empty_line,
+            tail_aligned: span.tail_cells.is_some(),
+        });
+        Ok(())
+    }
+
+    /// Measure what [`Self::judge_block`] left pending: the tables here, the
+    /// rest on the threads when there is enough to divide, and whatever is
+    /// left here.
+    fn measure_judged(
+        &mut self,
+        pass: &BlockPass<'_>,
+        work: &mut BlockWork,
+        spans: &[BlockSpan],
+        block_lines: &[Range<usize>],
+    ) -> Result<()> {
+        let text = pass.styled.text;
+        let typography = pass.typography;
+        // 要件 7.3.2: **the tables that changed, and only those.** One
+        // `with_graphics` for all of them, and a document whose tables are
+        // where they were never wakes the graphics at all — which is what a
+        // keystroke somewhere else in the document is.
+        if !work.table_tasks.is_empty() {
+            let table_tasks = std::mem::take(&mut work.table_tasks);
+            with_graphics(|graphics| {
+                for index in table_tasks {
+                    self.check_cancelled()?;
+                    let span = &spans[index];
+                    let block_styled = block_styling(pass.styled, span, &block_lines[index]);
+                    let (grid, mut measure) = measure_table(
+                        graphics,
+                        block_styled,
+                        typography,
+                        pass.mode,
+                        pass.fit
+                            .line_box(pass.margin, block_inset(span, typography)),
+                        index == pass.last_index,
+                    )?
+                    .expect("a block whose lines are a table holds one (`tables`)");
+                    measure.grid = Some(Arc::new(grid));
+                    if let Some(slot) = work.pending.get(&index) {
+                        work.fresh_measures.push((
+                            slot.measure_key,
+                            MeasuredBlock {
+                                text: text[span.byte_start..span.byte_end].to_owned(),
+                                keep_trailing_empty_line: slot.keep_trailing_empty_line,
+                                measure: measure.clone(),
+                            },
+                        ));
+                    }
+                    work.measures[index] = Some(measure);
+                }
+                Ok(())
+            })?;
+        }
+
+        // **On the threads only when there is enough to divide** (要件 2). A
+        // keystroke leaves one block to measure, and handing one block over
+        // costs more than measuring it; a change of width leaves the whole
+        // document, and that is what this is for.
+        //
+        // The threads bring back measurements and no layouts — a DirectWrite
+        // layout belongs to the thread that made it. What that costs is the few
+        // blocks on screen, whose layouts `layout_for` builds again when the
+        // tiles are drawn; measuring them all again is what it saves.
+        let divide = work.tasks.len() >= PARALLEL_MEASURE_MIN
+            && self.work_cancel.is_none()
+            && pass.foreground.is_none();
+        let handed = divide.then(|| {
+            let queued = work.tasks.iter().cloned().map(PoolTask::Measure).collect();
+            on_layout_threads(queued)
+        });
+        if let Some(answered) = handed.flatten() {
+            let answered = answered?;
+            work.cost.divided = answered.len() as u32;
+            for (index, measure) in answered.into_iter().filter_map(measured_answer) {
+                if let Some(slot) = work.pending.get(&index) {
+                    let span = &spans[index];
+                    work.fresh_measures.push((
+                        slot.measure_key,
+                        MeasuredBlock {
+                            text: text[span.byte_start..span.byte_end].to_owned(),
+                            keep_trailing_empty_line: slot.keep_trailing_empty_line,
+                            measure: measure.clone(),
+                        },
+                    ));
+                }
+                work.measures[index] = Some(measure);
+            }
+        }
+
+        // **Whatever is left, which is all of it when there are no threads.**
+        // A block the threads did not answer for is not a special case here: it
+        // is a block that still has no measurement, and this is where a block
+        // without one gets measured.
+        let tasks = std::mem::take(&mut work.tasks);
+        let left = tasks
+            .iter()
+            .filter(|task| work.measures[task.index].is_none())
+            .collect::<Vec<&MeasureTask>>();
+        if !left.is_empty() {
+            with_graphics(|graphics| {
+                for task in left {
+                    self.check_cancelled()?;
+                    let (measure, layout) = measure_task(graphics, task)?;
+                    if let Some(slot) = work.pending.get(&task.index) {
+                        work.fresh_measures.push((
+                            slot.measure_key,
+                            MeasuredBlock {
+                                text: task.text.clone(),
+                                keep_trailing_empty_line: slot.keep_trailing_empty_line,
+                                measure: measure.clone(),
+                            },
+                        ));
+                        // Keep the layout that was just built. The caret hit
+                        // test and the tile render both want this exact block
+                        // moments from now, and building it again is one of the
+                        // more expensive things here. **Only here** — a layout
+                        // made on another thread belongs to that thread, so a
+                        // block measured there is laid out again when it is
+                        // drawn (`layout_for`).
+                        work.fresh_layouts.push((slot.layout_key, layout));
+                    }
+                    work.measures[task.index] = Some(measure);
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     /// Answer every question the recording split asked, and split again
@@ -6008,7 +6549,7 @@ impl TextEngine {
         cells: u32,
         typography: &Typography,
         foreground: Option<&incremental::Window>,
-    ) -> Result<Option<(Vec<BlockSpan>, Vec<ParagraphWraps>, UpdateCost)>> {
+    ) -> Result<Option<(Vec<Vec<usize>>, Vec<ParagraphWraps>, UpdateCost)>> {
         if asked.is_empty() {
             return Ok(None);
         }
@@ -6133,9 +6674,8 @@ impl TextEngine {
                 complete: complete[at],
             })
             .collect();
-        let mut prepared = PreparedWraps::new(answers);
-        let spans = split_blocks(styled, cells, typography, &mut prepared);
-        Ok(Some((spans, current, cost)))
+        let _ = (styled, cells);
+        Ok(Some((answers, current, cost)))
     }
 
     /// How many of the document's logical lines begin with a list marker
@@ -7557,6 +8097,23 @@ fn wrap_reuse(previous: &[ParagraphWraps], line: LongLine<'_>) -> WrapReuse {
             whole: true,
             shared: 0,
             starts: 0,
+        };
+    }
+    // **The same paragraph, not yet wrapped to its end**, is taken as far as
+    // it got (RFN01-6 B). The margin below is for text that changed after the
+    // shared part, where the last lines before the change can flow again;
+    // here nothing changed, and trimming it cost a paragraph the window does
+    // not reach two lines of its progress on every update.
+    let unfinished = previous.iter().find(|kept| {
+        !kept.complete && kept.matches(line) && kept.marks == line.marks && kept.text == line.text
+    });
+    if let Some(unfinished) = unfinished {
+        return WrapReuse {
+            kept: unfinished.starts.clone(),
+            from: unfinished.starts.last().copied().unwrap_or(0),
+            whole: false,
+            shared: line.text.len(),
+            starts: unfinished.starts.len(),
         };
     }
 

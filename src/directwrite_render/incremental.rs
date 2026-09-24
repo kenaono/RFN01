@@ -12,7 +12,13 @@ const FOREGROUND_LOOKAHEAD: usize = 2048;
 /// in characters (RFN01-6 A). The caret can sit at the bottom of the view, and
 /// the text above it is on screen.
 const FOREGROUND_LOOKBEHIND: usize = 2048;
+#[cfg(not(test))]
 const FOREGROUND_BUDGET: Duration = Duration::from_millis(8);
+/// Tests stop on the window count alone: a budget of time makes where the
+/// foreground stops depend on how fast the machine was that moment, and two
+/// engines compared step by step would part for no reason in the code.
+#[cfg(test)]
+const FOREGROUND_BUDGET: Duration = Duration::MAX;
 
 #[derive(Clone)]
 pub(super) struct Cancellation {
@@ -63,6 +69,10 @@ struct Completed {
     margin: f32,
     numbers: Option<NumberColumn>,
     wrapping_items: usize,
+    block_keys: Vec<Option<(u64, u64)>>,
+    block_measures: Vec<BlockMeasure>,
+    measure_refs: HashMap<u64, u32>,
+    line_count: usize,
 }
 
 #[derive(Default)]
@@ -70,6 +80,8 @@ struct Mailbox {
     job: Option<Job>,
     answer: Option<Answer>,
     stopped: bool,
+    /// The epoch of the job the worker is laying out now, if it is.
+    running: Option<u64>,
 }
 
 /// 手前の組版が正確に組む範囲（E17、RFN01-6のA、2026-09-24）。
@@ -85,15 +97,73 @@ pub(super) struct Window {
     ranges: Vec<Range<usize>>,
 }
 
+/// Where the new text differs from the one laid out last (RFN01-6 B): the
+/// same up to `prefix`, and the same again from `old_end` in the old text and
+/// `new_end` in the new one. All three are character boundaries. An identical
+/// text is an empty change at its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TextDiff {
+    pub prefix: usize,
+    pub old_end: usize,
+    pub new_end: usize,
+}
+
+impl TextDiff {
+    /// Compared a page at a time, which is `memcmp` and a few milliseconds for
+    /// the largest document the editor opens — against the tens of
+    /// milliseconds a pass that looks at each character costs.
+    pub(super) fn between(old: &str, new: &str) -> Self {
+        const PAGE: usize = 4096;
+        let (a, b) = (old.as_bytes(), new.as_bytes());
+        let shorter = a.len().min(b.len());
+        let mut prefix = 0;
+        while prefix + PAGE <= shorter && a[prefix..prefix + PAGE] == b[prefix..prefix + PAGE] {
+            prefix += PAGE;
+        }
+        while prefix < shorter && a[prefix] == b[prefix] {
+            prefix += 1;
+        }
+        while !old.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let room = shorter - prefix;
+        let mut suffix = 0;
+        while suffix + PAGE <= room
+            && a[a.len() - suffix - PAGE..a.len() - suffix]
+                == b[b.len() - suffix - PAGE..b.len() - suffix]
+        {
+            suffix += PAGE;
+        }
+        while suffix < room && a[a.len() - suffix - 1] == b[b.len() - suffix - 1] {
+            suffix += 1;
+        }
+        // The same bytes follow in both, so a boundary in one is a boundary
+        // in the other; only a character cut in half has to be given back.
+        while !old.is_char_boundary(a.len() - suffix) || !new.is_char_boundary(b.len() - suffix) {
+            suffix -= 1;
+        }
+        Self {
+            prefix,
+            old_end: a.len() - suffix,
+            new_end: b.len() - suffix,
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.old_end == self.prefix && self.new_end == self.prefix
+    }
+}
+
 impl Window {
     /// Each stretch the caller needs, widened by the look-behind and the
-    /// look-ahead. `needed` is in UTF-16 units of `text`.
-    fn around(text: &str, needed: &[Range<u32>]) -> Self {
+    /// look-ahead. `needed` is in UTF-16 units of `text`; `bytes` turns them
+    /// into bytes of it, all at once.
+    fn around(text: &str, needed: &[Range<u32>], bytes: impl FnOnce(&[u32]) -> Vec<usize>) -> Self {
         let ends = needed
             .iter()
             .flat_map(|range| [range.start, range.end.max(range.start)])
             .collect::<Vec<u32>>();
-        let bytes = bytes_at_utf16(text, &ends);
+        let bytes = bytes(&ends);
         let mut ranges = bytes
             .chunks(2)
             .map(|pair| {
@@ -179,7 +249,9 @@ impl BackgroundLayout {
                             release_graphics();
                             break;
                         }
-                        slot.job.take().unwrap()
+                        let job = slot.job.take().unwrap();
+                        slot.running = Some(job.generation);
+                        job
                     };
                     let token = Cancellation {
                         generation: versions.clone(),
@@ -195,7 +267,7 @@ impl BackgroundLayout {
                         let styled = StyledText::marked(&job.text, &job.styles, &job.marks)
                             .with_markers(&job.markers)
                             .with_source_line(job.source_line);
-                        engine.update_inner(styled, job.fit, &job.typography, None)?;
+                        engine.update_inner(styled, job.fit, &job.typography, None, None)?;
                         token.check()?;
                         Ok::<_, Error>(Completed {
                             plan: engine.plan,
@@ -206,12 +278,17 @@ impl BackgroundLayout {
                             margin: engine.margin,
                             numbers: engine.numbers,
                             wrapping_items: engine.wrapping_items,
+                            block_keys: engine.block_keys,
+                            block_measures: engine.block_measures,
+                            measure_refs: engine.measure_refs,
+                            line_count: engine.line_count,
                         })
                     }))
                     .map_err(|_| "layout worker panicked".to_owned())
                     .and_then(|result| result.map_err(|error| error.to_string()));
-                    if token.check().is_ok() {
+                    {
                         let mut slot = shared.0.lock().unwrap_or_else(|e| e.into_inner());
+                        slot.running = None;
                         if !slot.stopped && token.check().is_ok() {
                             // The request waiting behind this one starts from what
                             // this one found, not from the snapshot it was asked
@@ -393,6 +470,63 @@ impl TextEngine {
         Some(start..end)
     }
 
+    /// The byte in `text` of each UTF-16 position in it, found through the last
+    /// plan rather than by counting from the head (RFN01-6 B): before the
+    /// change a position is where it was, after it where it was moved by the
+    /// change, and only inside it is the new text counted.
+    fn bytes_near(&self, text: &str, diff: &TextDiff, targets: &[u32]) -> Vec<usize> {
+        if self.plan.blocks.is_empty() || self.text.len() + diff.new_end < diff.old_end {
+            return bytes_at_utf16(text, targets);
+        }
+        let old = self.text.as_str();
+        let units = |slice: &str| slice.encode_utf16().count() as u32;
+        // In the old text: the block holding the position, then its own text.
+        let old_byte = |target: u32| {
+            let block = &self.plan.blocks[self.plan.block_at_utf16(target)].span;
+            let mut at = block.utf16_start;
+            let mut byte = block.byte_start;
+            for (offset, ch) in old[block.byte_start..].char_indices() {
+                if at >= target {
+                    return block.byte_start + offset;
+                }
+                at += ch.len_utf16() as u32;
+                byte = block.byte_start + offset + ch.len_utf8();
+            }
+            byte
+        };
+        let prefix_utf16 = {
+            let block = &self.plan.blocks[self
+                .plan
+                .blocks
+                .partition_point(|block| block.span.byte_start <= diff.prefix)
+                .saturating_sub(1)]
+            .span;
+            block.utf16_start + units(&old[block.byte_start.min(diff.prefix)..diff.prefix])
+        };
+        let old_end_utf16 = prefix_utf16 + units(&old[diff.prefix..diff.old_end]);
+        let new_end_utf16 = prefix_utf16 + units(&text[diff.prefix..diff.new_end]);
+        targets
+            .iter()
+            .map(|&target| {
+                if target <= prefix_utf16 {
+                    old_byte(target).min(diff.prefix)
+                } else if target >= new_end_utf16 {
+                    let was = old_byte(target - new_end_utf16 + old_end_utf16).max(diff.old_end);
+                    was - diff.old_end + diff.new_end
+                } else {
+                    let mut at = prefix_utf16;
+                    for (offset, ch) in text[diff.prefix..diff.new_end].char_indices() {
+                        if at >= target {
+                            return diff.prefix + offset;
+                        }
+                        at += ch.len_utf16() as u32;
+                    }
+                    diff.new_end
+                }
+            })
+            .collect()
+    }
+
     /// What a pane's foreground update has to lay out: the screen, and the
     /// positions it is holding on to — the caret, a kept view — each on its own
     /// (RFN01-6 A). With nothing on screen yet and nothing held, the head.
@@ -418,7 +552,17 @@ impl TextEngine {
         if fit == LineFit::Free {
             return self.update(styled, fit, typography);
         }
-        let same = self.matches(styled, fit, typography);
+        // **One comparison of the text for the whole update** (RFN01-6 B): it
+        // says whether anything changed, where, and — through the last plan —
+        // where the positions asked for are, without walking the text.
+        let diff = TextDiff::between(&self.text, styled.text);
+        let same = diff.is_empty()
+            && self.text.len() == styled.text.len()
+            && self.same_setting(styled, fit, typography);
+        // A background answer merged below changes what the caches hold for
+        // blocks the near update would keep as they were, so that update is
+        // the whole one.
+        let mut merged = false;
         if let Some(worker) = self.background.as_mut() {
             let answer = worker
                 .mailbox
@@ -442,13 +586,20 @@ impl TextEngine {
                         self.margin = done.margin;
                         self.numbers = done.numbers;
                         self.wrapping_items = done.wrapping_items;
+                        self.block_keys = done.block_keys;
+                        self.block_measures = done.block_measures;
+                        self.measure_refs = done.measure_refs;
+                        self.line_count = done.line_count;
                         self.deferred_blocks.clear();
                         self.layouts.clear();
                         return Ok(UpdateCost::default());
                     }
                     // An earlier text: what it measured is still true of every
                     // paragraph and block the edits since have not touched.
-                    Ok(done) => carry_over(&mut self.wraps, &mut self.measures, &done),
+                    Ok(done) => {
+                        carry_over(&mut self.wraps, &mut self.measures, &done);
+                        merged = true;
+                    }
                     Err(_) if newest => {
                         // Retry in bounded foreground windows on subsequent
                         // refreshes; never synchronously redo the whole tail.
@@ -461,8 +612,14 @@ impl TextEngine {
         if same && !self.layout_pending() {
             return Ok(UpdateCost::default());
         }
-        let window = Window::around(styled.text, needed);
+        let window = Window::around(styled.text, needed, |targets| {
+            self.bytes_near(styled.text, &diff, targets)
+        });
+        // **Not when an answer was just taken for an older text**: the worker
+        // is idle now and was asked nothing since (see below), so this update
+        // is the one that asks again.
         if same
+            && !merged
             && self
                 .background
                 .as_ref()
@@ -480,12 +637,38 @@ impl TextEngine {
         if (self.fit, &self.typography) != (settled.0, &settled.1) {
             self.cancel_background();
         }
-        let cost = self.update_inner(styled, fit, typography, Some(&window))?;
+        let near = (!merged).then_some(&diff);
+        let cost = self.update_inner(styled, fit, typography, Some(&window), near)?;
         if self.layout_pending() {
             if self.background.is_none() {
                 self.background = BackgroundLayout::new();
             }
             if let Some(worker) = &mut self.background {
+                // **No new request while the worker is still on one of this
+                // epoch** (RFN01-6 B). A request is a copy of the whole text and
+                // its settings — 6ms a keystroke at ten million characters —
+                // and the worker only takes the newest when it is done, so
+                // every copy but the last was thrown away unread. When the
+                // answer comes back, the update that takes it asks again with
+                // the text as it is then. A worker still finishing a cancelled
+                // epoch is asked at once: nothing of that epoch will come back
+                // to ask again.
+                let epoch = worker.generation.load(Ordering::Relaxed);
+                let busy = worker
+                    .mailbox
+                    .0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .running
+                    == Some(epoch);
+                // The serial moves on either way: the answer on its way is
+                // for a text before this one, and must not be taken as the
+                // newest just because nothing newer was sent.
+                if busy {
+                    worker.latest += 1;
+                    worker.pending = true;
+                    return Ok(cost);
+                }
                 worker.latest += 1;
                 let job = Job {
                     generation: worker.generation.load(Ordering::Relaxed),
@@ -959,6 +1142,10 @@ mod tests {
                             margin: 0.0,
                             numbers: None,
                             wrapping_items: 0,
+                            block_keys: Vec::new(),
+                            block_measures: Vec::new(),
+                            measure_refs: HashMap::new(),
+                            line_count: 0,
                         }),
                     }),
                     ..Mailbox::default()
@@ -1097,6 +1284,249 @@ mod tests {
             engine.plan,
             full_plan(WritingMode::Vertical, &text, &typography)
         );
+    }
+
+    /// RFN01-6 B: a document with every kind of block the split treats
+    /// differently — headings, short and long paragraphs, a fence, a table, a
+    /// list and a quote. Numbered, so that no two blocks share their text.
+    fn mixed_document() -> String {
+        let mut text = String::new();
+        for index in 0..48 {
+            match index % 8 {
+                0 => text.push_str(&format!("# 見出し{index}\n\n")),
+                1 => text.push_str(&format!("{index}番目の段落。短い文が続く。\n")),
+                2 => {
+                    // Numbered sentences, so that no two pieces the paragraph
+                    // is cut into read the same. One is long enough that the
+                    // foreground leaves an estimated tail of it.
+                    let sentences = if index == 26 { 1200 } else { 60 + index * 4 };
+                    for sentence in 0..sentences {
+                        text.push_str(&format!("長い段落{index}の{sentence}番目の文。"));
+                    }
+                    text.push('\n');
+                }
+                3 => text.push_str(&format!("```\ncode {index}\nmore code\n```\n")),
+                4 => text.push_str(&format!(
+                    "| 見出し{index} | 値 |\n| --- | --- |\n| a{index} | b |\n"
+                )),
+                5 => text.push_str(&format!("- 項目{index}\n- 次の項目{index}\n")),
+                6 => text.push_str(&format!("> 引用{index}の文。\n")),
+                _ => text.push('\n'),
+            }
+        }
+        text
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, below: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % below.max(1)
+        }
+    }
+
+    /// Everything a near update and a whole one have to agree on.
+    fn assert_same_engine(near: &TextEngine, whole: &TextEngine, step: usize, what: &str) {
+        let context = format!("step {step}: {what}");
+        assert_eq!(near.text, whole.text, "{context}: text");
+        if near.plan != whole.plan {
+            let first = near
+                .plan
+                .blocks
+                .iter()
+                .zip(&whole.plan.blocks)
+                .position(|(a, b)| a != b)
+                .unwrap_or(near.plan.blocks.len().min(whole.plan.blocks.len()));
+            let show = |engine: &TextEngine| {
+                engine
+                    .plan
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .skip(first.saturating_sub(1))
+                    .take(3)
+                    .map(|(index, block)| {
+                        format!(
+                            "#{index} {:?} {:?} flow={} size={} deferred={} lines={}",
+                            block.span,
+                            engine.text[block.span.byte_start..block.span.byte_end]
+                                .chars()
+                                .take(12)
+                                .collect::<String>(),
+                            block.flow_start,
+                            block.flow_size,
+                            engine.deferred_blocks.contains(&index),
+                            block.lines.len()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            };
+            panic!(
+                "{context}: plan differs at block {first} of {} / {}\nnear:\n  {}\nwhole:\n  {}",
+                near.plan.blocks.len(),
+                whole.plan.blocks.len(),
+                show(near),
+                show(whole)
+            );
+        }
+        assert_eq!(
+            near.deferred_blocks, whole.deferred_blocks,
+            "{context}: deferred"
+        );
+        assert_eq!(
+            near.block_lines, whole.block_lines,
+            "{context}: block lines"
+        );
+        assert_eq!(near.line_count, whole.line_count, "{context}: line count");
+        assert_eq!(near.line_styles, whole.line_styles, "{context}: styles");
+        assert_eq!(near.line_spans, whole.line_spans, "{context}: spans");
+        assert_eq!(near.line_markers, whole.line_markers, "{context}: markers");
+        assert_eq!(
+            near.source_line, whole.source_line,
+            "{context}: source line"
+        );
+        let wraps = |engine: &TextEngine| {
+            engine
+                .wraps
+                .iter()
+                .map(|wrap| {
+                    (
+                        wrap.byte_start,
+                        wrap.text.len(),
+                        wrap.starts.len(),
+                        wrap.starts.last().copied(),
+                        wrap.complete,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            wraps(near),
+            wraps(whole),
+            "{context}: wraps (start, bytes, lines, last, complete)"
+        );
+        assert!(
+            near.wraps
+                .iter()
+                .zip(&whole.wraps)
+                .all(|(a, b)| a.text == b.text && a.starts == b.starts),
+            "{context}: wrap texts or starts"
+        );
+    }
+
+    /// RFN01-6 B: **the near update makes what the whole one makes**, edit
+    /// after edit, in both writing modes and in the preview — where the
+    /// settings of lines move with the text (a fence opened by the edit, a
+    /// table row that becomes a header) and the line shown as its own source
+    /// moves with the caret.
+    ///
+    /// The background is cancelled after every update on both sides, so both
+    /// go on from the same estimates. One thing the two may do differently is
+    /// not exercised: an estimated block whose text another block shares, once
+    /// that other block is measured, is taken from the cache by the whole
+    /// update and left estimated by the near one until the window reaches it.
+    #[test]
+    fn a_near_update_makes_what_a_whole_update_makes() {
+        let typography = Typography::new(22.0);
+        for (mode, steps, seed) in [
+            (WritingMode::Vertical, 70, 7_u64),
+            (WritingMode::Horizontal, 40, 11),
+        ] {
+            let mut source = mixed_document();
+            let mut near = TextEngine::new(mode);
+            let mut whole = TextEngine::new(mode);
+            whole.take_whole_updates();
+            let mut random = Lcg(seed);
+            let mut caret;
+            for step in 0..steps {
+                let characters = source.chars().count();
+                let at = |index: usize, source: &str| {
+                    source
+                        .char_indices()
+                        .nth(index)
+                        .map_or(source.len(), |(byte, _)| byte)
+                };
+                let pick = random.next(characters + 1);
+                let byte = at(pick, &source);
+                let what = match random.next(9) {
+                    0 | 1 => {
+                        source.insert_str(byte, "あ");
+                        caret = byte + "あ".len();
+                        "insert"
+                    }
+                    2 if characters > 0 => {
+                        let end = at(pick + 1, &source);
+                        source.replace_range(byte..end, "");
+                        caret = byte;
+                        "delete"
+                    }
+                    3 => {
+                        source.insert(byte, '\n');
+                        caret = byte + 1;
+                        "break"
+                    }
+                    4 => {
+                        let line = source[..byte].rfind('\n').map_or(0, |at| at + 1);
+                        let fence = format!("```{step}\n");
+                        source.insert_str(line, &fence);
+                        caret = line + fence.len();
+                        "fence"
+                    }
+                    5 => {
+                        let line = source[..byte].rfind('\n').map_or(0, |at| at + 1);
+                        let heading = format!("# {step} ");
+                        source.insert_str(line, &heading);
+                        caret = line + heading.len();
+                        "heading"
+                    }
+                    6 => {
+                        let end = at(pick + random.next(30), &source);
+                        source.replace_range(byte..end, "");
+                        caret = byte;
+                        "delete range"
+                    }
+                    7 => {
+                        // Numbered like everything else put in, so that no
+                        // two blocks the edits make share their text.
+                        let table = format!("|x{step}|y|\n|{}|-|\n", "-".repeat(step + 1));
+                        source.insert_str(byte, &table);
+                        caret = byte + table.len();
+                        "table"
+                    }
+                    _ => {
+                        caret = byte;
+                        "move"
+                    }
+                };
+                let line = source[..caret].rfind('\n').map_or(0, |at| at + 1);
+                let preview = crate::document::PreviewDocument::from_source_with_active_line(
+                    &source,
+                    Some(line),
+                );
+                let styles = crate::document::line_styles(&source);
+                let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                    .with_markers(preview.markers())
+                    .with_source_line(preview.active_line());
+                let shown = preview.utf16_at_source_byte(caret) as u32;
+                let mut needed = vec![shown..shown];
+                if random.next(4) == 0 {
+                    let far = random.next(preview.utf16_len() + 1) as u32;
+                    needed.push(far..far);
+                }
+                for engine in [&mut near, &mut whole] {
+                    engine
+                        .update_interactive(styled, LineFit::Extent(700), &typography, &needed)
+                        .unwrap();
+                    engine.cancel_background();
+                }
+                assert_same_engine(&near, &whole, step, what);
+            }
+        }
     }
 
     #[test]
