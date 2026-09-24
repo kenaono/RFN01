@@ -97,6 +97,30 @@ pub(crate) fn pointer(
     phase: SelectionPhase,
     vertical: bool,
 ) -> PointerResult {
+    // RFN01-58: **Altを押して押した点から、矩形選択が始まる。**行番号・ダブルクリック・
+    // 立っている印より先に答える——Altを押した書き手が言っているのは矩形である。
+    // 引けば`Update`が来て、両端の間の表示行を矩形で囲む（要件 7.1）。
+    if phase == SelectionPhase::Rectangle {
+        let byte = hit.byte;
+        let next_active_line_start = source_line_start(source, byte);
+        let mut state = state.borrow_mut();
+        state.line_drag = None;
+        state.word_drag = None;
+        state.mark = false;
+        state.search_selection = None;
+        state.selection_anchor_source_byte = Some(byte);
+        state.caret_source_byte = Some(byte);
+        state.rectangular = true;
+        // 開いている行は替えない——縦書きは離したときに開き（下の`End`）、横書きは
+        // キャレットから読む。
+        state.preedit.clear();
+        state.preferred_line = None;
+        return PointerResult::Caret {
+            hit: byte,
+            next_active_line_start,
+            selection: pane_selection(&state),
+        };
+    }
     // E3: **行番号を押したら、その論理行が選ばれる。**番号は本文ではないので、
     // そこへカーソルを置いても書き手の言ったことにならない——押した先が行その
     // ものであるほうが、次にすること（動かす・複製する・消す）に繋がる。

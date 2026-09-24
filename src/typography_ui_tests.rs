@@ -1100,6 +1100,7 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
     // 右端ではメニューの右端を点に合わせる。どの向きでも、開いた面の行が押せて、
     // 面の側の空きを押せば閉じる。
     // （右クリックの点、「箇条書き▸」の点、開いた面の`-`、面の側の空き、「本文だけをコピー」）
+    // RFN01-57で挿入が1行になり、メニューが窓に収まるので、上端は押した点の近くに出る。
     for (at, bullet, dash, empty, copy) in [
         (300.0, 340.0, 620.0, 680.0, 340.0),
         (800.0, 840.0, 720.0, 650.0, 840.0),
@@ -1119,7 +1120,7 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
         );
         press(at, 200.0, PointerEventButton::Right);
         press(empty, 220.0, PointerEventButton::Left);
-        press(copy, 336.0, PointerEventButton::Left);
+        press(copy, 308.0, PointerEventButton::Left);
         assert_eq!(
             copied.get(),
             0,
@@ -1127,8 +1128,95 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
         );
         // 閉じずに押せば、同じ位置の「本文だけをコピー」に届く（位置の確かめ）。
         press(at, 200.0, PointerEventButton::Right);
-        press(copy, 336.0, PointerEventButton::Left);
+        press(copy, 308.0, PointerEventButton::Left);
         assert_eq!(copied.get(), 1, "the menu stands where expected at {at}");
+    }
+}
+
+/// RFN01-57（書き手の求め 2026-09-24）: **右クリックの挿入は「Insert」の1行で、並びは右へ、
+/// 組はさらにその右へ開く。**端では2段とも左へ開く。どの向きでも、組の中の行と並びの
+/// 行が押せて、押した挿入の番号が届く。
+#[test]
+fn the_insert_row_opens_the_list_and_its_groups() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let surface = MinimalSoftwareWindow::new(Default::default());
+    slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
+    let window = AppWindow::new().unwrap();
+    surface.set_size(slint::PhysicalSize::new(1100, 760));
+    window.set_tree_open(false);
+    publish_panes(&window, 1);
+    let id = PaneId::FIRST;
+    let source = "本文の一行目。\n二行目。\n";
+    let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
+    let states = PaneStates::new(&document);
+    let cache = Rc::new(RefCell::new(RenderCache::default()));
+    window.show().unwrap();
+    id.update_screen(&window, |screen| {
+        screen.width = 1050.0;
+        screen.height = 640.0;
+        screen.shown_width = 1050.0;
+        screen.shown_height = 540.0;
+        screen.preview = true;
+    });
+    set_pane_direction(&window, &cache, id, false);
+    refresh_pane_from_state(&window, &cache, &document, id, &states.of(id), source);
+    let row = |title: &str, flyout: bool, group: i32, number: i32| InsertRow {
+        title: title.into(),
+        flyout,
+        group,
+        number,
+        enabled: true,
+        checked: false,
+        picker: false,
+    };
+    // 並び：組（Link）、行（Ruby）。組の中身：Markdown Link。
+    window.set_insert_rows(ModelRc::new(VecModel::from(vec![
+        row("Link", true, 0, -1),
+        row("Ruby", false, -1, 7),
+    ])));
+    window.set_insert_children(ModelRc::new(VecModel::from(vec![row(
+        "Markdown Link",
+        false,
+        0,
+        3,
+    )])));
+    let chosen = Rc::new(RefCell::new(Vec::new()));
+    let received = chosen.clone();
+    window.on_pane_insert_chosen(move |_, number| received.borrow_mut().push(number));
+    let press = |x, y, button| {
+        let position = slint::LogicalPosition::new(x, y);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    let hover = |x, y| {
+        window.window().dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, y),
+        });
+    };
+    // 「Insert」は箇条書きの1行上（349）。並びの1行目はその高さに、2行目は1行下に出る。
+    // （右クリックの点、「Insert」の点、並びの中の点、組の中の点）
+    for (at, insert, list, group) in [
+        (300.0, 340.0, 650.0, 820.0),
+        (800.0, 840.0, 700.0, 540.0),
+        (1000.0, 800.0, 650.0, 480.0),
+    ] {
+        chosen.borrow_mut().clear();
+        press(at, 200.0, PointerEventButton::Right);
+        hover(insert, 349.0);
+        hover(list, 349.0);
+        press(group, 349.0, PointerEventButton::Left);
+        press(at, 200.0, PointerEventButton::Right);
+        hover(insert, 349.0);
+        press(list, 378.0, PointerEventButton::Left);
+        assert_eq!(
+            &*chosen.borrow(),
+            &[3, 7],
+            "the group's row and the list's row answer at {at}"
+        );
     }
 }
 

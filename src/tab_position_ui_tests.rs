@@ -245,7 +245,7 @@ fn a_click_on_the_margin_makes_the_pane_active() {
     // 本文の押下が届いたら数える——余白の押下は本文に届かないことも見る。
     let selected = Rc::new(std::cell::Cell::new(0));
     let seen = selected.clone();
-    window.on_pane_selection_start(move |_, _, _, _| seen.set(seen.get() + 1));
+    window.on_pane_selection_start(move |_, _, _, _, _| seen.set(seen.get() + 1));
     window.show().unwrap();
     let click = |x: f32, y: f32| {
         let position = slint::LogicalPosition::new(x, y);

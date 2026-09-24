@@ -73,6 +73,8 @@ mod quick_draft;
 mod read_only_ui_tests;
 #[cfg(test)]
 mod recovery_ui_tests;
+#[cfg(test)]
+mod rectangle_ui_tests;
 mod saving;
 mod searcher;
 mod session;
@@ -659,6 +661,19 @@ fn shift_as_windows_sees_it(cache: &Rc<RefCell<RenderCache>>, said: bool, what: 
     false
 }
 
+/// 本文を押した合図の段階：Altなら矩形の始まり、Shiftならそこまで伸ばす、どちらも
+/// 無ければ新しい選択（RFN01-58）。**Altが先**——Alt+Shiftで押した書き手が言って
+/// いるのは矩形である。
+fn press_phase(rectangle: bool, extend: bool) -> SelectionPhase {
+    if rectangle {
+        SelectionPhase::Rectangle
+    } else if extend {
+        SelectionPhase::Extend
+    } else {
+        SelectionPhase::Begin
+    }
+}
+
 /// Both panes' states, so that a callback carrying a pane number can reach the
 /// one it names.
 ///
@@ -782,6 +797,10 @@ enum SelectionPhase {
     /// back to wherever it already was. Everything else about it is a `Begin`,
     /// including that a drag may follow.
     Extend,
+    /// A press with Alt held (RFN01-58): a rectangle starts where it lands, the
+    /// same rectangle `Ctrl+Shift+Space` starts (要件 7.1). The drag that follows
+    /// is an ordinary `Update`.
+    Rectangle,
     Update,
     End,
 }
@@ -2594,17 +2613,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
-    window.on_pane_selection_start(move |pane, x, y, extend| {
+    window.on_pane_selection_start(move |pane, x, y, extend, rectangle| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             // **押した場所までを選ぶのは、Shiftを押しているときだけ。**届いた旗を
             // そのまま信じると、古い旗のせいでただのクリックが選択になる。
-            let phase = if shift_as_windows_sees_it(&cache, extend, "click") {
-                SelectionPhase::Extend
-            } else {
-                SelectionPhase::Begin
-            };
+            // RFN01-58: **Altを押して押せば、そこから矩形選択。**Altも届いた旗を
+            // Windowsの答えと突き合わせる（`alt_held`）。
+            let rectangle = rectangle && input_platform::alt_held();
+            let phase = press_phase(rectangle, shift_as_windows_sees_it(&cache, extend, "click"));
             let state = states.of(id);
             let x = id.flow_x(&window, x);
             update_pane_selection(&window, &document, &state, &cache, id, x, y, phase);
@@ -18551,7 +18569,7 @@ fn select_in_terminal(
             return;
         };
         match phase {
-            SelectionPhase::Begin => {
+            SelectionPhase::Begin | SelectionPhase::Rectangle => {
                 shell.selection = Some(TerminalSelection {
                     anchor: (row, column),
                     head: (row, column),
@@ -20432,7 +20450,9 @@ fn update_pane_selection(
     );
     id.set_ime_buffer(window, "");
 
-    if id.vertical(window) && phase == SelectionPhase::Update {
+    // 矩形は引くあいだも矩形で見せる（RFN01-58）——キャレットだけを動かす近道は、
+    // 選択を字の並びとして塗る。
+    if id.vertical(window) && phase == SelectionPhase::Update && !selection.rectangular {
         drag_caret_only(
             window,
             cache,

@@ -19,6 +19,17 @@ pub(crate) fn control_held() -> bool {
     unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 || GetAsyncKeyState(VK_CONTROL.0 as i32) < 0 }
 }
 
+/// Altが押されているか（RFN01-58：Alt+ドラッグで矩形選択）。
+///
+/// **届いた旗だけを信じない。**Alt+Tabで窓を離れると、離したAltが窓に届かないことがあり、
+/// 旗が立ったままだと次のただのクリックが矩形選択になる。
+pub(crate) fn alt_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_MENU};
+
+    // SAFETY: `shift_really_held`と同じ、仮想キーの番号を1つ渡すだけの呼び出し。
+    unsafe { GetKeyState(VK_MENU.0 as i32) < 0 || GetAsyncKeyState(VK_MENU.0 as i32) < 0 }
+}
+
 pub(crate) fn double_click_time() -> Duration {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 
