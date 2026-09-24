@@ -217,3 +217,67 @@ fn a_terminal_preset_carries_the_shell_profiles() {
     );
     assert!(!modified(window, 1));
 }
+
+/// 書き手の報告 2026-09-24（引数を変えてもApplyできない）の確かめ：設定の画面で、先頭以外の
+/// プロファイルを選び、引数の欄に打って「Apply」を押せば、そのプロファイルが書き換わり、
+/// Terminalのプリセットは「変更あり」になる。
+#[test]
+fn applying_typed_arguments_changes_the_profile() {
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    let r = rig("本文。\n", (1000, 740));
+    let window = &r.window;
+    settings_transfer::wire(window, &r.live);
+    crate::terminal_shells::install(window, &r.live);
+    settings_transfer::save_as(window, &r.live, PresetKind::Terminal, "T");
+    open_settings(window, &r.live);
+    window.set_settings_tab(1);
+    let draw = || {
+        slint::platform::update_timers_and_animations();
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+        r.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+    };
+    let click = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        window.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+        draw();
+    };
+    let key = |text: SharedString| {
+        window
+            .window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        window
+            .window()
+            .dispatch_event(WindowEvent::KeyReleased { text });
+    };
+    let last = configured_shells(window).len() - 1;
+    window.invoke_shell_profile_action(0, last as i32);
+    draw();
+    // 引数の欄（PRESETの行の下、4つ目の欄）。
+    click(500.0, 276.0);
+    key(Key::End.into());
+    for c in [" ", "-", "X"] {
+        key(c.into());
+    }
+    click(264.0, 348.0);
+    assert!(
+        configured_shells(window)[last].command.ends_with(" -X"),
+        "{:?}",
+        configured_shells(window)[last]
+    );
+    assert!(modified(window, 1));
+}

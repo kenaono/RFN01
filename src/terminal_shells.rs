@@ -65,6 +65,15 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
     index = index.min(shells.len().saturating_sub(1));
     let old_default = shell_at(window, window.get_default_shell()).name;
     let editing_default = shells.get(index).is_some_and(|s| s.name == old_default);
+    // 書き手の報告 2026-09-24（引数を変えてもApplyできない）：押された操作と、どのプロファイルに
+    // 効いたかを残す。手元の試験では再現しなかったので、実際の実行の記録で確かめる。
+    live.cache.borrow_mut().log_diag(
+        "shell",
+        &format!(
+            "profile action={what} at={at} index={index} count={}",
+            shells.len()
+        ),
+    );
     match what {
         0 => {
             publish(window, at.max(0) as usize);
@@ -86,6 +95,18 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
                     .enumerate()
                     .any(|(i, s)| i != index && s.name == name)
             {
+                live.cache.borrow_mut().log_diag(
+                    "shell",
+                    &format!(
+                        "profile refused name_empty={} exe_empty={} name_bad={} exe_bad={} args_bad={} dir_bad={}",
+                        name.is_empty(),
+                        exe.is_empty(),
+                        name.contains(['|', '\r', '\n', '\t']),
+                        exe.contains(['"', '\r', '\n', '\t']),
+                        args.contains(['\r', '\n', '\t']),
+                        directory.contains(['\r', '\n', '\t', '"']),
+                    ),
+                );
                 window.tell(pick("名前と実行ファイルを確認してください。同じ名前や改行は使えません", "Check the name and executable; names must be unique and fields cannot contain line breaks").into());
                 return;
             }
@@ -152,6 +173,10 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
     }
     publish(window, index);
     save_settings(window, &live.cache);
+    live.cache.borrow_mut().log_diag(
+        "shell",
+        &format!("profile saved action={what} index={index}"),
+    );
 }
 
 pub(crate) fn open_in(window: &AppWindow, live: &Live, directory: PathBuf) {
