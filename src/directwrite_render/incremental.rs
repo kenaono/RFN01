@@ -109,43 +109,13 @@ pub(super) struct TextDiff {
 }
 
 impl TextDiff {
-    /// Compared a page at a time, which is `memcmp` and a few milliseconds for
-    /// the largest document the editor opens — against the tens of
-    /// milliseconds a pass that looks at each character costs.
+    /// Compared a page at a time ([`crate::document::changed_span`]).
     pub(super) fn between(old: &str, new: &str) -> Self {
-        const PAGE: usize = 4096;
-        let (a, b) = (old.as_bytes(), new.as_bytes());
-        let shorter = a.len().min(b.len());
-        let mut prefix = 0;
-        while prefix + PAGE <= shorter && a[prefix..prefix + PAGE] == b[prefix..prefix + PAGE] {
-            prefix += PAGE;
-        }
-        while prefix < shorter && a[prefix] == b[prefix] {
-            prefix += 1;
-        }
-        while !old.is_char_boundary(prefix) {
-            prefix -= 1;
-        }
-        let room = shorter - prefix;
-        let mut suffix = 0;
-        while suffix + PAGE <= room
-            && a[a.len() - suffix - PAGE..a.len() - suffix]
-                == b[b.len() - suffix - PAGE..b.len() - suffix]
-        {
-            suffix += PAGE;
-        }
-        while suffix < room && a[a.len() - suffix - 1] == b[b.len() - suffix - 1] {
-            suffix += 1;
-        }
-        // The same bytes follow in both, so a boundary in one is a boundary
-        // in the other; only a character cut in half has to be given back.
-        while !old.is_char_boundary(a.len() - suffix) || !new.is_char_boundary(b.len() - suffix) {
-            suffix -= 1;
-        }
+        let (prefix, old_end, new_end) = crate::document::changed_span(old, new);
         Self {
             prefix,
-            old_end: a.len() - suffix,
-            new_end: b.len() - suffix,
+            old_end,
+            new_end,
         }
     }
 

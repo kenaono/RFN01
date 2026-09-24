@@ -797,7 +797,6 @@ struct PreviewSlot {
     invalid_link_source: String,
     invalid_link_targets: Vec<Range<usize>>,
     validity_changed: bool,
-    source: String,
     active_line_start: Option<usize>,
     preview: PreviewDocument,
     started: bool,
@@ -853,23 +852,17 @@ impl PreviewSlot {
         zoom_percent: i32,
         folder: Option<&Path>,
     ) -> &PreviewDocument {
-        let stale = !self.started
-            || self.active_line_start != active_line_start
-            || self.source != source
-            // 要件 E9: **読み方も、古いかどうかの理由である。**同じ本文でも、
-            // 記法を読むかどうかで組み上がりが変わる。
-            || self.reading != reading;
-        if stale {
-            // Refreshed rather than rebuilt: the preview keeps its mapping a
-            // line at a time, so this recounts the lines that changed and
-            // leaves the rest (技術検証 7.1).
-            self.preview.refresh(source, active_line_start, reading);
-            self.source.clear();
-            self.source.push_str(source);
-            self.active_line_start = active_line_start;
-            self.reading = reading;
-            self.started = true;
-        }
+        // Refreshed rather than rebuilt: the preview keeps its mapping a line
+        // at a time, so this recounts the lines that changed and leaves the
+        // rest (技術検証 7.1). **Whether anything changed is its answer**
+        // (RFN01-6 C): it holds the source it was built from, so a second copy
+        // here, compared on every call, would be thirty more megabytes read
+        // at ten million characters. 要件 E9: 読み方も、古いかどうかの理由で、
+        // それもあちらが見る。
+        let stale = self.preview.refresh(source, active_line_start, reading) || !self.started;
+        self.active_line_start = active_line_start;
+        self.reading = reading;
+        self.started = true;
         if stale || self.validity_changed {
             self.preview
                 .set_invalid_link_targets(if self.invalid_link_source == source {
@@ -21089,9 +21082,13 @@ fn insert_pane_text(
     }
     let state = states.of(id);
     let started = Instant::now();
-    let source = document.text.borrow().clone();
+    // RFN01-6 D: **borrowed, not copied** — the edit below is made in the
+    // document itself, and the borrow is let go just before it.
+    let source = document.text.borrow();
     let cloned_ms = elapsed_ms(started);
-    if !fits_document_limit(&source, &input) {
+    // The count is the document's own, kept across keystrokes, rather than a
+    // walk over the whole text (`SharedText::character_count`).
+    if !fits_document_limit(document.text.character_count(), &input) {
         window.tell_tab(over_limit_message(&input).into());
         return;
     }
@@ -21154,12 +21151,15 @@ fn insert_pane_text(
         caret
     };
     let end = selection.map_or(at, |range| range.1);
+    drop(source);
     let session = editor_session::EditorSession::with_state(document.clone(), state);
     let stored = Instant::now();
-    let Some((source, next, change)) = session.insert_at(source, at, end, input) else {
+    let Some((next, change)) = session.insert_at(at, end, input) else {
         return;
     };
     let stored_ms = elapsed_ms(stored);
+    // Held while the edit is drawn: nothing that draws writes the text.
+    let source = document.text.borrow();
     id.draw_edit(window, states, cache, document, &source, Some(next), change);
     let name = id.log_name();
     log_edit(cache, &name, &source, started, cloned_ms, stored_ms);
@@ -22560,16 +22560,15 @@ fn over_limit_message(input: &str) -> String {
     )
 }
 
-/// Whether `source` can hold `addition` and stay inside the document limit.
+/// Whether a document of `existing` characters can take `addition` and stay
+/// inside the document limit.
 ///
 /// Counted in characters, so the answer does not depend on the encoding of what
-/// is being added. The existing document is measured too rather than tracked,
-/// because it is the thing being protected and it is cheap next to the paste
-/// that prompted the question.
-fn fits_document_limit(source: &str, addition: &str) -> bool {
-    let existing = source.chars().count();
-    let added = addition.chars().count();
-    existing.saturating_add(added) <= MAX_DOCUMENT_CHARACTERS
+/// is being added. RFN01-6 D: `existing` is the document's own count, kept
+/// across edits (`SharedText::character_count`) — counting the whole text here
+/// was a walk over ten million characters on every keystroke.
+fn fits_document_limit(existing: usize, addition: &str) -> bool {
+    existing.saturating_add(addition.chars().count()) <= MAX_DOCUMENT_CHARACTERS
 }
 
 /// One line for the whole of an edit, from the callback to the last pixel.
@@ -23508,15 +23507,15 @@ mod tests {
     /// weigh.
     #[test]
     fn refuses_an_addition_that_would_pass_the_document_limit() {
-        let nearly_full = "あ".repeat(MAX_DOCUMENT_CHARACTERS - 2);
+        let nearly_full = MAX_DOCUMENT_CHARACTERS - 2;
 
-        assert!(fits_document_limit(&nearly_full, "あい"));
-        assert!(!fits_document_limit(&nearly_full, "あいう"));
+        assert!(fits_document_limit(nearly_full, "あい"));
+        assert!(!fits_document_limit(nearly_full, "あいう"));
         // Counted in characters, not bytes: three ASCII characters weigh three
         // bytes and three ideographs weigh nine, and both are three characters.
-        assert!(!fits_document_limit(&nearly_full, "abc"));
+        assert!(!fits_document_limit(nearly_full, "abc"));
         assert!(fits_document_limit(
-            "",
+            0,
             &"あ".repeat(MAX_DOCUMENT_CHARACTERS)
         ));
     }

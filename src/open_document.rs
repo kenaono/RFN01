@@ -51,6 +51,12 @@ pub struct SharedText {
     /// these two moments; see [`work_copy_due`].
     pub changed_at: Cell<Instant>,
     pub pending_since: Cell<Option<Instant>>,
+    /// How many characters the text holds, once somebody has asked (RFN01-6
+    /// D). **Forgotten by every edit** — they all come through
+    /// [`Self::borrow_mut`] — and told again by the one edit that knows what it
+    /// added and took away, so a keystroke does not count the whole document
+    /// to see whether it is still inside the limit.
+    characters: Cell<Option<usize>>,
     /// Told as soon as the flag moves, so the title marker does not depend on
     /// remembering to refresh it at each of the places an edit can begin.
     events: DocumentEvents,
@@ -64,8 +70,29 @@ impl SharedText {
             edited: Cell::new(false),
             changed_at: Cell::new(Instant::now()),
             pending_since: Cell::new(None),
+            characters: Cell::new(None),
             events,
         }
+    }
+
+    /// How many characters the text holds, counted only when no edit since the
+    /// last count has said.
+    pub fn character_count(&self) -> usize {
+        match self.characters.get() {
+            Some(count) => count,
+            None => {
+                let count = self.text.borrow().chars().count();
+                self.characters.set(Some(count));
+                count
+            }
+        }
+    }
+
+    /// An edit that knows what it added and took away says what the count is
+    /// now, after its [`Self::borrow_mut`] has let the old one go.
+    pub fn set_character_count(&self, count: usize) {
+        debug_assert_eq!(count, self.text.borrow().chars().count());
+        self.characters.set(Some(count));
     }
 
     pub fn borrow(&self) -> Ref<'_, String> {
@@ -81,6 +108,7 @@ impl SharedText {
         }
         self.set_edited(true);
         self.forget_status();
+        self.characters.set(None);
         self.text.borrow_mut()
     }
 
@@ -455,27 +483,18 @@ impl History {
 /// changes one line (技術検証 7.1).
 #[derive(Default)]
 pub struct CountsSlot {
-    pub source: String,
     pub counts: DocumentCounts,
-    pub started: bool,
-    /// 前回どちらで数えたか（要件 E9）。**古いかどうかを決めるのはこの枠**
-    /// ——本文が同じなら`refresh`を呼ばないので、中の`DocumentCounts`が持つ
-    /// 同じ規則にはたどり着かない。
-    pub reading: Reading,
 }
 
 impl CountsSlot {
     /// 要件 E9: `ruby`は記法を読むかどうか。**古くなったかどうかを決めるのは
     /// `DocumentCounts`のほう**——切り替えたときに行を捨てるのはあちらの仕事で、
     /// ここはただ渡す。
+    ///
+    /// RFN01-6 C: **本文の写しはあちらが持つ**。ここにも写しを置いて比べていた
+    /// ころは、1000万字で30MBの写しがもう1本あり、比べるたびに全部を読んでいた。
     pub fn get(&mut self, source: &str, reading: Reading) -> &DocumentCounts {
-        if !self.started || self.source != source || self.reading != reading {
-            self.counts.refresh(source, reading);
-            self.source.clear();
-            self.source.push_str(source);
-            self.reading = reading;
-            self.started = true;
-        }
+        self.counts.refresh(source, reading);
         &self.counts
     }
 }
