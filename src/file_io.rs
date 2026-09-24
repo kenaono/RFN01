@@ -156,7 +156,29 @@ pub enum LoadError {
         characters: usize,
         limit: usize,
     },
+    /// 読む前から上限を超えると分かるファイル（RFN01-6のE、2026-09-24）。
+    ///
+    /// **字を数えるには全部を読まなければならない**——数GBのファイルをうっかり
+    /// 開くと、断るより先に数GBを読み込んでいた。1字は最大で4バイト（UTF-8の
+    /// 4バイト字、UTF-16のサロゲート対、UTF-16の改行CRLF）なので、上限の4倍を
+    /// 超える大きさなら、読まずに断っても開けるはずのファイルを断ることはない。
+    FileTooLarge {
+        bytes: u64,
+        limit: usize,
+    },
     Io(io::Error),
+}
+
+/// 1字が占めうる最大のバイト数（[`LoadError::FileTooLarge`]）。
+const MAX_BYTES_PER_CHARACTER: u64 = 4;
+/// 先頭の印（BOM）のぶん。UTF-8の3バイトがいちばん長い。
+const MAX_BYTE_ORDER_MARK: u64 = 3;
+
+/// `limit`字の文書を入れうるファイルの最大の大きさ。
+fn largest_readable(limit: usize) -> u64 {
+    (limit as u64)
+        .saturating_mul(MAX_BYTES_PER_CHARACTER)
+        .saturating_add(MAX_BYTE_ORDER_MARK)
 }
 
 impl fmt::Display for LoadError {
@@ -166,12 +188,48 @@ impl fmt::Display for LoadError {
                 "UTF-8・UTF-16・CP932のどれとしても読めないファイルです",
                 "The file cannot be read as UTF-8, UTF-16 or CP932"
             )),
-            LoadError::TooLarge { characters, limit } => formatter.write_str(&crate::say!(
-                "{characters}文字のファイルは、上限{limit}文字を超えるため開けません",
-                "Cannot open a file of {characters} characters: the limit is {limit}"
-            )),
+            // **「開けません」は言わない**——呼ぶ側が「開けません: 」「開き直せません: 」と
+            // 前に付ける（2026-09-24、二重になっていた）。ここは理由だけを言う。
+            LoadError::TooLarge { characters, limit } => {
+                let (characters, limit) = (grouped(*characters as u64), grouped(*limit as u64));
+                formatter.write_str(&crate::say!(
+                    "{characters}文字あり、上限の{limit}文字を超えます",
+                    "The file has {characters} characters, over the limit of {limit}"
+                ))
+            }
+            LoadError::FileTooLarge { bytes, limit } => {
+                let (size, limit) = (file_size(*bytes), grouped(*limit as u64));
+                formatter.write_str(&crate::say!(
+                    "{size}のファイルで、上限の{limit}文字を超えます",
+                    "The file is {size}, over the limit of {limit} characters"
+                ))
+            }
             LoadError::Io(error) => write!(formatter, "{error}"),
         }
+    }
+}
+
+/// `10000000` → `10,000,000`。
+fn grouped(number: u64) -> String {
+    let digits = number.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// ファイルの大きさを、読める単位で（`3.0GB`、`45.2MB`）。
+fn file_size(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    let megabytes = bytes as f64 / MB;
+    if megabytes >= 1024.0 {
+        format!("{:.1}GB", megabytes / 1024.0)
+    } else {
+        format!("{megabytes:.1}MB")
     }
 }
 
@@ -458,6 +516,10 @@ fn read_with(
     limit: usize,
     encoding: Option<Encoding>,
 ) -> Result<LoadedFile, LoadError> {
+    let size = fs::metadata(path)?.len();
+    if size > largest_readable(limit) {
+        return Err(LoadError::FileTooLarge { bytes: size, limit });
+    }
     let bytes = fs::read(path)?;
     // Taken after the read rather than before, so that a file written while it
     // was being read leaves a stamp that does not match what was loaded, and
@@ -926,6 +988,48 @@ mod tests {
 
         assert!(error.to_string().contains('🐈'), "{error}");
         assert!(!path.exists(), "ファイルは作られない");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn refuses_a_file_too_large_to_fit_without_reading_it() {
+        // RFN01-6 E: past four bytes a character, no encoding can bring it
+        // under the limit, so it is turned away on its size.
+        let directory =
+            std::env::temp_dir().join(format!("rfn-file-too-large-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("large.txt");
+        fs::write(&path, "a".repeat(4 * 10 + 4)).unwrap();
+        match read(&path, 10) {
+            Err(LoadError::FileTooLarge { bytes, limit }) => {
+                assert_eq!((bytes, limit), (44, 10));
+            }
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_refusal_says_the_size_and_the_limit_in_readable_numbers() {
+        assert_eq!(grouped(10_000_000), "10,000,000");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(file_size(3 * 1024 * 1024 * 1024), "3.0GB");
+        assert_eq!(file_size(45 * 1024 * 1024), "45.0MB");
+    }
+
+    #[test]
+    fn a_file_at_four_bytes_a_character_is_still_read_and_counted() {
+        // The largest that can still fit: ten characters of four bytes each
+        // behind a UTF-8 mark. Refusing it on its size would be wrong.
+        let directory =
+            std::env::temp_dir().join(format!("rfn-file-at-bound-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("bound.txt");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend("🐈".repeat(10).as_bytes());
+        fs::write(&path, &bytes).unwrap();
+        let loaded = read(&path, 10).expect("fits");
+        assert_eq!(loaded.text.chars().count(), 10);
         let _ = fs::remove_dir_all(&directory);
     }
 

@@ -558,7 +558,12 @@ const PARAGRAPH_WARNING_CHARACTERS: usize = 32_000;
 ///
 /// **The number moved; the reason for having one did not.** Making the scans
 /// incremental bought room, not permission to open anything.
-const MAX_DOCUMENT_CHARACTERS: usize = 1_000_000;
+///
+/// 書き手の判断 2026-09-24（RFN01-6）: **1,000万字**。作品を書く道具なので数GBは
+/// 扱わないが、上限は置く——開くときは見える範囲だけを組むので（E17の`Window`）、
+/// 開く時間はもう字数で決まらない。上限を超えるファイルは読む前に大きさで断る
+/// （`LoadError::FileTooLarge`）。
+const MAX_DOCUMENT_CHARACTERS: usize = 10_000_000;
 
 /// How long the writer has to stop before the work copy is written (要件 8.1).
 const WORK_COPY_IDLE: Duration = Duration::from_secs(2);
@@ -20256,14 +20261,16 @@ fn hit_test_pane(
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
     let label = id.label(window);
-    let through = engine
-        .viewport_end_utf16(id.scroll(window), id.shown_flow(window))
-        .max(view.caret_utf16.unwrap_or(0));
+    let needed = engine.needed_utf16(
+        id.scroll(window),
+        id.shown_flow(window),
+        &[view.caret_utf16],
+    );
     if let Err(error) = engine.update_interactive(
         styled,
         id.line_fit(window, &typography),
         &typography,
-        through,
+        &needed,
     ) {
         window.tell_pane(say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into());
         return None;
@@ -20349,14 +20356,16 @@ fn lay_out_for_caret<'a>(
         .with_source_line(shown.source_line());
     let typography = pane_typography(window, id);
     let engine = &mut graphics.engine;
-    let through = engine
-        .viewport_end_utf16(id.scroll(window), id.shown_flow(window))
-        .max(view.caret_utf16.unwrap_or(0));
+    let needed = engine.needed_utf16(
+        id.scroll(window),
+        id.shown_flow(window),
+        &[view.caret_utf16],
+    );
     if let Err(error) = engine.update_interactive(
         styled,
         id.line_fit(window, &typography),
         &typography,
-        through,
+        &needed,
     ) {
         let label = id.label(window);
         window.tell_pane(say!("{label}整形: NG / {error}", "{label} layout: NG / {error}").into());

@@ -5624,7 +5624,7 @@ impl TextEngine {
         styled: StyledText<'_>,
         fit: LineFit,
         typography: &Typography,
-        foreground_limit: Option<usize>,
+        foreground: Option<&incremental::Window>,
     ) -> Result<UpdateCost> {
         let (fit, typography) = settled(fit, typography);
         if self.matches(styled, fit, &typography) && self.deferred_blocks.is_empty() {
@@ -5684,14 +5684,8 @@ impl TextEngine {
             line_extent: charged_extent,
             line_box,
         };
-        let answered = self.wrap_answers(
-            &asking.asked,
-            &page,
-            styled,
-            cells,
-            &typography,
-            foreground_limit,
-        )?;
+        let answered =
+            self.wrap_answers(&asking.asked, &page, styled, cells, &typography, foreground)?;
         let (spans, fresh_wraps, wrap_cost) = match answered {
             Some(done) => done,
             None => (spans, Vec::new(), UpdateCost::default()),
@@ -5767,6 +5761,16 @@ impl TextEngine {
                 // **The same test `tables` makes**, both halves of it: a
                 // source pane sets a table as text, bars and all (要件 7.3.1),
                 // so there is no grid there to measure.
+                // **組む範囲の外で、まだ測っていないブロックは推定で置く**（RFN01-6のA）。
+                // 何も測っていない最初の組版では、控えを引く鍵も作らない——作るだけで
+                // 全ブロックの本文をなめることになる。
+                let outside = foreground
+                    .is_some_and(|window| !window.touches(span.byte_start..span.byte_end));
+                if outside && self.measures.is_empty() {
+                    self.deferred_blocks.insert(index);
+                    measures[index] = Some(incremental::estimate(span, cells, &typography));
+                    continue;
+                }
                 let table = block_styled.is_preview()
                     && block_styled.lines.iter().any(|line| line.kind.is_table());
                 let block_layout = layout_key(block_text, &runs, &typography, block_box);
@@ -5784,6 +5788,11 @@ impl TextEngine {
                     // Cheap now that the line table is shared, and the entry
                     // itself stays put rather than being copied into a new map.
                     measures[index] = Some(cached.measure.clone());
+                    continue;
+                }
+                if outside {
+                    self.deferred_blocks.insert(index);
+                    measures[index] = Some(incremental::estimate(span, cells, &typography));
                     continue;
                 }
 
@@ -5869,7 +5878,7 @@ impl TextEngine {
         // tiles are drawn; measuring them all again is what it saves.
         let divide = tasks.len() >= PARALLEL_MEASURE_MIN
             && self.work_cancel.is_none()
-            && foreground_limit.is_none();
+            && foreground.is_none();
         let handed = divide.then(|| {
             let queued = tasks.iter().cloned().map(PoolTask::Measure).collect();
             on_layout_threads(queued)
@@ -5998,7 +6007,7 @@ impl TextEngine {
         styled: StyledText<'_>,
         cells: u32,
         typography: &Typography,
-        foreground_limit: Option<usize>,
+        foreground: Option<&incremental::Window>,
     ) -> Result<Option<(Vec<BlockSpan>, Vec<ParagraphWraps>, UpdateCost)>> {
         if asked.is_empty() {
             return Ok(None);
@@ -6038,9 +6047,8 @@ impl TextEngine {
         // **Two paragraphs are already worth dividing.** Unlike a block, a long
         // paragraph is never small: the cheapest one here is the one that only
         // just grew past a block.
-        let divide = tasks.len() >= PARALLEL_WRAP_MIN
-            && self.work_cancel.is_none()
-            && foreground_limit.is_none();
+        let divide =
+            tasks.len() >= PARALLEL_WRAP_MIN && self.work_cancel.is_none() && foreground.is_none();
         let handed = divide.then(|| {
             let queued = tasks.iter().cloned().map(PoolTask::Wrap).collect();
             on_layout_threads(queued)
@@ -6067,11 +6075,14 @@ impl TextEngine {
                     self.check_cancelled()?;
                     let line = task.line.borrowed();
                     let base = asked[task.at].byte_start;
-                    let stop =
-                        foreground_limit.map(|limit| limit.saturating_sub(base).max(task.from));
+                    let stop = foreground.map(|window| {
+                        window
+                            .reach_in(base..base + line.text.len())
+                            .map_or(task.from, |reach| (reach - base).max(task.from))
+                    });
                     // **手前の組版が届かない段落は、そのまま残す**（E17、2026-09-24）。
-                    // 入力位置の先の余白より後ろにある段落は推定のまま置き、裏の組版に
-                    // 任せる。`wrap_prefix`は止める位置が頭にあっても1窓は組むので、
+                    // 組む範囲（`Window`）の外にある段落は推定のまま置き、裏の組版に
+                    // 任せる——入力位置の先の余白より後ろも、見ている所より手前も。`wrap_prefix`は止める位置が頭にあっても1窓は組むので、
                     // ここで除かないと、組み終わっていない段落が1打鍵ごとに全部1窓ずつ
                     // 組まれていた——3万2千字の段落が32ある100万字の縦書きで、1打鍵
                     // 0.6〜1秒（RFN01-6の測定）。
@@ -11999,7 +12010,10 @@ mod tests {
                                     StyledText::plain(&edited),
                                     LineFit::Extent(LINE_EXTENT),
                                     &plain(),
-                                    edited[..at].encode_utf16().count() as u32 + 3,
+                                    &[{
+                                        let at = edited[..at].encode_utf16().count() as u32 + 3;
+                                        at..at
+                                    }],
                                 )
                                 .unwrap()
                         } else {
@@ -12014,7 +12028,7 @@ mod tests {
                                         StyledText::plain(&edited),
                                         LineFit::Extent(LINE_EXTENT),
                                         &plain(),
-                                        0,
+                                        &[0..0],
                                     )
                                     .unwrap();
                             } else {

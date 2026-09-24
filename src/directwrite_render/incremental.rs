@@ -8,6 +8,10 @@ use std::sync::{
 
 const WINDOW_CHARACTERS: usize = 2048;
 const FOREGROUND_LOOKAHEAD: usize = 2048;
+/// How far before what the writer is looking at the foreground lays out too,
+/// in characters (RFN01-6 A). The caret can sit at the bottom of the view, and
+/// the text above it is on screen.
+const FOREGROUND_LOOKBEHIND: usize = 2048;
 const FOREGROUND_BUDGET: Duration = Duration::from_millis(8);
 
 #[derive(Clone)]
@@ -66,6 +70,67 @@ struct Mailbox {
     job: Option<Job>,
     answer: Option<Answer>,
     stopped: bool,
+}
+
+/// 手前の組版が正確に組む範囲（E17、RFN01-6のA、2026-09-24）。
+///
+/// **ここに入らない、まだ測っていないブロックは、推定の大きさのまま裏に任せる。**
+/// 以前は長い段落の組み終わっていない尾だけを裏に回し、短い段落のブロックは
+/// 文書の頭から入力位置まで全部その場で測っていた——小説風の990万字を開くと、
+/// 25,838ブロックを測り終えるまで40秒、窓も出なかった。範囲は入力位置・
+/// 見ている所・留めている所のそれぞれの前後で、離れた2か所のあいだは組まない
+/// （頭に入力位置を残したまま末尾を見ても、そのあいだを全部組まずに済む）。
+pub(super) struct Window {
+    /// Byte ranges into the text, in order and not overlapping.
+    ranges: Vec<Range<usize>>,
+}
+
+impl Window {
+    /// Each stretch the caller needs, widened by the look-behind and the
+    /// look-ahead. `needed` is in UTF-16 units of `text`.
+    fn around(text: &str, needed: &[Range<u32>]) -> Self {
+        let ends = needed
+            .iter()
+            .flat_map(|range| [range.start, range.end.max(range.start)])
+            .collect::<Vec<u32>>();
+        let bytes = bytes_at_utf16(text, &ends);
+        let mut ranges = bytes
+            .chunks(2)
+            .map(|pair| {
+                retreat_characters(text, pair[0], FOREGROUND_LOOKBEHIND)
+                    ..advance_characters(text, pair[1], FOREGROUND_LOOKAHEAD)
+            })
+            .collect::<Vec<Range<usize>>>();
+        ranges.sort_by_key(|range| range.start);
+        let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        Self { ranges: merged }
+    }
+
+    /// Whether any of the window reaches `span`. Touching counts: a block that
+    /// ends where the window begins is measured, which costs one block and
+    /// saves asking whether its last line is on screen.
+    pub(super) fn touches(&self, span: Range<usize>) -> bool {
+        self.ranges
+            .iter()
+            .any(|range| span.start <= range.end && span.end >= range.start)
+    }
+
+    /// How far into `span` the window reaches, or `None` if it does not reach
+    /// it at all. A paragraph is wrapped from its head, so this is the one
+    /// number its wrap search needs.
+    pub(super) fn reach_in(&self, span: Range<usize>) -> Option<usize> {
+        self.ranges
+            .iter()
+            .filter(|range| span.start <= range.end && span.end >= range.start)
+            .map(|range| range.end.min(span.end))
+            .max()
+    }
 }
 
 /// **打鍵では中止しない**（E17の改訂、2026-09-24）。`generation`は取り消しの
@@ -285,16 +350,11 @@ impl TextEngine {
             .filter(|block| {
                 block.flow_start < visible.1 && block.flow_start + block.flow_size > visible.0
             })
-            .map(|block| {
-                block
-                    .span
-                    .utf16_start
-                    .saturating_add(FOREGROUND_LOOKAHEAD as u32)
-            })
-            .max();
-        let Some(through) = needed else {
+            .map(|block| block.span.utf16_start..block.span.utf16_start)
+            .collect::<Vec<Range<u32>>>();
+        if needed.is_empty() {
             return Ok(());
-        };
+        }
         let text = self.text.clone();
         let styles = self.line_styles.clone();
         let marks = self.line_spans.clone();
@@ -303,29 +363,49 @@ impl TextEngine {
         let styled = StyledText::marked(&text, &styles, &marks)
             .with_markers(&markers)
             .with_source_line(self.source_line);
-        self.update_interactive(styled, self.fit, &typography, through)?;
+        self.update_interactive(styled, self.fit, &typography, &needed)?;
         Ok(())
     }
 
-    /// Return an old-view text position, not an absolute pixel coordinate:
-    /// vertical content changes its origin as the estimated tail changes size.
-    pub fn viewport_end_utf16(&self, scroll: f32, extent: f32) -> u32 {
+    /// The text on screen, as a range of the last plan's UTF-16 positions —
+    /// text positions rather than pixels, because vertical content changes its
+    /// origin as the estimated blocks change size. `None` before anything has
+    /// been laid out, when there is no screen to speak of.
+    ///
+    /// **Estimated blocks count** (RFN01-6 A): one that is on screen is exactly
+    /// what the next foreground update has to measure.
+    pub fn viewport_utf16(&self, scroll: f32, extent: f32) -> Option<Range<u32>> {
         let visible =
             crate::text_blocks::visible_flow_range(scroll, extent, self.plan.flow_bounds());
-        self.plan
-            .blocks
-            .iter()
-            .filter(|block| {
-                block.flow_start < visible.1 && block.flow_start + block.flow_size > visible.0
-            })
-            .filter(|block| {
-                !self
-                    .deferred_blocks
-                    .contains(&self.plan.block_at_utf16(block.span.utf16_start))
-            })
-            .map(|block| block.span.utf16_end)
-            .max()
-            .unwrap_or(0)
+        let mut shown = self.plan.blocks.iter().filter(|block| {
+            block.flow_start < visible.1 && block.flow_start + block.flow_size > visible.0
+        });
+        let first = shown.next()?;
+        let (start, end) = shown.fold(
+            (first.span.utf16_start, first.span.utf16_end),
+            |(start, end), block| {
+                (
+                    start.min(block.span.utf16_start),
+                    end.max(block.span.utf16_end),
+                )
+            },
+        );
+        Some(start..end)
+    }
+
+    /// What a pane's foreground update has to lay out: the screen, and the
+    /// positions it is holding on to — the caret, a kept view — each on its own
+    /// (RFN01-6 A). With nothing on screen yet and nothing held, the head.
+    pub fn needed_utf16(&self, scroll: f32, extent: f32, held: &[Option<u32>]) -> Vec<Range<u32>> {
+        let mut needed = self
+            .viewport_utf16(scroll, extent)
+            .into_iter()
+            .collect::<Vec<Range<u32>>>();
+        needed.extend(held.iter().flatten().map(|at| *at..*at));
+        if needed.is_empty() {
+            needed.push(0..0);
+        }
+        needed
     }
 
     pub fn update_interactive(
@@ -333,7 +413,7 @@ impl TextEngine {
         styled: StyledText<'_>,
         fit: LineFit,
         typography: &Typography,
-        through_utf16: u32,
+        needed: &[Range<u32>],
     ) -> Result<UpdateCost> {
         if fit == LineFit::Free {
             return self.update(styled, fit, typography);
@@ -381,16 +461,16 @@ impl TextEngine {
         if same && !self.layout_pending() {
             return Ok(UpdateCost::default());
         }
-        let target = byte_at_utf16(styled.text, through_utf16);
+        let window = Window::around(styled.text, needed);
         if same
             && self
                 .background
                 .as_ref()
                 .is_some_and(|worker| worker.pending)
-            && !self
-                .deferred_blocks
-                .iter()
-                .any(|index| self.plan.blocks[*index].span.byte_start <= target)
+            && !self.deferred_blocks.iter().any(|index| {
+                let span = &self.plan.blocks[*index].span;
+                window.touches(span.byte_start..span.byte_end)
+            })
         {
             return Ok(UpdateCost::default());
         }
@@ -400,8 +480,7 @@ impl TextEngine {
         if (self.fit, &self.typography) != (settled.0, &settled.1) {
             self.cancel_background();
         }
-        let limit = advance_characters(styled.text, target, FOREGROUND_LOOKAHEAD);
-        let cost = self.update_inner(styled, fit, typography, Some(limit))?;
+        let cost = self.update_inner(styled, fit, typography, Some(&window))?;
         if self.layout_pending() {
             if self.background.is_none() {
                 self.background = BackgroundLayout::new();
@@ -472,6 +551,33 @@ fn byte_at_utf16(text: &str, target: u32) -> usize {
         units += ch.len_utf16() as u32;
     }
     text.len()
+}
+
+/// The byte of each UTF-16 position, in one pass however many are asked.
+fn bytes_at_utf16(text: &str, targets: &[u32]) -> Vec<usize> {
+    let mut order = (0..targets.len()).collect::<Vec<usize>>();
+    order.sort_by_key(|index| targets[*index]);
+    let mut found = vec![text.len(); targets.len()];
+    let mut next = order.into_iter().peekable();
+    let mut units = 0u32;
+    for (byte, ch) in text.char_indices() {
+        while let Some(index) = next.next_if(|index| units >= targets[*index]) {
+            found[index] = byte;
+        }
+        if next.peek().is_none() {
+            break;
+        }
+        units += ch.len_utf16() as u32;
+    }
+    found
+}
+
+fn retreat_characters(text: &str, from: usize, count: usize) -> usize {
+    text[..from]
+        .char_indices()
+        .rev()
+        .nth(count.saturating_sub(1))
+        .map_or(0, |(at, _)| at)
 }
 
 fn advance_characters(text: &str, from: usize, count: usize) -> usize {
@@ -604,7 +710,7 @@ mod tests {
                         StyledText::plain(text),
                         LineFit::Extent(700),
                         typography,
-                        0,
+                        &[0..0],
                     )
                     .unwrap();
             } else {
@@ -635,7 +741,7 @@ mod tests {
                         StyledText::plain(&edited),
                         LineFit::Extent(700),
                         &typography,
-                        target,
+                        &[target..target],
                     )
                     .unwrap();
                 assert!(engine.layout_pending());
@@ -687,7 +793,7 @@ mod tests {
                 StyledText::plain(&text),
                 LineFit::Extent(700),
                 &typography,
-                0,
+                &[0..0],
             )
             .unwrap();
         engine.cancel_background();
@@ -698,7 +804,7 @@ mod tests {
                 StyledText::plain(&edited),
                 LineFit::Extent(700),
                 &typography,
-                1,
+                &[1..1],
             )
             .unwrap();
         assert!(engine.layout_pending());
@@ -743,7 +849,7 @@ mod tests {
                     StyledText::plain(&edited),
                     LineFit::Extent(700),
                     &typography,
-                    1,
+                    &[1..1],
                 )
                 .unwrap();
             thread::sleep(Duration::from_millis(5));
@@ -774,7 +880,7 @@ mod tests {
                     StyledText::plain(&latest),
                     LineFit::Extent(700),
                     &typography,
-                    30,
+                    &[30..30],
                 )
                 .unwrap();
             let worker = engine.background.as_ref().unwrap();
@@ -803,7 +909,7 @@ mod tests {
                 StyledText::plain(&text),
                 LineFit::Extent(700),
                 &typography,
-                0,
+                &[0..0],
             )
             .unwrap();
         let index = *engine.deferred_blocks.iter().next().unwrap();
@@ -834,7 +940,7 @@ mod tests {
                 StyledText::plain(&text),
                 LineFit::Extent(700),
                 &typography,
-                0,
+                &[0..0],
             )
             .unwrap();
         let plan = engine.plan.clone();
@@ -868,7 +974,7 @@ mod tests {
                 StyledText::plain(&text),
                 LineFit::Extent(700),
                 &typography,
-                0,
+                &[0..0],
             )
             .unwrap();
         assert_eq!(engine.plan, plan);
@@ -890,7 +996,7 @@ mod tests {
                 StyledText::plain(&text),
                 LineFit::Extent(700),
                 &typography,
-                0,
+                &[0..0],
             )
             .unwrap();
         assert!(engine.position_ready(10));
@@ -909,7 +1015,7 @@ mod tests {
                 StyledText::plain(&text),
                 LineFit::Extent(700),
                 &typography,
-                end,
+                &[end..end],
             )
             .unwrap();
         assert!(cost.wrapped <= 4096);
@@ -919,18 +1025,125 @@ mod tests {
         assert!(engine.caret_geometry(end).is_ok());
     }
 
+    /// RFN01-6 A: 短い段落の多い文書（小説）は、見ている所の前後だけを組んで
+    /// 残りを推定で置く。以前は入力位置より手前を全部その場で測っていた。
+    fn novel(paragraphs: usize) -> String {
+        (0..paragraphs)
+            .map(|index| format!("{index}番目の段落。短い文が続く小説の一段落である。\n"))
+            .collect()
+    }
+
+    fn full_plan(mode: WritingMode, text: &str, typography: &Typography) -> BlockLayoutPlan {
+        let mut full = TextEngine::new(mode);
+        full.update(StyledText::plain(text), LineFit::Extent(700), typography)
+            .unwrap();
+        full.plan
+    }
+
     #[test]
-    fn duplicate_long_paragraphs_and_crlf_have_distinct_deferred_offsets() {
+    fn opening_a_long_novel_measures_only_around_the_caret() {
         let typography = Typography::default();
-        let paragraph = "同じ長い段落。".repeat(1500);
-        let text = format!("{paragraph}\r\n{paragraph}\r\n後続。");
+        let text = novel(4000);
+        for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
+            let mut engine = TextEngine::new(mode);
+            let cost = engine
+                .update_interactive(
+                    StyledText::plain(&text),
+                    LineFit::Extent(700),
+                    &typography,
+                    &[0..0],
+                )
+                .unwrap();
+            assert!(engine.layout_pending(), "{mode:?}");
+            let blocks = engine.plan.blocks.len();
+            assert!(
+                (cost.blocks as usize) * 10 < blocks,
+                "{mode:?}: measured {} of {blocks} blocks",
+                cost.blocks
+            );
+            assert!(engine.position_ready(0));
+            finish(&mut engine, &text, &typography);
+            assert_eq!(engine.plan, full_plan(mode, &text, &typography), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_caret_at_the_end_does_not_lay_out_everything_before_it() {
+        // A document restored with its caret at the end, or Ctrl+End before the
+        // background has finished: the text before is estimated, the end exact.
+        let typography = Typography::default();
+        let text = novel(4000);
+        let end = text.encode_utf16().count() as u32;
+        let mut engine = TextEngine::new(WritingMode::Vertical);
+        let cost = engine
+            .update_interactive(
+                StyledText::plain(&text),
+                LineFit::Extent(700),
+                &typography,
+                &[end..end],
+            )
+            .unwrap();
+        let blocks = engine.plan.blocks.len();
+        assert!(
+            (cost.blocks as usize) * 10 < blocks,
+            "measured {} of {blocks} blocks",
+            cost.blocks
+        );
+        assert!(engine.position_ready(end));
+        assert!(!engine.position_ready(0));
+        assert!(engine.caret_geometry(end).is_ok());
+        finish(&mut engine, &text, &typography);
+        assert_eq!(
+            engine.plan,
+            full_plan(WritingMode::Vertical, &text, &typography)
+        );
+    }
+
+    #[test]
+    fn two_places_far_apart_leave_the_text_between_them_estimated() {
+        // The caret at the head and the view at the end, as after dragging the
+        // scroll bar: laying out everything between the two would be the whole
+        // document.
+        let typography = Typography::default();
+        let text = novel(4000);
+        let end = text.encode_utf16().count() as u32;
+        let middle = end / 2;
         let mut engine = TextEngine::new(WritingMode::Horizontal);
         engine
             .update_interactive(
                 StyledText::plain(&text),
                 LineFit::Extent(700),
                 &typography,
-                0,
+                &[0..0, end..end],
+            )
+            .unwrap();
+        assert!(engine.position_ready(0));
+        assert!(engine.position_ready(end));
+        assert!(!engine.position_ready(middle));
+        finish(&mut engine, &text, &typography);
+        assert!(engine.position_ready(middle));
+        assert_eq!(
+            engine.plan,
+            full_plan(WritingMode::Horizontal, &text, &typography)
+        );
+    }
+
+    #[test]
+    fn duplicate_long_paragraphs_and_crlf_have_distinct_deferred_offsets() {
+        let typography = Typography::default();
+        let paragraph = "同じ長い段落。".repeat(1500);
+        let text = format!("{paragraph}\r\n{paragraph}\r\n後続。");
+        let mut engine = TextEngine::new(WritingMode::Horizontal);
+        // The whole text is asked for, so that both paragraphs are reached and
+        // what is left of each is its own deferred tail (RFN01-6 A: a paragraph
+        // the window does not reach is not started at all).
+        let whole = text.encode_utf16().count() as u32;
+        engine
+            .update_interactive(
+                StyledText::plain(&text),
+                LineFit::Extent(700),
+                &typography,
+                &[0..whole],
             )
             .unwrap();
         assert_eq!(engine.wraps.len(), 2);
@@ -957,7 +1170,7 @@ mod tests {
         for mode in [WritingMode::Vertical, WritingMode::Horizontal] {
             let mut engine = TextEngine::new(mode);
             engine
-                .update_interactive(styled, LineFit::Extent(700), &typography, 0)
+                .update_interactive(styled, LineFit::Extent(700), &typography, &[0..0])
                 .unwrap();
             assert!(engine.layout_pending());
             let previous = engine.wraps[0].starts.len();
@@ -975,7 +1188,7 @@ mod tests {
                 assert!(Instant::now() < deadline);
                 if engine.layout_ready() {
                     engine
-                        .update_interactive(styled, LineFit::Extent(700), &typography, 0)
+                        .update_interactive(styled, LineFit::Extent(700), &typography, &[0..0])
                         .unwrap();
                 } else {
                     thread::sleep(Duration::from_millis(2));
