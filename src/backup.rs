@@ -96,6 +96,21 @@ fn unmirror(relative: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
+/// `canonicalize`が付ける`\\?\`を外した、画面に出す形のパス。
+///
+/// Workspaceの台帳は正規化したパス（`\\?\C:\…`）を持ち、バックアップの置き場から戻した
+/// パスは素の形（`C:\…`）なので、**比べる前にも、見せる前にも、この形にそろえる**。
+pub fn plain(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{share}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path.to_path_buf(),
+    }
+}
+
 /// `original`のバックアップが入るフォルダ。
 fn folder_of(root: &Path, original: &Path) -> Option<PathBuf> {
     Some(root.join(mirror(original.parent()?)?))
@@ -414,9 +429,9 @@ pub fn groups(root: &Path, registered: &[PathBuf]) -> Vec<Group> {
         };
         let owner = registered
             .iter()
+            .map(|folder| plain(folder))
             .filter(|folder| starts_with_ignoring_case(&original_parent, folder))
             .max_by_key(|folder| folder.components().count())
-            .cloned()
             .unwrap_or(original_parent);
         grouped.entry(owner).or_default().push(root.join(relative));
     }
@@ -476,6 +491,16 @@ mod tests {
         );
         assert_eq!(mirror(Path::new(r"原稿\長編A")), None);
         assert_eq!(mirror(Path::new(r"D:\原稿\..\長編A")), None);
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_taken_off_for_showing() {
+        assert_eq!(plain(Path::new(r"\\?\C:\原稿")), PathBuf::from(r"C:\原稿"));
+        assert_eq!(
+            plain(Path::new(r"\\?\UNC\server\share\原稿")),
+            PathBuf::from(r"\\server\share\原稿")
+        );
+        assert_eq!(plain(Path::new(r"C:\原稿")), PathBuf::from(r"C:\原稿"));
     }
 
     #[test]
@@ -632,7 +657,9 @@ mod tests {
             fs::write(&path, "x").unwrap();
             take(&root, &path, 5, at(1)).unwrap();
         }
-        let found = groups(&root, &[novel.clone(), part.clone()]);
+        // 台帳のパスは正規化してある（`\\?\C:\…`）。それでも同じフォルダとしてまとまる。
+        let verbatim = |p: &Path| PathBuf::from(format!(r"\\?\{}", p.display()));
+        let found = groups(&root, &[verbatim(&novel), part.clone()]);
         let folders: Vec<_> = found.iter().map(|g| g.folder.clone()).collect();
         // 一時フォルダのドライブ名は大文字（`C:\`）なので、戻したパスがそのまま比べられる。
         // 並びはパスの順（「外」は「長編」より前）。

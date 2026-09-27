@@ -24,6 +24,7 @@ use editor_state::{
 };
 mod app_data;
 mod backup;
+mod backup_ui;
 mod buffer;
 mod clipboard;
 mod code_page;
@@ -2690,7 +2691,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let insert_live = live.clone();
     window.on_pane_menu_opened(move |pane| {
         if let Some(window) = weak.upgrade() {
-            menu_commands::publish_context_insert(&window, &insert_live, PaneId::from_index(pane));
+            let pane = PaneId::from_index(pane);
+            menu_commands::publish_context_insert(&window, &insert_live, pane);
+            // RFN01-61: バックアップが無ければ「Backup History…」を淡く出す。
+            backup_ui::publish_menu(&window, &insert_live, pane);
         }
     });
     // 書式のボタン（2026-09-23）。**押された番号はメニューと同じ操作へ戻す。**
@@ -3054,6 +3058,7 @@ fn main() -> Result<(), slint::PlatformError> {
     open_word_modes(&window, &live);
     // RFN01-31・56: プリセットは設定を読んだあと——いまの値に合うものを出すので。
     settings_transfer::wire(&window, &live);
+    backup_ui::wire(&window, &live);
 
     wiring::wire_colours(
         &window,
@@ -6680,7 +6685,14 @@ fn observe_folder_autosave(window: &AppWindow, live: &Live) {
         for document in open_documents(live) {
             engine.observe(&document, &registry, Instant::now());
         }
-        let mode = match engine.status(&live.active(window)) {
+        let active = live.active(window);
+        // RFN01-61: 自動バックアップは自動保存と排他なので、自動保存の見立てが`Off`のときだけ
+        // 起こりうる。
+        let backs_up = active.file.borrow().path().is_some_and(|path| {
+            registry.save_mode_for(Some(path)) == workspace::SaveMode::AutoBackup
+        });
+        let mode = match engine.status(&active) {
+            saving::AutoSaveStatus::Off if backs_up => pick("自動バックアップ", "Auto Backup"),
             saving::AutoSaveStatus::Off => pick("退避", "Recovery"),
             saving::AutoSaveStatus::Idle => pick("自動保存", "Auto Save"),
             saving::AutoSaveStatus::Pending => pick("自動保存待ち", "Auto Save pending"),
@@ -6779,6 +6791,11 @@ struct WorkspaceManagerIds {
     folders: Vec<workspace::FolderId>,
     /// Registered folders no Workspace references any more.
     unused: Vec<workspace::FolderId>,
+    /// RFN01-61: 管理画面で登録フォルダを開いているWorkspace。**開いた直後は使用中の
+    /// ものだけ**（`workspace_manager_requested`）。
+    expanded: BTreeSet<workspace::WorkspaceId>,
+    /// RFN01-61: 管理画面のフォルダの行（設定状況の一覧）が指すフォルダ、行の順に。
+    status_folders: Vec<workspace::FolderId>,
 }
 
 /// Which of the left pane's three things is showing (要件 6.2).
@@ -8023,12 +8040,35 @@ fn publish_workspace_manager(window: &AppWindow, live: &Live) {
 
     let mut workspace_ids = Vec::new();
     let mut rows = Vec::new();
+    let expanded = live.workspace_ids.borrow().expanded.clone();
+    let mut status_ids = Vec::new();
     for entry in registry.workspaces() {
         workspace_ids.push(entry.id);
+        let open = expanded.contains(&entry.id);
+        // RFN01-61: 開いているWorkspaceの登録フォルダと、その保存方式（ONのものだけ）。
+        let mut lines = Vec::new();
+        for &folder_id in entry.folders.iter().filter(|_| open) {
+            let Some(folder) = registry.folder(folder_id) else {
+                continue;
+            };
+            let mode = match folder.mode {
+                workspace::SaveMode::Recovery => "",
+                workspace::SaveMode::AutoSave => "AutoSave",
+                workspace::SaveMode::AutoBackup => "AutoBackup",
+            };
+            lines.push(WorkspaceFolderStatus {
+                line: status_ids.len() as i32,
+                path: backup::plain(&folder.path).display().to_string().into(),
+                mode: mode.into(),
+            });
+            status_ids.push(folder_id);
+        }
         rows.push(WorkspaceRow {
             name: entry.name.clone().into(),
             is_default: default == Some(entry.id),
             is_active: active == Some(entry.id),
+            expanded: open,
+            folders: ModelRc::new(VecModel::from(lines)),
         });
     }
     let selected_index = manager_selection
@@ -8076,6 +8116,7 @@ fn publish_workspace_manager(window: &AppWindow, live: &Live) {
         held.workspaces = workspace_ids;
         held.folders = folder_ids;
         held.unused = unused_ids;
+        held.status_folders = status_ids;
     }
     window.set_workspace_rows(ModelRc::new(VecModel::from(rows)));
     window.set_workspace_manager_selected(selected_index);
@@ -8161,6 +8202,14 @@ fn workspace_switcher_chosen(window: &AppWindow, live: &Live, index: usize) {
 }
 
 fn workspace_manager_requested(window: &AppWindow, live: &Live) {
+    // RFN01-61: 開いた直後は、使用中のWorkspaceの登録フォルダだけを見せる。
+    let active = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| runtime.borrow().active_workspace());
+    live.workspace_ids.borrow_mut().expanded = active.into_iter().collect();
     window.set_left_tab(4);
     window.set_tree_open(true);
     publish_left(window, live);
@@ -8959,10 +9008,52 @@ fn workspace_folder_mode_toggled(
     index: usize,
     wanted: workspace::SaveMode,
 ) {
-    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+    let Some(folder_id) = live.workspace_ids.borrow().folders.get(index).copied() else {
         return;
     };
-    let Some(folder_id) = live.workspace_ids.borrow().folders.get(index).copied() else {
+    toggle_folder_mode(window, live, folder_id, wanted);
+}
+
+/// RFN01-61: 管理画面の設定状況の行から、同じ切り替えをする。
+fn workspace_status_mode_toggled(window: &AppWindow, live: &Live, line: usize, backup: bool) {
+    let Some(folder_id) = live
+        .workspace_ids
+        .borrow()
+        .status_folders
+        .get(line)
+        .copied()
+    else {
+        return;
+    };
+    let wanted = if backup {
+        workspace::SaveMode::AutoBackup
+    } else {
+        workspace::SaveMode::AutoSave
+    };
+    toggle_folder_mode(window, live, folder_id, wanted);
+}
+
+/// RFN01-61: 管理画面でWorkspaceの登録フォルダを開く／閉じる。
+fn workspace_row_expand_toggled(window: &AppWindow, live: &Live, index: usize) {
+    let Some(id) = live.workspace_ids.borrow().workspaces.get(index).copied() else {
+        return;
+    };
+    {
+        let mut held = live.workspace_ids.borrow_mut();
+        if !held.expanded.remove(&id) {
+            held.expanded.insert(id);
+        }
+    }
+    publish_workspace_manager(window, live);
+}
+
+fn toggle_folder_mode(
+    window: &AppWindow,
+    live: &Live,
+    folder_id: workspace::FolderId,
+    wanted: workspace::SaveMode,
+) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
         return;
     };
     let current = runtime_rc
@@ -12276,6 +12367,10 @@ enum Question {
     SavePreset(settings_transfer::PresetKind),
     /// RFN01-56: 読めた書き出しで、設定の全体を置き換えてよいか。
     ImportSettings(Rc<settings_transfer::Export>),
+    /// RFN01-61: 選んだバックアップを消すか（Backup History・Delete Backups…）。
+    DeleteBackups(Vec<PathBuf>),
+    /// RFN01-61: 知らせるだけ（保存先を変えられなかった）。答えで何もしない。
+    BackupNotice,
 }
 
 impl Question {
@@ -12319,6 +12414,8 @@ impl Question {
             Self::DeleteBookmarkGroup(..) => "DeleteBookmarkGroup",
             Self::SavePreset(..) => "SavePreset",
             Self::ImportSettings(..) => "ImportSettings",
+            Self::DeleteBackups(..) => "DeleteBackups",
+            Self::BackupNotice => "BackupNotice",
         }
     }
 }
@@ -12852,6 +12949,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             cancel_close_run(live);
         }
         (Question::ResetAll, 0) => reset_all_settings(window, live),
+        (Question::DeleteBackups(paths), 0) => backup_ui::delete_confirmed(window, live, &paths),
         (Question::SavePreset(kind), 0) => {
             let name = window.get_question_name().to_string();
             settings_transfer::save_as(window, live, kind, &name);

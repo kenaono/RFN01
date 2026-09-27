@@ -2229,6 +2229,27 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
         });
     });
 
+    // RFN01-61: 管理画面の設定状況の一覧（開閉と、保存方式の切り替え）。
+    let weak = window.as_weak();
+    let expand_live = live.clone();
+    window.on_workspace_row_expand_toggled(move |index| {
+        if let Some(window) = weak.upgrade() {
+            crate::workspace_row_expand_toggled(&window, &expand_live, index.max(0) as usize);
+        }
+    });
+    let weak = window.as_weak();
+    let status_live = live.clone();
+    window.on_workspace_status_mode_toggled(move |line, backup| {
+        let line = line.max(0) as usize;
+        let weak = weak.clone();
+        let live = status_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::workspace_status_mode_toggled(&window, &live, line, backup);
+            }
+        });
+    });
+
     let weak = window.as_weak();
     let mode_live = live.clone();
     window.on_workspace_folder_mode_toggled(move |index| {

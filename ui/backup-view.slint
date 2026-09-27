@@ -1,0 +1,315 @@
+// RFN01-61（書き手と決めた 2026-09-27）: 自動バックアップの2つの画面。
+//
+// - Backup History：比較の画面の左に、そのファイルのバックアップの一覧を置く。**行を押すと
+//   比較の相手が替わり、チェックは消す対象を選ぶ**——2つの役割を1つの操作に重ねない。
+// - Delete Backups…：バックアップを持つフォルダの一覧から、消すフォルダを選ぶ。
+//
+// どちらも頭に「All」を置き、開いた直後はどれもチェックしない。チェックが無いあいだ
+// 消すボタンは押せない。
+
+import { ScrollView } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { Role, TextButton } from "controls.slint";
+
+export struct BackupRow {
+    // 一覧の文字：History は日時、Delete Backups… はフォルダのパス。
+    label: string,
+    // 右に添える小さい文字：History は本文文字数。
+    detail: string,
+    checked: bool,
+}
+
+// 比較の画面の`SideCheck`と同じ形の四角。同じ画面の中で、チェックの形を2つにしない。
+component CheckMark inherits Rectangle {
+    in property <bool> checked;
+    in property <string> tip;
+    callback toggled();
+    width: 24px;
+    height: 26px;
+    Rectangle {
+        x: 3px;
+        y: 4px;
+        width: 18px;
+        height: 18px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: root.checked || touch.has-hover ? Tok.accent : Tok.rule-strong;
+        background: root.checked ? Tok.accent : touch.has-hover ? Tok.accent-faint : Tok.paper;
+        if root.checked: Text {
+            text: "✓";
+            color: Tok.paper;
+            font-size: 15px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+// 1行：チェック、文字、添え字。`selected`は History の「いま比べている相手」。
+component CheckLine inherits Rectangle {
+    in property <BackupRow> item;
+    in property <bool> selected;
+    callback toggled();
+    callback chosen();
+    height: 30px;
+    border-radius: 5px;
+    background: root.selected ? Tok.accent-faint : line.has-hover ? Tok.accent-faint : transparent;
+    border-width: root.selected ? 1px : 0px;
+    border-color: Tok.accent;
+    line := TouchArea {
+        clicked => {
+            root.chosen();
+        }
+    }
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 8px;
+        spacing: 6px;
+        CheckMark {
+            checked: root.item.checked;
+            toggled => {
+                root.toggled();
+            }
+        }
+        Text {
+            text: root.item.label;
+            color: Tok.ink;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.item.detail != "": Text {
+            text: root.item.detail;
+            color: Tok.ink-muted;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+        }
+    }
+}
+
+// 頭の「All」。全部チェックされていればチェック済みに見え、押せば全部を替える。
+component AllLine inherits Rectangle {
+    in property <bool> checked;
+    callback toggled();
+    height: 30px;
+    all := TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+    HorizontalLayout {
+        padding-left: 4px;
+        spacing: 6px;
+        CheckMark {
+            checked: root.checked;
+            toggled => {
+                root.toggled();
+            }
+        }
+        Text {
+            text: @tr("All");
+            color: Tok.ink-muted;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// Backup History の左の列。
+export component BackupHistoryList inherits Rectangle {
+    in property <string> file-name;
+    in property <[BackupRow]> rows;
+    in property <int> selected: -1;
+    in property <bool> all-checked;
+    in property <bool> any-checked;
+    callback chosen(int);
+    callback toggled(int);
+    callback all-toggled();
+    callback delete-requested();
+
+    background: Tok.paper;
+    border-width: 1px;
+    border-color: Tok.rule;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        Text {
+            text: @tr("Backup History");
+            color: Tok.ink-strong;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: root.file-name;
+            color: Tok.ink-muted;
+            font-size: 11px;
+            overflow: elide;
+        }
+
+        AllLine {
+            checked: root.all-checked;
+            toggled => {
+                root.all-toggled();
+            }
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                spacing: 1px;
+                for row[index] in root.rows: CheckLine {
+                    item: row;
+                    selected: index == root.selected;
+                    toggled => {
+                        root.toggled(index);
+                    }
+                    chosen => {
+                        root.chosen(index);
+                    }
+                }
+            }
+        }
+
+        TextButton {
+            wide: true;
+            title: @tr("Delete…");
+            role: Role.danger;
+            enabled: root.any-checked;
+            clicked => {
+                if root.any-checked {
+                    root.delete-requested();
+                }
+            }
+        }
+    }
+}
+
+// Delete Backups… の画面（Settings → FILES → Auto Backup から開く）。
+export component BackupDeleteDialog inherits Rectangle {
+    in property <[BackupRow]> rows;
+    in property <bool> all-checked;
+    in property <bool> any-checked;
+    callback toggled(int);
+    callback all-toggled();
+    callback delete-requested();
+    callback closed();
+
+    background: Tok.scrim;
+
+    // 後ろの画面を押させない。
+    TouchArea { }
+
+    keys := FocusScope {
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.closed();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: min(root.width - 64px, 560px);
+                    background: Tok.paper;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: Tok.rule-strong;
+                    drop-shadow-color: #1713214d;
+                    drop-shadow-blur: 40px;
+                    drop-shadow-offset-y: 16px;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 10px;
+
+                        Text {
+                            text: @tr("Delete Backups");
+                            color: Tok.ink-strong;
+                            font-size: 15px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: root.rows.length == 0
+                                ? @tr("There are no backups.")
+                                : @tr("Choose the folders whose backups you want to delete.");
+                            color: Tok.ink-muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        if root.rows.length > 0: AllLine {
+                            checked: root.all-checked;
+                            toggled => {
+                                root.all-toggled();
+                            }
+                        }
+
+                        if root.rows.length > 0: ScrollView {
+                            height: min(280px, root.rows.length * 31px + 2px);
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 1px;
+                                for row[index] in root.rows: CheckLine {
+                                    item: row;
+                                    toggled => {
+                                        root.toggled(index);
+                                    }
+                                    // 行を押してもチェックが替わる（ここに「比べる」は無い）。
+                                    chosen => {
+                                        root.toggled(index);
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+
+                            TextButton {
+                                title: @tr("Delete…");
+                                role: Role.danger;
+                                enabled: root.any-checked;
+                                clicked => {
+                                    if root.any-checked {
+                                        root.delete-requested();
+                                    }
+                                }
+                            }
+
+                            TextButton {
+                                title: @tr("Cancel");
+                                clicked => {
+                                    root.closed();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

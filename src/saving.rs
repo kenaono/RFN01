@@ -1929,6 +1929,12 @@ fn drive_entry(entry: &mut AutoSaveEntry, window: &AppWindow, live: &Live, now: 
     }
 }
 
+// RFN01-61: バックアップの画面の試験（`backup_ui_tests`）も、同じ窓と文書の組み立てを使う。
+// **塊そのものは`mod`のまま**にしてある——言語の試験（`i18n`）は`#[cfg(test)]`の次の
+// `mod … {`から先を試験として読み飛ばす。
+#[cfg(test)]
+pub(crate) use folder_auto_save_tests::{Harness, attach_workspace, open_under, scratch_directory};
+
 #[cfg(test)]
 mod folder_auto_save_tests {
     use super::*;
@@ -1949,9 +1955,9 @@ mod folder_auto_save_tests {
     /// A minimal, offscreen `AppWindow`/`Live` pair, the same shape the other
     /// `*_ui_tests` files build — just enough to hold one document in one
     /// pane so [`open_documents`] and [`write_document_in`] work normally.
-    struct Harness {
-        window: AppWindow,
-        live: Live,
+    pub(crate) struct Harness {
+        pub(crate) window: AppWindow,
+        pub(crate) live: Live,
     }
 
     impl Harness {
@@ -1959,7 +1965,7 @@ mod folder_auto_save_tests {
         /// is only handed the window's `Weak` afterwards, because
         /// `AppWindow::new` needs a platform already set, and the document a
         /// test wants has to be built with this window's own handle.
-        fn new(
+        pub(crate) fn new(
             make_document: impl FnOnce(slint::Weak<AppWindow>) -> Rc<OpenDocument>,
         ) -> (Self, Rc<OpenDocument>) {
             let directory = std::env::temp_dir().join(format!(
@@ -2039,14 +2045,14 @@ mod folder_auto_save_tests {
 
     /// A change recorded through undo, the way real typing is — plain
     /// mutation of `text` would leave `changed_at`/`pending_since` untouched.
-    fn edit(document: &Rc<OpenDocument>, text: &str) {
+    pub(crate) fn edit(document: &Rc<OpenDocument>, text: &str) {
         let at = document.text.borrow().len();
         document.history.borrow_mut().separate_next = true;
         document.record(at, String::new(), text.into());
         document.text.borrow_mut().push_str(text);
     }
 
-    fn open_under(
+    pub(crate) fn open_under(
         directory: &Path,
         name: &str,
         text: &str,
@@ -2071,7 +2077,7 @@ mod folder_auto_save_tests {
     }
 
     /// RFN01-61: `root`を登録フォルダに持つWorkspaceを使用中にする。
-    fn attach_workspace(live: &Live, root: &Path, mode: workspace::SaveMode) {
+    pub(crate) fn attach_workspace(live: &Live, root: &Path, mode: workspace::SaveMode) {
         let appdata = app_data::app_directory().unwrap();
         let runtime = crate::workspace_ui::Runtime::open(appdata);
         let runtime = Rc::new(RefCell::new(runtime));
@@ -2093,7 +2099,7 @@ mod folder_auto_save_tests {
         write_document_in(&harness.window, &harness.live, document, target, form)
     }
 
-    fn scratch_directory(name: &str) -> PathBuf {
+    pub(crate) fn scratch_directory(name: &str) -> PathBuf {
         let directory = std::env::temp_dir().join(format!(
             "editor-folder-autosave-{name}-{}-{}",
             std::process::id(),

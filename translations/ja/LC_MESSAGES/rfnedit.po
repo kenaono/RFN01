@@ -39,7 +39,7 @@ msgstr "適用して保存"
 msgid "Assignable keys: the default keys in the list, or Ctrl+Alt+A–Z."
 msgstr "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"
 
-msgid "Auto Backup"
+msgid "Auto Recovery"
 msgstr "自動退避"
 
 msgid "Auto-Save"
@@ -54,7 +54,7 @@ msgstr "戻る"
 msgid "Background"
 msgstr "背景"
 
-msgid "Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing."
+msgid "Keeps a work copy 2 seconds after you stop typing, or every 5 seconds while typing."
 msgstr "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
 
 msgid "Backup"
@@ -465,7 +465,7 @@ msgstr "次の差分"
 msgid "No Color"
 msgstr "色を付けない"
 
-msgid "No backup. Turning it off also deletes the work copies."
+msgid "No work copy is kept. Turning it off also deletes the work copies."
 msgstr "退避しません。オフにすると作業コピーも削除します。"
 
 msgid "No bullet marks (every mark is plain text)."
@@ -1325,3 +1325,39 @@ msgstr "設定・キー・プリセット・単語帳を1つのファイルに�
 
 msgid "{} (changed)"
 msgstr "{}（変更あり）"
+
+msgid "Auto Backup"
+msgstr "自動バックアップ"
+
+msgid "Keeps the previous version when you save, in Workspace folders with AutoBackup ON."
+msgstr "AutoBackupをONにしたWorkspaceのフォルダで、保存の前の版を残します。"
+
+msgid "Versions to Keep"
+msgstr "残す数"
+
+msgid "Backup Folder"
+msgstr "保存先"
+
+msgid "App data folder (default)"
+msgstr "アプリのフォルダ（既定）"
+
+msgid "Delete Backups…"
+msgstr "バックアップを消す…"
+
+msgid "Delete Backups"
+msgstr "バックアップを消す"
+
+msgid "There are no backups."
+msgstr "バックアップはありません。"
+
+msgid "Choose the folders whose backups you want to delete."
+msgstr "バックアップを消すフォルダを選んでください。"
+
+msgid "All"
+msgstr "すべて"
+
+msgid "Backup History"
+msgstr "バックアップの履歴"
+
+msgid "Backup History…"
+msgstr "バックアップの履歴…"

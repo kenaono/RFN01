@@ -1305,6 +1305,8 @@ fn build(
         stepped_place(strip.history.len(), strip.at, true).is_some()
     };
     let path = t.document.file.borrow().path().is_some();
+    // RFN01-61: バックアップが無ければ「Backup History…」を淡く出す。
+    let backups = path && crate::backup_ui::has_backups(window, &t.document);
     let selected = if terminal {
         live.cache
             .borrow_mut()
@@ -1949,6 +1951,12 @@ fn build(
                 main && path
             );
             add!(
+                "バックアップの履歴…",
+                "Backup History…",
+                Command::Compare(3),
+                main && backups
+            );
+            add!(
                 "別ファイルと比較…",
                 "Compare with Another File…",
                 Command::Compare(2),
@@ -2467,6 +2475,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::ZoomSet(percent) => window.invoke_pane_zoom_set(p, percent),
         Command::Compare(0) => window.invoke_compare_saved_requested(),
         Command::Compare(1) => window.invoke_compare_head_requested(),
+        Command::Compare(3) => window.invoke_backup_history_requested(),
         Command::Compare(_) => window.invoke_compare_files_requested(),
         Command::Terminal(n) => terminal_workflow::action(window, live, t.parent, t.spot, n),
         Command::Panel(n) => terminal_panels::action(window, live, t.parent, n, 0),

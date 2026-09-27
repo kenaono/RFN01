@@ -7,10 +7,22 @@ import { LinkRow, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 // automatically, and the one the tree is scoped to right now — and both are
 // worth telling apart on screen (Workspace設計.md: "デフォルトWorkspaceを一つ
 // 設定できる…手動で切り替えたWorkspaceをリンクの範囲に使う").
+// RFN01-61（2026-09-27）: 設定状況の一覧の1行——あるWorkspaceの登録フォルダと、その保存方式。
+// **ONのものだけを文字で出す**（`AutoSave`／`AutoBackup`）。両方OFFなら空。`line`は
+// 全Workspaceを通した行の番号で、右クリックの切り替えがRustへ運ぶ。
+export struct WorkspaceFolderStatus {
+    line: int,
+    path: string,
+    mode: string,
+}
+
 export struct WorkspaceRow {
     name: string,
     is-default: bool,
     is-active: bool,
+    // RFN01-61: 登録フォルダの行を下に開いているか。開いていれば`folders`がその行。
+    expanded: bool,
+    folders: [WorkspaceFolderStatus],
 }
 
 // One shared folder, as it applies to the Workspace currently selected in the
@@ -56,8 +68,10 @@ component WorkspaceListRow inherits Rectangle {
     in property <bool> is-default;
     in property <bool> is-active;
     in property <bool> selected;
+    in property <bool> expanded;
     callback chosen();
     callback context-requested();
+    callback expand-toggled();
 
     height: 32px;
     border-radius: 6px;
@@ -65,10 +79,35 @@ component WorkspaceListRow inherits Rectangle {
         ? Tok.accent-soft
         : (touch.has-hover ? Tok.chrome-sunken : transparent);
 
+    // 行を押すのは「このWorkspaceを選ぶ」なので、開閉は左の印だけが受ける。
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.context-requested();
+            }
+        }
+    }
+
     HorizontalLayout {
-        padding-left: 8px;
+        padding-left: 2px;
         padding-right: 8px;
-        spacing: 6px;
+        spacing: 4px;
+
+        Rectangle {
+            width: 20px;
+            Text {
+                text: root.expanded ? "▾" : "▸";
+                color: fold.has-hover ? Tok.accent : Tok.ink-muted;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            fold := TouchArea {
+                clicked => { root.expand-toggled(); }
+            }
+        }
 
         Text {
             text: root.name;
@@ -91,14 +130,44 @@ component WorkspaceListRow inherits Rectangle {
             vertical-alignment: center;
         }
     }
+}
+
+// RFN01-61: 開いたWorkspaceの下の、登録フォルダの1行。右クリックで保存方式を切り替える。
+component FolderStatusLine inherits Rectangle {
+    in property <WorkspaceFolderStatus> line;
+    callback context-requested();
+
+    height: 26px;
+    border-radius: 5px;
+    background: touch.has-hover ? Tok.chrome-sunken : transparent;
 
     touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.chosen(); }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                 root.context-requested();
             }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 26px;
+        padding-right: 8px;
+        spacing: 6px;
+
+        Text {
+            text: root.line.path;
+            color: Tok.ink-muted;
+            font-size: 12px;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.line.mode != "": Text {
+            text: root.line.mode;
+            color: Tok.accent;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
         }
     }
 }
@@ -136,6 +205,13 @@ export component WorkspaceManager inherits Rectangle {
     in property <[UnusedFolderRow]> unused-folders;
     callback unused-folder-removed(int);
 
+    // RFN01-61: 設定状況の一覧（行は`WorkspaceRow.folders`）。
+    callback expand-toggled(int);
+    callback status-mode-toggled(int, bool);
+    property <int> status-line: -1;
+    property <string> status-mode;
+    property <length> status-y;
+
     callback closed();
     callback open-selected();
     callback leave-requested();
@@ -157,13 +233,27 @@ export component WorkspaceManager inherits Rectangle {
                     role: Role.danger; clicked => { root.read-error-reset-requested(); }
                 }
                 Text { text: @tr("Choose a Workspace"); color: Tok.ink-muted; font-size: 12px; }
-                for row[index] in root.workspaces: workspace-row := WorkspaceListRow {
-                    name: row.name; is-default: row.is-default; selected: false; is-active: false;
-                    chosen => { root.row-chosen(index); }
-                    context-requested => {
-                        root.context-y = workspace-row.absolute-position.y - root.absolute-position.y + 32px;
-                        root.row-context-chosen(index);
-                        folders-menu.show();
+                for row[index] in root.workspaces: VerticalLayout {
+                    spacing: 1px;
+                    workspace-row := WorkspaceListRow {
+                        name: row.name; is-default: row.is-default; selected: false; is-active: false;
+                        expanded: row.expanded;
+                        chosen => { root.row-chosen(index); }
+                        expand-toggled => { root.expand-toggled(index); }
+                        context-requested => {
+                            root.context-y = workspace-row.absolute-position.y - root.absolute-position.y + 32px;
+                            root.row-context-chosen(index);
+                            folders-menu.show();
+                        }
+                    }
+                    for line in row.folders: status-row := FolderStatusLine {
+                        line: line;
+                        context-requested => {
+                            root.status-line = line.line;
+                            root.status-mode = line.mode;
+                            root.status-y = status-row.absolute-position.y - root.absolute-position.y + 26px;
+                            status-menu.show();
+                        }
                     }
                 }
                 if root.workspaces.length == 0: Text {
@@ -194,6 +284,27 @@ export component WorkspaceManager inherits Rectangle {
             }
         }
     }
+    // RFN01-61: 設定状況の行の右クリック。ツリーの右クリックと同じ2行（排他）。
+    status-menu := PopupWindow {
+        x: 8px; y: root.status-y; width: 220px; close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 220px;
+            VerticalLayout {
+                padding: 6px; spacing: 1px;
+                MenuRow {
+                    title: root.status-mode == "AutoSave" ? "AutoSave ON" : "AutoSave OFF";
+                    checked: root.status-mode == "AutoSave";
+                    activated => { root.status-mode-toggled(root.status-line, false); status-menu.close(); }
+                }
+                MenuRow {
+                    title: root.status-mode == "AutoBackup" ? "AutoBackup ON" : "AutoBackup OFF";
+                    checked: root.status-mode == "AutoBackup";
+                    activated => { root.status-mode-toggled(root.status-line, true); status-menu.close(); }
+                }
+            }
+        }
+    }
+
     folders-menu := PopupWindow {
         x: 8px; y: root.context-y; width: 340px; close-policy: close-on-click-outside;
         MenuFrame {
