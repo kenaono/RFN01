@@ -3917,10 +3917,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let menu_live = live.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
-            // **印刷中なら、メニューが閉じても押せる場所のまま**（RFN01-44）。
+            // **印刷中なら、メニューが閉じても押せる場所のまま**（RFN01-44）。比較の画面も同じ。
             let printing = weak
                 .upgrade()
-                .is_some_and(|window| window.get_print_active());
+                .is_some_and(|window| window.get_print_active() || window.get_diff_active());
             let end = reach(printing, shown);
             chrome.set_interactive_end(end);
             // 診断（RFN01-44）：**この道も同じ値を書く**。印刷プレビュー中の値を
@@ -3948,7 +3948,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let held = chrome.clone();
     let print_live = live.clone();
     let print_weak = window.as_weak();
-    window.on_print_active_changed(move |active| {
+    // 比較の画面（`diff-active`）も同じ受け口を通る（書き手の報告 2026-09-27：比較の上の帯の
+    // 「比較を終了」が押せなかった）。**引数ではなく窓の今の値で決める**——どちらの知らせでも同じ答え。
+    window.on_print_active_changed(move |_| {
+        let active = print_weak
+            .upgrade()
+            .is_some_and(|window| window.get_print_active() || window.get_diff_active());
         if let Some(chrome) = held.borrow().as_ref() {
             // **メニューのバーが出ていても、印刷中なら押せる場所**（RFN01-44）。
             let menu = print_weak

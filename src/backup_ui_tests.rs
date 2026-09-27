@@ -474,3 +474,51 @@ fn backup_screens() {
     }
     fs::write(out.join("settings-files.ppm"), ppm).unwrap();
 }
+
+#[test]
+fn ending_the_comparison_closes_the_history() {
+    let root = scratch_directory("backup-end");
+    let (harness, _document) = Harness::new(|weak| open_under(&root, "draft.md", "現在\n", weak));
+    attach_workspace(&harness.live, &root, SaveMode::AutoBackup);
+    let window = &harness.window;
+    let live = &harness.live;
+    diff_view::wire(window, live);
+    with_backups(&harness, &root.join("draft.md"), &["一\n"], "現在\n");
+    open_history(window, live);
+    assert!(window.get_diff_active());
+    window.invoke_diff_dismissed();
+    assert!(!window.get_diff_active());
+    assert!(!window.get_backup_history_active());
+}
+
+#[test]
+fn clicking_end_comparison_closes_the_history() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let root = scratch_directory("backup-end-click");
+    let (harness, _document) = Harness::new(|weak| open_under(&root, "draft.md", "現在\n", weak));
+    attach_workspace(&harness.live, &root, SaveMode::AutoBackup);
+    let window = &harness.window;
+    let live = &harness.live;
+    diff_view::wire(window, live);
+    with_backups(&harness, &root.join("draft.md"), &["一\n"], "現在\n");
+    window.show().unwrap();
+    open_history(window, live);
+    slint::platform::update_timers_and_animations();
+    let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+    harness.surface.draw_if_needed(|renderer| {
+        renderer.render(&mut pixels, 1000);
+    });
+    let at = slint::LogicalPosition::new(610.0, 20.0);
+    let w = window.window();
+    w.dispatch_event(WindowEvent::PointerMoved { position: at });
+    w.dispatch_event(WindowEvent::PointerPressed {
+        position: at,
+        button: PointerEventButton::Left,
+    });
+    w.dispatch_event(WindowEvent::PointerReleased {
+        position: at,
+        button: PointerEventButton::Left,
+    });
+    slint::platform::update_timers_and_animations();
+    assert!(!window.get_diff_active(), "End Comparison did not close");
+}

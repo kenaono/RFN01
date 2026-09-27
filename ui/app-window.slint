@@ -161,6 +161,9 @@ export component AppWindow inherits Window {
     /// 高さに重なっているので、そのままでは中のボタンに指が届かない。
     callback print-active-changed(bool);
     changed print-active => { root.print-active-changed(root.print-active); }
+    // 比較の画面も同じ（書き手の報告 2026-09-27：「比較を終了」が押せない）。上の帯が
+    // タイトル行の高さに重なるので、出ている間は上端を押せる場所にする。
+    changed diff-active => { root.print-active-changed(root.print-active); }
     // The document in front, then the editor's name. It said
     // 「Editor - 横書き・縦書き切り替え検証」 until 2026-09-06, which was the
     // title of the technical validation this grew out of — true once, and a
@@ -2237,8 +2240,10 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
+                        // 5 Bookmarks と 7 Backups は自分の面を持つ（RFN01-61：出したままだと高さを
+                        // 半分ずつ取り合い、Backups の行が下半分へ押し出された）。
                         visible: (root.left-tab != 4 || root.workspace-active) && root.left-tab != 5
-                            && (root.left-tab != 6 || root.tag-available);
+                            && root.left-tab != 7 && (root.left-tab != 6 || root.tag-available);
                         vertical-stretch: self.visible ? 1 : 0;
                         max-height: self.visible ? 100000px : 0px;
                         // 要件 5.2: the point being carried, but only while it
@@ -4263,6 +4268,11 @@ export component AppWindow inherits Window {
                                                     accepted => {
                                                         root.backup-name-accepted(self.text);
                                                     }
+                                                    // 欄を離れたときも確定する（書き手の報告 2026-09-27：Enterを押さずに
+                                                    // 離れると反映されなかった。ほかの欄は打った時点で効いている）。
+                                                    focus-lost => {
+                                                        root.backup-name-accepted(self.text);
+                                                    }
                                                 }
                                             }
 
@@ -4274,7 +4284,7 @@ export component AppWindow inherits Window {
                                                 wrap: word-wrap;
                                             }
                                             if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup"), @tr("File Name")]): Text {
-                                                text: "{name}  {ext}  yyyy MM dd HH mm ss : " + @tr("replaced when a backup is named. The name and the time to the second are required. Press Enter to apply; existing backups are renamed.");
+                                                text: "{name}  {ext}  yyyy MM dd HH mm ss : " + @tr("replaced when a backup is named. The name and the time to the second are required. Applied when you press Enter or leave the box; existing backups are renamed.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
                                                 wrap: word-wrap;

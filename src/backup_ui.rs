@@ -730,6 +730,10 @@ fn name_edited(window: &AppWindow, format: &str) {
 /// Enter：書式を替え、**それまでのバックアップの名前も全部付け替える**。付け替えられなければ
 /// 何も変えずにダイアログで言い、欄を確定済みの書式へ戻す。
 fn name_accepted(window: &AppWindow, live: &Live, format: &str) {
+    // Enterのあと欄を離れても2度は付け替えない。
+    if format == window.get_backup_name_format().as_str() {
+        return;
+    }
     if let Err(problem) = backup::check_format(format) {
         window.set_backup_name_problem(problem_text(problem).into());
         return;
@@ -759,6 +763,9 @@ fn name_accepted(window: &AppWindow, live: &Live, format: &str) {
     }
     window.set_backup_name_format(format.into());
     save_settings(window, &live.cache);
+    live.cache
+        .borrow_mut()
+        .log_diag("file", &format!("backup rename ok format={format}"));
     publish_settings(window);
     refresh_pane(window, live);
     window.tell(say!("ファイル名の書式を変えました", "File name format changed").into());
