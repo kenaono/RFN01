@@ -23,6 +23,8 @@ use editor_state::{
     selection_source_range, source_line_start, update_selection_after_move,
 };
 mod app_data;
+mod backup;
+mod backup_ui;
 mod buffer;
 mod clipboard;
 mod code_page;
@@ -3053,6 +3055,7 @@ fn main() -> Result<(), slint::PlatformError> {
     open_word_modes(&window, &live);
     // RFN01-31・56: プリセットは設定を読んだあと——いまの値に合うものを出すので。
     settings_transfer::wire(&window, &live);
+    backup_ui::wire(&window, &live);
 
     wiring::wire_colours(
         &window,
@@ -3914,10 +3917,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let menu_live = live.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
-            // **印刷中なら、メニューが閉じても押せる場所のまま**（RFN01-44）。
+            // **印刷中なら、メニューが閉じても押せる場所のまま**（RFN01-44）。比較の画面も同じ。
             let printing = weak
                 .upgrade()
-                .is_some_and(|window| window.get_print_active());
+                .is_some_and(|window| window.get_print_active() || window.get_diff_active());
             let end = reach(printing, shown);
             chrome.set_interactive_end(end);
             // 診断（RFN01-44）：**この道も同じ値を書く**。印刷プレビュー中の値を
@@ -3945,7 +3948,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let held = chrome.clone();
     let print_live = live.clone();
     let print_weak = window.as_weak();
-    window.on_print_active_changed(move |active| {
+    // 比較の画面（`diff-active`）も同じ受け口を通る（書き手の報告 2026-09-27：比較の上の帯の
+    // 「比較を終了」が押せなかった）。**引数ではなく窓の今の値で決める**——どちらの知らせでも同じ答え。
+    window.on_print_active_changed(move |_| {
+        let active = print_weak
+            .upgrade()
+            .is_some_and(|window| window.get_print_active() || window.get_diff_active());
         if let Some(chrome) = held.borrow().as_ref() {
             // **メニューのバーが出ていても、印刷中なら押せる場所**（RFN01-44）。
             let menu = print_weak
@@ -6679,7 +6687,14 @@ fn observe_folder_autosave(window: &AppWindow, live: &Live) {
         for document in open_documents(live) {
             engine.observe(&document, &registry, Instant::now());
         }
-        let mode = match engine.status(&live.active(window)) {
+        let active = live.active(window);
+        // RFN01-61: 自動バックアップは自動保存と排他なので、自動保存の見立てが`Off`のときだけ
+        // 起こりうる。
+        let backs_up = active.file.borrow().path().is_some_and(|path| {
+            registry.save_mode_for(Some(path)) == workspace::SaveMode::AutoBackup
+        });
+        let mode = match engine.status(&active) {
+            saving::AutoSaveStatus::Off if backs_up => pick("自動バックアップ", "Auto Backup"),
             saving::AutoSaveStatus::Off => pick("退避", "Recovery"),
             saving::AutoSaveStatus::Idle => pick("自動保存", "Auto Save"),
             saving::AutoSaveStatus::Pending => pick("自動保存待ち", "Auto Save pending"),
@@ -6778,6 +6793,11 @@ struct WorkspaceManagerIds {
     folders: Vec<workspace::FolderId>,
     /// Registered folders no Workspace references any more.
     unused: Vec<workspace::FolderId>,
+    /// RFN01-61: 管理画面で登録フォルダを開いているWorkspace。**開いた直後は使用中の
+    /// ものだけ**（`workspace_manager_requested`）。
+    expanded: BTreeSet<workspace::WorkspaceId>,
+    /// RFN01-61: 管理画面のフォルダの行（設定状況の一覧）が指すフォルダ、行の順に。
+    status_folders: Vec<workspace::FolderId>,
 }
 
 /// Which of the left pane's three things is showing (要件 6.2).
@@ -6792,6 +6812,8 @@ enum LeftTab {
     Bookmarks,
     /// 書き手の求め 2026-09-23.
     Tags,
+    /// RFN01-61（書き手の求め 2026-09-27）.
+    Backups,
 }
 
 impl LeftTab {
@@ -6805,6 +6827,7 @@ impl LeftTab {
             Self::Workspace => 4,
             Self::Bookmarks => 5,
             Self::Tags => 6,
+            Self::Backups => 7,
         }
     }
 
@@ -6817,6 +6840,7 @@ impl LeftTab {
             4 => Self::Workspace,
             5 => Self::Bookmarks,
             6 => Self::Tags,
+            7 => Self::Backups,
             _ => Self::Explorer,
         }
     }
@@ -6859,6 +6883,7 @@ fn publish_left(window: &AppWindow, live: &Live) {
         LeftTab::Outline => publish_outline(window, live),
         LeftTab::Bookmarks => bookmark_ui::publish(window, live),
         LeftTab::Tags => publish_tags(window, live),
+        LeftTab::Backups => backup_ui::publish_pane(window, live),
     }
 }
 
@@ -7271,8 +7296,8 @@ fn activate_left_row(window: &AppWindow, live: &Live, index: usize) {
         LeftTab::Search => open_result(window, live, index),
         LeftTab::Recent => open_remembered(window, live, index),
         LeftTab::Outline => go_to_heading(window, live, index),
-        // The view answers its own rows (`bookmark_ui::activate`).
-        LeftTab::Bookmarks => {}
+        // The views answer their own rows (`bookmark_ui::activate`, `backup_ui`).
+        LeftTab::Bookmarks | LeftTab::Backups => {}
         LeftTab::Tags => search_tag_row(window, live, index),
     }
 }
@@ -8022,12 +8047,35 @@ fn publish_workspace_manager(window: &AppWindow, live: &Live) {
 
     let mut workspace_ids = Vec::new();
     let mut rows = Vec::new();
+    let expanded = live.workspace_ids.borrow().expanded.clone();
+    let mut status_ids = Vec::new();
     for entry in registry.workspaces() {
         workspace_ids.push(entry.id);
+        let open = expanded.contains(&entry.id);
+        // RFN01-61: 開いているWorkspaceの登録フォルダと、その保存方式（ONのものだけ）。
+        let mut lines = Vec::new();
+        for &folder_id in entry.folders.iter().filter(|_| open) {
+            let Some(folder) = registry.folder(folder_id) else {
+                continue;
+            };
+            let mode = match folder.mode {
+                workspace::SaveMode::Recovery => "",
+                workspace::SaveMode::AutoSave => "AutoSave",
+                workspace::SaveMode::AutoBackup => "AutoBackup",
+            };
+            lines.push(WorkspaceFolderStatus {
+                line: status_ids.len() as i32,
+                path: backup::plain(&folder.path).display().to_string().into(),
+                mode: mode.into(),
+            });
+            status_ids.push(folder_id);
+        }
         rows.push(WorkspaceRow {
             name: entry.name.clone().into(),
             is_default: default == Some(entry.id),
             is_active: active == Some(entry.id),
+            expanded: open,
+            folders: ModelRc::new(VecModel::from(lines)),
         });
     }
     let selected_index = manager_selection
@@ -8075,6 +8123,7 @@ fn publish_workspace_manager(window: &AppWindow, live: &Live) {
         held.workspaces = workspace_ids;
         held.folders = folder_ids;
         held.unused = unused_ids;
+        held.status_folders = status_ids;
     }
     window.set_workspace_rows(ModelRc::new(VecModel::from(rows)));
     window.set_workspace_manager_selected(selected_index);
@@ -8160,6 +8209,14 @@ fn workspace_switcher_chosen(window: &AppWindow, live: &Live, index: usize) {
 }
 
 fn workspace_manager_requested(window: &AppWindow, live: &Live) {
+    // RFN01-61: 開いた直後は、使用中のWorkspaceの登録フォルダだけを見せる。
+    let active = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| runtime.borrow().active_workspace());
+    live.workspace_ids.borrow_mut().expanded = active.into_iter().collect();
     window.set_left_tab(4);
     window.set_tree_open(true);
     publish_left(window, live);
@@ -8947,11 +9004,63 @@ fn workspace_folder_add_requested(window: &AppWindow, live: &Live) {
     }
 }
 
-fn workspace_folder_mode_toggled(window: &AppWindow, live: &Live, index: usize) {
-    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+/// フォルダの保存方式の`wanted`をON/OFFする。
+///
+/// RFN01-61（2026-09-27）: 自動保存と自動バックアップは**排他**——片方をONにすれば、
+/// そのフォルダの保存方式が替わるので、もう片方は自然にOFFになる。OFFにすれば退避だけ
+/// （`Recovery`）へ戻る。
+fn workspace_folder_mode_toggled(
+    window: &AppWindow,
+    live: &Live,
+    index: usize,
+    wanted: workspace::SaveMode,
+) {
+    let Some(folder_id) = live.workspace_ids.borrow().folders.get(index).copied() else {
         return;
     };
-    let Some(folder_id) = live.workspace_ids.borrow().folders.get(index).copied() else {
+    toggle_folder_mode(window, live, folder_id, wanted);
+}
+
+/// RFN01-61: 管理画面の設定状況の行から、同じ切り替えをする。
+fn workspace_status_mode_toggled(window: &AppWindow, live: &Live, line: usize, backup: bool) {
+    let Some(folder_id) = live
+        .workspace_ids
+        .borrow()
+        .status_folders
+        .get(line)
+        .copied()
+    else {
+        return;
+    };
+    let wanted = if backup {
+        workspace::SaveMode::AutoBackup
+    } else {
+        workspace::SaveMode::AutoSave
+    };
+    toggle_folder_mode(window, live, folder_id, wanted);
+}
+
+/// RFN01-61: 管理画面でWorkspaceの登録フォルダを開く／閉じる。
+fn workspace_row_expand_toggled(window: &AppWindow, live: &Live, index: usize) {
+    let Some(id) = live.workspace_ids.borrow().workspaces.get(index).copied() else {
+        return;
+    };
+    {
+        let mut held = live.workspace_ids.borrow_mut();
+        if !held.expanded.remove(&id) {
+            held.expanded.insert(id);
+        }
+    }
+    publish_workspace_manager(window, live);
+}
+
+fn toggle_folder_mode(
+    window: &AppWindow,
+    live: &Live,
+    folder_id: workspace::FolderId,
+    wanted: workspace::SaveMode,
+) {
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
         return;
     };
     let current = runtime_rc
@@ -8962,9 +9071,10 @@ fn workspace_folder_mode_toggled(window: &AppWindow, live: &Live, index: usize) 
     let Some(current) = current else {
         return;
     };
-    let next = match current {
-        workspace::SaveMode::AutoSave => workspace::SaveMode::Recovery,
-        workspace::SaveMode::Recovery => workspace::SaveMode::AutoSave,
+    let next = if current == wanted {
+        workspace::SaveMode::Recovery
+    } else {
+        wanted
     };
     // See `workspace_create`'s comment: never match the borrow directly.
     let result = runtime_rc
@@ -8974,6 +9084,7 @@ fn workspace_folder_mode_toggled(window: &AppWindow, live: &Live, index: usize) 
         Ok(()) => {
             observe_folder_autosave(window, live);
             publish_workspace_manager(window, live);
+            backup_ui::refresh_pane(window, live);
         }
         Err(error) => window.tell(workspace_edit_error_message(&error).into()),
     }
@@ -9265,9 +9376,9 @@ fn workspace_context_requested(window: &AppWindow, live: &Live, index: i32) {
     window.set_tree_selected(index);
     let context = workspace_context_folder(live);
     window.set_workspace_context_folder(context.is_some());
-    window.set_workspace_context_auto(
-        context.is_some_and(|(_, _, mode)| mode == workspace::SaveMode::AutoSave),
-    );
+    let mode = context.map(|(_, _, mode)| mode);
+    window.set_workspace_context_auto(mode == Some(workspace::SaveMode::AutoSave));
+    window.set_workspace_context_backup(mode == Some(workspace::SaveMode::AutoBackup));
 }
 
 fn workspace_tree_command(window: &AppWindow, live: &Live, command: i32) {
@@ -9278,13 +9389,24 @@ fn workspace_tree_command(window: &AppWindow, live: &Live, command: i32) {
         0 => workspace_folder_add_requested(window, live),
         1 => workspace_clone_requested(window, live),
         4 => workspace_reset_view_requested(window, live),
-        2 | 3 | 5 | 6 => {
+        2 | 3 | 5 | 6 | 7 => {
             let Some((index, _, _)) = workspace_context_folder(live) else {
                 return;
             };
             publish_workspace_manager(window, live);
             match command {
-                2 => workspace_folder_mode_toggled(window, live, index),
+                2 => workspace_folder_mode_toggled(
+                    window,
+                    live,
+                    index,
+                    workspace::SaveMode::AutoSave,
+                ),
+                7 => workspace_folder_mode_toggled(
+                    window,
+                    live,
+                    index,
+                    workspace::SaveMode::AutoBackup,
+                ),
                 3 => workspace_folder_detached(window, live, index),
                 5 => workspace_folder_move(window, live, index, -1),
                 6 => workspace_folder_move(window, live, index, 1),
@@ -10914,6 +11036,8 @@ fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::i
     let before = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
     file_tree::rename(from, to)?;
     documents_follow(window, live, from, to);
+    // RFN01-61: Editorの中での名前変更・移動には、バックアップも付いていく。
+    saving::backups_follow(window, live, from, to);
     let after = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
     link_move::start(window, live, before, after);
     let mut open = live.folder.borrow_mut();
@@ -12251,6 +12375,10 @@ enum Question {
     SavePreset(settings_transfer::PresetKind),
     /// RFN01-56: 読めた書き出しで、設定の全体を置き換えてよいか。
     ImportSettings(Rc<settings_transfer::Export>),
+    /// RFN01-61: 選んだバックアップを消すか（Backup History・Delete Backups…）。
+    DeleteBackups(Vec<PathBuf>),
+    /// RFN01-61: 知らせるだけ（保存先を変えられなかった）。答えで何もしない。
+    BackupNotice,
 }
 
 impl Question {
@@ -12294,6 +12422,8 @@ impl Question {
             Self::DeleteBookmarkGroup(..) => "DeleteBookmarkGroup",
             Self::SavePreset(..) => "SavePreset",
             Self::ImportSettings(..) => "ImportSettings",
+            Self::DeleteBackups(..) => "DeleteBackups",
+            Self::BackupNotice => "BackupNotice",
         }
     }
 }
@@ -12361,6 +12491,10 @@ fn reset_all_settings(window: &AppWindow, live: &Live) {
     window.invoke_count_ruby_toggled(false);
     window.invoke_ruby_marks_toggled(true);
     window.invoke_autosave_toggled(true);
+    // RFN01-61: 残す数は既定へ戻す。**保存先は戻さない**——保存先を替えるのはバックアップを
+    // 移すことで、それは Settings の「Choose…」「Default」だけが行う。
+    window.set_backup_keep(backup::DEFAULT_KEEP as i32);
+    save_settings(window, &live.cache);
     window.invoke_terminal_reset();
     window.invoke_left_reset();
     window.invoke_shortcut_reset_all();
@@ -12827,6 +12961,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             cancel_close_run(live);
         }
         (Question::ResetAll, 0) => reset_all_settings(window, live),
+        (Question::DeleteBackups(paths), 0) => backup_ui::delete_confirmed(window, live, &paths),
         (Question::SavePreset(kind), 0) => {
             let name = window.get_question_name().to_string();
             settings_transfer::save_as(window, live, kind, &name);
@@ -14544,6 +14679,13 @@ const DEFAULT_SHELL_SETTING: &str = "terminal.default";
 /// has: 要件 8.1 is the promise the editor makes about unsaved work, and a
 /// writer who has not said anything has not asked to give it up.
 const AUTOSAVE_SETTING: &str = "work.autosave";
+/// RFN01-61（2026-09-27）: 自動バックアップの残す数。**`0`や読めない値は既定の5へ倒す**
+/// ——残す数0は「取らない」だが、取るかどうかはフォルダの保存方式が決めることである。
+const BACKUP_KEEP_SETTING: &str = "backup.keep";
+/// 同じく保存先。**空ならアプリ専用領域**（`backup::default_root`）。
+const BACKUP_FOLDER_SETTING: &str = "backup.folder";
+/// 同じくファイル名の書式（書き手の決定 2026-09-27）。**使えない書式は既定へ倒す**。
+const BACKUP_NAME_SETTING: &str = "backup.name";
 /// 本文文字数がルビの読みを数えるか（要件 7.8・要件 10、2026-09-09）。
 ///
 /// **紙の設定（要件 9）のシートには置かない。**シートが持つのは組み方であり、
@@ -15500,6 +15642,18 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_autosave()).to_string(),
     ));
     values.push((
+        BACKUP_KEEP_SETTING.to_owned(),
+        window.get_backup_keep().to_string(),
+    ));
+    values.push((
+        BACKUP_FOLDER_SETTING.to_owned(),
+        window.get_backup_folder().to_string(),
+    ));
+    values.push((
+        BACKUP_NAME_SETTING.to_owned(),
+        window.get_backup_name_format().to_string(),
+    ));
+    values.push((
         COUNT_RUBY_SETTING.to_owned(),
         i32::from(window.get_count_ruby()).to_string(),
     ));
@@ -15714,6 +15868,29 @@ fn apply_settings(
         // 無い値なので、約束しているほう（要件 8.1 を守る側）へ倒す。
         if written == AUTOSAVE_SETTING {
             window.set_autosave(value.trim() != "0");
+            continue;
+        }
+        if written == BACKUP_KEEP_SETTING {
+            let keep = value
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .filter(|keep| (1..=backup::MAX_KEEP as i32).contains(keep))
+                .unwrap_or(backup::DEFAULT_KEEP as i32);
+            window.set_backup_keep(keep);
+            continue;
+        }
+        if written == BACKUP_FOLDER_SETTING {
+            window.set_backup_folder(value.trim().into());
+            continue;
+        }
+        if written == BACKUP_NAME_SETTING {
+            let format = if backup::check_format(value).is_ok() {
+                value.as_str()
+            } else {
+                backup::DEFAULT_NAME_FORMAT
+            };
+            window.set_backup_name_format(format.into());
             continue;
         }
         // 要件 7.8: **`1`だけがOn。**初期値は数えないほうなので、読めない値は

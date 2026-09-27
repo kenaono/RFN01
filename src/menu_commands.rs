@@ -1305,6 +1305,8 @@ fn build(
         stepped_place(strip.history.len(), strip.at, true).is_some()
     };
     let path = t.document.file.borrow().path().is_some();
+    // RFN01-61: バックアップが無ければ「Backup History…」を淡く出す。
+    let backups = path && crate::backup_ui::has_backups(window, &t.document);
     let selected = if terminal {
         live.cache
             .borrow_mut()
@@ -1465,6 +1467,13 @@ fn build(
                 pick("文字コードを指定して開き直す", "Reopen with Encoding"),
                 enc,
             )?;
+            // RFN01-61（書き手の求め 2026-09-27）: バックアップの履歴は File から（今のTABのファイル）。
+            add!(
+                "バックアップの履歴…",
+                "Backup History…",
+                Command::Compare(3),
+                main && backups
+            );
             add!("印刷…", "Print…", Command::Print, main);
             root.sep()?;
             add!("終了", "Exit", Command::Exit, true);
@@ -1723,6 +1732,7 @@ fn build(
                 ("検索", "Search", 1),
                 ("履歴", "History", 2),
                 ("Outline", "Outline", 3),
+                ("バックアップ", "Backups", 7),
             ] {
                 row(
                     &side,
@@ -2467,6 +2477,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::ZoomSet(percent) => window.invoke_pane_zoom_set(p, percent),
         Command::Compare(0) => window.invoke_compare_saved_requested(),
         Command::Compare(1) => window.invoke_compare_head_requested(),
+        Command::Compare(3) => window.invoke_backup_history_requested(),
         Command::Compare(_) => window.invoke_compare_files_requested(),
         Command::Terminal(n) => terminal_workflow::action(window, live, t.parent, t.spot, n),
         Command::Panel(n) => terminal_panels::action(window, live, t.parent, n, 0),

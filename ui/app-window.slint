@@ -17,6 +17,7 @@ export { MenuInput } from "controls.slint";
 import { QuickDraft } from "quick-draft.slint";
 export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
+import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
@@ -160,6 +161,9 @@ export component AppWindow inherits Window {
     /// 高さに重なっているので、そのままでは中のボタンに指が届かない。
     callback print-active-changed(bool);
     changed print-active => { root.print-active-changed(root.print-active); }
+    // 比較の画面も同じ（書き手の報告 2026-09-27：「比較を終了」が押せない）。上の帯が
+    // タイトル行の高さに重なるので、出ている間は上端を押せる場所にする。
+    changed diff-active => { root.print-active-changed(root.print-active); }
     // The document in front, then the editor's name. It said
     // 「Editor - 横書き・縦書き切り替え検証」 until 2026-09-06, which was the
     // title of the technical validation this grew out of — true once, and a
@@ -307,6 +311,8 @@ export component AppWindow inherits Window {
     callback workspace-tree-command(int);
     in property <bool> workspace-context-folder;
     in property <bool> workspace-context-auto;
+    // RFN01-61: 右クリックしたフォルダが自動バックアップか。自動保存とは排他。
+    in property <bool> workspace-context-backup;
     in property <bool> workspace-active;
     in-out property <bool> workspace-manager-open;
     in property <bool> workspace-read-error;
@@ -327,6 +333,9 @@ export component AppWindow inherits Window {
     in property <[WorkspaceFolderRow]> workspace-folder-rows;
     callback workspace-folder-add-requested();
     callback workspace-folder-mode-toggled(int);
+    // RFN01-61: 管理画面の設定状況の一覧（行は`WorkspaceRow.folders`）。
+    callback workspace-row-expand-toggled(int);
+    callback workspace-status-mode-toggled(int, bool);
     callback workspace-folder-move-up-requested(int);
     callback workspace-folder-move-down-requested(int);
     callback workspace-folder-detached(int);
@@ -912,6 +921,41 @@ export component AppWindow inherits Window {
     /// 言っていない。Offにした瞬間に、置いてある作業コピーは全部消える。
     in-out property <bool> autosave: true;
     callback autosave-toggled(bool);
+    /// RFN01-61: 自動バックアップの残す数（ファイルごと、既定5）と保存先（空ならアプリ
+    /// 専用領域）。**どのフォルダで取るかはここではなく、フォルダの保存方式が決める。**
+    in-out property <int> backup-keep: 5;
+    in-out property <string> backup-folder;
+    callback backup-keep-stepped(int);
+    callback backup-folder-requested();
+    callback backup-folder-default();
+    /// 保存先の実際のパス（Settings に見せる。既定ならアプリ専用領域の下）。
+    in property <string> backup-folder-shown;
+    /// ファイル名の書式（書き手の決定 2026-09-27：書式を書く形）。Enterで確定し、それまでの
+    /// バックアップも付け替える。打っているあいだは例と、使えない理由だけを更新する。
+    in-out property <string> backup-name-format: "{name}.yyyy-MM-dd_HHmmss{ext}";
+    /// 欄に打っている書式（確定前）。確定に失敗したら Rust が確定済みの書式へ戻す。
+    in-out property <string> backup-name-draft: "{name}.yyyy-MM-dd_HHmmss{ext}";
+    in property <string> backup-name-example;
+    in property <string> backup-name-problem;
+    callback backup-name-edited(string);
+    callback backup-name-accepted(string);
+    /// 左ペインの Backups の行（`backup_ui::publish_pane`）。
+    in property <[BackupPaneRow]> backup-pane-rows;
+    callback backup-pane-clicked(int);
+    callback backup-pane-toggled(int);
+    callback backup-pane-menu(int, int);
+    /// Backup History（Paneメニュー）。比較の画面の左に一覧を出している間だけtrue。
+    callback backup-history-requested();
+    in-out property <bool> backup-history-active;
+    in property <string> backup-history-file;
+    in property <[BackupRow]> backup-history-rows;
+    in property <int> backup-history-selected: -1;
+    in property <bool> backup-history-all;
+    in property <bool> backup-history-any;
+    callback backup-history-chosen(int);
+    callback backup-history-toggled(int);
+    callback backup-history-all-toggled();
+    callback backup-history-delete();
     // 要件 7.8・要件 10: 本文文字数がルビの読みを数えるか。**初期値は数えない**
     // ——投稿サイトへ出すための字数はルビを含まない。打ち込んだ量を知りたい
     // 人には逆が要るので、これは「正解が二つある」たぐいで、選ばせる。
@@ -1496,6 +1540,21 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // RFN01-61（書き手の求め 2026-09-27）: バックアップの管理はここへ集める。
+                IconButton {
+                    x: 7px;
+                    y: root.custom-title ? 214px : 250px;
+                    icon: Icons.backup;
+                    tip: @tr("Backups");
+                    checked: root.tree-open && root.left-tab == 7;
+                    clicked => {
+                        root.tree-open = !(root.tree-open && root.left-tab == 7);
+                        root.left-tab = 7;
+                        root.left-tab-chosen(7);
+                        root.focus-generation += 1;
+                    }
+                }
+
                 // Declared here so its position is read against the rail. A popup is
                 // its own layer, so it is drawn over the panes without the window
                 // having to hold it last the way the question overlay does.
@@ -1733,6 +1792,8 @@ export component AppWindow inherits Window {
                         folders: root.workspace-folder-rows;
                         folder-add-requested => { root.workspace-folder-add-requested(); }
                         folder-mode-toggled(index) => { root.workspace-folder-mode-toggled(index); }
+                        expand-toggled(index) => { root.workspace-row-expand-toggled(index); }
+                        status-mode-toggled(line, backup) => { root.workspace-status-mode-toggled(line, backup); }
                         folder-move-up-requested(index) => { root.workspace-folder-move-up-requested(index); }
                         folder-move-down-requested(index) => { root.workspace-folder-move-down-requested(index); }
                         folder-detached(index) => { root.workspace-folder-detached(index); }
@@ -1789,6 +1850,15 @@ export component AppWindow inherits Window {
                             IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
+                    }
+                    if root.left-tab == 7: BackupsView {
+                        vertical-stretch: 1;
+                        recovery: root.autosave;
+                        rows: root.backup-pane-rows;
+                        recovery-toggled(wanted) => { root.autosave-toggled(wanted); }
+                        row-clicked(index) => { root.backup-pane-clicked(index); }
+                        backup-toggled(index) => { root.backup-pane-toggled(index); }
+                        menu-chosen(index, action) => { root.backup-pane-menu(index, action); }
                     }
                     if root.left-tab == 5: BookmarkView {
                         available: root.bookmark-available;
@@ -2170,8 +2240,10 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
+                        // 5 Bookmarks と 7 Backups は自分の面を持つ（RFN01-61：出したままだと高さを
+                        // 半分ずつ取り合い、Backups の行が下半分へ押し出された）。
                         visible: (root.left-tab != 4 || root.workspace-active) && root.left-tab != 5
-                            && (root.left-tab != 6 || root.tag-available);
+                            && root.left-tab != 7 && (root.left-tab != 6 || root.tag-available);
                         vertical-stretch: self.visible ? 1 : 0;
                         max-height: self.visible ? 100000px : 0px;
                         // 要件 5.2: the point being carried, but only while it
@@ -3252,6 +3324,8 @@ export component AppWindow inherits Window {
                                         { id: 3, title: @tr("Editor") },
                                         { id: 1, title: @tr("Terminal") },
                                         { id: 6, title: @tr("Keys") },
+                                        // RFN01-61: バックアップ関係は別のカテゴリ（書き手の求め 2026-09-27）。
+                                        { id: 8, title: @tr("Backup") },
                                     ]: SideTab {
                                         title: category.title;
                                         current: root.settings-tab == category.id;
@@ -4070,30 +4144,29 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
-                                        if root.shows-group(3, []): VerticalLayout {
+                                        // RFN01-61（書き手の求め 2026-09-27）: バックアップ関係は別のカテゴリ。Auto Recovery
+                                        // （要件 8.1）と Auto Backup（8.6）をここにまとめる。**どのフォルダで取るかは
+                                        // ここではなく**、左ペインの Backups で選ぶ。
+                                        if root.shows-group(8, []): VerticalLayout {
                                             alignment: start; vertical-stretch: 0; spacing: 8px;
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
-                                                text: root.section-title(@tr("Editor"), @tr("FILES"));
+
+                                            if root.shows-any([@tr("AUTO RECOVERY"), @tr("Auto Recovery")]): Text {
+                                                text: root.section-title(@tr("Backup"), @tr("AUTO RECOVERY"));
                                                 color: Tok.ink-faint;
                                                 font-size: 10px;
                                                 letter-spacing: 0.9px;
                                             }
 
-                                            // 追加要件 2026-09-08: 要件 8.1 の自動退避。**On/Offと、
-                                            // Offが何を意味するかを、同じ場所で言う**——「切ってある
-                                            // 間は書かない」だけなら、置いてある古い退避が次の起動で
-                                            // 戻ってきて、書き手の言ったこととちょうど逆になる。
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): HorizontalLayout {
+                                            // 要件 8.1 の自動退避。**On/Offと、Offが何を意味するかを、同じ場所で言う**。
+                                            if root.shows-any([@tr("AUTO RECOVERY"), @tr("Auto Recovery")]): HorizontalLayout {
                                                 spacing: 2px;
-
                                                 Text {
-                                                    text: @tr("Auto Backup");
+                                                    text: @tr("Auto Recovery");
                                                     color: Tok.ink;
                                                     font-size: 12px;
                                                     vertical-alignment: center;
                                                     horizontal-stretch: 1;
                                                 }
-
                                                 TextButton {
                                                     title: root.autosave ? @tr("On") : @tr("Off");
                                                     role: root.autosave ? Role.primary : Role.normal;
@@ -4103,27 +4176,123 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            // U1: 説明は対象の直下へ。popupの寸法を安定させるため折り返さない。
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
+                                            if root.shows-any([@tr("AUTO RECOVERY"), @tr("Auto Recovery")]): Text {
                                                 text: root.autosave
-                                                    ? @tr("Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing.")
-                                                    : @tr("No backup. Turning it off also deletes the work copies.");
+                                                    ? @tr("Keeps a work copy 2 seconds after you stop typing, or every 5 seconds while typing.")
+                                                    : @tr("No work copy is kept. Turning it off also deletes the work copies.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
-                                                overflow: elide;
+                                                wrap: word-wrap;
                                             }
-                                            if root.shows-any([@tr("FILES"), @tr("Auto Backup")]): Text {
+                                            if root.shows-any([@tr("AUTO RECOVERY"), @tr("Auto Recovery")]): Text {
                                                 text: @tr("Ctrl+S writes to the original file.");
                                                 color: Tok.ink-faint;
                                                 font-size: 11px;
-                                                overflow: elide;
+                                                wrap: word-wrap;
                                             }
 
-                                            // 書き手の報告 2026-09-11: **見出しが中身を言っていなかった。**
-                                            // `FILES`の下にルビの記法も箇条書きの字も並んでいて、どれも
-                                            // ファイルの話ではない——**画面とソースが食い違えば、書き手と
-                                            // 私が別のものを指して話すことになる。**記法の読み書きは
-                                            // ここから下である。
+                                            if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup"), @tr("Generations"), @tr("Backup Folder"), @tr("File Name")]): Text {
+                                                text: root.section-title(@tr("Backup"), @tr("AUTO BACKUP"));
+                                                color: Tok.ink-faint;
+                                                font-size: 10px;
+                                                letter-spacing: 0.9px;
+                                            }
+
+                                            if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup")]): Text {
+                                                text: @tr("Keeps the previous version each time you save. Choose the folders in Backups on the left pane.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+
+                                            if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup"), @tr("Generations")]): StepRow {
+                                                label: @tr("Generations");
+                                                value: root.backup-keep;
+                                                stepped(by) => {
+                                                    root.backup-keep-stepped(by);
+                                                }
+                                            }
+
+                                            if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup"), @tr("Backup Folder")]): HorizontalLayout {
+                                                spacing: 6px;
+                                                height: 28px;
+                                                Text {
+                                                    text: @tr("Backup Folder");
+                                                    color: Tok.ink-muted;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 0;
+                                                    min-width: 90px;
+                                                }
+                                                Text {
+                                                    text: root.backup-folder == ""
+                                                        ? root.backup-folder-shown + "  " + @tr("(default)")
+                                                        : root.backup-folder-shown;
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                    overflow: elide;
+                                                }
+                                                if root.backup-folder != "": TextButton {
+                                                    title: @tr("Default");
+                                                    clicked => {
+                                                        root.backup-folder-default();
+                                                    }
+                                                }
+                                                TextButton {
+                                                    title: @tr("Choose…");
+                                                    clicked => {
+                                                        root.backup-folder-requested();
+                                                    }
+                                                }
+                                            }
+
+                                            if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup"), @tr("File Name")]): HorizontalLayout {
+                                                spacing: 6px;
+                                                height: 28px;
+                                                Text {
+                                                    text: @tr("File Name");
+                                                    color: Tok.ink-muted;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 0;
+                                                    min-width: 90px;
+                                                }
+                                                name-field := Field {
+                                                    horizontal-stretch: 1;
+                                                    text <=> root.backup-name-draft;
+                                                    edited => {
+                                                        root.backup-name-edited(self.text);
+                                                    }
+                                                    accepted => {
+                                                        root.backup-name-accepted(self.text);
+                                                    }
+                                                    // 欄を離れたときも確定する（書き手の報告 2026-09-27：Enterを押さずに
+                                                    // 離れると反映されなかった。ほかの欄は打った時点で効いている）。
+                                                    focus-lost => {
+                                                        root.backup-name-accepted(self.text);
+                                                    }
+                                                }
+                                            }
+
+                                            // 例、または使えない理由。打っているあいだ替わる。
+                                            if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup"), @tr("File Name")]): Text {
+                                                text: root.backup-name-problem != "" ? root.backup-name-problem : root.backup-name-example;
+                                                color: root.backup-name-problem != "" ? #a4262c : Tok.ink-faint;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+                                            if root.shows-any([@tr("AUTO BACKUP"), @tr("Auto Backup"), @tr("File Name")]): Text {
+                                                text: "{name}  {ext}  yyyy MM dd HH mm ss : " + @tr("replaced when a backup is named. The name and the time to the second are required. Applied when you press Enter or leave the box; existing backups are renamed.");
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+
+                                        if root.shows-group(3, []): VerticalLayout {
+                                            alignment: start; vertical-stretch: 0; spacing: 8px;
                                             if root.shows-any([@tr("MARKUP"), @tr("Count ruby"), @tr("Ruby markup"), @tr("Bullet marks")]): Text {
                                                 text: root.section-title(@tr("Editor"), @tr("MARKUP"));
                                                 color: Tok.ink-faint;
@@ -6069,7 +6238,105 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Last in the window, so it is drawn over everything the editor shows.
+    // C5: 「その他の色」。問いと同じく窓の一番上に重ねる。
+    if root.colour-mixer-open: ColourMixer {
+        current: root.colour-mixer-current;
+        hue <=> root.colour-mixer-hue;
+        saturation <=> root.colour-mixer-saturation;
+        value <=> root.colour-mixer-value;
+        hex-of(colour) => { return root.colour-hex-of(colour); }
+        hex-typed(text) => { root.colour-hex-typed(text); }
+        channel-typed(channel, text) => { root.colour-channel-typed(channel, text); }
+        accepted(colour) => {
+            root.colour-mixer-open = false;
+            root.colour-mixer-accepted(colour);
+            root.focus-generation += 1;
+        }
+        cancelled => {
+            root.colour-mixer-open = false;
+            root.focus-generation += 1;
+        }
+    }
+
+    // 編集画面はそのまま下に残す（比較と同じ作法）。
+    if root.print-active: Rectangle {
+        background: Tok.chrome-sunken;
+        TouchArea { }
+        PrintView {
+            width: parent.width;
+            height: parent.height;
+            title: root.print-title;
+            sheets: root.print-sheets;
+            sheet-width: root.print-sheet-width * 1px;
+            zoom: root.print-zoom;
+            pan-x <=> root.print-pan-x;
+            pan-y <=> root.print-pan-y;
+            vertical: root.print-vertical;
+            room-changed(wide, tall) => { root.print-room-changed(wide, tall); }
+            zoomed(by) => { root.print-zoomed(by); }
+            head: root.print-head;
+            foot: root.print-foot;
+            trim-written(head, at, said) => { root.print-trim-written(head, at, said); }
+            aspect: root.print-aspect;
+            at: root.print-at;
+            pages: root.print-pages;
+            status: root.print-status;
+            paper-note: root.print-paper-note;
+            size: root.print-size;
+            size-stepped(by) => { root.print-size-stepped(by); }
+            size-from-screen => { root.print-size-from-screen(); }
+            paper-pressed => { root.print-paper-pressed(); }
+            working: root.print-working;
+            turned(to) => { root.print-turned(to); }
+            margin-stepped(by) => { root.print-margin-stepped(by); }
+            print-requested => { root.print-requested(); }
+            dismissed => { root.print-dismissed(); }
+        }
+    }
+
+    // Keep all original panes and their view state underneath the comparison.
+    if root.diff-active: Rectangle {
+        background: Tok.paper;
+        TouchArea { }
+        HorizontalLayout {
+        // RFN01-61: Backup History は、比較の画面の左に一覧の列を足したもの。
+        if root.backup-history-active: BackupHistoryList {
+            width: min(320px, root.width * 0.34);
+            file-name: root.backup-history-file;
+            rows: root.backup-history-rows;
+            selected: root.backup-history-selected;
+            all-checked: root.backup-history-all;
+            any-checked: root.backup-history-any;
+            chosen(index) => { root.backup-history-chosen(index); }
+            toggled(index) => { root.backup-history-toggled(index); }
+            all-toggled => { root.backup-history-all-toggled(); }
+            delete-requested => { root.backup-history-delete(); }
+        }
+        DiffView {
+            rows: root.diff-rows;
+            left-path: root.diff-left-path;
+            right-path: root.diff-right-path;
+            status <=> root.diff-status;
+            selected-row <=> root.diff-selected-row;
+            content-width: root.diff-content-width;
+            can-previous: root.diff-can-previous;
+            can-next: root.diff-can-next;
+            next-difference(forward) => { root.diff-next-difference(forward); }
+            select-difference(row) => { root.diff-select-difference(row); }
+            copy-side(right) => { root.diff-copy-side(right); }
+            dismissed => { root.diff-dismissed(); }
+            merge-enabled: root.diff-merge-enabled;
+            can-apply: root.diff-can-apply;
+            choose-side(right) => { root.diff-choose-side(right); }
+            apply-merge => { root.diff-apply-merge(); }
+        }
+        }
+    }
+
+
+    // Last of the overlays, so it is drawn over everything the editor shows —
+    // the comparison and print views included (RFN01-61: Backup History asks
+    // before it deletes, and that question has to be seen over the comparison).
     if root.question-open: Rectangle {
         background: Tok.scrim;
 
@@ -6269,88 +6536,6 @@ export component AppWindow inherits Window {
             }
         }
     }
-    // C5: 「その他の色」。問いと同じく窓の一番上に重ねる。
-    if root.colour-mixer-open: ColourMixer {
-        current: root.colour-mixer-current;
-        hue <=> root.colour-mixer-hue;
-        saturation <=> root.colour-mixer-saturation;
-        value <=> root.colour-mixer-value;
-        hex-of(colour) => { return root.colour-hex-of(colour); }
-        hex-typed(text) => { root.colour-hex-typed(text); }
-        channel-typed(channel, text) => { root.colour-channel-typed(channel, text); }
-        accepted(colour) => {
-            root.colour-mixer-open = false;
-            root.colour-mixer-accepted(colour);
-            root.focus-generation += 1;
-        }
-        cancelled => {
-            root.colour-mixer-open = false;
-            root.focus-generation += 1;
-        }
-    }
-
-    // 編集画面はそのまま下に残す（比較と同じ作法）。
-    if root.print-active: Rectangle {
-        background: Tok.chrome-sunken;
-        TouchArea { }
-        PrintView {
-            width: parent.width;
-            height: parent.height;
-            title: root.print-title;
-            sheets: root.print-sheets;
-            sheet-width: root.print-sheet-width * 1px;
-            zoom: root.print-zoom;
-            pan-x <=> root.print-pan-x;
-            pan-y <=> root.print-pan-y;
-            vertical: root.print-vertical;
-            room-changed(wide, tall) => { root.print-room-changed(wide, tall); }
-            zoomed(by) => { root.print-zoomed(by); }
-            head: root.print-head;
-            foot: root.print-foot;
-            trim-written(head, at, said) => { root.print-trim-written(head, at, said); }
-            aspect: root.print-aspect;
-            at: root.print-at;
-            pages: root.print-pages;
-            status: root.print-status;
-            paper-note: root.print-paper-note;
-            size: root.print-size;
-            size-stepped(by) => { root.print-size-stepped(by); }
-            size-from-screen => { root.print-size-from-screen(); }
-            paper-pressed => { root.print-paper-pressed(); }
-            working: root.print-working;
-            turned(to) => { root.print-turned(to); }
-            margin-stepped(by) => { root.print-margin-stepped(by); }
-            print-requested => { root.print-requested(); }
-            dismissed => { root.print-dismissed(); }
-        }
-    }
-
-    // Keep all original panes and their view state underneath the comparison.
-    if root.diff-active: Rectangle {
-        background: Tok.paper;
-        TouchArea { }
-        DiffView {
-            width: parent.width;
-            height: parent.height;
-            rows: root.diff-rows;
-            left-path: root.diff-left-path;
-            right-path: root.diff-right-path;
-            status <=> root.diff-status;
-            selected-row <=> root.diff-selected-row;
-            content-width: root.diff-content-width;
-            can-previous: root.diff-can-previous;
-            can-next: root.diff-can-next;
-            next-difference(forward) => { root.diff-next-difference(forward); }
-            select-difference(row) => { root.diff-select-difference(row); }
-            copy-side(right) => { root.diff-copy-side(right); }
-            dismissed => { root.diff-dismissed(); }
-            merge-enabled: root.diff-merge-enabled;
-            can-apply: root.diff-can-apply;
-            choose-side(right) => { root.diff-choose-side(right); }
-            apply-merge => { root.diff-apply-merge(); }
-        }
-    }
-
     property <int> outline-menu-row: -1;
     property <length> outline-menu-x;
     property <length> outline-menu-y;
@@ -6397,6 +6582,7 @@ export component AppWindow inherits Window {
                     MenuRow { title: @tr("Add Folder…"); activated => { root.workspace-tree-command(0); root.close-tree-menu(); } }
                     MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.workspace-tree-command(1); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: root.workspace-context-auto ? "AutoSave ON" : "AutoSave OFF"; checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: root.workspace-context-backup ? "AutoBackup ON" : "AutoBackup OFF"; checked: root.workspace-context-backup; activated => { root.workspace-tree-command(7); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Up"); activated => { root.workspace-tree-command(5); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Down"); activated => { root.workspace-tree-command(6); root.close-tree-menu(); } }

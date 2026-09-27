@@ -39,7 +39,7 @@ msgstr "適用して保存"
 msgid "Assignable keys: the default keys in the list, or Ctrl+Alt+A–Z."
 msgstr "変更できるキー：一覧の既定キー、またはCtrl+Alt+A〜Z。"
 
-msgid "Auto Backup"
+msgid "Auto Recovery"
 msgstr "自動退避"
 
 msgid "Auto-Save"
@@ -54,11 +54,11 @@ msgstr "戻る"
 msgid "Background"
 msgstr "背景"
 
-msgid "Backs up to a work copy 2 seconds after you stop typing, or every 5 seconds while typing."
+msgid "Keeps a work copy 2 seconds after you stop typing, or every 5 seconds while typing."
 msgstr "入力停止2秒／継続中は5秒ごとに作業コピーへ退避。"
 
 msgid "Backup"
-msgstr "退避"
+msgstr "バックアップ"
 
 msgid "Bold"
 msgstr "太字"
@@ -465,7 +465,7 @@ msgstr "次の差分"
 msgid "No Color"
 msgstr "色を付けない"
 
-msgid "No backup. Turning it off also deletes the work copies."
+msgid "No work copy is kept. Turning it off also deletes the work copies."
 msgstr "退避しません。オフにすると作業コピーも削除します。"
 
 msgid "No bullet marks (every mark is plain text)."
@@ -1325,3 +1325,54 @@ msgstr "設定・キー・プリセット・単語帳を1つのファイルに�
 
 msgid "{} (changed)"
 msgstr "{}（変更あり）"
+
+msgid "Auto Backup"
+msgstr "自動バックアップ"
+
+
+
+msgid "Backup Folder"
+msgstr "保存先"
+
+
+msgid "Delete Backups…"
+msgstr "バックアップを消す…"
+
+
+
+
+msgid "All"
+msgstr "すべて"
+
+msgid "Backup History"
+msgstr "バックアップの履歴"
+
+msgid "Backup History…"
+msgstr "バックアップの履歴…"
+
+msgid "Backups"
+msgstr "バックアップ"
+
+msgid "BACKUPS"
+msgstr "バックアップ"
+
+msgid "AUTO RECOVERY"
+msgstr "自動退避"
+
+msgid "AUTO BACKUP"
+msgstr "自動バックアップ"
+
+msgid "Generations"
+msgstr "世代数"
+
+msgid "File Name"
+msgstr "ファイル名"
+
+msgid "(default)"
+msgstr "（既定）"
+
+msgid "Keeps the previous version each time you save. Choose the folders in Backups on the left pane."
+msgstr "保存のたびに前の版を残します。どのフォルダで取るかは、左ペインのバックアップで選びます。"
+
+msgid "replaced when a backup is named. The name and the time to the second are required. Applied when you press Enter or leave the box; existing backups are renamed."
+msgstr "がバックアップの名前で置き換わります。名前と秒までの日時が要ります。Enterを押すか欄を離れると確定し、それまでのバックアップも名前を付け替えます。"

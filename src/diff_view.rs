@@ -205,12 +205,14 @@ fn read(path: &Path) -> Result<String, String> {
         })
 }
 
-fn dismiss(app: &AppWindow) {
+pub(crate) fn dismiss(app: &AppWindow) {
     app.set_diff_merge_enabled(false);
     app.set_diff_can_apply(false);
     app.on_diff_choose_side(|_| {});
     app.on_diff_apply_merge(|| {});
     app.set_diff_active(false);
+    // RFN01-61: Backup History は比較の画面の上にあるので、比較を閉じれば一緒に閉じる。
+    crate::backup_ui::forget(app);
     app.set_diff_rows(Default::default());
     app.on_diff_copy_side(|_| {});
     app.on_diff_next_difference(|_| {});
