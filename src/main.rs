@@ -23,6 +23,7 @@ use editor_state::{
     selection_source_range, source_line_start, update_selection_after_move,
 };
 mod app_data;
+mod backup;
 mod buffer;
 mod clipboard;
 mod code_page;
