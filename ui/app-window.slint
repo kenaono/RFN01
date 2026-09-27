@@ -6301,7 +6301,7 @@ export component AppWindow inherits Window {
         HorizontalLayout {
         // RFN01-61: Backup History は、比較の画面の左に一覧の列を足したもの。
         if root.backup-history-active: BackupHistoryList {
-            width: min(280px, root.width * 0.3);
+            width: min(320px, root.width * 0.34);
             file-name: root.backup-history-file;
             rows: root.backup-history-rows;
             selected: root.backup-history-selected;

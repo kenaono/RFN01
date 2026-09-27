@@ -73,6 +73,8 @@ fn history_lists_newest_first_and_applies_with_one_undo() {
     assert!(!window.get_backup_history_any());
     assert!(window.get_diff_right_path().contains("14:30:02"));
     let first = window.get_backup_history_rows().row_data(0).unwrap();
+    // 2段目はバックアップのファイル名（書き手の求め 2026-09-27）。
+    assert_eq!(first.name, "draft.2026-09-27_143002.md");
     // 添え字はステータスバーと同じ数え方の本文文字数。
     let counted = crate::thousands(body_characters(window, "古い二\n"));
     assert_eq!(first.detail, say!("{counted}字", "{counted} chars"));

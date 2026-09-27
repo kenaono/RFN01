@@ -16,6 +16,10 @@ export struct BackupRow {
     label: string,
     // 右に添える小さい文字：History は本文文字数。
     detail: string,
+    // 2段目に出すバックアップのファイル名（書き手の求め 2026-09-27）。空なら1段。
+    name: string,
+    // マウスを載せると出す、全体のパス。
+    tip: string,
     checked: bool,
 }
 
@@ -51,13 +55,13 @@ component CheckMark inherits Rectangle {
     }
 }
 
-// 1行：チェック、文字、添え字。`selected`は History の「いま比べている相手」。
+// 1行：チェック、日時と添え字、その下にファイル名。`selected`は History の「いま比べている相手」。
 component CheckLine inherits Rectangle {
     in property <BackupRow> item;
     in property <bool> selected;
     callback toggled();
     callback chosen();
-    height: 30px;
+    height: root.item.name != "" ? 44px : 30px;
     border-radius: 5px;
     background: root.selected ? Tok.accent-faint : line.has-hover ? Tok.accent-faint : transparent;
     border-width: root.selected ? 1px : 0px;
@@ -72,26 +76,42 @@ component CheckLine inherits Rectangle {
         padding-right: 8px;
         spacing: 6px;
         CheckMark {
+            y: (parent.height - self.height) / 2;
             checked: root.item.checked;
             toggled => {
                 root.toggled();
             }
         }
-        Text {
-            text: root.item.label;
-            color: Tok.ink;
-            font-size: 12px;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
             horizontal-stretch: 1;
-            overflow: elide;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.item.label;
+                    color: Tok.ink;
+                    font-size: 12px;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                if root.item.detail != "": Text {
+                    text: root.item.detail;
+                    color: Tok.ink-muted;
+                    font-size: 11px;
+                    horizontal-stretch: 0;
+                }
+            }
+            if root.item.name != "": Text {
+                text: root.item.name;
+                color: Tok.ink-muted;
+                font-size: 11px;
+                overflow: elide;
+            }
         }
-        if root.item.detail != "": Text {
-            text: root.item.detail;
-            color: Tok.ink-muted;
-            font-size: 11px;
-            vertical-alignment: center;
-            horizontal-stretch: 0;
-        }
+    }
+    // 最後に置く：上に重なって指を見るだけで、押したことは下の TouchArea へ行く。
+    if root.item.tip != "": Tooltip {
+        text: @markdown("`\{root.item.tip}`");
     }
 }
 

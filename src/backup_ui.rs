@@ -111,6 +111,14 @@ fn rows_of(history: &History) -> Vec<BackupRow> {
         .map(|((backup, detail), checked)| BackupRow {
             label: when(backup).into(),
             detail: detail.into(),
+            // 書き手の求め 2026-09-27：日時と並べて、バックアップのファイル名も出す。
+            name: backup
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+                .into(),
+            tip: backup.path.display().to_string().into(),
             checked: *checked,
         })
         .collect()
