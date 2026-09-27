@@ -12483,6 +12483,10 @@ fn reset_all_settings(window: &AppWindow, live: &Live) {
     window.invoke_count_ruby_toggled(false);
     window.invoke_ruby_marks_toggled(true);
     window.invoke_autosave_toggled(true);
+    // RFN01-61: 残す数は既定へ戻す。**保存先は戻さない**——保存先を替えるのはバックアップを
+    // 移すことで、それは Settings の「Choose…」「Default」だけが行う。
+    window.set_backup_keep(backup::DEFAULT_KEEP as i32);
+    save_settings(window, &live.cache);
     window.invoke_terminal_reset();
     window.invoke_left_reset();
     window.invoke_shortcut_reset_all();

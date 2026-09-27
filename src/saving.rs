@@ -1958,6 +1958,8 @@ mod folder_auto_save_tests {
     pub(crate) struct Harness {
         pub(crate) window: AppWindow,
         pub(crate) live: Live,
+        /// 画面を画素へ描くとき（`backup_ui_tests`の絵の書き出し）。
+        pub(crate) surface: Rc<MinimalSoftwareWindow>,
     }
 
     impl Harness {
@@ -2032,7 +2034,12 @@ mod folder_auto_save_tests {
                 searcher: Rc::new(crate::searcher::Searcher::start(|| {})),
                 searched: Rc::default(),
             };
-            (Self { window, live }, document)
+            let harness = Self {
+                window,
+                live,
+                surface,
+            };
+            (harness, document)
         }
     }
 

@@ -533,7 +533,15 @@ pub(crate) fn import(window: &AppWindow, live: &Live, export: Export) -> io::Res
         )
         .map(|_| ())?;
     }
-    apply_values(window, live, &export.settings);
+    // RFN01-61: **バックアップの保存先は取り込まない。**その場所にこの機械のバックアップが
+    // あり、保存先を替えるのは中身を移すこと（Settings の「Choose…」）だけが行う。
+    let settings: Vec<_> = export
+        .settings
+        .iter()
+        .filter(|(name, _)| name != crate::BACKUP_FOLDER_SETTING)
+        .cloned()
+        .collect();
+    apply_values(window, live, &settings);
     if let Some(keys) = &export.keys {
         apply_keys(window, live, keys);
     }

@@ -28,6 +28,9 @@ struct History {
     pane: PaneId,
     path: PathBuf,
     backups: Vec<Backup>,
+    /// 一覧の添え字（本文文字数）。**一覧を組むときに1度だけ数える**——チェックのたびに
+    /// 全部のバックアップを読み直さない。
+    details: Vec<String>,
     /// 比べている相手（`backups`の番号）。
     selected: usize,
     checked: Vec<bool>,
@@ -88,23 +91,28 @@ fn body_characters(window: &AppWindow, text: &str) -> usize {
     }
 }
 
-fn rows_of(window: &AppWindow, history: &History) -> Vec<BackupRow> {
-    history
-        .backups
+/// 一覧の添え字：バックアップごとの本文文字数。
+fn details_of(window: &AppWindow, backups: &[Backup], document: &OpenDocument) -> Vec<String> {
+    backups
         .iter()
-        .zip(&history.checked)
-        .map(|(backup, checked)| {
-            let detail = read_backup(backup, &history.document)
+        .map(|backup| {
+            read_backup(backup, document)
                 .map(|text| {
                     let count = crate::thousands(body_characters(window, &text));
                     say!("{count}字", "{count} chars")
                 })
-                .unwrap_or_default();
-            BackupRow {
-                label: when(backup).into(),
-                detail: detail.into(),
-                checked: *checked,
-            }
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn rows_of(history: &History) -> Vec<BackupRow> {
+    let each = history.backups.iter().zip(&history.details);
+    each.zip(&history.checked)
+        .map(|((backup, detail), checked)| BackupRow {
+            label: when(backup).into(),
+            detail: detail.into(),
+            checked: *checked,
         })
         .collect()
 }
@@ -115,7 +123,7 @@ fn publish_history(window: &AppWindow) {
         let Some(history) = held.as_ref() else {
             return;
         };
-        let rows = rows_of(window, history);
+        let rows = rows_of(history);
         window.set_backup_history_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
         window.set_backup_history_selected(history.selected as i32);
         let checked = history.checked.iter().filter(|c| **c).count();
@@ -201,12 +209,14 @@ pub fn open_history(window: &AppWindow, live: &Live) {
         .unwrap_or_default();
     window.set_backup_history_file(name.into());
     let checked = vec![false; backups.len()];
+    let details = details_of(window, &backups, &document);
     HISTORY.with(|held| {
         *held.borrow_mut() = Some(History {
             document,
             pane,
             path,
             backups,
+            details,
             selected: 0,
             checked,
         });
@@ -405,6 +415,7 @@ fn after_history_delete(window: &AppWindow, live: &Live) {
             .get(history.selected)
             .map(|b| b.path.clone());
         history.backups = backups_of(window, &history.path);
+        history.details = details_of(window, &history.backups, &history.document);
         history.checked = vec![false; history.backups.len()];
         if history.backups.is_empty() {
             return Next::Close;

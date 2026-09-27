@@ -271,3 +271,107 @@ fn the_manager_and_the_status_bar_say_which_folders_back_up() {
     assert!(!row.expanded);
     assert_eq!(row.folders.row_count(), 0);
 }
+
+#[test]
+fn importing_settings_keeps_this_machines_backup_folder() {
+    let root = scratch_directory("backup-import");
+    let (harness, _document) = Harness::new(|weak| open_under(&root, "draft.md", "現在\n", weak));
+    let window = &harness.window;
+    let here = root.join("ここのバックアップ");
+    window.set_backup_folder(here.display().to_string().into());
+    let export = crate::settings_transfer::Export {
+        settings: vec![
+            ("backup.folder".into(), r"Z:\よその機械".into()),
+            ("backup.keep".into(), "12".into()),
+        ],
+        ..Default::default()
+    };
+    crate::settings_transfer::import(window, &harness.live, export).unwrap();
+    assert_eq!(window.get_backup_folder(), here.display().to_string());
+    assert_eq!(window.get_backup_keep(), 12);
+}
+
+/// 画面の絵を書き出す（`cargo test -- --ignored backup_screens`）。一時フォルダの
+/// `rfnedit-backup-snapshot`に、Backup History と Delete Backups… をPPMで置く。
+#[test]
+#[ignore]
+fn backup_screens() {
+    let root = scratch_directory("backup-snapshot");
+    let (harness, _document) = Harness::new(|weak| {
+        open_under(
+            &root,
+            "第一章.md",
+            "# 第一章\n猫が眠っている。\n風が木々を揺らす。\n",
+            weak,
+        )
+    });
+    attach_workspace(&harness.live, &root, SaveMode::AutoBackup);
+    let window = &harness.window;
+    let live = &harness.live;
+    let path = root.join("第一章.md");
+    with_backups(
+        &harness,
+        &path,
+        &[
+            "# 第一章\n猫が眠る。\n",
+            "# 第一章\n犬が眠っている。\n風が吹く。\n",
+            "# 第一章\n猫が眠っている。\n風が吹く。\n夜になった。\n",
+        ],
+        "# 第一章\n猫が眠っている。\n風が木々を揺らす。\n",
+    );
+    let out = std::env::temp_dir().join("rfnedit-backup-snapshot");
+    fs::create_dir_all(&out).unwrap();
+    let (width, height) = (1000usize, 740usize);
+    let draw = |name: &str| {
+        let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+        window.window().request_redraw();
+        harness.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+        let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for pixel in &pixels {
+            ppm.extend([pixel.r, pixel.g, pixel.b]);
+        }
+        fs::write(out.join(format!("{name}.ppm")), ppm).unwrap();
+    };
+    window.show().unwrap();
+    open_history(window, live);
+    history_toggled(window, 2);
+    draw("history");
+    diff_view::dismiss(window);
+    open_groups(window, live);
+    group_toggled(window, 0);
+    draw("delete-backups");
+    close_groups(window);
+    crate::workspace_manager_requested(window, live);
+    window.set_workspace_manager_open(true);
+    draw("workspace-manager");
+    window.set_workspace_manager_open(false);
+    crate::open_settings(window, live);
+    window.set_settings_tab(3);
+    // 設定の検索（設定のTABで開いた検索欄の語）で、FILES の2つの欄だけを出す。
+    window.on_settings_match(|query, labels| crate::settings_match(&query, labels.iter()));
+    window.set_find_open(true);
+    window.set_find_pane(0);
+    PaneId::from_index(0).update_screen(window, |screen| screen.find_needle = "Backup".into());
+    slint::platform::update_timers_and_animations();
+    // 検索中も語を持たない群は出たままなので、縦に長い面で描いて全部を写す。
+    let (width, tall) = (1600usize, 3000usize);
+    harness
+        .surface
+        .set_size(slint::PhysicalSize::new(width as u32, tall as u32));
+    PaneId::from_index(0).update_screen(window, |screen| {
+        screen.width = width as f32 - 360.0;
+        screen.height = tall as f32 - 120.0;
+    });
+    let mut pixels = vec![slint::Rgb8Pixel::default(); width * tall];
+    window.window().request_redraw();
+    harness.surface.draw_if_needed(|renderer| {
+        renderer.render(&mut pixels, width);
+    });
+    let mut ppm = format!("P6\n{width} {tall}\n255\n").into_bytes();
+    for pixel in &pixels {
+        ppm.extend([pixel.r, pixel.g, pixel.b]);
+    }
+    fs::write(out.join("settings-files.ppm"), ppm).unwrap();
+}
