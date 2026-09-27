@@ -459,11 +459,6 @@ fn change_folder(window: &AppWindow, live: &Live, chosen: String) {
         && let Err(error) = backup::move_all(&from, &to)
     {
         let why = match error {
-            backup::MoveError::Nested => pick(
-                "移し先が今の保存先の中（またはその逆）にあります。",
-                "The new folder is inside the current one, or the other way round.",
-            )
-            .to_owned(),
             backup::MoveError::Exists(path) => say!(
                 "移し先に同じ名前のファイルがあります：{}",
                 "A file with the same name is already there: {}",

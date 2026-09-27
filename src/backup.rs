@@ -178,8 +178,10 @@ fn original_name(name: &str) -> Option<String> {
         Some(dot) if stamp_ends_at(dot).is_some() => name.split_at(dot),
         _ => (name, ""),
     };
+    // **字の途中では切らない**（書き手の報告 2026-09-27：長い日本語の名前で落ちた）。
+    // 時刻は18バイトのASCIIなので、そこが字の境目でなければバックアップの名前ではない。
     let split = before.len().checked_sub(STAMP_LENGTH + 1)?;
-    let (stem, rest) = before.split_at(split);
+    let (stem, rest) = (before.get(..split)?, before.get(split..)?);
     if !rest.starts_with('.') || stem.is_empty() || parse_stamp(&rest[1..]).is_none() {
         return None;
     }
@@ -358,11 +360,37 @@ fn backup_files_under(folder: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// 保存先にあるバックアップ（保存先からの相対パス）。
+///
+/// **歩くのは写しのフォルダ（`C`・`D`などのドライブと`UNC`）の中だけ**（書き手の報告
+/// 2026-09-27）。保存先は書き手が選んだ普通のフォルダでありうるので、その中の書き手自身の
+/// フォルダやファイルには入らない——読みもしないし、移しも消しもしない。
+fn store_files(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let mirrored =
+            name == "UNC" || (name.len() == 1 && name.chars().all(|c| c.is_ascii_alphabetic()));
+        if !mirrored || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let inside = backup_files_under(&root.join(&name));
+        found.extend(
+            inside
+                .into_iter()
+                .map(|relative| Path::new(&name).join(relative)),
+        );
+    }
+    found.sort();
+    found
+}
+
 /// 保存先を変えたときの失敗。
 #[derive(Debug)]
 pub enum MoveError {
-    /// 移し先が移し元の中か、その逆。
-    Nested,
     /// 移し先に同じ名前のバックアップがある。
     Exists(PathBuf),
     Io(io::Error),
@@ -377,10 +405,9 @@ pub fn move_all(from: &Path, to: &Path) -> Result<(), MoveError> {
     if from == to {
         return Ok(());
     }
-    if from.starts_with(to) || to.starts_with(from) {
-        return Err(MoveError::Nested);
-    }
-    let files = backup_files_under(from);
+    // 入れ子（今の保存先の中のフォルダへ、またはその逆）も移せる：先に一覧を取り、
+    // 歩くのは写しのフォルダだけなので、移し先が移し元の中にあっても数え直さない。
+    let files = store_files(from);
     if let Some(clash) = files.iter().map(|f| to.join(f)).find(|t| t.exists()) {
         return Err(MoveError::Exists(clash));
     }
@@ -423,7 +450,7 @@ pub struct Group {
 /// まとめる。どこにも入らないもの（登録を外した、外で名前を変えた）は元の親フォルダで並ぶ。
 pub fn groups(root: &Path, registered: &[PathBuf]) -> Vec<Group> {
     let mut grouped: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = Default::default();
-    for relative in backup_files_under(root) {
+    for relative in store_files(root) {
         let Some(original_parent) = relative.parent().and_then(unmirror) else {
             continue;
         };
@@ -634,15 +661,46 @@ mod tests {
         assert_eq!(list(&from, &work.join("a.md")).len(), 1);
         assert_eq!(list(&to, &work.join("a.md")).len(), 0);
         fs::remove_file(&clash).unwrap();
-        // 入れ子は断る。
-        assert!(matches!(
-            move_all(&from, &from.join("sub")),
-            Err(MoveError::Nested)
-        ));
         move_all(&from, &to).unwrap();
         assert!(list(&from, &work.join("a.md")).is_empty());
         assert_eq!(list(&to, &work.join("a.md")).len(), 1);
         assert_eq!(list(&to, &work.join("b.md")).len(), 1);
+        // 入れ子も移せる（書き手の報告 2026-09-27：今の保存先の中のフォルダを選んで断られた）。
+        let inner = to.join("Temp");
+        move_all(&to, &inner).unwrap();
+        assert_eq!(list(&inner, &work.join("a.md")).len(), 1);
+        assert!(list(&to, &work.join("a.md")).is_empty());
+        move_all(&inner, &to).unwrap();
+        assert_eq!(list(&to, &work.join("a.md")).len(), 1);
+        assert!(list(&inner, &work.join("a.md")).is_empty());
+    }
+
+    #[test]
+    fn a_chosen_folder_keeps_its_own_files_to_itself() {
+        // 書き手の報告 2026-09-27：保存先に選んだフォルダの長い日本語の名前で落ちた。
+        assert_eq!(original_name("あいうえおかきくけこさしすせそ.md"), None);
+        assert_eq!(original_name("あいうえおかきくけこさしすせそ"), None);
+        assert_eq!(
+            original_name("長い日本語の名前の原稿.2026-09-27_143012.md").as_deref(),
+            Some("長い日本語の名前の原稿.md")
+        );
+        let from = scratch("own-from");
+        let to = scratch("own-to");
+        let work = scratch("own-work");
+        let original = work.join("a.md");
+        fs::write(&original, "x").unwrap();
+        take(&from, &original, 5, at(1)).unwrap();
+        // 保存先に元からある書き手のもの：バックアップの形の名前でも、写しのフォルダの外なら触らない。
+        let own = from.join("原稿").join("第一章.2026-09-27_143012.md");
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        fs::write(&own, "書き手の").unwrap();
+        fs::write(from.join("あいうえおかきくけこさしすせそ.md"), "書き手の").unwrap();
+        move_all(&from, &to).unwrap();
+        assert!(own.exists());
+        assert!(from.join("あいうえおかきくけこさしすせそ.md").exists());
+        assert!(!to.join("原稿").exists());
+        assert_eq!(list(&to, &original).len(), 1);
+        assert!(groups(&from, &[]).is_empty());
     }
 
     #[test]
