@@ -1199,6 +1199,19 @@ pub fn backup_root(window: &AppWindow) -> Option<PathBuf> {
     }
 }
 
+/// RFN01-61: 自動バックアップの置き場（保存先とファイル名の書式）。
+///
+/// 書式が使えない（設定ファイルを手で書き換えた）ときは既定の書式で読む。
+pub fn backup_store(window: &AppWindow) -> Option<backup::Store> {
+    let format = window.get_backup_name_format().to_string();
+    let format = if backup::check_format(&format).is_ok() {
+        format
+    } else {
+        backup::DEFAULT_NAME_FORMAT.to_owned()
+    };
+    Some(backup::Store::new(backup_root(window)?, format))
+}
+
 /// `target`が自動バックアップのフォルダにあるか。
 ///
 /// **Workspaceを使っていなければ、どこも自動バックアップではない**——保存方式は登録フォルダの
@@ -1219,18 +1232,19 @@ fn back_up_before_saving(window: &AppWindow, live: &Live, target: &Path) -> Opti
     if !backs_up(live, target) {
         return None;
     }
-    let Some(root) = backup_root(window) else {
+    let Some(store) = backup_store(window) else {
         return Some(pick("保存先が分かりません", "no backup folder").to_owned());
     };
     let keep = window.get_backup_keep().clamp(1, backup::MAX_KEEP as i32) as usize;
     let shown = target.display();
-    match backup::take(&root, target, keep, crate::timestamp::now()) {
+    match store.take(target, keep, crate::timestamp::now()) {
         Ok(written) => {
             if let Some(written) = written {
                 live.cache.borrow_mut().log_diag(
                     "file",
                     &format!("backup ok path={shown} to={}", written.display()),
                 );
+                crate::backup_ui::refresh_pane(window, live);
             }
             None
         }
@@ -1247,10 +1261,12 @@ fn back_up_before_saving(window: &AppWindow, live: &Live, target: &Path) -> Opti
 ///
 /// 名前変更そのものはもう済んでいるので、動かせなくても戻さない。言うだけにする。
 pub fn backups_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
-    let Some(root) = backup_root(window) else {
+    let Some(store) = backup_store(window) else {
         return;
     };
-    if let Err(error) = backup::follow(&root, from, to) {
+    let followed = store.follow(from, to);
+    crate::backup_ui::refresh_pane(window, live);
+    if let Err(error) = followed {
         live.cache.borrow_mut().log_diag(
             "file",
             &format!(
@@ -1933,7 +1949,9 @@ fn drive_entry(entry: &mut AutoSaveEntry, window: &AppWindow, live: &Live, now: 
 // **塊そのものは`mod`のまま**にしてある——言語の試験（`i18n`）は`#[cfg(test)]`の次の
 // `mod … {`から先を試験として読み飛ばす。
 #[cfg(test)]
-pub(crate) use folder_auto_save_tests::{Harness, attach_workspace, open_under, scratch_directory};
+pub(crate) use folder_auto_save_tests::{
+    Harness, attach_workspace, edit, open_under, scratch_directory,
+};
 
 #[cfg(test)]
 mod folder_auto_save_tests {
@@ -2698,11 +2716,11 @@ mod folder_auto_save_tests {
         let root = scratch_directory("backup-save");
         let (harness, document) = Harness::new(|weak| open_under(&root, "draft.md", "一", weak));
         attach_workspace(&harness.live, &root, workspace::SaveMode::AutoBackup);
-        let store = backup_root(&harness.window).unwrap();
+        let store = backup_store(&harness.window).unwrap();
         let path = root.join("draft.md");
         edit(&document, "二");
         assert!(save(&harness, &document, path.clone()));
-        let kept = backup::list(&store, &path);
+        let kept = store.list(&path);
         assert_eq!(kept.len(), 1);
         assert_eq!(std::fs::read_to_string(&kept[0].path).unwrap(), "一");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "一二");
@@ -2710,7 +2728,7 @@ mod folder_auto_save_tests {
         let other = root.join("other.md");
         std::fs::write(&other, "上書きされる").unwrap();
         assert!(save(&harness, &document, other.clone()));
-        let kept = backup::list(&store, &other);
+        let kept = store.list(&other);
         assert_eq!(kept.len(), 1);
         assert_eq!(
             std::fs::read_to_string(&kept[0].path).unwrap(),
@@ -2719,7 +2737,7 @@ mod folder_auto_save_tests {
         // 新しいファイルへの保存では、上書きする相手が無いので何も残らない。
         let fresh = root.join("fresh.md");
         assert!(save(&harness, &document, fresh.clone()));
-        assert!(backup::list(&store, &fresh).is_empty());
+        assert!(store.list(&fresh).is_empty());
     }
 
     /// 保存しても、バックアップが1つも残らないこと。
@@ -2732,8 +2750,8 @@ mod folder_auto_save_tests {
         let path = root.join("draft.md");
         edit(&document, "二");
         assert!(save(&harness, &document, path.clone()));
-        let store = backup_root(&harness.window).unwrap();
-        assert!(backup::list(&store, &path).is_empty(), "{name}");
+        let store = backup_store(&harness.window).unwrap();
+        assert!(store.list(&path).is_empty(), "{name}");
     }
 
     #[test]

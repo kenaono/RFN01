@@ -2691,10 +2691,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let insert_live = live.clone();
     window.on_pane_menu_opened(move |pane| {
         if let Some(window) = weak.upgrade() {
-            let pane = PaneId::from_index(pane);
-            menu_commands::publish_context_insert(&window, &insert_live, pane);
-            // RFN01-61: バックアップが無ければ「Backup History…」を淡く出す。
-            backup_ui::publish_menu(&window, &insert_live, pane);
+            menu_commands::publish_context_insert(&window, &insert_live, PaneId::from_index(pane));
         }
     });
     // 書式のボタン（2026-09-23）。**押された番号はメニューと同じ操作へ戻す。**
@@ -6810,6 +6807,8 @@ enum LeftTab {
     Bookmarks,
     /// 書き手の求め 2026-09-23.
     Tags,
+    /// RFN01-61（書き手の求め 2026-09-27）.
+    Backups,
 }
 
 impl LeftTab {
@@ -6823,6 +6822,7 @@ impl LeftTab {
             Self::Workspace => 4,
             Self::Bookmarks => 5,
             Self::Tags => 6,
+            Self::Backups => 7,
         }
     }
 
@@ -6835,6 +6835,7 @@ impl LeftTab {
             4 => Self::Workspace,
             5 => Self::Bookmarks,
             6 => Self::Tags,
+            7 => Self::Backups,
             _ => Self::Explorer,
         }
     }
@@ -6877,6 +6878,7 @@ fn publish_left(window: &AppWindow, live: &Live) {
         LeftTab::Outline => publish_outline(window, live),
         LeftTab::Bookmarks => bookmark_ui::publish(window, live),
         LeftTab::Tags => publish_tags(window, live),
+        LeftTab::Backups => backup_ui::publish_pane(window, live),
     }
 }
 
@@ -7289,8 +7291,8 @@ fn activate_left_row(window: &AppWindow, live: &Live, index: usize) {
         LeftTab::Search => open_result(window, live, index),
         LeftTab::Recent => open_remembered(window, live, index),
         LeftTab::Outline => go_to_heading(window, live, index),
-        // The view answers its own rows (`bookmark_ui::activate`).
-        LeftTab::Bookmarks => {}
+        // The views answer their own rows (`bookmark_ui::activate`, `backup_ui`).
+        LeftTab::Bookmarks | LeftTab::Backups => {}
         LeftTab::Tags => search_tag_row(window, live, index),
     }
 }
@@ -9077,6 +9079,7 @@ fn toggle_folder_mode(
         Ok(()) => {
             observe_folder_autosave(window, live);
             publish_workspace_manager(window, live);
+            backup_ui::refresh_pane(window, live);
         }
         Err(error) => window.tell(workspace_edit_error_message(&error).into()),
     }
@@ -14676,6 +14679,8 @@ const AUTOSAVE_SETTING: &str = "work.autosave";
 const BACKUP_KEEP_SETTING: &str = "backup.keep";
 /// 同じく保存先。**空ならアプリ専用領域**（`backup::default_root`）。
 const BACKUP_FOLDER_SETTING: &str = "backup.folder";
+/// 同じくファイル名の書式（書き手の決定 2026-09-27）。**使えない書式は既定へ倒す**。
+const BACKUP_NAME_SETTING: &str = "backup.name";
 /// 本文文字数がルビの読みを数えるか（要件 7.8・要件 10、2026-09-09）。
 ///
 /// **紙の設定（要件 9）のシートには置かない。**シートが持つのは組み方であり、
@@ -15640,6 +15645,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_backup_folder().to_string(),
     ));
     values.push((
+        BACKUP_NAME_SETTING.to_owned(),
+        window.get_backup_name_format().to_string(),
+    ));
+    values.push((
         COUNT_RUBY_SETTING.to_owned(),
         i32::from(window.get_count_ruby()).to_string(),
     ));
@@ -15868,6 +15877,15 @@ fn apply_settings(
         }
         if written == BACKUP_FOLDER_SETTING {
             window.set_backup_folder(value.trim().into());
+            continue;
+        }
+        if written == BACKUP_NAME_SETTING {
+            let format = if backup::check_format(value).is_ok() {
+                value.as_str()
+            } else {
+                backup::DEFAULT_NAME_FORMAT
+            };
+            window.set_backup_name_format(format.into());
             continue;
         }
         // 要件 7.8: **`1`だけがOn。**初期値は数えないほうなので、読めない値は

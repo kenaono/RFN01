@@ -533,12 +533,14 @@ pub(crate) fn import(window: &AppWindow, live: &Live, export: Export) -> io::Res
         )
         .map(|_| ())?;
     }
-    // RFN01-61: **バックアップの保存先は取り込まない。**その場所にこの機械のバックアップが
-    // あり、保存先を替えるのは中身を移すこと（Settings の「Choose…」）だけが行う。
+    // RFN01-61: **バックアップの保存先とファイル名の書式は取り込まない。**その場所・その名前で
+    // この機械のバックアップがあり、替えるのは中身を移す・付け替える操作（Settings）だけが行う。
     let settings: Vec<_> = export
         .settings
         .iter()
-        .filter(|(name, _)| name != crate::BACKUP_FOLDER_SETTING)
+        .filter(|(name, _)| {
+            name != crate::BACKUP_FOLDER_SETTING && name != crate::BACKUP_NAME_SETTING
+        })
         .cloned()
         .collect();
     apply_values(window, live, &settings);
@@ -723,6 +725,7 @@ mod tests {
         // RFN01-61: バックアップの残す数と保存先も守りの設定で、プリセットでは切り替えない。
         assert_eq!(kind_of("backup.keep"), None);
         assert_eq!(kind_of("backup.folder"), None);
+        assert_eq!(kind_of("backup.name"), None);
         assert_eq!(kind_of("terminal.shell.0"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("terminal.default"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("language"), None);

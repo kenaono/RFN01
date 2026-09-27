@@ -526,10 +526,6 @@ export component EditorPane inherits Rectangle {
     callback print-requested();
     callback compare-saved-requested();
     callback compare-head-requested();
-    /// RFN01-61: Backup History。**バックアップが無いファイルでは淡く出す**（`has-backups`は
-    /// メニューを開いた時点でRustが入れる）。
-    callback backup-history-requested();
-    in property <bool> has-backups;
     callback reopen-closed-requested();
     in property <[string]> shortcut-keys: ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+T", "Ctrl+Z", "Ctrl+Y"];
     callback shortcut-key(string, bool, bool, bool) -> bool;
@@ -1298,14 +1294,6 @@ export component EditorPane inherits Rectangle {
                             title: @tr("Compare with Last Commit");
                             activated => {
                                 root.compare-head-requested();
-                                pane-menu.close();
-                            }
-                        }
-                        if root.writing: MenuRow {
-                            title: @tr("Backup History…");
-                            enabled: root.has-backups;
-                            activated => {
-                                root.backup-history-requested();
                                 pane-menu.close();
                             }
                         }

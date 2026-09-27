@@ -11,20 +11,15 @@
 //! **バックアップと読むのは、この名前の形をしたファイルだけ**である。保存先は書き手が選べる
 //! （OneDriveのフォルダなど）ので、そこにある書き手自身のファイルを移したり消したりしない。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 
-use crate::timestamp::{self, LocalTime};
+use crate::timestamp::LocalTime;
 
 /// 既定の保存先を置くアプリ専用領域の中のフォルダ名。
 const DEFAULT_FOLDER: &str = "Backups";
-
-/// 名前に入れる時刻の形。**秒まで**入れる——分までだと、1分に2回保存したとき片方が消える。
-const STAMP_FORMAT: &str = "yyyy-MM-dd_HHmmss";
-
-/// `yyyy-MM-dd_HHmmss`の長さ。
-const STAMP_LENGTH: usize = 17;
 
 /// 既定の残す数（書き手の決定 2026-09-27：5世代、設定で変えられる）。
 pub const DEFAULT_KEEP: usize = 5;
@@ -116,167 +111,552 @@ fn folder_of(root: &Path, original: &Path) -> Option<PathBuf> {
     Some(root.join(mirror(original.parent()?)?))
 }
 
-/// 名前の頭と尻：`第一章.md`なら`第一章.`と`.md`、拡張子の無い`README`なら`README.`と空。
+/// 既定のファイル名の書式（書き手の決定 2026-09-27：書式を書く形）。
+///
+/// `{name}`は元のファイル名から拡張子を除いたもの、`{ext}`は`.md`のような拡張子（無ければ空）。
+/// 日時はTerminalのタイムスタンプと同じ文字（`yyyy` `MM` `dd` `HH` `mm` `ss`）で書く。
+pub const DEFAULT_NAME_FORMAT: &str = "{name}.yyyy-MM-dd_HHmmss{ext}";
+
+/// 書式の1片。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Piece {
+    Literal(char),
+    Name,
+    Ext,
+    /// 日時の欄と、その桁数。
+    Field(Field, usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+}
+
+/// 書式を片に分ける。**文字の並びの読み方はTerminalのタイムスタンプ（`timestamp::format`）と
+/// 同じ**：同じ位置では`yyyy` `MM` `dd` `HH` `mm` `ss`の順に見る。
+fn pieces(format: &str) -> Vec<Piece> {
+    const WORDS: [(&str, Piece); 8] = [
+        ("{name}", Piece::Name),
+        ("{ext}", Piece::Ext),
+        ("yyyy", Piece::Field(Field::Year, 4)),
+        ("MM", Piece::Field(Field::Month, 2)),
+        ("dd", Piece::Field(Field::Day, 2)),
+        ("HH", Piece::Field(Field::Hour, 2)),
+        ("mm", Piece::Field(Field::Minute, 2)),
+        ("ss", Piece::Field(Field::Second, 2)),
+    ];
+    let mut out = Vec::new();
+    let mut rest = format;
+    'next: while let Some(c) = rest.chars().next() {
+        for (word, piece) in WORDS {
+            if let Some(after) = rest.strip_prefix(word) {
+                out.push(piece);
+                rest = after;
+                continue 'next;
+            }
+        }
+        out.push(Piece::Literal(c));
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// 書式が使えない理由。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatProblem {
+    /// `{name}`がちょうど1つ無い。
+    Name,
+    /// 秒までの日時（年・月・日・時・分・秒）のどれかが無い。
+    Time,
+    /// `{ext}`が2つ以上ある。
+    Ext,
+    /// ファイル名に使えない字がある。
+    Character(char),
+}
+
+/// 書式が使えるか。**名前と秒までの日時が要る**——どちらが欠けても、どのファイルの・いつの
+/// バックアップかを名前から読み戻せない。
+pub fn check_format(format: &str) -> Result<(), FormatProblem> {
+    if let Some(bad) = format.chars().find(|c| {
+        matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
+    }) {
+        return Err(FormatProblem::Character(bad));
+    }
+    let pieces = pieces(format);
+    let count = |wanted: Piece| pieces.iter().filter(|p| **p == wanted).count();
+    if count(Piece::Name) != 1 {
+        return Err(FormatProblem::Name);
+    }
+    if count(Piece::Ext) > 1 {
+        return Err(FormatProblem::Ext);
+    }
+    let fields = [
+        Field::Year,
+        Field::Month,
+        Field::Day,
+        Field::Hour,
+        Field::Minute,
+        Field::Second,
+    ];
+    let has = |field| {
+        pieces
+            .iter()
+            .any(|p| matches!(p, Piece::Field(f, _) if *f == field))
+    };
+    if !fields.into_iter().all(has) {
+        return Err(FormatProblem::Time);
+    }
+    Ok(())
+}
+
+/// 元のファイル名の、拡張子を除いたところと拡張子（`.`付き、無ければ空）。
 fn name_parts(original: &Path) -> Option<(String, String)> {
     let stem = original.file_stem()?.to_string_lossy().into_owned();
     let extension = original
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    Some((format!("{stem}."), extension))
+    Some((stem, extension))
 }
 
-fn backup_name(original: &Path, taken: LocalTime) -> Option<String> {
-    let (head, tail) = name_parts(original)?;
-    let stamp = timestamp::format(STAMP_FORMAT, taken);
-    Some(format!("{head}{stamp}{tail}"))
-}
-
-/// `yyyy-MM-dd_HHmmss`を時刻として読む。形が違えば`None`。
-fn parse_stamp(stamp: &str) -> Option<LocalTime> {
-    let bytes = stamp.as_bytes();
-    if bytes.len() != STAMP_LENGTH {
-        return None;
+/// `format`で、`original`の`taken`のバックアップの名前を作る。
+pub fn name_for(format: &str, original: &Path, taken: LocalTime) -> Option<String> {
+    let (stem, extension) = name_parts(original)?;
+    let mut out = String::new();
+    for piece in pieces(format) {
+        match piece {
+            Piece::Literal(c) => out.push(c),
+            Piece::Name => out.push_str(&stem),
+            Piece::Ext => out.push_str(&extension),
+            Piece::Field(field, width) => {
+                let value = match field {
+                    Field::Year => taken.year,
+                    Field::Month => taken.month,
+                    Field::Day => taken.day,
+                    Field::Hour => taken.hour,
+                    Field::Minute => taken.minute,
+                    Field::Second => taken.second,
+                };
+                out.push_str(&format!("{value:0width$}"));
+            }
+        }
     }
-    let shape_ok = bytes.iter().enumerate().all(|(at, byte)| match at {
-        4 | 7 => *byte == b'-',
-        10 => *byte == b'_',
-        _ => byte.is_ascii_digit(),
-    });
-    if !shape_ok {
-        return None;
+    Some(out)
+}
+
+/// 名前から読み戻したもの。
+#[derive(Default)]
+struct Read<'a> {
+    stem: &'a str,
+    extension: &'a str,
+    taken: LocalTime,
+}
+
+/// `name`を書式の片に当てはめる。`{name}`と`{ext}`は長いほうから試し、合わなければ短くする。
+/// `want`があれば、`{name}`と`{ext}`はその字でなければならない。
+fn fit<'a>(
+    pieces: &[Piece],
+    name: &'a str,
+    want: Option<(&str, &str)>,
+    read: &mut Read<'a>,
+) -> bool {
+    let Some((first, rest)) = pieces.split_first() else {
+        return name.is_empty();
+    };
+    match *first {
+        Piece::Literal(c) => name
+            .strip_prefix(c)
+            .is_some_and(|after| fit(rest, after, want, read)),
+        Piece::Field(field, width) => {
+            let Some(digits) = name.get(..width) else {
+                return false;
+            };
+            if !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            let value: u16 = digits.parse().unwrap_or(0);
+            let slot = match field {
+                Field::Year => &mut read.taken.year,
+                Field::Month => &mut read.taken.month,
+                Field::Day => &mut read.taken.day,
+                Field::Hour => &mut read.taken.hour,
+                Field::Minute => &mut read.taken.minute,
+                Field::Second => &mut read.taken.second,
+            };
+            *slot = value;
+            fit(rest, &name[width..], want, read)
+        }
+        Piece::Name => {
+            if let Some((stem, _)) = want {
+                return name.strip_prefix(stem).is_some_and(|after| {
+                    read.stem = &name[..stem.len()];
+                    fit(rest, after, want, read)
+                });
+            }
+            let ends: Vec<usize> = name
+                .char_indices()
+                .map(|(at, c)| at + c.len_utf8())
+                .collect();
+            ends.into_iter().rev().any(|end| {
+                read.stem = &name[..end];
+                fit(rest, &name[end..], want, read)
+            })
+        }
+        Piece::Ext => {
+            if let Some((_, extension)) = want {
+                return name.strip_prefix(extension).is_some_and(|after| {
+                    read.extension = &name[..extension.len()];
+                    fit(rest, after, want, read)
+                });
+            }
+            // `.`で始まり、ほかに`.`を含まないもの（長いほうから）、または空。
+            let mut ends = vec![0];
+            if name.starts_with('.') {
+                for (at, c) in name.char_indices().skip(1) {
+                    if c == '.' {
+                        break;
+                    }
+                    ends.push(at + c.len_utf8());
+                }
+            }
+            ends.into_iter().rev().any(|end| {
+                read.extension = &name[..end];
+                fit(rest, &name[end..], want, read)
+            })
+        }
     }
-    let number = |range: std::ops::Range<usize>| stamp[range].parse::<u16>().ok();
-    Some(LocalTime {
-        year: number(0..4)?,
-        month: number(5..7)?,
-        day: number(8..10)?,
-        hour: number(11..13)?,
-        minute: number(13..15)?,
-        second: number(15..17)?,
-        millis: 0,
-    })
 }
 
-/// `name`が`original`のバックアップの名前なら、その時刻。
-fn stamp_in(name: &str, original: &Path) -> Option<LocalTime> {
-    let (head, tail) = name_parts(original)?;
-    let middle = name.strip_prefix(&head)?.strip_suffix(&tail)?;
-    parse_stamp(middle)
+/// `name`が`original`の、`format`で名付けたバックアップなら、その時刻。
+fn stamp_in(format: &str, name: &str, original: &Path) -> Option<LocalTime> {
+    let (stem, extension) = name_parts(original)?;
+    let mut read = Read::default();
+    fit(&pieces(format), name, Some((&stem, &extension)), &mut read).then_some(read.taken)
 }
 
-/// 名前だけから、バックアップの形をしているか見る（元のファイル名は問わない）。
+/// 名前だけから、`format`のバックアップの形をしているか見る（元のファイル名は問わない）。
 ///
 /// 戻り値は元のファイル名。`第一章.2026-09-27_143012.md` → `第一章.md`。
-fn original_name(name: &str) -> Option<String> {
-    // 時刻の後ろは拡張子（`.`で始まり、それ以上`.`を含まない）か、何も無い。
-    let stamp_ends_at = |dot: usize| {
-        let start = dot.checked_sub(STAMP_LENGTH)?;
-        parse_stamp(name.get(start..dot)?)
-    };
-    let (before, extension) = match name.rfind('.') {
-        Some(dot) if stamp_ends_at(dot).is_some() => name.split_at(dot),
-        _ => (name, ""),
-    };
-    // **字の途中では切らない**（書き手の報告 2026-09-27：長い日本語の名前で落ちた）。
-    // 時刻は18バイトのASCIIなので、そこが字の境目でなければバックアップの名前ではない。
-    let split = before.len().checked_sub(STAMP_LENGTH + 1)?;
-    let (stem, rest) = (before.get(..split)?, before.get(split..)?);
-    if !rest.starts_with('.') || stem.is_empty() || parse_stamp(&rest[1..]).is_none() {
-        return None;
-    }
-    Some(format!("{stem}{extension}"))
+fn original_name(format: &str, name: &str) -> Option<String> {
+    let mut read = Read::default();
+    let fits = fit(&pieces(format), name, None, &mut read);
+    (fits && !read.stem.is_empty()).then(|| format!("{}{}", read.stem, read.extension))
 }
 
-/// `original`のバックアップ、新しい順。
-pub fn list(root: &Path, original: &Path) -> Vec<Backup> {
-    let Some(folder) = folder_of(root, original) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(&folder) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(String, Backup)> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let taken = stamp_in(&name, original)?;
-            let path = entry.path();
-            Some((name, Backup { path, taken }))
-        })
-        .collect();
-    // 名前の時刻は桁がそろっているので、文字列の順がそのまま時刻の順である。
-    found.sort_by(|a, b| b.0.cmp(&a.0));
-    found.into_iter().map(|(_, backup)| backup).collect()
+/// バックアップの置き場：保存先と、ファイル名の書式。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Store {
+    pub root: PathBuf,
+    pub format: String,
 }
 
-/// 保存の直前に呼ぶ：`original`の今の中身をバックアップとして残す。
-///
-/// - 元のファイルが無ければ（新しいファイルへの保存）何もしない。
-/// - **いちばん新しいバックアップと中身が同じなら書かない**——同じものが世代を押し出す
-///   だけになる。
-/// - 書いたあと、`keep`を超えた古いものを消す。
-///
-/// 戻り値は書いたバックアップ。書かなかったときは`None`。
-pub fn take(
-    root: &Path,
-    original: &Path,
-    keep: usize,
-    taken: LocalTime,
-) -> io::Result<Option<PathBuf>> {
-    let bytes = match fs::read(original) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let folder = folder_of(root, original).ok_or_else(|| unsupported(original))?;
-    let name = backup_name(original, taken).ok_or_else(|| unsupported(original))?;
-    let existing = list(root, original);
-    let same = existing
-        .first()
-        .is_some_and(|newest| fs::read(&newest.path).is_ok_and(|held| held == bytes));
-    let target = folder.join(name);
-    // 同じ秒にもう取ってある（1秒に2回保存した）なら、その1つで足りる。
-    let written = if same || target.exists() {
-        None
-    } else {
-        fs::create_dir_all(&folder)?;
-        crate::file_io::write_atomically(&target, &bytes)?;
-        Some(target)
-    };
-    prune(root, original, keep.max(1));
-    Ok(written)
-}
-
-fn unsupported(path: &Path) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("cannot back up {}", path.display()),
-    )
-}
-
-/// `keep`を超えた古いバックアップを消す。消せなかったものは次の機会に回す。
-fn prune(root: &Path, original: &Path, keep: usize) {
-    for old in list(root, original).into_iter().skip(keep) {
-        let _ = fs::remove_file(&old.path);
-    }
-}
-
-/// バックアップを消す（Backup History画面・Delete Backups…）。
-///
-/// 1つでも消せなければ`Err`。消せたものは戻らない——消すことを選んだものだからである。
-pub fn delete(root: &Path, paths: &[PathBuf]) -> io::Result<()> {
-    let mut failed = None;
-    for path in paths {
-        if let Err(error) = fs::remove_file(path)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            failed.get_or_insert(error);
+impl Store {
+    pub fn new(root: impl Into<PathBuf>, format: impl Into<String>) -> Self {
+        Self {
+            root: root.into(),
+            format: format.into(),
         }
-        tidy(root, path.parent());
     }
-    failed.map_or(Ok(()), Err)
+
+    /// `original`のバックアップ、新しい順。
+    pub fn list(&self, original: &Path) -> Vec<Backup> {
+        let Some(folder) = folder_of(&self.root, original) else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(&folder) else {
+            return Vec::new();
+        };
+        let mut found: Vec<Backup> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let taken = stamp_in(&self.format, &name, original)?;
+                Some(Backup {
+                    path: entry.path(),
+                    taken,
+                })
+            })
+            .collect();
+        // 書式によって名前の並びと時刻の並びは一致しないので、時刻で並べる。
+        let key = |b: &Backup| {
+            let t = b.taken;
+            (t.year, t.month, t.day, t.hour, t.minute, t.second)
+        };
+        found.sort_by_key(|b| std::cmp::Reverse(key(b)));
+        found
+    }
+
+    /// 保存の直前に呼ぶ：`original`の今の中身をバックアップとして残す。
+    ///
+    /// - 元のファイルが無ければ（新しいファイルへの保存）何もしない。
+    /// - **いちばん新しいバックアップと中身が同じなら書かない**——同じものが世代を押し出す
+    ///   だけになる。
+    /// - 書いたあと、`keep`を超えた古いものを消す。
+    ///
+    /// 戻り値は書いたバックアップ。書かなかったときは`None`。
+    pub fn take(
+        &self,
+        original: &Path,
+        keep: usize,
+        taken: LocalTime,
+    ) -> io::Result<Option<PathBuf>> {
+        let bytes = match fs::read(original) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let folder = folder_of(&self.root, original).ok_or_else(|| unsupported(original))?;
+        let name = name_for(&self.format, original, taken).ok_or_else(|| unsupported(original))?;
+        let existing = self.list(original);
+        let same = existing
+            .first()
+            .is_some_and(|newest| fs::read(&newest.path).is_ok_and(|held| held == bytes));
+        let target = folder.join(name);
+        // 同じ秒にもう取ってある（1秒に2回保存した）なら、その1つで足りる。
+        let written = if same || target.exists() {
+            None
+        } else {
+            fs::create_dir_all(&folder)?;
+            crate::file_io::write_atomically(&target, &bytes)?;
+            Some(target)
+        };
+        self.prune(original, keep.max(1));
+        Ok(written)
+    }
+
+    /// `keep`を超えた古いバックアップを消す。消せなかったものは次の機会に回す。
+    fn prune(&self, original: &Path, keep: usize) {
+        for old in self.list(original).into_iter().skip(keep) {
+            let _ = fs::remove_file(&old.path);
+        }
+    }
+
+    /// バックアップを消す（Backup History画面・Backupsの面）。
+    ///
+    /// 1つでも消せなければ`Err`。消せたものは戻らない——消すことを選んだものだからである。
+    pub fn delete(&self, paths: &[PathBuf]) -> io::Result<()> {
+        let mut failed = None;
+        for path in paths {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                failed.get_or_insert(error);
+            }
+            tidy(&self.root, path.parent());
+        }
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Editorの中で`from`を`to`へ名前変更・移動したとき、バックアップも付いていく。
+    ///
+    /// `from`はファイルでもフォルダでもよい。バックアップが無ければ何もしない。
+    pub fn follow(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let (Some(from_mirror), Some(to_mirror)) = (mirror(from), mirror(to)) else {
+            return Ok(());
+        };
+        let (from_folder, to_folder) = (self.root.join(from_mirror), self.root.join(to_mirror));
+        if from_folder.is_dir() {
+            // フォルダを動かした：その下のバックアップを丸ごと写す先へ。
+            for relative in self.files_under(&from_folder) {
+                carry(&from_folder.join(&relative), &to_folder.join(&relative))?;
+            }
+            tidy(&self.root, Some(&from_folder));
+            return Ok(());
+        }
+        // ファイルを動かした：時刻はそのまま、名前を新しいファイルのものに。
+        let target = folder_of(&self.root, to).ok_or_else(|| unsupported(to))?;
+        for backup in self.list(from) {
+            let name = name_for(&self.format, to, backup.taken).ok_or_else(|| unsupported(to))?;
+            carry(&backup.path, &target.join(name))?;
+        }
+        tidy(&self.root, folder_of(&self.root, from).as_deref());
+        Ok(())
+    }
+
+    /// `folder`の下にあるバックアップの形をしたファイル（`folder`からの相対パス）。
+    fn files_under(&self, folder: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![PathBuf::new()];
+        while let Some(relative) = pending.pop() {
+            let Ok(entries) = fs::read_dir(folder.join(&relative)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                let child = relative.join(entry.file_name());
+                if kind.is_dir() {
+                    pending.push(child);
+                } else if kind.is_file()
+                    && original_name(&self.format, &entry.file_name().to_string_lossy()).is_some()
+                {
+                    found.push(child);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// 保存先にあるバックアップ（保存先からの相対パス）。
+    ///
+    /// **歩くのは写しのフォルダ（`C`・`D`などのドライブと`UNC`）の中だけ**（書き手の報告
+    /// 2026-09-27）。保存先は書き手が選んだ普通のフォルダでありうるので、その中の書き手自身の
+    /// フォルダやファイルには入らない——読みもしないし、移しも消しもしない。
+    fn files(&self) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let mirrored =
+                name == "UNC" || (name.len() == 1 && name.chars().all(|c| c.is_ascii_alphabetic()));
+            if !mirrored || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let inside = self.files_under(&self.root.join(&name));
+            found.extend(inside.into_iter().map(|r| Path::new(&name).join(r)));
+        }
+        found.sort();
+        found
+    }
+
+    /// 保存先を`to`へ変えるとき、バックアップを全部移す。
+    ///
+    /// **途中で失敗したら何も変えない**（書き手の決定 2026-09-27）：全部を写し終えてから元を
+    /// 消すので、写す途中の失敗は写したものを消せば元どおりになる。写し終えたあと元を消せ
+    /// なかったものは、元の場所に残るだけで、失われるものは無い。
+    ///
+    /// 入れ子（今の保存先の中のフォルダへ、またはその逆）も移せる：先に一覧を取り、歩くのは
+    /// 写しのフォルダだけなので、移し先が移し元の中にあっても数え直さない。
+    pub fn move_to(&self, to: &Path) -> Result<(), MoveError> {
+        let from = &self.root;
+        if from == to {
+            return Ok(());
+        }
+        let files = self.files();
+        if let Some(clash) = files.iter().map(|f| to.join(f)).find(|t| t.exists()) {
+            return Err(MoveError::Exists(clash));
+        }
+        let mut copied = Vec::new();
+        for relative in &files {
+            let target = to.join(relative);
+            let copy = target
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::copy(from.join(relative), &target));
+            if let Err(error) = copy {
+                let _ = fs::remove_file(&target);
+                for done in &copied {
+                    let _ = fs::remove_file(done);
+                    tidy(to, Path::new(done).parent());
+                }
+                tidy(to, target.parent());
+                return Err(MoveError::Io(error));
+            }
+            copied.push(target);
+        }
+        for relative in &files {
+            let source = from.join(relative);
+            let _ = fs::remove_file(&source);
+            tidy(from, source.parent());
+        }
+        Ok(())
+    }
+
+    /// ファイル名の書式を`format`へ変えるとき、バックアップの名前を全部付け替える。
+    ///
+    /// **途中で失敗したら何も変えない**（保存先の変更と同じ）：付け替えたものを元の名前へ戻す。
+    pub fn rename_to(&self, format: &str) -> Result<(), MoveError> {
+        if format == self.format {
+            return Ok(());
+        }
+        let mut plan = Vec::new();
+        for relative in self.files() {
+            let from = self.root.join(&relative);
+            let Some(name) = from.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let Some(original) = original_name(&self.format, &name) else {
+                continue;
+            };
+            let original = from.with_file_name(original);
+            let Some(taken) = stamp_in(&self.format, &name, &original) else {
+                continue;
+            };
+            let Some(renamed) = name_for(format, &original, taken) else {
+                continue;
+            };
+            let to = from.with_file_name(renamed);
+            if to != from {
+                plan.push((from, to));
+            }
+        }
+        if let Some((_, clash)) = plan.iter().find(|(_, to)| to.exists()) {
+            return Err(MoveError::Exists(clash.clone()));
+        }
+        let mut done: Vec<&(PathBuf, PathBuf)> = Vec::new();
+        for step in &plan {
+            if let Err(error) = fs::rename(&step.0, &step.1) {
+                for (from, to) in done.into_iter().rev() {
+                    let _ = fs::rename(to, from);
+                }
+                return Err(MoveError::Io(error));
+            }
+            done.push(step);
+        }
+        Ok(())
+    }
+
+    /// 保存先にあるバックアップを、元のフォルダごとにまとめる（Backupsの面）。
+    ///
+    /// `registered`（Workspaceの登録フォルダ）の中にあったものは、**いちばん深い登録フォルダ**に
+    /// まとめる。どこにも入らないもの（登録を外した、外で名前を変えた）は元の親フォルダで並ぶ。
+    pub fn groups(&self, registered: &[PathBuf]) -> Vec<Group> {
+        type Originals = BTreeMap<PathBuf, Vec<PathBuf>>;
+        let mut grouped: BTreeMap<PathBuf, Originals> = BTreeMap::new();
+        for relative in self.files() {
+            let Some(original_parent) = relative.parent().and_then(unmirror) else {
+                continue;
+            };
+            let Some(name) = relative
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            let Some(original) = original_name(&self.format, &name) else {
+                continue;
+            };
+            let owner = registered
+                .iter()
+                .map(|folder| plain(folder))
+                .filter(|folder| starts_with_ignoring_case(&original_parent, folder))
+                .max_by_key(|folder| folder.components().count())
+                .unwrap_or_else(|| original_parent.clone());
+            grouped
+                .entry(owner)
+                .or_default()
+                .entry(original_parent.join(original))
+                .or_default()
+                .push(self.root.join(relative));
+        }
+        grouped
+            .into_iter()
+            .map(|(folder, originals)| Group {
+                folder,
+                originals: originals.into_iter().collect(),
+            })
+            .collect()
+    }
 }
 
 /// 空になったフォルダを、保存先の手前まで畳む。
@@ -289,30 +669,11 @@ fn tidy(root: &Path, mut folder: Option<&Path>) {
     }
 }
 
-/// Editorの中で`from`を`to`へ名前変更・移動したとき、バックアップも付いていく。
-///
-/// `from`はファイルでもフォルダでもよい。バックアップが無ければ何もしない。
-pub fn follow(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
-    let (Some(from_mirror), Some(to_mirror)) = (mirror(from), mirror(to)) else {
-        return Ok(());
-    };
-    let (from_folder, to_folder) = (root.join(from_mirror), root.join(to_mirror));
-    if from_folder.is_dir() {
-        // フォルダを動かした：その下のバックアップを丸ごと写す先へ。
-        for relative in backup_files_under(&from_folder) {
-            carry(&from_folder.join(&relative), &to_folder.join(&relative))?;
-        }
-        tidy(root, Some(&from_folder));
-        return Ok(());
-    }
-    // ファイルを動かした：時刻はそのまま、名前を新しいファイルのものに。
-    let target = folder_of(root, to).ok_or_else(|| unsupported(to))?;
-    for backup in list(root, from) {
-        let name = backup_name(to, backup.taken).ok_or_else(|| unsupported(to))?;
-        carry(&backup.path, &target.join(name))?;
-    }
-    tidy(root, folder_of(root, from).as_deref());
-    Ok(())
+fn unsupported(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("cannot back up {}", path.display()),
+    )
 }
 
 /// 1つのファイルを動かす。同じ名前が先にあれば上書きしない。
@@ -334,138 +695,27 @@ fn carry(from: &Path, to: &Path) -> io::Result<()> {
     fs::remove_file(from)
 }
 
-/// `folder`の下にあるバックアップの形をしたファイル（`folder`からの相対パス）。
-fn backup_files_under(folder: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut pending = vec![PathBuf::new()];
-    while let Some(relative) = pending.pop() {
-        let Ok(entries) = fs::read_dir(folder.join(&relative)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            let child = relative.join(entry.file_name());
-            if kind.is_dir() {
-                pending.push(child);
-            } else if kind.is_file()
-                && original_name(&entry.file_name().to_string_lossy()).is_some()
-            {
-                found.push(child);
-            }
-        }
-    }
-    found.sort();
-    found
-}
-
-/// 保存先にあるバックアップ（保存先からの相対パス）。
-///
-/// **歩くのは写しのフォルダ（`C`・`D`などのドライブと`UNC`）の中だけ**（書き手の報告
-/// 2026-09-27）。保存先は書き手が選んだ普通のフォルダでありうるので、その中の書き手自身の
-/// フォルダやファイルには入らない——読みもしないし、移しも消しもしない。
-fn store_files(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let mirrored =
-            name == "UNC" || (name.len() == 1 && name.chars().all(|c| c.is_ascii_alphabetic()));
-        if !mirrored || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        let inside = backup_files_under(&root.join(&name));
-        found.extend(
-            inside
-                .into_iter()
-                .map(|relative| Path::new(&name).join(relative)),
-        );
-    }
-    found.sort();
-    found
-}
-
-/// 保存先を変えたときの失敗。
+/// 保存先の変更・書式の変更の失敗。
 #[derive(Debug)]
 pub enum MoveError {
-    /// 移し先に同じ名前のバックアップがある。
+    /// 移し先（付け替え先）に同じ名前のファイルがある。
     Exists(PathBuf),
     Io(io::Error),
 }
 
-/// 保存先を`from`から`to`へ変えるとき、バックアップを全部移す。
-///
-/// **途中で失敗したら何も変えない**（書き手の決定 2026-09-27）：全部を写し終えてから元を
-/// 消すので、写す途中の失敗は写したものを消せば元どおりになる。写し終えたあと元を消せ
-/// なかったものは、元の場所に残るだけで、失われるものは無い。
-pub fn move_all(from: &Path, to: &Path) -> Result<(), MoveError> {
-    if from == to {
-        return Ok(());
-    }
-    // 入れ子（今の保存先の中のフォルダへ、またはその逆）も移せる：先に一覧を取り、
-    // 歩くのは写しのフォルダだけなので、移し先が移し元の中にあっても数え直さない。
-    let files = store_files(from);
-    if let Some(clash) = files.iter().map(|f| to.join(f)).find(|t| t.exists()) {
-        return Err(MoveError::Exists(clash));
-    }
-    let mut copied = Vec::new();
-    for relative in &files {
-        let target = to.join(relative);
-        let copy = target
-            .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| fs::copy(from.join(relative), &target));
-        if let Err(error) = copy {
-            let _ = fs::remove_file(&target);
-            for done in &copied {
-                let _ = fs::remove_file(done);
-                tidy(to, Path::new(done).parent());
-            }
-            tidy(to, target.parent());
-            return Err(MoveError::Io(error));
-        }
-        copied.push(target);
-    }
-    for relative in &files {
-        let source = from.join(relative);
-        let _ = fs::remove_file(&source);
-        tidy(from, source.parent());
-    }
-    Ok(())
-}
-
-/// Delete Backups…の1行：元のフォルダと、そこに属するバックアップ。
+/// Backupsの面の1つのフォルダ：元のフォルダと、そこのファイルごとのバックアップ。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
     pub folder: PathBuf,
-    pub files: Vec<PathBuf>,
+    /// 元のファイル（素の絶対パス）と、そのバックアップ。
+    pub originals: Vec<(PathBuf, Vec<PathBuf>)>,
 }
 
-/// 保存先にあるバックアップを、元のフォルダごとにまとめる。
-///
-/// `registered`（Workspaceの登録フォルダ）の中にあったものは、**いちばん深い登録フォルダ**に
-/// まとめる。どこにも入らないもの（登録を外した、外で名前を変えた）は元の親フォルダで並ぶ。
-pub fn groups(root: &Path, registered: &[PathBuf]) -> Vec<Group> {
-    let mut grouped: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = Default::default();
-    for relative in store_files(root) {
-        let Some(original_parent) = relative.parent().and_then(unmirror) else {
-            continue;
-        };
-        let owner = registered
-            .iter()
-            .map(|folder| plain(folder))
-            .filter(|folder| starts_with_ignoring_case(&original_parent, folder))
-            .max_by_key(|folder| folder.components().count())
-            .unwrap_or(original_parent);
-        grouped.entry(owner).or_default().push(root.join(relative));
+impl Group {
+    /// このフォルダのバックアップ全部。
+    pub fn files(&self) -> Vec<PathBuf> {
+        self.originals.iter().flat_map(|(_, b)| b.clone()).collect()
     }
-    grouped
-        .into_iter()
-        .map(|(folder, files)| Group { folder, files })
-        .collect()
 }
 
 /// Windowsのパスは大文字・小文字を区別しない。
@@ -483,6 +733,10 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).expect("creates");
         directory
+    }
+
+    fn store(root: &Path) -> Store {
+        Store::new(root, DEFAULT_NAME_FORMAT)
     }
 
     fn at(second: u16) -> LocalTime {
@@ -531,40 +785,100 @@ mod tests {
     }
 
     #[test]
-    fn names_carry_the_second_and_keep_the_extension() {
+    fn names_follow_the_format_and_read_back() {
         let taken = at(12);
-        let name = |p: &str| backup_name(Path::new(p), taken);
+        let name = |format: &str, p: &str| name_for(format, Path::new(p), taken);
+        let f = DEFAULT_NAME_FORMAT;
         assert_eq!(
-            name(r"D:\a\第一章.md").as_deref(),
+            name(f, r"D:\a\第一章.md").as_deref(),
             Some("第一章.2026-09-27_143012.md")
         );
         assert_eq!(
-            name(r"D:\a\README").as_deref(),
+            name(f, r"D:\a\README").as_deref(),
             Some("README.2026-09-27_143012")
         );
         assert_eq!(
-            name(r"D:\a\a.b.txt").as_deref(),
+            name(f, r"D:\a\a.b.txt").as_deref(),
             Some("a.b.2026-09-27_143012.txt")
         );
         assert_eq!(
-            stamp_in("a.b.2026-09-27_143012.txt", Path::new(r"D:\a\a.b.txt")),
+            stamp_in(f, "a.b.2026-09-27_143012.txt", Path::new(r"D:\a\a.b.txt")),
             Some(taken)
         );
         // 別のファイルの名前は、頭が同じでもそのファイルのものではない。
         assert_eq!(
-            stamp_in("a.b.2026-09-27_143012.txt", Path::new(r"D:\a\a.txt")),
+            stamp_in(f, "a.b.2026-09-27_143012.txt", Path::new(r"D:\a\a.txt")),
             None
         );
         assert_eq!(
-            original_name("第一章.2026-09-27_143012.md").as_deref(),
+            original_name(f, "第一章.2026-09-27_143012.md").as_deref(),
             Some("第一章.md")
         );
         assert_eq!(
-            original_name("README.2026-09-27_143012").as_deref(),
+            original_name(f, "README.2026-09-27_143012").as_deref(),
             Some("README")
         );
-        assert_eq!(original_name("第一章.md"), None);
-        assert_eq!(original_name(".2026-09-27_143012.md"), None);
+        assert_eq!(
+            original_name(f, "a.b.2026-09-27_143012.txt").as_deref(),
+            Some("a.b.txt")
+        );
+        assert_eq!(original_name(f, "第一章.md"), None);
+        assert_eq!(original_name(f, ".2026-09-27_143012.md"), None);
+        // 書き手の報告 2026-09-27：長い日本語の名前で落ちた。
+        assert_eq!(original_name(f, "あいうえおかきくけこさしすせそ.md"), None);
+        assert_eq!(
+            original_name(f, "長い日本語の名前の原稿.2026-09-27_143012.md").as_deref(),
+            Some("長い日本語の名前の原稿.md")
+        );
+        // 別の書式：日時が先、拡張子の後ろに印。
+        let g = "yyyyMMdd_HHmmss_{name}{ext}.bak";
+        assert_eq!(
+            name(g, r"D:\a\第一章.md").as_deref(),
+            Some("20260927_143012_第一章.md.bak")
+        );
+        assert_eq!(
+            original_name(g, "20260927_143012_第一章.md.bak").as_deref(),
+            Some("第一章.md")
+        );
+        assert_eq!(
+            stamp_in(
+                g,
+                "20260927_143012_第一章.md.bak",
+                Path::new(r"D:\a\第一章.md")
+            ),
+            Some(taken)
+        );
+        assert_eq!(original_name(g, "第一章.2026-09-27_143012.md"), None);
+    }
+
+    #[test]
+    fn a_format_needs_the_name_and_the_time_to_the_second() {
+        assert_eq!(check_format(DEFAULT_NAME_FORMAT), Ok(()));
+        assert_eq!(check_format("yyyyMMdd_HHmmss_{name}{ext}.bak"), Ok(()));
+        assert_eq!(
+            check_format("yyyy-MM-dd_HHmmss{ext}"),
+            Err(FormatProblem::Name)
+        );
+        assert_eq!(
+            check_format("{name}{name}.yyyyMMddHHmmss"),
+            Err(FormatProblem::Name)
+        );
+        assert_eq!(
+            check_format("{name}.yyyy-MM-dd_HHmm{ext}"),
+            Err(FormatProblem::Time)
+        );
+        assert_eq!(
+            check_format("{name}{ext}.yyyyMMddHHmmss{ext}"),
+            Err(FormatProblem::Ext)
+        );
+        assert_eq!(
+            check_format(r"{name}\yyyyMMddHHmmss"),
+            Err(FormatProblem::Character('\\'))
+        );
+        assert_eq!(
+            check_format("{name}:yyyyMMddHHmmss"),
+            Err(FormatProblem::Character(':'))
+        );
     }
 
     #[test]
@@ -572,22 +886,45 @@ mod tests {
         let root = scratch("take-root");
         let work = scratch("take-work");
         let original = work.join("第一章.md");
+        let store = store(&root);
         // 新しいファイル（上書きする相手が無い）では何も取らない。
-        assert_eq!(take(&root, &original, 5, at(0)).unwrap(), None);
+        assert_eq!(store.take(&original, 5, at(0)).unwrap(), None);
         for (second, text) in (1..=7).zip(["一", "二", "三", "四", "五", "六", "七"]) {
             fs::write(&original, text).unwrap();
-            assert!(take(&root, &original, 5, at(second)).unwrap().is_some());
+            assert!(store.take(&original, 5, at(second)).unwrap().is_some());
         }
         // 同じ中身は書かない。
-        assert_eq!(take(&root, &original, 5, at(8)).unwrap(), None);
-        let kept = list(&root, &original);
+        assert_eq!(store.take(&original, 5, at(8)).unwrap(), None);
+        let kept = store.list(&original);
         assert_eq!(kept.len(), 5);
         assert_eq!(kept[0].taken, at(7));
         assert_eq!(fs::read_to_string(&kept[0].path).unwrap(), "七");
         assert_eq!(kept[4].taken, at(3));
         // 名前の形をしていない書き手のファイルは数えない。
         fs::write(kept[0].path.with_file_name("第一章.メモ.md"), "x").unwrap();
-        assert_eq!(list(&root, &original).len(), 5);
+        assert_eq!(store.list(&original).len(), 5);
+    }
+
+    #[test]
+    fn a_date_first_format_still_lists_newest_first() {
+        let root = scratch("order-root");
+        let work = scratch("order-work");
+        let original = work.join("a.md");
+        let store = Store::new(&root, "dd-MM-yyyy HHmmss {name}{ext}");
+        let days = [(1u16, "一"), (2, "二"), (3, "三")];
+        for (day, text) in days {
+            fs::write(&original, text).unwrap();
+            let taken = LocalTime {
+                day,
+                month: if day == 1 { 12 } else { 1 },
+                year: if day == 1 { 2025 } else { 2026 },
+                ..at(0)
+            };
+            store.take(&original, 5, taken).unwrap();
+        }
+        let kept = store.list(&original);
+        assert_eq!(fs::read_to_string(&kept[0].path).unwrap(), "三");
+        assert_eq!(fs::read_to_string(&kept[2].path).unwrap(), "一");
     }
 
     #[test]
@@ -597,7 +934,7 @@ mod tests {
         let original = work.join("sjis.txt");
         let bytes = [0x82u8, 0xa0, b'\r', b'\n', 0x82, 0xa2];
         fs::write(&original, bytes).unwrap();
-        let written = take(&root, &original, 5, at(1)).unwrap().unwrap();
+        let written = store(&root).take(&original, 5, at(1)).unwrap().unwrap();
         assert_eq!(fs::read(written).unwrap(), bytes);
     }
 
@@ -606,15 +943,16 @@ mod tests {
         let root = scratch("delete-root");
         let work = scratch("delete-work");
         let original = work.join("a.md");
+        let store = store(&root);
         fs::write(&original, "x").unwrap();
-        take(&root, &original, 5, at(1)).unwrap();
+        store.take(&original, 5, at(1)).unwrap();
         fs::write(&original, "y").unwrap();
-        take(&root, &original, 5, at(2)).unwrap();
-        let paths: Vec<_> = list(&root, &original).into_iter().map(|b| b.path).collect();
-        delete(&root, &paths[..1]).unwrap();
-        assert_eq!(list(&root, &original).len(), 1);
-        delete(&root, &paths[1..]).unwrap();
-        assert!(list(&root, &original).is_empty());
+        store.take(&original, 5, at(2)).unwrap();
+        let paths: Vec<_> = store.list(&original).into_iter().map(|b| b.path).collect();
+        store.delete(&paths[..1]).unwrap();
+        assert_eq!(store.list(&original).len(), 1);
+        store.delete(&paths[1..]).unwrap();
+        assert!(store.list(&original).is_empty());
         assert!(root.is_dir());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
     }
@@ -623,22 +961,25 @@ mod tests {
     fn backups_follow_a_renamed_file_and_a_moved_folder() {
         let root = scratch("follow-root");
         let work = scratch("follow-work");
+        let store = store(&root);
         let chapter = work.join("章").join("第一章.md");
         fs::create_dir_all(chapter.parent().unwrap()).unwrap();
         fs::write(&chapter, "x").unwrap();
-        take(&root, &chapter, 5, at(1)).unwrap();
+        store.take(&chapter, 5, at(1)).unwrap();
         let renamed = work.join("章").join("序章.md");
-        follow(&root, &chapter, &renamed).unwrap();
-        assert!(list(&root, &chapter).is_empty());
-        let moved = list(&root, &renamed);
+        store.follow(&chapter, &renamed).unwrap();
+        assert!(store.list(&chapter).is_empty());
+        let moved = store.list(&renamed);
         assert_eq!(moved.len(), 1);
         assert_eq!(moved[0].taken, at(1));
         let folder = work.join("第一部");
-        follow(&root, &work.join("章"), &folder).unwrap();
-        assert_eq!(list(&root, &folder.join("序章.md")).len(), 1);
-        assert!(list(&root, &renamed).is_empty());
+        store.follow(&work.join("章"), &folder).unwrap();
+        assert_eq!(store.list(&folder.join("序章.md")).len(), 1);
+        assert!(store.list(&renamed).is_empty());
         // 何も無いものを動かしても何も起きない。
-        follow(&root, &work.join("無い.md"), &work.join("別.md")).unwrap();
+        store
+            .follow(&work.join("無い.md"), &work.join("別.md"))
+            .unwrap();
     }
 
     #[test]
@@ -649,7 +990,7 @@ mod tests {
         for name in ["a.md", "b.md"] {
             let original = work.join(name);
             fs::write(&original, name).unwrap();
-            take(&from, &original, 5, at(1)).unwrap();
+            store(&from).take(&original, 5, at(1)).unwrap();
         }
         // 移し先に同じ名前があれば、1つも動かさない。
         let clash = to
@@ -657,50 +998,77 @@ mod tests {
             .join("b.2026-09-27_143001.md");
         fs::create_dir_all(clash.parent().unwrap()).unwrap();
         fs::write(&clash, "先客").unwrap();
-        assert!(matches!(move_all(&from, &to), Err(MoveError::Exists(_))));
-        assert_eq!(list(&from, &work.join("a.md")).len(), 1);
-        assert_eq!(list(&to, &work.join("a.md")).len(), 0);
+        assert!(matches!(
+            store(&from).move_to(&to),
+            Err(MoveError::Exists(_))
+        ));
+        assert_eq!(store(&from).list(&work.join("a.md")).len(), 1);
+        assert_eq!(store(&to).list(&work.join("a.md")).len(), 0);
         fs::remove_file(&clash).unwrap();
-        move_all(&from, &to).unwrap();
-        assert!(list(&from, &work.join("a.md")).is_empty());
-        assert_eq!(list(&to, &work.join("a.md")).len(), 1);
-        assert_eq!(list(&to, &work.join("b.md")).len(), 1);
+        store(&from).move_to(&to).unwrap();
+        assert!(store(&from).list(&work.join("a.md")).is_empty());
+        assert_eq!(store(&to).list(&work.join("a.md")).len(), 1);
+        assert_eq!(store(&to).list(&work.join("b.md")).len(), 1);
         // 入れ子も移せる（書き手の報告 2026-09-27：今の保存先の中のフォルダを選んで断られた）。
         let inner = to.join("Temp");
-        move_all(&to, &inner).unwrap();
-        assert_eq!(list(&inner, &work.join("a.md")).len(), 1);
-        assert!(list(&to, &work.join("a.md")).is_empty());
-        move_all(&inner, &to).unwrap();
-        assert_eq!(list(&to, &work.join("a.md")).len(), 1);
-        assert!(list(&inner, &work.join("a.md")).is_empty());
+        store(&to).move_to(&inner).unwrap();
+        assert_eq!(store(&inner).list(&work.join("a.md")).len(), 1);
+        assert!(store(&to).list(&work.join("a.md")).is_empty());
+        store(&inner).move_to(&to).unwrap();
+        assert_eq!(store(&to).list(&work.join("a.md")).len(), 1);
     }
 
     #[test]
     fn a_chosen_folder_keeps_its_own_files_to_itself() {
-        // 書き手の報告 2026-09-27：保存先に選んだフォルダの長い日本語の名前で落ちた。
-        assert_eq!(original_name("あいうえおかきくけこさしすせそ.md"), None);
-        assert_eq!(original_name("あいうえおかきくけこさしすせそ"), None);
-        assert_eq!(
-            original_name("長い日本語の名前の原稿.2026-09-27_143012.md").as_deref(),
-            Some("長い日本語の名前の原稿.md")
-        );
         let from = scratch("own-from");
         let to = scratch("own-to");
         let work = scratch("own-work");
         let original = work.join("a.md");
         fs::write(&original, "x").unwrap();
-        take(&from, &original, 5, at(1)).unwrap();
+        store(&from).take(&original, 5, at(1)).unwrap();
         // 保存先に元からある書き手のもの：バックアップの形の名前でも、写しのフォルダの外なら触らない。
         let own = from.join("原稿").join("第一章.2026-09-27_143012.md");
         fs::create_dir_all(own.parent().unwrap()).unwrap();
         fs::write(&own, "書き手の").unwrap();
         fs::write(from.join("あいうえおかきくけこさしすせそ.md"), "書き手の").unwrap();
-        move_all(&from, &to).unwrap();
+        store(&from).move_to(&to).unwrap();
         assert!(own.exists());
         assert!(from.join("あいうえおかきくけこさしすせそ.md").exists());
         assert!(!to.join("原稿").exists());
-        assert_eq!(list(&to, &original).len(), 1);
-        assert!(groups(&from, &[]).is_empty());
+        assert_eq!(store(&to).list(&original).len(), 1);
+        assert!(store(&from).groups(&[]).is_empty());
+    }
+
+    #[test]
+    fn changing_the_format_renames_everything_or_nothing() {
+        let root = scratch("rename-root");
+        let work = scratch("rename-work");
+        let a = work.join("第一章.md");
+        let b = work.join("README");
+        for (second, path) in [(1, &a), (2, &b)] {
+            fs::write(path, "x").unwrap();
+            store(&root).take(path, 5, at(second)).unwrap();
+        }
+        let new_format = "yyyyMMdd_HHmmss_{name}{ext}.bak";
+        // 付け替え先に同じ名前があれば、1つも付け替えない。
+        let folder = root.join(mirror(&work).unwrap());
+        let clash = folder.join("20260927_143002_README.bak");
+        fs::write(&clash, "先客").unwrap();
+        assert!(matches!(
+            store(&root).rename_to(new_format),
+            Err(MoveError::Exists(_))
+        ));
+        assert_eq!(store(&root).list(&a).len(), 1);
+        assert_eq!(store(&root).list(&b).len(), 1);
+        fs::remove_file(&clash).unwrap();
+        store(&root).rename_to(new_format).unwrap();
+        let renamed = Store::new(&root, new_format);
+        assert_eq!(
+            renamed.list(&a)[0].path,
+            folder.join("20260927_143001_第一章.md.bak")
+        );
+        assert_eq!(renamed.list(&b)[0].taken, at(2));
+        assert!(store(&root).list(&a).is_empty());
     }
 
     #[test]
@@ -710,18 +1078,31 @@ mod tests {
         let novel = work.join("長編");
         let part = novel.join("第一部");
         let loose = work.join("外");
-        for path in [novel.join("a.md"), part.join("b.md"), loose.join("c.md")] {
+        for path in [
+            novel.join("a.md"),
+            novel.join("b.md"),
+            part.join("b.md"),
+            loose.join("c.md"),
+        ] {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, "x").unwrap();
-            take(&root, &path, 5, at(1)).unwrap();
+            store(&root).take(&path, 5, at(1)).unwrap();
         }
         // 台帳のパスは正規化してある（`\\?\C:\…`）。それでも同じフォルダとしてまとまる。
         let verbatim = |p: &Path| PathBuf::from(format!(r"\\?\{}", p.display()));
-        let found = groups(&root, &[verbatim(&novel), part.clone()]);
+        let found = store(&root).groups(&[verbatim(&novel), part.clone()]);
         let folders: Vec<_> = found.iter().map(|g| g.folder.clone()).collect();
-        // 一時フォルダのドライブ名は大文字（`C:\`）なので、戻したパスがそのまま比べられる。
-        // 並びはパスの順（「外」は「長編」より前）。
+        // 並びはパスの順（「外」は「長編」より前）。一時フォルダのドライブ名は大文字。
         assert_eq!(folders, vec![loose.clone(), novel.clone(), part.clone()]);
-        assert!(found.iter().all(|g| g.files.len() == 1));
+        let originals: Vec<_> = found[1]
+            .originals
+            .iter()
+            .map(|(o, b)| (o.clone(), b.len()))
+            .collect();
+        assert_eq!(
+            originals,
+            vec![(novel.join("a.md"), 1), (novel.join("b.md"), 1)]
+        );
+        assert_eq!(found[1].files().len(), 2);
     }
 }

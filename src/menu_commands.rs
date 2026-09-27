@@ -1467,6 +1467,13 @@ fn build(
                 pick("文字コードを指定して開き直す", "Reopen with Encoding"),
                 enc,
             )?;
+            // RFN01-61（書き手の求め 2026-09-27）: バックアップの履歴は File から（今のTABのファイル）。
+            add!(
+                "バックアップの履歴…",
+                "Backup History…",
+                Command::Compare(3),
+                main && backups
+            );
             add!("印刷…", "Print…", Command::Print, main);
             root.sep()?;
             add!("終了", "Exit", Command::Exit, true);
@@ -1725,6 +1732,7 @@ fn build(
                 ("検索", "Search", 1),
                 ("履歴", "History", 2),
                 ("Outline", "Outline", 3),
+                ("バックアップ", "Backups", 7),
             ] {
                 row(
                     &side,
@@ -1949,12 +1957,6 @@ fn build(
                 "Compare with Git Last Commit",
                 Command::Compare(1),
                 main && path
-            );
-            add!(
-                "バックアップの履歴…",
-                "Backup History…",
-                Command::Compare(3),
-                main && backups
             );
             add!(
                 "別ファイルと比較…",

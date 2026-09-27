@@ -2,14 +2,14 @@
 //
 // - Backup History：比較の画面の左に、そのファイルのバックアップの一覧を置く。**行を押すと
 //   比較の相手が替わり、チェックは消す対象を選ぶ**——2つの役割を1つの操作に重ねない。
-// - Delete Backups…：バックアップを持つフォルダの一覧から、消すフォルダを選ぶ。
-//
-// どちらも頭に「All」を置き、開いた直後はどれもチェックしない。チェックが無いあいだ
-// 消すボタンは押せない。
+//   頭に「All」を置き、開いた直後はどれもチェックしない。チェックが無いあいだ消せない。
+// - Backups（左ペイン）：バックアップの管理はここへ集める（書き手の求め 2026-09-27）。
+//   Auto Recovery の On/Off、フォルダごとの AutoBackup の ON/OFF、バックアップのある
+//   ファイルと件数。ファイルを押すと Backup History、右クリックで消す。
 
 import { ScrollView } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
-import { Role, TextButton } from "controls.slint";
+import { Icon, Icons, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 
 export struct BackupRow {
     // 一覧の文字：History は日時、Delete Backups… はフォルダのパス。
@@ -197,116 +197,202 @@ export component BackupHistoryList inherits Rectangle {
     }
 }
 
-// Delete Backups… の画面（Settings → FILES → Auto Backup から開く）。
-export component BackupDeleteDialog inherits Rectangle {
-    in property <[BackupRow]> rows;
-    in property <bool> all-checked;
-    in property <bool> any-checked;
-    callback toggled(int);
-    callback all-toggled();
-    callback delete-requested();
-    callback closed();
+// Backups の面の1行。
+export struct BackupPaneRow {
+    // 0 フォルダ、1 ファイル、2 案内の文。
+    kind: int,
+    // フォルダは最後の名前、ファイルは名前、案内は文そのもの。
+    label: string,
+    // マウスを載せると出す、全体のパス。
+    tip: string,
+    // フォルダの添え字：`AutoSave`、未登録など。
+    mode: string,
+    // フォルダの AutoBackup が ON か。
+    backup-on: bool,
+    // この面で ON/OFF を替えられるか（使用中の Workspace の登録フォルダだけ）。
+    can-toggle: bool,
+    // ファイルのバックアップの件数。
+    count: string,
+    // フォルダを開いているか。
+    open: bool,
+}
 
-    background: Tok.scrim;
+// 左ペインの Backups。
+export component BackupsView inherits Rectangle {
+    in property <bool> recovery;
+    in property <[BackupPaneRow]> rows;
+    callback recovery-toggled(bool);
+    // フォルダなら開閉、ファイルなら Backup History。
+    callback row-clicked(int);
+    callback backup-toggled(int);
+    // 右クリックの行：0 Backup History…、1 Delete Backups…。
+    callback menu-chosen(int, int);
+    property <int> menu-row: -1;
+    property <int> menu-kind: 0;
+    property <length> menu-y;
 
-    // 後ろの画面を押させない。
-    TouchArea { }
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
 
-    keys := FocusScope {
-        init => {
-            self.focus();
+        Text {
+            text: @tr("BACKUPS");
+            color: Tok.ink-faint;
+            font-size: 10px;
+            letter-spacing: 0.9px;
         }
-        key-pressed(event) => {
-            if event.text == Key.Escape {
-                root.closed();
-                return accept;
+
+        // 自動退避（要件 8.1）。Settings の Backup と同じ値を、ここでも切り替える。
+        HorizontalLayout {
+            spacing: 6px;
+            height: 28px;
+            Text {
+                text: @tr("Auto Recovery");
+                color: Tok.ink;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
             }
-            reject
+            TextButton {
+                title: root.recovery ? @tr("On") : @tr("Off");
+                role: root.recovery ? Role.primary : Role.normal;
+                clicked => {
+                    root.recovery-toggled(!root.recovery);
+                }
+            }
         }
 
-        VerticalLayout {
-            alignment: center;
+        Rectangle {
+            height: 1px;
+            background: Tok.rule;
+        }
 
-            HorizontalLayout {
-                alignment: center;
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                spacing: 1px;
+                for row[index] in root.rows: line := Rectangle {
+                    // 案内の文は2行ぶん（狭い面では折り返す）。
+                    height: row.kind == 2 ? 36px : (row.kind == 0 ? 30px : 26px);
+                    border-radius: 5px;
+                    background: row.kind != 2 && touch.has-hover ? Tok.accent-faint : transparent;
 
-                Rectangle {
-                    width: min(root.width - 64px, 560px);
-                    background: Tok.paper;
-                    border-radius: 10px;
-                    border-width: 1px;
-                    border-color: Tok.rule-strong;
-                    drop-shadow-color: #1713214d;
-                    drop-shadow-blur: 40px;
-                    drop-shadow-offset-y: 16px;
-
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 10px;
-
-                        Text {
-                            text: @tr("Delete Backups");
-                            color: Tok.ink-strong;
-                            font-size: 15px;
-                            font-weight: 600;
+                    touch := TouchArea {
+                        enabled: row.kind != 2;
+                        clicked => {
+                            root.row-clicked(index);
                         }
+                        pointer-event(event) => {
+                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                                root.menu-row = index;
+                                root.menu-kind = row.kind;
+                                root.menu-y = line.absolute-position.y - root.absolute-position.y + line.height;
+                                menu.show();
+                            }
+                        }
+                    }
 
+                    if row.kind == 2: Text {
+                        x: 6px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        text: row.label;
+                        color: Tok.ink-muted;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+
+                    if row.kind == 0: HorizontalLayout {
+                        padding-left: 2px;
+                        padding-right: 4px;
+                        spacing: 4px;
+                        Rectangle {
+                            width: 18px;
+                            Icon {
+                                x: 1px;
+                                y: (parent.height - self.height) / 2;
+                                commands: row.open ? Icons.down : Icons.right;
+                                tint: Tok.ink-muted;
+                            }
+                        }
                         Text {
-                            text: root.rows.length == 0
-                                ? @tr("There are no backups.")
-                                : @tr("Choose the folders whose backups you want to delete.");
-                            color: Tok.ink-muted;
+                            text: row.label;
+                            color: Tok.ink;
                             font-size: 12px;
-                            wrap: word-wrap;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                         }
-
-                        if root.rows.length > 0: AllLine {
-                            checked: root.all-checked;
-                            toggled => {
-                                root.all-toggled();
+                        if row.mode != "": Text {
+                            text: row.mode;
+                            color: Tok.ink-muted;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 0;
+                        }
+                        if row.can-toggle: TextButton {
+                            title: "AutoBackup";
+                            role: row.backup-on ? Role.primary : Role.normal;
+                            clicked => {
+                                root.backup-toggled(index);
                             }
                         }
+                    }
 
-                        if root.rows.length > 0: ScrollView {
-                            height: min(280px, root.rows.length * 31px + 2px);
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 1px;
-                                for row[index] in root.rows: CheckLine {
-                                    item: row;
-                                    toggled => {
-                                        root.toggled(index);
-                                    }
-                                    // 行を押してもチェックが替わる（ここに「比べる」は無い）。
-                                    chosen => {
-                                        root.toggled(index);
-                                    }
-                                }
-                            }
+                    if row.kind == 1: HorizontalLayout {
+                        padding-left: 24px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        Text {
+                            text: row.label;
+                            color: Tok.ink;
+                            font-size: 12px;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                         }
-
-                        HorizontalLayout {
-                            alignment: end;
-                            spacing: 8px;
-
-                            TextButton {
-                                title: @tr("Delete…");
-                                role: Role.danger;
-                                enabled: root.any-checked;
-                                clicked => {
-                                    if root.any-checked {
-                                        root.delete-requested();
-                                    }
-                                }
-                            }
-
-                            TextButton {
-                                title: @tr("Cancel");
-                                clicked => {
-                                    root.closed();
-                                }
-                            }
+                        Text {
+                            text: row.count;
+                            color: Tok.ink-muted;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 0;
                         }
+                    }
+
+                    // 最後に置く：上に重なって指を見るだけで、押したことは下の TouchArea へ行く。
+                    if row.kind != 2: Tooltip {
+                        text: @markdown("`\{row.tip}`");
+                    }
+                }
+            }
+        }
+    }
+
+    menu := PopupWindow {
+        x: 8px;
+        y: root.menu-y;
+        width: 220px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 220px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                if root.menu-kind == 1: MenuRow {
+                    title: @tr("Backup History…");
+                    activated => {
+                        menu.close();
+                        root.menu-chosen(root.menu-row, 0);
+                    }
+                }
+                MenuRow {
+                    title: @tr("Delete Backups…");
+                    activated => {
+                        menu.close();
+                        root.menu-chosen(root.menu-row, 1);
                     }
                 }
             }
