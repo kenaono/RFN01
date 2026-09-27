@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use slint::ComponentHandle;
 
 use crate::StatusBar;
+use crate::backup;
 use crate::buffer::{DocumentFile, ExternalChange};
 use crate::file_io::{self, Encoding, LoadError};
 use crate::i18n::pick;
@@ -1087,6 +1088,8 @@ pub fn write_document_in(
     let previous = work_identity(&file.borrow());
     let moved = file.borrow().path() != Some(target.as_path());
     let saved_to = target.clone();
+    // RFN01-61: 上書きの直前に、今ディスクにある中身を残す（自動バックアップのフォルダだけ）。
+    let backup_failed = back_up_before_saving(window, live, &target);
     let outcome = file.borrow_mut().save_to_as(target, &text, form);
     match outcome {
         Ok(()) => {
@@ -1105,7 +1108,17 @@ pub fn write_document_in(
             // 打鍵で組み直すまで待たない——保存は本文を1字も動かさないので、
             // その組み直しは来ない。
             crate::publish_active_encoding(window, live);
-            window.tell_tab(say!("保存しました", "Saved").into());
+            match &backup_failed {
+                None => window.tell_tab(say!("保存しました", "Saved").into()),
+                // **保存は止めていない**ことと、バックアップが無いことを両方言う。
+                Some(error) => window.tell_tab(
+                    say!(
+                        "保存しました。バックアップは残せませんでした: {error}",
+                        "Saved. The backup could not be kept: {error}"
+                    )
+                    .into(),
+                ),
+            }
             if moved && crate::release_read_only(window, live, document) {
                 window.tell_tab(
                     say!(
@@ -1172,6 +1185,87 @@ pub fn write_document_in(
                 .log_diag("file", &format!("save failed path={shown} error={error}"));
             false
         }
+    }
+}
+
+/// RFN01-61: 自動バックアップの置き場。設定が空ならアプリ専用領域。
+pub fn backup_root(window: &AppWindow) -> Option<PathBuf> {
+    let chosen = window.get_backup_folder();
+    let chosen = chosen.trim();
+    if chosen.is_empty() {
+        backup::default_root()
+    } else {
+        Some(PathBuf::from(chosen))
+    }
+}
+
+/// `target`が自動バックアップのフォルダにあるか。
+///
+/// **Workspaceを使っていなければ、どこも自動バックアップではない**——保存方式は登録フォルダの
+/// ものなので、自動保存と同じく、Workspaceの外では退避だけになる。
+pub fn backs_up(live: &Live, target: &Path) -> bool {
+    let folder = live.folder.borrow();
+    folder.workspace.as_ref().is_some_and(|runtime| {
+        let mode = runtime.borrow().registry().save_mode_for(Some(target));
+        mode == workspace::SaveMode::AutoBackup
+    })
+}
+
+/// RFN01-61（書き手の決定 2026-09-27）: 保存でファイルを上書きする直前に、今の中身を残す。
+///
+/// **書けなくても保存は止めない。**書き手が頼んだのは保存であり、バックアップはその手前の
+/// 守りである。書けなかった理由を返し、保存のあとでステータスバーに言う。
+fn back_up_before_saving(window: &AppWindow, live: &Live, target: &Path) -> Option<String> {
+    if !backs_up(live, target) {
+        return None;
+    }
+    let Some(root) = backup_root(window) else {
+        return Some(pick("保存先が分かりません", "no backup folder").to_owned());
+    };
+    let keep = window.get_backup_keep().clamp(1, backup::MAX_KEEP as i32) as usize;
+    let shown = target.display();
+    match backup::take(&root, target, keep, crate::timestamp::now()) {
+        Ok(written) => {
+            if let Some(written) = written {
+                live.cache.borrow_mut().log_diag(
+                    "file",
+                    &format!("backup ok path={shown} to={}", written.display()),
+                );
+            }
+            None
+        }
+        Err(error) => {
+            live.cache
+                .borrow_mut()
+                .log_diag("file", &format!("backup failed path={shown} error={error}"));
+            Some(error.to_string())
+        }
+    }
+}
+
+/// RFN01-61: Editorの中で`from`を`to`へ名前変更・移動したとき、バックアップも動かす。
+///
+/// 名前変更そのものはもう済んでいるので、動かせなくても戻さない。言うだけにする。
+pub fn backups_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
+    let Some(root) = backup_root(window) else {
+        return;
+    };
+    if let Err(error) = backup::follow(&root, from, to) {
+        live.cache.borrow_mut().log_diag(
+            "file",
+            &format!(
+                "backup follow failed from={} to={} error={error}",
+                from.display(),
+                to.display()
+            ),
+        );
+        window.tell(
+            say!(
+                "バックアップを新しい名前へ移せませんでした: {error}",
+                "The backups could not follow the new name: {error}"
+            )
+            .into(),
+        );
     }
 }
 
@@ -1976,6 +2070,29 @@ mod folder_auto_save_tests {
         registry
     }
 
+    /// RFN01-61: `root`を登録フォルダに持つWorkspaceを使用中にする。
+    fn attach_workspace(live: &Live, root: &Path, mode: workspace::SaveMode) {
+        let appdata = app_data::app_directory().unwrap();
+        let runtime = crate::workspace_ui::Runtime::open(appdata);
+        let runtime = Rc::new(RefCell::new(runtime));
+        let active = runtime
+            .borrow_mut()
+            .edit(|registry| {
+                let id = registry.create_workspace("試験".to_owned())?;
+                let folder = registry.add_root(id, root)?;
+                registry.set_folder_mode(folder, mode)?;
+                Ok(id)
+            })
+            .unwrap();
+        runtime.borrow_mut().set_active_silently(Some(active));
+        live.folder.borrow_mut().workspace = Some(runtime);
+    }
+
+    fn save(harness: &Harness, document: &Rc<OpenDocument>, target: PathBuf) -> bool {
+        let form = document.file.borrow().form();
+        write_document_in(&harness.window, &harness.live, document, target, form)
+    }
+
     fn scratch_directory(name: &str) -> PathBuf {
         let directory = std::env::temp_dir().join(format!(
             "editor-folder-autosave-{name}-{}-{}",
@@ -2560,6 +2677,86 @@ mod folder_auto_save_tests {
         assert_eq!(
             std::fs::read_to_string(root.join("draft.md")).unwrap(),
             "original existing new"
+        );
+    }
+
+    #[test]
+    fn saving_in_an_auto_backup_folder_keeps_what_was_there_before() {
+        let root = scratch_directory("backup-save");
+        let (harness, document) = Harness::new(|weak| open_under(&root, "draft.md", "一", weak));
+        attach_workspace(&harness.live, &root, workspace::SaveMode::AutoBackup);
+        let store = backup_root(&harness.window).unwrap();
+        let path = root.join("draft.md");
+        edit(&document, "二");
+        assert!(save(&harness, &document, path.clone()));
+        let kept = backup::list(&store, &path);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(&kept[0].path).unwrap(), "一");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "一二");
+        // 名前を付けて保存で既にあるファイルを上書きしたら、上書きされたほうが残る。
+        let other = root.join("other.md");
+        std::fs::write(&other, "上書きされる").unwrap();
+        assert!(save(&harness, &document, other.clone()));
+        let kept = backup::list(&store, &other);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&kept[0].path).unwrap(),
+            "上書きされる"
+        );
+        // 新しいファイルへの保存では、上書きする相手が無いので何も残らない。
+        let fresh = root.join("fresh.md");
+        assert!(save(&harness, &document, fresh.clone()));
+        assert!(backup::list(&store, &fresh).is_empty());
+    }
+
+    /// 保存しても、バックアップが1つも残らないこと。
+    fn assert_no_backup(name: &str, mode: Option<workspace::SaveMode>) {
+        let root = scratch_directory(name);
+        let (harness, document) = Harness::new(|weak| open_under(&root, "draft.md", "一", weak));
+        if let Some(mode) = mode {
+            attach_workspace(&harness.live, &root, mode);
+        }
+        let path = root.join("draft.md");
+        edit(&document, "二");
+        assert!(save(&harness, &document, path.clone()));
+        let store = backup_root(&harness.window).unwrap();
+        assert!(backup::list(&store, &path).is_empty(), "{name}");
+    }
+
+    #[test]
+    fn a_recovery_folder_keeps_no_backup() {
+        assert_no_backup("backup-none-recovery", Some(workspace::SaveMode::Recovery));
+    }
+
+    #[test]
+    fn an_auto_save_folder_keeps_no_backup() {
+        assert_no_backup("backup-none-autosave", Some(workspace::SaveMode::AutoSave));
+    }
+
+    #[test]
+    fn a_file_outside_any_workspace_keeps_no_backup() {
+        assert_no_backup("backup-none-outside", None);
+    }
+
+    #[test]
+    fn a_backup_that_cannot_be_written_does_not_stop_the_save() {
+        let root = scratch_directory("backup-unwritable");
+        let (harness, document) = Harness::new(|weak| open_under(&root, "draft.md", "一", weak));
+        attach_workspace(&harness.live, &root, workspace::SaveMode::AutoBackup);
+        // 保存先の場所にファイルがあって、フォルダを作れない。
+        let blocked = root.join("塞がれた保存先");
+        std::fs::write(&blocked, "file").unwrap();
+        harness
+            .window
+            .set_backup_folder(blocked.display().to_string().into());
+        let path = root.join("draft.md");
+        edit(&document, "二");
+        assert!(save(&harness, &document, path.clone()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "一二");
+        let told = harness.window.get_render_status().to_string();
+        assert!(
+            told.contains("バックアップ") || told.contains("backup"),
+            "{told}"
         );
     }
 }

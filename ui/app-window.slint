@@ -307,6 +307,8 @@ export component AppWindow inherits Window {
     callback workspace-tree-command(int);
     in property <bool> workspace-context-folder;
     in property <bool> workspace-context-auto;
+    // RFN01-61: 右クリックしたフォルダが自動バックアップか。自動保存とは排他。
+    in property <bool> workspace-context-backup;
     in property <bool> workspace-active;
     in-out property <bool> workspace-manager-open;
     in property <bool> workspace-read-error;
@@ -912,6 +914,10 @@ export component AppWindow inherits Window {
     /// 言っていない。Offにした瞬間に、置いてある作業コピーは全部消える。
     in-out property <bool> autosave: true;
     callback autosave-toggled(bool);
+    /// RFN01-61: 自動バックアップの残す数（ファイルごと、既定5）と保存先（空ならアプリ
+    /// 専用領域）。**どのフォルダで取るかはここではなく、フォルダの保存方式が決める。**
+    in-out property <int> backup-keep: 5;
+    in-out property <string> backup-folder;
     // 要件 7.8・要件 10: 本文文字数がルビの読みを数えるか。**初期値は数えない**
     // ——投稿サイトへ出すための字数はルビを含まない。打ち込んだ量を知りたい
     // 人には逆が要るので、これは「正解が二つある」たぐいで、選ばせる。
@@ -6397,6 +6403,7 @@ export component AppWindow inherits Window {
                     MenuRow { title: @tr("Add Folder…"); activated => { root.workspace-tree-command(0); root.close-tree-menu(); } }
                     MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.workspace-tree-command(1); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: root.workspace-context-auto ? "AutoSave ON" : "AutoSave OFF"; checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: root.workspace-context-backup ? "AutoBackup ON" : "AutoBackup OFF"; checked: root.workspace-context-backup; activated => { root.workspace-tree-command(7); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Up"); activated => { root.workspace-tree-command(5); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Down"); activated => { root.workspace-tree-command(6); root.close-tree-menu(); } }

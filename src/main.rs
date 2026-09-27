@@ -8948,7 +8948,17 @@ fn workspace_folder_add_requested(window: &AppWindow, live: &Live) {
     }
 }
 
-fn workspace_folder_mode_toggled(window: &AppWindow, live: &Live, index: usize) {
+/// フォルダの保存方式の`wanted`をON/OFFする。
+///
+/// RFN01-61（2026-09-27）: 自動保存と自動バックアップは**排他**——片方をONにすれば、
+/// そのフォルダの保存方式が替わるので、もう片方は自然にOFFになる。OFFにすれば退避だけ
+/// （`Recovery`）へ戻る。
+fn workspace_folder_mode_toggled(
+    window: &AppWindow,
+    live: &Live,
+    index: usize,
+    wanted: workspace::SaveMode,
+) {
     let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
         return;
     };
@@ -8963,9 +8973,10 @@ fn workspace_folder_mode_toggled(window: &AppWindow, live: &Live, index: usize) 
     let Some(current) = current else {
         return;
     };
-    let next = match current {
-        workspace::SaveMode::AutoSave => workspace::SaveMode::Recovery,
-        workspace::SaveMode::Recovery => workspace::SaveMode::AutoSave,
+    let next = if current == wanted {
+        workspace::SaveMode::Recovery
+    } else {
+        wanted
     };
     // See `workspace_create`'s comment: never match the borrow directly.
     let result = runtime_rc
@@ -9266,9 +9277,9 @@ fn workspace_context_requested(window: &AppWindow, live: &Live, index: i32) {
     window.set_tree_selected(index);
     let context = workspace_context_folder(live);
     window.set_workspace_context_folder(context.is_some());
-    window.set_workspace_context_auto(
-        context.is_some_and(|(_, _, mode)| mode == workspace::SaveMode::AutoSave),
-    );
+    let mode = context.map(|(_, _, mode)| mode);
+    window.set_workspace_context_auto(mode == Some(workspace::SaveMode::AutoSave));
+    window.set_workspace_context_backup(mode == Some(workspace::SaveMode::AutoBackup));
 }
 
 fn workspace_tree_command(window: &AppWindow, live: &Live, command: i32) {
@@ -9279,13 +9290,24 @@ fn workspace_tree_command(window: &AppWindow, live: &Live, command: i32) {
         0 => workspace_folder_add_requested(window, live),
         1 => workspace_clone_requested(window, live),
         4 => workspace_reset_view_requested(window, live),
-        2 | 3 | 5 | 6 => {
+        2 | 3 | 5 | 6 | 7 => {
             let Some((index, _, _)) = workspace_context_folder(live) else {
                 return;
             };
             publish_workspace_manager(window, live);
             match command {
-                2 => workspace_folder_mode_toggled(window, live, index),
+                2 => workspace_folder_mode_toggled(
+                    window,
+                    live,
+                    index,
+                    workspace::SaveMode::AutoSave,
+                ),
+                7 => workspace_folder_mode_toggled(
+                    window,
+                    live,
+                    index,
+                    workspace::SaveMode::AutoBackup,
+                ),
                 3 => workspace_folder_detached(window, live, index),
                 5 => workspace_folder_move(window, live, index, -1),
                 6 => workspace_folder_move(window, live, index, 1),
@@ -10915,6 +10937,8 @@ fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::i
     let before = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
     file_tree::rename(from, to)?;
     documents_follow(window, live, from, to);
+    // RFN01-61: Editorの中での名前変更・移動には、バックアップも付いていく。
+    saving::backups_follow(window, live, from, to);
     let after = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
     link_move::start(window, live, before, after);
     let mut open = live.folder.borrow_mut();
@@ -14545,6 +14569,11 @@ const DEFAULT_SHELL_SETTING: &str = "terminal.default";
 /// has: 要件 8.1 is the promise the editor makes about unsaved work, and a
 /// writer who has not said anything has not asked to give it up.
 const AUTOSAVE_SETTING: &str = "work.autosave";
+/// RFN01-61（2026-09-27）: 自動バックアップの残す数。**`0`や読めない値は既定の5へ倒す**
+/// ——残す数0は「取らない」だが、取るかどうかはフォルダの保存方式が決めることである。
+const BACKUP_KEEP_SETTING: &str = "backup.keep";
+/// 同じく保存先。**空ならアプリ専用領域**（`backup::default_root`）。
+const BACKUP_FOLDER_SETTING: &str = "backup.folder";
 /// 本文文字数がルビの読みを数えるか（要件 7.8・要件 10、2026-09-09）。
 ///
 /// **紙の設定（要件 9）のシートには置かない。**シートが持つのは組み方であり、
@@ -15501,6 +15530,14 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         i32::from(window.get_autosave()).to_string(),
     ));
     values.push((
+        BACKUP_KEEP_SETTING.to_owned(),
+        window.get_backup_keep().to_string(),
+    ));
+    values.push((
+        BACKUP_FOLDER_SETTING.to_owned(),
+        window.get_backup_folder().to_string(),
+    ));
+    values.push((
         COUNT_RUBY_SETTING.to_owned(),
         i32::from(window.get_count_ruby()).to_string(),
     ));
@@ -15715,6 +15752,20 @@ fn apply_settings(
         // 無い値なので、約束しているほう（要件 8.1 を守る側）へ倒す。
         if written == AUTOSAVE_SETTING {
             window.set_autosave(value.trim() != "0");
+            continue;
+        }
+        if written == BACKUP_KEEP_SETTING {
+            let keep = value
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .filter(|keep| (1..=backup::MAX_KEEP as i32).contains(keep))
+                .unwrap_or(backup::DEFAULT_KEEP as i32);
+            window.set_backup_keep(keep);
+            continue;
+        }
+        if written == BACKUP_FOLDER_SETTING {
+            window.set_backup_folder(value.trim().into());
             continue;
         }
         // 要件 7.8: **`1`だけがOn。**初期値は数えないほうなので、読めない値は

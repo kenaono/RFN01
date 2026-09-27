@@ -712,6 +712,9 @@ mod tests {
         assert_eq!(kind_of(KEYS_SETTING), Some(PresetKind::Keys));
         // 守りの設定・この機械のもの・General。
         assert_eq!(kind_of("work.autosave"), None);
+        // RFN01-61: バックアップの残す数と保存先も守りの設定で、プリセットでは切り替えない。
+        assert_eq!(kind_of("backup.keep"), None);
+        assert_eq!(kind_of("backup.folder"), None);
         assert_eq!(kind_of("terminal.shell.0"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("terminal.default"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("language"), None);

@@ -23,10 +23,16 @@ use crate::file_io;
 ///
 /// `Recovery` is the default everywhere: only a folder explicitly switched to
 /// `AutoSave` writes back to the original file.
+///
+/// RFN01-61（2026-09-27）: `AutoBackup`は`Recovery`と同じく明示保存だけで書き、
+/// **上書きの直前に前の中身をバックアップへ残す**。自動保存とは発想が合わない（2秒ごとの
+/// 上書きが世代を押し流す）ので、同じフォルダの保存方式として**排他**にしてある——
+/// どちらをONにするかは書き手が選び、既定はどちらもOFF（`Recovery`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SaveMode {
     Recovery,
     AutoSave,
+    AutoBackup,
 }
 
 /// A stable identifier for a [`Workspace`]. Never reused after the Workspace
@@ -498,6 +504,7 @@ fn mode_name(mode: SaveMode) -> &'static str {
     match mode {
         SaveMode::Recovery => "Recovery",
         SaveMode::AutoSave => "AutoSave",
+        SaveMode::AutoBackup => "AutoBackup",
     }
 }
 
@@ -505,6 +512,7 @@ fn mode_from_name(name: &str) -> Option<SaveMode> {
     match name {
         "Recovery" => Some(SaveMode::Recovery),
         "AutoSave" => Some(SaveMode::AutoSave),
+        "AutoBackup" => Some(SaveMode::AutoBackup),
         _ => None,
     }
 }
@@ -1018,6 +1026,27 @@ mod tests {
         assert_eq!(read.workspaces(), registry.workspaces());
         assert_eq!(read.folders(), registry.folders());
         assert_eq!(read.default_workspace(), registry.default_workspace());
+    }
+
+    #[test]
+    fn an_auto_backup_folder_round_trips_and_the_old_modes_are_written_as_before() {
+        let root = scratch_directory("auto-backup-mode");
+        let mut registry = sample_registry(&root);
+        let before = encode(&registry);
+        assert!(before.contains(" AutoSave ") && !before.contains("AutoBackup"));
+        let folder = registry.folders()[0].id;
+        registry
+            .set_folder_mode(folder, SaveMode::AutoBackup)
+            .expect("sets");
+        let written = encode(&registry);
+        assert!(written.contains(" AutoBackup "));
+        let read = decode(&written).expect("decodes");
+        assert_eq!(read.folder(folder).unwrap().mode, SaveMode::AutoBackup);
+        // 1つのフォルダは1つの保存方式しか持たない：自動保存へ替えればバックアップは外れる。
+        registry
+            .set_folder_mode(folder, SaveMode::AutoSave)
+            .expect("sets");
+        assert_eq!(registry.folder(folder).unwrap().mode, SaveMode::AutoSave);
     }
 
     #[test]

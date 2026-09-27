@@ -2237,7 +2237,12 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
         let live = mode_live.clone();
         Timer::single_shot(Duration::ZERO, move || {
             if let Some(window) = weak.upgrade() {
-                crate::workspace_folder_mode_toggled(&window, &live, index);
+                crate::workspace_folder_mode_toggled(
+                    &window,
+                    &live,
+                    index,
+                    crate::workspace::SaveMode::AutoSave,
+                );
             }
         });
     });

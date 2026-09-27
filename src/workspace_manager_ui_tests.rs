@@ -173,11 +173,19 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         .edit(|registry| registry.add_root(second, &workspace_root))
         .unwrap();
     publish_workspace_manager(&window, &live);
-    workspace_folder_mode_toggled(&window, &live, 0);
+    workspace_folder_mode_toggled(&window, &live, 0, workspace::SaveMode::AutoSave);
     assert_eq!(
         runtime.borrow().registry().folder(folder).unwrap().mode,
         workspace::SaveMode::AutoSave
     );
+    // RFN01-61: 自動バックアップをONにすれば自動保存は外れ、OFFにすれば退避だけに戻る。
+    let mode_now = || runtime.borrow().registry().folder(folder).unwrap().mode;
+    workspace_folder_mode_toggled(&window, &live, 0, workspace::SaveMode::AutoBackup);
+    assert_eq!(mode_now(), workspace::SaveMode::AutoBackup);
+    workspace_folder_mode_toggled(&window, &live, 0, workspace::SaveMode::AutoBackup);
+    assert_eq!(mode_now(), workspace::SaveMode::Recovery);
+    workspace_folder_mode_toggled(&window, &live, 0, workspace::SaveMode::AutoSave);
+    assert_eq!(mode_now(), workspace::SaveMode::AutoSave);
     switch_workspace(&window, &live, Some(second));
     workspace_manager_requested(&window, &live);
     assert!(!window.get_workspace_manager_open());
