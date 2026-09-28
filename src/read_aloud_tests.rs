@@ -81,3 +81,51 @@ fn reading_aloud_goes_paragraph_by_paragraph_and_stops_on_an_edit() {
     read_aloud::toggle(window, live, id);
     assert!(!read_aloud::reading());
 }
+
+#[test]
+fn speed_snaps_to_the_slider_and_old_steps_carry_over() {
+    assert_eq!(read_aloud::speed_of(1.26), 1.25);
+    assert_eq!(read_aloud::speed_of(0.1), 0.5);
+    assert_eq!(read_aloud::speed_of(9.0), 2.0);
+    assert_eq!(read_aloud::speed_of(1.0), 1.0);
+    // 以前の5段の番号は、同じ速さとして読む。
+    assert_eq!(read_aloud::speed_from_old_rate("3"), 1.5);
+    assert_eq!(read_aloud::speed_from_old_rate("x"), 1.0);
+}
+
+#[test]
+fn the_sample_plays_and_stops_and_gives_way_to_reading() {
+    let root = scratch_directory("read-aloud-sample");
+    let (harness, _document) =
+        Harness::new(|weak| open_under(&root, "draft.md", "本文の段落。\n", weak));
+    let window = &harness.window;
+    let live = &harness.live;
+    let id = PaneId::from_index(0);
+    read_aloud::install(window, live);
+    read_aloud::publish_voices(window);
+    if !window.get_speech_available() {
+        eprintln!("no Japanese voice installed; skipped");
+        return;
+    }
+    window.set_speech_speed(1.5);
+
+    // 押すと鳴り、釦は「■ Stop」になる。もう一度押すと止まる。
+    read_aloud::sample(window, live);
+    assert!(read_aloud::sampling());
+    assert!(window.get_speech_sampling());
+    read_aloud::sample(window, live);
+    assert!(!read_aloud::sampling());
+    assert!(!window.get_speech_sampling());
+
+    // 文書を読み上げるときは、Sampleを止めてから。
+    read_aloud::sample(window, live);
+    read_aloud::toggle(window, live, id);
+    assert!(!read_aloud::sampling());
+    assert!(read_aloud::reading());
+    // 読み上げ中にSampleを押すと、読み上げを止めて鳴らす。
+    read_aloud::sample(window, live);
+    assert!(!read_aloud::reading());
+    assert!(read_aloud::sampling());
+    read_aloud::stop_all(window, live);
+    assert!(!read_aloud::sampling());
+}

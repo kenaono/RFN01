@@ -1111,12 +1111,15 @@ export component AppWindow inherits Window {
     in property <[string]> speech-voice-names;
     in-out property <int> speech-voice: -1;
     in-out property <string> speech-voice-id;
-    in-out property <int> speech-rate: 1;
+    /// 速さの倍率（0.5〜2.0、0.05刻み。書き手と合意 2026-09-28：スライダーで）。
+    in-out property <float> speech-speed: 1.0;
     /// 日本語の声がWindowsに入っているか。無ければ読み上げは押せない。
     in property <bool> speech-available;
-    property <[string]> speech-rate-names: ["0.75×", "1.0×", "1.25×", "1.5×", "2.0×"];
+    /// Sampleを鳴らしているか（釦が「■ Stop」になる）。
+    in property <bool> speech-sampling;
     callback speech-voice-chosen(int);
-    callback speech-rate-chosen(int);
+    callback speech-speed-moved(float);
+    callback speech-sample-requested();
     /// 追加要件 2026-09-15（書き手）: 背景の壁紙（全体の設定）。0 なし、1 Windowsの壁紙
     /// （画面に固定して敷くので、窓越しにデスクトップが見えているように感じる）、2 画像ファイル。
     in-out property <int> wall-kind: 0;
@@ -3739,6 +3742,12 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                 }
+
+                                                // 書き手と合意 2026-09-28: いまの声と速さで例文を読む。鳴っていれば止める。
+                                                if root.speech-available: TextButton {
+                                                    title: root.speech-sampling ? @tr("■ Stop") : @tr("▶ Sample");
+                                                    clicked => { root.speech-sample-requested(); }
+                                                }
                                             }
                                             if root.shows-any([@tr("READ ALOUD"), @tr("Speed")]): HorizontalLayout {
                                                 spacing: 6px;
@@ -3752,42 +3761,21 @@ export component AppWindow inherits Window {
                                                     horizontal-stretch: 1;
                                                 }
 
-                                                Rectangle {
+                                                Slider {
                                                     width: 240px;
-
-                                                    TextButton {
-                                                        width: parent.width;
-                                                        wide: true;
-                                                        title: root.speech-rate-names[root.speech-rate];
-                                                        clicked => {
-                                                            rate-menu.show();
-                                                        }
-                                                    }
-
-                                                    rate-menu := PopupWindow {
-                                                        x: 0px;
-                                                        y: 32px;
-                                                        width: 240px;
-                                                        close-policy: close-on-click-outside;
-
-                                                        MenuFrame {
-                                                            width: 240px;
-
-                                                            VerticalLayout {
-                                                                padding: 6px;
-                                                                spacing: 1px;
-
-                                                                for name[index] in root.speech-rate-names: MenuRow {
-                                                                    title: name;
-                                                                    checked: index == root.speech-rate;
-                                                                    activated => {
-                                                                        root.speech-rate-chosen(index);
-                                                                        rate-menu.close();
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
+                                                    y: 3px;
+                                                    minimum: 0.5;
+                                                    maximum: 2.0;
+                                                    value: root.speech-speed;
+                                                    moved(value) => { root.speech-speed-moved(value); }
+                                                }
+                                                Text {
+                                                    // 0.05刻みを2桁で（1.25×）。
+                                                    text: root.speech-speed.to-fixed(2) + "×";
+                                                    color: Tok.ink-muted;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    min-width: 44px;
                                                 }
                                             }
                                             if !root.settings-searching: Rectangle { height: 12px; }

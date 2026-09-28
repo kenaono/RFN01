@@ -2431,10 +2431,17 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     let weak = window.as_weak();
     let speech_cache = render_cache.clone();
-    window.on_speech_rate_chosen(move |index| {
+    window.on_speech_speed_moved(move |value| {
         if let Some(window) = weak.upgrade() {
-            window.set_speech_rate(index.clamp(0, read_aloud::RATES.len() as i32 - 1));
+            window.set_speech_speed(read_aloud::speed_of(value));
             save_settings(&window, &speech_cache);
+        }
+    });
+    let weak = window.as_weak();
+    let speech_live = live.clone();
+    window.on_speech_sample_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            read_aloud::sample(&window, &speech_live);
         }
     });
     // RFN01-63: 綴りの確認。書いたあとの数え直しと、右クリックの行。
@@ -4145,7 +4152,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let outcome = window.run();
     terminal_panels::stop_all(&live);
     // RFN01-62: 読み上げ中に閉じても、鳴らしている口を閉じてから終える。
-    read_aloud::stop(&window, &live);
+    read_aloud::stop_all(&window, &live);
     // 要件 8.5: the arrangement as the writer left it, including a boundary
     // moved without anything else happening. The views are taken out of the
     // panes first, because a caret and a scroll live there until they are.
@@ -12646,7 +12653,7 @@ fn reset_all_settings(window: &AppWindow, live: &Live) {
     window.set_backup_keep(backup::DEFAULT_KEEP as i32);
     // RFN01-62: 読み上げはWindowsの既定の声、1.0×へ。
     window.set_speech_voice_id(SharedString::new());
-    window.set_speech_rate(read_aloud::DEFAULT_RATE);
+    window.set_speech_speed(read_aloud::DEFAULT_SPEED);
     read_aloud::publish_voices(window);
     save_settings(window, &live.cache);
     window.invoke_terminal_reset();
@@ -14863,8 +14870,10 @@ const LAYOUT_SHARED_SETTING: &str = "layout.shared";
 const PAPER_RANDOM_SETTING: &str = "paper.random";
 /// 追加要件 2026-09-15（書き手）: 表示の言語。0 システムに合わせる、1 日本語、2 English。
 const LANGUAGE_SETTING: &str = "language";
-/// RFN01-62: 読み上げの声（WindowsのId、空なら既定）と速さ（`read_aloud::RATES`の番号）。
+/// RFN01-62: 読み上げの声（WindowsのId、空なら既定）と速さ（0.5〜2.0の倍率）。
 const SPEECH_VOICE_SETTING: &str = "speech.voice";
+const SPEECH_SPEED_SETTING: &str = "speech.speed";
+/// 以前の5段の番号（2026-09-28の1日だけ使った）。読むだけで、もう書かない。
 const SPEECH_RATE_SETTING: &str = "speech.rate";
 /// 追加要件 2026-09-15（書き手）: 背景の壁紙。種類（0 なし・1 Windows・2 画像）、画像のパス、
 /// 置き方（0 タイル・1 縦・2 横）、濃さ（%）。
@@ -15831,8 +15840,8 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_speech_voice_id().to_string(),
     ));
     values.push((
-        SPEECH_RATE_SETTING.to_owned(),
-        window.get_speech_rate().to_string(),
+        SPEECH_SPEED_SETTING.to_owned(),
+        format!("{:.2}", read_aloud::speed_of(window.get_speech_speed())),
     ));
     values.push((
         WALL_KIND_SETTING.to_owned(),
@@ -16076,15 +16085,16 @@ fn apply_settings(
             window.set_speech_voice_id(value.trim().into());
             continue;
         }
+        if written == SPEECH_SPEED_SETTING {
+            let speed = value
+                .trim()
+                .parse::<f32>()
+                .unwrap_or(read_aloud::DEFAULT_SPEED);
+            window.set_speech_speed(read_aloud::speed_of(speed));
+            continue;
+        }
         if written == SPEECH_RATE_SETTING {
-            let last = read_aloud::RATES.len() as i32 - 1;
-            window.set_speech_rate(
-                value
-                    .trim()
-                    .parse::<i32>()
-                    .unwrap_or(read_aloud::DEFAULT_RATE)
-                    .clamp(0, last),
-            );
+            window.set_speech_speed(read_aloud::speed_from_old_rate(value));
             continue;
         }
         if written == WALL_KIND_SETTING {

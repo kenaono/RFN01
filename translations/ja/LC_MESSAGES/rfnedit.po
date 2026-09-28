@@ -1400,3 +1400,9 @@ msgstr "速さ"
 
 msgid "No Japanese voice is installed"
 msgstr "日本語の音声がありません"
+
+msgid "▶ Sample"
+msgstr "▶ 試聴"
+
+msgid "■ Stop"
+msgstr "■ 停止"

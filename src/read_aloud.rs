@@ -33,10 +33,36 @@ use crate::i18n::pick;
 use crate::open_document::OpenDocument;
 use crate::{AppWindow, Live, PaneId, StatusBar};
 
-/// 速さの選び方（書き手と合意：0.75×〜2.0×）。設定が持つのは番号。
-pub const RATES: [f64; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+/// 速さ（書き手と合意 2026-09-28：スライダーで0.5×〜2.0×、0.05刻み）。
+pub const SLOWEST: f32 = 0.5;
+pub const FASTEST: f32 = 2.0;
+pub const SPEED_STEP: f32 = 0.05;
 /// 速さの既定（1.0×）。
-pub const DEFAULT_RATE: i32 = 1;
+pub const DEFAULT_SPEED: f32 = 1.0;
+/// 以前の5段の選び方（番号で保存していた）。**読み込むときだけ使う**——その日に
+/// 保存された設定を、同じ速さとして引き継ぐ。
+const OLD_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+/// Sampleで読む例文（書き手と合意）。
+const SAMPLE: &str = "吾輩は猫である。名前はまだ無い。";
+
+/// 速さをスライダーの刻みと範囲へそろえる。
+pub fn speed_of(value: f32) -> f32 {
+    let stepped = (value / SPEED_STEP).round() * SPEED_STEP;
+    // 0.05刻みの小数を、表示と保存で「1.2500001」にしない。
+    (stepped.clamp(SLOWEST, FASTEST) * 100.0).round() / 100.0
+}
+
+/// 以前の番号の保存（`speech.rate`）を、速さへ。
+pub fn speed_from_old_rate(index: &str) -> f32 {
+    index
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .and_then(|at| OLD_RATES.get(at))
+        .copied()
+        .unwrap_or(DEFAULT_SPEED)
+}
 
 /// Windowsに入っている声の1つ。
 #[derive(Clone, Debug)]
@@ -162,13 +188,91 @@ fn synthesizer_for(window: &AppWindow) -> windows::core::Result<SpeechSynthesize
     {
         synthesizer.SetVoice(&voice)?;
     }
-    let rate = usize::try_from(window.get_speech_rate())
-        .ok()
-        .and_then(|at| RATES.get(at))
-        .copied()
-        .unwrap_or(1.0);
-    synthesizer.Options()?.SetSpeakingRate(rate)?;
+    let speed = speed_of(window.get_speech_speed());
+    synthesizer.Options()?.SetSpeakingRate(f64::from(speed))?;
     Ok(synthesizer)
+}
+
+thread_local! {
+    /// Sampleを鳴らしている口。鳴り終われば捨てる。
+    static SAMPLING: RefCell<Option<(MediaPlayer, u64)>> = const { RefCell::new(None) };
+}
+
+/// 設定の「▶ Sample」（書き手と合意 2026-09-28）。いまの声と速さで例文を読む。
+/// 鳴っていれば止める。文書を読み上げていれば、それを止めてから鳴らす。
+pub fn sample(window: &AppWindow, live: &Live) {
+    if stop_sample(window) {
+        return;
+    }
+    stop(window, live);
+    let generation = GENERATION.with(|held| {
+        held.set(held.get() + 1);
+        held.get()
+    });
+    let started = (|| -> windows::core::Result<MediaPlayer> {
+        let synthesizer = synthesizer_for(window)?;
+        let stream = synthesizer
+            .SynthesizeTextToStreamAsync(&HSTRING::from(SAMPLE))?
+            .join()?;
+        let content = stream.ContentType()?;
+        let stream: IRandomAccessStream = stream.cast()?;
+        let source = MediaSource::CreateFromStream(&stream, &content)?;
+        let player = MediaPlayer::new()?;
+        #[cfg(test)]
+        player.SetIsMuted(true)?;
+        player.MediaEnded(&TypedEventHandler::new(move |_, _| {
+            let _ = slint::invoke_from_event_loop(move || sample_ended(generation));
+            Ok(())
+        }))?;
+        player.SetSource(&source)?;
+        player.Play()?;
+        Ok(player)
+    })();
+    match started {
+        Ok(player) => {
+            SAMPLING.with(|held| *held.borrow_mut() = Some((player, generation)));
+            window.set_speech_sampling(true);
+        }
+        Err(_) => {
+            window.tell(pick("音声を再生できませんでした", "Could not play the voice").into());
+        }
+    }
+}
+
+/// 窓を閉じるとき：読み上げもSampleも止める。
+pub fn stop_all(window: &AppWindow, live: &Live) {
+    stop_sample(window);
+    stop(window, live);
+}
+
+/// Sampleを止める。鳴っていたら真。
+fn stop_sample(window: &AppWindow) -> bool {
+    let Some((player, _)) = SAMPLING.with(|held| held.borrow_mut().take()) else {
+        return false;
+    };
+    let _ = player.Pause();
+    let _ = player.Close();
+    window.set_speech_sampling(false);
+    true
+}
+
+fn sample_ended(generation: u64) {
+    let current = SAMPLING.with(|held| {
+        held.borrow()
+            .as_ref()
+            .is_some_and(|(_, held)| *held == generation)
+    });
+    if current {
+        with_hook(|window, _| {
+            stop_sample(window);
+        });
+    }
+}
+
+/// 試験のため：Sampleを鳴らしているか。
+#[cfg(test)]
+pub fn sampling() -> bool {
+    SAMPLING.with(|held| held.borrow().is_some())
 }
 
 /// 実行の「読み上げ」／「読み上げを停止」（RFN01-62）。
@@ -187,6 +291,8 @@ pub fn toggle(window: &AppWindow, live: &Live, id: PaneId) {
         );
         return;
     }
+    // Sampleが鳴っていれば止める——声が2つ重なる。
+    stop_sample(window);
     let document = live.states.document(id);
     let source = document.text.borrow().clone();
     let caret = live.states.of(id).borrow().caret_source_byte.unwrap_or(0);
