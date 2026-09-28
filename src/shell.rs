@@ -31,7 +31,14 @@ use windows::core::{HSTRING, PCWSTR};
 /// editor is inside somebody else's (技術検証 6.18); it is out of reach on the
 /// ordinary path, which is why the questions the editor asks itself are drawn
 /// in the window instead.
+///
+/// **The shell does not take `\\?\`.** A Workspace holds its roots
+/// canonicalized, so every row under one arrives as `\\?\D:\…`, and
+/// `SHFileOperationW` refuses that form — the tree's delete, and the replace
+/// a move asks about, only ever said the bin had failed (RFN01-64). The prefix
+/// is taken off before the path goes in.
 pub fn recycle(owner: Option<HWND>, path: &Path) -> bool {
+    let path = crate::backup::plain(path);
     // `pFrom` is a *list* of names, one after another, and the last of them is
     // followed by a second NUL. One name here, so two.
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -68,5 +75,26 @@ pub fn reveal(path: &Path) {
         }
         let _ = SHOpenFolderAndSelectItems(item as *const _, None, 0);
         ILFree(Some(item as *const _));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFN01-64: a path the way a Workspace row holds it, `\\?\` and all,
+    /// still reaches the bin.
+    #[test]
+    fn a_canonicalized_path_goes_to_the_bin() {
+        let dir = std::env::temp_dir().join(format!("rfn-recycle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("上書きされる.txt");
+        std::fs::write(&file, "a").unwrap();
+        let held = file.canonicalize().unwrap();
+        assert!(held.to_string_lossy().starts_with(r"\\?\"));
+
+        assert!(recycle(None, &held));
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir(&dir);
     }
 }
