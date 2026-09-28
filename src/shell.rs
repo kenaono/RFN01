@@ -8,9 +8,10 @@
 //! own palette, because the writer found Windows' small and hard to read.
 
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Component, Path, Prefix};
 
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Storage::FileSystem::GetDriveTypeW;
 use windows::Win32::UI::Shell::{
     FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, ILCreateFromPathW, ILFree,
     SHFILEOPSTRUCTW, SHFileOperationW, SHOpenFolderAndSelectItems,
@@ -25,12 +26,18 @@ use windows::core::{HSTRING, PCWSTR};
 /// **`FOF_NOCONFIRMATION` without `FOF_WANTNUKEWARNING` would delete
 /// outright.** The editor has already asked its own question by the time this
 /// is called, so the shell's confirmation is turned off — but the case where
-/// the item *cannot* go to the bin (a network drive, something too large) is
-/// not the question that was answered, and Windows has to be allowed to say so.
-/// That warning runs its own message loop, so this is one of the few places the
-/// editor is inside somebody else's (技術検証 6.18); it is out of reach on the
-/// ordinary path, which is why the questions the editor asks itself are drawn
-/// in the window instead.
+/// the item *cannot* go to the bin (something too large) is not the question
+/// that was answered, and Windows has to be allowed to say so. That warning
+/// runs its own message loop, so this is one of the few places the editor is
+/// inside somebody else's (技術検証 6.18); it is out of reach on the ordinary
+/// path, which is why the questions the editor asks itself are drawn in the
+/// window instead.
+///
+/// **Where [`has_recycle_bin`] says there is no bin, the question already said
+/// so** (RFN01-64): the writer was told it is deleted for good and cannot be
+/// restored, and answered that. Windows asking the same thing again is dropped
+/// there. `FOF_ALLOWUNDO` stays, so a place that turns out to have a bin after
+/// all still gets it.
 ///
 /// **The shell does not take `\\?\`.** A Workspace holds its roots
 /// canonicalized, so every row under one arrives as `\\?\D:\…`, and
@@ -44,7 +51,10 @@ pub fn recycle(owner: Option<HWND>, path: &Path) -> bool {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
     wide.push(0);
-    let flags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING;
+    let mut flags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION;
+    if has_recycle_bin(&path) {
+        flags |= FOF_WANTNUKEWARNING;
+    }
     let mut operation = SHFILEOPSTRUCTW {
         hwnd: owner.unwrap_or_default(),
         wFunc: FO_DELETE,
@@ -56,6 +66,29 @@ pub fn recycle(owner: Option<HWND>, path: &Path) -> bool {
     // holds. The shell copies what it needs before it returns.
     let outcome = unsafe { SHFileOperationW(&mut operation) };
     outcome == 0 && !operation.fAnyOperationsAborted.as_bool()
+}
+
+/// Whether what is at `path` can go to the recycle bin (RFN01-64).
+///
+/// **Asked before the question, so the question can say what will happen.**
+/// Windows keeps a bin on fixed drives only: a network share, a mapped network
+/// drive, a USB stick or a CD has none, and what is deleted there is gone. A
+/// share is known from its name alone, so an unreachable server is never waited
+/// on. A fixed drive whose bin is switched off, or something too large for it,
+/// is not caught here — Windows still warns about those itself (see
+/// [`recycle`]).
+pub fn has_recycle_bin(path: &Path) -> bool {
+    const DRIVE_FIXED: u32 = 3;
+    let path = crate::backup::plain(path);
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return false;
+    };
+    let Prefix::Disk(letter) = prefix.kind() else {
+        return false;
+    };
+    let root = HSTRING::from(format!("{}:\\", letter as char));
+    // SAFETY: `root` is a NUL-terminated wide string that outlives the call.
+    unsafe { GetDriveTypeW(&root) == DRIVE_FIXED }
 }
 
 /// Show something in Explorer, with it selected (要件 5.2).
@@ -96,5 +129,17 @@ mod tests {
         assert!(recycle(None, &held));
         assert!(!file.exists());
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// RFN01-64: a fixed drive has a bin, however the path is written; a
+    /// network share has none, and is answered without reaching for it.
+    #[test]
+    fn only_a_fixed_drive_has_a_bin() {
+        let temp = std::env::temp_dir();
+        assert!(has_recycle_bin(&temp));
+        assert!(has_recycle_bin(&temp.canonicalize().unwrap()));
+        assert!(!has_recycle_bin(Path::new(r"\\server\share\原稿.md")));
+        assert!(!has_recycle_bin(Path::new(r"\\?\UNC\server\share\原稿.md")));
+        assert!(!has_recycle_bin(Path::new("原稿.md")));
     }
 }
