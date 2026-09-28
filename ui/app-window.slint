@@ -1106,6 +1106,17 @@ export component AppWindow inherits Window {
     /// 並びは設定の番号（0 System、1 日本語、2 English）。
     property <[string]> language-names: [@tr("System"), "日本語", "English"];
     callback language-chosen(int);
+    // RFN01-62: 読み上げの設定（全体に1つ）。声はWindowsに入っているもの、速さは5段。
+    // 声は設定がIdで持ち、一覧の番号（`speech-voice`）はRustが引き当てる。
+    in property <[string]> speech-voice-names;
+    in-out property <int> speech-voice: -1;
+    in-out property <string> speech-voice-id;
+    in-out property <int> speech-rate: 1;
+    /// 日本語の声がWindowsに入っているか。無ければ読み上げは押せない。
+    in property <bool> speech-available;
+    property <[string]> speech-rate-names: ["0.75×", "1.0×", "1.25×", "1.5×", "2.0×"];
+    callback speech-voice-chosen(int);
+    callback speech-rate-chosen(int);
     /// 追加要件 2026-09-15（書き手）: 背景の壁紙（全体の設定）。0 なし、1 Windowsの壁紙
     /// （画面に固定して敷くので、窓越しにデスクトップが見えているように感じる）、2 画像ファイル。
     in-out property <int> wall-kind: 0;
@@ -3653,6 +3664,125 @@ export component AppWindow inherits Window {
                                                                     activated => {
                                                                         root.language-chosen(index);
                                                                         language-menu.close();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if !root.settings-searching: Rectangle { height: 12px; }
+
+                                            // RFN01-62（書き手と合意 2026-09-28）: **読み上げの声と速さ。**全体に1つ。
+                                            // 日本語の声が無ければ、声の欄にそう出す（読み上げは押せない）。
+                                            if root.shows-any([@tr("READ ALOUD"), @tr("Voice"), @tr("Speed")]): Rectangle { height: 1px; background: Tok.rule; }
+                                            if root.shows-any([@tr("READ ALOUD"), @tr("Voice"), @tr("Speed")]): Text {
+                                                text: root.section-title(@tr("General"), @tr("READ ALOUD"));
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                letter-spacing: 0.9px;
+                                            }
+                                            if root.shows-any([@tr("READ ALOUD"), @tr("Voice")]): HorizontalLayout {
+                                                spacing: 6px;
+                                                height: 28px;
+
+                                                Text {
+                                                    text: @tr("Voice");
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                if !root.speech-available: Text {
+                                                    text: @tr("No Japanese voice is installed");
+                                                    color: Tok.alert;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                if root.speech-available: Rectangle {
+                                                    width: 240px;
+
+                                                    TextButton {
+                                                        width: parent.width;
+                                                        wide: true;
+                                                        title: root.speech-voice >= 0 ? root.speech-voice-names[root.speech-voice] : "";
+                                                        clicked => {
+                                                            voice-menu.show();
+                                                        }
+                                                    }
+
+                                                    voice-menu := PopupWindow {
+                                                        x: 0px;
+                                                        y: 32px;
+                                                        width: 240px;
+                                                        close-policy: close-on-click-outside;
+
+                                                        MenuFrame {
+                                                            width: 240px;
+
+                                                            VerticalLayout {
+                                                                padding: 6px;
+                                                                spacing: 1px;
+
+                                                                // 頼んでから閉じる（技術検証 6.24）。
+                                                                for name[index] in root.speech-voice-names: MenuRow {
+                                                                    title: name;
+                                                                    checked: index == root.speech-voice;
+                                                                    activated => {
+                                                                        root.speech-voice-chosen(index);
+                                                                        voice-menu.close();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if root.shows-any([@tr("READ ALOUD"), @tr("Speed")]): HorizontalLayout {
+                                                spacing: 6px;
+                                                height: 28px;
+
+                                                Text {
+                                                    text: @tr("Speed");
+                                                    color: Tok.ink;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                Rectangle {
+                                                    width: 240px;
+
+                                                    TextButton {
+                                                        width: parent.width;
+                                                        wide: true;
+                                                        title: root.speech-rate-names[root.speech-rate];
+                                                        clicked => {
+                                                            rate-menu.show();
+                                                        }
+                                                    }
+
+                                                    rate-menu := PopupWindow {
+                                                        x: 0px;
+                                                        y: 32px;
+                                                        width: 240px;
+                                                        close-policy: close-on-click-outside;
+
+                                                        MenuFrame {
+                                                            width: 240px;
+
+                                                            VerticalLayout {
+                                                                padding: 6px;
+                                                                spacing: 1px;
+
+                                                                for name[index] in root.speech-rate-names: MenuRow {
+                                                                    title: name;
+                                                                    checked: index == root.speech-rate;
+                                                                    activated => {
+                                                                        root.speech-rate-chosen(index);
+                                                                        rate-menu.close();
                                                                     }
                                                                 }
                                                             }

@@ -3910,6 +3910,7 @@ dependencies = [
  "unicode-width",
  "windows",
  "windows-core",
+ "windows-future",
  "windows-numerics",
 ]
 

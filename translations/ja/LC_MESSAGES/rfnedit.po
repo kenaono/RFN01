@@ -1388,3 +1388,15 @@ msgstr "無視"
 
 msgid "Add to Dictionary"
 msgstr "辞書に追加"
+
+msgid "READ ALOUD"
+msgstr "読み上げ"
+
+msgid "Voice"
+msgstr "声"
+
+msgid "Speed"
+msgstr "速さ"
+
+msgid "No Japanese voice is installed"
+msgstr "日本語の音声がありません"
