@@ -195,30 +195,84 @@ pub fn scan(
 ) -> Scan {
     let mut asked: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
     let mut out = Scan::default();
-    for (index, line) in source.split('\n').enumerate() {
-        // 表はセルごとに描かれ、印を付ける道が無いので、数えるほうも読まない。
-        if styles.get(index).is_some_and(|style| {
-            style.kind.is_code() || matches!(style.kind, LineKind::TableRow | LineKind::TableRule)
-        }) {
+    for word in readable_words(source, styles) {
+        let text = &source[word.range.clone()];
+        if ignored.contains(text) {
             continue;
         }
-        for word in words(line) {
-            let text = &line[word.range.clone()];
-            if ignored.contains(text) {
-                continue;
-            }
-            if word.repeated {
-                out.count += 1;
-                continue;
-            }
-            let wrong = *asked.entry(text).or_insert_with(|| is_wrong(text));
-            if wrong {
-                out.count += 1;
-                out.wrong.insert(text.to_owned());
-            }
+        if word.repeated {
+            out.count += 1;
+            continue;
+        }
+        let wrong = *asked.entry(text).or_insert_with(|| is_wrong(text));
+        if wrong {
+            out.count += 1;
+            out.wrong.insert(text.to_owned());
         }
     }
     out
+}
+
+/// 文書全体の、調べる英単語（範囲はソースのバイト）。**[`scan`]と[`marked`]が
+/// 同じここを通る**——数と、移る先が食い違わない。
+///
+/// 表はセルごとに描かれて印を付ける道が無いので、コードと同じく読まない。
+fn readable_words<'a>(source: &'a str, styles: &'a [LineStyle]) -> impl Iterator<Item = Word> + 'a {
+    let mut line_start = 0;
+    source
+        .split('\n')
+        .enumerate()
+        .flat_map(move |(index, line)| {
+            let start = line_start;
+            line_start += line.len() + 1;
+            let skipped = styles.get(index).is_some_and(|style| {
+                style.kind.is_code()
+                    || matches!(style.kind, LineKind::TableRow | LineKind::TableRule)
+            });
+            let found = if skipped { Vec::new() } else { words(line) };
+            found.into_iter().map(move |word| Word {
+                range: start + word.range.start..start + word.range.end,
+                repeated: word.repeated,
+            })
+        })
+}
+
+/// 印の付いている語の、ソースの範囲（文書の順）。誤りから誤りへ移るときに使う。
+pub fn marked(source: &str, styles: &[LineStyle], marks: &SpellMarks) -> Vec<Range<usize>> {
+    readable_words(source, styles)
+        .filter(|word| {
+            let text = &source[word.range.clone()];
+            !marks.ignored.contains(text) && (word.repeated || marks.wrong.contains(text))
+        })
+        .map(|word| word.range)
+        .collect()
+}
+
+/// `marked`の中で、`from`の次（`back`なら前）の範囲。端を越えたら反対の端へ戻り、
+/// そのとき2つめが真になる。
+///
+/// `from`は選んでいる語の頭か、何も選んでいなければキャレット。`caret`が真なら
+/// **キャレットの所から始まる語も「次」**——文書の頭でF8を押せば、頭の語へ移る。
+pub fn step_from(
+    found: &[Range<usize>],
+    from: usize,
+    caret: bool,
+    back: bool,
+) -> Option<(Range<usize>, bool)> {
+    let next = if back {
+        found.iter().rev().find(|range| range.start < from)
+    } else {
+        found
+            .iter()
+            .find(|range| range.start > from || (caret && range.start == from))
+    };
+    match next {
+        Some(range) => Some((range.clone(), false)),
+        None => {
+            let wrapped = if back { found.last() } else { found.first() };
+            wrapped.map(|range| (range.clone(), true))
+        }
+    }
 }
 
 /// タイルへ渡す、誤りの語（RFN01-63）。
@@ -415,6 +469,42 @@ mod tests {
         );
         assert!(ignoring.marks_in("teh", &[]).is_empty());
         assert_ne!(marks.fingerprint(), ignoring.fingerprint());
+    }
+
+    #[test]
+    fn stepping_goes_from_mark_to_mark_and_wraps() {
+        let source = "teh a\n```\nteh\n```\nb teh the the";
+        let styles = crate::document::line_styles(source);
+        let marks = SpellMarks::new(HashSet::from(["teh".to_owned()]), HashSet::new());
+        let found = marked(source, &styles, &marks);
+        let spelled: Vec<&str> = found.iter().map(|range| &source[range.clone()]).collect();
+        assert_eq!(spelled, ["teh", "teh", "the"], "the code line is skipped");
+        let first = found[0].clone();
+        let second = found[1].clone();
+        let last = found[2].clone();
+        // 頭の語を選んでいれば次へ、キャレットが頭にあるだけならその語へ。
+        assert_eq!(
+            step_from(&found, 0, false, false),
+            Some((second.clone(), false))
+        );
+        assert_eq!(
+            step_from(&found, 0, true, false),
+            Some((first.clone(), false))
+        );
+        assert_eq!(
+            step_from(&found, second.start, false, false),
+            Some((last.clone(), false))
+        );
+        assert_eq!(
+            step_from(&found, last.start, false, false),
+            Some((first.clone(), true))
+        );
+        assert_eq!(
+            step_from(&found, second.start, false, true),
+            Some((first.clone(), false))
+        );
+        assert_eq!(step_from(&found, 0, true, true), Some((last, true)));
+        assert_eq!(step_from(&[], 0, true, false), None);
     }
 
     #[test]

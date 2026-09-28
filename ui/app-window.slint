@@ -791,6 +791,8 @@ export component AppWindow inherits Window {
     in property <string> word-mode-name;
     /// RFN01-63: 前に出ている文書の綴りの誤りの数（確認していなければ空）。
     in property <string> spelling-status;
+    /// RFN01-63: ステータスバーの数を押した——次のスペルミスへ。
+    callback spelling-status-clicked();
     /// RFN01-63: 右クリックした語の綴りの誤り（空なら行を出さない）と、直す行。
     in property <string> spell-word;
     in property <bool> spell-repeated;
@@ -5916,12 +5918,27 @@ export component AppWindow inherits Window {
 
                 // RFN01-63: 綴りを確認している文書の、誤りの数。確認しているあいだ
                 // ずっと出す。
-                if root.spelling-status != "": Text {
-                    text: root.spelling-status;
-                    color: Tok.ink-muted;
-                    font-size: 12px;
-                    vertical-alignment: center;
+                // 押せば次のスペルミスへ移る（書き手と合意 2026-09-28）。
+                if root.spelling-status != "": Rectangle {
+                    width: spelling-text.preferred-width + 12px;
                     horizontal-stretch: 0;
+                    background: spelling-touch.has-hover ? Tok.chrome-raised : transparent;
+                    border-radius: 4px;
+
+                    spelling-text := Text {
+                        x: 6px;
+                        y: (parent.height - self.height) / 2;
+                        text: root.spelling-status;
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                    }
+
+                    spelling-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.spelling-status-clicked();
+                        }
+                    }
                 }
 
                 // 要件 7.9（2026-09-08）: **単語チェックモード。**コードエディタが

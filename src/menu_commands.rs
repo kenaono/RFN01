@@ -64,8 +64,10 @@ enum Command {
     Zoom(i32),
     ZoomReset,
     Compare(i32),
-    /// RFN01-63: 綴りの確認を始める／終える（アクティブな文書）。
+    /// RFN01-63: スペルチェックを始める／終える（アクティブな文書）。
     Spelling,
+    /// RFN01-63: 次（`false`）／前（`true`）のスペルミスへ。
+    SpellingStep(bool),
     Terminal(i32),
     Panel(i32),
     Shell(i32),
@@ -90,6 +92,8 @@ pub enum ShortcutAction {
     Bullets(i32),
     NumberedList,
     Renumber,
+    /// RFN01-63: 次（`false`）／前（`true`）のスペルミスへ。
+    SpellingStep(bool),
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -1969,21 +1973,35 @@ fn build(
             // RFN01-63: **アクティブな文書に対して実行する**（書き手と合意 2026-09-28）。
             // 確認しているあいだは、同じ場所が終える行になる。
             root.sep()?;
-            if crate::spelling_ui::checking(&t.document) {
+            let checking = crate::spelling_ui::checking(&t.document);
+            if checking {
                 add!(
-                    "綴りの確認を終了",
-                    "Stop Checking Spelling",
+                    "スペルチェックを終了",
+                    "Stop Spell Check",
                     Command::Spelling,
                     main
                 );
             } else {
                 add!(
-                    "綴りを確認",
-                    "Check Spelling",
+                    "スペルチェック（英語）",
+                    "Check Spelling (English)",
                     Command::Spelling,
                     main && editable
                 );
             }
+            // 書き手と合意 2026-09-28: 誤りから誤りへ。スペルチェック中だけ押せる。
+            add!(
+                "次のスペルミス",
+                "Next Spelling Error",
+                Command::SpellingStep(false),
+                main && checking
+            );
+            add!(
+                "前のスペルミス",
+                "Previous Spelling Error",
+                Command::SpellingStep(true),
+                main && checking
+            );
             if terminal {
                 root.sep()?;
                 add!("出力を保存…", "Save Output…", Command::Terminal(7), true);
@@ -2321,6 +2339,7 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::Bullets(index) => Command::List(0, index),
         ShortcutAction::NumberedList => Command::List(1, -1),
         ShortcutAction::Renumber => Command::List(2, -1),
+        ShortcutAction::SpellingStep(back) => Command::SpellingStep(back),
     };
     execute(window, live, &target, command);
 }
@@ -2500,6 +2519,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Compare(3) => window.invoke_backup_history_requested(),
         Command::Compare(_) => window.invoke_compare_files_requested(),
         Command::Spelling => crate::spelling_ui::toggle(window, live, t.id),
+        Command::SpellingStep(back) => crate::spelling_ui::step(window, live, t.id, back),
         Command::Terminal(n) => terminal_workflow::action(window, live, t.parent, t.spot, n),
         Command::Panel(n) => terminal_panels::action(window, live, t.parent, n, 0),
         Command::Shell(n) => {
@@ -2566,6 +2586,10 @@ fn shortcut(window: &AppWindow, command: &Command, field: bool) -> String {
         Command::Preview => 43,
         Command::Viewer => 44,
         Command::Print => 45,
+        // RFN01-63: メニューから来た操作のキー（既定はF8／Shift+F8）。
+        Command::SpellingStep(back) => {
+            return shortcuts::action_label(window, ShortcutAction::SpellingStep(*back));
+        }
         _ => return String::new(),
     };
     shortcuts::label(window, id)
