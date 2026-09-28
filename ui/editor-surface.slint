@@ -68,6 +68,12 @@ export component EditorSurface inherits Rectangle {
     in property <[string]> word-sets;
     in property <bool> has-selection;
     callback word-add-requested(int);
+    // RFN01-63: 右クリックした語の綴りの誤り。語が空なら行を出さない。
+    in property <string> spell-word;
+    in property <bool> spell-repeated;
+    in property <[string]> spell-suggestions;
+    callback spelling-at(float, float);
+    callback spelling-chosen(int);
     in property <[string]> terminal-shells;
     in property <int> default-shell;
     callback new-file-requested();
@@ -1259,6 +1265,8 @@ export component EditorSurface inherits Rectangle {
                                     root.context-x = self.mouse-x;
                                     root.context-y = self.mouse-y;
                                     root.menu-opened();
+                                    // RFN01-63: **右クリックした位置の語**。キャレットは動かさない。
+                                    root.spelling-at(self.mouse-x / 1px, self.mouse-y / 1px);
                                     // **開くたびに畳んでおく**——前に開いた形が
                                     // 残っていると、右クリックの長さが回ごとに違う。
                                     root.bullet-rows-open = false;
@@ -1479,6 +1487,50 @@ export component EditorSurface inherits Rectangle {
                                         // （技術検証 6.24・6.30）。`close`はこの木を
                                         // 捨て、捨てられた木から`root`へ登ろうと
                                         // した生成コードは黙って何もしない。
+                                        // RFN01-63（書き手と合意 2026-09-28）: **綴りの誤りの語を
+                                        // 右クリックしたら、直す行をいちばん上に**。候補（最大3つ）、
+                                        // 繰り返しの語を消す、Ignore、Add to Dictionary。
+                                        if root.writing && root.spell-word != "": VerticalLayout {
+                                            spacing: 1px;
+
+                                            for suggestion[index] in root.spell-suggestions: MenuRow {
+                                                title: suggestion;
+                                                activated => {
+                                                    root.spelling-chosen(index);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                            if root.spell-repeated: MenuRow {
+                                                title: @tr("Delete Repeated Word");
+                                                activated => {
+                                                    root.spelling-chosen(-1);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                            if !root.spell-repeated && root.spell-suggestions.length == 0: MenuRow {
+                                                title: @tr("No Suggestions");
+                                                enabled: false;
+                                            }
+
+                                            MenuSep { }
+
+                                            MenuRow {
+                                                title: @tr("Ignore");
+                                                activated => {
+                                                    root.spelling-chosen(-2);
+                                                    context-menu.close();
+                                                }
+                                            }
+                                            if !root.spell-repeated: MenuRow {
+                                                title: @tr("Add to Dictionary");
+                                                activated => {
+                                                    root.spelling-chosen(-3);
+                                                    context-menu.close();
+                                                }
+                                            }
+
+                                            MenuSep { }
+                                        }
                                         if root.writing: MenuRow {
                                             title: @tr("Undo");
                                             shortcut: root.shortcut-keys[8];

@@ -1376,3 +1376,15 @@ msgstr "保存のたびに前の版を残します。どのフォルダで取る
 
 msgid "replaced when a backup is named. The name and the time to the second are required. Applied when you press Enter or leave the box; existing backups are renamed."
 msgstr "がバックアップの名前で置き換わります。名前と秒までの日時が要ります。Enterを押すか欄を離れると確定し、それまでのバックアップも名前を付け替えます。"
+
+msgid "Delete Repeated Word"
+msgstr "繰り返しの語を削除"
+
+msgid "No Suggestions"
+msgstr "候補はありません"
+
+msgid "Ignore"
+msgstr "無視"
+
+msgid "Add to Dictionary"
+msgstr "辞書に追加"

@@ -789,6 +789,14 @@ export component AppWindow inherits Window {
     /// 変えた瞬間に文書のモードが切れていた。
     in property <int> word-mode;
     in property <string> word-mode-name;
+    /// RFN01-63: 前に出ている文書の綴りの誤りの数（確認していなければ空）。
+    in property <string> spelling-status;
+    /// RFN01-63: 右クリックした語の綴りの誤り（空なら行を出さない）と、直す行。
+    in property <string> spell-word;
+    in property <bool> spell-repeated;
+    in property <[string]> spell-suggestions;
+    callback pane-spelling-at(int, float, float);
+    callback pane-spelling-chosen(int);
     /// **色分けが働いていない理由**（空なら働いている、2026-09-08）。
     ///
     /// この機能の値打ちは**色が付かなかったこと**にあるので（単語チェックモード
@@ -3255,6 +3263,11 @@ export component AppWindow inherits Window {
                         word-add-requested(at) => {
                             root.pane-word-added(pane.id, at);
                         }
+                        spell-word: root.spell-word;
+                        spell-repeated: root.spell-repeated;
+                        spell-suggestions: root.spell-suggestions;
+                        spelling-at(x, y) => { root.pane-spelling-at(pane.id, x, y); }
+                        spelling-chosen(action) => { root.pane-spelling-chosen(action); }
                         mark-toggled(rectangular) => {
                             root.pane-mark-toggled(pane.id, rectangular);
                         }
@@ -5899,6 +5912,16 @@ export component AppWindow inherits Window {
                 // The only thing in the row that grows.
                 Rectangle {
                     horizontal-stretch: 1;
+                }
+
+                // RFN01-63: 綴りを確認している文書の、誤りの数。確認しているあいだ
+                // ずっと出す。
+                if root.spelling-status != "": Text {
+                    text: root.spelling-status;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
                 }
 
                 // 要件 7.9（2026-09-08）: **単語チェックモード。**コードエディタが

@@ -3747,6 +3747,109 @@ fn draw_highlights(
     Ok(())
 }
 
+/// 綴りの誤りに赤の波線を引く（RFN01-63、書き手と合意 2026-09-28）。
+///
+/// **横書きは語の下、縦書きは語の左。**縦書きの右は、ルビと傍線が使う。波の刻み方は
+/// 傍線の波線（[`draw_beside_rule`]）と同じだが、**色は赤で細い**——青空文庫の
+/// 「波線」の注記（墨の色）とは色と位置で見分ける。幾何は1画素も動かさない。
+///
+/// 調べないところ（コード・リンク・箱の下＝ルビの読みなど）は`runs`から取る。
+/// 本文の中の読み方は[`crate::spelling::words`]の1か所にある。
+fn draw_spelling(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    layout: &IDWriteTextLayout,
+    task: &TileTask,
+    spelling: &crate::spelling::SpellMarks,
+    origin: windows_numerics::Vector2,
+) -> Result<()> {
+    // UTF-16の位置 → 本文のバイト位置。印が1つも無ければ作らない。
+    let byte_at = |utf16: u32| {
+        let mut units = 0_u32;
+        for (at, c) in task.text.char_indices() {
+            if units >= utf16 {
+                return at;
+            }
+            units += c.len_utf16() as u32;
+        }
+        task.text.len()
+    };
+    let covered: Vec<std::ops::Range<usize>> = task
+        .runs
+        .iter()
+        .filter(|run| {
+            run.marks.code
+                || run.marks.link
+                || run.marks.unresolved_link
+                || run.marks.collapsed
+                || run.ornament.is_some()
+        })
+        .map(|run| byte_at(run.utf16_start)..byte_at(run.utf16_start + run.utf16_len))
+        .collect();
+    let marks = spelling.marks_in(&task.text, &covered);
+    if marks.is_empty() {
+        return Ok(());
+    }
+    let mode = task.mode;
+    let cell = task.typography.font_size;
+    // **画素の格子にそろえる。**半端な位置の1画素は周りへにじみ、赤が淡い桃色になって
+    // 見落とされる（最初の版がそうだった）。
+    let stroke = (cell / 16.0).round().max(1.0);
+    let period = (cell * 0.3).max(4.0);
+    let amplitude = (cell * 0.07).max(1.0);
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 32];
+    // SAFETY: the brush outlives every call here, and its colour is put back.
+    let ink = unsafe { brush.GetColor() };
+    unsafe { brush.SetColor(&colour([0.86, 0.10, 0.10])) };
+    for range in marks {
+        let start = utf16_units(&task.text[..range.start]);
+        let length = utf16_units(&task.text[range.clone()]);
+        let mut count = 0;
+        // SAFETY: the range is inside the block's own text, which the layout holds.
+        unsafe {
+            layout.HitTestTextRange(
+                start,
+                length,
+                origin.X,
+                origin.Y,
+                Some(&mut regions),
+                &mut count,
+            )?;
+        }
+        for region in regions.iter().take((count as usize).min(regions.len())) {
+            let (flow_start, line_start) = mode.to_axes(region.left, region.top);
+            let (flow_extent, line_extent) = mode.to_axes(region.width, region.height);
+            let glyph = cell.min(flow_extent);
+            // 波の中心。横書きは行の箱の下の端の少し上、縦書きは字の左の外。
+            let centre = match mode {
+                WritingMode::Horizontal => flow_start + flow_extent - amplitude - stroke,
+                WritingMode::Vertical => {
+                    flow_start + (flow_extent - glyph) / 2.0 - amplitude - stroke * 2.0
+                }
+            };
+            let mut at = 0.0;
+            while at < line_extent {
+                let phase = (at / period) * std::f32::consts::TAU;
+                let (left, top) = mode.to_screen(centre + phase.sin() * amplitude, line_start + at);
+                let (left, top) = (left.round(), top.round());
+                let (width, height) = mode.to_screen(stroke, stroke.min(line_extent - at));
+                let rect = D2D_RECT_F {
+                    left,
+                    top,
+                    right: left + width,
+                    bottom: top + height,
+                };
+                // SAFETY: as above.
+                unsafe { target.FillRectangle(&rect, brush) };
+                at += stroke;
+            }
+        }
+    }
+    // SAFETY: as above.
+    unsafe { brush.SetColor(&ink) };
+    Ok(())
+}
+
 /// E11: backgrounds and heading separators occupy the line box, not glyph underlines.
 fn draw_text_decorations(
     target: &ID2D1RenderTarget,
@@ -4379,6 +4482,8 @@ struct TileTask {
     /// 要件 7.9: 色を付ける語。**`Typography`ではなくここ**——組み直しの判定に
     /// 入れてはならない（`TextEngine::set_words`）。
     words: Arc<crate::word_marks::WordMarks>,
+    /// RFN01-63: 綴りの誤りの語。確認していない文書では無い。
+    spelling: Option<Arc<crate::spelling::SpellMarks>>,
     /// 追加要件 2026-09-15: 画像の行に描く絵。
     pictures: Pictures,
     mode: WritingMode,
@@ -4777,6 +4882,10 @@ fn draw_block(
                 mode,
                 typography.font_size,
             )?;
+        }
+        // RFN01-63: 綴りの誤り。**字の後に描く**——字を1つも隠さない細い線である。
+        if let Some(spelling) = &task.spelling {
+            draw_spelling(target, &brush, &layout, task, spelling, origin)?;
         }
         // 要件 7.3.2: what stands in each of this block's boxes. After the text,
         // so the ink sits on top of nothing it has to fight.
@@ -5185,6 +5294,8 @@ pub struct TextEngine {
     /// 変えるだけで`matches`が偽になり、**文書全体が測り直された**。語も色も
     /// 幾何を1画素も動かさないのだから、測り直す理由が無い。
     words: Arc<crate::word_marks::WordMarks>,
+    /// RFN01-63: 綴りの誤りの語。**`words`と同じく組み直しの判定の外**。
+    spelling: Option<Arc<crate::spelling::SpellMarks>>,
     /// 追加要件 2026-09-15: 画像の行に描く絵（鍵 → 画素）。**`words`と同じく組み直しの判定の外**——
     /// 大きさは箱（`Ornament::Image`）が持っていて、ここは描く画素だけ。
     pictures: Pictures,
@@ -5677,6 +5788,12 @@ impl TextEngine {
     /// だからここは`matches`に入らず、[`TextEngine::tile_signature`]にだけ入る。
     pub fn set_words(&mut self, words: Arc<crate::word_marks::WordMarks>) {
         self.words = words;
+    }
+
+    /// RFN01-63: 綴りの誤りの語を渡す。[`Self::set_words`]と同じく、変わっても
+    /// タイルだけが古くなる。
+    pub fn set_spelling(&mut self, spelling: Option<Arc<crate::spelling::SpellMarks>>) {
+        self.spelling = spelling;
     }
 
     /// 追加要件 2026-09-15: 画像の行に描く絵を渡す。
@@ -7053,6 +7170,7 @@ impl TextEngine {
                     lines,
                     typography: spec.clone(),
                     words: self.words.clone(),
+                    spelling: self.spelling.clone(),
                     pictures: self.pictures.clone(),
                     mode: self.mode,
                     margin: self.margin,
@@ -7145,6 +7263,11 @@ impl TextEngine {
         // だけが古くなる**。だから`matches`ではなくここに入る。混ぜていないと、
         // 絵置き場の古い絵がそのまま出る（6.18の罠）。
         self.words.fingerprint().hash(&mut hasher);
+        // RFN01-63: 綴りの印も色と同じ側。
+        self.spelling
+            .as_ref()
+            .map(|spelling| spelling.fingerprint())
+            .hash(&mut hasher);
         // 要件 9（2026-09-07追加）: **which numbers this tile shows.** Two
         // blocks holding the same words draw the same pixels — until they carry
         // their line numbers, and then the one at line 12 and the one at line

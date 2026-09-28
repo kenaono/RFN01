@@ -14,6 +14,8 @@ fn events(window: Weak<AppWindow>) -> DocumentEvents {
             }
         })),
         editing: Some(Rc::new(move || {
+            // RFN01-63: 綴りを確認している文書があれば、手が止まってから数え直す。
+            crate::spelling_ui::touched();
             if let Some(window) = window.upgrade() {
                 if !window.get_render_status().is_empty() {
                     window.set_render_status(Default::default());

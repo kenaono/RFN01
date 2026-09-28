@@ -87,6 +87,10 @@ mod settings_transfer_ui_tests;
 mod settings_ui_tests;
 mod shell;
 mod shortcuts;
+mod spelling;
+mod spelling_ui;
+#[cfg(test)]
+mod spelling_ui_tests;
 #[cfg(test)]
 mod tab_position_ui_tests;
 mod table_edit;
@@ -2412,6 +2416,23 @@ fn main() -> Result<(), slint::PlatformError> {
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
     wiring::wire_word_modes(&window, &live);
+    // RFN01-63: 綴りの確認。書いたあとの数え直しと、右クリックの行。
+    spelling_ui::install(&window, &live);
+    let weak = window.as_weak();
+    let spelling_live = live.clone();
+    window.on_pane_spelling_at(move |pane, x, y| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            spelling_ui::at_pointer(&window, &spelling_live, id, id.flow_x(&window, x), y);
+        }
+    });
+    let weak = window.as_weak();
+    let spelling_live = live.clone();
+    window.on_pane_spelling_chosen(move |action| {
+        if let Some(window) = weak.upgrade() {
+            spelling_ui::chosen(&window, &spelling_live, action);
+        }
+    });
 
     let weak = window.as_weak();
     let tab_live = live.clone();
@@ -15277,6 +15298,8 @@ fn publish_word_mode_of(window: &AppWindow, live: &Live) {
     } else {
         SharedString::new()
     });
+    // RFN01-63: 綴りの誤りの数も、前に出ている文書のもの。
+    spelling_ui::publish(window, live);
 }
 
 /// 足す語群に与える色（要件 7.9）。

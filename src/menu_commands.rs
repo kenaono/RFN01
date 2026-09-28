@@ -64,6 +64,8 @@ enum Command {
     Zoom(i32),
     ZoomReset,
     Compare(i32),
+    /// RFN01-63: 綴りの確認を始める／終える（アクティブな文書）。
+    Spelling,
     Terminal(i32),
     Panel(i32),
     Shell(i32),
@@ -1964,6 +1966,24 @@ fn build(
                 Command::Compare(2),
                 main
             );
+            // RFN01-63: **アクティブな文書に対して実行する**（書き手と合意 2026-09-28）。
+            // 確認しているあいだは、同じ場所が終える行になる。
+            root.sep()?;
+            if crate::spelling_ui::checking(&t.document) {
+                add!(
+                    "綴りの確認を終了",
+                    "Stop Checking Spelling",
+                    Command::Spelling,
+                    main
+                );
+            } else {
+                add!(
+                    "綴りを確認",
+                    "Check Spelling",
+                    Command::Spelling,
+                    main && editable
+                );
+            }
             if terminal {
                 root.sep()?;
                 add!("出力を保存…", "Save Output…", Command::Terminal(7), true);
@@ -2479,6 +2499,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Compare(1) => window.invoke_compare_head_requested(),
         Command::Compare(3) => window.invoke_backup_history_requested(),
         Command::Compare(_) => window.invoke_compare_files_requested(),
+        Command::Spelling => crate::spelling_ui::toggle(window, live, t.id),
         Command::Terminal(n) => terminal_workflow::action(window, live, t.parent, t.spot, n),
         Command::Panel(n) => terminal_panels::action(window, live, t.parent, n, 0),
         Command::Shell(n) => {

@@ -252,6 +252,9 @@ pub struct OpenDocument {
     /// does not match, but a full re-scan every time two panes showing
     /// different documents took turns.
     pub counts: RefCell<CountsSlot>,
+    /// RFN01-63: 綴りの確認をしているあいだの状態。**文書のもの**——同じ文書を
+    /// 出しているどのペインにも同じ印が付き、文書が閉じれば一緒に消える。
+    pub spelling: RefCell<Option<crate::spelling::DocumentSpelling>>,
 }
 
 impl OpenDocument {
@@ -268,6 +271,7 @@ impl OpenDocument {
             recovery_failed: Cell::new(false),
             history: RefCell::new(History::default()),
             counts: RefCell::new(CountsSlot::default()),
+            spelling: RefCell::new(None),
         })
     }
 
