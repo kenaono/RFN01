@@ -203,6 +203,12 @@ export component EditorPane inherits Rectangle {
     in property <bool> has-selection: false;
     /// 選んだ語を、何冊目のセットへ足すか。
     callback word-add-requested(int);
+    /// RFN01-63: 右クリックした語の綴りの誤りと、直す行。
+    in property <string> spell-word;
+    in property <bool> spell-repeated;
+    in property <[string]> spell-suggestions;
+    callback spelling-at(float, float);
+    callback spelling-chosen(int);
     /// 追加要件 2026-09-07: New Tab の三つの言葉。
     ///
     /// **接続先は New Tab の中でも選べる**（書き手の指摘 2026-09-07）——
@@ -1769,6 +1775,11 @@ export component EditorPane inherits Rectangle {
             word-sets: root.word-sets;
             has-selection: root.has-selection;
             word-add-requested(a0) => { root.word-add-requested(a0); }
+            spell-word: root.spell-word;
+            spell-repeated: root.spell-repeated;
+            spell-suggestions: root.spell-suggestions;
+            spelling-at(a0, a1) => { root.spelling-at(a0, a1); }
+            spelling-chosen(a0) => { root.spelling-chosen(a0); }
             terminal-shells: root.terminal-shells;
             default-shell: root.default-shell;
             new-file-requested() => { root.new-file-requested(); }

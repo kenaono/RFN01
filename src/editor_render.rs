@@ -212,6 +212,17 @@ pub(crate) fn layout(
     // **組み直しの判定には入らない**——幾何を1画素も動かさないので、変わっても
     // タイルだけが古くなる（技術検証 9.3.1）。
     engine.set_words(options.words.clone());
+    // RFN01-63: 綴りの誤り。**文書のもの**なので、同じ文書を出しているどのペインにも
+    // 付く。Viewerでは直せないので出さない。
+    engine.set_spelling(if options.viewer {
+        None
+    } else {
+        document
+            .spelling
+            .borrow()
+            .as_ref()
+            .map(|spelling| spelling.marks.clone())
+    });
     // 追加要件 2026-09-15: 画像の行に描く絵。これも幾何の外（大きさは箱が持つ）。
     engine.set_pictures(shown.pictures());
     let needed = engine.needed_utf16(
