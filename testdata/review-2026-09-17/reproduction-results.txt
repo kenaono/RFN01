@@ -1,0 +1,43 @@
+warning: unused variable: `live`
+    --> src\memo_ui_tests.rs:1426:9
+     |
+1426 |     let live = Live {
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_live`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+
+running 3 tests
+memo_ui_tests::review_missing_origins_must_have_distinct_recovery_ids --- FAILED
+memo_ui_tests::review_restored_unsaved_text_must_stay_dirty_after_undo --- FAILED
+memo_ui_tests::review_undo_must_retire_stale_backup --- FAILED
+
+failures:
+
+---- memo_ui_tests::review_missing_origins_must_have_distinct_recovery_ids stdout ----
+
+thread 'memo_ui_tests::review_missing_origins_must_have_distinct_recovery_ids' (40784) panicked at src\memo_ui_tests.rs:1469:5:
+assertion `left != right` failed: distinct recovered manuscripts must not overwrite the same work copy
+  left: "untitled-1.rfnwork"
+ right: "untitled-1.rfnwork"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- memo_ui_tests::review_restored_unsaved_text_must_stay_dirty_after_undo stdout ----
+
+thread 'memo_ui_tests::review_restored_unsaved_text_must_stay_dirty_after_undo' (39160) panicked at src\memo_ui_tests.rs:1380:5:
+restored unsaved text is incorrectly marked saved after undo
+
+---- memo_ui_tests::review_undo_must_retire_stale_backup stdout ----
+
+thread 'memo_ui_tests::review_undo_must_retire_stale_backup' (19132) panicked at src\memo_ui_tests.rs:1294:5:
+Undo was reverted on restart: restored ["残す本文X"]
+
+
+failures:
+    memo_ui_tests::review_missing_origins_must_have_distinct_recovery_ids
+    memo_ui_tests::review_restored_unsaved_text_must_stay_dirty_after_undo
+    memo_ui_tests::review_undo_must_retire_stale_backup
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 800 filtered out; finished in 2.40s
+
+error: test failed, to rerun pass `--bin editor_spike`

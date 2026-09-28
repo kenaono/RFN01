@@ -1,4 +1,0 @@
-# 「windows」は言い回し.txtにもあります（大小だけの違い）。
-Windows
-DirectWrite
-クラレンシア

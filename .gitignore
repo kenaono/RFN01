@@ -20,7 +20,4 @@
 /testdata/menu-ui-*/
 
 # 手で動かしたときにできた保存先の切れ端。手で確かめる一式は testdata/ にある
-/TEST.md
-/TEST 2.md
-/TestData2
-/無題.md
+/work

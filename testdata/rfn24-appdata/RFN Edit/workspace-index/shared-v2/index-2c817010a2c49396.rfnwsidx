@@ -1,0 +1,14 @@
+RFN-EDIT-WSINDEX 1
+root: 66
+\\?\D:\Projects\10_Creation\50_Dev\10_Editor\testdata\rfn24-review
+count: 3
+entry: 18 1 1789955524 114461800 72054 0 1
+assets\picture.bmp
+entry: 9 1 1789956399 849769100 157 1 1
+Review.md
+heading: 1 0 18
+RFN24 index review
+entry: 15 1 1789956386 947722500 48 1 1
+notes\Target.md
+heading: 1 0 19
+Target heading Test

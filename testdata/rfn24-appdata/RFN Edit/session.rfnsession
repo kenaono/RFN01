@@ -1,0 +1,24 @@
+RFN-EDIT-SESSION 1
+layout: P 0
+place: 208 208 1770 1721
+focused: 0
+tree: 1
+tree-width: 260
+search-exclusions: 
+shortcut-bindings: 
+recent: \\?\D:\Projects\10_Creation\50_Dev\10_Editor\testdata\rfn24-review\Review.md
+recent: \\?\D:\Projects\10_Creation\50_Dev\10_Editor\testdata\rfn24-review\notes\Target.md
+recent: D:\Projects\10_Creation\50_Dev\10_Editor\testdata\rfn24-review\Review.md
+pane: 0 150
+tab: 0 0 1 0
+origin: \\?\D:\Projects\10_Creation\50_Dev\10_Editor\testdata\rfn24-review\Review.md
+caret: 90
+anchor: 90
+top: 2
+below: 0 200
+tab: 0 0 1 0
+origin: \\?\D:\Projects\10_Creation\50_Dev\10_Editor\testdata\rfn24-review\notes\Target.md
+caret: 45
+anchor: 45
+top: 2
+below: 0 200

@@ -1,0 +1,196 @@
+RFN-EDIT-SETTINGS 1
+terminal.shell.0: WSL | wsl.exe
+terminal.shell.1: PowerShell | powershell.exe -NoLogo
+terminal.shell.2: PowerShell 7 | pwsh.exe -NoLogo
+terminal.default: WSL
+work.autosave: 1
+count.ruby: 0
+paper.random: 0
+language: 0
+wallpaper.kind: 0
+wallpaper.path: 
+print.size: 0
+print.head: 		
+print.foot: 	{page} / {pages}	
+wallpaper.fit: 0
+wallpaper.strength: 30
+background.transparency: 0
+text.shared: 0
+layout.shared: 0
+paper.shared: 0
+ruby.marks: 1
+list.marks: -*+
+colour.recent: 
+terminal.paper: #fffefa
+left.size: 12
+left.paper: #faf9fc
+left.ink: #171321
+left.folder: 
+left.file: 
+terminal.ink: #24211e
+terminal.font: Consolas
+terminal.size: 15
+terminal.appearance.0: #fffefa	#24211e	15	0	false	false	false	0	Consolas
+terminal.appearance.1: #fffefa	#24211e	14	0	false	false	false	0	Consolas
+terminal.appearance.2: #fffefa	#24211e	15	0	false	false	false	0	Consolas
+terminal.confirm_paste: true
+terminal.confirm_close: true
+terminal.history_limit: 10000
+h.body-size: 14
+h.line-advance: 100
+h.char-advance: 0
+h.page-margin: 12
+h.h1: 200
+h.h2: 160
+h.h3: 130
+h.h4: 115
+h.h5: 105
+h.h6: 100
+h.wrap-mode: 2
+h.wrap-chars: 40
+h.line-numbers: 0
+h.ruby-size: 50
+h.ruby-offset: 0
+h.upright-digits: 0
+h.bullet-mark-hyphen: 0
+h.bullet-mark-star: 0
+h.bullet-mark-plus: 0
+h.body-bold: 0
+h.body-italic: 0
+h.body-strike: 0
+h.body-background: 0
+h.body-rule: 0
+h.h1-bold: 0
+h.h1-italic: 0
+h.h1-strike: 0
+h.h1-background: 0
+h.h1-rule: 0
+h.h2-bold: 0
+h.h2-italic: 0
+h.h2-strike: 0
+h.h2-background: 0
+h.h2-rule: 0
+h.h3-bold: 0
+h.h3-italic: 0
+h.h3-strike: 0
+h.h3-background: 0
+h.h3-rule: 0
+h.h4-bold: 0
+h.h4-italic: 0
+h.h4-strike: 0
+h.h4-background: 0
+h.h4-rule: 0
+h.h5-bold: 0
+h.h5-italic: 0
+h.h5-strike: 0
+h.h5-background: 0
+h.h5-rule: 0
+h.h6-bold: 0
+h.h6-italic: 0
+h.h6-strike: 0
+h.h6-background: 0
+h.h6-rule: 0
+h.whitespace: 0
+h.upright-marks: 0
+h.ink: #24211e
+h.ink-h1: #24211e
+h.ink-h2: #24211e
+h.ink-h3: #24211e
+h.ink-h4: #24211e
+h.ink-h5: #24211e
+h.ink-h6: #24211e
+h.paper: #fffefa
+h.background-body: #fffefa
+h.background-h1: #fffefa
+h.background-h2: #fffefa
+h.background-h3: #fffefa
+h.background-h4: #fffefa
+h.background-h5: #fffefa
+h.background-h6: #fffefa
+h.font-body: Yu Mincho
+h.font-h1: Yu Mincho
+h.font-h2: Yu Mincho
+h.font-h3: Yu Mincho
+h.font-h4: Yu Mincho
+h.font-h5: Yu Mincho
+h.font-h6: Yu Mincho
+h.font-code: Consolas
+v.body-size: 14
+v.line-advance: 100
+v.char-advance: 0
+v.page-margin: 12
+v.h1: 200
+v.h2: 160
+v.h3: 130
+v.h4: 115
+v.h5: 105
+v.h6: 100
+v.wrap-mode: 2
+v.wrap-chars: 40
+v.line-numbers: 0
+v.ruby-size: 50
+v.ruby-offset: 0
+v.upright-digits: 0
+v.bullet-mark-hyphen: 0
+v.bullet-mark-star: 0
+v.bullet-mark-plus: 0
+v.body-bold: 0
+v.body-italic: 0
+v.body-strike: 0
+v.body-background: 0
+v.body-rule: 0
+v.h1-bold: 0
+v.h1-italic: 0
+v.h1-strike: 0
+v.h1-background: 0
+v.h1-rule: 0
+v.h2-bold: 0
+v.h2-italic: 0
+v.h2-strike: 0
+v.h2-background: 0
+v.h2-rule: 0
+v.h3-bold: 0
+v.h3-italic: 0
+v.h3-strike: 0
+v.h3-background: 0
+v.h3-rule: 0
+v.h4-bold: 0
+v.h4-italic: 0
+v.h4-strike: 0
+v.h4-background: 0
+v.h4-rule: 0
+v.h5-bold: 0
+v.h5-italic: 0
+v.h5-strike: 0
+v.h5-background: 0
+v.h5-rule: 0
+v.h6-bold: 0
+v.h6-italic: 0
+v.h6-strike: 0
+v.h6-background: 0
+v.h6-rule: 0
+v.whitespace: 0
+v.upright-marks: 0
+v.ink: #24211e
+v.ink-h1: #24211e
+v.ink-h2: #24211e
+v.ink-h3: #24211e
+v.ink-h4: #24211e
+v.ink-h5: #24211e
+v.ink-h6: #24211e
+v.paper: #fdfbf4
+v.background-body: #fdfbf4
+v.background-h1: #fdfbf4
+v.background-h2: #fdfbf4
+v.background-h3: #fdfbf4
+v.background-h4: #fdfbf4
+v.background-h5: #fdfbf4
+v.background-h6: #fdfbf4
+v.font-body: Yu Mincho
+v.font-h1: Yu Mincho
+v.font-h2: Yu Mincho
+v.font-h3: Yu Mincho
+v.font-h4: Yu Mincho
+v.font-h5: Yu Mincho
+v.font-h6: Yu Mincho
+v.font-code: Consolas
