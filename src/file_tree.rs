@@ -414,6 +414,84 @@ pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
+/// Why a move stopped (RFN01-64).
+pub enum Stopped {
+    /// What was in the way could not be cleared, so nothing moved.
+    Kept,
+    /// The disk refused; nothing moved.
+    Failed(io::Error),
+}
+
+/// Put `from` at `to`, on the same drive or another one (RFN01-64).
+///
+/// `clear`, when there is one, takes away what is already at `to` — the
+/// writer said it may go. Returns whether `from` was left behind: on another
+/// drive the move is a copy, and a copy that is all there with its source
+/// still standing is not a failed move.
+///
+/// **On another drive, nothing is taken away until the copy is whole.**
+/// `fs::rename` cannot cross drives, so the thing is copied beside where it is
+/// going under a name no one would pick, and only then is what was in the way
+/// cleared, the copy named, and the source removed. Stopping anywhere before
+/// the last step leaves the source and what was in the way as they were.
+/// Clearing first, as the same drive can afford to, was how a replace across
+/// drives deleted what was there and then failed to put anything in its place.
+pub fn carry(
+    from: &Path,
+    to: &Path,
+    across: bool,
+    clear: Option<&mut dyn FnMut(&Path) -> bool>,
+) -> Result<bool, Stopped> {
+    if !across {
+        if let Some(clear) = clear
+            && !clear(to)
+        {
+            return Err(Stopped::Kept);
+        }
+        return rename(from, to).map(|()| false).map_err(Stopped::Failed);
+    }
+    let Some(into) = to.parent() else {
+        return Err(Stopped::Failed(io::Error::from(
+            io::ErrorKind::InvalidInput,
+        )));
+    };
+    let name = to.file_name().unwrap_or_default().to_string_lossy();
+    let staging = into.join(unique_name(&names_in(into), &format!(".{name}.moving")));
+    let folder = from.is_dir();
+    let copied = if folder {
+        copy_folder(from, &staging)
+    } else {
+        fs::copy(from, &staging).map(|_| ())
+    };
+    let discard = |staging: &Path| {
+        let _ = if folder {
+            fs::remove_dir_all(staging)
+        } else {
+            fs::remove_file(staging)
+        };
+    };
+    if let Err(error) = copied {
+        discard(&staging);
+        return Err(Stopped::Failed(error));
+    }
+    if let Some(clear) = clear
+        && !clear(to)
+    {
+        discard(&staging);
+        return Err(Stopped::Kept);
+    }
+    if let Err(error) = rename(&staging, to) {
+        discard(&staging);
+        return Err(Stopped::Failed(error));
+    }
+    let removed = if folder {
+        fs::remove_dir_all(from)
+    } else {
+        fs::remove_file(from)
+    };
+    Ok(removed.is_err())
+}
+
 /// Copy something beside itself under a name nothing else has (要件 5.2).
 ///
 /// Returns where the copy landed, so the tree can put the writer on it.
@@ -1020,5 +1098,89 @@ mod tests {
     fn rows_never_marks_anything_as_a_root() {
         let rows = rows(Path::new("/work"), &expanded(&["/work/章"]), &imagined);
         assert!(rows.iter().all(|row| !row.is_root));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rfn-carry-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("元")).unwrap();
+        fs::create_dir_all(dir.join("先")).unwrap();
+        dir
+    }
+
+    fn names(folder: &Path) -> Vec<String> {
+        let mut held = names_in(folder);
+        held.sort();
+        held
+    }
+
+    /// RFN01-64: across drives a replace is a copy, then the clearing, then
+    /// the source going — and it ends where a same-drive replace ends.
+    #[test]
+    fn a_replace_across_drives_ends_with_one_file_where_it_went() {
+        let dir = scratch("replace");
+        let from = dir.join("元").join("原稿.md");
+        let to = dir.join("先").join("原稿.md");
+        fs::write(&from, "新しい").unwrap();
+        fs::write(&to, "古い").unwrap();
+        let mut cleared = Vec::new();
+        let mut clear = |path: &Path| {
+            // The copy is already whole when what was there is taken away.
+            assert!(
+                names_in(path.parent().unwrap())
+                    .iter()
+                    .any(|n| n.ends_with(".moving"))
+            );
+            cleared.push(path.to_path_buf());
+            fs::remove_file(path).is_ok()
+        };
+
+        let left = carry(&from, &to, true, Some(&mut clear)).ok();
+
+        assert_eq!(left, Some(false));
+        assert_eq!(cleared, vec![to.clone()]);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "新しい");
+        assert!(!from.exists());
+        assert_eq!(names(&dir.join("先")), vec!["原稿.md"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// RFN01-64: a refused clearing leaves both files, and no copy behind.
+    #[test]
+    fn a_refused_clearing_across_drives_leaves_both() {
+        let dir = scratch("refused");
+        let from = dir.join("元").join("原稿.md");
+        let to = dir.join("先").join("原稿.md");
+        fs::write(&from, "新しい").unwrap();
+        fs::write(&to, "古い").unwrap();
+        let mut clear = |_: &Path| false;
+
+        assert!(matches!(
+            carry(&from, &to, true, Some(&mut clear)),
+            Err(Stopped::Kept)
+        ));
+
+        assert_eq!(fs::read_to_string(&from).unwrap(), "新しい");
+        assert_eq!(fs::read_to_string(&to).unwrap(), "古い");
+        assert_eq!(names(&dir.join("先")), vec!["原稿.md"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// RFN01-64: a folder goes across with everything under it.
+    #[test]
+    fn a_folder_goes_across_drives_with_what_is_under_it() {
+        let dir = scratch("folder");
+        let from = dir.join("元").join("章");
+        fs::create_dir_all(from.join("下書き")).unwrap();
+        fs::write(from.join("下書き").join("断片.md"), "断片").unwrap();
+        let to = dir.join("先").join("章");
+
+        assert!(matches!(carry(&from, &to, true, None), Ok(false)));
+
+        let fragment = to.join("下書き").join("断片.md");
+        assert_eq!(fs::read_to_string(fragment).unwrap(), "断片");
+        assert!(!from.exists());
+        assert_eq!(names(&dir.join("先")), vec!["章"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

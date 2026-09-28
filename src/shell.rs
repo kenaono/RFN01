@@ -11,7 +11,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, Prefix};
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
 use windows::Win32::UI::Shell::{
     FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, ILCreateFromPathW, ILFree,
     SHFILEOPSTRUCTW, SHFileOperationW, SHOpenFolderAndSelectItems,
@@ -91,6 +91,28 @@ pub fn has_recycle_bin(path: &Path) -> bool {
     unsafe { GetDriveTypeW(&root) == DRIVE_FIXED }
 }
 
+/// Whether `a` and `b` are on one volume, so a rename can carry one to the
+/// other (RFN01-64).
+///
+/// **`false` when it cannot tell.** The answer picks between a rename and a
+/// copy, and a copy is right on one volume too — only slower — while a rename
+/// across two cannot happen at all. Both paths have to exist.
+pub fn same_volume(a: &Path, b: &Path) -> bool {
+    let volume = |path: &Path| {
+        let wide = HSTRING::from(crate::backup::plain(path).as_os_str());
+        let mut out = [0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `out` is
+        // written only within its length.
+        unsafe { GetVolumePathNameW(&wide, &mut out) }.ok()?;
+        let end = out.iter().position(|&c| c == 0).unwrap_or(out.len());
+        Some(String::from_utf16_lossy(&out[..end]).to_lowercase())
+    };
+    match (volume(a), volume(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Show something in Explorer, with it selected (要件 5.2).
 ///
 /// **The item's own list, not its folder's.** Given one item and no selection
@@ -114,6 +136,7 @@ pub fn reveal(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// RFN01-64: a path the way a Workspace row holds it, `\\?\` and all,
     /// still reaches the bin.
@@ -141,5 +164,19 @@ mod tests {
         assert!(!has_recycle_bin(Path::new(r"\\server\share\原稿.md")));
         assert!(!has_recycle_bin(Path::new(r"\\?\UNC\server\share\原稿.md")));
         assert!(!has_recycle_bin(Path::new("原稿.md")));
+    }
+
+    /// RFN01-64: one drive is one volume however it is written; a share is
+    /// another one.
+    #[test]
+    fn a_share_is_not_the_drive_it_is_on() {
+        let temp = std::env::temp_dir();
+        assert!(same_volume(&temp, &temp.canonicalize().unwrap()));
+        let text = temp.to_string_lossy().into_owned();
+        let letter = &text[..1];
+        let shared = PathBuf::from(format!(r"\\localhost\{letter}$\{}", &text[3..]));
+        if shared.exists() {
+            assert!(!same_volume(&temp, &shared));
+        }
     }
 }

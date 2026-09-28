@@ -10997,30 +10997,46 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
 /// **Overwriting is deleting**, and 要件 5.2 says what deleting means here: the
 /// bin, never the void. The move follows only if the bin took it, so a refusal
 /// leaves both the writer's file and the one that was there.
+///
+/// Across drives the bin comes after the copy instead (RFN01-64, see
+/// `file_tree::carry`): what was there goes only once what replaces it is
+/// whole.
 fn replace_on_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     let owner = ime::window_handle(window);
-    if !shell::recycle(owner, to) {
-        let told = if shell::has_recycle_bin(to) {
-            pick(
-                "ごみ箱へ移動できませんでした",
-                "Could not move it to the Recycle Bin",
-            )
-        } else {
-            pick("削除できませんでした", "Could not delete it")
-        };
-        window.tell(told.into());
-        return;
+    let mut clear = |path: &Path| shell::recycle(owner, path);
+    match carry_entry(window, live, from, to, Some(&mut clear)) {
+        Err(file_tree::Stopped::Kept) => {
+            let told = if shell::has_recycle_bin(to) {
+                pick(
+                    "ごみ箱へ移動できませんでした",
+                    "Could not move it to the Recycle Bin",
+                )
+            } else {
+                pick("削除できませんでした", "Could not delete it")
+            };
+            window.tell(told.into());
+        }
+        Err(file_tree::Stopped::Failed(error)) => cannot_move(window, &error),
+        Ok(()) => after_move(window, live, from, to),
     }
-    finish_move(window, live, from, to);
 }
 
 /// Carry out a move that has nothing left to ask (要件 5.2).
 fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     if let Err(error) = move_entry(window, live, from, to) {
-        let told = say!("移動できません: {error}", "Cannot move: {error}");
-        window.tell(told.into());
+        cannot_move(window, &error);
         return;
     }
+    after_move(window, live, from, to);
+}
+
+fn cannot_move(window: &AppWindow, error: &dyn std::fmt::Display) {
+    let told = say!("移動できません: {error}", "Cannot move: {error}");
+    window.tell(told.into());
+}
+
+/// What follows a move into a folder, however it was made.
+fn after_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     // The folder it went into is opened, or what was just carried there would
     // not be on screen at all — the same as a file that has just been made.
     if let Some(into) = to.parent() {
@@ -11041,14 +11057,44 @@ fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 /// not the name. Drawing the tree again is left to the caller, because the one
 /// that carried something into a folder has that folder to open first.
 fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::io::Result<()> {
+    match carry_entry(window, live, from, to, None) {
+        Err(file_tree::Stopped::Failed(error)) => Err(error),
+        // Nothing was asked to be cleared, so nothing could refuse.
+        Err(file_tree::Stopped::Kept) | Ok(()) => Ok(()),
+    }
+}
+
+/// [`move_entry`], with what is at `to` taken away first by `clear`.
+///
+/// **Across drives it is a copy** (RFN01-64): `fs::rename` cannot leave the
+/// volume it is on, and a network folder or another drive in the Workspace is
+/// another volume. A copy that is all there with its source still standing is
+/// a move that happened, and is followed as one — the writer is only told the
+/// original is still there.
+fn carry_entry(
+    window: &AppWindow,
+    live: &Live,
+    from: &Path,
+    to: &Path,
+    clear: Option<&mut dyn FnMut(&Path) -> bool>,
+) -> Result<(), file_tree::Stopped> {
     if live.folder.borrow().link_move_job.is_some() {
-        return Err(std::io::Error::other(pick(
+        return Err(file_tree::Stopped::Failed(std::io::Error::other(pick(
             "リンク更新中です。完了後に移動してください",
             "Link update in progress. Try moving again after it finishes.",
-        )));
+        ))));
     }
     let before = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
-    file_tree::rename(from, to)?;
+    let into = to.parent().unwrap_or(to);
+    let across = !shell::same_volume(from, into);
+    if file_tree::carry(from, to, across, clear)? {
+        let told = say!(
+            "「{}」を移動先へコピーしましたが、元の場所から消せませんでした",
+            "Copied \"{}\" to where it was going, but could not remove the original",
+            entry_name(to)
+        );
+        window.tell(told.into());
+    }
     documents_follow(window, live, from, to);
     // RFN01-61: Editorの中での名前変更・移動には、バックアップも付いていく。
     saving::backups_follow(window, live, from, to);
