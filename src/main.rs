@@ -71,6 +71,9 @@ mod print_ui_tests;
 mod print_view;
 mod pty;
 mod quick_draft;
+mod read_aloud;
+#[cfg(test)]
+mod read_aloud_tests;
 #[cfg(test)]
 mod read_only_ui_tests;
 #[cfg(test)]
@@ -2416,6 +2419,24 @@ fn main() -> Result<(), slint::PlatformError> {
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
     wiring::wire_word_modes(&window, &live);
+    // RFN01-62: 読み上げ。鳴り終わりの知らせと、設定の声の一覧。
+    read_aloud::install(&window, &live);
+    let weak = window.as_weak();
+    let speech_cache = render_cache.clone();
+    window.on_speech_voice_chosen(move |index| {
+        if let Some(window) = weak.upgrade() {
+            read_aloud::voice_chosen(&window, index);
+            save_settings(&window, &speech_cache);
+        }
+    });
+    let weak = window.as_weak();
+    let speech_cache = render_cache.clone();
+    window.on_speech_rate_chosen(move |index| {
+        if let Some(window) = weak.upgrade() {
+            window.set_speech_rate(index.clamp(0, read_aloud::RATES.len() as i32 - 1));
+            save_settings(&window, &speech_cache);
+        }
+    });
     // RFN01-63: 綴りの確認。書いたあとの数え直しと、右クリックの行。
     spelling_ui::install(&window, &live);
     let weak = window.as_weak();
@@ -3079,6 +3100,8 @@ fn main() -> Result<(), slint::PlatformError> {
     i18n::apply(window.get_language());
     // TABの色は全体の紙も見る（書き手の判断 2026-09-15）。最初に並べたときは設定を読む前だった。
     publish_tabs(&window, &live);
+    // RFN01-62: 設定ファイルが無い初回も、声の一覧は出す（読んだときは`apply_settings`が出した）。
+    read_aloud::publish_voices(&window);
     // 要件 7.9: **設定を読んだあとで、名指されたファイルを読む。**設定は場所と
     // 色しか覚えていないので、語はここで初めて手に入る。
     open_word_modes(&window, &live);
@@ -4121,6 +4144,8 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     let outcome = window.run();
     terminal_panels::stop_all(&live);
+    // RFN01-62: 読み上げ中に閉じても、鳴らしている口を閉じてから終える。
+    read_aloud::stop(&window, &live);
     // 要件 8.5: the arrangement as the writer left it, including a boundary
     // moved without anything else happening. The views are taken out of the
     // panes first, because a caret and a scroll live there until they are.
@@ -12619,6 +12644,10 @@ fn reset_all_settings(window: &AppWindow, live: &Live) {
     // RFN01-61: 残す数は既定へ戻す。**保存先は戻さない**——保存先を替えるのはバックアップを
     // 移すことで、それは Settings の「Choose…」「Default」だけが行う。
     window.set_backup_keep(backup::DEFAULT_KEEP as i32);
+    // RFN01-62: 読み上げはWindowsの既定の声、1.0×へ。
+    window.set_speech_voice_id(SharedString::new());
+    window.set_speech_rate(read_aloud::DEFAULT_RATE);
+    read_aloud::publish_voices(window);
     save_settings(window, &live.cache);
     window.invoke_terminal_reset();
     window.invoke_left_reset();
@@ -14834,6 +14863,9 @@ const LAYOUT_SHARED_SETTING: &str = "layout.shared";
 const PAPER_RANDOM_SETTING: &str = "paper.random";
 /// 追加要件 2026-09-15（書き手）: 表示の言語。0 システムに合わせる、1 日本語、2 English。
 const LANGUAGE_SETTING: &str = "language";
+/// RFN01-62: 読み上げの声（WindowsのId、空なら既定）と速さ（`read_aloud::RATES`の番号）。
+const SPEECH_VOICE_SETTING: &str = "speech.voice";
+const SPEECH_RATE_SETTING: &str = "speech.rate";
 /// 追加要件 2026-09-15（書き手）: 背景の壁紙。種類（0 なし・1 Windows・2 画像）、画像のパス、
 /// 置き方（0 タイル・1 縦・2 横）、濃さ（%）。
 const WALL_KIND_SETTING: &str = "wallpaper.kind";
@@ -15308,6 +15340,8 @@ fn publish_word_mode_of(window: &AppWindow, live: &Live) {
     });
     // RFN01-63: 綴りの誤りの数も、前に出ている文書のもの。
     spelling_ui::publish(window, live);
+    // RFN01-62: 読んでいる文書が前から外れたら、読み上げを止める。
+    read_aloud::check_front(window, live);
 }
 
 /// 足す語群に与える色（要件 7.9）。
@@ -15793,6 +15827,14 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_language().to_string(),
     ));
     values.push((
+        SPEECH_VOICE_SETTING.to_owned(),
+        window.get_speech_voice_id().to_string(),
+    ));
+    values.push((
+        SPEECH_RATE_SETTING.to_owned(),
+        window.get_speech_rate().to_string(),
+    ));
+    values.push((
         WALL_KIND_SETTING.to_owned(),
         window.get_wall_kind().to_string(),
     ));
@@ -16030,6 +16072,21 @@ fn apply_settings(
             window.set_language(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
             continue;
         }
+        if written == SPEECH_VOICE_SETTING {
+            window.set_speech_voice_id(value.trim().into());
+            continue;
+        }
+        if written == SPEECH_RATE_SETTING {
+            let last = read_aloud::RATES.len() as i32 - 1;
+            window.set_speech_rate(
+                value
+                    .trim()
+                    .parse::<i32>()
+                    .unwrap_or(read_aloud::DEFAULT_RATE)
+                    .clamp(0, last),
+            );
+            continue;
+        }
         if written == WALL_KIND_SETTING {
             window.set_wall_kind(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
             continue;
@@ -16250,6 +16307,8 @@ fn apply_settings(
             }
         }
     }
+    // RFN01-62: 声は**Idで持つ**ので、一覧のどれに当たるかは読み込んでから決める。
+    read_aloud::publish_voices(window);
 }
 
 /// Put every sheet back to what a fresh install has (要件 9).
@@ -17973,7 +18032,9 @@ fn lay_out_pane(
         find_showing: window.get_find_open() && window.get_find_pane() == id.index(),
         needle: screen.find_needle.to_string(),
         rules: find_rules(window, id),
-        mark: bookmark_mark_in(window, cache, document, id),
+        // RFN01-62: 読み上げている段落は、ブックマークの節と同じ帯で塗る。
+        mark: read_aloud::mark_in(id, document)
+            .or_else(|| bookmark_mark_in(window, cache, document, id)),
     };
     let pane = cache.pane(id);
     match editor_render::layout(

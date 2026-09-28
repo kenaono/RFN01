@@ -286,6 +286,13 @@ const RUN_ACTIONS: &[MenuAction] = &[
         "Shift+F8",
         ShortcutAction::SpellingStep(true)
     ),
+    // RFN01-62: 読み上げ。**既定なし**で、書き手が割り当てる（書き手と合意 2026-09-28）。
+    // idは末尾へ足す。
+    menu_action!(
+        "読み上げ・停止",
+        "Read Aloud / Stop",
+        ShortcutAction::ReadAloud
+    ),
 ];
 /// ファイルの分類に並べる、メニューから来た操作。
 ///

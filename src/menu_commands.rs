@@ -68,6 +68,8 @@ enum Command {
     Spelling,
     /// RFN01-63: 次（`false`）／前（`true`）のスペルミスへ。
     SpellingStep(bool),
+    /// RFN01-62: 読み上げを始める／止める（キャレットの位置から）。
+    ReadAloud,
     Terminal(i32),
     Panel(i32),
     Shell(i32),
@@ -94,6 +96,8 @@ pub enum ShortcutAction {
     Renumber,
     /// RFN01-63: 次（`false`）／前（`true`）のスペルミスへ。
     SpellingStep(bool),
+    /// RFN01-62: 読み上げを始める／止める。
+    ReadAloud,
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -2002,6 +2006,24 @@ fn build(
                 Command::SpellingStep(true),
                 main && checking
             );
+            // RFN01-62（書き手と合意 2026-09-28）: 読み上げ。読んでいるあいだは同じ場所が
+            // 止める行になる。**日本語の声が無ければ押せない。**
+            root.sep()?;
+            if crate::read_aloud::reading() {
+                add!(
+                    "読み上げを停止",
+                    "Stop Reading Aloud",
+                    Command::ReadAloud,
+                    true
+                );
+            } else {
+                add!(
+                    "読み上げ",
+                    "Read Aloud",
+                    Command::ReadAloud,
+                    main && window.get_speech_available()
+                );
+            }
             if terminal {
                 root.sep()?;
                 add!("出力を保存…", "Save Output…", Command::Terminal(7), true);
@@ -2340,6 +2362,7 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::NumberedList => Command::List(1, -1),
         ShortcutAction::Renumber => Command::List(2, -1),
         ShortcutAction::SpellingStep(back) => Command::SpellingStep(back),
+        ShortcutAction::ReadAloud => Command::ReadAloud,
     };
     execute(window, live, &target, command);
 }
@@ -2520,6 +2543,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Compare(_) => window.invoke_compare_files_requested(),
         Command::Spelling => crate::spelling_ui::toggle(window, live, t.id),
         Command::SpellingStep(back) => crate::spelling_ui::step(window, live, t.id, back),
+        Command::ReadAloud => crate::read_aloud::toggle(window, live, t.id),
         Command::Terminal(n) => terminal_workflow::action(window, live, t.parent, t.spot, n),
         Command::Panel(n) => terminal_panels::action(window, live, t.parent, n, 0),
         Command::Shell(n) => {
@@ -2590,6 +2614,7 @@ fn shortcut(window: &AppWindow, command: &Command, field: bool) -> String {
         Command::SpellingStep(back) => {
             return shortcuts::action_label(window, ShortcutAction::SpellingStep(*back));
         }
+        Command::ReadAloud => return shortcuts::action_label(window, ShortcutAction::ReadAloud),
         _ => return String::new(),
     };
     shortcuts::label(window, id)

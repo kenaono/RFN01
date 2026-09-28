@@ -3061,6 +3061,123 @@ pub fn plain_body_text(source: &str, ranges: &[(usize, usize)]) -> String {
         .join("\n")
 }
 
+/// 読み上げる段落の1つ（RFN01-62）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spoken {
+    /// 段落のソースの範囲（改行は含まない）。読んでいるあいだ、ここを塗る。
+    pub range: std::ops::Range<usize>,
+    /// 声にする文。
+    pub text: String,
+}
+
+/// 読み上げる段落（RFN01-62、書き手と合意 2026-09-28）。
+///
+/// **段落は改行から改行まで**——画面の折り返しに左右されない。空の段落は飛ばす。
+/// `from`（キャレット）のある段落はそこから読む。
+///
+/// **読むのは整形表示に出る字**なので、Markdownの記号と注記は整形表示と同じ判定
+/// （[`PreviewDocument`]）で消える。そのうえで：
+/// - **ルビは読みのほうを読む**（`｜漢字《かんじ》`は「かんじ」）。親文字は読まない。
+///   書き手の意図した読みで聞けることが、この編集器で読み上げる理由である。
+/// - コード・表・フロントマター・コメント・左の注・行頭の印は読まない。
+/// - URLと、句読点でない記号（`#`・`*`・`★`など）は読まない（[`speakable`]）。
+pub fn spoken_paragraphs(source: &str, from: usize) -> Vec<Spoken> {
+    let mut preview = PreviewDocument::default();
+    preview.refresh(source, None, Reading::all());
+    let mut out = Vec::new();
+    for (index, line) in preview.lines.iter().enumerate() {
+        let line_start = preview.source_starts[index];
+        let line_end = line_start + line.source.trim_end_matches(['\n', '\r']).len();
+        if line_end < from
+            || matches!(
+                line.style.kind,
+                LineKind::Fence
+                    | LineKind::Code
+                    | LineKind::Rule
+                    | LineKind::TableRow
+                    | LineKind::TableRule
+                    | LineKind::Image
+                    | LineKind::Note
+                    | LineKind::PageBreak
+                    | LineKind::FrontMatter
+            )
+        {
+            continue;
+        }
+        // ルビの親文字（読みの箱の直前）。
+        let bases: Vec<std::ops::Range<u32>> = line
+            .marks
+            .iter()
+            .filter_map(|mark| match mark.ornament {
+                Some(Ornament::Ruby { base_utf16 }) => {
+                    Some(mark.utf16_start.saturating_sub(base_utf16)..mark.utf16_start)
+                }
+                _ => None,
+            })
+            .collect();
+        let mut text = String::new();
+        let mut utf16 = 0_u32;
+        for ch in line.visible.chars() {
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+            let here = utf16;
+            utf16 += ch.len_utf16() as u32;
+            let position = line_start + line.source_byte[here as usize] as usize;
+            if position < from
+                || line.marker.is_some_and(|marker| here < marker.utf16_len)
+                || bases.iter().any(|base| base.contains(&here))
+            {
+                continue;
+            }
+            let unread = line.marks.iter().any(|mark| {
+                (mark.utf16_start..mark.utf16_start + mark.utf16_len).contains(&here)
+                    && (mark.marks.code
+                        || mark.marks.comment
+                        || matches!(mark.ornament, Some(Ornament::LeftNote { .. })))
+            });
+            if !unread {
+                text.push(ch);
+            }
+        }
+        let text = speakable(&text);
+        if !text.is_empty() {
+            out.push(Spoken {
+                range: line_start..line_end,
+                text,
+            });
+        }
+    }
+    out
+}
+
+/// 声にしない字を外す（RFN01-62）。URLと、句読点でない記号。空白は1つに詰める。
+///
+/// **句読点は残す**——読点や句点は音声合成が間として読むので、外すと文が続いて
+/// 聞こえる。
+pub fn speakable(text: &str) -> String {
+    const KEPT: &str = "、。，．,.!?！？「」『』（）()〈〉【】―…‥〜ー・:：;；'’\"“”-";
+    let mut out = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        if lower.contains("://") || lower.starts_with("www.") || lower.starts_with("mailto:") {
+            continue;
+        }
+        let kept: String = word
+            .chars()
+            .filter(|c| c.is_alphanumeric() || KEPT.contains(*c))
+            .collect();
+        if kept.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&kept);
+    }
+    out
+}
+
 /// 同じことを、**記法を読むかどうかを言われて**する（要件 E9）。
 #[cfg(test)]
 pub fn visible_markdown_text_as(source: &str, reading: Reading) -> String {
@@ -10332,5 +10449,25 @@ mod tests {
             Reading::all(),
         );
         (visible, marks)
+    }
+    #[test]
+    fn spoken_paragraphs_read_what_is_shown_and_ruby_by_its_reading() {
+        let source = "---\ntitle: 原稿\n---\n# 第一章\n\n｜漢字《かんじ》を**読む**。［＃「読む」に傍点］\n\n- 項目 ★ https://example.com/x\n```\ncode here\n```\n| a | b |\n| --- | --- |\n[表示](https://example.com) と `code` と %%コメント%%。\n";
+        let spoken = spoken_paragraphs(source, 0);
+        let texts: Vec<&str> = spoken.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["第一章", "かんじを読む。", "項目", "表示 と と 。"]);
+        // 範囲は段落のソース（改行を含まない）。
+        let first = &spoken[1];
+        assert_eq!(
+            &source[first.range.clone()],
+            "｜漢字《かんじ》を**読む**。［＃「読む」に傍点］"
+        );
+        // キャレットの段落はそこから、前の段落は読まない。
+        let from = source.find("を**読む").unwrap();
+        let texts: Vec<String> = spoken_paragraphs(source, from)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("を読む。"));
     }
 }

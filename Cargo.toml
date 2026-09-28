@@ -69,6 +69,13 @@ windows = { version = "0.62.2", features = [
     # 同じ原稿が道具によって違う字になる——`MultiByteToWideChar`と
     # `WideCharToMultiByte`だけをここから使う。
     "Win32_Globalization",
+    # RFN01-62: 読み上げ。声を作るのは`SpeechSynthesis`、鳴らすのは`Playback`と`Core`、
+    # 合成した音は`Storage_Streams`の流れ、声の一覧は`Foundation_Collections`で返る。
+    "Media_SpeechSynthesis",
+    "Media_Playback",
+    "Media_Core",
+    "Storage_Streams",
+    "Foundation_Collections",
     # The colour dialog, for 要件 9's text and paper colours. Windows draws it,
     # so a colour is picked the way it is picked in every other Windows program.
     "Win32_UI_Controls_Dialogs",
@@ -106,6 +113,10 @@ windows = { version = "0.62.2", features = [
 # there would be two `windows_core` crates and the COM traits of one would not
 # satisfy the other.
 windows-core = "0.62.2"
+# RFN01-62: 読み上げ。WinRTの合成は`IAsyncOperation`を返し、その型は`windows`から
+# 再公開されていない。**`windows`が既に連れてきている版**を直に指すので、増える
+# パッケージは無く`--offline`も成立する。
+windows-future = "0.3.2"
 
 [build-dependencies]
 slint-build = "1.17.1"
