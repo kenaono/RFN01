@@ -117,7 +117,7 @@ const CATEGORIES: &[i32] = &[
 ];
 /// Keys の面の分類（書き手の求め 2026-09-15：タブで切り替えず、全部を並べて
 /// 分類ごとに畳めるように）。番号は[`CATEGORIES`]の値。
-const CATEGORY_NAMES: [(&str, &str); 9] = [
+const CATEGORY_NAMES: [(&str, &str); 10] = [
     ("本文の操作", "Text Actions"),
     ("基本編集", "Basic Editing"),
     ("Terminal", "Terminal"),
@@ -127,8 +127,9 @@ const CATEGORY_NAMES: [(&str, &str); 9] = [
     ("Quick Draft", "Quick Draft"),
     ("ファイル", "File"),
     ("挿入", "Insert"),
+    ("実行", "Run"),
 ];
-const CATEGORY_NOTES: [(&str, &str); 9] = [
+const CATEGORY_NOTES: [(&str, &str); 10] = [
     (
         "本文にフォーカスがあり、IME変換中でないときに有効です。",
         "Active when the text has focus and no IME conversion is in progress.",
@@ -164,6 +165,10 @@ const CATEGORY_NOTES: [(&str, &str); 9] = [
     (
         "メニューの「挿入」と同じ操作です。選んだ字が要る形は、選んでいないときは何もしません。",
         "The same actions as the Insert menu. A form that needs a picked word does nothing when nothing is picked.",
+    ),
+    (
+        "メニューの「実行」と同じ操作です。スペルミスへ移るのは、スペルチェック中だけです。",
+        "The same actions as the Run menu. Moving to a spelling error works only during a spell check.",
     ),
 ];
 /// 変えられないキー。**同じ一覧に並べる**——「このキーは何か」を探す書き手に
@@ -263,6 +268,25 @@ macro_rules! menu_action {
 /// メニューから来た操作の分類。`CATEGORY_NAMES`の番号。
 const FILE_CATEGORY: i32 = 7;
 const INSERT_CATEGORY: i32 = 8;
+const RUN_CATEGORY: i32 = 9;
+/// 実行の分類に並べる、メニューから来た操作（RFN01-63）。
+///
+/// **スペルミスへ移る操作は既定を持つ**（F8／Shift+F8、書き手と合意 2026-09-28）。
+/// F3（検索の次の一致）と共用すると、どちらに効くかの決まりが要るので分けた。
+const RUN_ACTIONS: &[MenuAction] = &[
+    menu_action!(
+        "次のスペルミス",
+        "Next Spelling Error",
+        "F8",
+        ShortcutAction::SpellingStep(false)
+    ),
+    menu_action!(
+        "前のスペルミス",
+        "Previous Spelling Error",
+        "Shift+F8",
+        ShortcutAction::SpellingStep(true)
+    ),
+];
 /// ファイルの分類に並べる、メニューから来た操作。
 ///
 /// **新規文書だけは既定を持つ**（`Ctrl+N`、書き手の合意 2026-09-21）——Windowsの
@@ -386,7 +410,7 @@ const INSERT_ACTIONS: &[MenuAction] = &[
 ];
 /// 変更できる操作の数——既存の46枠と、メニューから来た分。
 fn count() -> usize {
-    NAMES.len() + FILE_ACTIONS.len() + INSERT_ACTIONS.len()
+    NAMES.len() + FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len()
 }
 /// idがメニューから来たものなら、その1つと分類の番号。
 fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
@@ -398,6 +422,11 @@ fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
             INSERT_ACTIONS
                 .get(index - FILE_ACTIONS.len())
                 .map(|action| (action, INSERT_CATEGORY))
+        })
+        .or_else(|| {
+            RUN_ACTIONS
+                .get(index - FILE_ACTIONS.len() - INSERT_ACTIONS.len())
+                .map(|action| (action, RUN_CATEGORY))
         })
 }
 fn name_at(id: usize) -> (&'static str, &'static str) {
@@ -623,6 +652,13 @@ pub(crate) fn label(app: &AppWindow, id: usize) -> String {
     bindings(&app.get_shortcut_bindings())
         .get(id)
         .cloned()
+        .unwrap_or_default()
+}
+/// メニューから来た操作に、いま割り当てているキー（メニューの行に併記する）。
+pub(crate) fn action_label(app: &AppWindow, action: ShortcutAction) -> String {
+    (NAMES.len()..count())
+        .find(|id| menu_at(*id).is_some_and(|(held, _)| held.action == action))
+        .map(|id| label(app, id))
         .unwrap_or_default()
 }
 // -1 is unhandled; -2 consumes a removed default so legacy handlers cannot run it.
@@ -1005,6 +1041,18 @@ mod tests {
         assert_eq!(resolve("38=Ctrl+Alt+C", 1, "c", true, true, false), 38);
         let tab: slint::SharedString = slint::platform::Key::Tab.into();
         assert_eq!(resolve("", 0, &tab, true, false, true), 12);
+        // RFN01-63: F8／Shift+F8は既定で次／前のスペルミス。
+        let f8: slint::SharedString = slint::platform::Key::F8.into();
+        let next = resolve("", 0, &f8, false, false, false);
+        let back = resolve("", 0, &f8, false, false, true);
+        assert_eq!(
+            menu_at(next as usize).map(|(action, _)| action.action),
+            Some(ShortcutAction::SpellingStep(false))
+        );
+        assert_eq!(
+            menu_at(back as usize).map(|(action, _)| action.action),
+            Some(ShortcutAction::SpellingStep(true))
+        );
         assert_eq!(
             chord(" ", true, false, true).as_deref(),
             Some("Ctrl+Shift+Space")

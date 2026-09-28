@@ -2433,6 +2433,14 @@ fn main() -> Result<(), slint::PlatformError> {
             spelling_ui::chosen(&window, &spelling_live, action);
         }
     });
+    let weak = window.as_weak();
+    let spelling_live = live.clone();
+    window.on_spelling_status_clicked(move || {
+        if let Some(window) = weak.upgrade() {
+            let id = focused_pane(&window);
+            spelling_ui::step(&window, &spelling_live, id, false);
+        }
+    });
 
     let weak = window.as_weak();
     let tab_live = live.clone();

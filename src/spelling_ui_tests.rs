@@ -99,9 +99,54 @@ fn spelling_is_checked_marked_and_fixed_from_the_right_click() {
 
     // Run → Check Spelling。recieve・teh・繰り返しのthe の3つ。コードの行は読まない。
     spelling_ui::toggle(window, live, id);
-    assert_eq!(status(window), say!("綴りの誤り {}", "Spelling {}", 3));
+    assert_eq!(status(window), say!("スペルミス {}", "Spelling {}", 3));
     let horizontal = red_count(&render(&harness, &document, id));
     assert!(horizontal > 30, "red wave pixels: {horizontal}");
+
+    // 誤りから誤りへ（F8／Shift+F8・実行メニュー・ステータスバーが同じ道）。
+    // キャレットは頭にある。選んだ語が次の起点になり、端を越えると反対の端へ戻る。
+    let selected = |live: &Live| {
+        let state = live.states.of(id);
+        let state = state.borrow();
+        let (a, b) = (
+            state.selection_anchor_source_byte.unwrap_or(0),
+            state.caret_source_byte.unwrap_or(0),
+        );
+        document.text.borrow()[a.min(b)..a.max(b)].to_owned()
+    };
+    {
+        let state = live.states.of(id);
+        let mut state = state.borrow_mut();
+        state.caret_source_byte = Some(0);
+        state.selection_anchor_source_byte = Some(0);
+    }
+    spelling_ui::step(window, live, id, false);
+    assert_eq!(selected(live), "recieve");
+    spelling_ui::step(window, live, id, false);
+    assert_eq!(selected(live), "teh");
+    spelling_ui::step(window, live, id, false);
+    assert_eq!(selected(live), "the");
+    let third = live.states.of(id).borrow().caret_source_byte;
+    assert_eq!(third, Some(text.find("the the").unwrap() + "the the".len()));
+    spelling_ui::step(window, live, id, false);
+    assert_eq!(selected(live), "recieve", "wraps to the beginning");
+    assert_eq!(
+        window.get_render_status().to_string(),
+        pick("先頭に戻りました", "Wrapped to the beginning")
+    );
+    spelling_ui::step(window, live, id, true);
+    assert_eq!(selected(live), "the", "wraps back to the end");
+
+    // 既定のキーはF8／Shift+F8（設定のKeysで変えられる、メニューの行にも併記する）。
+    use crate::menu_commands::ShortcutAction;
+    assert_eq!(
+        crate::shortcuts::action_label(window, ShortcutAction::SpellingStep(false)),
+        "F8"
+    );
+    assert_eq!(
+        crate::shortcuts::action_label(window, ShortcutAction::SpellingStep(true)),
+        "Shift+F8"
+    );
 
     // 縦書きでも描く。
     set_pane_direction(window, &live.cache, id, true);
@@ -124,7 +169,7 @@ fn spelling_is_checked_marked_and_fixed_from_the_right_click() {
     assert!(document.text.borrow().starts_with("I recieve teh"));
     undo_in_pane(window, id, &document, &live.states, &live.cache, true);
     spelling_ui::recount_all(window, live);
-    assert_eq!(status(window), say!("綴りの誤り {}", "Spelling {}", 2));
+    assert_eq!(status(window), say!("スペルミス {}", "Spelling {}", 2));
 
     // 繰り返しの語は「Delete Repeated Word」で、前の空白ごと消える。
     let second_the = text.find("the the").unwrap() + "the t".len();
@@ -138,7 +183,7 @@ fn spelling_is_checked_marked_and_fixed_from_the_right_click() {
             .starts_with("I receive teh the letter.")
     );
     spelling_ui::recount_all(window, live);
-    assert_eq!(status(window), say!("綴りの誤り {}", "Spelling {}", 1));
+    assert_eq!(status(window), say!("スペルミス {}", "Spelling {}", 1));
 
     // Ignoreした語には、この文書の中ではもう印が付かない。
     right_click_at(
@@ -149,7 +194,7 @@ fn spelling_is_checked_marked_and_fixed_from_the_right_click() {
     );
     assert_eq!(window.get_spell_word(), "teh");
     spelling_ui::chosen(window, live, -2);
-    assert_eq!(status(window), say!("綴りの誤り {}", "Spelling {}", 0));
+    assert_eq!(status(window), say!("スペルミス {}", "Spelling {}", 0));
     assert_eq!(red_count(&render(&harness, &document, id)), 0);
 
     // 印の無い語を右クリックしても行は出ない。

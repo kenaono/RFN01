@@ -4,9 +4,9 @@
 //! （`ISpellChecker`、en-US）に語を聞く**ことと、Runメニュー・右クリック・ステータス
 //! バー・書いたあとの数え直しをつなぐことだけをする。
 //!
-//! **書き手が頼んだ文書だけを調べる**（書き手と合意 2026-09-28）。Runの「Check
-//! Spelling」で始まり、「Stop Checking Spelling」かタブを閉じると終わる。再起動では
-//! 戻さない。
+//! **書き手が頼んだ文書だけを調べる**（書き手と合意 2026-09-28）。実行の「スペル
+//! チェック（英語）」で始まり、「スペルチェックを終了」かタブを閉じると終わる。
+//! 再起動では戻さない。
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -214,7 +214,7 @@ fn recount(window: &AppWindow, document: &OpenDocument) {
     held.count = found.count;
 }
 
-/// Runの「Check Spelling」／「Stop Checking Spelling」（RFN01-63）。
+/// 実行の「スペルチェック（英語）」／「スペルチェックを終了」（RFN01-63）。
 ///
 /// **アクティブな文書に対して**。確認していれば終え、していなければ始める。
 pub fn toggle(window: &AppWindow, live: &Live, id: PaneId) {
@@ -226,8 +226,8 @@ pub fn toggle(window: &AppWindow, live: &Live, id: PaneId) {
         if document.read_only() || id.screen(window).viewer {
             window.tell(
                 pick(
-                    "ViewerとReadOnlyでは綴りを確認できません",
-                    "Spelling cannot be checked in Viewer or ReadOnly",
+                    "ViewerとReadOnlyではスペルチェックできません",
+                    "Spell check is not available in Viewer or ReadOnly",
                 )
                 .into(),
             );
@@ -252,7 +252,7 @@ pub fn toggle(window: &AppWindow, live: &Live, id: PaneId) {
             .as_ref()
             .map_or(0, |held| held.count);
         if count == 0 {
-            window.tell(pick("綴りの誤りはありません", "No spelling errors").into());
+            window.tell(no_errors().into());
         }
         live.cache
             .borrow_mut()
@@ -271,10 +271,57 @@ pub fn checking(document: &OpenDocument) -> bool {
 pub fn publish(window: &AppWindow, live: &Live) {
     let document = live.states.document(crate::focused_pane(window));
     let text = match document.spelling.borrow().as_ref() {
-        Some(held) => crate::say!("綴りの誤り {}", "Spelling {}", held.count),
+        Some(held) => crate::say!("スペルミス {}", "Spelling {}", held.count),
         None => String::new(),
     };
     window.set_spelling_status(SharedString::from(text));
+}
+
+fn no_errors() -> &'static str {
+    pick("スペルミスはありません", "No spelling errors")
+}
+
+/// 次（`back`なら前）のスペルミスへ移り、その語を選ぶ（書き手と合意 2026-09-28）。
+///
+/// 実行メニューの「次のスペルミス／前のスペルミス」、F8／Shift+F8、ステータスバーの
+/// 数を押したときの3つの入口がここへ来る。**移る先は印と同じ判定**
+/// （`spelling::marked`）から出すので、波線の無い所へは移らない。
+pub fn step(window: &AppWindow, live: &Live, id: PaneId, back: bool) {
+    let document = live.states.document(id);
+    let marks = match document.spelling.borrow().as_ref() {
+        Some(held) => held.marks.clone(),
+        None => return,
+    };
+    let source = document.text.borrow().clone();
+    let found = {
+        let mut counts = document.counts.borrow_mut();
+        let styles = counts.get(&source, crate::reading_of(window)).line_styles();
+        spelling::marked(&source, styles, &marks)
+    };
+    let (from, caret) = {
+        let state = live.states.of(id);
+        let state = state.borrow();
+        let caret = state.caret_source_byte.unwrap_or(0);
+        let anchor = state.selection_anchor_source_byte.unwrap_or(caret);
+        if anchor == caret {
+            (caret, true)
+        } else {
+            (anchor.min(caret), false)
+        }
+    };
+    let Some((range, wrapped)) = spelling::step_from(&found, from, caret, back) else {
+        window.tell(no_errors().into());
+        return;
+    };
+    crate::show_source_range(window, live, id, &source, range.start, range.end);
+    if wrapped {
+        let told = if back {
+            pick("末尾に戻りました", "Wrapped to the end")
+        } else {
+            pick("先頭に戻りました", "Wrapped to the beginning")
+        };
+        window.tell(told.into());
+    }
 }
 
 fn forget_pointed() {
