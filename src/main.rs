@@ -10962,16 +10962,28 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
     // the answer they have not given yet is whether that thing may go.
     if to.exists() {
         let going = entry_name(&to);
-        ask_question(
-            window,
-            live,
-            Question::ReplaceOnMove(source, to),
+        // RFN01-64: **where there is no bin, the question says so** rather
+        // than promising a bin Windows will then say it cannot use.
+        let told = if shell::has_recycle_bin(&to) {
             say!(
                 "「{going}」はすでにあります。\n\n\
                  いまある「{going}」はごみ箱へ移ります。Windowsのごみ箱から戻せます。",
                 "\"{going}\" already exists.\n\n\
                  The existing \"{going}\" goes to the Recycle Bin, where you can restore it."
-            ),
+            )
+        } else {
+            say!(
+                "「{going}」はすでにあります。\n\n\
+                 この場所ではごみ箱が使えません。いまある「{going}」は完全に削除され、元に戻せません。",
+                "\"{going}\" already exists.\n\n\
+                 This location has no Recycle Bin. The existing \"{going}\" is deleted permanently and cannot be restored."
+            )
+        };
+        ask_question(
+            window,
+            live,
+            Question::ReplaceOnMove(source, to),
+            told,
             &[pick("上書きする", "Replace"), cancel()],
             0,
         );
@@ -10985,28 +10997,46 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
 /// **Overwriting is deleting**, and 要件 5.2 says what deleting means here: the
 /// bin, never the void. The move follows only if the bin took it, so a refusal
 /// leaves both the writer's file and the one that was there.
+///
+/// Across drives the bin comes after the copy instead (RFN01-64, see
+/// `file_tree::carry`): what was there goes only once what replaces it is
+/// whole.
 fn replace_on_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     let owner = ime::window_handle(window);
-    if !shell::recycle(owner, to) {
-        window.tell(
-            pick(
-                "ごみ箱へ移動できませんでした",
-                "Could not move it to the Recycle Bin",
-            )
-            .into(),
-        );
-        return;
+    let mut clear = |path: &Path| shell::recycle(owner, path);
+    match carry_entry(window, live, from, to, Some(&mut clear)) {
+        Err(file_tree::Stopped::Kept) => {
+            let told = if shell::has_recycle_bin(to) {
+                pick(
+                    "ごみ箱へ移動できませんでした",
+                    "Could not move it to the Recycle Bin",
+                )
+            } else {
+                pick("削除できませんでした", "Could not delete it")
+            };
+            window.tell(told.into());
+        }
+        Err(file_tree::Stopped::Failed(error)) => cannot_move(window, &error),
+        Ok(()) => after_move(window, live, from, to),
     }
-    finish_move(window, live, from, to);
 }
 
 /// Carry out a move that has nothing left to ask (要件 5.2).
 fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     if let Err(error) = move_entry(window, live, from, to) {
-        let told = say!("移動できません: {error}", "Cannot move: {error}");
-        window.tell(told.into());
+        cannot_move(window, &error);
         return;
     }
+    after_move(window, live, from, to);
+}
+
+fn cannot_move(window: &AppWindow, error: &dyn std::fmt::Display) {
+    let told = say!("移動できません: {error}", "Cannot move: {error}");
+    window.tell(told.into());
+}
+
+/// What follows a move into a folder, however it was made.
+fn after_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
     // The folder it went into is opened, or what was just carried there would
     // not be on screen at all — the same as a file that has just been made.
     if let Some(into) = to.parent() {
@@ -11027,14 +11057,44 @@ fn finish_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 /// not the name. Drawing the tree again is left to the caller, because the one
 /// that carried something into a folder has that folder to open first.
 fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::io::Result<()> {
+    match carry_entry(window, live, from, to, None) {
+        Err(file_tree::Stopped::Failed(error)) => Err(error),
+        // Nothing was asked to be cleared, so nothing could refuse.
+        Err(file_tree::Stopped::Kept) | Ok(()) => Ok(()),
+    }
+}
+
+/// [`move_entry`], with what is at `to` taken away first by `clear`.
+///
+/// **Across drives it is a copy** (RFN01-64): `fs::rename` cannot leave the
+/// volume it is on, and a network folder or another drive in the Workspace is
+/// another volume. A copy that is all there with its source still standing is
+/// a move that happened, and is followed as one — the writer is only told the
+/// original is still there.
+fn carry_entry(
+    window: &AppWindow,
+    live: &Live,
+    from: &Path,
+    to: &Path,
+    clear: Option<&mut dyn FnMut(&Path) -> bool>,
+) -> Result<(), file_tree::Stopped> {
     if live.folder.borrow().link_move_job.is_some() {
-        return Err(std::io::Error::other(pick(
+        return Err(file_tree::Stopped::Failed(std::io::Error::other(pick(
             "リンク更新中です。完了後に移動してください",
             "Link update in progress. Try moving again after it finishes.",
-        )));
+        ))));
     }
     let before = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
-    file_tree::rename(from, to)?;
+    let into = to.parent().unwrap_or(to);
+    let across = !shell::same_volume(from, into);
+    if file_tree::carry(from, to, across, clear)? {
+        let told = say!(
+            "「{}」を移動先へコピーしましたが、元の場所から消せませんでした",
+            "Copied \"{}\" to where it was going, but could not remove the original",
+            entry_name(to)
+        );
+        window.tell(told.into());
+    }
     documents_follow(window, live, from, to);
     // RFN01-61: Editorの中での名前変更・移動には、バックアップも付いていく。
     saving::backups_follow(window, live, from, to);
@@ -11111,17 +11171,35 @@ fn ask_delete_entry(window: &AppWindow, live: &Live, path: &Path) {
             (d.file.borrow().path().unwrap().to_owned(), text)
         })
         .collect();
+    // RFN01-64: where there is no bin, every line of the question says the
+    // file is gone for good — the buttons too, since they are what is pressed.
+    let bin = shell::has_recycle_bin(path);
     if dirty.is_empty() {
+        let (told, go) = if bin {
+            (
+                say!(
+                    "「{}」をごみ箱へ移動し、開いているTABを閉じます。\nWindowsのごみ箱から戻せます。",
+                    "Moves \"{}\" to the Recycle Bin and closes its open tabs.\nYou can restore it from the Recycle Bin.",
+                    entry_name(path)
+                ),
+                pick("ごみ箱へ移動", "Move to Recycle Bin"),
+            )
+        } else {
+            (
+                say!(
+                    "「{}」を完全に削除し、開いているTABを閉じます。\nこの場所ではごみ箱が使えないため、元に戻せません。",
+                    "Deletes \"{}\" permanently and closes its open tabs.\nThis location has no Recycle Bin, so it cannot be restored.",
+                    entry_name(path)
+                ),
+                pick("完全に削除", "Delete Permanently"),
+            )
+        };
         ask_question(
             window,
             live,
             Question::DeleteEntry(path.to_owned()),
-            say!(
-                "「{}」をごみ箱へ移動し、開いているTABを閉じます。\nWindowsのごみ箱から戻せます。",
-                "Moves \"{}\" to the Recycle Bin and closes its open tabs.\nYou can restore it from the Recycle Bin.",
-                entry_name(path)
-            ),
-            &[pick("ごみ箱へ移動", "Move to Recycle Bin"), cancel()],
+            told,
+            &[go, cancel()],
             0,
         );
     } else {
@@ -11130,20 +11208,33 @@ fn ask_delete_entry(window: &AppWindow, live: &Live, path: &Path) {
             .map(|(p, _)| entry_name(p))
             .collect::<Vec<_>>()
             .join(pick("、", ", "));
+        let (told, save, discard) = if bin {
+            (
+                say!(
+                    "「{}」を削除します。\n未保存の変更があります：{names}\n保存してからごみ箱へ移動しますか？ 開いているTABも閉じます。",
+                    "Deleting \"{}\".\nThese have unsaved changes: {names}\nSave them before moving to the Recycle Bin? Open tabs are closed too.",
+                    entry_name(path)
+                ),
+                pick("保存してごみ箱へ移動", "Save and Move to Recycle Bin"),
+                pick("保存せずごみ箱へ移動", "Move to Recycle Bin without Saving"),
+            )
+        } else {
+            (
+                say!(
+                    "「{}」を完全に削除します。この場所ではごみ箱が使えないため、元に戻せません。\n未保存の変更があります：{names}\n保存してから削除しますか？ 開いているTABも閉じます。",
+                    "Deleting \"{}\" permanently. This location has no Recycle Bin, so it cannot be restored.\nThese have unsaved changes: {names}\nSave them before deleting? Open tabs are closed too.",
+                    entry_name(path)
+                ),
+                pick("保存して完全に削除", "Save and Delete Permanently"),
+                pick("保存せず完全に削除", "Delete Permanently without Saving"),
+            )
+        };
         ask_question(
             window,
             live,
             Question::DeleteEdited(path.to_owned(), dirty),
-            say!(
-                "「{}」を削除します。\n未保存の変更があります：{names}\n保存してからごみ箱へ移動しますか？ 開いているTABも閉じます。",
-                "Deleting \"{}\".\nThese have unsaved changes: {names}\nSave them before moving to the Recycle Bin? Open tabs are closed too.",
-                entry_name(path)
-            ),
-            &[
-                pick("保存してごみ箱へ移動", "Save and Move to Recycle Bin"),
-                pick("保存せずごみ箱へ移動", "Move to Recycle Bin without Saving"),
-                cancel(),
-            ],
+            told,
+            &[save, discard, cancel()],
             1,
         );
     }
@@ -11186,13 +11277,18 @@ fn delete_entry_with(
 ) {
     let documents = deleting_documents(live, path);
     if !recycle(path) {
-        window.tell(
+        let told = if shell::has_recycle_bin(path) {
             pick(
                 "ごみ箱へ移動できませんでした。TABは保持しています",
                 "Could not move it to the Recycle Bin. The tab is kept",
             )
-            .into(),
-        );
+        } else {
+            pick(
+                "削除できませんでした。TABは保持しています",
+                "Could not delete it. The tab is kept",
+            )
+        };
+        window.tell(told.into());
         return;
     }
     live.closed_tabs.borrow_mut().retain(|tab| {
