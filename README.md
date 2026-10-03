@@ -1346,7 +1346,7 @@ PCにインストールされている`git`を使います。Gitが無い（イ�
 
 ## Git Repository
 
-File の「Git Repository…」か、Git Changes の見出しの右端のアイコンで、全ブランチのグラフを開きます（RFN01-67、手本はGitKraken）。対象は Git Changes で選んでいるリポジトリです。比較の画面と同じく窓に重ねて開き、Close か Esc で元のペインとTABへ戻ります。
+File の「Git Repository…」か、Git Changes の見出しの右端のアイコンで、全ブランチのグラフを開きます（RFN01-67、手本はGitKraken）。対象は Git Changes で選んでいるリポジトリです。比較の画面と同じく窓に重ねて開き、Close か Esc、または「戻る」（マウスの戻る釦・Alt+←・メニューの「戻る」）で元のペインとTABへ戻ります。
 - **上の帯**：今のブランチ▾、Undo／Redo、Pull／Push／Fetch／Branch（選んでいるCommitから新しいブランチ）／Stash／Pop。
 - **左の列**：LOCAL・REMOTE・STASHES。ブランチを押すとグラフでその先端を選び、ダブルクリックで Checkout。右クリックで Checkout／New Branch…／Merge into 〈今のブランチ〉／Push／Delete…。**ブランチを押したまま別のローカルブランチへ動かして離すと、確認してから Merge** します（落とし先が今のブランチでなければ、先にそこへ Checkout します）。
 - **真ん中のグラフ**：分岐と合流を線で描きます。**紫の幹は main** で、ほかのブランチ（今いるブランチも）は別の色で main から分かれます。今いるブランチは✓の札で分かります。取り込んでいない Commit に ↓、送っていない Commit に ↑。Commit していない変更があれば一番上に「// WIP」。最初は200件で、「Show more」で読み足します。

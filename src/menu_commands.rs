@@ -2543,6 +2543,10 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Focus(n) => window.invoke_pane_focus_moved(parent, n),
         Command::Below => window.invoke_pane_below_toggled(parent),
         Command::Above => window.invoke_pane_below_focus(parent, false),
+        // RFN01-67: Git Repository の画面では「戻る」で画面を閉じる（書き手の求め 2026-10-03）。
+        Command::Navigate(false) if window.get_git_repo_active() => {
+            crate::git_repo_ui::close(window)
+        }
         Command::Navigate(forward) => window.invoke_pane_navigate(p, forward),
         Command::Draft => window.invoke_quick_draft_requested(),
         Command::Zoom(n) => window.invoke_pane_zoom(p, n),

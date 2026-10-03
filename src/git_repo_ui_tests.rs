@@ -478,6 +478,69 @@ fn a_merge_is_undone_and_redone_from_the_toolbar() {
     assert!(window.get_git_repo_undo_tip().contains("Undo Merge draft"));
 }
 
+/// 書き手の求め 2026-10-03：Git Repository で「戻る」と、画面を閉じる。マウスの戻る釦は、
+/// 行の上でも何も無い所でも効く。ショートカットの「戻る」（既定 Alt+←）も同じ。
+#[test]
+fn back_closes_the_repository_screen() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let Some((_root, harness)) = manuscript("repo-back") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    wire(window, live);
+    crate::shortcuts::wire(window, live);
+    let (width, height) = (1400usize, 800usize);
+    harness
+        .surface
+        .set_size(slint::PhysicalSize::new(width as u32, height as u32));
+    window.show().unwrap();
+    let draw = || {
+        let mut pixels = vec![slint::Rgb8Pixel::default(); width * height];
+        window.window().request_redraw();
+        harness.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+    };
+    let back = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        for event in [
+            WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Back,
+            },
+            WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Back,
+            },
+        ] {
+            window.window().dispatch_event(event);
+        }
+        slint::platform::update_timers_and_animations();
+    };
+    // 行の上（グラフの1行目）、何も無い所（グラフの下・左の列の下・右の列）。
+    for (x, y) in [
+        (600.0, 95.0),
+        (600.0, 600.0),
+        (120.0, 600.0),
+        (1200.0, 600.0),
+    ] {
+        open(window, live);
+        settle(window, live);
+        draw();
+        assert!(window.get_git_repo_active());
+        back(x, y);
+        assert!(!window.get_git_repo_active(), "back at ({x}, {y})");
+    }
+    // ショートカットの「戻る」。
+    open(window, live);
+    settle(window, live);
+    draw();
+    let left: slint::SharedString = slint::platform::Key::LeftArrow.into();
+    assert!(window.invoke_shortcut_key(left, false, true, false));
+    slint::platform::update_timers_and_animations();
+    assert!(!window.get_git_repo_active());
+}
+
 /// 画面の絵を書き出す（`cargo test -- --ignored git_repository_screens`）。一時フォルダの
 /// `rfnedit-git-snapshot`に、Git Repository の画面をPPMで置く。
 #[test]
