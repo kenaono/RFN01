@@ -1,0 +1,590 @@
+// RFN01-67（書き手と決めた 2026-10-03）: 左ペインの Git Changes。
+//
+// Visual Studio の Git Changes を手本にする：上にリポジトリとブランチ、Fetch／Pull／Push／Sync、
+// メッセージ欄と Commit、その下に Staged Changes・Changes・Stashes。押したことはRust
+// （`git_ui.rs`）へ番号で渡し、ここは何をするかを決めない。
+
+import { ScrollView } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { Field, Icon, Icons, IconButton, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
+
+export struct GitRow {
+    // 0 Staged Changes の見出し、1 Changes の見出し、2 Stashes の見出し、
+    // 3 Staged のファイル、4 Changes のファイル、5 Stash、6 案内の文。
+    kind: int,
+    // 見出しは「Staged Changes (2)」、ファイルは名前、Stash はメッセージ。
+    label: string,
+    // ファイルのあるフォルダ（根からの道）。名前の右に薄く出す。
+    folder: string,
+    // M・A・D・R・U。
+    letter: string,
+    // マウスを載せると出す、全体の道。
+    tip: string,
+    // 見出しが開いているか。
+    open: bool,
+}
+
+// ▾の付いた選び口（リポジトリ・ブランチ）。
+component Picker inherits Rectangle {
+    in property <string> icon;
+    in property <string> title;
+    in property <string> tip;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 28px;
+    border-radius: 5px;
+    background: touch.has-hover && root.enabled ? Tok.accent-faint : transparent;
+    opacity: root.enabled ? 1.0 : 0.45;
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 4px;
+        if root.icon != "": Rectangle {
+            width: 16px;
+            Icon {
+                y: (parent.height - self.height) / 2;
+                commands: root.icon;
+                tint: Tok.ink-muted;
+            }
+        }
+        Text {
+            text: root.title;
+            color: Tok.ink;
+            font-size: 12px;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Rectangle {
+            width: 16px;
+            Icon {
+                y: (parent.height - self.height) / 2;
+                commands: Icons.down;
+                tint: Tok.ink-muted;
+            }
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+    if root.tip != "": Tooltip {
+        text: @markdown("`\{root.tip}`");
+    }
+}
+
+export component GitChangesView inherits Rectangle {
+    // 0 案内の文だけ、1 Gitの管理下にない（Create Git Repository）、2 リポジトリ。
+    in property <int> mode;
+    in property <string> note;
+    in property <[string]> repos;
+    in property <int> repo-index;
+    in property <string> repo-tip;
+    in property <string> branch;
+    in property <[string]> branches;
+    in property <bool> on-branch;
+    in property <bool> has-upstream;
+    in property <bool> has-commit;
+    in property <int> incoming;
+    in property <int> outgoing;
+    in property <bool> busy;
+    in property <string> busy-text;
+    in property <bool> can-cancel;
+    in property <int> staged-count;
+    in property <int> change-count;
+    in property <[GitRow]> rows;
+    in-out property <string> message;
+    in-out property <bool> amend;
+
+    callback repo-chosen(int);
+    callback create-repository();
+    callback branch-chosen(int);
+    callback new-branch();
+    callback fetch();
+    callback pull();
+    callback push();
+    callback sync();
+    callback commit();
+    callback amend-toggled(bool);
+    callback stash-all();
+    callback cancel();
+    // 行を押した：見出しは開閉。
+    callback row-clicked(int);
+    // 行をダブルクリック：ファイルを開く（変更があれば前回のCommitと比べる）。
+    callback row-activated(int);
+    // 行の＋／−：Stage・Unstage（見出しなら全部）。
+    callback row-staged(int);
+    // 右クリックの行：0 Open、1 Stage・Unstage、2 Undo Changes…（Stash は 0 Apply、1 Pop、2 Drop…）。
+    callback row-menu(int, int);
+
+    property <int> menu-row: -1;
+    property <int> menu-kind: 0;
+    property <length> menu-y;
+    property <length> commit-menu-y;
+    property <bool> can-commit: !root.busy && root.message != "" && (root.amend ? root.has-commit : (root.staged-count > 0 || root.change-count > 0));
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        Text {
+            text: @tr("GIT CHANGES");
+            color: Tok.ink-faint;
+            font-size: 10px;
+            letter-spacing: 0.9px;
+        }
+
+        if root.repos.length > 1: Picker {
+            icon: Icons.folder;
+            title: root.repos[root.repo-index];
+            tip: root.repo-tip;
+            enabled: !root.busy;
+            clicked => {
+                repo-menu.show();
+            }
+        }
+
+        // 案内の文（mode 0）と、管理下にないフォルダの文（mode 1）。
+        if root.mode <= 1: Text {
+            text: root.note;
+            color: Tok.ink-muted;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+
+        if root.mode == 1: TextButton {
+            wide: true;
+            title: @tr("Create Git Repository");
+            role: Role.primary;
+            enabled: !root.busy;
+            clicked => {
+                root.create-repository();
+            }
+        }
+
+        // 管理下にないときは、残りの高さを空けておく（釦が下へ伸びないように）。
+        if root.mode <= 1: Rectangle {
+            vertical-stretch: 1;
+        }
+
+        if root.mode == 2: VerticalLayout {
+            spacing: 6px;
+            vertical-stretch: 1;
+
+            Picker {
+                icon: Icons.git;
+                title: root.branch;
+                enabled: !root.busy;
+                clicked => {
+                    branch-menu.show();
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 4px;
+                TextButton {
+                    title: @tr("Fetch");
+                    enabled: !root.busy && root.has-commit;
+                    clicked => {
+                        root.fetch();
+                    }
+                }
+                TextButton {
+                    title: root.incoming > 0 ? @tr("Pull") + " ↓" + root.incoming : @tr("Pull");
+                    enabled: !root.busy && root.has-upstream;
+                    clicked => {
+                        root.pull();
+                    }
+                }
+                TextButton {
+                    title: !root.has-upstream ? @tr("Publish") : root.outgoing > 0 ? @tr("Push") + " ↑" + root.outgoing : @tr("Push");
+                    enabled: !root.busy && root.on-branch && root.has-commit;
+                    clicked => {
+                        root.push();
+                    }
+                }
+                TextButton {
+                    title: @tr("Sync");
+                    enabled: !root.busy && root.on-branch && root.has-commit;
+                    clicked => {
+                        root.sync();
+                    }
+                }
+            }
+
+            if root.busy-text != "": HorizontalLayout {
+                spacing: 6px;
+                height: 28px;
+                Text {
+                    text: root.busy-text;
+                    color: Tok.ink-muted;
+                    font-size: 11px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                if root.can-cancel: TextButton {
+                    title: @tr("Cancel");
+                    clicked => {
+                        root.cancel();
+                    }
+                }
+            }
+
+            Field {
+                multi-line: true;
+                height: 64px;
+                enabled: !root.busy;
+                placeholder: @tr("Enter a message");
+                text <=> root.message;
+            }
+
+            HorizontalLayout {
+                spacing: 4px;
+                TextButton {
+                    title: root.amend ? @tr("Amend") : root.staged-count > 0 ? @tr("Commit Staged") : @tr("Commit All");
+                    role: Role.primary;
+                    enabled: root.can-commit;
+                    clicked => {
+                        if root.can-commit {
+                            root.commit();
+                        }
+                    }
+                }
+                IconButton {
+                    icon: Icons.down;
+                    tip: @tr("More commit actions");
+                    enabled: !root.busy;
+                    clicked => {
+                        root.commit-menu-y = self.absolute-position.y - root.absolute-position.y + self.height;
+                        commit-menu.show();
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                // Amend：直前のCommitをやり直す。チェックするとメッセージ欄に直前のメッセージが入る。
+                amend-box := Rectangle {
+                    width: amend-row.preferred-width;
+                    opacity: root.has-commit && !root.busy ? 1.0 : 0.45;
+                    amend-row := HorizontalLayout {
+                        spacing: 4px;
+                        Rectangle {
+                            width: 18px;
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 16px;
+                                height: 16px;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: root.amend ? Tok.accent : Tok.rule-strong;
+                                background: root.amend ? Tok.accent : Tok.paper;
+                                if root.amend: Text {
+                                    text: "✓";
+                                    color: Tok.paper;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Text {
+                            text: @tr("Amend");
+                            color: Tok.ink;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea {
+                        enabled: root.has-commit && !root.busy;
+                        clicked => {
+                            root.amend-toggled(!root.amend);
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Tok.rule;
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 1px;
+                    for row[index] in root.rows: line := Rectangle {
+                        height: row.kind == 6 ? 36px : 26px;
+                        border-radius: 5px;
+                        background: row.kind != 6 && touch.has-hover ? Tok.accent-faint : transparent;
+
+                        touch := TouchArea {
+                            enabled: row.kind != 6;
+                            clicked => {
+                                root.row-clicked(index);
+                            }
+                            double-clicked => {
+                                root.row-activated(index);
+                            }
+                            pointer-event(event) => {
+                                if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && row.kind >= 3 && row.kind <= 5 {
+                                    root.menu-row = index;
+                                    root.menu-kind = row.kind;
+                                    root.menu-y = line.absolute-position.y - root.absolute-position.y + line.height;
+                                    row-menu.show();
+                                }
+                            }
+                        }
+
+                        if row.kind == 6: Text {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            text: row.label;
+                            color: Tok.ink-muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+
+                        // 見出し：開閉の印、名前、全部を Stage・Unstage する＋／−。
+                        if row.kind <= 2: HorizontalLayout {
+                            padding-left: 2px;
+                            padding-right: 2px;
+                            spacing: 4px;
+                            Rectangle {
+                                width: 18px;
+                                Icon {
+                                    x: 1px;
+                                    y: (parent.height - self.height) / 2;
+                                    commands: row.open ? Icons.down : Icons.right;
+                                    tint: Tok.ink-muted;
+                                }
+                            }
+                            Text {
+                                text: row.label;
+                                color: Tok.ink-strong;
+                                font-size: 12px;
+                                font-weight: 600;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            if row.kind <= 1: IconButton {
+                                size: 22px;
+                                y: 2px;
+                                icon: row.kind == 0 ? Icons.minus : Icons.plus;
+                                tip: row.kind == 0 ? @tr("Unstage All") : @tr("Stage All");
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.row-staged(index);
+                                }
+                            }
+                        }
+
+                        // ファイル：状態の字、名前、フォルダ、＋／−。
+                        if row.kind == 3 || row.kind == 4: HorizontalLayout {
+                            padding-left: 22px;
+                            padding-right: 2px;
+                            spacing: 6px;
+                            Text {
+                                width: 12px;
+                                text: row.letter;
+                                color: row.letter == "D" ? Tok.alert : row.letter == "A" ? #2e7d32 : Tok.accent;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: row.label;
+                                color: Tok.ink;
+                                font-size: 12px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 0;
+                            }
+                            Text {
+                                text: row.folder;
+                                color: Tok.ink-faint;
+                                font-size: 11px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            IconButton {
+                                size: 22px;
+                                y: 2px;
+                                icon: row.kind == 3 ? Icons.minus : Icons.plus;
+                                tip: row.kind == 3 ? @tr("Unstage") : @tr("Stage");
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.row-staged(index);
+                                }
+                            }
+                        }
+
+                        if row.kind == 5: HorizontalLayout {
+                            padding-left: 22px;
+                            padding-right: 2px;
+                            spacing: 6px;
+                            Text {
+                                text: row.label;
+                                color: Tok.ink;
+                                font-size: 12px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: row.folder;
+                                color: Tok.ink-faint;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 0;
+                            }
+                            // 書き手の Accept 2026-10-03：右クリックだけでは、Stash の行で何ができるか
+                            // 見えない。いちばん使う Pop を、ファイルの＋／−と同じ形で行に出す。
+                            IconButton {
+                                size: 22px;
+                                y: 2px;
+                                icon: Icons.pop;
+                                tip: @tr("Pop");
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.row-menu(index, 1);
+                                }
+                            }
+                        }
+
+                        // 最後に置く：上に重なって指を見るだけで、押したことは下の TouchArea へ行く。
+                        if row.kind >= 3 && row.kind <= 5: Tooltip {
+                            text: @markdown("`\{row.tip}`");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    repo-menu := PopupWindow {
+        x: 8px;
+        y: 44px;
+        width: root.width - 16px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: root.width - 16px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                for name[index] in root.repos: MenuRow {
+                    title: name;
+                    checked: index == root.repo-index;
+                    activated => {
+                        repo-menu.close();
+                        root.repo-chosen(index);
+                    }
+                }
+            }
+        }
+    }
+
+    branch-menu := PopupWindow {
+        x: 8px;
+        y: root.repos.length > 1 ? 78px : 44px;
+        width: root.width - 16px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: root.width - 16px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                for name[index] in root.branches: MenuRow {
+                    title: name;
+                    checked: name == root.branch;
+                    activated => {
+                        branch-menu.close();
+                        root.branch-chosen(index);
+                    }
+                }
+                if root.branches.length > 0: Rectangle {
+                    height: 7px;
+                    Rectangle {
+                        y: 3px;
+                        height: 1px;
+                        background: Tok.rule;
+                    }
+                }
+                MenuRow {
+                    title: @tr("New Branch…");
+                    enabled: root.has-commit;
+                    activated => {
+                        branch-menu.close();
+                        root.new-branch();
+                    }
+                }
+            }
+        }
+    }
+
+    commit-menu := PopupWindow {
+        x: 8px;
+        y: root.commit-menu-y;
+        width: 200px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 200px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                MenuRow {
+                    title: @tr("Stash All");
+                    enabled: root.has-commit && (root.staged-count > 0 || root.change-count > 0);
+                    activated => {
+                        commit-menu.close();
+                        root.stash-all();
+                    }
+                }
+            }
+        }
+    }
+
+    row-menu := PopupWindow {
+        x: 8px;
+        y: root.menu-y;
+        width: 200px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 200px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                MenuRow {
+                    title: root.menu-kind == 5 ? @tr("Apply") : @tr("Open");
+                    activated => {
+                        row-menu.close();
+                        root.row-menu(root.menu-row, 0);
+                    }
+                }
+                MenuRow {
+                    title: root.menu-kind == 5 ? @tr("Pop") : root.menu-kind == 3 ? @tr("Unstage") : @tr("Stage");
+                    activated => {
+                        row-menu.close();
+                        root.row-menu(root.menu-row, 1);
+                    }
+                }
+                MenuRow {
+                    title: root.menu-kind == 5 ? @tr("Drop…") : @tr("Undo Changes…");
+                    activated => {
+                        row-menu.close();
+                        root.row-menu(root.menu-row, 2);
+                    }
+                }
+            }
+        }
+    }
+}

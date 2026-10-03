@@ -1332,6 +1332,18 @@ PCにインストールされている`git`を使います。Gitが無い（イ�
 フォルダの持ち主が今のWindowsユーザーと違うと、Gitは読むのを断ります（「safe.directoryへの追加が必要です」と出ます）。そのフォルダを信頼してよければ、`git config --global --add safe.directory <フォルダ>` を一度実行してください。
 確認手順は `testdata/41_前回のCommitとの比較.md` にあります。
 
+## Git Changes
+
+左のアイコン列の **Git**（Backupsの上、ブランチの形）で、使用中のWorkspaceの登録フォルダのGitを操作できます（RFN01-67）。PCに入っている`git`を使い、手本はVisual StudioのGit Changesです。
+- **上から**：リポジトリ▾（登録フォルダが2つ以上のとき）、ブランチ▾（切り替え・New Branch…）、Fetch／Pull／Push／Sync、メッセージ欄と「Commit All」（Stageしたものがあれば「Commit Staged」）、Amend、その下に Staged Changes・Changes・Stashes。
+- **ファイル**：＋／−で Stage・Unstage（見出しの＋／−で全部）。ダブルクリックで開き、変更のあるファイルは前回のCommitと比較します。右クリックで Open／Stage・Unstage／Undo Changes…。
+- **Commit の▾** に Stash All。しまった変更は Stashes の行に並び、行の右端の釦で Pop（取り出してStashを消す）、右クリックで Apply／Pop／Drop…。Apply・Pop は変更が無いときだけできます。
+- Gitの管理下にないフォルダでは「Create Git Repository」が出ます。
+- Pull・Sync・ブランチの切り替え・Stashの取り出しの前に、そのリポジトリの未保存の文書を保存するか破棄するかを訊きます。Commit の前は保存するかを訊きます。終わったあと、変わったファイルのTABを読み直します。
+- **衝突したら中止して元に戻し**、ダイアログで知らせます。衝突はTerminalで解いてください。
+- Push・Pullでサインインが要るときは、Git Credential Managerの窓が出ます。Fetch・Pull・Push・Sync は面の Cancel で止められます。
+- 面が出ているあいだは5秒ごとに読み直すので、Terminalで打った`git`も映ります。
+
 ## 印刷（紙の形で見る）
 
 Paneメニュー（⋮）の「Print…」かCtrl+Pで、**そのペインのそのTAB**の印刷プレビューが開きます。窓の☰には置いていません——どのペインのどのTABが出るのか、押す側から分からないからです。編集画面はその下にそのまま残り、Escか「Close」で戻ります。

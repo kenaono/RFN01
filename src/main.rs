@@ -41,6 +41,8 @@ mod file_dialog;
 mod file_io;
 mod file_tree;
 mod find;
+mod git;
+mod git_ui;
 mod git_version;
 mod i18n;
 #[cfg(test)]
@@ -3115,6 +3117,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // RFN01-31・56: プリセットは設定を読んだあと——いまの値に合うものを出すので。
     settings_transfer::wire(&window, &live);
     backup_ui::wire(&window, &live);
+    git_ui::wire(&window, &live);
 
     wiring::wire_colours(
         &window,
@@ -6875,6 +6878,8 @@ enum LeftTab {
     Tags,
     /// RFN01-61（書き手の求め 2026-09-27）.
     Backups,
+    /// RFN01-67（書き手と決めた 2026-10-03）.
+    Git,
 }
 
 impl LeftTab {
@@ -6889,6 +6894,7 @@ impl LeftTab {
             Self::Bookmarks => 5,
             Self::Tags => 6,
             Self::Backups => 7,
+            Self::Git => 8,
         }
     }
 
@@ -6902,6 +6908,7 @@ impl LeftTab {
             5 => Self::Bookmarks,
             6 => Self::Tags,
             7 => Self::Backups,
+            8 => Self::Git,
             _ => Self::Explorer,
         }
     }
@@ -6945,6 +6952,7 @@ fn publish_left(window: &AppWindow, live: &Live) {
         LeftTab::Bookmarks => bookmark_ui::publish(window, live),
         LeftTab::Tags => publish_tags(window, live),
         LeftTab::Backups => backup_ui::publish_pane(window, live),
+        LeftTab::Git => git_ui::publish(window, live),
     }
 }
 
@@ -7358,7 +7366,7 @@ fn activate_left_row(window: &AppWindow, live: &Live, index: usize) {
         LeftTab::Recent => open_remembered(window, live, index),
         LeftTab::Outline => go_to_heading(window, live, index),
         // The views answer their own rows (`bookmark_ui::activate`, `backup_ui`).
-        LeftTab::Bookmarks | LeftTab::Backups => {}
+        LeftTab::Bookmarks | LeftTab::Backups | LeftTab::Git => {}
         LeftTab::Tags => search_tag_row(window, live, index),
     }
 }
@@ -12536,6 +12544,14 @@ enum Question {
     DeleteBackups(Vec<PathBuf>),
     /// RFN01-61: 知らせるだけ（保存先を変えられなかった）。答えで何もしない。
     BackupNotice,
+    /// RFN01-67: Gitの操作の前に、そのリポジトリの未保存の文書を保存するか破棄するか。
+    GitUnsaved(git_ui::Pending),
+    /// RFN01-67: Undo Changes・Drop・Push済みのAmendを確かめる。
+    GitConfirm(git_ui::Pending),
+    /// RFN01-67: 新しいブランチの名前（リポジトリの根）。
+    GitNewBranch(PathBuf),
+    /// RFN01-67: 知らせるだけ（Gitが断った文）。答えで何もしない。
+    GitNotice,
 }
 
 impl Question {
@@ -12581,6 +12597,10 @@ impl Question {
             Self::ImportSettings(..) => "ImportSettings",
             Self::DeleteBackups(..) => "DeleteBackups",
             Self::BackupNotice => "BackupNotice",
+            Self::GitUnsaved(..) => "GitUnsaved",
+            Self::GitConfirm(..) => "GitConfirm",
+            Self::GitNewBranch(..) => "GitNewBranch",
+            Self::GitNotice => "GitNotice",
         }
     }
 }
@@ -13123,6 +13143,14 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         }
         (Question::ResetAll, 0) => reset_all_settings(window, live),
         (Question::DeleteBackups(paths), 0) => backup_ui::delete_confirmed(window, live, &paths),
+        (Question::GitUnsaved(pending), choice) => {
+            git_ui::unsaved_answered(window, live, pending, choice)
+        }
+        (Question::GitConfirm(pending), 0) => git_ui::confirmed(window, live, pending),
+        (Question::GitNewBranch(root), 0) => {
+            let name = window.get_question_name().trim().to_owned();
+            git_ui::branch_named(window, live, root, name);
+        }
         (Question::SavePreset(kind), 0) => {
             let name = window.get_question_name().to_string();
             settings_transfer::save_as(window, live, kind, &name);

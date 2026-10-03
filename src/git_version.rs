@@ -5,7 +5,7 @@
 //! 取り出すのは生のバイトだけで、読み方は文書の文字コード設定に従う（要件 7.11）。
 use std::io;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum GitError {
@@ -47,20 +47,10 @@ impl std::fmt::Display for GitError {
     }
 }
 
+/// 起動の決まり（窓を出さない、端末で訊かない）は`git::command`の1か所に置く（RFN01-67）。
 fn git(folder: &Path, arguments: &[&str]) -> Result<Output, GitError> {
-    run("git", folder, arguments)
-}
-
-/// 呼ぶ名前を差し替えられるのは、**Gitの無いPC**を試験で作るため。
-fn run(program: &str, folder: &Path, arguments: &[&str]) -> Result<Output, GitError> {
-    use std::os::windows::process::CommandExt;
-    // コンソールの窓を一瞬でも出さない。
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new(program)
-        .arg("-C")
-        .arg(folder)
+    crate::git::command(folder)
         .args(arguments)
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|error| match error.kind() {
             io::ErrorKind::NotFound => GitError::Missing,
@@ -103,8 +93,9 @@ mod tests {
     /// 書き手の確認 2026-09-15: Gitが入っていなくても、断りの理由が出る。
     #[test]
     fn a_machine_without_git_says_so() {
-        let error = run("rfnedit-no-such-git", &std::env::temp_dir(), &["--version"]);
-        assert_eq!(error.err(), Some(GitError::Missing));
+        let error =
+            crate::git::tests::without_git(|| git(&std::env::temp_dir(), &["--version"]).err());
+        assert_eq!(error, Some(GitError::Missing));
         assert!(
             GitError::Missing
                 .to_string()

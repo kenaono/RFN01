@@ -1406,3 +1406,73 @@ msgstr "▶ 試聴"
 
 msgid "■ Stop"
 msgstr "■ 停止"
+
+# RFN01-67: Git Changes。Gitの操作の名前（Commit・Push など）は、書き手がコマンドで使う名前のまま。
+msgid "Git Changes"
+msgstr "Gitの変更"
+
+msgid "GIT CHANGES"
+msgstr "Gitの変更"
+
+msgid "Create Git Repository"
+msgstr "Gitリポジトリを作成"
+
+msgid "Fetch"
+msgstr "Fetch"
+
+msgid "Pull"
+msgstr "Pull"
+
+msgid "Push"
+msgstr "Push"
+
+msgid "Publish"
+msgstr "Publish"
+
+msgid "Sync"
+msgstr "Sync"
+
+msgid "Enter a message"
+msgstr "メッセージを入力"
+
+msgid "Amend"
+msgstr "Amend"
+
+msgid "Commit Staged"
+msgstr "Stage済みをCommit"
+
+msgid "Commit All"
+msgstr "すべてCommit"
+
+msgid "More commit actions"
+msgstr "Commitのほかの操作"
+
+msgid "Stage All"
+msgstr "すべてStage"
+
+msgid "Unstage All"
+msgstr "すべてUnstage"
+
+msgid "Stage"
+msgstr "Stage"
+
+msgid "Unstage"
+msgstr "Unstage"
+
+msgid "New Branch…"
+msgstr "新しいブランチ…"
+
+msgid "Stash All"
+msgstr "すべてStash"
+
+msgid "Open"
+msgstr "開く"
+
+msgid "Pop"
+msgstr "Pop"
+
+msgid "Drop…"
+msgstr "Drop…"
+
+msgid "Undo Changes…"
+msgstr "変更を元に戻す…"
