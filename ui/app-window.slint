@@ -19,6 +19,7 @@ export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
+import { GitBranchRow, GitCommitRow, GitLine, GitRef, GitRepositoryView } from "git-repository.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
@@ -987,6 +988,41 @@ export component AppWindow inherits Window {
     callback git-row-activated(int);
     callback git-row-staged(int);
     callback git-row-menu(int, int);
+    callback git-manage-branches();
+    /// RFN01-67 PR 2a: Git Repository の画面（`git_repo_ui`）。
+    in-out property <bool> git-repo-active;
+    in property <string> git-repo-name;
+    in property <bool> git-repo-has-stash;
+    in property <bool> git-repo-has-changes;
+    in property <[GitBranchRow]> git-repo-branches;
+    in property <[GitCommitRow]> git-repo-commits;
+    in property <bool> git-repo-more;
+    in property <string> git-repo-note;
+    in property <int> git-repo-selected: -1;
+    in property <int> git-repo-detail-mode;
+    in property <string> git-repo-detail-sha;
+    in property <string> git-repo-detail-message;
+    in property <string> git-repo-detail-author;
+    in property <string> git-repo-detail-date;
+    in property <string> git-repo-detail-parents;
+    in property <[GitRow]> git-repo-detail-files;
+    in property <int> git-repo-scroll-row;
+    in property <int> git-repo-scroll-generation;
+    in property <int> git-repo-focus-generation;
+    callback git-repo-close();
+    /// File の「Git Repository…」。
+    callback git-repository-requested();
+    callback git-repo-branch-here();
+    callback git-repo-pop();
+    callback git-repo-commit-selected(int);
+    callback git-repo-commit-menu(int, int);
+    callback git-repo-show-more();
+    callback git-repo-branch-clicked(int);
+    callback git-repo-branch-activated(int);
+    callback git-repo-branch-menu(int, int);
+    callback git-repo-branch-dropped(int, int);
+    callback git-repo-file-clicked(int);
+    callback git-repo-file-menu(int, int);
     /// 左ペインの Backups の行（`backup_ui::publish_pane`）。
     in property <[BackupPaneRow]> backup-pane-rows;
     callback backup-pane-clicked(int);
@@ -1413,7 +1449,7 @@ export component AppWindow inherits Window {
     if root.custom-title: TitleMenuBar {
         x: 0px; y: 0px; width: root.width;
         menu-visible: root.title-menu-visible;
-        blocked: root.question-open || root.print-active || root.diff-active;
+        blocked: root.question-open || root.print-active || root.diff-active || root.git-repo-active;
         maximized: root.title-maximized;
         hot: root.title-hot;
         pressed: root.title-pressed;
@@ -1966,6 +2002,7 @@ export component AppWindow inherits Window {
                         row-activated(index) => { root.git-row-activated(index); }
                         row-staged(index) => { root.git-row-staged(index); }
                         row-menu(index, action) => { root.git-row-menu(index, action); }
+                        manage-branches => { root.git-manage-branches(); }
                     }
                     if root.left-tab == 7: BackupsView {
                         vertical-stretch: 1;
@@ -6541,6 +6578,78 @@ export component AppWindow inherits Window {
             margin-stepped(by) => { root.print-margin-stepped(by); }
             print-requested => { root.print-requested(); }
             dismissed => { root.print-dismissed(); }
+        }
+    }
+
+    // RFN01-67 PR 2a: Git Repository。ペインとTABはこの下にそのまま残る。比較の画面はこの上に
+    // 開く（ファイルの比較を閉じると、この画面へ戻る）。
+    if root.git-repo-active: Rectangle {
+        background: Tok.paper;
+        TouchArea { }
+        GitRepositoryView {
+            repo-name: root.git-repo-name;
+            branch: root.git-branch;
+            branches: root.git-branches;
+            has-commit: root.git-has-commit;
+            has-upstream: root.git-has-upstream;
+            on-branch: root.git-on-branch;
+            incoming: root.git-incoming;
+            outgoing: root.git-outgoing;
+            busy: root.git-busy;
+            busy-text: root.git-busy-text;
+            can-cancel: root.git-can-cancel;
+            has-stash: root.git-repo-has-stash;
+            has-changes: root.git-repo-has-changes;
+            branch-rows: root.git-repo-branches;
+            commits: root.git-repo-commits;
+            more: root.git-repo-more;
+            note: root.git-repo-note;
+            selected: root.git-repo-selected;
+            detail-mode: root.git-repo-detail-mode;
+            detail-sha: root.git-repo-detail-sha;
+            detail-message: root.git-repo-detail-message;
+            detail-author: root.git-repo-detail-author;
+            detail-date: root.git-repo-detail-date;
+            detail-parents: root.git-repo-detail-parents;
+            detail-files: root.git-repo-detail-files;
+            scroll-row: root.git-repo-scroll-row;
+            scroll-generation: root.git-repo-scroll-generation;
+            focus-generation: root.git-repo-focus-generation;
+            changes-mode: root.git-mode;
+            changes-note: root.git-note;
+            changes-repos: root.git-repos;
+            changes-repo-index: root.git-repo-index;
+            staged-count: root.git-staged-count;
+            change-count: root.git-change-count;
+            change-rows: root.git-rows;
+            message <=> root.git-message;
+            amend <=> root.git-amend;
+            close => { root.git-repo-close(); }
+            branch-chosen(index) => { root.git-branch-chosen(index); }
+            new-branch => { root.git-new-branch(); }
+            pull => { root.git-pull(); }
+            push => { root.git-push(); }
+            fetch => { root.git-fetch(); }
+            branch-here => { root.git-repo-branch-here(); }
+            stash => { root.git-stash-all(); }
+            pop => { root.git-repo-pop(); }
+            cancel => { root.git-cancel(); }
+            commit-selected(index) => { root.git-repo-commit-selected(index); }
+            commit-menu(index, action) => { root.git-repo-commit-menu(index, action); }
+            show-more => { root.git-repo-show-more(); }
+            branch-clicked(index) => { root.git-repo-branch-clicked(index); }
+            branch-activated(index) => { root.git-repo-branch-activated(index); }
+            branch-menu(index, action) => { root.git-repo-branch-menu(index, action); }
+            branch-dropped(from, to) => { root.git-repo-branch-dropped(from, to); }
+            file-clicked(index) => { root.git-repo-file-clicked(index); }
+            file-menu(index, action) => { root.git-repo-file-menu(index, action); }
+            changes-commit => { root.git-commit(); }
+            changes-amend-toggled(wanted) => { root.git-amend-toggled(wanted); }
+            changes-stash-all => { root.git-stash-all(); }
+            changes-row-clicked(index) => { root.git-row-clicked(index); }
+            changes-row-activated(index) => { root.git-row-activated(index); }
+            changes-row-staged(index) => { root.git-row-staged(index); }
+            changes-row-menu(index, action) => { root.git-row-menu(index, action); }
         }
     }
 

@@ -218,6 +218,8 @@ pub(crate) fn dismiss(app: &AppWindow) {
     app.on_diff_next_difference(|_| {});
     app.on_diff_select_difference(|_| {});
     crate::restore_editor_focus(app);
+    // RFN01-67: Git Repository の上で開いた比較なら、その画面へ鍵盤を返す。
+    crate::git_repo_ui::regain_focus(app);
 }
 
 pub fn show(app: &AppWindow, left_label: String, left: String, right_label: String, right: String) {

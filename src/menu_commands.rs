@@ -64,6 +64,8 @@ enum Command {
     Zoom(i32),
     ZoomReset,
     Compare(i32),
+    /// RFN01-67: Git Repository の画面を開く。
+    GitRepository,
     /// RFN01-63: スペルチェックを始める／終える（アクティブな文書）。
     Spelling,
     /// RFN01-63: 次（`false`）／前（`true`）のスペルミスへ。
@@ -1393,6 +1395,13 @@ fn build(
             }
             root.child(pick("最近のフォルダ", "Recent Folders"), recent)?;
             add!("Workspaces…", "Workspaces…", Command::Workspaces, true);
+            // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
+            add!(
+                "Git Repository…",
+                "Git Repository…",
+                Command::GitRepository,
+                true
+            );
             root.sep()?;
             add!(
                 "保存",
@@ -1742,6 +1751,7 @@ fn build(
                 ("検索", "Search", 1),
                 ("履歴", "History", 2),
                 ("Outline", "Outline", 3),
+                ("Git Changes", "Git Changes", 8),
                 ("バックアップ", "Backups", 7),
             ] {
                 row(
@@ -2403,6 +2413,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Folder => window.invoke_work_folder_requested(),
         Command::Recent(path) => open_work_folder(window, live, &path),
         Command::Workspaces => window.invoke_workspace_manager_requested(),
+        Command::GitRepository => window.invoke_git_repository_requested(),
         Command::Save(false) => window.invoke_save_requested(),
         Command::Save(true) => window.invoke_save_as_requested(),
         Command::SaveAll => window.invoke_save_all_requested(),

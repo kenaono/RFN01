@@ -1,0 +1,1069 @@
+// RFN01-67 PR 2a（書き手と決めた 2026-10-03、見本 https://claude.ai/artifact/BtWN1o1bpf6dCYNkp47jDc ）:
+// Git Repository の画面。GitKraken を手本に、全ブランチのグラフを真ん中に置く。
+//
+// - 上の帯：リポジトリ、今のブランチ▾、Pull／Push／Fetch／Branch／Stash／Pop、Close。
+// - 左の列：LOCAL・REMOTE・STASHES。押すとグラフでその先端を選び、ダブルクリックで Checkout、
+//   右クリックでメニュー、**押したまま別のローカルブランチへ動かして離すと Merge**（確認はRust）。
+// - 真ん中：グラフ。線は行ごとの`Path`で、行を縦に並べるとつながる（筋はRustの`git_graph`）。
+// - 右の列：Commit の詳細、WIP なら Git Changes（左ペインと同じ部品・同じ状態）。
+//
+// 押したことはRust（`git_repo_ui.rs`）へ番号で渡し、ここは何をするかを決めない。
+
+import { ScrollView } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { Icon, Icons, IconButton, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
+import { GitChangesView, GitRow } from "git-view.slint";
+
+export struct GitLine {
+    commands: string,
+    color: color,
+}
+
+export struct GitRef {
+    label: string,
+    // 0 今のブランチ、1 ローカル、2 リモート。
+    kind: int,
+}
+
+export struct GitCommitRow {
+    sha: string,
+    message: string,
+    // メッセージの右に薄く出す（WIP の「3 files」）。
+    extra: string,
+    author: string,
+    date: string,
+    // ↓ 取り込んでいない、↑ 送っていない。
+    mark: string,
+    refs: [GitRef],
+    lines: [GitLine],
+    // 点の横位置（グラフの列の中、px）。
+    node-x: float,
+    node-color: color,
+    head: bool,
+    wip: bool,
+    // 今のブランチから辿れる（Revert・Reset はここだけ、Cherry-pick はここ以外）。
+    in-head: bool,
+}
+
+export struct GitBranchRow {
+    // 0 見出し、1 ローカル、2 リモート、3 リモートの名前、4 Stash、5 案内の文。
+    kind: int,
+    label: string,
+    // ↑↓の数、Stash の名前。
+    detail: string,
+    current: bool,
+}
+
+// アイコンの下に名前を置いた帯の釦（GitKraken と同じ形）。
+component ToolButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> title;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: max(56px, label.preferred-width + 12px);
+    height: 44px;
+    border-radius: 6px;
+    opacity: root.enabled ? 1.0 : 0.4;
+    background: touch.has-hover && root.enabled ? Tok.chrome-sunken : transparent;
+    VerticalLayout {
+        alignment: center;
+        spacing: 2px;
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                commands: root.icon;
+                tint: Tok.ink-muted;
+            }
+        }
+        label := Text {
+            text: root.title;
+            color: Tok.ink;
+            font-size: 11px;
+            horizontal-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component GitRepositoryView inherits Rectangle {
+    in property <string> repo-name;
+    in property <string> branch;
+    in property <[string]> branches;
+    in property <bool> has-commit;
+    in property <bool> has-upstream;
+    in property <bool> on-branch;
+    in property <int> incoming;
+    in property <int> outgoing;
+    in property <bool> busy;
+    in property <string> busy-text;
+    in property <bool> can-cancel;
+    in property <bool> has-stash;
+    in property <bool> has-changes;
+    in property <[GitBranchRow]> branch-rows;
+    in property <[GitCommitRow]> commits;
+    in property <bool> more;
+    in property <string> note;
+    in property <int> selected: -1;
+    // 0 何も選んでいない、1 Commit、2 WIP。
+    in property <int> detail-mode;
+    in property <string> detail-sha;
+    in property <string> detail-message;
+    in property <string> detail-author;
+    in property <string> detail-date;
+    in property <string> detail-parents;
+    in property <[GitRow]> detail-files;
+    // 先端へ移るとき：Rust が行を入れて番号を進める。
+    in property <int> scroll-row;
+    in property <int> scroll-generation;
+    // 比較の画面を閉じて戻ってきたとき：鍵盤を取り直す。
+    in property <int> focus-generation;
+
+    // WIP の右の列（左ペインの Git Changes と同じ状態）。
+    in property <int> changes-mode;
+    in property <string> changes-note;
+    in property <[string]> changes-repos;
+    in property <int> changes-repo-index;
+    in property <int> staged-count;
+    in property <int> change-count;
+    in property <[GitRow]> change-rows;
+    in-out property <string> message;
+    in-out property <bool> amend;
+
+    callback close();
+    callback branch-chosen(int);
+    callback new-branch();
+    callback pull();
+    callback push();
+    callback fetch();
+    callback branch-here();
+    callback stash();
+    callback pop();
+    callback cancel();
+    callback commit-selected(int);
+    callback commit-menu(int, int);
+    callback show-more();
+    callback branch-clicked(int);
+    callback branch-activated(int);
+    callback branch-menu(int, int);
+    callback branch-dropped(int, int);
+    callback file-clicked(int);
+    callback file-menu(int, int);
+    // WIP の右の列から（Git Changes と同じ操作）。
+    callback changes-commit();
+    callback changes-amend-toggled(bool);
+    callback changes-stash-all();
+    callback changes-row-clicked(int);
+    callback changes-row-activated(int);
+    callback changes-row-staged(int);
+    callback changes-row-menu(int, int);
+
+    property <length> row-height: 30px;
+    property <length> branch-height: 26px;
+    property <length> graph-width: 120px;
+    // 左の列のドラッグ。
+    property <int> drag-from: -1;
+    property <bool> dragging;
+    property <length> drag-start;
+    property <int> drop-index: -1;
+    // 右クリックのメニュー。
+    property <int> menu-row: -1;
+    property <int> menu-kind;
+    property <bool> menu-current;
+    property <bool> menu-in-head;
+    property <length> menu-x;
+    property <length> menu-y;
+
+    background: Tok.paper;
+
+    changed scroll-generation => {
+        let top = root.scroll-row * root.row-height;
+        if top < -list.viewport-y || top + root.row-height > -list.viewport-y + list.visible-height {
+            list.viewport-y = min(0px, max(list.visible-height - list.viewport-height, -(top - list.visible-height / 2)));
+        }
+    }
+    changed focus-generation => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    VerticalLayout {
+        // 上の帯。
+        Rectangle {
+            height: 52px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 4px;
+                alignment: start;
+                HorizontalLayout {
+                    spacing: 6px;
+                    padding-right: 6px;
+                    Rectangle {
+                        width: 16px;
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            commands: Icons.folder;
+                        }
+                    }
+                    Text {
+                        text: root.repo-name;
+                        color: Tok.ink-strong;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+                branch-button := Rectangle {
+                    width: branch-row.preferred-width + 16px;
+                    border-radius: 5px;
+                    background: branch-touch.has-hover && !root.busy ? Tok.chrome-sunken : transparent;
+                    branch-row := HorizontalLayout {
+                        x: 8px;
+                        spacing: 6px;
+                        Rectangle {
+                            width: 16px;
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: Icons.git;
+                            }
+                        }
+                        Text {
+                            text: root.branch;
+                            color: Tok.ink;
+                            font-size: 13px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            width: 16px;
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: Icons.down;
+                            }
+                        }
+                    }
+                    branch-touch := TouchArea {
+                        enabled: !root.busy && root.has-commit;
+                        clicked => {
+                            branch-menu.show();
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 13px;
+                    Rectangle {
+                        x: 6px;
+                        y: 12px;
+                        width: 1px;
+                        height: 28px;
+                        background: Tok.rule;
+                    }
+                }
+                ToolButton {
+                    icon: "M8 2.5v9M4.5 8 8 11.5 11.5 8M3 13.5h10";
+                    title: root.incoming > 0 ? @tr("Pull") + " ↓" + root.incoming : @tr("Pull");
+                    enabled: !root.busy && root.has-upstream;
+                    clicked => {
+                        root.pull();
+                    }
+                }
+                ToolButton {
+                    icon: "M8 13.5v-9M4.5 8 8 4.5 11.5 8M3 2.5h10";
+                    title: !root.has-upstream ? @tr("Publish") : root.outgoing > 0 ? @tr("Push") + " ↑" + root.outgoing : @tr("Push");
+                    enabled: !root.busy && root.on-branch && root.has-commit;
+                    clicked => {
+                        root.push();
+                    }
+                }
+                ToolButton {
+                    icon: "M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3";
+                    title: @tr("Fetch");
+                    enabled: !root.busy && root.has-commit;
+                    clicked => {
+                        root.fetch();
+                    }
+                }
+                ToolButton {
+                    icon: Icons.git;
+                    title: @tr("Branch");
+                    enabled: !root.busy && root.has-commit;
+                    clicked => {
+                        root.branch-here();
+                    }
+                }
+                ToolButton {
+                    icon: "M2.5 9.5v4h11v-4M8 2.5V11M5 8 8 11 11 8";
+                    title: @tr("Stash");
+                    enabled: !root.busy && root.has-commit && root.has-changes;
+                    clicked => {
+                        root.stash();
+                    }
+                }
+                ToolButton {
+                    icon: Icons.pop;
+                    title: @tr("Pop");
+                    enabled: !root.busy && root.has-stash;
+                    clicked => {
+                        root.pop();
+                    }
+                }
+                if root.busy-text != "": HorizontalLayout {
+                    spacing: 6px;
+                    padding-left: 8px;
+                    Text {
+                        text: root.busy-text;
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    if root.can-cancel: VerticalLayout {
+                        alignment: center;
+                        TextButton {
+                            title: @tr("Cancel");
+                            clicked => {
+                                root.cancel();
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-right: 12px;
+                alignment: end;
+                spacing: 8px;
+                Text {
+                    text: "Esc";
+                    color: Tok.ink-faint;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TextButton {
+                        title: @tr("Close");
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Tok.rule;
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+
+            // 左の列。
+            Rectangle {
+                width: 240px;
+                background: Tok.chrome;
+                branch-list := ScrollView {
+                    VerticalLayout {
+                        padding: 8px;
+                        alignment: start;
+                        for row[index] in root.branch-rows: line := Rectangle {
+                            height: root.branch-height;
+                            border-radius: 5px;
+                            property <bool> target: root.dragging && root.drop-index == index && row.kind == 1 && index != root.drag-from;
+                            background: self.target ? Tok.accent-soft : (row.kind == 1 || row.kind == 2 || row.kind == 4) && touch.has-hover ? Tok.accent-faint : transparent;
+                            border-width: self.target ? 2px : 0px;
+                            border-color: Tok.accent;
+                            touch := TouchArea {
+                                enabled: row.kind == 1 || row.kind == 2 || row.kind == 4;
+                                clicked => {
+                                    root.branch-clicked(index);
+                                }
+                                double-clicked => {
+                                    root.branch-activated(index);
+                                }
+                                pointer-event(event) => {
+                                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.down && (row.kind == 1 || row.kind == 2) {
+                                        root.drag-from = index;
+                                        root.drag-start = self.mouse-y;
+                                        root.dragging = false;
+                                        root.drop-index = -1;
+                                    }
+                                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                        if root.dragging && root.drop-index >= 0 && root.drop-index != root.drag-from {
+                                            root.branch-dropped(root.drag-from, root.drop-index);
+                                        }
+                                        root.drag-from = -1;
+                                        root.dragging = false;
+                                        root.drop-index = -1;
+                                    }
+                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && (row.kind == 1 || row.kind == 2 || row.kind == 4) {
+                                        root.menu-row = index;
+                                        root.menu-kind = row.kind == 1 ? 1 : row.kind == 2 ? 2 : 4;
+                                        root.menu-current = row.current;
+                                        root.menu-x = 16px;
+                                        root.menu-y = line.absolute-position.y - root.absolute-position.y + line.height;
+                                        side-menu.show();
+                                    }
+                                }
+                                moved => {
+                                    if root.drag-from == index {
+                                        if !root.dragging && abs(self.mouse-y - root.drag-start) > 4px {
+                                            root.dragging = true;
+                                        }
+                                        if root.dragging {
+                                            root.drop-index = floor((line.y + self.mouse-y) / root.branch-height);
+                                        }
+                                    }
+                                }
+                            }
+                            if row.kind == 0: Text {
+                                x: 8px;
+                                text: row.label;
+                                color: Tok.ink-faint;
+                                font-size: 10px;
+                                letter-spacing: 0.9px;
+                                vertical-alignment: center;
+                            }
+                            if row.kind == 5: Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                text: row.label;
+                                color: Tok.ink-muted;
+                                font-size: 11px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if row.kind == 3: HorizontalLayout {
+                                padding-left: 6px;
+                                spacing: 4px;
+                                Rectangle {
+                                    width: 16px;
+                                    Icon {
+                                        y: (parent.height - self.height) / 2;
+                                        commands: Icons.down;
+                                    }
+                                }
+                                Text {
+                                    text: row.label;
+                                    color: Tok.ink-muted;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            if row.kind == 1 || row.kind == 2 || row.kind == 4: HorizontalLayout {
+                                padding-left: row.kind == 2 ? 26px : 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                if row.kind == 1: Text {
+                                    width: 12px;
+                                    text: row.current ? "✓" : "";
+                                    color: Tok.accent;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: row.label;
+                                    color: row.current ? Tok.ink-strong : Tok.ink;
+                                    font-size: 12px;
+                                    font-weight: row.current ? 700 : 400;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: row.detail;
+                                    color: Tok.ink-muted;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: 1px;
+                background: Tok.rule;
+            }
+
+            // 真ん中：グラフ。
+            VerticalLayout {
+                horizontal-stretch: 1;
+                Rectangle {
+                    height: 28px;
+                    background: Tok.chrome;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        Text {
+                            width: 150px - 12px;
+                            text: "BRANCH";
+                            color: Tok.ink-faint;
+                            font-size: 10px;
+                            letter-spacing: 0.9px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            width: root.graph-width;
+                            text: "GRAPH";
+                            color: Tok.ink-faint;
+                            font-size: 10px;
+                            letter-spacing: 0.9px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "COMMIT MESSAGE";
+                            color: Tok.ink-faint;
+                            font-size: 10px;
+                            letter-spacing: 0.9px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            width: 80px;
+                            text: "AUTHOR";
+                            color: Tok.ink-faint;
+                            font-size: 10px;
+                            letter-spacing: 0.9px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            width: 120px;
+                            text: "DATE";
+                            color: Tok.ink-faint;
+                            font-size: 10px;
+                            letter-spacing: 0.9px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            width: 76px;
+                            text: "SHA";
+                            color: Tok.ink-faint;
+                            font-size: 10px;
+                            letter-spacing: 0.9px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Tok.rule;
+                    }
+                }
+                if root.note != "": Text {
+                    height: 40px;
+                    x: 16px;
+                    text: root.note;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                list := ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: start;
+                        for row[index] in root.commits: commit-line := Rectangle {
+                            height: root.row-height;
+                            background: index == root.selected ? Tok.accent-faint : commit-touch.has-hover ? Tok.chrome-raised : transparent;
+                            commit-touch := TouchArea {
+                                clicked => {
+                                    root.commit-selected(index);
+                                }
+                                pointer-event(event) => {
+                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && !row.wip {
+                                        root.commit-selected(index);
+                                        root.menu-row = index;
+                                        root.menu-kind = 0;
+                                        root.menu-in-head = row.in-head;
+                                        root.menu-x = 150px + root.graph-width + 240px + 40px;
+                                        root.menu-y = commit-line.absolute-position.y - root.absolute-position.y + commit-line.height;
+                                        commit-menu.show();
+                                    }
+                                }
+                            }
+                            if index == root.selected: Rectangle {
+                                x: 0;
+                                width: 3px;
+                                background: Tok.accent;
+                            }
+                            HorizontalLayout {
+                                // 札。
+                                HorizontalLayout {
+                                    width: 150px;
+                                    padding-left: 10px;
+                                    spacing: 4px;
+                                    alignment: start;
+                                    for tag in row.refs: Rectangle {
+                                        y: (root.row-height - 20px) / 2;
+                                        height: 20px;
+                                        width: min(tag-text.preferred-width + 12px, 130px);
+                                        border-radius: 4px;
+                                        background: tag.kind == 0 ? Tok.accent-soft : tag.kind == 1 ? Tok.accent-faint : transparent;
+                                        border-width: 1px;
+                                        border-color: tag.kind == 0 ? Tok.accent : Tok.rule-strong;
+                                        tag-text := Text {
+                                            x: 6px;
+                                            width: parent.width - 12px;
+                                            text: tag.kind == 0 ? "✓ " + tag.label : tag.label;
+                                            color: tag.kind == 0 ? Tok.accent-strong : tag.kind == 1 ? Tok.ink : Tok.ink-muted;
+                                            font-size: 11px;
+                                            font-weight: tag.kind == 0 ? 700 : 400;
+                                            font-italic: tag.kind == 2;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                // 線と点。
+                                Rectangle {
+                                    width: root.graph-width;
+                                    for line in row.lines: Path {
+                                        x: 0;
+                                        y: 0;
+                                        width: root.graph-width;
+                                        height: root.row-height;
+                                        viewbox-width: root.graph-width / 1px;
+                                        viewbox-height: root.row-height / 1px;
+                                        commands: line.commands;
+                                        stroke: line.color;
+                                        stroke-width: 2px;
+                                        fill: transparent;
+                                    }
+                                    Rectangle {
+                                        x: row.node-x * 1px - self.width / 2;
+                                        y: (root.row-height - self.height) / 2;
+                                        width: row.head ? 14px : 10px;
+                                        height: self.width;
+                                        border-radius: self.width / 2;
+                                        background: row.wip || row.head ? Tok.paper : row.node-color;
+                                        border-width: row.wip || row.head ? 2px : 0px;
+                                        border-color: row.node-color;
+                                        if row.head: Rectangle {
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 6px;
+                                            height: 6px;
+                                            border-radius: 3px;
+                                            background: row.node-color;
+                                        }
+                                    }
+                                }
+                                // メッセージ。
+                                HorizontalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 6px;
+                                    if row.mark != "": VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            height: 16px;
+                                            width: 18px;
+                                            border-radius: 3px;
+                                            background: row.mark == "↓" ? Tok.chrome-sunken : Tok.accent-faint;
+                                            Text {
+                                                text: row.mark;
+                                                color: row.mark == "↓" ? Tok.ink : Tok.accent-strong;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: row.message;
+                                        color: row.wip ? Tok.ink-muted : index == root.selected ? Tok.ink-strong : Tok.ink;
+                                        font-size: 13px;
+                                        font-italic: row.wip;
+                                        font-weight: index == root.selected ? 600 : 400;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 0;
+                                    }
+                                    Text {
+                                        text: row.extra;
+                                        color: Tok.ink-faint;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                Text {
+                                    width: 80px;
+                                    text: row.author;
+                                    color: Tok.ink-muted;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    width: 120px;
+                                    text: row.date;
+                                    color: Tok.ink-muted;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    width: 76px;
+                                    text: row.sha;
+                                    color: Tok.ink-faint;
+                                    font-size: 12px;
+                                    font-family: "Consolas";
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        if root.more: Rectangle {
+                            height: root.row-height;
+                            more-touch := TouchArea {
+                                clicked => {
+                                    root.show-more();
+                                }
+                            }
+                            Text {
+                                x: 150px + root.graph-width;
+                                text: @tr("Show more");
+                                color: more-touch.has-hover ? Tok.accent-strong : Tok.accent;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: 1px;
+                background: Tok.rule;
+            }
+
+            // 右の列。
+            Rectangle {
+                width: 340px;
+                background: Tok.chrome;
+                if root.detail-mode == 0: Text {
+                    text: @tr("Select a commit");
+                    color: Tok.ink-faint;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                if root.detail-mode == 1: ScrollView {
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "commit " + root.detail-sha;
+                            color: Tok.ink-faint;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                        }
+                        Text {
+                            text: root.detail-message;
+                            color: Tok.ink-strong;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: root.detail-author;
+                            color: Tok.ink-muted;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.detail-date;
+                            color: Tok.ink-muted;
+                            font-size: 12px;
+                        }
+                        Text {
+                            text: root.detail-parents;
+                            color: Tok.ink-muted;
+                            font-size: 12px;
+                            font-family: "Consolas";
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: Tok.rule;
+                        }
+                        Text {
+                            text: root.detail-files.length + " " + @tr("FILES CHANGED");
+                            color: Tok.ink-faint;
+                            font-size: 10px;
+                            letter-spacing: 0.9px;
+                        }
+                        for file[index] in root.detail-files: file-line := Rectangle {
+                            height: 26px;
+                            border-radius: 5px;
+                            background: file-touch.has-hover ? Tok.accent-faint : transparent;
+                            file-touch := TouchArea {
+                                clicked => {
+                                    root.file-clicked(index);
+                                }
+                                pointer-event(event) => {
+                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                                        root.menu-row = index;
+                                        root.menu-kind = 5;
+                                        root.menu-x = root.width - 340px + 24px;
+                                        root.menu-y = file-line.absolute-position.y - root.absolute-position.y + file-line.height;
+                                        side-menu.show();
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                spacing: 8px;
+                                Text {
+                                    width: 12px;
+                                    text: file.letter;
+                                    color: file.letter == "D" ? Tok.alert : file.letter == "A" ? #2e7d32 : Tok.accent;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: file.label;
+                                    color: Tok.ink;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                }
+                                Text {
+                                    text: file.folder;
+                                    color: Tok.ink-faint;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                            if file.tip != "": Tooltip {
+                                text: @markdown("`\{file.tip}`");
+                            }
+                        }
+                    }
+                }
+                if root.detail-mode == 2: GitChangesView {
+                    mode: root.changes-mode;
+                    note: root.changes-note;
+                    // リポジトリとブランチはこの画面の上の帯が持つので、ここでは選ばせない。
+                    repos: [];
+                    repo-index: root.changes-repo-index;
+                    branch: root.branch;
+                    branches: root.branches;
+                    on-branch: root.on-branch;
+                    has-upstream: root.has-upstream;
+                    has-commit: root.has-commit;
+                    incoming: root.incoming;
+                    outgoing: root.outgoing;
+                    busy: root.busy;
+                    busy-text: root.busy-text;
+                    can-cancel: root.can-cancel;
+                    staged-count: root.staged-count;
+                    change-count: root.change-count;
+                    rows: root.change-rows;
+                    message <=> root.message;
+                    amend <=> root.amend;
+                    compact: true;
+                    branch-chosen(index) => { root.branch-chosen(index); }
+                    new-branch => { root.new-branch(); }
+                    fetch => { root.fetch(); }
+                    pull => { root.pull(); }
+                    push => { root.push(); }
+                    commit => { root.changes-commit(); }
+                    amend-toggled(wanted) => { root.changes-amend-toggled(wanted); }
+                    stash-all => { root.changes-stash-all(); }
+                    cancel => { root.cancel(); }
+                    row-clicked(index) => { root.changes-row-clicked(index); }
+                    row-activated(index) => { root.changes-row-activated(index); }
+                    row-staged(index) => { root.changes-row-staged(index); }
+                    row-menu(index, action) => { root.changes-row-menu(index, action); }
+                }
+            }
+        }
+    }
+
+    branch-menu := PopupWindow {
+        x: 160px;
+        y: 46px;
+        width: 240px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 240px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                for name[index] in root.branches: MenuRow {
+                    title: name;
+                    checked: name == root.branch;
+                    activated => {
+                        root.branch-chosen(index);
+                        branch-menu.close();
+                    }
+                }
+                if root.branches.length > 0: Rectangle {
+                    height: 7px;
+                    Rectangle {
+                        y: 3px;
+                        height: 1px;
+                        background: Tok.rule;
+                    }
+                }
+                MenuRow {
+                    title: @tr("New Branch…");
+                    activated => {
+                        branch-menu.close();
+                        root.new-branch();
+                    }
+                }
+            }
+        }
+    }
+
+    commit-menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 260px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 260px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                MenuRow {
+                    title: @tr("New Branch…");
+                    activated => {
+                        commit-menu.close();
+                        root.commit-menu(root.menu-row, 0);
+                    }
+                }
+                Rectangle {
+                    height: 7px;
+                    Rectangle {
+                        y: 3px;
+                        height: 1px;
+                        background: Tok.rule;
+                    }
+                }
+                MenuRow {
+                    title: @tr("Revert");
+                    enabled: root.menu-in-head;
+                    activated => {
+                        commit-menu.close();
+                        root.commit-menu(root.menu-row, 1);
+                    }
+                }
+                MenuRow {
+                    title: @tr("Cherry-pick");
+                    enabled: !root.menu-in-head;
+                    activated => {
+                        commit-menu.close();
+                        root.commit-menu(root.menu-row, 2);
+                    }
+                }
+                Rectangle {
+                    height: 7px;
+                    Rectangle {
+                        y: 3px;
+                        height: 1px;
+                        background: Tok.rule;
+                    }
+                }
+                MenuRow {
+                    title: @tr("Reset — Keep Changes");
+                    enabled: root.menu-in-head;
+                    activated => {
+                        commit-menu.close();
+                        root.commit-menu(root.menu-row, 3);
+                    }
+                }
+                MenuRow {
+                    title: @tr("Reset — Delete Changes…");
+                    enabled: root.menu-in-head;
+                    activated => {
+                        commit-menu.close();
+                        root.commit-menu(root.menu-row, 4);
+                    }
+                }
+            }
+        }
+    }
+
+    // 左の列（ローカル 1・リモート 2・Stash 4）と右の列のファイル（5）のメニュー。
+    side-menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 240px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 240px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                MenuRow {
+                    title: root.menu-kind == 4 ? @tr("Apply") : root.menu-kind == 5 ? @tr("Compare with Previous") : @tr("Checkout");
+                    enabled: !(root.menu-kind == 1 && root.menu-current);
+                    activated => {
+                        side-menu.close();
+                        root.side-chosen(0);
+                    }
+                }
+                MenuRow {
+                    title: root.menu-kind == 4 ? @tr("Pop") : root.menu-kind == 5 ? @tr("Compare with Working Copy") : @tr("New Branch…");
+                    activated => {
+                        side-menu.close();
+                        root.side-chosen(1);
+                    }
+                }
+                MenuRow {
+                    title: root.menu-kind == 4 ? @tr("Drop…") : root.menu-kind == 5 ? @tr("Open") : @tr("Merge into") + " " + root.branch;
+                    enabled: !(root.menu-kind == 1 && root.menu-current);
+                    activated => {
+                        side-menu.close();
+                        root.side-chosen(2);
+                    }
+                }
+                if root.menu-kind == 1: MenuRow {
+                    title: @tr("Push");
+                    activated => {
+                        side-menu.close();
+                        root.side-chosen(3);
+                    }
+                }
+                if root.menu-kind == 1: MenuRow {
+                    title: @tr("Delete…");
+                    enabled: !root.menu-current;
+                    activated => {
+                        side-menu.close();
+                        root.side-chosen(4);
+                    }
+                }
+            }
+        }
+    }
+
+    function side-chosen(action: int) {
+        if root.menu-kind == 5 {
+            root.file-menu(root.menu-row, action);
+        } else {
+            root.branch-menu(root.menu-row, action);
+        }
+    }
+}

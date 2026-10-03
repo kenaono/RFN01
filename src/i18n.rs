@@ -103,6 +103,9 @@ mod tests {
             include_str!("../ui/workspace-manager.slint"),
             include_str!("../ui/panel-style-editor.slint"),
             include_str!("../ui/table-picker.slint"),
+            // RFN01-67: Git Changes と Git Repository。
+            include_str!("../ui/git-view.slint"),
+            include_str!("../ui/git-repository.slint"),
         ];
         let mut used = HashSet::new();
         for source in sources {

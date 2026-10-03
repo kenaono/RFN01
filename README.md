@@ -1344,6 +1344,16 @@ PCにインストールされている`git`を使います。Gitが無い（イ�
 - Push・Pullでサインインが要るときは、Git Credential Managerの窓が出ます。Fetch・Pull・Push・Sync は面の Cancel で止められます。
 - 面が出ているあいだは5秒ごとに読み直すので、Terminalで打った`git`も映ります。
 
+## Git Repository
+
+File の「Git Repository…」か、Git Changes のブランチ▾の「Manage Branches」で、全ブランチのグラフを開きます（RFN01-67、手本はGitKraken）。対象は Git Changes で選んでいるリポジトリです。比較の画面と同じく窓に重ねて開き、Close か Esc で元のペインとTABへ戻ります。
+- **上の帯**：今のブランチ▾、Pull／Push／Fetch／Branch（選んでいるCommitから新しいブランチ）／Stash／Pop。
+- **左の列**：LOCAL・REMOTE・STASHES。ブランチを押すとグラフでその先端を選び、ダブルクリックで Checkout。右クリックで Checkout／New Branch…／Merge into 〈今のブランチ〉／Push／Delete…。**ブランチを押したまま別のローカルブランチへ動かして離すと、確認してから Merge** します（落とし先が今のブランチでなければ、先にそこへ Checkout します）。
+- **真ん中のグラフ**：分岐と合流を線で描きます。今のブランチの筋は紫です。取り込んでいない Commit に ↓、送っていない Commit に ↑。Commit していない変更があれば一番上に「// WIP」。最初は200件で、「Show more」で読み足します。
+- **右の列**：選んだ Commit の詳細と変更したファイル。ファイルを押すと親 Commit との比較が開き、閉じるとこの画面へ戻ります（右クリックで今のファイルとの比較・Open）。「// WIP」を選ぶと Git Changes が出ます。
+- **Commit の右クリック**：New Branch…、Revert（今のブランチの Commit）、Cherry-pick（ほかのブランチの Commit）、Reset — Keep Changes／Delete Changes…（今のブランチの Commit。Delete Changes と、Push 済みの Commit を外す Reset は確認します）。
+- 未保存の文書の確かめ、衝突したら中止して元に戻すこと、終わったあとの読み直しは Git Changes と同じです。Merge していないブランチを消すときは、もう一度確認します。
+
 ## 印刷（紙の形で見る）
 
 Paneメニュー（⋮）の「Print…」かCtrl+Pで、**そのペインのそのTAB**の印刷プレビューが開きます。窓の☰には置いていません——どのペインのどのTABが出るのか、押す側から分からないからです。編集画面はその下にそのまま残り、Escか「Close」で戻ります。

@@ -97,11 +97,16 @@ export component GitChangesView inherits Rectangle {
     in property <[GitRow]> rows;
     in-out property <string> message;
     in-out property <bool> amend;
+    // Git Repository の右の列に置くとき（RFN01-67 PR 2a）：ブランチと Fetch／Pull／Push／Sync は
+    // その画面の上の帯にあるので、ここでは出さない。
+    in property <bool> compact: false;
 
     callback repo-chosen(int);
     callback create-repository();
     callback branch-chosen(int);
     callback new-branch();
+    // ブランチ▾の「Manage Branches」：Git Repository の画面を開く（RFN01-67 PR 2a）。
+    callback manage-branches();
     callback fetch();
     callback pull();
     callback push();
@@ -173,7 +178,7 @@ export component GitChangesView inherits Rectangle {
             spacing: 6px;
             vertical-stretch: 1;
 
-            Picker {
+            if !root.compact: Picker {
                 icon: Icons.git;
                 title: root.branch;
                 enabled: !root.busy;
@@ -182,7 +187,7 @@ export component GitChangesView inherits Rectangle {
                 }
             }
 
-            HorizontalLayout {
+            if !root.compact: HorizontalLayout {
                 spacing: 4px;
                 TextButton {
                     title: @tr("Fetch");
@@ -214,7 +219,7 @@ export component GitChangesView inherits Rectangle {
                 }
             }
 
-            if root.busy-text != "": HorizontalLayout {
+            if root.busy-text != "" && !root.compact: HorizontalLayout {
                 spacing: 6px;
                 height: 28px;
                 Text {
@@ -525,6 +530,14 @@ export component GitChangesView inherits Rectangle {
                     activated => {
                         branch-menu.close();
                         root.new-branch();
+                    }
+                }
+                if !root.compact: MenuRow {
+                    title: @tr("Manage Branches");
+                    enabled: root.has-commit;
+                    activated => {
+                        branch-menu.close();
+                        root.manage-branches();
                     }
                 }
             }
