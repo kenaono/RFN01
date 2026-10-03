@@ -105,8 +105,9 @@ export component GitChangesView inherits Rectangle {
     callback create-repository();
     callback branch-chosen(int);
     callback new-branch();
-    // ブランチ▾の「Manage Branches」：Git Repository の画面を開く（RFN01-67 PR 2a）。
-    callback manage-branches();
+    // 見出しの右端の釦：Git Repository の画面を開く（RFN01-67 PR 2b。PR 2a ではブランチ▾の
+    // 「Manage Branches」だったが、同じ面に入口を2つ置かないため見出しへ移した）。
+    callback open-repository();
     callback fetch();
     callback pull();
     callback push();
@@ -134,11 +135,25 @@ export component GitChangesView inherits Rectangle {
         padding: 10px;
         spacing: 6px;
 
-        Text {
-            text: @tr("GIT CHANGES");
-            color: Tok.ink-faint;
-            font-size: 10px;
-            letter-spacing: 0.9px;
+        // 見出しの右端に Git Repository を開く釦（書き手と決めた 2026-10-03、PR 2b）。
+        HorizontalLayout {
+            height: 22px;
+            Text {
+                text: @tr("GIT CHANGES");
+                color: Tok.ink-faint;
+                font-size: 10px;
+                letter-spacing: 0.9px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if !root.compact && root.mode == 2: IconButton {
+                size: 22px;
+                icon: Icons.graph;
+                tip: @tr("Git Repository");
+                clicked => {
+                    root.open-repository();
+                }
+            }
         }
 
         if root.repos.length > 1: Picker {
@@ -536,14 +551,7 @@ export component GitChangesView inherits Rectangle {
                         root.new-branch();
                     }
                 }
-                if !root.compact: MenuRow {
-                    title: @tr("Manage Branches");
-                    enabled: root.has-commit;
-                    activated => {
-                        branch-menu.close();
-                        root.manage-branches();
-                    }
-                }
+
             }
         }
     }

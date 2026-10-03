@@ -19,7 +19,7 @@ export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
-import { GitBranchRow, GitCommitRow, GitLine, GitRef, GitRepositoryView } from "git-repository.slint";
+import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitLine, GitRef, GitRepositoryView } from "git-repository.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
@@ -988,7 +988,7 @@ export component AppWindow inherits Window {
     callback git-row-activated(int);
     callback git-row-staged(int);
     callback git-row-menu(int, int);
-    callback git-manage-branches();
+    callback git-open-repository();
     /// RFN01-67 PR 2a: Git Repository の画面（`git_repo_ui`）。
     in-out property <bool> git-repo-active;
     in property <string> git-repo-name;
@@ -1023,6 +1023,26 @@ export component AppWindow inherits Window {
     callback git-repo-branch-dropped(int, int);
     callback git-repo-file-clicked(int);
     callback git-repo-file-menu(int, int);
+    // PR 2b: 右の列の差分と Undo／Redo。
+    in property <string> git-repo-diff-name;
+    in property <string> git-repo-diff-caption;
+    in property <int> git-repo-diff-removed;
+    in property <int> git-repo-diff-added;
+    in property <bool> git-repo-diff-working;
+    in property <bool> git-repo-diff-switchable;
+    in property <[GitDiffRow]> git-repo-diff-rows;
+    in property <bool> git-repo-can-undo;
+    in property <string> git-repo-undo-tip;
+    in property <bool> git-repo-can-redo;
+    in property <string> git-repo-redo-tip;
+    callback git-repo-undo();
+    /// WIP の右の列で行を押した：見出しなら開閉、ファイルなら差分（PR 2b）。
+    callback git-repo-changes-clicked(int);
+    callback git-repo-redo();
+    callback git-repo-diff-back();
+    callback git-repo-diff-working-chosen(bool);
+    callback git-repo-diff-open-full();
+    callback git-repo-diff-width-changed(float);
     /// 左ペインの Backups の行（`backup_ui::publish_pane`）。
     in property <[BackupPaneRow]> backup-pane-rows;
     callback backup-pane-clicked(int);
@@ -2002,7 +2022,7 @@ export component AppWindow inherits Window {
                         row-activated(index) => { root.git-row-activated(index); }
                         row-staged(index) => { root.git-row-staged(index); }
                         row-menu(index, action) => { root.git-row-menu(index, action); }
-                        manage-branches => { root.git-manage-branches(); }
+                        open-repository => { root.git-open-repository(); }
                     }
                     if root.left-tab == 7: BackupsView {
                         vertical-stretch: 1;
@@ -6619,6 +6639,23 @@ export component AppWindow inherits Window {
             scroll-row: root.git-repo-scroll-row;
             scroll-generation: root.git-repo-scroll-generation;
             focus-generation: root.git-repo-focus-generation;
+            diff-name: root.git-repo-diff-name;
+            diff-caption: root.git-repo-diff-caption;
+            diff-removed: root.git-repo-diff-removed;
+            diff-added: root.git-repo-diff-added;
+            diff-working: root.git-repo-diff-working;
+            diff-switchable: root.git-repo-diff-switchable;
+            diff-rows: root.git-repo-diff-rows;
+            can-undo: root.git-repo-can-undo;
+            undo-tip: root.git-repo-undo-tip;
+            can-redo: root.git-repo-can-redo;
+            redo-tip: root.git-repo-redo-tip;
+            undo => { root.git-repo-undo(); }
+            redo => { root.git-repo-redo(); }
+            diff-back => { root.git-repo-diff-back(); }
+            diff-working-chosen(working) => { root.git-repo-diff-working-chosen(working); }
+            diff-open-full => { root.git-repo-diff-open-full(); }
+            diff-width-changed(width) => { root.git-repo-diff-width-changed(width); }
             changes-mode: root.git-mode;
             changes-note: root.git-note;
             changes-repos: root.git-repos;
@@ -6650,7 +6687,7 @@ export component AppWindow inherits Window {
             changes-commit => { root.git-commit(); }
             changes-amend-toggled(wanted) => { root.git-amend-toggled(wanted); }
             changes-stash-all => { root.git-stash-all(); }
-            changes-row-clicked(index) => { root.git-row-clicked(index); }
+            changes-row-clicked(index) => { root.git-repo-changes-clicked(index); }
             changes-row-activated(index) => { root.git-row-activated(index); }
             changes-row-staged(index) => { root.git-row-staged(index); }
             changes-row-menu(index, action) => { root.git-row-menu(index, action); }

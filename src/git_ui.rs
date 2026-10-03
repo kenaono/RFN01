@@ -20,6 +20,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::git::{self, Cancel, Change, GitError, Kind, Stash, Status};
+use crate::git_history::{self, Entry, Kind as HistoryKind, Point};
 use crate::i18n::pick;
 use crate::open_document::OpenDocument;
 use crate::{AppWindow, GitRow, Live, Opening, Question, StatusBar, say};
@@ -63,6 +64,23 @@ struct Job {
     discarded: Vec<Rc<OpenDocument>>,
     /// 通ったときにすること（Commitならメッセージ欄を空にする）。
     after: After,
+    /// 通ったら Undo の記録に足すもの（RFN01-67 PR 2b）。
+    record: Option<Recording>,
+    /// Undo（`false`）・Redo（`true`）そのもの。通ったら記録を反対の山へ移す。
+    history: Option<bool>,
+}
+
+/// 操作の前に控えておく、Undo の記録の材料。
+struct Recording {
+    label: String,
+    kind: HistoryKind,
+    before: Point,
+}
+
+#[derive(Default)]
+struct History {
+    undo: Vec<Entry>,
+    redo: Vec<Entry>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +115,9 @@ struct Pane {
 
 thread_local! {
     static PANE: RefCell<Pane> = RefCell::new(Pane::default());
+    /// Undo／Redo の記録。リポジトリの根（`key`）ごと、アプリを起動してからのもの。
+    static HISTORY: RefCell<std::collections::HashMap<String, History>> =
+        RefCell::new(std::collections::HashMap::new());
     /// 裏の結果を受け取る時計。待つものがあるあいだだけ動く。
     static POLL: Timer = Timer::default();
     /// 面が出ているあいだの5秒ごとの読み直し。
@@ -166,6 +187,11 @@ pub(crate) enum Action {
         force: bool,
     },
     PushBranch(String),
+    /// RFN01-67 PR 2b: Undo（`redo: false`）・Redo。`files`はファイルが替わるか（未保存を確かめるか）。
+    History {
+        redo: bool,
+        files: bool,
+    },
 }
 
 impl Action {
@@ -185,7 +211,9 @@ impl Action {
             // Keep Changes は作業ツリーを替えない。
             Action::Reset { hard: false, .. }
             | Action::DeleteBranch { .. }
-            | Action::PushBranch(_) => Guard::None,
+            | Action::PushBranch(_)
+            | Action::History { files: false, .. } => Guard::None,
+            Action::History { files: true, .. } => Guard::SaveOrDiscard,
             Action::Commit { .. } | Action::StashAll(_) => Guard::SaveOnly,
             // 書き手は捨てると答えている（確認の問いで言う）。
             Action::Undo { .. } => Guard::Discard,
@@ -482,6 +510,9 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
         .borrow_mut()
         .log_diag("spec.git", &format!("done {outcome}"));
     reload_documents(window, live, &job);
+    if result.is_ok() {
+        settle_history(&job);
+    }
     match result {
         Ok(told) => {
             if job.after == After::ClearMessage {
@@ -756,6 +787,8 @@ fn start(
             reload,
             discarded,
             after,
+            record: None,
+            history: None,
         });
         true
     });
@@ -816,6 +849,8 @@ fn request(window: &AppWindow, live: &Live, pending: Pending) {
             Action::Reset { .. } => (pick("Resetする", "Reset"), -1),
             Action::DeleteBranch { force: true, .. } => (pick("それでも消す", "Delete Anyway"), 0),
             Action::DeleteBranch { .. } => (pick("消す", "Delete"), 0),
+            Action::History { redo: false, .. } => (pick("Undoする", "Undo"), 0),
+            Action::History { redo: true, .. } => (pick("Redoする", "Redo"), 0),
             _ => (pick("変更を元に戻す", "Undo Changes"), 0),
         };
         crate::ask_question(
@@ -943,6 +978,9 @@ fn confirmation(pending: &Pending) -> Option<String> {
             "{name}はまだMergeされていません。それでも消しますか？\n\nこのブランチにしか無いCommitは、どのブランチからも辿れなくなります。",
             "{name} has not been merged. Delete it anyway?\n\nCommits that are only on this branch are no longer reachable from any branch."
         )),
+        Action::History { redo, .. } => {
+            top(&pending.root, *redo).and_then(|entry| git_history::warning(&entry, *redo))
+        }
         Action::Commit { amend: true, .. } if git::head_is_pushed(&pending.root) => Some(say!(
             "直前のCommitはもうPushしています。Amendしますか？\n\nAmendすると、送ったCommitと食い違います（送り直すにはforce pushが要ります）。",
             "The last commit has already been pushed. Amend it?\n\nAmending makes it differ from the pushed commit (pushing again needs a force push)."
@@ -1035,6 +1073,8 @@ pub fn branch_named(
         "ブランチ{name}を作って移りました",
         "Created and switched to {name}"
     );
+    let before = git_history::point(&root);
+    let name2 = name.clone();
     start(
         window,
         live,
@@ -1045,8 +1085,13 @@ pub fn branch_named(
         Vec::new(),
         After::Nothing,
         "branch",
-        move |root, _| git::create_branch(root, &name).map(|()| told),
+        move |root, _| git::create_branch(root, &name2).map(|()| told),
     );
+    remember(Recording {
+        label: format!("New Branch {name}"),
+        kind: HistoryKind::NewBranch { name },
+        before,
+    });
 }
 
 /// 確かめ終わった操作を走らせる。`discarded`は破棄すると答えた文書。
@@ -1059,6 +1104,11 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
         );
     }
     let Pending { root, action, .. } = pending;
+    if let Action::History { redo, .. } = action {
+        run_history(window, live, root, redo, discarded);
+        return;
+    }
+    let record = recording(&root, &action);
     match action {
         Action::Switch(branch) => {
             let told = say!("{branch}へ切り替えました", "Switched to {branch}");
@@ -1339,7 +1389,237 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
                 move |root, cancel| git::push_branch(root, &name, cancel).map(|()| told),
             );
         }
+        Action::History { .. } => {}
     }
+    if let Some(record) = record {
+        remember(record);
+    }
+}
+
+/// 操作の前に、Undo の記録の材料を控える。記録しない操作（Push・Stage・Undo Changes・
+/// Apply など）は`None`。
+fn recording(root: &Path, action: &Action) -> Option<Recording> {
+    let before = || git_history::point(root);
+    let (label, kind) = match action {
+        Action::Switch(branch) | Action::Checkout { branch, .. } => {
+            (format!("Checkout {branch}"), HistoryKind::Checkout)
+        }
+        Action::Pull | Action::Sync => {
+            let label = if matches!(action, Action::Pull) {
+                "Pull"
+            } else {
+                "Sync"
+            };
+            let moved = git::head_sha(root);
+            (label.to_owned(), HistoryKind::Move { moved })
+        }
+        Action::Merge { branch, into, .. } => {
+            let moved = match into {
+                Some(into) => git::resolve(root, into),
+                None => git::head_sha(root),
+            };
+            (format!("Merge {branch}"), HistoryKind::Move { moved })
+        }
+        Action::Revert { sha, .. } => (
+            git_history::label_sha("Revert", sha),
+            HistoryKind::Move {
+                moved: git::head_sha(root),
+            },
+        ),
+        Action::CherryPick { sha, .. } => (
+            git_history::label_sha("Cherry-pick", sha),
+            HistoryKind::Move {
+                moved: git::head_sha(root),
+            },
+        ),
+        Action::Reset { sha, hard } => (
+            git_history::label_sha("Reset to", sha),
+            if *hard {
+                HistoryKind::ResetDelete
+            } else {
+                HistoryKind::ResetKeep
+            },
+        ),
+        Action::Commit { message, amend, .. } => (
+            git_history::label_commit(message, *amend),
+            HistoryKind::Commit,
+        ),
+        Action::StashAll(message) => (
+            "Stash All".to_owned(),
+            HistoryKind::StashAll {
+                message: message.clone(),
+                stash: None,
+            },
+        ),
+        Action::StashApply { name, pop: true } => {
+            let message = git::stashes(root)
+                .ok()?
+                .into_iter()
+                .find(|s| &s.name == name)?
+                .message;
+            (format!("Pop {name}"), HistoryKind::Pop { message })
+        }
+        Action::BranchAt { name, .. } => (
+            format!("New Branch {name}"),
+            HistoryKind::NewBranch { name: name.clone() },
+        ),
+        Action::DeleteBranch { name, .. } => (
+            format!("Delete Branch {name}"),
+            HistoryKind::DeleteBranch {
+                name: name.clone(),
+                sha: git::resolve(root, &format!("refs/heads/{name}"))?,
+            },
+        ),
+        _ => return None,
+    };
+    Some(Recording {
+        label,
+        kind,
+        before: before(),
+    })
+}
+
+/// いま走らせた操作に、Undo の記録の材料を付ける。
+fn remember(record: Recording) {
+    PANE.with(|pane| {
+        if let Some(job) = pane.borrow_mut().job.as_mut() {
+            job.record = Some(record);
+        }
+    });
+}
+
+/// 通った操作を記録する（新しい操作なら Redo は消える）。Undo／Redo なら記録を移す。
+fn settle_history(job: &Job) {
+    let key = key(&job.root);
+    if let Some(redo) = job.history {
+        HISTORY.with(|history| {
+            let mut history = history.borrow_mut();
+            let held = history.entry(key).or_default();
+            let (from, to) = if redo {
+                (&mut held.redo, &mut held.undo)
+            } else {
+                (&mut held.undo, &mut held.redo)
+            };
+            if let Some(entry) = from.pop() {
+                to.push(entry);
+            }
+        });
+        return;
+    }
+    let Some(record) = job.record.as_ref() else {
+        return;
+    };
+    let mut kind = record.kind.clone();
+    if let HistoryKind::StashAll { stash, .. } = &mut kind {
+        *stash = git::resolve(&job.root, "refs/stash");
+    }
+    let entry = Entry {
+        label: record.label.clone(),
+        kind,
+        before: record.before.clone(),
+        after: git_history::point(&job.root),
+    };
+    if !entry.changed() {
+        return;
+    }
+    HISTORY.with(|history| {
+        let mut history = history.borrow_mut();
+        let held = history.entry(key).or_default();
+        held.undo.push(entry);
+        held.redo.clear();
+    });
+}
+
+/// Undo（`redo == false`）・Redo の山の一番上。
+fn top(root: &Path, redo: bool) -> Option<Entry> {
+    HISTORY.with(|history| {
+        let history = history.borrow();
+        let held = history.get(&key(root))?;
+        if redo {
+            held.redo.last().cloned()
+        } else {
+            held.undo.last().cloned()
+        }
+    })
+}
+
+/// Undo／Redo の釦の状態：押せるか、Tip の文。`now`は今の HEAD とブランチ。
+pub(crate) fn history_state(root: &Path, now: &Point, redo: bool) -> (bool, String) {
+    let verb = if redo { "Redo" } else { "Undo" };
+    match top(root, redo) {
+        None => (
+            false,
+            if redo {
+                pick("やり直すものはありません", "Nothing to redo").to_owned()
+            } else {
+                pick("戻すものはありません", "Nothing to undo").to_owned()
+            },
+        ),
+        Some(entry) if git_history::usable(&entry, now, redo) => {
+            (true, format!("{verb} {}", entry.label))
+        }
+        Some(entry) => (
+            false,
+            say!(
+                "{verb} {}：外でHEADやブランチが動いたため使えません",
+                "{verb} {}: HEAD or the branch moved outside RFN Edit, so it is unavailable",
+                entry.label
+            ),
+        ),
+    }
+}
+
+/// Undo／Redo の釦。使えるか・断るかを確かめてから、ほかの操作と同じ道で走らせる。
+pub(crate) fn history_step(window: &AppWindow, live: &Live, root: PathBuf, redo: bool) {
+    let Some(entry) = top(&root, redo) else {
+        return;
+    };
+    let (usable, tip) = history_state(&root, &git_history::point(&root), redo);
+    if !usable {
+        window.tell(tip.into());
+        return;
+    }
+    if let Some(reason) = git_history::refusal(&root, &entry, redo) {
+        notice(window, live, reason);
+        return;
+    }
+    let files = !matches!(entry.kind, HistoryKind::DeleteBranch { .. });
+    act_on(window, live, root, Action::History { redo, files });
+}
+
+fn run_history(
+    window: &AppWindow,
+    live: &Live,
+    root: PathBuf,
+    redo: bool,
+    discarded: Vec<Rc<OpenDocument>>,
+) {
+    let Some(entry) = top(&root, redo) else {
+        return;
+    };
+    start(
+        window,
+        live,
+        root,
+        "",
+        false,
+        Reload::Repository,
+        discarded,
+        After::Nothing,
+        if redo { "redo" } else { "undo" },
+        move |root, _| {
+            if redo {
+                git_history::redo(root, &entry)
+            } else {
+                git_history::undo(root, &entry)
+            }
+        },
+    );
+    PANE.with(|pane| {
+        if let Some(job) = pane.borrow_mut().job.as_mut() {
+            job.history = Some(redo);
+        }
+    });
 }
 
 fn pending(action: Action) -> Option<Pending> {
@@ -1535,6 +1815,19 @@ fn row(index: usize) -> Option<(Option<Section>, Option<(bool, Change)>, Option<
     })
 }
 
+/// Git Repository の WIP の右の列で行を押した（RFN01-67 PR 2b）：見出しなら開閉し、
+/// ファイルならその変更を返す（右の列に差分を出すのは呼ぶ側）。
+pub(crate) fn clicked_change(window: &AppWindow, index: usize) -> Option<Change> {
+    match row(index)? {
+        (Some(_), ..) => {
+            row_clicked(window, index);
+            None
+        }
+        (None, Some((_, change)), _) => Some(change),
+        _ => None,
+    }
+}
+
 fn row_clicked(window: &AppWindow, index: usize) {
     if let Some((Some(section), ..)) = row(index) {
         PANE.with(|pane| {
@@ -1702,7 +1995,7 @@ pub fn wire(window: &AppWindow, live: &Live) {
         index.max(0) as usize
     ));
     on!(on_git_new_branch, |w, l| new_branch(w, l));
-    on!(on_git_manage_branches, |w, l| crate::git_repo_ui::open(
+    on!(on_git_open_repository, |w, l| crate::git_repo_ui::open(
         w, l
     ));
     on!(on_git_fetch, |w, l| fetch(w, l));

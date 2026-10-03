@@ -1478,8 +1478,8 @@ msgid "Undo Changes…"
 msgstr "変更を元に戻す…"
 
 # RFN01-67 PR 2a: Git Repository。Gitの操作の名前は、書き手がコマンドで使う名前のまま。
-msgid "Manage Branches"
-msgstr "ブランチの管理"
+msgid "Git Repository"
+msgstr "Gitリポジトリ"
 
 msgid "Branch"
 msgstr "Branch"
@@ -1519,3 +1519,19 @@ msgstr "ファイルの変更"
 
 msgid "Show more"
 msgstr "さらに表示"
+
+# RFN01-67 PR 2b: 右の列の差分。
+msgid "Files"
+msgstr "ファイル"
+
+msgid "Working Copy"
+msgstr "今のファイル"
+
+msgid "Open in Comparison"
+msgstr "比較の画面で開く"
+
+msgid "No differences"
+msgstr "違いはありません"
+
+msgid "Previous Commit"
+msgstr "親Commit"
