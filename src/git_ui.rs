@@ -113,7 +113,7 @@ pub struct Pending {
 }
 
 #[derive(Clone, Debug)]
-enum Action {
+pub(crate) enum Action {
     Switch(String),
     Pull,
     Sync,
@@ -132,15 +132,60 @@ enum Action {
         changes: Vec<Change>,
         staged: bool,
     },
+    // RFN01-67 PR 2a: Git Repository の画面から。
+    /// ローカルのブランチ、またはリモートのブランチ（同じ名前のローカルブランチへ）。
+    Checkout {
+        branch: String,
+        remote: bool,
+    },
+    /// `at`から新しいブランチを作って移る。
+    BranchAt {
+        name: String,
+        at: String,
+    },
+    /// `branch`を Merge する。`into`があれば先にそこへ移る。`ask`はドラッグで落としたとき。
+    Merge {
+        branch: String,
+        into: Option<String>,
+        ask: bool,
+    },
+    Revert {
+        sha: String,
+        merge: bool,
+    },
+    CherryPick {
+        sha: String,
+        merge: bool,
+    },
+    Reset {
+        sha: String,
+        hard: bool,
+    },
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
+    PushBranch(String),
 }
 
 impl Action {
     /// 未保存のTABをどう確かめるか。
     fn guard(&self) -> Guard {
         match self {
-            Action::Switch(_) | Action::Pull | Action::Sync | Action::StashApply { .. } => {
-                Guard::SaveOrDiscard
-            }
+            Action::Switch(_)
+            | Action::Pull
+            | Action::Sync
+            | Action::StashApply { .. }
+            | Action::Checkout { .. }
+            | Action::BranchAt { .. }
+            | Action::Merge { .. }
+            | Action::Revert { .. }
+            | Action::CherryPick { .. }
+            | Action::Reset { hard: true, .. } => Guard::SaveOrDiscard,
+            // Keep Changes は作業ツリーを替えない。
+            Action::Reset { hard: false, .. }
+            | Action::DeleteBranch { .. }
+            | Action::PushBranch(_) => Guard::None,
             Action::Commit { .. } | Action::StashAll(_) => Guard::SaveOnly,
             // 書き手は捨てると答えている（確認の問いで言う）。
             Action::Undo { .. } => Guard::Discard,
@@ -156,8 +201,9 @@ enum Guard {
     Discard,
 }
 
+/// Git Changes が見えているか：左ペインか、Git Repository の画面（WIP の右の列）。
 fn visible(window: &AppWindow) -> bool {
-    window.get_tree_open() && window.get_left_tab() == TAB
+    (window.get_tree_open() && window.get_left_tab() == TAB) || window.get_git_repo_active()
 }
 
 /// 道を比べられる形に（大文字小文字・区切りを揃え、`\\?\`を外す）。
@@ -237,6 +283,64 @@ pub fn refresh_soon(window: &AppWindow, live: &Live) {
     if visible(window) {
         refresh(window, live);
     }
+    crate::git_repo_ui::refresh(window, live);
+}
+
+/// Git Repository の画面が使うリポジトリ：Git Changes で選んでいるもの（RFN01-67 PR 2a）。
+/// まだ選んでいなければ、Git Changes を開いたときと同じ決まりで選ぶ。
+pub(crate) fn chosen_root(window: &AppWindow, live: &Live) -> Result<PathBuf, String> {
+    let chosen = PANE.with(|pane| pane.borrow().chosen.clone());
+    if chosen.is_none() {
+        publish(window, live);
+    }
+    if let Some(root) = PANE.with(|pane| root_of(&pane.borrow())) {
+        return Ok(root);
+    }
+    let Some(folder) = PANE.with(|pane| pane.borrow().chosen.clone()) else {
+        return Err(say!(
+            "Workspaceを開くと、その登録フォルダのGitを操作できます",
+            "Open a Workspace to use Git with its folders"
+        ));
+    };
+    match git::repository_root(&folder) {
+        Ok(Some(root)) => Ok(root),
+        Ok(None) => Err(say!(
+            "{}はGitで管理されていません",
+            "{} is not a Git repository",
+            folder.display()
+        )),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Git Repository の画面から操作を頼む（確認・未保存の確かめは同じ道）。
+pub(crate) fn act_on(window: &AppWindow, live: &Live, root: PathBuf, action: Action) {
+    request(
+        window,
+        live,
+        Pending {
+            root,
+            action,
+            confirmed: false,
+        },
+    );
+}
+
+/// Git Repository の画面の「Branch」と、Commit の「New Branch…」：`at`から作る名前を訊く。
+pub(crate) fn ask_branch_name(window: &AppWindow, live: &Live, root: PathBuf, at: Option<String>) {
+    if live.pending.borrow().is_some() {
+        return;
+    }
+    crate::ask_for_name(
+        window,
+        live,
+        Question::GitNewBranch(root, at),
+        say!(
+            "新しいブランチの名前を入れてください。作ったら、そのブランチへ移ります。",
+            "Name the new branch. You will be switched to it."
+        ),
+        "",
+    );
 }
 
 /// 選んでいるフォルダを裏で読み直す。操作の最中なら、終わったあとの読み直しに任せる。
@@ -390,9 +494,20 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
             }
         }
         Err(GitError::Cancelled) => window.tell(GitError::Cancelled.to_string().into()),
+        // Merge されていないブランチは、もう一度訊いてから`-D`で消す。
+        Err(GitError::NotMerged(name)) => request(
+            window,
+            live,
+            Pending {
+                root: job.root.clone(),
+                action: Action::DeleteBranch { name, force: true },
+                confirmed: false,
+            },
+        ),
         Err(error) => notice(window, live, error.to_string()),
     }
     refresh(window, live);
+    crate::git_repo_ui::refresh(window, live);
 }
 
 /// 知らせるだけの問い。Gitの文は長いので、帯ではなくダイアログで見せる。
@@ -694,6 +809,13 @@ fn request(window: &AppWindow, live: &Live, pending: Pending) {
         let (yes, danger) = match &pending.action {
             Action::Commit { .. } => (pick("Amendする", "Amend"), -1),
             Action::StashDrop(_) => (pick("Dropする", "Drop"), 0),
+            Action::Merge { .. } => (pick("Mergeする", "Merge"), -1),
+            Action::Reset { hard: true, .. } => {
+                (pick("Resetして変更を消す", "Reset and Delete Changes"), 0)
+            }
+            Action::Reset { .. } => (pick("Resetする", "Reset"), -1),
+            Action::DeleteBranch { force: true, .. } => (pick("それでも消す", "Delete Anyway"), 0),
+            Action::DeleteBranch { .. } => (pick("消す", "Delete"), 0),
             _ => (pick("変更を元に戻す", "Undo Changes"), 0),
         };
         crate::ask_question(
@@ -764,6 +886,62 @@ fn confirmation(pending: &Pending) -> Option<String> {
         Action::StashDrop(name) => Some(say!(
             "{name}を捨てますか？\n\n元に戻せません。",
             "Drop {name}?\n\nThis cannot be undone."
+        )),
+        Action::Merge {
+            branch,
+            into,
+            ask: true,
+        } => {
+            let target = into.clone().or_else(|| status_now().and_then(|s| s.branch));
+            let target = target.unwrap_or_else(|| "HEAD".to_owned());
+            let mut text = say!(
+                "{branch}を{target}へMergeしますか？\n\n",
+                "Merge {branch} into {target}?\n\n"
+            );
+            if into.is_some() {
+                text.push_str(&say!(
+                    "先に{target}へCheckoutしてからMergeします。",
+                    "It checks out {target} first, then merges. "
+                ));
+            }
+            text.push_str(&say!(
+                "衝突したら中止して元に戻します。",
+                "If there are conflicts, it stops and undoes the merge."
+            ));
+            Some(text)
+        }
+        Action::Reset { sha, hard } => {
+            let short: String = sha.chars().take(7).collect();
+            let pushed = git::reset_drops_pushed(&pending.root, sha);
+            if !hard && !pushed {
+                return None;
+            }
+            let mut text = if *hard {
+                say!(
+                    "{short}へResetして、Commitしていない変更を消しますか？\n\n消した変更は元に戻せません。",
+                    "Reset to {short} and delete the uncommitted changes?\n\nDeleted changes cannot be restored."
+                ) + &say!(
+                    "まだGitが知らない新しいファイルは残ります。",
+                    " New files that Git does not track yet are kept."
+                )
+            } else {
+                say!("{short}へResetしますか？\n\n", "Reset to {short}?\n\n")
+            };
+            if pushed {
+                text.push_str(&say!(
+                    "Push済みのCommitが今のブランチから外れます（送り直すにはforce pushが要ります）。",
+                    " Pushed commits leave the current branch (pushing again needs a force push)."
+                ));
+            }
+            Some(text)
+        }
+        Action::DeleteBranch { name, force: false } => Some(say!(
+            "ブランチ{name}を消しますか？",
+            "Delete the branch {name}?"
+        )),
+        Action::DeleteBranch { name, force: true } => Some(say!(
+            "{name}はまだMergeされていません。それでも消しますか？\n\nこのブランチにしか無いCommitは、どのブランチからも辿れなくなります。",
+            "{name} has not been merged. Delete it anyway?\n\nCommits that are only on this branch are no longer reachable from any branch."
         )),
         Action::Commit { amend: true, .. } if git::head_is_pushed(&pending.root) => Some(say!(
             "直前のCommitはもうPushしています。Amendしますか？\n\nAmendすると、送ったCommitと食い違います（送り直すにはforce pushが要ります）。",
@@ -840,8 +1018,19 @@ pub fn confirmed(window: &AppWindow, live: &Live, mut pending: Pending) {
     request(window, live, pending);
 }
 
-/// 新しいブランチの名前が来た（`Question::GitNewBranch`）。
-pub fn branch_named(window: &AppWindow, live: &Live, root: PathBuf, name: String) {
+/// 新しいブランチの名前が来た（`Question::GitNewBranch`）。`at`があればその Commit から作る
+/// （ファイルが替わるので、未保存のTABを確かめる）。
+pub fn branch_named(
+    window: &AppWindow,
+    live: &Live,
+    root: PathBuf,
+    name: String,
+    at: Option<String>,
+) {
+    if let Some(at) = at {
+        act_on(window, live, root, Action::BranchAt { name, at });
+        return;
+    }
     let told = say!(
         "ブランチ{name}を作って移りました",
         "Created and switched to {name}"
@@ -1012,6 +1201,144 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
                 },
             );
         }
+        Action::Checkout { branch, remote } => {
+            let told = say!("{branch}へ切り替えました", "Checked out {branch}");
+            start(
+                window,
+                live,
+                root,
+                "",
+                false,
+                Reload::Repository,
+                discarded,
+                After::Nothing,
+                "checkout",
+                move |root, _| {
+                    if remote {
+                        git::checkout_remote(root, &branch)?;
+                    } else {
+                        git::switch(root, &branch)?;
+                    }
+                    Ok(told)
+                },
+            );
+        }
+        Action::BranchAt { name, at } => {
+            let told = say!(
+                "ブランチ{name}を作って移りました",
+                "Created and switched to {name}"
+            );
+            start(
+                window,
+                live,
+                root,
+                "",
+                false,
+                Reload::Repository,
+                discarded,
+                After::Nothing,
+                "branch-at",
+                move |root, _| git::create_branch_at(root, &name, &at).map(|()| told),
+            );
+        }
+        Action::Merge { branch, into, .. } => {
+            let told = say!("{branch}をMergeしました", "Merged {branch}");
+            start(
+                window,
+                live,
+                root,
+                pick("Mergeしています…", "Merging…"),
+                false,
+                Reload::Repository,
+                discarded,
+                After::Nothing,
+                "merge",
+                move |root, _| {
+                    if let Some(into) = into {
+                        git::switch(root, &into)?;
+                    }
+                    git::merge(root, &branch).map(|()| told)
+                },
+            );
+        }
+        Action::Revert { sha, merge } => {
+            let short: String = sha.chars().take(7).collect();
+            let told = say!("{short}をRevertしました", "Reverted {short}");
+            start(
+                window,
+                live,
+                root,
+                "",
+                false,
+                Reload::Repository,
+                discarded,
+                After::Nothing,
+                "revert",
+                move |root, _| git::revert(root, &sha, merge).map(|()| told),
+            );
+        }
+        Action::CherryPick { sha, merge } => {
+            let short: String = sha.chars().take(7).collect();
+            let told = say!("{short}をCherry-pickしました", "Cherry-picked {short}");
+            start(
+                window,
+                live,
+                root,
+                "",
+                false,
+                Reload::Repository,
+                discarded,
+                After::Nothing,
+                "cherry-pick",
+                move |root, _| git::cherry_pick(root, &sha, merge).map(|()| told),
+            );
+        }
+        Action::Reset { sha, hard } => {
+            let short: String = sha.chars().take(7).collect();
+            let told = say!("{short}へResetしました", "Reset to {short}");
+            start(
+                window,
+                live,
+                root,
+                "",
+                false,
+                Reload::Repository,
+                discarded,
+                After::Nothing,
+                "reset",
+                move |root, _| git::reset(root, &sha, hard).map(|()| told),
+            );
+        }
+        Action::DeleteBranch { name, force } => {
+            let told = say!("ブランチ{name}を消しました", "Deleted the branch {name}");
+            start(
+                window,
+                live,
+                root,
+                "",
+                false,
+                Reload::None,
+                discarded,
+                After::Nothing,
+                "delete-branch",
+                move |root, _| git::delete_branch(root, &name, force).map(|()| told),
+            );
+        }
+        Action::PushBranch(name) => {
+            let told = say!("{name}をPushしました", "Pushed {name}");
+            start(
+                window,
+                live,
+                root,
+                pick("Pushしています…", "Pushing…"),
+                true,
+                Reload::None,
+                discarded,
+                After::Nothing,
+                "push-branch",
+                move |root, cancel| git::push_branch(root, &name, cancel).map(|()| told),
+            );
+        }
     }
 }
 
@@ -1096,22 +1423,9 @@ fn branch_chosen(window: &AppWindow, live: &Live, index: usize) {
 }
 
 fn new_branch(window: &AppWindow, live: &Live) {
-    let Some(root) = PANE.with(|pane| root_of(&pane.borrow())) else {
-        return;
-    };
-    if live.pending.borrow().is_some() {
-        return;
+    if let Some(root) = PANE.with(|pane| root_of(&pane.borrow())) {
+        ask_branch_name(window, live, root, None);
     }
-    crate::ask_for_name(
-        window,
-        live,
-        Question::GitNewBranch(root),
-        say!(
-            "新しいブランチの名前を入れてください。作ったら、そのブランチへ移ります。",
-            "Name the new branch. You will be switched to it."
-        ),
-        "",
-    );
 }
 
 fn fetch(window: &AppWindow, live: &Live) {
@@ -1339,6 +1653,7 @@ fn row_menu(window: &AppWindow, live: &Live, index: usize, action: i32) {
 fn tick(window: &AppWindow, live: &Live) {
     if visible(window) && live.pending.borrow().is_none() {
         refresh(window, live);
+        crate::git_repo_ui::refresh(window, live);
     }
 }
 
@@ -1387,6 +1702,9 @@ pub fn wire(window: &AppWindow, live: &Live) {
         index.max(0) as usize
     ));
     on!(on_git_new_branch, |w, l| new_branch(w, l));
+    on!(on_git_manage_branches, |w, l| crate::git_repo_ui::open(
+        w, l
+    ));
     on!(on_git_fetch, |w, l| fetch(w, l));
     on!(on_git_pull, |w, l| act(w, l, Action::Pull));
     on!(on_git_push, |w, l| push(w, l));
@@ -1430,6 +1748,16 @@ pub fn wire(window: &AppWindow, live: &Live) {
             }
         });
     });
+}
+
+/// 試験から：裏の操作と読み直しの結果を1度受け取る。終わっていれば`true`。
+#[cfg(test)]
+pub(crate) fn pump(window: &AppWindow, live: &Live) -> bool {
+    collect(window, live);
+    PANE.with(|pane| {
+        let pane = pane.borrow();
+        pane.job.is_none() && pane.reading.is_none()
+    })
 }
 
 #[cfg(test)]

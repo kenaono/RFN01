@@ -42,6 +42,8 @@ mod file_io;
 mod file_tree;
 mod find;
 mod git;
+mod git_graph;
+mod git_repo_ui;
 mod git_ui;
 mod git_version;
 mod i18n;
@@ -3118,6 +3120,7 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_transfer::wire(&window, &live);
     backup_ui::wire(&window, &live);
     git_ui::wire(&window, &live);
+    git_repo_ui::wire(&window, &live);
 
     wiring::wire_colours(
         &window,
@@ -12548,8 +12551,8 @@ enum Question {
     GitUnsaved(git_ui::Pending),
     /// RFN01-67: Undo Changes・Drop・Push済みのAmendを確かめる。
     GitConfirm(git_ui::Pending),
-    /// RFN01-67: 新しいブランチの名前（リポジトリの根）。
-    GitNewBranch(PathBuf),
+    /// RFN01-67: 新しいブランチの名前（リポジトリの根、Git Repository からならどの Commit から作るか）。
+    GitNewBranch(PathBuf, Option<String>),
     /// RFN01-67: 知らせるだけ（Gitが断った文）。答えで何もしない。
     GitNotice,
 }
@@ -13147,9 +13150,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             git_ui::unsaved_answered(window, live, pending, choice)
         }
         (Question::GitConfirm(pending), 0) => git_ui::confirmed(window, live, pending),
-        (Question::GitNewBranch(root), 0) => {
+        (Question::GitNewBranch(root, at), 0) => {
             let name = window.get_question_name().trim().to_owned();
-            git_ui::branch_named(window, live, root, name);
+            git_ui::branch_named(window, live, root, name, at);
         }
         (Question::SavePreset(kind), 0) => {
             let name = window.get_question_name().to_string();

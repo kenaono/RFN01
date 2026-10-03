@@ -328,3 +328,208 @@ fn a_folder_outside_git_has_no_root_and_can_be_made_one() {
     init(root).unwrap();
     assert!(repository_root(root).unwrap().is_some());
 }
+
+// RFN01-67 PR 2a: Git Repository の画面が読むもの・行う操作。
+
+/// main：最初 ← 二 ← Merge（draft の「場面」）、draft：最初 ← 場面。
+fn branched(root: &Path) -> Option<()> {
+    repository(root)?;
+    write(root, "a.md", "1\n");
+    commit(root, "最初", true, false).unwrap();
+    git_ok(root, &["switch", "-q", "-c", "draft"]);
+    write(root, "場面.md", "場面\n");
+    commit(root, "場面", true, false).unwrap();
+    git_ok(root, &["switch", "-q", "main"]);
+    write(root, "a.md", "2\n");
+    commit(root, "二", true, false).unwrap();
+    merge(root, "draft").unwrap();
+    Some(())
+}
+
+#[test]
+fn log_refs_and_details_describe_the_graph() {
+    let scratch = Scratch::new("log");
+    let root = &scratch.0;
+    if branched(root).is_none() {
+        return;
+    }
+    let entries = log(root, 200).unwrap();
+    assert_eq!(entries.len(), 4);
+    assert!(entries[0].subject.starts_with("Merge branch 'draft'"));
+    assert_eq!(entries[0].parents.len(), 2);
+    assert_eq!(entries.last().unwrap().subject, "最初");
+    assert_eq!(log(root, 2).unwrap().len(), 2);
+    let names: Vec<String> = refs(root).unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(names, ["draft", "main"]);
+    assert_eq!(head_sha(root).unwrap(), entries[0].sha);
+    assert_eq!(incoming_outgoing(root), (Vec::new(), Vec::new()));
+
+    // Merge は1つ目の親との差：draft から来た「場面.md」。
+    let merged = detail(root, &entries[0].sha).unwrap();
+    assert!(merged.message.starts_with("Merge branch 'draft'"));
+    assert_eq!(merged.parents.len(), 2);
+    assert_eq!(merged.files.len(), 1);
+    assert_eq!(merged.files[0].path, "場面.md");
+    assert_eq!(merged.files[0].kind, Kind::Added);
+    // 最初の Commit は全ファイル。
+    let first = detail(root, &entries[3].sha).unwrap();
+    assert_eq!(first.files[0].path, "a.md");
+    assert!(first.parents.is_empty());
+    // その版の中身。
+    let blob = blob_at(root, &entries[3].sha, "a.md").unwrap().unwrap();
+    assert_eq!(
+        String::from_utf8(blob).unwrap().replace("\r\n", "\n"),
+        "1\n"
+    );
+    assert_eq!(blob_at(root, &entries[3].sha, "場面.md").unwrap(), None);
+
+    // 名前の変更は R と元の名前。
+    git_ok(root, &["mv", "a.md", "b.md"]);
+    commit(root, "名前を変える", false, false).unwrap();
+    let renamed = detail(root, &head_sha(root).unwrap()).unwrap();
+    assert_eq!(renamed.files[0].kind, Kind::Renamed);
+    assert_eq!(renamed.files[0].from.as_deref(), Some("a.md"));
+    assert_eq!(renamed.files[0].path, "b.md");
+}
+
+#[test]
+fn a_repository_without_commits_has_an_empty_log() {
+    let scratch = Scratch::new("empty-log");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    assert!(log(root, 200).unwrap().is_empty());
+    assert_eq!(head_sha(root), None);
+}
+
+#[test]
+fn conflicting_merge_revert_and_cherry_pick_are_undone() {
+    let scratch = Scratch::new("abort");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "1\n");
+    commit(root, "1", true, false).unwrap();
+    git_ok(root, &["switch", "-q", "-c", "draft"]);
+    write(root, "a.md", "draft\n");
+    commit(root, "draft", true, false).unwrap();
+    let draft = head_sha(root).unwrap();
+    git_ok(root, &["switch", "-q", "main"]);
+    write(root, "a.md", "main\n");
+    commit(root, "main", true, false).unwrap();
+    let head = head_sha(root).unwrap();
+
+    assert_eq!(merge(root, "draft"), Err(GitError::Conflict));
+    assert_eq!(cherry_pick(root, &draft, false), Err(GitError::Conflict));
+    for (name, ok) in [("MERGE_HEAD", false), ("CHERRY_PICK_HEAD", false)] {
+        let found = run(root, &["rev-parse", "-q", "--verify", name], None).unwrap();
+        assert_eq!(found.ok, ok, "{name} is left behind");
+    }
+    assert_eq!(head_sha(root).unwrap(), head);
+    assert_eq!(read(root, "a.md"), "main\n");
+    let clean = status(root).unwrap();
+    assert!(clean.staged.is_empty() && clean.changes.is_empty());
+
+    // Revert：衝突しない打ち消しは Commit になる。
+    write(root, "b.md", "b\n");
+    commit(root, "b", true, false).unwrap();
+    let b = head_sha(root).unwrap();
+    write(root, "a.md", "later\n");
+    commit(root, "later", true, false).unwrap();
+    revert(root, &b, false).unwrap();
+    assert!(!root.join("b.md").exists());
+    assert!(last_message(root).unwrap().starts_with("Revert \"b\""));
+}
+
+#[test]
+fn reset_moves_the_branch_and_knows_what_was_pushed() {
+    let scratch = Scratch::new("reset");
+    let remote = scratch.0.join("remote.git");
+    let root = scratch.0.join("mine");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    if !run(&remote, &["init", "-q", "--bare", "-b", "main"], None).is_ok_and(|o| o.ok) {
+        return;
+    }
+    repository(&root).unwrap();
+    let url = remote.display().to_string();
+    git_ok(&root, &["remote", "add", "origin", &url]);
+    write(&root, "a.md", "1\n");
+    commit(&root, "1", true, false).unwrap();
+    let first = head_sha(&root).unwrap();
+    write(&root, "a.md", "2\n");
+    commit(&root, "2", true, false).unwrap();
+    let second = head_sha(&root).unwrap();
+    assert!(!reset_drops_pushed(&root, &first));
+    push(&root, &status(&root).unwrap(), &Cancel::default()).unwrap();
+    write(&root, "a.md", "3\n");
+    commit(&root, "3", true, false).unwrap();
+    // 3 だけなら送っていない。2 より前へ戻すと送った 2 が外れる。
+    assert!(!reset_drops_pushed(&root, &second));
+    assert!(reset_drops_pushed(&root, &first));
+
+    // Keep Changes：位置だけ戻り、中身は作業ツリーに残る。
+    reset(&root, &second, false).unwrap();
+    assert_eq!(head_sha(&root).unwrap(), second);
+    assert_eq!(read(&root, "a.md"), "3\n");
+    // Delete Changes：中身も戻る。
+    reset(&root, &first, true).unwrap();
+    assert_eq!(read(&root, "a.md"), "1\n");
+    assert!(status(&root).unwrap().changes.is_empty());
+}
+
+#[test]
+fn branches_are_made_at_a_commit_deleted_and_checked_out_from_a_remote() {
+    let scratch = Scratch::new("branch-ops");
+    let remote = scratch.0.join("remote.git");
+    let root = scratch.0.join("mine");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    if !run(&remote, &["init", "-q", "--bare", "-b", "main"], None).is_ok_and(|o| o.ok) {
+        return;
+    }
+    repository(&root).unwrap();
+    let url = remote.display().to_string();
+    git_ok(&root, &["remote", "add", "origin", &url]);
+    write(&root, "a.md", "1\n");
+    commit(&root, "1", true, false).unwrap();
+    let first = head_sha(&root).unwrap();
+    write(&root, "a.md", "2\n");
+    commit(&root, "2", true, false).unwrap();
+
+    create_branch_at(&root, "old", &first).unwrap();
+    assert_eq!(status(&root).unwrap().branch.as_deref(), Some("old"));
+    assert_eq!(read(&root, "a.md"), "1\n");
+    write(&root, "x.md", "x\n");
+    commit(&root, "x", true, false).unwrap();
+    let cancel = Cancel::default();
+    push_branch(&root, "old", &cancel).unwrap();
+    switch(&root, "main").unwrap();
+    // Merge していないブランチは -d で断られ、-D なら消える。
+    git_ok(&root, &["switch", "-q", "-c", "side"]);
+    write(&root, "s.md", "s\n");
+    commit(&root, "s", true, false).unwrap();
+    switch(&root, "main").unwrap();
+    assert_eq!(
+        delete_branch(&root, "side", false),
+        Err(GitError::NotMerged("side".into()))
+    );
+    delete_branch(&root, "side", true).unwrap();
+    assert!(!branches(&root).unwrap().contains(&"side".to_owned()));
+
+    // origin/old から：ローカルの old を消してから移ると、作り直して上流を付ける。
+    delete_branch(&root, "old", true).unwrap();
+    checkout_remote(&root, "origin/old").unwrap();
+    let now = status(&root).unwrap();
+    assert_eq!(now.branch.as_deref(), Some("old"));
+    assert_eq!(now.upstream.as_deref(), Some("origin/old"));
+    let listed = refs(&root).unwrap();
+    assert!(listed.iter().any(|r| r.remote && r.name == "origin/old"));
+    assert!(
+        listed
+            .iter()
+            .any(|r| !r.remote && r.name == "old" && r.upstream.as_deref() == Some("origin/old"))
+    );
+}

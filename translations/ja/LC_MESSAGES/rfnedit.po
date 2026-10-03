@@ -1476,3 +1476,46 @@ msgstr "Drop…"
 
 msgid "Undo Changes…"
 msgstr "変更を元に戻す…"
+
+# RFN01-67 PR 2a: Git Repository。Gitの操作の名前は、書き手がコマンドで使う名前のまま。
+msgid "Manage Branches"
+msgstr "ブランチの管理"
+
+msgid "Branch"
+msgstr "Branch"
+
+msgid "Stash"
+msgstr "Stash"
+
+msgid "Checkout"
+msgstr "Checkout"
+
+msgid "Merge into"
+msgstr "Merge先："
+
+msgid "Revert"
+msgstr "Revert"
+
+msgid "Cherry-pick"
+msgstr "Cherry-pick"
+
+msgid "Reset — Keep Changes"
+msgstr "Reset — 変更を残す"
+
+msgid "Reset — Delete Changes…"
+msgstr "Reset — 変更を消す…"
+
+msgid "Compare with Previous"
+msgstr "親Commitと比較"
+
+msgid "Compare with Working Copy"
+msgstr "今のファイルと比較"
+
+msgid "Select a commit"
+msgstr "Commitを選んでください"
+
+msgid "FILES CHANGED"
+msgstr "ファイルの変更"
+
+msgid "Show more"
+msgstr "さらに表示"

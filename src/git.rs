@@ -28,6 +28,8 @@ pub enum GitError {
     Conflict,
     /// Gitが断った。中身はGitの文（資格情報を伏せたもの）か、こちらの文。
     Failed(String),
+    /// ブランチがどこにも Merge されていないので、`-d`では消せない（`-D`なら消せる）。
+    NotMerged(String),
 }
 
 impl std::fmt::Display for GitError {
@@ -47,6 +49,10 @@ impl std::fmt::Display for GitError {
                 "There were conflicts, so it was stopped and undone. Resolve them in a Terminal",
             )),
             GitError::Failed(said) => f.write_str(said),
+            GitError::NotMerged(name) => f.write_str(&crate::say!(
+                "{name}はまだMergeされていません",
+                "{name} has not been merged"
+            )),
         }
     }
 }
@@ -616,15 +622,8 @@ pub fn switch(root: &Path, branch: &str) -> Result<(), GitError> {
 
 /// 新しいブランチを作って移る。名前はGitの決まりで確かめる。
 pub fn create_branch(root: &Path, name: &str) -> Result<(), GitError> {
-    let name = name.trim();
-    let valid = run(root, &["check-ref-format", "--branch", name], None)?;
-    if name.is_empty() || name.starts_with('-') || !valid.ok {
-        return Err(GitError::Failed(crate::say!(
-            "ブランチの名前に使えません: {name}",
-            "Not a valid branch name: {name}"
-        )));
-    }
-    checked(root, &["switch", "-q", "-c", name], None).map(drop)
+    let name = valid_branch_name(root, name)?;
+    checked(root, &["switch", "-q", "-c", &name], None).map(drop)
 }
 
 pub fn fetch(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
@@ -663,22 +662,445 @@ pub fn push(root: &Path, status: &Status, cancel: &Cancel) -> Result<(), GitErro
             .to_owned(),
         ));
     };
+    let remote = publish_remote(root)?;
+    checked(root, &["push", "-q", "-u", &remote, branch], Some(cancel)).map(drop)
+}
+
+/// Publish の送り先：`origin`、無ければ最初のリモート。
+fn publish_remote(root: &Path) -> Result<String, GitError> {
     let remotes = checked(root, &["remote"], None)?;
     let remotes: Vec<&str> = remotes.lines().collect();
-    let Some(remote) = remotes
+    remotes
         .iter()
         .find(|name| **name == "origin")
         .or(remotes.first())
-    else {
-        return Err(GitError::Failed(
-            crate::i18n::pick(
-                "リモートがありません（git remote add で足してください）",
-                "There is no remote (add one with git remote add)",
+        .map(|name| (*name).to_owned())
+        .ok_or_else(|| {
+            GitError::Failed(
+                crate::i18n::pick(
+                    "リモートがありません（git remote add で足してください）",
+                    "There is no remote (add one with git remote add)",
+                )
+                .to_owned(),
             )
-            .to_owned(),
-        ));
+        })
+}
+
+// RFN01-67 PR 2a: Git Repository の画面が読むもの・行う操作。
+
+/// グラフの1行（Commit）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    /// `2026-10-03 14:20`。
+    pub date: String,
+    pub subject: String,
+}
+
+/// ローカルとリモートのブランチの Commit を、新しい順（親より子が先）に`count`件。
+/// Stash の Commit は入れない。まだCommitが無ければ空。
+pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
+    let limit = format!("-n{count}");
+    let output = run(
+        root,
+        &[
+            "log",
+            "--topo-order",
+            "--branches",
+            "--remotes",
+            "HEAD",
+            "--date=format:%Y-%m-%d %H:%M",
+            "--format=%H%x1f%P%x1f%an%x1f%ad%x1f%s%x1e",
+            &limit,
+            "--",
+        ],
+        None,
+    )?;
+    if !output.ok {
+        // まだ1度もCommitしていない（HEADが無い）。
+        if run(root, &["rev-parse", "-q", "--verify", "HEAD"], None)?.ok {
+            return Err(output.failure());
+        }
+        return Ok(Vec::new());
+    }
+    Ok(output
+        .text()
+        .split('\x1e')
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').split('\x1f');
+            let sha = fields.next()?.to_owned();
+            if sha.is_empty() {
+                return None;
+            }
+            let parents = fields
+                .next()?
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
+            Some(LogEntry {
+                sha,
+                parents,
+                author: fields.next()?.to_owned(),
+                date: fields.next()?.to_owned(),
+                subject: fields.next()?.to_owned(),
+            })
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ref {
+    /// `main`、`origin/main`。
+    pub name: String,
+    pub sha: String,
+    pub remote: bool,
+    /// ローカルのブランチの上流（`origin/main`）。
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+/// ローカルとリモートのブランチ。リモートの`HEAD`（`origin/HEAD`）は入れない。
+pub fn refs(root: &Path) -> Result<Vec<Ref>, GitError> {
+    let text = checked(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)%1f%(refname)%1f%(upstream:short)%1f%(upstream:track,nobracket)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        None,
+    )?;
+    let mut refs = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('\x1f').collect();
+        let [sha, full, upstream, track] = fields[..] else {
+            continue;
+        };
+        let (name, remote) = if let Some(name) = full.strip_prefix("refs/heads/") {
+            (name, false)
+        } else if let Some(name) = full.strip_prefix("refs/remotes/") {
+            (name, true)
+        } else {
+            continue;
+        };
+        if remote && (name.ends_with("/HEAD") || !name.contains('/')) {
+            continue;
+        }
+        let count = |word: &str| {
+            track
+                .split(", ")
+                .find_map(|part| part.strip_prefix(word))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0)
+        };
+        refs.push(Ref {
+            name: name.to_owned(),
+            sha: sha.to_owned(),
+            remote,
+            upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
+            ahead: count("ahead "),
+            behind: count("behind "),
+        });
+    }
+    Ok(refs)
+}
+
+/// リモートの既定のブランチ（`origin/HEAD`が指すもの、`origin/main`など）。無ければ`None`。
+pub fn remote_default(root: &Path) -> Option<String> {
+    checked(
+        root,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+        None,
+    )
+    .ok()
+    .map(|text| text.trim().to_owned())
+    .filter(|name| !name.is_empty())
+}
+
+/// HEAD の Commit。まだ無ければ`None`。
+pub fn head_sha(root: &Path) -> Option<String> {
+    checked(root, &["rev-parse", "-q", "--verify", "HEAD"], None)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+/// 上流にあって HEAD に無い Commit（取り込んでいない）と、HEAD にあって上流に無い Commit
+/// （送っていない）。上流が無ければ両方空。
+pub fn incoming_outgoing(root: &Path) -> (Vec<String>, Vec<String>) {
+    let list = |range: &str| {
+        checked(root, &["rev-list", range, "--"], None)
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
     };
-    checked(root, &["push", "-q", "-u", remote, branch], Some(cancel)).map(drop)
+    if run(root, &["rev-parse", "-q", "--verify", "@{u}"], None).is_ok_and(|o| o.ok) {
+        (list("HEAD..@{u}"), list("@{u}..HEAD"))
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Detail {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub email: String,
+    pub date: String,
+    /// メッセージの全文。
+    pub message: String,
+    /// 1つ目の親との差（最初の Commit は全ファイル）。
+    pub files: Vec<Change>,
+}
+
+pub fn detail(root: &Path, sha: &str) -> Result<Detail, GitError> {
+    let text = checked(
+        root,
+        &[
+            "log",
+            "-1",
+            "--date=format:%Y-%m-%d %H:%M",
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%B",
+            sha,
+            "--",
+        ],
+        None,
+    )?;
+    let mut fields = text.splitn(6, '\x1f');
+    let mut next = || fields.next().unwrap_or("").to_owned();
+    let mut detail = Detail {
+        sha: next(),
+        parents: next().split_whitespace().map(str::to_owned).collect(),
+        author: next(),
+        email: next(),
+        date: next(),
+        message: next().trim_end().to_owned(),
+        files: Vec::new(),
+    };
+    let output = match detail.parents.first() {
+        Some(parent) => run(
+            root,
+            &[
+                "diff-tree",
+                "-r",
+                "-M",
+                "--no-commit-id",
+                "--name-status",
+                "-z",
+                parent,
+                &detail.sha,
+            ],
+            None,
+        )?,
+        None => run(
+            root,
+            &[
+                "diff-tree",
+                "-r",
+                "--root",
+                "-M",
+                "--no-commit-id",
+                "--name-status",
+                "-z",
+                &detail.sha,
+            ],
+            None,
+        )?,
+    };
+    if !output.ok {
+        return Err(output.failure());
+    }
+    detail.files = parse_name_status(&output.stdout);
+    Ok(detail)
+}
+
+/// `--name-status -z`：`M\0道\0`、名前の変更は`R100\0元\0先\0`。
+fn parse_name_status(bytes: &[u8]) -> Vec<Change> {
+    let mut fields = bytes
+        .split(|b| *b == 0)
+        .map(|field| String::from_utf8_lossy(field).into_owned());
+    let mut files = Vec::new();
+    while let Some(code) = fields.next() {
+        let Some(&first) = code.as_bytes().first() else {
+            continue;
+        };
+        let Some(kind) = Kind::of(first) else {
+            continue;
+        };
+        if kind == Kind::Renamed {
+            let (Some(from), Some(path)) = (fields.next(), fields.next()) else {
+                break;
+            };
+            files.push(Change {
+                path,
+                kind,
+                from: Some(from),
+            });
+        } else if let Some(path) = fields.next() {
+            files.push(Change {
+                path,
+                kind,
+                from: None,
+            });
+        }
+    }
+    files
+}
+
+/// `sha`の版の`path`の中身。その版に無ければ`None`。
+pub fn blob_at(root: &Path, sha: &str, path: &str) -> Result<Option<Vec<u8>>, GitError> {
+    let object = format!("{sha}:{path}");
+    let output = run(root, &["cat-file", "blob", &object], None)?;
+    Ok(output.ok.then_some(output.stdout))
+}
+
+/// 途中で止まった操作（Merge・Revert・Cherry-pick）が残っていれば`--abort`で戻し、衝突と答える。
+fn abort_if_stopped(root: &Path, failed: Output, head: &str, command: &str) -> GitError {
+    if run(root, &["rev-parse", "-q", "--verify", head], None).is_ok_and(|o| o.ok) {
+        return match checked(root, &[command, "--abort"], None) {
+            Ok(_) => GitError::Conflict,
+            Err(error) => error,
+        };
+    }
+    failed.failure()
+}
+
+/// `branch`を今のブランチへ Merge する。衝突したら`merge --abort`。
+pub fn merge(root: &Path, branch: &str) -> Result<(), GitError> {
+    let output = run(root, &["merge", "-q", "--no-edit", branch, "--"], None)?;
+    if output.ok {
+        return Ok(());
+    }
+    Err(abort_if_stopped(root, output, "MERGE_HEAD", "merge"))
+}
+
+/// Revert。Merge の Commit は1つ目の親に対して打ち消す。衝突したら`revert --abort`。
+pub fn revert(root: &Path, sha: &str, merge_commit: bool) -> Result<(), GitError> {
+    let mut arguments = vec!["revert", "--no-edit"];
+    if merge_commit {
+        arguments.extend(["-m", "1"]);
+    }
+    arguments.push(sha);
+    let output = run(root, &arguments, None)?;
+    if output.ok {
+        return Ok(());
+    }
+    Err(abort_if_stopped(root, output, "REVERT_HEAD", "revert"))
+}
+
+/// Cherry-pick。Merge の Commit は1つ目の親との差を取る。衝突したら`cherry-pick --abort`。
+pub fn cherry_pick(root: &Path, sha: &str, merge_commit: bool) -> Result<(), GitError> {
+    let mut arguments = vec!["cherry-pick"];
+    if merge_commit {
+        arguments.extend(["-m", "1"]);
+    }
+    arguments.push(sha);
+    let output = run(root, &arguments, None)?;
+    if output.ok {
+        return Ok(());
+    }
+    Err(abort_if_stopped(
+        root,
+        output,
+        "CHERRY_PICK_HEAD",
+        "cherry-pick",
+    ))
+}
+
+/// Reset。`hard`は Delete Changes（作業ツリーの変更も消す）、そうでなければ Keep Changes（--mixed）。
+pub fn reset(root: &Path, sha: &str, hard: bool) -> Result<(), GitError> {
+    let mode = if hard { "--hard" } else { "--mixed" };
+    checked(root, &["reset", "-q", mode, sha, "--"], None).map(drop)
+}
+
+/// `target`へ Reset すると、どこかのリモートにある Commit が今のブランチから外れるか。
+pub fn reset_drops_pushed(root: &Path, target: &str) -> bool {
+    let count = |arguments: &[&str]| {
+        checked(root, arguments, None)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    let range = format!("{target}..HEAD");
+    let dropped = count(&["rev-list", &range, "--"]);
+    let unpushed = count(&["rev-list", &range, "--not", "--remotes", "--"]);
+    dropped > unpushed
+}
+
+/// ローカルのブランチを消す。`force`でなければ、Merge されていないブランチは`NotMerged`で断る。
+pub fn delete_branch(root: &Path, name: &str, force: bool) -> Result<(), GitError> {
+    let flag = if force { "-D" } else { "-d" };
+    let output = run(root, &["branch", flag, name], None)?;
+    if output.ok {
+        return Ok(());
+    }
+    if output.stderr.contains("not fully merged") {
+        return Err(GitError::NotMerged(name.to_owned()));
+    }
+    Err(output.failure())
+}
+
+/// `at`から新しいブランチを作って移る。
+pub fn create_branch_at(root: &Path, name: &str, at: &str) -> Result<(), GitError> {
+    let name = valid_branch_name(root, name)?;
+    checked(root, &["switch", "-q", "-c", &name, at], None).map(drop)
+}
+
+/// リモートのブランチへ移る：同じ名前のローカルブランチがあればそこへ、無ければ作って移る。
+pub fn checkout_remote(root: &Path, remote_branch: &str) -> Result<(), GitError> {
+    let Some((_, local)) = remote_branch.split_once('/') else {
+        return switch(root, remote_branch);
+    };
+    let exists = run(
+        root,
+        &[
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("refs/heads/{local}"),
+        ],
+        None,
+    )?;
+    if exists.ok {
+        return switch(root, local);
+    }
+    checked(root, &["switch", "-q", "--track", remote_branch], None).map(drop)
+}
+
+/// ローカルのブランチを送る。上流が無ければ Publish（`-u`）。
+pub fn push_branch(root: &Path, name: &str, cancel: &Cancel) -> Result<(), GitError> {
+    let upstream = format!("{name}@{{upstream}}");
+    let tracked = run(
+        root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &upstream,
+        ],
+        None,
+    )?;
+    if tracked.ok {
+        let text = tracked.text();
+        let remote = text.trim().split('/').next().unwrap_or("origin").to_owned();
+        return checked(root, &["push", "-q", &remote, name], Some(cancel)).map(drop);
+    }
+    let remote = publish_remote(root)?;
+    checked(root, &["push", "-q", "-u", &remote, name], Some(cancel)).map(drop)
+}
+
+fn valid_branch_name(root: &Path, name: &str) -> Result<String, GitError> {
+    let name = name.trim();
+    let valid = run(root, &["check-ref-format", "--branch", name], None)?;
+    if name.is_empty() || name.starts_with('-') || !valid.ok {
+        return Err(GitError::Failed(crate::say!(
+            "ブランチの名前に使えません: {name}",
+            "Not a valid branch name: {name}"
+        )));
+    }
+    Ok(name.to_owned())
 }
 
 #[cfg(test)]
