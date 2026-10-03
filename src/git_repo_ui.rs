@@ -41,8 +41,16 @@ fn lane_x(lane: usize) -> f32 {
     10.0 + lane as f32 * 14.0
 }
 
+/// 筋の色。**紫（0）は今のブランチだけ**——ほかの筋は残りの7色を順に回す。8色を単に
+/// 回すと、9本目の枝が今のブランチと同じ紫になり、main から分かれたように見えなかった
+/// （書き手の確認 2026-10-03）。
 fn lane_color(index: usize) -> Color {
-    let rgb = LANE_COLORS[index % LANE_COLORS.len()];
+    let others = LANE_COLORS.len() - 1;
+    let rgb = if index == 0 {
+        LANE_COLORS[0]
+    } else {
+        LANE_COLORS[1 + (index - 1) % others]
+    };
     Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 

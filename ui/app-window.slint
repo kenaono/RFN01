@@ -6583,7 +6583,11 @@ export component AppWindow inherits Window {
 
     // RFN01-67 PR 2a: Git Repository。ペインとTABはこの下にそのまま残る。比較の画面はこの上に
     // 開く（ファイルの比較を閉じると、この画面へ戻る）。
+    // **窓の題の帯は覆わない。**右上は Windows が窓の閉じる釦として扱う場所で、そこに
+    // 重ねた「Close」を押すとアプリが終わった（書き手の確認 2026-10-03、window_chrome.rs）。
     if root.git-repo-active: Rectangle {
+        y: root.title-height;
+        height: root.height - root.title-height;
         background: Tok.paper;
         TouchArea { }
         GitRepositoryView {

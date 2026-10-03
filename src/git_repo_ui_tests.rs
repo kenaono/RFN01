@@ -72,6 +72,16 @@ fn row_of(window: &AppWindow, message: &str) -> usize {
         .unwrap_or_else(|| panic!("no commit {message}"))
 }
 
+/// 紫は今のブランチの筋だけ。何本枝が出ても、ほかの筋は紫にならない。
+#[test]
+fn only_the_current_branch_is_purple() {
+    let purple = lane_color(0);
+    for index in 1..40 {
+        assert_ne!(lane_color(index), purple, "lane colour {index}");
+    }
+    assert_ne!(lane_color(1), lane_color(2));
+}
+
 #[test]
 fn without_a_workspace_it_does_not_open() {
     let root = scratch_directory("repo-no-workspace");

@@ -634,13 +634,17 @@ export component GitRepositoryView inherits Rectangle {
                                 // 線と点。
                                 Rectangle {
                                     width: root.graph-width;
+                                    // **`fit: preserve`で、座標をそのままpxとして描く。**既定の`contain`は
+                                    // 線の太さのぶん図形を縮めて中央へ寄せるので、線が点の中心から外れ、
+                                    // 行の境目に隙間ができた（書き手の確認 2026-10-03）。`preserve`でも
+                                    // 線の太さの半分だけ右下へずらして描くので、その分を戻す。
                                     for line in row.lines: Path {
-                                        x: 0;
-                                        y: 0;
-                                        width: root.graph-width;
-                                        height: root.row-height;
-                                        viewbox-width: root.graph-width / 1px;
-                                        viewbox-height: root.row-height / 1px;
+                                        // 箱も線の太さぶん広げる（ずらした1pxで行の下端が切れないように）。
+                                        x: -1px;
+                                        y: -1px;
+                                        width: root.graph-width + 2px;
+                                        height: root.row-height + 2px;
+                                        fit: preserve;
                                         commands: line.commands;
                                         stroke: line.color;
                                         stroke-width: 2px;
