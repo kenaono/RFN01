@@ -42,6 +42,7 @@ mod file_io;
 mod file_tree;
 mod find;
 mod git;
+mod git_file_history;
 mod git_graph;
 mod git_history;
 mod git_repo_ui;
@@ -3123,6 +3124,7 @@ fn main() -> Result<(), slint::PlatformError> {
     backup_ui::wire(&window, &live);
     git_ui::wire(&window, &live);
     git_repo_ui::wire(&window, &live);
+    git_file_history::wire(&window, &live);
 
     wiring::wire_colours(
         &window,

@@ -1535,3 +1535,7 @@ msgstr "違いはありません"
 
 msgid "Previous Commit"
 msgstr "親Commit"
+
+# RFN01-67 PR 3: File の「Git History…」。
+msgid "Git History"
+msgstr "Gitの履歴"

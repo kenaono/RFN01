@@ -1050,6 +1050,13 @@ export component AppWindow inherits Window {
     callback backup-pane-menu(int, int);
     /// Backup History（Paneメニュー）。比較の画面の左に一覧を出している間だけtrue。
     callback backup-history-requested();
+    /// RFN01-67 PR 3: File の「Git History…」（`git_file_history`）。
+    callback git-history-requested();
+    in-out property <bool> git-history-active;
+    in property <string> git-history-file;
+    in property <[BackupRow]> git-history-rows;
+    in property <int> git-history-selected: -1;
+    callback git-history-chosen(int);
     in-out property <bool> backup-history-active;
     in property <string> backup-history-file;
     in property <[BackupRow]> backup-history-rows;
@@ -6701,6 +6708,16 @@ export component AppWindow inherits Window {
         TouchArea { }
         HorizontalLayout {
         // RFN01-61: Backup History は、比較の画面の左に一覧の列を足したもの。
+        // RFN01-67 PR 3: Git History も同じ一覧（チェックと Delete は出さない）。
+        if root.git-history-active: BackupHistoryList {
+            width: min(320px, root.width * 0.34);
+            title: @tr("Git History");
+            checkable: false;
+            file-name: root.git-history-file;
+            rows: root.git-history-rows;
+            selected: root.git-history-selected;
+            chosen(index) => { root.git-history-chosen(index); }
+        }
         if root.backup-history-active: BackupHistoryList {
             width: min(320px, root.width * 0.34);
             file-name: root.backup-history-file;

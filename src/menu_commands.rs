@@ -1493,6 +1493,13 @@ fn build(
                 Command::Compare(3),
                 main && backups
             );
+            // RFN01-67 PR 3: Git の履歴も File から（今のTABのファイル、管理下になければ淡く）。
+            add!(
+                "Gitの履歴…",
+                "Git History…",
+                Command::Compare(4),
+                main && path && crate::git_file_history::available(&t.document)
+            );
             add!("印刷…", "Print…", Command::Print, main);
             root.sep()?;
             add!("終了", "Exit", Command::Exit, true);
@@ -2555,6 +2562,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Compare(0) => window.invoke_compare_saved_requested(),
         Command::Compare(1) => window.invoke_compare_head_requested(),
         Command::Compare(3) => window.invoke_backup_history_requested(),
+        Command::Compare(4) => window.invoke_git_history_requested(),
         Command::Compare(_) => window.invoke_compare_files_requested(),
         Command::Spelling => crate::spelling_ui::toggle(window, live, t.id),
         Command::SpellingStep(back) => crate::spelling_ui::step(window, live, t.id, back),
