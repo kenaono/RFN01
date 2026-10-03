@@ -430,7 +430,7 @@ export component GitChangesView inherits Rectangle {
 
                         if row.kind == 5: HorizontalLayout {
                             padding-left: 22px;
-                            padding-right: 8px;
+                            padding-right: 2px;
                             spacing: 6px;
                             Text {
                                 text: row.label;
@@ -446,6 +446,18 @@ export component GitChangesView inherits Rectangle {
                                 font-size: 11px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 0;
+                            }
+                            // 書き手の Accept 2026-10-03：右クリックだけでは、Stash の行で何ができるか
+                            // 見えない。いちばん使う Pop を、ファイルの＋／−と同じ形で行に出す。
+                            IconButton {
+                                size: 22px;
+                                y: 2px;
+                                icon: Icons.pop;
+                                tip: @tr("Pop");
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.row-menu(index, 1);
+                                }
                             }
                         }
 

@@ -267,6 +267,31 @@ fn a_failure_is_shown_as_a_notice_and_changes_nothing() {
     assert!(!window.get_git_busy());
 }
 
+/// 書き手の Accept 2026-10-03：Stash の行の Pop の釦（右クリックの Pop と同じ`row-menu(行, 1)`）。
+#[test]
+fn the_pop_button_on_a_stash_row_brings_the_changes_back() {
+    let Some((root, harness, _document)) = manuscript("git-pop") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    fs::write(root.join("原稿.md"), "書きかけ\n").unwrap();
+    show(window, live);
+    window.set_git_message("場面".into());
+    act(window, live, Action::StashAll("場面".into()));
+    settle(window, live);
+    assert_eq!(window.get_git_change_count(), 0);
+    let stash = rows(window)
+        .iter()
+        .position(|(kind, ..)| *kind == 5)
+        .expect("a stash row");
+    row_menu(window, live, stash, 1);
+    settle(window, live);
+    assert_eq!(window.get_git_change_count(), 1);
+    assert!(rows(window).iter().all(|(kind, ..)| *kind != 5));
+    let text = fs::read_to_string(root.join("原稿.md")).unwrap();
+    assert_eq!(text.replace("\r\n", "\n"), "書きかけ\n");
+}
+
 /// 画面の絵を書き出す（`cargo test -- --ignored git_screens`）。一時フォルダの
 /// `rfnedit-git-snapshot`に、Git Changes の面をPPMで置く。
 #[test]
