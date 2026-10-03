@@ -18,13 +18,15 @@ use std::time::Duration;
 
 use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
-use crate::git::{self, GitError, LogEntry, Ref, Stash, Status};
+use crate::git::{self, Change, GitError, Kind, LogEntry, Ref, Stash, Status};
 use crate::git_graph;
+use crate::git_history::Point;
 use crate::git_ui::{self, Action};
 use crate::i18n::pick;
+use crate::inline_diff;
 use crate::{
-    AppWindow, GitBranchRow, GitCommitRow, GitLine, GitRef, GitRow, Live, MAX_DOCUMENT_CHARACTERS,
-    Opening, StatusBar, say,
+    AppWindow, GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitLine, GitRef, GitRow, Live,
+    MAX_DOCUMENT_CHARACTERS, Opening, StatusBar, say,
 };
 
 /// 1度に読む Commit の数（「Show more」で同じだけ足す）。
@@ -89,6 +91,26 @@ enum Side {
     Stash(Stash),
 }
 
+/// 右の列の差分（PR 2b）が何を比べているか。
+#[derive(Clone)]
+enum DiffSource {
+    /// Commit の詳細のファイル。
+    Commit {
+        sha: String,
+        parent: Option<String>,
+        change: Change,
+    },
+    /// WIP（Commit していない変更）のファイル：前回の Commit と今のファイル。
+    Wip { change: Change },
+}
+
+#[derive(Clone)]
+struct DiffShown {
+    source: DiffSource,
+    /// Working Copy（今のファイル）と比べるか。Commit のファイルだけで選べる。
+    working: bool,
+}
+
 #[derive(Default)]
 struct Repo {
     root: Option<PathBuf>,
@@ -100,6 +122,7 @@ struct Repo {
     again: bool,
     selected: Option<Selected>,
     detail: Option<git::Detail>,
+    diff: Option<DiffShown>,
     side: Vec<Side>,
     /// グラフの行の Commit（`None`は `// WIP`）。
     rows: Vec<Option<String>>,
@@ -114,7 +137,7 @@ fn root() -> Option<PathBuf> {
     REPO.with(|repo| repo.borrow().root.clone())
 }
 
-/// File の「Git Repository…」と、Git Changes のブランチ▾の「Manage Branches」。
+/// File の「Git Repository…」と、Git Changes の見出しの釦。
 pub fn open(window: &AppWindow, live: &Live) {
     let root = match git_ui::chosen_root(window, live) {
         Ok(root) => root,
@@ -135,6 +158,7 @@ pub fn open(window: &AppWindow, live: &Live) {
         // 開いた直後は何も選ばない（書き手と決めた見本のとおり）。
         repo.selected = None;
         repo.detail = None;
+        repo.diff = None;
     });
     let name = root
         .file_name()
@@ -272,6 +296,7 @@ fn collect(window: &AppWindow, live: &Live) {
                 if !keep {
                     repo.selected = None;
                     repo.detail = None;
+                    repo.diff = None;
                 }
                 repo.data = Some(data);
                 repo.error = None;
@@ -333,6 +358,18 @@ fn render(window: &AppWindow) {
         repo.side = side;
         repo.rows = shas;
         publish_detail(window, repo);
+        if let Some(root) = &repo.root {
+            let now = Point {
+                head: data.head.clone(),
+                branch: data.status.branch.clone(),
+            };
+            let (can_undo, undo_tip) = git_ui::history_state(root, &now, false);
+            let (can_redo, redo_tip) = git_ui::history_state(root, &now, true);
+            window.set_git_repo_can_undo(can_undo);
+            window.set_git_repo_undo_tip(undo_tip.into());
+            window.set_git_repo_can_redo(can_redo);
+            window.set_git_repo_redo_tip(redo_tip.into());
+        }
     });
 }
 
@@ -515,8 +552,12 @@ fn side_rows(data: &Data) -> (Vec<GitBranchRow>, Vec<Side>) {
     (rows, side)
 }
 
-/// 右の列：何も選んでいない（0）、Commit（1）、WIP（2）。
+/// 右の列：何も選んでいない（0）、Commit（1）、WIP（2）、差分（3）。
 fn publish_detail(window: &AppWindow, repo: &Repo) {
+    if let (Some(diff), Some(root)) = (&repo.diff, &repo.root) {
+        publish_diff(window, root, diff);
+        return;
+    }
     match (&repo.selected, &repo.detail) {
         (Some(Selected::Wip), _) => window.set_git_repo_detail_mode(2),
         (Some(Selected::Commit(_)), Some(detail)) => {
@@ -592,6 +633,7 @@ fn select_row(window: &AppWindow, index: usize) {
         let mut repo = repo.borrow_mut();
         repo.selected = Some(selected);
         repo.detail = detail;
+        repo.diff = None;
     });
     window.set_git_repo_selected(index as i32);
     REPO.with(|repo| publish_detail(window, &repo.borrow()));
@@ -797,73 +839,261 @@ fn read_text(bytes: Option<Vec<u8>>) -> String {
         .unwrap_or_default()
 }
 
-/// 詳細のファイルを比べる。`working`なら今のファイルと、そうでなければ親 Commit と。
-fn compare_file(window: &AppWindow, index: usize, working: bool) {
-    let target = REPO.with(|repo| {
-        let repo = repo.borrow();
-        let detail = repo.detail.as_ref()?;
-        Some((
-            repo.root.clone()?,
-            detail.sha.clone(),
-            detail.parents.first().cloned(),
-            detail.files.get(index)?.clone(),
-        ))
-    });
-    let Some((root, sha, parent, change)) = target else {
-        return;
-    };
-    let short: String = sha.chars().take(7).collect();
-    let at_commit = match git::blob_at(&root, &sha, &change.path) {
-        Ok(bytes) => read_text(bytes),
-        Err(error) => {
-            window.tell(error.to_string().into());
-            return;
-        }
-    };
-    if working {
-        let path = root.join(&change.path);
-        let now = read_text(std::fs::read(&path).ok());
-        crate::diff_view::show(
-            window,
-            format!("{} @ {short}", change.path),
-            at_commit,
-            say!("{}（今のファイル）", "{} (working copy)", change.path),
-            now,
-        );
-        return;
+/// 差分の段の幅（px）＝右の列の幅から、行番号・印・余白を引いたもの。右の列は窓の幅に
+/// 合わせて変わるので、画面が幅を知らせてくる（`diff_width_changed`）。字の幅は目安で、
+/// 少し狭めに数えて段からはみ出さないようにする。
+const DIFF_CHROME: f32 = 126.0;
+
+thread_local! {
+    static DIFF_WIDTH: std::cell::Cell<f32> = const { std::cell::Cell::new(530.0) };
+}
+
+/// 右の列の幅が変わった（差分を出しているとき）。段を折り直す。
+fn diff_width_changed(window: &AppWindow, panel: f32) {
+    let width = (panel - DIFF_CHROME).max(120.0);
+    let old = DIFF_WIDTH.with(|held| held.replace(width));
+    if (old - width).abs() >= 1.0 {
+        REPO.with(|repo| publish_detail(window, &repo.borrow()));
     }
-    let before = match &parent {
-        Some(parent) => {
-            let old = change.from.as_deref().unwrap_or(&change.path);
-            match git::blob_at(&root, parent, old) {
-                Ok(bytes) => read_text(bytes),
-                Err(error) => {
-                    window.tell(error.to_string().into());
-                    return;
+}
+
+fn char_width(c: char) -> f32 {
+    if c.is_ascii() || ('\u{ff61}'..='\u{ff9f}').contains(&c) {
+        7.6
+    } else {
+        13.0
+    }
+}
+
+/// 1列の差分を、右の列の段に折る。行番号は1段目だけに出す。
+fn diff_rows(unified: &inline_diff::Unified) -> Vec<GitDiffRow> {
+    let limit = DIFF_WIDTH.with(std::cell::Cell::get);
+    let mut rows = Vec::new();
+    for line in &unified.lines {
+        let kind = match line.kind {
+            inline_diff::Kind::Context => 0,
+            inline_diff::Kind::Removed => 1,
+            inline_diff::Kind::Added => 2,
+            inline_diff::Kind::Gap => 3,
+        };
+        let number = |n: Option<usize>| n.map(|n| n.to_string()).unwrap_or_default();
+        let mut parts: Vec<GitDiffPart> = Vec::new();
+        let mut width = 0.0;
+        let mut first = true;
+        let mut flush = |parts: &mut Vec<GitDiffPart>, first: &mut bool| {
+            if parts.is_empty() {
+                parts.push(GitDiffPart::default());
+            }
+            rows.push(GitDiffRow {
+                kind,
+                old: if *first {
+                    number(line.old)
+                } else {
+                    String::new()
+                }
+                .into(),
+                new: if *first {
+                    number(line.new)
+                } else {
+                    String::new()
+                }
+                .into(),
+                parts: ModelRc::new(VecModel::from(std::mem::take(parts))),
+            });
+            *first = false;
+        };
+        for (text, mark) in &line.parts {
+            for c in text.chars() {
+                let c = if c == '\t' { ' ' } else { c };
+                let w = char_width(c);
+                if width + w > limit && width > 0.0 {
+                    flush(&mut parts, &mut first);
+                    width = 0.0;
+                }
+                width += w;
+                match parts.last_mut() {
+                    Some(part) if part.mark == *mark => {
+                        let mut held = part.text.to_string();
+                        held.push(c);
+                        part.text = held.into();
+                    }
+                    _ => parts.push(GitDiffPart {
+                        text: c.to_string().into(),
+                        mark: *mark,
+                    }),
                 }
             }
         }
-        None => String::new(),
+        flush(&mut parts, &mut first);
+    }
+    rows
+}
+
+/// 差分の左右の文と、見出しに出す文。
+fn diff_texts(root: &Path, diff: &DiffShown) -> Result<(String, String, String), GitError> {
+    let disk = |path: &str| read_text(std::fs::read(root.join(path)).ok());
+    let blob = |sha: &str, path: &str| git::blob_at(root, sha, path).map(read_text);
+    match &diff.source {
+        DiffSource::Commit {
+            sha,
+            parent,
+            change,
+        } => {
+            let short: String = sha.chars().take(7).collect();
+            if diff.working {
+                let caption = say!(
+                    "Commit {short}（左）と今のファイル（右）",
+                    "Commit {short} (left) and the working copy (right)"
+                );
+                return Ok((blob(sha, &change.path)?, disk(&change.path), caption));
+            }
+            let old_path = change.from.as_deref().unwrap_or(&change.path);
+            let before = match parent {
+                Some(parent) => blob(parent, old_path)?,
+                None => String::new(),
+            };
+            let parent_short: String = parent
+                .as_deref()
+                .map(|p| p.chars().take(7).collect())
+                .unwrap_or_else(|| "—".to_owned());
+            let caption = say!(
+                "親Commit {parent_short}（左）と {short}（右）",
+                "Parent {parent_short} (left) and {short} (right)"
+            );
+            Ok((before, blob(sha, &change.path)?, caption))
+        }
+        DiffSource::Wip { change } => {
+            let old_path = change.from.as_deref().unwrap_or(&change.path);
+            let before = match git::head_sha(root) {
+                Some(head) => blob(&head, old_path)?,
+                None => String::new(),
+            };
+            let now = if change.kind == Kind::Deleted {
+                String::new()
+            } else {
+                disk(&change.path)
+            };
+            let caption = say!(
+                "前回のCommit（左）と今のファイル（右）",
+                "Last commit (left) and the working copy (right)"
+            );
+            Ok((before, now, caption))
+        }
+    }
+}
+
+fn change_of(source: &DiffSource) -> &Change {
+    match source {
+        DiffSource::Commit { change, .. } | DiffSource::Wip { change } => change,
+    }
+}
+
+fn publish_diff(window: &AppWindow, root: &Path, diff: &DiffShown) {
+    let (left, right, caption) = match diff_texts(root, diff) {
+        Ok(texts) => texts,
+        Err(error) => (String::new(), String::new(), error.to_string()),
     };
-    let parent_short: String = parent
-        .as_deref()
-        .map(|p| p.chars().take(7).collect())
-        .unwrap_or_else(|| "—".to_owned());
-    let old_name = change.from.clone().unwrap_or_else(|| change.path.clone());
-    crate::diff_view::show(
-        window,
-        format!("{old_name} @ {parent_short}"),
-        before,
-        format!("{} @ {short}", change.path),
-        at_commit,
-    );
+    let unified = inline_diff::unified(&left, &right, 3);
+    window.set_git_repo_diff_name(change_of(&diff.source).path.clone().into());
+    window.set_git_repo_diff_caption(caption.into());
+    window.set_git_repo_diff_removed(unified.removed as i32);
+    window.set_git_repo_diff_added(unified.added as i32);
+    window.set_git_repo_diff_working(diff.working);
+    window.set_git_repo_diff_switchable(matches!(diff.source, DiffSource::Commit { .. }));
+    window.set_git_repo_diff_rows(ModelRc::new(VecModel::from(diff_rows(&unified))));
+    window.set_git_repo_detail_mode(3);
+}
+
+/// 右の列に差分を出す（Commit の詳細のファイル）。
+fn show_diff(window: &AppWindow, index: usize, working: bool) {
+    let source = REPO.with(|repo| {
+        let repo = repo.borrow();
+        let detail = repo.detail.as_ref()?;
+        Some(DiffSource::Commit {
+            sha: detail.sha.clone(),
+            parent: detail.parents.first().cloned(),
+            change: detail.files.get(index)?.clone(),
+        })
+    });
+    if let Some(source) = source {
+        set_diff(window, DiffShown { source, working });
+    }
+}
+
+fn set_diff(window: &AppWindow, diff: DiffShown) {
+    REPO.with(|repo| {
+        let mut repo = repo.borrow_mut();
+        repo.diff = Some(diff);
+        publish_detail(window, &repo);
+    });
+}
+
+/// 「‹ Files」：差分を閉じて、詳細（または WIP）へ戻る。
+fn diff_back(window: &AppWindow) {
+    REPO.with(|repo| {
+        let mut repo = repo.borrow_mut();
+        repo.diff = None;
+        publish_detail(window, &repo);
+    });
+}
+
+/// Previous／Working Copy。
+fn diff_working_chosen(window: &AppWindow, working: bool) {
+    let diff = REPO.with(|repo| repo.borrow().diff.clone());
+    if let Some(mut diff) = diff {
+        diff.working = working;
+        set_diff(window, diff);
+    }
+}
+
+/// 「Open in Comparison」：今までの左右の比較の画面で開く（閉じるとここへ戻る）。
+fn diff_open_full(window: &AppWindow) {
+    let target = REPO.with(|repo| {
+        let repo = repo.borrow();
+        Some((repo.root.clone()?, repo.diff.clone()?))
+    });
+    let Some((root, diff)) = target else {
+        return;
+    };
+    match diff_texts(&root, &diff) {
+        Ok((left, right, caption)) => {
+            let name = &change_of(&diff.source).path;
+            crate::diff_view::show(
+                window,
+                format!("{name}（{caption}）"),
+                left,
+                name.clone(),
+                right,
+            );
+        }
+        Err(error) => window.tell(error.to_string().into()),
+    }
+}
+
+/// WIP の右の列で行を押した：ファイルなら前回の Commit との差分を出す。
+fn changes_clicked(window: &AppWindow, index: usize) {
+    if let Some(change) = git_ui::clicked_change(window, index) {
+        set_diff(
+            window,
+            DiffShown {
+                source: DiffSource::Wip { change },
+                working: true,
+            },
+        );
+    }
+}
+
+fn history(window: &AppWindow, live: &Live, redo: bool) {
+    if let Some(root) = root() {
+        git_ui::history_step(window, live, root, redo);
+    }
 }
 
 /// 詳細のファイルの右クリック：0 Compare with Previous、1 Compare with Working Copy、2 Open。
 fn file_menu(window: &AppWindow, live: &Live, index: usize, action: i32) {
     match action {
-        0 => compare_file(window, index, false),
-        1 => compare_file(window, index, true),
+        0 => show_diff(window, index, false),
+        1 => show_diff(window, index, true),
         2 => {
             let target = REPO.with(|repo| {
                 let repo = repo.borrow();
@@ -974,10 +1204,24 @@ pub fn wire(window: &AppWindow, live: &Live) {
         from.max(0) as usize,
         to.max(0) as usize
     ));
-    on!(on_git_repo_file_clicked, |w, _l, index| compare_file(
+    on!(on_git_repo_file_clicked, |w, _l, index| show_diff(
         w,
         index.max(0) as usize,
         false
+    ));
+    on!(on_git_repo_undo, |w, l| history(w, l, false));
+    on!(on_git_repo_redo, |w, l| history(w, l, true));
+    on!(on_git_repo_diff_back, |w, _l| diff_back(w));
+    on!(on_git_repo_diff_working_chosen, |w, _l, working| {
+        diff_working_chosen(w, working)
+    });
+    on!(on_git_repo_diff_open_full, |w, _l| diff_open_full(w));
+    on!(on_git_repo_diff_width_changed, |w, _l, width| {
+        diff_width_changed(w, width)
+    });
+    on!(on_git_repo_changes_clicked, |w, _l, index| changes_clicked(
+        w,
+        index.max(0) as usize
     ));
     on!(on_git_repo_file_menu, |w, l, index, action| file_menu(
         w,

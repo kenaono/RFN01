@@ -43,6 +43,7 @@ mod file_tree;
 mod find;
 mod git;
 mod git_graph;
+mod git_history;
 mod git_repo_ui;
 mod git_ui;
 mod git_version;
@@ -53,6 +54,7 @@ mod ime;
 #[cfg(test)]
 mod incremental_ui_tests;
 mod index_work;
+mod inline_diff;
 mod kill_ring;
 #[cfg(test)]
 mod layout_snapshot_ui_tests;

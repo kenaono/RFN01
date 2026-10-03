@@ -821,6 +821,27 @@ pub fn remote_default(root: &Path) -> Option<String> {
     .filter(|name| !name.is_empty())
 }
 
+/// 今いるブランチの名前。ブランチの外（detached）やまだCommitが無いときは`None`のこともある。
+pub fn current_branch(root: &Path) -> Option<String> {
+    checked(root, &["symbolic-ref", "-q", "--short", "HEAD"], None)
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|name| !name.is_empty())
+}
+
+/// `name`（ブランチや`refs/stash`）が指す Commit。無ければ`None`。
+pub fn resolve(root: &Path, name: &str) -> Option<String> {
+    checked(root, &["rev-parse", "-q", "--verify", name], None)
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|sha| !sha.is_empty())
+}
+
+/// 決まった引数で git を呼ぶだけの操作（Undo／Redo が組み合わせて使う、`git_history`）。
+pub(crate) fn plain(root: &Path, arguments: &[&str]) -> Result<(), GitError> {
+    checked(root, arguments, None).map(drop)
+}
+
 /// HEAD の Commit。まだ無ければ`None`。
 pub fn head_sha(root: &Path) -> Option<String> {
     checked(root, &["rev-parse", "-q", "--verify", "HEAD"], None)

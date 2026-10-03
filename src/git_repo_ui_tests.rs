@@ -163,9 +163,11 @@ fn selecting_shows_details_and_a_branch_jumps_to_its_tip() {
     assert_eq!(window.get_git_repo_detail_message(), "場面");
     assert_eq!(window.get_git_repo_scroll_generation(), generation + 1);
 
-    // ファイルを押すと、比較の画面がこの上に開く。
+    // ファイルを押すと、右の列に1列の差分（PR 2b）。「Open in Comparison」で比較の画面がこの上に開く。
     select_row(window, row_of(window, "二"));
-    compare_file(window, 0, false);
+    show_diff(window, 0, false);
+    assert_eq!(window.get_git_repo_detail_mode(), 3);
+    diff_open_full(window);
     assert!(window.get_diff_active());
     assert!(window.get_git_repo_active());
     assert!(window.get_diff_right_path().contains("原稿.md"));
@@ -338,6 +340,144 @@ fn the_trunk_is_main_then_master_then_the_remote_default() {
     assert_eq!(trunk_of(&remote, None), None);
 }
 
+fn diff_text(window: &AppWindow) -> Vec<(i32, String, Vec<String>)> {
+    let rows = window.get_git_repo_diff_rows();
+    (0..rows.row_count())
+        .map(|at| {
+            let row = rows.row_data(at).unwrap();
+            let text: String = (0..row.parts.row_count())
+                .map(|k| row.parts.row_data(k).unwrap().text.to_string())
+                .collect();
+            let marked: Vec<String> = (0..row.parts.row_count())
+                .map(|k| row.parts.row_data(k).unwrap())
+                .filter(|part| part.mark)
+                .map(|part| part.text.to_string())
+                .collect();
+            (row.kind, text, marked)
+        })
+        .collect()
+}
+
+/// PR 2b：ファイルを押すと右の列に1列の差分。変わった字だけを塗る。
+#[test]
+fn a_file_shows_an_inline_diff_with_the_changed_characters() {
+    let Some((root, harness)) = manuscript("repo-inline") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    open(window, live);
+    settle(window, live);
+    select_row(window, row_of(window, "二"));
+    show_diff(window, 0, false);
+    assert_eq!(window.get_git_repo_detail_mode(), 3);
+    assert_eq!(window.get_git_repo_diff_name(), "原稿.md");
+    assert!(window.get_git_repo_diff_switchable());
+    assert_eq!(
+        (
+            window.get_git_repo_diff_removed(),
+            window.get_git_repo_diff_added()
+        ),
+        (1, 1)
+    );
+    let lines = diff_text(window);
+    assert_eq!(lines[0], (1, "一行目".to_owned(), vec!["一".to_owned()]));
+    assert_eq!(lines[1], (2, "二行目".to_owned(), vec!["二".to_owned()]));
+    // Working Copy：その Commit と今のファイル。
+    fs::write(root.join("原稿.md"), "二行目を直した\n").unwrap();
+    diff_working_chosen(window, true);
+    assert!(window.get_git_repo_diff_working());
+    let lines = diff_text(window);
+    assert_eq!(lines[1].2, ["を直した"]);
+    // ‹ Files で詳細へ戻る。
+    diff_back(window);
+    assert_eq!(window.get_git_repo_detail_mode(), 1);
+}
+
+#[test]
+fn a_wip_file_shows_its_change_from_the_last_commit() {
+    let Some((root, harness)) = manuscript("repo-wip-diff") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    fs::write(root.join("原稿.md"), "二行目と三行目\n").unwrap();
+    open(window, live);
+    settle(window, live);
+    select_row(window, 0);
+    assert_eq!(window.get_git_repo_detail_mode(), 2);
+    let rows = window.get_git_rows();
+    let file = (0..rows.row_count())
+        .position(|at| rows.row_data(at).unwrap().label == "原稿.md")
+        .unwrap();
+    changes_clicked(window, file);
+    assert_eq!(window.get_git_repo_detail_mode(), 3);
+    assert!(!window.get_git_repo_diff_switchable());
+    assert_eq!(diff_text(window)[1].2, ["と三行目"]);
+    diff_back(window);
+    assert_eq!(window.get_git_repo_detail_mode(), 2);
+}
+
+#[test]
+fn long_lines_are_folded_with_the_number_on_the_first_row() {
+    let text = "あ".repeat(100);
+    let unified = inline_diff::unified("", &format!("{text}\n"), 3);
+    let rows = diff_rows(&unified);
+    assert!(rows.len() >= 3, "100 wide characters take several rows");
+    assert_eq!(rows[0].new, "1");
+    assert!(rows[1..].iter().all(|row| row.new.is_empty()));
+    let joined: String = rows
+        .iter()
+        .flat_map(|row| {
+            (0..row.parts.row_count())
+                .map(|k| row.parts.row_data(k).unwrap().text.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(joined, text);
+}
+
+/// PR 2b：Undo／Redo。ドラッグで Merge したものを戻し、やり直す。外で動かしたら使えない。
+#[test]
+fn a_merge_is_undone_and_redone_from_the_toolbar() {
+    let Some((root, harness)) = manuscript("repo-undo") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    open(window, live);
+    settle(window, live);
+    assert!(!window.get_git_repo_can_undo());
+    let before = git::head_sha(&root);
+    branch_dropped(
+        window,
+        live,
+        side_index(window, 1, "draft"),
+        side_index(window, 1, "main"),
+    );
+    let Question::GitConfirm(pending) = take_question(live) else {
+        panic!("expected the merge confirmation");
+    };
+    git_ui::confirmed(window, live, pending);
+    settle(window, live);
+    let merged = git::head_sha(&root);
+    assert!(window.get_git_repo_can_undo());
+    assert_eq!(window.get_git_repo_undo_tip(), "Undo Merge draft");
+    history(window, live, false);
+    settle(window, live);
+    assert_eq!(git::head_sha(&root), before);
+    assert!(!root.join("場面.md").exists());
+    assert!(window.get_git_repo_can_redo());
+    assert!(!window.get_git_repo_can_undo());
+    history(window, live, true);
+    settle(window, live);
+    assert_eq!(git::head_sha(&root), merged);
+    assert!(window.get_git_repo_can_undo());
+    // 外で HEAD を動かすと、Undo は使えない（理由を Tip に出す）。
+    git_ok(&root, &["reset", "-q", "--hard", "HEAD~1"]);
+    refresh(window, live);
+    settle(window, live);
+    assert!(!window.get_git_repo_can_undo());
+    assert!(window.get_git_repo_undo_tip().contains("Undo Merge draft"));
+}
+
 /// 画面の絵を書き出す（`cargo test -- --ignored git_repository_screens`）。一時フォルダの
 /// `rfnedit-git-snapshot`に、Git Repository の画面をPPMで置く。
 #[test]
@@ -352,7 +492,11 @@ fn git_repository_screens() {
     git::commit(&root, "第三章の下書き", true, false).unwrap();
     git_ok(&root, &["switch", "-q", "main"]);
     git::merge(&root, "draft").unwrap();
-    fs::write(root.join("原稿.md"), "三行目\n").unwrap();
+    fs::write(
+        root.join("原稿.md"),
+        "雨は朝から降っていた。\n猫は窓辺で眠っている。風がカーテンを静かに揺らす。夜になると、遠くの家々に灯りがともり、通りを行く人の足音も少しずつ途絶えていった。\n",
+    )
+    .unwrap();
     git::commit(&root, "第一章を直す", true, false).unwrap();
     git_ok(&root, &["switch", "-q", "draft"]);
     fs::write(root.join("第四章.md"), "四\n").unwrap();
@@ -377,11 +521,18 @@ fn git_repository_screens() {
         }
         fs::write(out.join(format!("{name}.ppm")), ppm).unwrap();
     };
+    wire(window, live);
     window.show().unwrap();
     open(window, live);
     settle(window, live);
     select_row(window, row_of(window, "第一章を直す"));
     draw("git-repository");
+    show_diff(window, 0, false);
+    // 右の列の幅が知らされて、段を折り直す（時計を回す）。
+    draw("git-repository-diff");
+    slint::platform::update_timers_and_animations();
+    draw("git-repository-diff");
+    diff_back(window);
     select_row(window, 0);
     draw("git-repository-wip");
     // main の先へ TestBranch で Commit した形（紫の幹は main のまま）。

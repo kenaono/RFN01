@@ -45,6 +45,22 @@ export struct GitCommitRow {
     in-head: bool,
 }
 
+// RFN01-67 PR 2b: 右の列の1列の差分。1行は画面の1段（長い段落は Rust が段に折る）。
+export struct GitDiffPart {
+    text: string,
+    // 行の中で変わった字（濃く塗る）。
+    mark: bool,
+}
+
+export struct GitDiffRow {
+    // 0 変わらない行、1 消した行、2 足した行、3 詰めた所（⋯）。
+    kind: int,
+    // 行番号（折った2段目からは空）。
+    old: string,
+    new: string,
+    parts: [GitDiffPart],
+}
+
 export struct GitBranchRow {
     // 0 見出し、1 ローカル、2 リモート、3 リモートの名前、4 Stash、5 案内の文。
     kind: int,
@@ -58,6 +74,7 @@ export struct GitBranchRow {
 component ToolButton inherits Rectangle {
     in property <string> icon;
     in property <string> title;
+    in property <string> tip;
     in property <bool> enabled: true;
     callback clicked();
     width: max(56px, label.preferred-width + 12px);
@@ -88,6 +105,10 @@ component ToolButton inherits Rectangle {
             root.clicked();
         }
     }
+    // 最後に置く：上に重なって指を見るだけで、押したことは下の TouchArea へ行く。
+    if root.tip != "": Tooltip {
+        text: @markdown("\{root.tip}");
+    }
 }
 
 export component GitRepositoryView inherits Rectangle {
@@ -109,8 +130,21 @@ export component GitRepositoryView inherits Rectangle {
     in property <bool> more;
     in property <string> note;
     in property <int> selected: -1;
-    // 0 何も選んでいない、1 Commit、2 WIP。
+    // 0 何も選んでいない、1 Commit、2 WIP、3 差分（PR 2b）。
     in property <int> detail-mode;
+    in property <string> diff-name;
+    in property <string> diff-caption;
+    in property <int> diff-removed;
+    in property <int> diff-added;
+    in property <bool> diff-working;
+    // WIP のファイルの差分では Previous／Working Copy を選ばせない（今のファイルと前回の Commit だけ）。
+    in property <bool> diff-switchable;
+    in property <[GitDiffRow]> diff-rows;
+    // Undo／Redo（PR 2b）。
+    in property <bool> can-undo;
+    in property <string> undo-tip;
+    in property <bool> can-redo;
+    in property <string> redo-tip;
     in property <string> detail-sha;
     in property <string> detail-message;
     in property <string> detail-author;
@@ -153,6 +187,13 @@ export component GitRepositoryView inherits Rectangle {
     callback branch-dropped(int, int);
     callback file-clicked(int);
     callback file-menu(int, int);
+    callback undo();
+    callback redo();
+    callback diff-back();
+    callback diff-working-chosen(bool);
+    callback diff-open-full();
+    // 右の列の幅（差分の段を Rust が折る）。
+    callback diff-width-changed(float);
     // WIP の右の列から（Git Changes と同じ操作）。
     callback changes-commit();
     callback changes-amend-toggled(bool);
@@ -163,6 +204,16 @@ export component GitRepositoryView inherits Rectangle {
     callback changes-row-menu(int, int);
 
     property <length> row-height: 30px;
+    // 右の列の幅。差分のあいだは広げるが、真ん中のグラフ（固定の列の合計＋メッセージ100px）を
+    // 押し出さない（書き手の窓の幅で右へはみ出さないように）。
+    property <length> right-width: root.detail-mode == 3
+        ? max(340px, min(660px, root.width - 240px - 2px - 150px - root.graph-width - 80px - 120px - 76px - 100px))
+        : 340px;
+    changed right-width => {
+        if root.detail-mode == 3 {
+            root.diff-width-changed(root.right-width / 1px);
+        }
+    }
     property <length> branch-height: 26px;
     property <length> graph-width: 120px;
     // 左の列のドラッグ。
@@ -265,6 +316,34 @@ export component GitRepositoryView inherits Rectangle {
                         clicked => {
                             branch-menu.show();
                         }
+                    }
+                }
+                Rectangle {
+                    width: 13px;
+                    Rectangle {
+                        x: 6px;
+                        y: 12px;
+                        width: 1px;
+                        height: 28px;
+                        background: Tok.rule;
+                    }
+                }
+                ToolButton {
+                    icon: "M5.5 3.5 2.5 6.5l3 3M2.5 6.5h7a4 4 0 0 1 0 8h-3";
+                    title: @tr("Undo");
+                    tip: root.undo-tip;
+                    enabled: !root.busy && root.can-undo;
+                    clicked => {
+                        root.undo();
+                    }
+                }
+                ToolButton {
+                    icon: "M10.5 3.5l3 3-3 3M13.5 6.5h-7a4 4 0 0 0 0 8h3";
+                    title: @tr("Redo");
+                    tip: root.redo-tip;
+                    enabled: !root.busy && root.can-redo;
+                    clicked => {
+                        root.redo();
                     }
                 }
                 Rectangle {
@@ -756,9 +835,9 @@ export component GitRepositoryView inherits Rectangle {
                 background: Tok.rule;
             }
 
-            // 右の列。
+            // 右の列。差分のあいだは広げる（書き手と見本で確かめた 2026-10-03）。
             Rectangle {
-                width: 340px;
+                width: root.right-width;
                 background: Tok.chrome;
                 if root.detail-mode == 0: Text {
                     text: @tr("Select a commit");
@@ -860,6 +939,195 @@ export component GitRepositoryView inherits Rectangle {
                             }
                             if file.tip != "": Tooltip {
                                 text: @markdown("`\{file.tip}`");
+                            }
+                        }
+                    }
+                }
+                if root.detail-mode == 3: VerticalLayout {
+                    // 上の帯：‹ Files、ファイル名、Previous／Working Copy。
+                    Rectangle {
+                        height: 40px;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            back := Rectangle {
+                                width: back-row.preferred-width + 12px;
+                                border-radius: 5px;
+                                background: back-touch.has-hover ? Tok.accent-faint : transparent;
+                                back-row := HorizontalLayout {
+                                    x: 6px;
+                                    spacing: 2px;
+                                    Rectangle {
+                                        width: 16px;
+                                        Icon {
+                                            y: (parent.height - self.height) / 2;
+                                            commands: "M9.5 4.5 6 8l3.5 3.5";
+                                            tint: Tok.accent;
+                                        }
+                                    }
+                                    Text {
+                                        text: @tr("Files");
+                                        color: Tok.accent;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                back-touch := TouchArea {
+                                    clicked => {
+                                        root.diff-back();
+                                    }
+                                }
+                            }
+                            Text {
+                                text: root.diff-name;
+                                color: Tok.ink-strong;
+                                font-size: 13px;
+                                font-weight: 600;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            if root.diff-switchable: HorizontalLayout {
+                                spacing: 0px;
+                                padding-top: 7px;
+                                padding-bottom: 7px;
+                                for choice[at] in [@tr("Previous Commit"), @tr("Working Copy")]: Rectangle {
+                                    property <bool> on: (at == 1) == root.diff-working;
+                                    width: choice-text.preferred-width + 20px;
+                                    border-width: 1px;
+                                    border-color: Tok.rule-strong;
+                                    background: self.on ? Tok.accent : choice-touch.has-hover ? Tok.accent-faint : Tok.paper;
+                                    choice-text := Text {
+                                        text: choice;
+                                        color: parent.on ? Tok.paper : Tok.ink;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    choice-touch := TouchArea {
+                                        clicked => {
+                                            root.diff-working-chosen(at == 1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Tok.rule;
+                        }
+                    }
+                    // 何と何を比べているか、数、左右の比較の画面へ。
+                    Rectangle {
+                        height: 34px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: root.diff-caption;
+                                color: Tok.ink-muted;
+                                font-size: 11px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: "−" + root.diff-removed;
+                                color: Tok.alert;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "+" + root.diff-added;
+                                color: #2e7d32;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                TextButton {
+                                    title: @tr("Open in Comparison");
+                                    clicked => {
+                                        root.diff-open-full();
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Tok.rule;
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Tok.paper;
+                        if root.diff-rows.length == 0: Text {
+                            text: @tr("No differences");
+                            color: Tok.ink-faint;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        ScrollView {
+                            VerticalLayout {
+                                padding-top: 6px;
+                                padding-bottom: 6px;
+                                alignment: start;
+                                for line in root.diff-rows: Rectangle {
+                                    height: 22px;
+                                    background: line.kind == 1 ? Tok.diff-removed : line.kind == 2 ? Tok.diff-added : transparent;
+                                    HorizontalLayout {
+                                        padding-right: 10px;
+                                        spacing: 4px;
+                                        Text {
+                                            width: 34px;
+                                            text: line.old;
+                                            color: Tok.ink-faint;
+                                            font-size: 11px;
+                                            font-family: "Consolas";
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            width: 34px;
+                                            text: line.new;
+                                            color: Tok.ink-faint;
+                                            font-size: 11px;
+                                            font-family: "Consolas";
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            width: 14px;
+                                            text: line.kind == 1 ? "−" : line.kind == 2 ? "+" : "";
+                                            color: Tok.ink-muted;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            spacing: 0px;
+                                            horizontal-stretch: 1;
+                                            for part in line.parts: Rectangle {
+                                                width: part-text.preferred-width;
+                                                y: 2px;
+                                                height: parent.height - 4px;
+                                                border-radius: 2px;
+                                                background: !part.mark ? transparent : line.kind == 1 ? #f4b9b4 : #b9e2bb;
+                                                part-text := Text {
+                                                    text: part.text;
+                                                    color: line.kind == 3 ? Tok.ink-faint : Tok.doc-ink;
+                                                    font-size: 13px;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
