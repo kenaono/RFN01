@@ -169,6 +169,8 @@ export component GitRepositoryView inherits Rectangle {
     in-out property <bool> amend;
 
     callback close();
+    // キーを窓のショートカットに照らす（「戻る」なら Rust が閉じる。書き手の求め 2026-10-03）。
+    callback shortcut(string, bool, bool, bool) -> bool;
     callback branch-chosen(int);
     callback new-branch();
     callback pull();
@@ -250,7 +252,26 @@ export component GitRepositoryView inherits Rectangle {
                 root.close();
                 return accept;
             }
+            if root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) {
+                return accept;
+            }
             return reject;
+        }
+    }
+
+    // マウスの「戻る」釦は、どこで押しても閉じる（書き手の求め 2026-10-03：「戻ると前の画面に
+    // 戻る（閉じる）ほうがいい」）。行の上で押したときは、行の TouchArea が同じことをする。
+    // **FocusScope より後に置く**——FocusScope は押下を受け取るので、下にあると何も無い所の
+    // 押下が届かない。その代わり、何も無い所を押したら鍵盤をこの画面へ戻す（Esc・戻るが効くように）。
+    TouchArea {
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                if event.button == PointerEventButton.back {
+                    root.close();
+                } else {
+                    keys.focus();
+                }
+            }
         }
     }
 
@@ -478,6 +499,9 @@ export component GitRepositoryView inherits Rectangle {
                                     root.branch-activated(index);
                                 }
                                 pointer-event(event) => {
+                                    if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
+                                        root.close();
+                                    }
                                     if event.button == PointerEventButton.left && event.kind == PointerEventKind.down && (row.kind == 1 || row.kind == 2) {
                                         root.drag-from = index;
                                         root.drag-start = self.mouse-y;
@@ -575,6 +599,17 @@ export component GitRepositoryView inherits Rectangle {
                                 }
                             }
                         }
+                        // マウスの「戻る」を、行の無い所でも受ける（ScrollView が押下を取るため、2026-10-03）。
+                        Rectangle {
+                            height: max(0px, branch-list.visible-height - root.branch-rows.length * root.branch-height - 16px);
+                            TouchArea {
+                                pointer-event(event) => {
+                                    if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
+                                        root.close();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -666,6 +701,9 @@ export component GitRepositoryView inherits Rectangle {
                                     root.commit-selected(index);
                                 }
                                 pointer-event(event) => {
+                                    if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
+                                        root.close();
+                                    }
                                     if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && !row.wip {
                                         root.commit-selected(index);
                                         root.menu-row = index;
@@ -827,6 +865,17 @@ export component GitRepositoryView inherits Rectangle {
                                 vertical-alignment: center;
                             }
                         }
+                        // マウスの「戻る」を、行の無い所でも受ける（ScrollView が押下を取るため、2026-10-03）。
+                        Rectangle {
+                            height: max(0px, list.visible-height - root.commits.length * root.row-height - (root.more ? root.row-height : 0px));
+                            TouchArea {
+                                pointer-event(event) => {
+                                    if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
+                                        root.close();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -899,6 +948,9 @@ export component GitRepositoryView inherits Rectangle {
                                     root.file-clicked(index);
                                 }
                                 pointer-event(event) => {
+                                    if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
+                                        root.close();
+                                    }
                                     if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                                         root.menu-row = index;
                                         root.menu-kind = 5;
@@ -1072,7 +1124,7 @@ export component GitRepositoryView inherits Rectangle {
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
-                        ScrollView {
+                        diff-list := ScrollView {
                             VerticalLayout {
                                 padding-top: 6px;
                                 padding-bottom: 6px;
@@ -1128,6 +1180,17 @@ export component GitRepositoryView inherits Rectangle {
                                         }
                                     }
                                 }
+                            // マウスの「戻る」を、行の無い所でも受ける（ScrollView が押下を取るため、2026-10-03）。
+                            Rectangle {
+                                height: max(0px, diff-list.visible-height - root.diff-rows.length * 22px - 12px);
+                                TouchArea {
+                                    pointer-event(event) => {
+                                        if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
+                                            root.close();
+                                        }
+                                    }
+                                }
+                            }
                             }
                         }
                     }

@@ -910,6 +910,20 @@ pub fn wire(app: &AppWindow, live: &Live) {
         if command == -2 {
             return true;
         }
+        // RFN01-67（書き手の求め 2026-10-03）: Git Repository の画面では「戻る」で画面を閉じる。
+        // ほかのショートカットは、下に隠れているペインへは届けない。
+        if app.get_git_repo_active() {
+            if command == 19 {
+                let weak = weak.clone();
+                slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                    if let Some(app) = weak.upgrade() {
+                        crate::git_repo_ui::close(&app);
+                    }
+                });
+                return true;
+            }
+            return false;
+        }
         let pane = crate::focused_pane(&app);
         let on_settings = keyed_live
             .tabs

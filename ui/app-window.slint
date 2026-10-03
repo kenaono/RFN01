@@ -6666,6 +6666,7 @@ export component AppWindow inherits Window {
             message <=> root.git-message;
             amend <=> root.git-amend;
             close => { root.git-repo-close(); }
+            shortcut(text, control, alt, shift) => { return root.shortcut-key(text, control, alt, shift); }
             branch-chosen(index) => { root.git-branch-chosen(index); }
             new-branch => { root.git-new-branch(); }
             pull => { root.git-pull(); }
