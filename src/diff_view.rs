@@ -213,6 +213,8 @@ pub(crate) fn dismiss(app: &AppWindow) {
     app.set_diff_active(false);
     // RFN01-61: Backup History は比較の画面の上にあるので、比較を閉じれば一緒に閉じる。
     crate::backup_ui::forget(app);
+    // RFN01-67 PR 3: Git History も同じ。
+    crate::git_file_history::forget(app);
     app.set_diff_rows(Default::default());
     app.on_diff_copy_side(|_| {});
     app.on_diff_next_difference(|_| {});

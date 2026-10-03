@@ -59,6 +59,7 @@ component CheckMark inherits Rectangle {
 component CheckLine inherits Rectangle {
     in property <BackupRow> item;
     in property <bool> selected;
+    in property <bool> checkable: true;
     callback toggled();
     callback chosen();
     height: root.item.name != "" ? 44px : 30px;
@@ -75,7 +76,7 @@ component CheckLine inherits Rectangle {
         padding-left: 4px;
         padding-right: 8px;
         spacing: 6px;
-        CheckMark {
+        if root.checkable: CheckMark {
             y: (parent.height - self.height) / 2;
             checked: root.item.checked;
             toggled => {
@@ -145,7 +146,10 @@ component AllLine inherits Rectangle {
 }
 
 // Backup History の左の列。
+// RFN01-67 PR 3: Git History も同じ一覧を使う（見出しを替え、チェックと Delete を出さない）。
 export component BackupHistoryList inherits Rectangle {
+    in property <string> title: @tr("Backup History");
+    in property <bool> checkable: true;
     in property <string> file-name;
     in property <[BackupRow]> rows;
     in property <int> selected: -1;
@@ -165,7 +169,7 @@ export component BackupHistoryList inherits Rectangle {
         spacing: 6px;
 
         Text {
-            text: @tr("Backup History");
+            text: root.title;
             color: Tok.ink-strong;
             font-size: 13px;
             font-weight: 600;
@@ -178,7 +182,7 @@ export component BackupHistoryList inherits Rectangle {
             overflow: elide;
         }
 
-        AllLine {
+        if root.checkable: AllLine {
             checked: root.all-checked;
             toggled => {
                 root.all-toggled();
@@ -193,6 +197,7 @@ export component BackupHistoryList inherits Rectangle {
                 for row[index] in root.rows: CheckLine {
                     item: row;
                     selected: index == root.selected;
+                    checkable: root.checkable;
                     toggled => {
                         root.toggled(index);
                     }
@@ -203,7 +208,7 @@ export component BackupHistoryList inherits Rectangle {
             }
         }
 
-        TextButton {
+        if root.checkable: TextButton {
             wide: true;
             title: @tr("Delete…");
             role: Role.danger;

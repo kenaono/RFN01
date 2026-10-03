@@ -1355,6 +1355,11 @@ File の「Git Repository…」か、Git Changes の見出しの右端のアイ�
 - **Commit の右クリック**：New Branch…、Revert（今のブランチの Commit）、Cherry-pick（ほかのブランチの Commit）、Reset — Keep Changes／Delete Changes…（今のブランチの Commit。Delete Changes と、Push 済みの Commit を外す Reset は確認します）。
 - 未保存の文書の確かめ、衝突したら中止して元に戻すこと、終わったあとの読み直しは Git Changes と同じです。Merge していないブランチを消すときは、もう一度確認します。
 
+## Git History
+
+File の「Git History…」（「Backup History…」の隣）で、今のTABのファイルの Git の履歴を開きます（RFN01-67）。Backup History と同じ形で、比較の画面の左に、そのファイルが入っている Commit が新しい順に並びます（日時・短い名前・メッセージ）。名前を変えたファイルは、変える前の Commit まで追います。
+行を押すと、編集中の本文（左）とその Commit の版（右）の比較に替わり、差分を選んで本文へ反映できます（Undo 1回で戻せます）。比較を終える（Esc）と一覧も閉じます。Git で管理していないファイルでは、この行は淡く押せません。
+
 ## 印刷（紙の形で見る）
 
 Paneメニュー（⋮）の「Print…」かCtrl+Pで、**そのペインのそのTAB**の印刷プレビューが開きます。窓の☰には置いていません——どのペインのどのTABが出るのか、押す側から分からないからです。編集画面はその下にそのまま残り、Escか「Close」で戻ります。

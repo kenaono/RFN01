@@ -971,6 +971,61 @@ fn parse_name_status(bytes: &[u8]) -> Vec<Change> {
     files
 }
 
+/// ファイルの履歴の1つ（RFN01-67 PR 3、Git History）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileVersion {
+    pub sha: String,
+    pub date: String,
+    pub subject: String,
+    /// その Commit でのファイルの道（根から、`/`区切り）。名前を変える前は前の名前。
+    pub path: String,
+}
+
+/// `file`（絶対の道）が入っている Commit を新しい順に`limit`件。名前の変更を追う（`--follow`）。
+pub fn file_log(file: &Path, limit: usize) -> Result<Vec<FileVersion>, GitError> {
+    let (Some(folder), Some(name)) = (file.parent(), file.file_name()) else {
+        return Ok(Vec::new());
+    };
+    let name = name.to_string_lossy();
+    let count = format!("-n{limit}");
+    let text = checked(
+        folder,
+        &[
+            // ファイル名の`*`や`?`を模様として読ませない。
+            "--literal-pathspecs",
+            "log",
+            "--follow",
+            "--name-only",
+            "--date=format:%Y-%m-%d %H:%M",
+            "--format=%x1e%H%x1f%ad%x1f%s",
+            &count,
+            "--",
+            &name,
+        ],
+        None,
+    )?;
+    Ok(text
+        .split('\x1e')
+        .filter_map(|record| {
+            let mut lines = record.lines();
+            let mut head = lines.next()?.split('\x1f');
+            let sha = head.next()?.to_owned();
+            if sha.is_empty() {
+                return None;
+            }
+            let date = head.next().unwrap_or("").to_owned();
+            let subject = head.next().unwrap_or("").to_owned();
+            let path = lines.filter(|l| !l.trim().is_empty()).last()?.to_owned();
+            Some(FileVersion {
+                sha,
+                date,
+                subject,
+                path,
+            })
+        })
+        .collect())
+}
+
 /// `sha`の版の`path`の中身。その版に無ければ`None`。
 pub fn blob_at(root: &Path, sha: &str, path: &str) -> Result<Option<Vec<u8>>, GitError> {
     let object = format!("{sha}:{path}");
