@@ -337,3 +337,47 @@ fn git_screens() {
     settle(window, live);
     draw("git-none");
 }
+
+/// 書き手の報告 2026-10-03：ブランチ▾で main を選んでも切り替わらない。**ポインタで押して**
+/// 確かめる（ハンドラを直に呼ぶ試験では、メニューを先に閉じて行ごと消える誤りが見えなかった）。
+#[test]
+fn choosing_a_branch_from_the_menu_with_the_pointer_switches() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let Some((root, harness, _document)) = manuscript("git-pointer") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    git_ok(&root, &["branch", "draft"]);
+    wire(window, live);
+    window.show().unwrap();
+    show(window, live);
+    assert_eq!(window.get_git_branch(), "main");
+    let draw = || {
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+        window.window().request_redraw();
+        harness.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+    };
+    let click = |x: f32, y: f32| {
+        let at = slint::LogicalPosition::new(x, y);
+        let w = window.window();
+        w.dispatch_event(WindowEvent::PointerMoved { position: at });
+        w.dispatch_event(WindowEvent::PointerPressed {
+            position: at,
+            button: PointerEventButton::Left,
+        });
+        w.dispatch_event(WindowEvent::PointerReleased {
+            position: at,
+            button: PointerEventButton::Left,
+        });
+        slint::platform::update_timers_and_animations();
+        draw();
+    };
+    draw();
+    // ブランチ▾（面の上から2段目）を押して、一覧の1行目（draft）を押す。
+    click(150.0, 50.0);
+    click(150.0, 72.0);
+    settle(window, live);
+    assert_eq!(window.get_git_branch(), "draft");
+}

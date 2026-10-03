@@ -489,9 +489,11 @@ export component GitChangesView inherits Rectangle {
                 for name[index] in root.repos: MenuRow {
                     title: name;
                     checked: index == root.repo-index;
+                    // **伝えてから閉じる**（書き手の報告 2026-10-03：main を選んでも切り替わらない）。
+                    // 繰り返しの行で先に閉じると、行ごと消えて次の文が走らない（技術検証6.22）。
                     activated => {
-                        repo-menu.close();
                         root.repo-chosen(index);
+                        repo-menu.close();
                     }
                 }
             }
@@ -511,9 +513,11 @@ export component GitChangesView inherits Rectangle {
                 for name[index] in root.branches: MenuRow {
                     title: name;
                     checked: name == root.branch;
+                    // **伝えてから閉じる**（書き手の報告 2026-10-03：main を選んでも切り替わらない）。
+                    // 繰り返しの行で先に閉じると、行ごと消えて次の文が走らない（技術検証6.22）。
                     activated => {
-                        branch-menu.close();
                         root.branch-chosen(index);
+                        branch-menu.close();
                     }
                 }
                 if root.branches.length > 0: Rectangle {

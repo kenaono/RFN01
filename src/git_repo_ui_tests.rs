@@ -288,6 +288,56 @@ fn cherry_pick_and_reset_from_the_commit_menu() {
     assert!(root.join("場面.md").exists());
 }
 
+/// 書き手の確認 2026-10-03：main から作った TestBranch で Commit した（Push も main の Commit も
+/// していない）。**今いるのが TestBranch でも、紫の幹は main**で、TestBranch は別の色で分かれる。
+#[test]
+fn a_branch_ahead_of_main_is_drawn_off_the_purple_trunk() {
+    let Some((root, harness)) = manuscript("repo-trunk") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    git_ok(&root, &["switch", "-q", "-c", "TestBranch"]);
+    fs::write(root.join("試し.md"), "試し\n").unwrap();
+    git::commit(&root, "試し", true, false).unwrap();
+    open(window, live);
+    settle(window, live);
+    let rows = window.get_git_repo_commits();
+    let test = rows.row_data(row_of(window, "試し")).unwrap();
+    let main = rows.row_data(row_of(window, "二")).unwrap();
+    assert!(test.head, "TestBranch is where HEAD is");
+    assert_eq!(main.node_color, lane_color(0), "main is the purple trunk");
+    assert_ne!(test.node_color, lane_color(0), "TestBranch is not purple");
+    assert_ne!(test.node_x, main.node_x, "TestBranch is drawn beside main");
+}
+
+#[test]
+fn the_trunk_is_main_then_master_then_the_remote_default() {
+    let branch = |name: &str, sha: &str, remote: bool| Ref {
+        name: name.into(),
+        sha: sha.into(),
+        remote,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+    };
+    let refs = [
+        branch("draft", "d", false),
+        branch("master", "s", false),
+        branch("main", "m", false),
+    ];
+    assert_eq!(trunk_of(&refs, None).as_deref(), Some("m"));
+    assert_eq!(trunk_of(&refs[..2], None).as_deref(), Some("s"));
+    let remote = [
+        branch("draft", "d", false),
+        branch("origin/trunk", "t", true),
+    ];
+    assert_eq!(
+        trunk_of(&remote, Some("origin/trunk")).as_deref(),
+        Some("t")
+    );
+    assert_eq!(trunk_of(&remote, None), None);
+}
+
 /// 画面の絵を書き出す（`cargo test -- --ignored git_repository_screens`）。一時フォルダの
 /// `rfnedit-git-snapshot`に、Git Repository の画面をPPMで置く。
 #[test]
@@ -334,4 +384,11 @@ fn git_repository_screens() {
     draw("git-repository");
     select_row(window, 0);
     draw("git-repository-wip");
+    // main の先へ TestBranch で Commit した形（紫の幹は main のまま）。
+    git_ok(&root, &["switch", "-q", "-c", "TestBranch"]);
+    fs::write(root.join("試し.md"), "試し\n").unwrap();
+    git::commit(&root, "試し", true, false).unwrap();
+    refresh(window, live);
+    settle(window, live);
+    draw("git-repository-trunk");
 }

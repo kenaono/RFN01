@@ -31,7 +31,7 @@ use crate::{
 const PAGE: usize = 200;
 /// 行の高さ（`git-repository.slint`の`row-height`と同じ）。
 const ROW_HEIGHT: f32 = 30.0;
-/// 筋の色。0 は今のブランチ（アクセントの紫）。グラフは筋を見分けるために色が要るので、
+/// 筋の色。0 は幹（main、アクセントの紫）。グラフは筋を見分けるために色が要るので、
 /// ここだけ紫の外の色を使う（書き手と見本で確かめた 2026-10-03）。
 const LANE_COLORS: [u32; 8] = [
     0x6b4cae, 0x2f7d79, 0xa8792a, 0x3f6fb0, 0x9a4f8a, 0x4f8a3a, 0xb0603f, 0x5f6b7a,
@@ -41,8 +41,8 @@ fn lane_x(lane: usize) -> f32 {
     10.0 + lane as f32 * 14.0
 }
 
-/// 筋の色。**紫（0）は今のブランチだけ**——ほかの筋は残りの7色を順に回す。8色を単に
-/// 回すと、9本目の枝が今のブランチと同じ紫になり、main から分かれたように見えなかった
+/// 筋の色。**紫（0）は幹（main）だけ**——ほかの筋は残りの7色を順に回す。8色を単に
+/// 回すと、9本目の枝が幹と同じ紫になり、main から分かれたように見えなかった
 /// （書き手の確認 2026-10-03）。
 fn lane_color(index: usize) -> Color {
     let others = LANE_COLORS.len() - 1;
@@ -60,6 +60,8 @@ struct Data {
     entries: Vec<LogEntry>,
     refs: Vec<Ref>,
     head: Option<String>,
+    /// 幹（紫の筋）の先端（`trunk_of`）。
+    trunk: Option<String>,
     status: Status,
     incoming: HashSet<String>,
     outgoing: HashSet<String>,
@@ -203,15 +205,34 @@ pub fn refresh(window: &AppWindow, live: &Live) {
 fn read(root: &Path, count: usize) -> Result<Data, GitError> {
     let status = git::status(root)?;
     let (incoming, outgoing) = git::incoming_outgoing(root);
+    let refs = git::refs(root)?;
+    let head = git::head_sha(root);
+    let trunk = trunk_of(&refs, git::remote_default(root).as_deref()).or_else(|| head.clone());
     Ok(Data {
         entries: git::log(root, count)?,
-        refs: git::refs(root)?,
-        head: git::head_sha(root),
+        refs,
+        head,
+        trunk,
         stashes: git::stashes(root)?,
         incoming: incoming.into_iter().collect(),
         outgoing: outgoing.into_iter().collect(),
         status,
     })
+}
+
+/// 幹（紫の筋）にするブランチの先端（書き手の判断 2026-10-03：「紫の幹は main」）。
+/// ローカルの main、master、origin の既定のブランチ（同じ名前のローカルがあればそちら）の順。
+/// どれも無ければ`None`（呼ぶ側が HEAD を幹にする）。
+fn trunk_of(refs: &[Ref], remote_default: Option<&str>) -> Option<String> {
+    let local = |name: &str| refs.iter().find(|r| !r.remote && r.name == name);
+    if let Some(found) = local("main").or_else(|| local("master")) {
+        return Some(found.sha.clone());
+    }
+    let remote = remote_default?;
+    let short = remote.split_once('/').map_or(remote, |(_, name)| name);
+    local(short)
+        .or_else(|| refs.iter().find(|r| r.remote && r.name == remote))
+        .map(|found| found.sha.clone())
 }
 
 fn collect(window: &AppWindow, live: &Live) {
@@ -323,7 +344,7 @@ fn commit_rows(data: &Data) -> (Vec<GitCommitRow>, Vec<Option<String>>) {
         .iter()
         .map(|e| (e.sha.as_str(), e.parents.as_slice()))
         .collect();
-    let layout = git_graph::layout(&pairs, data.head.as_deref(), wip);
+    let layout = git_graph::layout(&pairs, data.trunk.as_deref(), data.head.as_deref(), wip);
     // 今のブランチから辿れる Commit（読んだ範囲の中で）。
     let parents: HashMap<&str, &[String]> = pairs.iter().copied().collect();
     let mut in_head: HashSet<&str> = HashSet::new();

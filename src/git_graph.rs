@@ -4,9 +4,10 @@
 //! 「どの線を描くか」を決める。線は行の中で閉じている——上の端から点へ入る線（`Into`）、
 //! 点から下の端へ出る線（`Out`）、行を素通りする線（`Through`）。行を縦に並べれば線がつながる。
 //!
-//! - **今のブランチ（HEAD）を筋0に置く**。HEAD より新しい行では筋0を空けておき、
-//!   `// WIP` の行があるときだけ、そこから HEAD まで線を引く。
-//! - 筋の色は筋を割り当てたときに決め、その筋が続くあいだ変えない。色0は今のブランチ。
+//! - **幹（main）を筋0に置く**（書き手の判断 2026-10-03：「紫の幹は main」）。main より新しい行
+//!   では筋0を空けておき、main に無い Commit は今いるブランチのものでも別の筋から分かれて入る。
+//!   `// WIP` の行は HEAD を待つ筋に置く（HEAD が幹なら筋0）。
+//! - 筋の色は筋を割り当てたときに決め、その筋が続くあいだ変えない。色0は幹だけ。
 //! - 筋が`MAX_LANES`本を超えたら、それより右は最後の筋に重ねて描く（`drawn_lane`）。
 
 /// 描く筋の数の上限。これより右の筋は最後の筋に重ねる。
@@ -38,26 +39,48 @@ struct Lane {
     reserved: bool,
 }
 
-/// `commits`は`(sha, 親)`を子が先の順で。`head`は HEAD の sha、`wip`は `// WIP` の行を
-/// 先頭に足すか（足すなら戻り値の先頭がその行）。
-pub fn layout(commits: &[(&str, &[String])], head: Option<&str>, wip: bool) -> Vec<Row> {
+/// `commits`は`(sha, 親)`を子が先の順で。`trunk`は幹（main）の先端、`head`は HEAD の sha、
+/// `wip`は `// WIP` の行を先頭に足すか（足すなら戻り値の先頭がその行）。
+pub fn layout(
+    commits: &[(&str, &[String])],
+    trunk: Option<&str>,
+    head: Option<&str>,
+    wip: bool,
+) -> Vec<Row> {
     let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut next_color = 1;
     let mut rows = Vec::with_capacity(commits.len() + 1);
-    let head = head.filter(|head| commits.iter().any(|(sha, _)| sha == head));
-    if let Some(head) = head {
+    let known = |sha: &&str| commits.iter().any(|(at, _)| at == sha);
+    let trunk = trunk.filter(known);
+    let head = head.filter(known);
+    if let Some(trunk) = trunk {
         lanes.push(Some(Lane {
-            expect: head.to_owned(),
+            expect: trunk.to_owned(),
             color: 0,
-            reserved: !wip,
+            reserved: true,
         }));
-        if wip {
-            rows.push(Row {
-                lane: 0,
-                color: 0,
-                lines: vec![Line::Out { to: 0, color: 0 }],
+    }
+    if let (true, Some(head)) = (wip, head) {
+        let lane = if Some(head) == trunk {
+            0
+        } else {
+            let at = free(&mut lanes);
+            lanes[at] = Some(Lane {
+                expect: head.to_owned(),
+                color: next_color,
+                reserved: false,
             });
-        }
+            next_color += 1;
+            at
+        };
+        let lane_entry = lanes[lane].as_mut().expect("the lane just set");
+        lane_entry.reserved = false;
+        let color = lane_entry.color;
+        rows.push(Row {
+            lane,
+            color,
+            lines: vec![Line::Out { to: lane, color }],
+        });
     }
     for (sha, parents) in commits {
         let mine: Vec<usize> = lanes
@@ -218,7 +241,7 @@ mod tests {
         let d = owned(&["a"]);
         let a = owned(&[]);
         let commits: Vec<(&str, &[String])> = vec![("m", &m), ("b", &b), ("d", &d), ("a", &a)];
-        let rows = layout(&commits, Some("m"), false);
+        let rows = layout(&commits, Some("m"), Some("m"), false);
         assert_eq!(rows.len(), 4);
         // M は筋0、下へ2本（筋0へ B、筋1へ D）。
         assert_eq!(rows[0].lane, 0);
@@ -237,15 +260,15 @@ mod tests {
         assert!(!rows[3].lines.iter().any(|l| matches!(l, Line::Out { .. })));
     }
 
-    /// HEAD より新しい Commit（origin/main）があっても、HEAD は筋0。筋0は WIP が無ければ
-    /// HEAD まで描かない。
+    /// main より新しい Commit（origin/main）があっても、main は筋0。筋0は WIP が無ければ
+    /// main まで描かない。
     #[test]
-    fn the_head_keeps_lane_zero_and_wip_joins_it() {
+    fn the_trunk_keeps_lane_zero_and_wip_joins_it() {
         let o = owned(&["h"]);
         let h = owned(&["a"]);
         let a = owned(&[]);
         let commits: Vec<(&str, &[String])> = vec![("o", &o), ("h", &h), ("a", &a)];
-        let rows = layout(&commits, Some("h"), false);
+        let rows = layout(&commits, Some("h"), Some("h"), false);
         assert_eq!(rows[0].lane, 1, "origin/main goes beside the head lane");
         assert!(
             !rows[0]
@@ -258,7 +281,7 @@ mod tests {
         assert!(rows[1].lines.contains(&Line::Into { from: 1, color: 1 }));
         assert!(!rows[1].lines.contains(&Line::Into { from: 0, color: 0 }));
 
-        let rows = layout(&commits, Some("h"), true);
+        let rows = layout(&commits, Some("h"), Some("h"), true);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].lines, vec![Line::Out { to: 0, color: 0 }]);
         assert!(rows[1].lines.contains(&Line::Through { lane: 0, color: 0 }));
@@ -274,11 +297,38 @@ mod tests {
         let mut commits: Vec<(&str, &[String])> =
             tips.iter().map(|t| (t.as_str(), root.as_slice())).collect();
         commits.push(("base", &base));
-        let rows = layout(&commits, None, false);
+        let rows = layout(&commits, None, None, false);
         assert_eq!(rows[9].lane, 9);
         assert_eq!(drawn_lane(rows[9].lane), MAX_LANES - 1);
         let drawn = commands(&rows[9], |lane| lane as f32 * 10.0 + 5.0, 30.0);
         assert!(drawn.iter().all(|(_, path)| !path.contains("95 ")));
+    }
+
+    /// 書き手の確認 2026-10-03：main から作った TestBranch で Commit した（main は動いていない）。
+    /// **今いるのが TestBranch でも、幹は main**——TestBranch の Commit は別の筋・別の色で
+    /// main の点へ入る。WIP は TestBranch の筋に置く。
+    #[test]
+    fn a_branch_ahead_of_main_splits_off_the_trunk() {
+        let t = owned(&["m"]);
+        let m = owned(&["a"]);
+        let a = owned(&[]);
+        let commits: Vec<(&str, &[String])> = vec![("t", &t), ("m", &m), ("a", &a)];
+        let rows = layout(&commits, Some("m"), Some("t"), true);
+        assert_eq!(rows.len(), 4);
+        // WIP と TestBranch は筋1（紫でない色）。
+        assert_eq!((rows[0].lane, rows[0].color), (1, 1));
+        assert_eq!((rows[1].lane, rows[1].color), (1, 1));
+        assert!(
+            !rows[1]
+                .lines
+                .iter()
+                .any(|l| matches!(l, Line::Through { lane: 0, .. })),
+            "nothing is drawn on the trunk above main"
+        );
+        // main の点（筋0・紫）へ、筋1から入る。
+        assert_eq!((rows[2].lane, rows[2].color), (0, 0));
+        assert!(rows[2].lines.contains(&Line::Into { from: 1, color: 1 }));
+        assert!(!rows[2].lines.contains(&Line::Into { from: 0, color: 0 }));
     }
 
     #[test]

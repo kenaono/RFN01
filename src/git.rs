@@ -809,6 +809,18 @@ pub fn refs(root: &Path) -> Result<Vec<Ref>, GitError> {
     Ok(refs)
 }
 
+/// リモートの既定のブランチ（`origin/HEAD`が指すもの、`origin/main`など）。無ければ`None`。
+pub fn remote_default(root: &Path) -> Option<String> {
+    checked(
+        root,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+        None,
+    )
+    .ok()
+    .map(|text| text.trim().to_owned())
+    .filter(|name| !name.is_empty())
+}
+
 /// HEAD の Commit。まだ無ければ`None`。
 pub fn head_sha(root: &Path) -> Option<String> {
     checked(root, &["rev-parse", "-q", "--verify", "HEAD"], None)
