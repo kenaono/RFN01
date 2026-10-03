@@ -1146,6 +1146,8 @@ pub fn write_document_in(
                     crate::newline_name(form.newline)
                 ),
             );
+            // RFN01-67: Git Changes の面が出ていれば、変更の一覧を読み直す。
+            crate::git_ui::refresh_soon(window, live);
             true
         }
         // 要件 E2 の③: **断って、次にすることを言う**（書き手の判断 2026-09-10）。

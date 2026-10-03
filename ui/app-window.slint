@@ -18,6 +18,7 @@ import { QuickDraft } from "quick-draft.slint";
 export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
+import { GitChangesView, GitRow } from "git-view.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
@@ -949,6 +950,43 @@ export component AppWindow inherits Window {
     in property <string> backup-name-problem;
     callback backup-name-edited(string);
     callback backup-name-accepted(string);
+    /// RFN01-67: 左ペインの Git Changes（`git_ui::publish`）。
+    in property <int> git-mode;
+    in property <string> git-note;
+    in property <[string]> git-repos;
+    in property <int> git-repo-index;
+    in property <string> git-repo-tip;
+    in property <string> git-branch;
+    in property <[string]> git-branches;
+    in property <bool> git-on-branch;
+    in property <bool> git-has-upstream;
+    in property <bool> git-has-commit;
+    in property <int> git-incoming;
+    in property <int> git-outgoing;
+    in property <bool> git-busy;
+    in property <string> git-busy-text;
+    in property <bool> git-can-cancel;
+    in property <int> git-staged-count;
+    in property <int> git-change-count;
+    in property <[GitRow]> git-rows;
+    in-out property <string> git-message;
+    in-out property <bool> git-amend;
+    callback git-repo-chosen(int);
+    callback git-create-repository();
+    callback git-branch-chosen(int);
+    callback git-new-branch();
+    callback git-fetch();
+    callback git-pull();
+    callback git-push();
+    callback git-sync();
+    callback git-commit();
+    callback git-amend-toggled(bool);
+    callback git-stash-all();
+    callback git-cancel();
+    callback git-row-clicked(int);
+    callback git-row-activated(int);
+    callback git-row-staged(int);
+    callback git-row-menu(int, int);
     /// 左ペインの Backups の行（`backup_ui::publish_pane`）。
     in property <[BackupPaneRow]> backup-pane-rows;
     callback backup-pane-clicked(int);
@@ -1564,10 +1602,25 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // RFN01-61（書き手の求め 2026-09-27）: バックアップの管理はここへ集める。
+                // RFN01-67（書き手と決めた 2026-10-03）: Git Changes。Backups の上。
                 IconButton {
                     x: 7px;
                     y: root.custom-title ? 214px : 250px;
+                    icon: Icons.git;
+                    tip: @tr("Git Changes");
+                    checked: root.tree-open && root.left-tab == 8;
+                    clicked => {
+                        root.tree-open = !(root.tree-open && root.left-tab == 8);
+                        root.left-tab = 8;
+                        root.left-tab-chosen(8);
+                        root.focus-generation += 1;
+                    }
+                }
+
+                // RFN01-61（書き手の求め 2026-09-27）: バックアップの管理はここへ集める。
+                IconButton {
+                    x: 7px;
+                    y: root.custom-title ? 244px : 280px;
                     icon: Icons.backup;
                     tip: @tr("Backups");
                     checked: root.tree-open && root.left-tab == 7;
@@ -1874,6 +1927,45 @@ export component AppWindow inherits Window {
                             IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
+                    }
+                    if root.left-tab == 8: GitChangesView {
+                        vertical-stretch: 1;
+                        mode: root.git-mode;
+                        note: root.git-note;
+                        repos: root.git-repos;
+                        repo-index: root.git-repo-index;
+                        repo-tip: root.git-repo-tip;
+                        branch: root.git-branch;
+                        branches: root.git-branches;
+                        on-branch: root.git-on-branch;
+                        has-upstream: root.git-has-upstream;
+                        has-commit: root.git-has-commit;
+                        incoming: root.git-incoming;
+                        outgoing: root.git-outgoing;
+                        busy: root.git-busy;
+                        busy-text: root.git-busy-text;
+                        can-cancel: root.git-can-cancel;
+                        staged-count: root.git-staged-count;
+                        change-count: root.git-change-count;
+                        rows: root.git-rows;
+                        message <=> root.git-message;
+                        amend <=> root.git-amend;
+                        repo-chosen(index) => { root.git-repo-chosen(index); }
+                        create-repository => { root.git-create-repository(); }
+                        branch-chosen(index) => { root.git-branch-chosen(index); }
+                        new-branch => { root.git-new-branch(); }
+                        fetch => { root.git-fetch(); }
+                        pull => { root.git-pull(); }
+                        push => { root.git-push(); }
+                        sync => { root.git-sync(); }
+                        commit => { root.git-commit(); }
+                        amend-toggled(wanted) => { root.git-amend-toggled(wanted); }
+                        stash-all => { root.git-stash-all(); }
+                        cancel => { root.git-cancel(); }
+                        row-clicked(index) => { root.git-row-clicked(index); }
+                        row-activated(index) => { root.git-row-activated(index); }
+                        row-staged(index) => { root.git-row-staged(index); }
+                        row-menu(index, action) => { root.git-row-menu(index, action); }
                     }
                     if root.left-tab == 7: BackupsView {
                         vertical-stretch: 1;
@@ -2267,7 +2359,7 @@ export component AppWindow inherits Window {
                         // 5 Bookmarks と 7 Backups は自分の面を持つ（RFN01-61：出したままだと高さを
                         // 半分ずつ取り合い、Backups の行が下半分へ押し出された）。
                         visible: (root.left-tab != 4 || root.workspace-active) && root.left-tab != 5
-                            && root.left-tab != 7 && (root.left-tab != 6 || root.tag-available);
+                            && root.left-tab != 7 && root.left-tab != 8 && (root.left-tab != 6 || root.tag-available);
                         vertical-stretch: self.visible ? 1 : 0;
                         max-height: self.visible ? 100000px : 0px;
                         // 要件 5.2: the point being carried, but only while it
