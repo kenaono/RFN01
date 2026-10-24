@@ -255,6 +255,12 @@ export component AppWindow inherits Window {
     in property <[int]> tree-pane-root-indices;
     property <int> tree-active-root-index: root.focused-pane >= 0 && root.focused-pane < root.tree-pane-root-indices.length
         ? root.tree-pane-root-indices[root.focused-pane] : -1;
+    /// RFN01-73: the 検索 panel's file row for the document in front of each pane,
+    /// `-1` where it is not among the results. Picked by the focused pane here, like
+    /// the Workspace root above, so a change of focus moves the mark at once.
+    in property <[int]> search-pane-file-indices;
+    property <int> search-active-file-index: root.focused-pane >= 0 && root.focused-pane < root.search-pane-file-indices.length
+        ? root.search-pane-file-indices[root.focused-pane] : -1;
     property <length> tree-root-row-height: max(24px, root.left-size * 2px);
     /// A row was clicked. What that does belongs to the panel showing:
     /// a folder opens or closes, a file is opened, a search result is gone to.
@@ -2517,6 +2523,7 @@ export component AppWindow inherits Window {
                                     : (root.left-tab == 4 && row.is-root
                                         ? (index == root.tree-active-root-index ? Tok.accent-soft : transparent)
                                     : (index == root.tree-selected
+                                        || (root.left-tab == 1 && index == root.search-active-file-index)
                                         ? Tok.accent-soft
                                         : (entry.has-hover ? Tok.accent-faint : transparent)));
 

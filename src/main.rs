@@ -59,6 +59,8 @@ mod inline_diff;
 mod kill_ring;
 #[cfg(test)]
 mod layout_snapshot_ui_tests;
+#[cfg(test)]
+mod left_pane_tabs_ui_tests;
 mod link_completion;
 mod link_move;
 mod link_rewrite;
@@ -7342,6 +7344,61 @@ fn publish_results(window: &AppWindow, live: &Live) {
     // The file commands act on the tree, and nothing here is a row of it.
     window.set_tree_selected(-1);
     window.set_left_rows(ModelRc::new(VecModel::from(drawn)));
+    drop(results);
+    publish_search_highlights(window, live);
+}
+
+/// RFN01-73: in the 検索 panel, the file row of the document in front of each
+/// pane, the way the Explorer marks the file that is open.
+///
+/// Only a file's own row is marked, not the lines under it. Compared without
+/// asking the disk (`path_key`) because this runs with every tab change.
+fn publish_search_highlights(window: &AppWindow, live: &Live) {
+    let showing = LeftTab::from_index(window.get_left_tab()) == LeftTab::Search;
+    let files: Vec<(usize, String)> = if showing {
+        live.results
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| !row.under_file)
+            .map(|(index, row)| (index, path_key(&row.path)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let indices: Vec<i32> = live
+        .tabs
+        .borrow()
+        .panes
+        .iter()
+        .map(|pane| {
+            pane.current()
+                .filter(|tab| !tab.stands_in() && !tab.empty)
+                .and_then(|tab| {
+                    let key = path_key(tab.document.file.borrow().path()?);
+                    let found = files.iter().find(|(_, file)| *file == key);
+                    found.map(|(index, _)| *index as i32)
+                })
+                .unwrap_or(-1)
+        })
+        .collect();
+    if !window
+        .get_search_pane_file_indices()
+        .iter()
+        .eq(indices.iter().copied())
+    {
+        window.set_search_pane_file_indices(ModelRc::new(VecModel::from(indices)));
+    }
+}
+
+/// A path as Windows compares it: without the `\\?\` prefix and in one case.
+fn path_key(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let text = match text.strip_prefix("\\\\?\\UNC\\") {
+        Some(rest) => format!("\\\\{rest}"),
+        None => text.strip_prefix("\\\\?\\").unwrap_or(&text).to_owned(),
+    };
+    text.replace('/', "\\").to_lowercase()
 }
 
 /// Draw the files opened most recently (要件 7.7).
@@ -11629,6 +11686,7 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
 /// act on. Moving them inside the panes is the next step (ペイン分割設計 6).
 fn publish_tabs(window: &AppWindow, live: &Live) {
     publish_workspace_root_highlights(window, live);
+    publish_search_highlights(window, live);
     observe_folder_autosave(window, live);
     // 要件 7.9・10: ステータスバーのモードは、前に出ているタブのもの。
     // **タブが動けばここも動く**ので、publishの入口で一緒に言う。
@@ -13351,7 +13409,8 @@ fn close_tab_content(window: &AppWindow, live: &Live, id: PaneId, index: usize) 
         return false;
     }
     // The pane the question is about becomes the pane the writer is in.
-    // **A run of closes crosses the panes** (`start_close_run`), and the answer
+    // **A run of closes can be asked for from a pane the writer is not in**
+    // (`start_close_run`, from that pane's menu), and the answer
     // is carried out against the focused pane (`Live::active`): without this,
     // 保存して閉じる on one pane's tab would save the other pane's document.
     window.set_focused_pane(id.index());
@@ -13421,44 +13480,23 @@ fn forget_memo_navigation(tabs: &mut Tabs, document: &Rc<OpenDocument>) {
     }
 }
 
-/// Close every tab in the window, or every one but the tab in front of the pane
-/// that asked (要件 6.3).
-///
-/// **すべて means the window, not the pane.** The pane the menu hangs from
-/// decides one thing only: with `keep_active`, which single tab is kept.
-///
-/// **Only the panes on screen.** A pane that has been undivided away keeps its
-/// tabs (要件 6.4), and closing one of those would put a question about a
-/// document nobody can see in front of the writer — the same reason
-/// [`close_tab`] brings a tab to the front before asking about it.
+/// Close every tab in the pane that asked, or every one but the tab in front of
+/// it (要件 6.3).
 ///
 /// The list is taken before anything closes, so the run is over what was on
-/// screen when the writer asked — not over whatever the strips hold by the time
+/// screen when the writer asked — not over whatever the strip holds by the time
 /// the questions have been answered.
 fn start_close_run(window: &AppWindow, live: &Live, id: PaneId, keep_active: bool) {
-    // The pane that asked first, then the rest: its tabs are the ones the
-    // writer is looking at, and with 他のタブを閉じる the kept tab is there.
-    let mut order = vec![id];
-    for index in live.layout.borrow().panes() {
-        let pane = PaneId::from_index(index as i32);
-        if pane != id {
-            order.push(pane);
-        }
-    }
+    // RFN01-71: only the pane that asked. The other panes are what the writer
+    // is still working in, the same as 未編集のTABを閉じる.
     let left = {
         let tabs = live.tabs.borrow();
-        let mut left = VecDeque::new();
-        for pane in order {
-            let strip = tabs.of(pane);
-            let keep = keep_active && pane == id;
-            let taken = close_run_positions(strip.tabs.len(), strip.active, keep);
-            for index in taken {
-                if let Some(tab) = strip.tabs.get(index) {
-                    left.push_back((pane, tab.document()));
-                }
-            }
-        }
-        left
+        let strip = tabs.of(id);
+        close_run_positions(strip.tabs.len(), strip.active, keep_active)
+            .into_iter()
+            .filter_map(|index| strip.tabs.get(index))
+            .map(|tab| (id, tab.document()))
+            .collect::<VecDeque<_>>()
     };
     *live.close_run.borrow_mut() = Some(CloseRun { left });
     advance_close_run(window, live);
