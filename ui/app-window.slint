@@ -255,6 +255,12 @@ export component AppWindow inherits Window {
     in property <[int]> tree-pane-root-indices;
     property <int> tree-active-root-index: root.focused-pane >= 0 && root.focused-pane < root.tree-pane-root-indices.length
         ? root.tree-pane-root-indices[root.focused-pane] : -1;
+    /// RFN01-73: the 検索 panel's file row for the document in front of each pane,
+    /// `-1` where it is not among the results. Picked by the focused pane here, like
+    /// the Workspace root above, so a change of focus moves the mark at once.
+    in property <[int]> search-pane-file-indices;
+    property <int> search-active-file-index: root.focused-pane >= 0 && root.focused-pane < root.search-pane-file-indices.length
+        ? root.search-pane-file-indices[root.focused-pane] : -1;
     property <length> tree-root-row-height: max(24px, root.left-size * 2px);
     /// A row was clicked. What that does belongs to the panel showing:
     /// a folder opens or closes, a file is opened, a search result is gone to.
@@ -2577,6 +2583,7 @@ export component AppWindow inherits Window {
                                     : (root.left-tab == 4 && row.is-root
                                         ? (index == root.tree-active-root-index ? Tok.accent-soft : transparent)
                                     : (index == root.tree-selected
+                                        || (root.left-tab == 1 && index == root.search-active-file-index)
                                         ? Tok.accent-soft
                                         : (entry.has-hover ? Tok.accent-faint : transparent)));
 
@@ -7057,19 +7064,6 @@ export component AppWindow inherits Window {
                 padding: 6px;
                 spacing: 1px;
 
-                if root.left-tab == 4: VerticalLayout {
-                    spacing: 1px;
-                    Text { text: @tr("Workspace"); color: Tok.ink-muted; font-size: 11px; }
-                    MenuRow { title: @tr("Add Folder…"); activated => { root.workspace-tree-command(0); root.close-tree-menu(); } }
-                    MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.workspace-tree-command(1); root.close-tree-menu(); } }
-                    if root.workspace-context-folder: MenuRow { title: root.workspace-context-auto ? "AutoSave ON" : "AutoSave OFF"; checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
-                    if root.workspace-context-folder: MenuRow { title: root.workspace-context-backup ? "AutoBackup ON" : "AutoBackup OFF"; checked: root.workspace-context-backup; activated => { root.workspace-tree-command(7); root.close-tree-menu(); } }
-                    if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }
-                    if root.workspace-context-folder: MenuRow { title: @tr("Move Up"); activated => { root.workspace-tree-command(5); root.close-tree-menu(); } }
-                    if root.workspace-context-folder: MenuRow { title: @tr("Move Down"); activated => { root.workspace-tree-command(6); root.close-tree-menu(); } }
-                    MenuRow { title: @tr("Reset View…"); activated => { root.workspace-tree-command(4); root.close-tree-menu(); } }
-                    MenuSep { }
-                }
                 MenuRow {
                     enabled: root.tree-selected >= 0;
                     title: @tr("New File…");
@@ -7137,6 +7131,21 @@ export component AppWindow inherits Window {
                         root.close-tree-menu();
                         root.tree-command(4);
                     }
+                }
+                // RFN01-72（書き手の求め 2026-10-24）: よく使うファイルの操作を上に、
+                // めったに使わないWorkspaceの操作（フォルダの追加・取得）は一番下に。
+                if root.left-tab == 4: VerticalLayout {
+                    spacing: 1px;
+                    MenuSep { }
+                    Text { text: @tr("Workspace"); color: Tok.ink-muted; font-size: 11px; }
+                    if root.workspace-context-folder: MenuRow { title: root.workspace-context-auto ? "AutoSave ON" : "AutoSave OFF"; checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: root.workspace-context-backup ? "AutoBackup ON" : "AutoBackup OFF"; checked: root.workspace-context-backup; activated => { root.workspace-tree-command(7); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: @tr("Move Up"); activated => { root.workspace-tree-command(5); root.close-tree-menu(); } }
+                    if root.workspace-context-folder: MenuRow { title: @tr("Move Down"); activated => { root.workspace-tree-command(6); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Reset View…"); activated => { root.workspace-tree-command(4); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Add Folder…"); activated => { root.workspace-tree-command(0); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.workspace-tree-command(1); root.close-tree-menu(); } }
                 }
             }
         }
