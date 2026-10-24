@@ -1150,6 +1150,8 @@ export component AppWindow inherits Window {
     /// 届いたShiftを、Windowsの答えと突き合わせて返す（書き手の報告 2026-09-12）。
     /// **窓の旗は変換をまたぐと古くなる。**
     callback shift-held(bool) -> bool;
+    /// 本文のCtrl+Vを貼り付けとして受けるか（書き手の報告 2026-10-23）。
+    callback paste-key-allowed(bool, bool, bool) -> bool;
     /// Divide the focused pane, right or down (要件 6.4). True is right.
     callback divide-requested(bool);
     /// Bring the arrangement back to the focused pane, gathering the tabs of
@@ -3448,6 +3450,9 @@ export component AppWindow inherits Window {
                         }
                         shift-held(said) => {
                             return root.shift-held(said);
+                        }
+                        paste-key-allowed(composing, alt, shift) => {
+                            return root.paste-key-allowed(composing, alt, shift);
                         }
                         escaped() => {
                             return root.dismiss-menus();

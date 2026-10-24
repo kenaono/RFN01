@@ -262,6 +262,9 @@ export component EditorSurface inherits Rectangle {
     callback escaped() -> bool;
     callback selection-escaped() -> bool;
     callback shift-held(bool) -> bool;
+    /// Ctrl+Vを本文の貼り付けとして受けるか（変換中、Alt、Shiftの順に届いた旗）。
+    /// **旗は古くなる**ので、AltとShiftはWindowsに訊き直す。
+    callback paste-key-allowed(bool, bool, bool) -> bool;
     callback dismiss-menus() -> bool;
     callback find-again(bool);
     private property <bool> had-preedit;
@@ -846,8 +849,11 @@ export component EditorSurface inherits Rectangle {
                                         root.shift-held(event.modifiers.shift));
                                     return accept;
                                 }
-                                if self.preedit-text == "" && event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift
-                                    && (event.text == "v" || event.text == "V" || event.text == "\u{16}") {
+                                // 書き手の報告 2026-10-23:「Ctrl+Vが効かない、右クリックの
+                                // Pasteは効く」。再起動で直った——**届いた旗が古かった**。
+                                if event.modifiers.control
+                                    && (event.text == "v" || event.text == "V" || event.text == "\u{16}")
+                                    && root.paste-key-allowed(self.preedit-text != "", event.modifiers.alt, event.modifiers.shift) {
                                     self.text = "";
                                     self.paste();
                                     return accept;
