@@ -9,7 +9,7 @@ import { TitleMenuBar } from "title-menu-bar.slint";
 import { PresetRow } from "preset-row.slint";
 import { FormatButton, FormatButtons } from "format-bar.slint";
 export { FormatButton } from "format-bar.slint";
-import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow } from "controls.slint";
+import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow, ToggleChip } from "controls.slint";
 // **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
 // 窓の外から見えない。
 export { Ime }
@@ -361,6 +361,12 @@ export component AppWindow inherits Window {
     // field, separate from the find bar's: one asks about a document and the
     // other about a folder, and they are not the same question.
     in-out property <string> folder-needle;
+    /// RFN01-70: 検索パネルの探し方（本文の検索帯と同じ3つ）と、一括置換の置換後の語。
+    in-out property <bool> folder-match-case;
+    in-out property <bool> folder-whole-word;
+    in-out property <bool> folder-regex;
+    in-out property <string> folder-replacement;
+    callback folder-replace-requested();
     in property <string> folder-status;
     // 要件 7.7（2026-09-07追加）: どのフォルダを歩くか。名前だけを出し、
     // 道のりはマウスを載せたときに出す。`scoped`は作業フォルダより内側に
@@ -2332,6 +2338,51 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // RFN01-70: 置換後の語。**いつも出しておく**（書き手の判断
+                            // 2026-10-24）——左の面には場所があり、隠れた状態を増やさない。
+                            Field {
+                                placeholder: @tr("Replace with…");
+                                text <=> root.folder-replacement;
+                                accepted => {
+                                    root.folder-replace-requested();
+                                }
+                            }
+
+                            // RFN01-70: 探し方。本文の検索帯と同じ字と同じ部品。切り替えたら
+                            // 一覧も探し直す——古い規則の一覧を残さない。
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: start;
+
+                                ToggleChip {
+                                    title: "Aa";
+                                    tip: @tr("Match case");
+                                    checked: root.folder-match-case;
+                                    clicked => {
+                                        root.folder-match-case = !root.folder-match-case;
+                                        root.folder-search-requested();
+                                    }
+                                }
+                                ToggleChip {
+                                    title: "W";
+                                    tip: @tr("Whole word");
+                                    checked: root.folder-whole-word;
+                                    clicked => {
+                                        root.folder-whole-word = !root.folder-whole-word;
+                                        root.folder-search-requested();
+                                    }
+                                }
+                                ToggleChip {
+                                    title: ".*";
+                                    tip: @tr("Regular expression");
+                                    checked: root.folder-regex;
+                                    clicked => {
+                                        root.folder-regex = !root.folder-regex;
+                                        root.folder-search-requested();
+                                    }
+                                }
+                            }
+
                             // 歩くフォルダ。押すと選び直せる。
                             HorizontalLayout {
                                 spacing: 4px;
@@ -2406,6 +2457,13 @@ export component AppWindow inherits Window {
                                     title: @tr("Search");
                                     clicked => {
                                         root.folder-search-requested();
+                                    }
+                                }
+
+                                TextButton {
+                                    title: @tr("Replace All");
+                                    clicked => {
+                                        root.folder-replace-requested();
                                     }
                                 }
 

@@ -48,6 +48,13 @@ pub struct SearchJob {
     /// a caller with nothing to search does not dispatch a job at all.
     pub roots: Vec<PathBuf>,
     pub needle: String,
+    /// 探し方（RFN01-70）。本文の検索帯と同じ3つの切り替えで、**組み立てられることは
+    /// 頼む側が確かめてから渡す**（正しくない正規表現なら、ここでは何も見つからない）。
+    pub rules: find::Rules,
+    /// 開いている文書の本文（`file_tree::path_key`で引く）。**開いているファイルは
+    /// ディスクではなくTABの本文を探す**（書き手の判断 2026-10-24、RFN01-70）——
+    /// 一括置換がTABの本文を置き換えるので、一覧も同じものを見ていなければならない。
+    pub open: Vec<(String, String)>,
     /// Which search this is, counting up. **The editor's staleness check**: a
     /// person types on while one search runs, so an outcome has to be able to
     /// say which question it answers.
@@ -111,25 +118,26 @@ impl Superseded for NeverSuperseded {
 /// half-done list is worse than none because it looks like an answer.
 pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcome> {
     let started = Instant::now();
-    let patterns = exclusion_patterns(&job.exclusions);
-    let paths = file_tree::files_under_many_cancellable(
-        &job.roots,
-        &|folder| {
-            file_tree::read_folder(folder)
-                .into_iter()
-                .filter(|node| {
-                    !patterns.iter().any(|(pattern, directory)| {
-                        (!directory || node.folder) && pattern.is_match(&node.name)
-                    })
-                })
-                .collect()
-        },
-        job.files,
-        &mut || stop.superseded(),
-    )?;
+    let paths = searched_files(&job.roots, &job.exclusions, job.files, &mut || {
+        stop.superseded()
+    })?;
     // 書き手の求め 2026-09-23: `tag:#小説`は、そのタグ（子を含む）を持つ文書に絞る。
     // 残りの語があれば、その中で語を探す。無ければタグの場所を並べる。
     let (tag_keys, words) = tags::split_query(&job.needle);
+    let wanted = if tag_keys.is_empty() {
+        &job.needle
+    } else {
+        &words
+    };
+    let Ok(seek) = find::Search::new(wanted, job.rules) else {
+        return Some(SearchOutcome {
+            generation: job.generation,
+            needle: job.needle.clone(),
+            files: Vec::new(),
+            total: 0,
+            ms: started.elapsed().as_secs_f64() * 1000.0,
+        });
+    };
     let mut files: Vec<FileHits> = Vec::new();
     let mut total = 0usize;
     for path in paths {
@@ -143,14 +151,24 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         if !tag_keys.is_empty() && !workspace_index::is_markdown(&path) {
             continue;
         }
-        let Ok(loaded) = file_io::read(&path, job.characters) else {
-            continue;
+        let key = file_tree::path_key(&path);
+        let held = job.open.iter().find(|(open, _)| *open == key);
+        let loaded;
+        let text = match held {
+            Some((_, text)) => text.as_str(),
+            None => match file_io::read(&path, job.characters) {
+                Ok(read) => {
+                    loaded = read;
+                    loaded.text.as_str()
+                }
+                Err(_) => continue,
+            },
         };
         let limit = job.hits_per_file.min(job.hits_in_all - total);
         let hits = if tag_keys.is_empty() {
-            find::hits_in(&loaded.text, &job.needle, limit)
+            seek.hits(text, limit)
         } else {
-            tag_hits(&loaded.text, &tag_keys, &words, limit)
+            tag_hits(text, &tag_keys, &words, &seek, limit)
         };
         if hits.is_empty() {
             continue;
@@ -168,14 +186,20 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
 }
 
 /// `tag:`の検索の、1つの文書の当たり。**タグをすべて持つ文書だけ**が当たる。
-fn tag_hits(text: &str, tag_keys: &[String], words: &str, limit: usize) -> Vec<Hit> {
+fn tag_hits(
+    text: &str,
+    tag_keys: &[String],
+    words: &str,
+    seek: &find::Search,
+    limit: usize,
+) -> Vec<Hit> {
     let found = tags::tags_in(text);
     let has = |query: &String| found.iter().any(|tag| tags::matches(&tag.name, query));
     if !tag_keys.iter().all(has) {
         return Vec::new();
     }
     if !words.is_empty() {
-        return find::hits_in(text, words, limit);
+        return seek.hits(text, limit);
     }
     found
         .iter()
@@ -183,6 +207,34 @@ fn tag_hits(text: &str, tag_keys: &[String], words: &str, limit: usize) -> Vec<H
         .take(limit)
         .map(|tag| find::hit_at(text, tag.at, tag.len))
         .collect()
+}
+
+/// 全文検索が読むファイル——除外する名前を除いた、`roots`の下のすべて（要件 7.7）。
+///
+/// RFN01-70: フォルダの一括置換も**同じ並びを書き換える**。一覧に出ないファイルを
+/// 書き換えないために、検索と置換はここを1つ通る。
+pub fn searched_files(
+    roots: &[PathBuf],
+    exclusions: &str,
+    limit: usize,
+    stop: &mut dyn FnMut() -> bool,
+) -> Option<Vec<PathBuf>> {
+    let patterns = exclusion_patterns(exclusions);
+    file_tree::files_under_many_cancellable(
+        roots,
+        &|folder| {
+            file_tree::read_folder(folder)
+                .into_iter()
+                .filter(|node| {
+                    !patterns.iter().any(|(pattern, directory)| {
+                        (!directory || node.folder) && pattern.is_match(&node.name)
+                    })
+                })
+                .collect()
+        },
+        limit,
+        stop,
+    )
 }
 
 fn exclusion_patterns(value: &str) -> Vec<(regex::Regex, bool)> {
@@ -336,6 +388,8 @@ mod tests {
             exclusions: String::new(),
             roots: roots.to_vec(),
             needle: needle.to_owned(),
+            rules: crate::find::Rules::default(),
+            open: Vec::new(),
             generation: 1,
             files: 5_000,
             hits_per_file: 50,
@@ -356,6 +410,33 @@ mod tests {
             sleep(Duration::from_millis(10));
         }
         collected
+    }
+
+    /// RFN01-70: 開いているファイルは、ディスクではなくTABの本文を探す。道の書き方
+    /// （`\\?\`の有無・大文字と小文字）が違っても同じファイルである。
+    #[test]
+    fn an_open_file_is_searched_in_its_tab() {
+        let folder = scratch_folder("open-tab");
+        write(&folder, "open.md", "猫\n");
+        write(&folder, "closed.md", "猫\n");
+        let mut request = job(&folder, "犬");
+        let held = format!("\\\\?\\{}", folder.join("OPEN.md").display());
+        request.open = vec![(
+            crate::file_tree::path_key(Path::new(&held)),
+            "犬と猫\n".to_owned(),
+        )];
+        let found = search(&request, &mut NeverSuperseded).unwrap();
+        assert_eq!(found.files.len(), 1);
+        assert_eq!(found.files[0].path, folder.join("open.md"));
+        assert_eq!(found.files[0].hits[0].preview, "犬と猫");
+        request.needle = "猫".into();
+        let found = search(&request, &mut NeverSuperseded).unwrap();
+        assert_eq!(
+            found.files.len(),
+            2,
+            "the tab still says 猫, and so does the disk"
+        );
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

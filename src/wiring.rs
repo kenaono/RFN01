@@ -1781,6 +1781,15 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
         }
     });
 
+    // RFN01-70: 同じ語と探し方で、フォルダのファイルをまとめて置換する。
+    let weak = window.as_weak();
+    let replace_live = live.clone();
+    window.on_folder_replace_requested(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::folder_replace::requested(&window, &replace_live);
+        }
+    });
+
     // 要件 7.7（2026-09-07追加）: which folder that search walks. **The dialog
     // opens where the search stands now**, so narrowing twice walks down rather
     // than starting over from the disk.
