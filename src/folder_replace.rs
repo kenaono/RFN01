@@ -138,9 +138,10 @@ pub(crate) fn confirmed(window: &AppWindow, live: &Live, plan: Plan) {
     );
     publish_tabs(window, live);
     crate::backup_ui::refresh_pane(window, live);
+    window.tell(told.clone().into());
+    // 探し直す。いま残っている一致（書き換えられなかったもの）が一覧に出る。
+    live.folder.borrow_mut().replaced_note = Some(told);
     search_work_folder(window, live);
-    window.set_folder_status(told.clone().into());
-    window.tell(told.into());
 }
 
 /// このファイルを開いている文書（同じファイルは1つの文書を共有する）。

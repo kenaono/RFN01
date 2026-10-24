@@ -6694,6 +6694,9 @@ fn editor_area(window: &AppWindow) -> Rect {
 /// The work folder, and which of its folders the writer has opened.
 #[derive(Default)]
 struct WorkFolder {
+    /// RFN01-70: 一括置換の結果。置換のあとの探し直しの答えに添えて言う——答えは
+    /// 後から届くので、先に言っておいても上書きされる。
+    replaced_note: Option<String>,
     link_move_job: Option<link_move::Job>,
     clone_job: Option<workspace_clone::Job>,
     clone_url_check: workspace_clone::UrlCheck,
@@ -7815,6 +7818,10 @@ fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
             "{total}件 / {answered}ファイル",
             "{total} found / {answered} files"
         )
+    };
+    let told = match live.folder.borrow_mut().replaced_note.take() {
+        Some(note) => format!("{note} / {told}"),
+        None => told,
     };
     window.set_folder_status(told.into());
     let (generation, ms) = (outcome.generation, outcome.ms);
