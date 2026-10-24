@@ -345,6 +345,18 @@ pub fn subtree_end(paths: &[PathBuf], at: usize) -> usize {
     at + 1 + rest.iter().take_while(inside).count()
 }
 
+/// A path as Windows compares it: without the `\\?\` prefix and in one case.
+///
+/// **Asks nothing of the disk**, so it can be used for every file a search walks.
+pub fn path_key(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let text = match text.strip_prefix("\\\\?\\UNC\\") {
+        Some(rest) => format!("\\\\{rest}"),
+        None => text.strip_prefix("\\\\?\\").unwrap_or(&text).to_owned(),
+    };
+    text.replace('/', "\\").to_lowercase()
+}
+
 /// The folder a new file or folder is made in (要件 5.2).
 ///
 /// The selected folder itself, the selected file's folder, or the work folder

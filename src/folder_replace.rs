@@ -145,15 +145,17 @@ pub(crate) fn confirmed(window: &AppWindow, live: &Live, plan: Plan) {
 }
 
 /// このファイルを開いている文書（同じファイルは1つの文書を共有する）。
+///
+/// 一覧と同じ見分け方（`file_tree::path_key`）——一覧がTABの本文で数えたファイルを、
+/// ここでもTABの本文で置き換える。
 fn held_document(documents: &[Rc<OpenDocument>], path: &Path) -> Option<Rc<OpenDocument>> {
-    let wanted = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let wanted = file_tree::path_key(path);
     documents
         .iter()
         .find(|document| {
             let file = document.file.borrow();
-            file.path().is_some_and(|held| {
-                held == path || held.canonicalize().is_ok_and(|held| held == wanted)
-            })
+            file.path()
+                .is_some_and(|held| file_tree::path_key(held) == wanted)
         })
         .cloned()
 }

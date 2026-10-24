@@ -51,6 +51,10 @@ pub struct SearchJob {
     /// 探し方（RFN01-70）。本文の検索帯と同じ3つの切り替えで、**組み立てられることは
     /// 頼む側が確かめてから渡す**（正しくない正規表現なら、ここでは何も見つからない）。
     pub rules: find::Rules,
+    /// 開いている文書の本文（`file_tree::path_key`で引く）。**開いているファイルは
+    /// ディスクではなくTABの本文を探す**（書き手の判断 2026-10-24、RFN01-70）——
+    /// 一括置換がTABの本文を置き換えるので、一覧も同じものを見ていなければならない。
+    pub open: Vec<(String, String)>,
     /// Which search this is, counting up. **The editor's staleness check**: a
     /// person types on while one search runs, so an outcome has to be able to
     /// say which question it answers.
@@ -147,14 +151,24 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         if !tag_keys.is_empty() && !workspace_index::is_markdown(&path) {
             continue;
         }
-        let Ok(loaded) = file_io::read(&path, job.characters) else {
-            continue;
+        let key = file_tree::path_key(&path);
+        let held = job.open.iter().find(|(open, _)| *open == key);
+        let loaded;
+        let text = match held {
+            Some((_, text)) => text.as_str(),
+            None => match file_io::read(&path, job.characters) {
+                Ok(read) => {
+                    loaded = read;
+                    loaded.text.as_str()
+                }
+                Err(_) => continue,
+            },
         };
         let limit = job.hits_per_file.min(job.hits_in_all - total);
         let hits = if tag_keys.is_empty() {
-            seek.hits(&loaded.text, limit)
+            seek.hits(text, limit)
         } else {
-            tag_hits(&loaded.text, &tag_keys, &words, &seek, limit)
+            tag_hits(text, &tag_keys, &words, &seek, limit)
         };
         if hits.is_empty() {
             continue;
@@ -375,6 +389,7 @@ mod tests {
             roots: roots.to_vec(),
             needle: needle.to_owned(),
             rules: crate::find::Rules::default(),
+            open: Vec::new(),
             generation: 1,
             files: 5_000,
             hits_per_file: 50,
@@ -395,6 +410,33 @@ mod tests {
             sleep(Duration::from_millis(10));
         }
         collected
+    }
+
+    /// RFN01-70: 開いているファイルは、ディスクではなくTABの本文を探す。道の書き方
+    /// （`\\?\`の有無・大文字と小文字）が違っても同じファイルである。
+    #[test]
+    fn an_open_file_is_searched_in_its_tab() {
+        let folder = scratch_folder("open-tab");
+        write(&folder, "open.md", "猫\n");
+        write(&folder, "closed.md", "猫\n");
+        let mut request = job(&folder, "犬");
+        let held = format!("\\\\?\\{}", folder.join("OPEN.md").display());
+        request.open = vec![(
+            crate::file_tree::path_key(Path::new(&held)),
+            "犬と猫\n".to_owned(),
+        )];
+        let found = search(&request, &mut NeverSuperseded).unwrap();
+        assert_eq!(found.files.len(), 1);
+        assert_eq!(found.files[0].path, folder.join("open.md"));
+        assert_eq!(found.files[0].hits[0].preview, "犬と猫");
+        request.needle = "猫".into();
+        let found = search(&request, &mut NeverSuperseded).unwrap();
+        assert_eq!(
+            found.files.len(),
+            2,
+            "the tab still says 猫, and so does the disk"
+        );
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

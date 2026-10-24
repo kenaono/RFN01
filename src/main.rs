@@ -7728,6 +7728,13 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
         roots,
         needle,
         rules,
+        open: open_documents(live)
+            .iter()
+            .filter_map(|document| {
+                let key = file_tree::path_key(document.file.borrow().path()?);
+                Some((key, document.text.borrow().clone()))
+            })
+            .collect(),
         generation,
         files: SEARCHED_FILES,
         hits_per_file: HITS_PER_FILE,
