@@ -682,6 +682,40 @@ fn shift_as_windows_sees_it(cache: &Rc<RefCell<RenderCache>>, said: bool, what: 
     false
 }
 
+/// 本文のCtrl+Vを貼り付けとして受けるか（書き手の報告 2026-10-23）。
+///
+/// **「Ctrl+Vが効かない、右クリックのPasteは効く」、再起動で直った。**右クリックは旗を見ず、
+/// Ctrl+Vだけが届いた旗の「Altも Shiftも無い」を条件にしていた——古いAltかShiftが
+/// 残れば、貼り付けは黙って消える。AltとShiftはWindowsに訊き直す。
+///
+/// **見送った回と、旗が食い違った回は`spec`で残す**：同じことが起きたら、何が
+/// 立っていたかを通常の記録から読める。
+fn paste_key_allowed(
+    cache: &Rc<RefCell<RenderCache>>,
+    composing: bool,
+    alt: bool,
+    shift: bool,
+) -> bool {
+    let alt_now = alt && input_platform::alt_held();
+    let shift_now = shift_as_windows_sees_it(cache, shift, "paste");
+    let allowed = !composing && !alt_now && !shift_now;
+    if !allowed || alt != alt_now || shift != shift_now {
+        cache.borrow_mut().log_diag(
+            "spec.paste",
+            &format!(
+                "key allowed={} composing={} alt={}/{} shift={}/{}",
+                u8::from(allowed),
+                u8::from(composing),
+                u8::from(alt),
+                u8::from(alt_now),
+                u8::from(shift),
+                u8::from(shift_now)
+            ),
+        );
+    }
+    allowed
+}
+
 /// 本文を押した合図の段階：Altなら矩形の始まり、Shiftならそこまで伸ばす、どちらも
 /// 無ければ新しい選択（RFN01-58）。**Altが先**——Alt+Shiftで押した書き手が言って
 /// いるのは矩形である。
@@ -3345,6 +3379,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // （行を写す）に化けるのも同じ古さである。
     let cache = render_cache.clone();
     window.on_shift_held(move |said| shift_as_windows_sees_it(&cache, said, "key"));
+    let cache = render_cache.clone();
+    window.on_paste_key_allowed(move |composing, alt, shift| {
+        paste_key_allowed(&cache, composing, alt, shift)
+    });
 
     // 書き手の報告 2026-09-12:「選択になって戻れなくなる」。**Escapeは、
     // 選んでいる途中ならいつでも戻れる鍵である**（要件 11.4）。ペインの

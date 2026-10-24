@@ -627,6 +627,8 @@ export component EditorPane inherits Rectangle {
     /// `Ctrl+K`が`Ctrl+Shift+K`（行を消す）に、`Alt+↓`が`Shift+Alt+↓`（行を写す）に
     /// 化けるのも同じ古さなので、**読むところを1つにして、そこで訊く。**
     callback shift-held(bool) -> bool;
+    /// Ctrl+Vを貼り付けとして受けるか。`shift-held`と同じく、訊く先はRustの1か所。
+    callback paste-key-allowed(bool, bool, bool) -> bool;
 
     /// Close whichever of this pane's menus is open, and say whether one was.
     ///
@@ -1902,6 +1904,7 @@ export component EditorPane inherits Rectangle {
             escaped() => { root.escaped(); }
             selection-escaped() => { root.selection-escaped(); }
             shift-held(a0) => { root.shift-held(a0); }
+            paste-key-allowed(a0, a1, a2) => { root.paste-key-allowed(a0, a1, a2) }
             dismiss-menus() => { root.dismiss-menus(); }
             find-again(a0) => { root.find-again(a0); }
             @children

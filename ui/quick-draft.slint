@@ -195,6 +195,7 @@ export component QuickDraft inherits Window {
                 copy-body-requested => { root.editor-copy(false); }
                 shortcut-key(text, control, alt, shift) => { root.shortcut-key(text, control, alt, shift); }
                 shift-held(said) => { said }
+                paste-key-allowed(composing, alt, shift) => { !composing && !alt && !shift }
                 selection-escaped => { root.editor-escape() }
                 mark-toggled(rectangle) => { root.editor-mark(rectangle); }
                 tab-pressed(backwards) => { if !backwards { root.editor-text("\u{9}"); } }
