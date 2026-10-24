@@ -7404,7 +7404,7 @@ fn publish_results(window: &AppWindow, live: &Live) {
 /// pane, the way the Explorer marks the file that is open.
 ///
 /// Only a file's own row is marked, not the lines under it. Compared without
-/// asking the disk (`path_key`) because this runs with every tab change.
+/// asking the disk (`file_tree::path_key`) because this runs with every tab change.
 fn publish_search_highlights(window: &AppWindow, live: &Live) {
     let showing = LeftTab::from_index(window.get_left_tab()) == LeftTab::Search;
     let files: Vec<(usize, String)> = if showing {
@@ -7413,7 +7413,7 @@ fn publish_search_highlights(window: &AppWindow, live: &Live) {
             .iter()
             .enumerate()
             .filter(|(_, row)| !row.under_file)
-            .map(|(index, row)| (index, path_key(&row.path)))
+            .map(|(index, row)| (index, file_tree::path_key(&row.path)))
             .collect()
     } else {
         Vec::new()
@@ -7427,7 +7427,7 @@ fn publish_search_highlights(window: &AppWindow, live: &Live) {
             pane.current()
                 .filter(|tab| !tab.stands_in() && !tab.empty)
                 .and_then(|tab| {
-                    let key = path_key(tab.document.file.borrow().path()?);
+                    let key = file_tree::path_key(tab.document.file.borrow().path()?);
                     let found = files.iter().find(|(_, file)| *file == key);
                     found.map(|(index, _)| *index as i32)
                 })
@@ -7441,16 +7441,6 @@ fn publish_search_highlights(window: &AppWindow, live: &Live) {
     {
         window.set_search_pane_file_indices(ModelRc::new(VecModel::from(indices)));
     }
-}
-
-/// A path as Windows compares it: without the `\\?\` prefix and in one case.
-fn path_key(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    let text = match text.strip_prefix("\\\\?\\UNC\\") {
-        Some(rest) => format!("\\\\{rest}"),
-        None => text.strip_prefix("\\\\?\\").unwrap_or(&text).to_owned(),
-    };
-    text.replace('/', "\\").to_lowercase()
 }
 
 /// Draw the files opened most recently (要件 7.7).
