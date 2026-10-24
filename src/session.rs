@@ -347,6 +347,11 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         folder: folder.root.clone(),
         search_folder: folder.searching.clone(),
         search_exclusions: window.get_search_exclusions().to_string(),
+        search_options: [
+            window.get_folder_match_case(),
+            window.get_folder_whole_word(),
+            window.get_folder_regex(),
+        ],
         shortcut_bindings: window.get_shortcut_bindings().to_string(),
         expanded: folder.expanded.iter().cloned().collect(),
         tree_shown: window.get_tree_open(),

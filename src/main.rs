@@ -41,6 +41,9 @@ mod file_dialog;
 mod file_io;
 mod file_tree;
 mod find;
+mod folder_replace;
+#[cfg(test)]
+mod folder_replace_ui_tests;
 mod git;
 mod git_file_history;
 mod git_graph;
@@ -1781,6 +1784,14 @@ fn main() -> Result<(), slint::PlatformError> {
             .unwrap_or_default()
             .into(),
     );
+    // RFN01-70: 検索パネルの探し方。何も言わないセッションは3つとも切（今までの検索）。
+    let [match_case, whole_word, regex] = session
+        .as_ref()
+        .map(|s| s.search_options)
+        .unwrap_or_default();
+    window.set_folder_match_case(match_case);
+    window.set_folder_whole_word(whole_word);
+    window.set_folder_regex(regex);
     // 追加要件 2026-09-06: the width the writer dragged the left pane to. A
     // session that says nothing says 0, which is not a width anybody chose —
     // the window keeps its own default then (the same rule the zoom uses).
@@ -7471,10 +7482,10 @@ fn open_result(window: &AppWindow, live: &Live, index: usize) {
         return;
     }
     let needle = if tag_keys.is_empty() { needle } else { words };
-    // **フォルダ全文検索は帯の切り替えを持たない**ので、既定の探し方で探し直す
-    // ——`hits_in`がその規則で見つけたものを、同じ規則で指し直すのでなければ、
-    // 一覧の行と本文の位置が食い違う。
-    let Ok(search) = find::Search::new(&needle, find::Rules::default()) else {
+    // **一覧を作ったのと同じ探し方で探し直す**（RFN01-70: 検索パネルの3つの切り替え）
+    // ——同じ規則で指し直すのでなければ、一覧の行と本文の位置が食い違う。切り替えれば
+    // 一覧も探し直すので、いまの切り替えが一覧の規則である。
+    let Ok(search) = find::Search::new(&needle, folder_rules(window)) else {
         return;
     };
     let Some((start, end)) = search.next(&source, found.at, true) else {
@@ -7657,18 +7668,31 @@ const HITS_PER_FILE: usize = 50;
 /// **The old way is still here**, for a run where the thread could not be
 /// started. It is the same search on the same data; only who waits for it
 /// differs.
+/// RFN01-70: 検索パネルの探し方。本文の検索帯と同じ3つ（範囲内検索は無い）。
+fn folder_rules(window: &AppWindow) -> find::Rules {
+    find::Rules {
+        match_case: window.get_folder_match_case(),
+        whole_word: window.get_folder_whole_word(),
+        regex: window.get_folder_regex(),
+        within: None,
+    }
+}
+
+/// 全文検索が歩くフォルダ。検索とフォルダの一括置換（RFN01-70）が同じものを見る。
+fn folder_search_roots(live: &Live, needle: &str) -> Vec<PathBuf> {
+    let folder = live.folder.borrow();
+    // 仕様の実装依頼 "existing explicit subtree remains sole root" — a
+    // scoped search never widens to the rest of the Workspace, whatever
+    // else is registered.
+    match folder.searching.clone() {
+        Some(scoped) => vec![scoped],
+        None => search_roots(&folder, needle).0,
+    }
+}
+
 fn search_work_folder(window: &AppWindow, live: &Live) {
     let needle = window.get_folder_needle().to_string();
-    let roots = {
-        let folder = live.folder.borrow();
-        // 仕様の実装依頼 "existing explicit subtree remains sole root" — a
-        // scoped search never widens to the rest of the Workspace, whatever
-        // else is registered.
-        match folder.searching.clone() {
-            Some(scoped) => vec![scoped],
-            None => search_roots(&folder, &needle).0,
-        }
-    };
+    let roots = folder_search_roots(live, &needle);
     if roots.is_empty() {
         window.set_folder_status(no_work_folder().into());
         return;
@@ -7683,12 +7707,24 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
         publish_left(window, live);
         return;
     }
+    let rules = folder_rules(window);
+    let (tag_keys, words) = tags::split_query(&needle);
+    let wanted = if tag_keys.is_empty() { &needle } else { &words };
+    if let Err(trouble) = find::Search::new(wanted, rules) {
+        // **書きかけの正規表現は0件ではない**（本文の帯と同じ）。古い一覧も消す。
+        live.searched.set(live.searched.get() + 1);
+        live.results.borrow_mut().clear();
+        window.set_folder_status(trouble.into());
+        publish_left(window, live);
+        return;
+    }
     let generation = live.searched.get() + 1;
     live.searched.set(generation);
     let job = SearchJob {
         exclusions: window.get_search_exclusions().to_string(),
         roots,
         needle,
+        rules,
         generation,
         files: SEARCHED_FILES,
         hits_per_file: HITS_PER_FILE,
@@ -12597,6 +12633,8 @@ enum Question {
     GitNewBranch(PathBuf, Option<String>),
     /// RFN01-67: 知らせるだけ（Gitが断った文）。答えで何もしない。
     GitNotice,
+    /// RFN01-70: 数えた置換を、本当に行うか。
+    FolderReplace(folder_replace::Plan),
 }
 
 impl Question {
@@ -12646,6 +12684,7 @@ impl Question {
             Self::GitConfirm(..) => "GitConfirm",
             Self::GitNewBranch(..) => "GitNewBranch",
             Self::GitNotice => "GitNotice",
+            Self::FolderReplace(..) => "FolderReplace",
         }
     }
 }
@@ -13188,6 +13227,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         }
         (Question::ResetAll, 0) => reset_all_settings(window, live),
         (Question::DeleteBackups(paths), 0) => backup_ui::delete_confirmed(window, live, &paths),
+        (Question::FolderReplace(plan), 0) => folder_replace::confirmed(window, live, plan),
         (Question::GitUnsaved(pending), choice) => {
             git_ui::unsaved_answered(window, live, pending, choice)
         }

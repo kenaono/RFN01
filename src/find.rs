@@ -293,6 +293,20 @@ impl Search {
         found
     }
 
+    /// フォルダ全文検索の一覧の当たり（RFN01-70）。**本文の検索と同じ一巡**なので、
+    /// 帯の3つの切り替えがそのまま効く。`limit`は1つのファイルが一覧へ出せる数。
+    pub fn hits(&self, source: &str, limit: usize) -> Vec<Hit> {
+        let mut hits = Vec::new();
+        if limit == 0 {
+            return hits;
+        }
+        self.walk(source, |start, end| {
+            hits.push(hit_at(source, start, end - start));
+            hits.len() < limit
+        });
+        hits
+    }
+
     /// 一致をすべて置き換えて、その数（要件 7.7）。
     ///
     /// **書いたものは読み直さない**ので、`a`を`aa`にしても走らない。
@@ -530,43 +544,6 @@ pub fn hit_at(source: &str, at: usize, len: usize) -> Hit {
     }
 }
 
-/// Every match in one document, with the line each sits on (要件 7.7).
-///
-/// **Every match, not the next one.** A folder-wide search is a list to read
-/// down rather than a place to stand, so this neither wraps around nor begins
-/// anywhere in particular.
-///
-/// `limit` bounds what one file contributes: a generated file that matches on
-/// every line must not be able to fill the pane on its own.
-pub fn hits_in(source: &str, needle: &str, limit: usize) -> Vec<Hit> {
-    let mut hits = Vec::new();
-    if needle.is_empty() {
-        return hits;
-    }
-    let mut line_start = 0usize;
-    for (number, line) in source.split('\n').enumerate() {
-        let mut from = 0usize;
-        // Every match on the line, not the first: a line that says the word
-        // twice is two places to go.
-        while let Some(at) = found_at(line, needle, from, Rules::default()) {
-            hits.push(Hit {
-                line: number + 1,
-                at: line_start + at,
-                preview: line.trim_end_matches('\r').to_owned(),
-                len: needle.len(),
-            });
-            if hits.len() >= limit {
-                return hits;
-            }
-            from = at + needle.len();
-        }
-        // The newline that ended the line counts too, or every line after the
-        // first would be reported one byte early.
-        line_start += line.len() + 1;
-    }
-    hits
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +563,39 @@ mod tests {
     }
 
     const SOURCE: &str = "春の海 ひねもすのたり のたりかな";
+
+    /// フォルダ全文検索の当たり——既定の探し方で（RFN01-70までの`hits_in`と同じ）。
+    fn hits_in(source: &str, needle: &str, limit: usize) -> Vec<Hit> {
+        seek(needle, PLAIN).hits(source, limit)
+    }
+
+    /// RFN01-70: フォルダ全文検索の一覧も、帯の3つの切り替えで変わる。
+    #[test]
+    fn folder_hits_follow_the_three_switches() {
+        let source = "Cat cat\ncatalog\n猫と犬";
+        let lines = |rules: Rules, needle: &str| -> Vec<(usize, String)> {
+            let hits = seek(needle, rules).hits(source, 50);
+            let at = |hit: &Hit| source[hit.at..hit.at + hit.len].to_owned();
+            hits.iter().map(|hit| (hit.line, at(hit))).collect()
+        };
+        let case = Rules {
+            match_case: true,
+            ..PLAIN
+        };
+        let word = Rules {
+            whole_word: true,
+            ..PLAIN
+        };
+        let regex = Rules {
+            regex: true,
+            ..PLAIN
+        };
+        assert_eq!(lines(PLAIN, "cat").len(), 3);
+        assert_eq!(lines(case, "Cat"), [(1, "Cat".to_owned())]);
+        assert_eq!(lines(word, "cat").len(), 2, "catalog is not the word");
+        let animals = lines(regex, "犬|猫");
+        assert_eq!(animals, [(3, "猫".to_owned()), (3, "犬".to_owned())]);
+    }
 
     #[test]
     fn finds_the_next_match_from_where_the_caret_is() {

@@ -213,6 +213,8 @@ pub struct Session {
     /// folder is opened.
     pub search_folder: Option<PathBuf>,
     pub search_exclusions: String,
+    /// RFN01-70: 検索パネルの探し方（大文字と小文字・単語単位・正規表現）。
+    pub search_options: [bool; 3],
     pub shortcut_bindings: String,
     pub expanded: Vec<PathBuf>,
     pub tree_shown: bool,
@@ -294,6 +296,12 @@ pub fn encode_session(session: &Session) -> String {
         "search-exclusions: {}\n",
         session.search_exclusions.replace(['\n', '\r'], "")
     ));
+    let options: String = session
+        .search_options
+        .iter()
+        .map(|on| if *on { '1' } else { '0' })
+        .collect();
+    out.push_str(&format!("search-options: {options}\n"));
     out.push_str(&format!(
         "shortcut-bindings: {}\n",
         session.shortcut_bindings.replace(['\n', '\r'], "")
@@ -418,6 +426,11 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "search" => session.search_folder = Some(PathBuf::from(value)),
             "shortcut-bindings" => session.shortcut_bindings = value.to_owned(),
             "search-exclusions" => session.search_exclusions = value.to_owned(),
+            "search-options" => {
+                for (on, letter) in session.search_options.iter_mut().zip(value.chars()) {
+                    *on = letter == '1';
+                }
+            }
             "workspace" => {
                 session.workspace = match value {
                     "none" => SessionWorkspace::None,
@@ -1289,6 +1302,7 @@ mod tests {
             folder: Some(PathBuf::from("D:\\書きかけ")),
             search_folder: Some(PathBuf::from("D:\\書きかけ\\章")),
             search_exclusions: "*.bak;backup/".into(),
+            search_options: [true, false, true],
             shortcut_bindings: "0=Ctrl+Alt+O".into(),
             expanded: vec![PathBuf::from("D:\\書きかけ\\章")],
             tree_shown: true,
