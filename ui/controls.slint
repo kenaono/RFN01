@@ -716,7 +716,10 @@ export component Tab inherits Rectangle {
         padding-left: 11px;
         // Room for the cross, which is not in this layout: it has to be
         // declared after the touch area below to be clickable at all.
-        padding-right: root.current ? 24px : 11px;
+        // RFN01-74: **on every tab**, since every tab shows it under the
+        // pointer — room made only then would widen the tab as the pointer
+        // reached it and push its neighbours along.
+        padding-right: 24px;
         spacing: 7px;
 
         Text {
@@ -850,9 +853,18 @@ export component Tab inherits Rectangle {
     // the click first and the rest of the tab still answers everywhere else.
     // The same ordering the tooltip in `IconButton` depends on.
     //
-    // Only the tab in front carries one. A cross on every tab is a row of ways
-    // to lose the wrong document, and the tabs are narrow enough already.
-    if root.current: Rectangle {
+    // The tab in front carries one, and any other **while the pointer is on
+    // it** (RFN01-74, 書き手の求め 2026-10-30: 選ばないと閉じられなかった). A
+    // cross standing on every tab is a row of ways to lose the wrong document;
+    // one under the pointer is the one the writer is looking at. Not while a
+    // tab is being carried: the hand is moving a tab, not closing one.
+    //
+    // **Hidden, not removed.** The cross is over the tab's own area, which
+    // stops being hovered when the pointer reaches the cross: removed then, the
+    // cross went away under the pointer and the click chose the tab instead
+    // (measured, 2026-11-02). Kept, its own hover holds it up.
+    Rectangle {
+        visible: root.current || ((touch.has-hover || cross.has-hover) && !root.carrying);
         x: parent.width - 22px;
         y: (parent.height - self.height) / 2;
         width: 18px;
