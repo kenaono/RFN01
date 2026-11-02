@@ -256,7 +256,7 @@ pub(crate) fn layout(
     view.selection_utf16 = runs.clone();
     view.difference_utf16 = difference_utf16;
     view.selection_source = selection_source.clone();
-    view.preedit_range = preedit_range;
+    view.preedit_lines = place_clauses(preedit_range, &view.ime_clauses);
 
     Ok(PaneLayout {
         comparison_note: note,
@@ -305,7 +305,7 @@ pub(crate) type TileCounts = (usize, usize, usize, usize, usize);
 
 pub(crate) fn tiles(
     graphics: &mut PaneGraphics,
-    preedit: Option<(u32, u32)>,
+    preedit: &[ImeClause],
     viewport: TileViewport,
     prefetch: u32,
 ) -> windows::core::Result<(Vec<PreviewTile>, TileCounts)> {
@@ -439,5 +439,94 @@ pub(crate) fn tile(vertical: bool, shift: f32, span: TileSpan, source: Image) ->
             height: flow_size,
             source,
         }
+    }
+}
+
+/// Place the IME's clauses at the caret (RFN01-77).
+///
+/// `composition` is where the composition stands in the laid-out text and how
+/// long it is; `clauses` are counted from its own start. **They are believed
+/// only while they tile the composition exactly**: the IME is asked when the
+/// text arrives, and an IME that cannot be asked, or a text that has moved on
+/// since, falls back to one thin line under the whole of it — the one line
+/// every composition had before.
+pub(crate) fn place_clauses(
+    composition: Option<(u32, u32)>,
+    clauses: &[ImeClause],
+) -> Vec<ImeClause> {
+    let Some((at, length)) = composition else {
+        return Vec::new();
+    };
+    let mut reached = 0;
+    let tiles = !clauses.is_empty()
+        && clauses.iter().all(|clause| {
+            let follows = clause.start == reached && clause.length > 0;
+            reached = clause.start + clause.length;
+            follows
+        })
+        && reached == length;
+    if !tiles {
+        return vec![ImeClause {
+            start: at,
+            length,
+            look: ClauseLook::Converted,
+        }];
+    }
+    clauses
+        .iter()
+        .map(|clause| ImeClause {
+            start: at + clause.start,
+            ..*clause
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clause(start: u32, length: u32, look: ClauseLook) -> ImeClause {
+        ImeClause {
+            start,
+            length,
+            look,
+        }
+    }
+
+    #[test]
+    fn the_clauses_move_to_the_caret() {
+        let clauses = [
+            clause(0, 2, ClauseLook::Target),
+            clause(2, 3, ClauseLook::Converted),
+        ];
+        assert_eq!(
+            place_clauses(Some((10, 5)), &clauses),
+            vec![
+                clause(10, 2, ClauseLook::Target),
+                clause(12, 3, ClauseLook::Converted),
+            ]
+        );
+    }
+
+    #[test]
+    fn clauses_that_do_not_cover_the_text_give_one_thin_line() {
+        let whole = vec![clause(4, 5, ClauseLook::Converted)];
+        // 何も聞けなかった、短すぎる、長すぎる、すき間がある。
+        assert_eq!(place_clauses(Some((4, 5)), &[]), whole);
+        let short = [clause(0, 3, ClauseLook::Input)];
+        assert_eq!(place_clauses(Some((4, 5)), &short), whole);
+        let long = [clause(0, 6, ClauseLook::Input)];
+        assert_eq!(place_clauses(Some((4, 5)), &long), whole);
+        let holed = [
+            clause(0, 2, ClauseLook::Input),
+            clause(3, 2, ClauseLook::Input),
+        ];
+        assert_eq!(place_clauses(Some((4, 5)), &holed), whole);
+    }
+
+    #[test]
+    fn no_composition_has_no_lines() {
+        let clauses = [clause(0, 2, ClauseLook::Target)];
+        assert!(place_clauses(None, &clauses).is_empty());
     }
 }

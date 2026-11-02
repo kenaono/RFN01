@@ -157,7 +157,8 @@ use std::{
 use buffer::DocumentFile;
 use diag::{DiagLog, RollingLog as PerfLog};
 use directwrite_render::{
-    CaretGeometry, LineFit, SelectionRect, TextEngine, TileSink, WritingMode, cells,
+    CaretGeometry, ClauseLook, ImeClause, LineFit, SelectionRect, TextEngine, TileSink,
+    WritingMode, cells,
 };
 use document::{PreviewDocument, caret_place};
 use i18n::pick;
@@ -1148,7 +1149,12 @@ struct PaneView {
     /// read it back rather than asking again: the pane has been laid out by the
     /// time the writer can press a key, and asking twice could answer twice.
     selection_source: Vec<(usize, usize)>,
-    preedit_range: Option<(u32, u32)>,
+    /// What the IME said each clause of the composition is, counted from the
+    /// composition's own start (RFN01-77). Set with the composition's text, and
+    /// only believed while its lengths add up to that text (`place_clauses`).
+    ime_clauses: Vec<ImeClause>,
+    /// The composition's lines, placed at the caret in the laid-out text.
+    preedit_lines: Vec<ImeClause>,
     /// ReadOnlyが最下行を追うか決めたときの、面の高さ（追加要件 2026-09-15）。
     ///
     /// **面が縮んだのは、書き手が上へスクロールしたのではない。**窓を縮めても
@@ -17815,7 +17821,7 @@ impl RenderCache {
         let pane = self.pane(id);
         let (tiles, counts) = editor_render::tiles(
             &mut pane.graphics,
-            pane.view.preedit_range,
+            &pane.view.preedit_lines,
             viewport,
             prefetch,
         )?;
@@ -22981,6 +22987,16 @@ fn set_pane_preedit(
     let revealed = PaneId::revealed_line(id.vertical(window), state, &source).unwrap_or(line);
     let selection = pane_selection(&state.borrow());
     let preedit = text.to_string();
+    // RFN01-77: which clause is which, asked while the IME still holds them.
+    // **Logged as looks only, never the text**: whether Windows answered at
+    // all is what tells a missing line from a wrong one.
+    let clauses = ime::clauses(window.window(), &preedit);
+    {
+        let mut cache = cache.borrow_mut();
+        let looks = ime::describe(&clauses);
+        cache.log_diag("spec.ime", &format!("clauses={looks}"));
+        cache.pane(id).view.ime_clauses = clauses;
+    }
     {
         let mut state = state.borrow_mut();
         state.caret_source_byte = Some(caret);

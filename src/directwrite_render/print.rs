@@ -671,7 +671,7 @@ fn today() -> String {
 /// 判断）。あの破線は画面が紙を切らないから引いてあるもので、紙では実際にページが
 /// 変わる——両方あると「消し忘れの線」に見える。
 fn page_tasks(engine: &TextEngine, tiles: &[TileSpan]) -> Vec<super::TileTask> {
-    let mut tasks = engine.tile_tasks(tiles, None);
+    let mut tasks = engine.tile_tasks(tiles, &[]);
     for task in &mut tasks {
         task.lines
             .retain(|run| run.ornament != LineOrnament::PageBreak);
@@ -982,7 +982,7 @@ mod tests {
         // その端を裏返した値で言う（`visible_flow_range`）。
         let (low, high) = engine.plan.flow_bounds();
         let tiles = engine.visible_tiles(-low, high - low, 0, 0.0, 4000.0);
-        let on_screen = engine.tile_tasks(&tiles, None);
+        let on_screen = engine.tile_tasks(&tiles, &[]);
         assert!(
             on_screen.iter().any(|task| task
                 .lines

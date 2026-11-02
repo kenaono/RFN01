@@ -99,6 +99,35 @@ use crate::text_blocks::{
 /// runs along the flow axis, and how DirectWrite is told to lay the text out.
 /// The rest of the engine is written in terms of the two axes and never names a
 /// screen axis of its own.
+/// How the IME asks one stretch of what it is composing to be marked (RFN01-77).
+///
+/// **The four looks a composition's clauses are told apart by**, read from what
+/// the IME says each character is (`ime::clauses`). One line for the whole
+/// composition hides the one thing the writer needs to see while converting:
+/// which clause the next key will change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClauseLook {
+    /// Typed and not yet converted: a dotted line.
+    Input,
+    /// Converted, and not the one being worked on: a thin line.
+    Converted,
+    /// The clause the next conversion acts on: a thick line.
+    Target,
+    /// What the IME could not take as typed: a wavy line.
+    Error,
+}
+
+/// One clause of a composition, in UTF-16 units.
+///
+/// Counted from the start of the composition when it comes from the IME, and
+/// from the start of the laid-out text once it is placed at the caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImeClause {
+    pub start: u32,
+    pub length: u32,
+    pub look: ClauseLook,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WritingMode {
     /// Lines run down the pane and stack right to left. The flow axis is screen
@@ -3755,6 +3784,153 @@ fn draw_highlights(
 ///
 /// 調べないところ（コード・リンク・箱の下＝ルビの読みなど）は`runs`から取る。
 /// 本文の中の読み方は[`crate::spelling::words`]の1か所にある。
+/// The clauses of a composition that fall inside one block, block-local.
+fn clauses_in_block(span: &BlockSpan, preedit: &[ImeClause]) -> Vec<ImeClause> {
+    preedit
+        .iter()
+        .filter_map(|clause| {
+            let end = clause.start + clause.length;
+            let (start, length) =
+                block_local_range(span.utf16_start, span.utf16_end, clause.start, end)?;
+            Some(ImeClause {
+                start,
+                length,
+                look: clause.look,
+            })
+        })
+        .collect()
+}
+
+/// RFN01-77: the lines under a composition, one look per clause.
+///
+/// **Where DirectWrite put its underline, to the pixel** (measured against
+/// `SetUnderline` before it was taken out): in horizontal writing just below
+/// the baseline, in vertical writing just outside the left of the em box. A
+/// thicker line grows away from the text, so the clause being converted does
+/// not crowd the characters it marks.
+///
+/// **Each clause stops short of the next**, the way the IME's own window draws
+/// them: two lines of the same look side by side would read as one clause.
+fn draw_composition_lines(
+    target: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    layout: &IDWriteTextLayout,
+    task: &TileTask,
+    origin: windows_numerics::Vector2,
+) -> Result<()> {
+    let mode = task.mode;
+    let cell = task.typography.font_size;
+    let thin = (cell / 20.0).round().max(1.0);
+    let gap = (thin * 2.0).max(2.0);
+    // Where each line starts along the flow, counted from the layout's own
+    // first edge: the top in horizontal writing, the right in vertical.
+    let mut line_count = 0;
+    // SAFETY: asking for the count only; the call reports the size it needs.
+    let _ = unsafe { layout.GetLineMetrics(None, &mut line_count) };
+    let mut lines = vec![DWRITE_LINE_METRICS::default(); line_count as usize];
+    // SAFETY: the buffer holds as many lines as the layout just reported.
+    unsafe { layout.GetLineMetrics(Some(&mut lines), &mut line_count)? };
+    let mut starts = Vec::with_capacity(lines.len());
+    let mut reached = 0.0_f32;
+    for line in &lines {
+        starts.push(reached);
+        reached += line.height;
+    }
+    // SAFETY: a plain getter on a live layout.
+    let first_edge = match mode {
+        WritingMode::Horizontal => origin.Y,
+        WritingMode::Vertical => origin.X + unsafe { layout.GetMaxWidth() },
+    };
+    let fill = |flow: (f32, f32), line: (f32, f32)| {
+        let (left, top) = mode.to_screen(flow.0.round(), line.0.round());
+        let (right, bottom) = mode.to_screen(flow.1.round(), line.1.round());
+        let rect = D2D_RECT_F {
+            left: left.min(right),
+            top: top.min(bottom),
+            right: left.max(right),
+            bottom: top.max(bottom),
+        };
+        // SAFETY: the brush and target outlive this call.
+        unsafe { target.FillRectangle(&rect, brush) };
+    };
+    let mut regions = [DWRITE_HIT_TEST_METRICS::default(); 32];
+    for clause in &task.underline {
+        let mut count = 0;
+        // SAFETY: the range is inside the block's own text, which the layout holds.
+        unsafe {
+            layout.HitTestTextRange(
+                clause.start,
+                clause.length,
+                origin.X,
+                origin.Y,
+                Some(&mut regions),
+                &mut count,
+            )?;
+        }
+        let taken = (count as usize).min(regions.len());
+        for (index, region) in regions.iter().take(taken).enumerate() {
+            let (flow_start, line_start) = mode.to_axes(region.left, region.top);
+            let (flow_extent, line_extent) = mode.to_axes(region.width, region.height);
+            // Which line this region sits on, by how far it is from the first edge.
+            let from_edge = match mode {
+                WritingMode::Horizontal => flow_start - first_edge,
+                WritingMode::Vertical => first_edge - (flow_start + flow_extent),
+            };
+            let at = starts
+                .partition_point(|start| *start <= from_edge + 0.5)
+                .saturating_sub(1);
+            let Some(line) = lines.get(at) else {
+                continue;
+            };
+            let line_edge = starts[at];
+            // The side of the text the line goes on, and which way is outwards.
+            let (inner, outwards) = match mode {
+                WritingMode::Horizontal => {
+                    let baseline = first_edge + line_edge + line.baseline;
+                    (baseline + (cell * 0.08).round(), 1.0)
+                }
+                WritingMode::Vertical => {
+                    let centre = first_edge - line_edge - line.baseline;
+                    (centre - cell / 2.0, -1.0)
+                }
+            };
+            let end = if index + 1 == taken {
+                line_start + line_extent - gap
+            } else {
+                line_start + line_extent
+            };
+            if end <= line_start {
+                continue;
+            }
+            let band = |thickness: f32| (inner, inner + outwards * thickness);
+            match clause.look {
+                ClauseLook::Converted => fill(band(thin), (line_start, end)),
+                ClauseLook::Target => fill(band(thin * 2.0), (line_start, end)),
+                ClauseLook::Input => {
+                    let mut from = line_start;
+                    while from < end {
+                        fill(band(thin), (from, (from + thin).min(end)));
+                        from += thin * 2.0;
+                    }
+                }
+                ClauseLook::Error => {
+                    let period = (cell * 0.3).max(4.0);
+                    let amplitude = (cell * 0.07).max(1.0);
+                    let centre = inner + outwards * (amplitude + thin);
+                    let mut from = line_start;
+                    while from < end {
+                        let phase = ((from - line_start) / period) * std::f32::consts::TAU;
+                        let across = centre + phase.sin() * amplitude;
+                        fill((across, across + thin), (from, (from + thin).min(end)));
+                        from += thin;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn draw_spelling(
     target: &ID2D1RenderTarget,
     brush: &ID2D1SolidColorBrush,
@@ -4499,8 +4675,8 @@ struct TileTask {
     /// across it.
     surface_size: u32,
     surface_cross: u32,
-    /// Where the IME's underline falls inside this block, if it falls in it.
-    underline: Option<(u32, u32)>,
+    /// The IME's lines that fall inside this block, block-local (RFN01-77).
+    underline: Vec<ImeClause>,
     /// Which line of the file this block starts on, counting from 0
     /// (要件 9、2026-09-07追加).
     ///
@@ -4849,28 +5025,15 @@ fn draw_block(
                 target, &brush, &layout, &task.runs, origin, mode, typography,
             )?;
         }
-        // SAFETY: The layout outlives the draw call, and the underline is set
-        // and cleared on the same layout.
+        // SAFETY: The layout outlives the draw call.
         unsafe {
-            if let Some((start, length)) = task.underline {
-                layout.SetUnderline(
-                    true,
-                    DWRITE_TEXT_RANGE {
-                        startPosition: start,
-                        length,
-                    },
-                )?;
-            }
             target.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-            if let Some((start, length)) = task.underline {
-                layout.SetUnderline(
-                    false,
-                    DWRITE_TEXT_RANGE {
-                        startPosition: start,
-                        length,
-                    },
-                )?;
-            }
+        }
+        // RFN01-77: the IME's lines, **drawn here rather than by DirectWrite**.
+        // Its underline is one look for every clause; a composition needs the
+        // clause being converted to stand out from the ones around it.
+        if !task.underline.is_empty() {
+            draw_composition_lines(target, &brush, &layout, task, origin)?;
         }
         if typography.whitespace {
             draw_whitespace(
@@ -7115,11 +7278,7 @@ impl TextEngine {
     /// makes between deciding what to measure and measuring it (技術検証 7.4):
     /// what a tile shows is decided from the document, and drawing it needs
     /// nothing but the answer.
-    fn tile_tasks(
-        &self,
-        tiles: &[TileSpan],
-        preedit_utf16_range: Option<(u32, u32)>,
-    ) -> Vec<TileTask> {
+    fn tile_tasks(&self, tiles: &[TileSpan], preedit: &[ImeClause]) -> Vec<TileTask> {
         // One surface for every tile, at the furthest a tile can reach.
         //
         // Tiles are slices of blocks, and blocks are all different sizes, so
@@ -7153,14 +7312,7 @@ impl TextEngine {
                     },
                     None => self.block_marks(span.block_index),
                 };
-                let underline = preedit_utf16_range.and_then(|(start, length)| {
-                    block_local_range(
-                        block.span.utf16_start,
-                        block.span.utf16_end,
-                        start,
-                        start + length,
-                    )
-                });
+                let underline = clauses_in_block(&block.span, preedit);
                 TileTask {
                     span: *span,
                     text: self.text[block.span.byte_start..block.span.byte_end].to_owned(),
@@ -7201,10 +7353,10 @@ impl TextEngine {
     pub fn render_tiles(
         &mut self,
         tiles: &[TileSpan],
-        preedit_utf16_range: Option<(u32, u32)>,
+        preedit: &[ImeClause],
         sink: &mut impl TileSink,
     ) -> Result<()> {
-        let tasks = self.tile_tasks(tiles, preedit_utf16_range);
+        let tasks = self.tile_tasks(tiles, preedit);
         if tasks.is_empty() {
             return Ok(());
         }
@@ -7244,7 +7396,7 @@ impl TextEngine {
     /// changes the document's width leave every other tile on screen untouched;
     /// the old grid-anchored fingerprint carried the block's offset within the
     /// tile, so one new line invalidated all of them.
-    pub fn tile_signature(&self, tile: TileSpan, preedit_utf16_range: Option<(u32, u32)>) -> u64 {
+    pub fn tile_signature(&self, tile: TileSpan, preedit: &[ImeClause]) -> u64 {
         let mut hasher = DefaultHasher::new();
         tile.sub_index.hash(&mut hasher);
         tile.flow_size.hash(&mut hasher);
@@ -7326,17 +7478,10 @@ impl TextEngine {
                 hash_grid(grid, &mut hasher);
             }
             // The underline is the one thing the block's own text does not say.
-            // Hashed block-local, so it stays put when earlier text changes.
-            if let Some(local) = preedit_utf16_range.and_then(|(start, length)| {
-                block_local_range(
-                    block.span.utf16_start,
-                    block.span.utf16_end,
-                    start,
-                    start + length,
-                )
-            }) {
-                local.hash(&mut hasher);
-            }
+            // Hashed block-local, so it stays put when earlier text changes —
+            // and **with its look**: moving to the next clause changes no
+            // character, only which line is thick (RFN01-77).
+            clauses_in_block(&block.span, preedit).hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -8925,7 +9070,7 @@ mod tests {
             let tiles =
                 engine.visible_tiles(-engine.flow_bounds().0, 2000.0, 0, 0.0, LINE_EXTENT as f32);
             let tile = tiles[0];
-            let before = engine.tile_signature(tile, None);
+            let before = engine.tile_signature(tile, &[]);
             spec.heading_scale[5] = 3.0;
             engine
                 .update(
@@ -8936,7 +9081,7 @@ mod tests {
                 .unwrap();
             assert_ne!(
                 before,
-                engine.tile_signature(tile, None),
+                engine.tile_signature(tile, &[]),
                 "body tile must move with the common margin: {mode:?}"
             );
         }
@@ -9037,7 +9182,7 @@ mod tests {
                             LINE_EXTENT as f32,
                         );
                         let mut drawn = DrawnTiles::default();
-                        engine.render_tiles(&tiles, None, &mut drawn).unwrap();
+                        engine.render_tiles(&tiles, &[], &mut drawn).unwrap();
                         let mut bounds = [(i32::MAX, i32::MIN); 2];
                         for (span, width, height, bgra) in &drawn.tiles {
                             for y in 0..*height {
@@ -9493,6 +9638,168 @@ mod tests {
         assert!(small < large, "桁が増えたら小さく組む: {large} -> {small}");
     }
 
+    /// RFN01-77: the pixels a composition's lines add, as `(x, y)` in the first tile.
+    fn composition_ink(mode: WritingMode, source: &str, clauses: &[ImeClause]) -> Vec<(u32, u32)> {
+        let spec = Typography::new(22.0);
+        let mut engine = engine_set(mode, StyledText::plain(source), &spec);
+        let tiles = engine.visible_tiles(
+            -engine.flow_bounds().0,
+            engine.total_flow_size() as f32,
+            0,
+            0.0,
+            LINE_EXTENT as f32,
+        );
+        let mut plain = DrawnTiles::default();
+        engine.render_tiles(&tiles, &[], &mut plain).unwrap();
+        let mut lined = DrawnTiles::default();
+        engine.render_tiles(&tiles, clauses, &mut lined).unwrap();
+        let (_, width, _, before) = &plain.tiles[0];
+        let after = &lined.tiles[0].3;
+        before
+            .chunks_exact(4)
+            .zip(after.chunks_exact(4))
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(at, _)| (at as u32 % width, at as u32 / width))
+            .collect()
+    }
+
+    fn one_clause(start: u32, length: u32, look: ClauseLook) -> ImeClause {
+        ImeClause {
+            start,
+            length,
+            look,
+        }
+    }
+
+    /// The line's thickness across the text and the positions it covers along it.
+    fn across_and_along(mode: WritingMode, ink: &[(u32, u32)]) -> (Vec<u32>, Vec<u32>) {
+        let mut across = Vec::new();
+        let mut along = Vec::new();
+        for &(x, y) in ink {
+            let (flow, line) = mode.to_axes(x as f32, y as f32);
+            across.push(flow as u32);
+            along.push(line as u32);
+        }
+        for list in [&mut across, &mut along] {
+            list.sort_unstable();
+            list.dedup();
+        }
+        (across, along)
+    }
+
+    /// **The thin line stands where DirectWrite's underline stood** (measured
+    /// before `SetUnderline` was taken out: rows 35–36 under 22px horizontal
+    /// text, columns 5–6 left of a vertical column whose ink is 9–27).
+    #[test]
+    fn a_converted_clause_is_lined_where_the_underline_was() {
+        let converted = [one_clause(0, 5, ClauseLook::Converted)];
+        let horizontal = composition_ink(WritingMode::Horizontal, "あいうえお", &converted);
+        let (rows, _) = across_and_along(WritingMode::Horizontal, &horizontal);
+        assert!(
+            rows.iter().all(|row| (34..=37).contains(row)),
+            "横書きは字の下：{rows:?}"
+        );
+        let vertical = composition_ink(WritingMode::Vertical, "あいうえお", &converted);
+        let (columns, _) = across_and_along(WritingMode::Vertical, &vertical);
+        assert!(
+            columns.iter().all(|column| (4..=8).contains(column)),
+            "縦書きは字の左：{columns:?}"
+        );
+    }
+
+    #[test]
+    fn each_look_is_drawn_differently() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let line = |look| {
+                let ink = composition_ink(mode, "あいうえお", &[one_clause(0, 5, look)]);
+                across_and_along(mode, &ink)
+            };
+            let (thin, thin_along) = line(ClauseLook::Converted);
+            let (thick, _) = line(ClauseLook::Target);
+            let (_, dotted_along) = line(ClauseLook::Input);
+            let (wavy, _) = line(ClauseLook::Error);
+            assert!(
+                thick.len() > thin.len(),
+                "{mode:?}: 太線 {thick:?} 細線 {thin:?}"
+            );
+            assert!(
+                dotted_along.len() * 3 < thin_along.len() * 2,
+                "{mode:?}: 点線は途切れる（{} / {}）",
+                dotted_along.len(),
+                thin_along.len()
+            );
+            assert!(wavy.len() > thick.len(), "{mode:?}: 波線は揺れる {wavy:?}");
+        }
+    }
+
+    /// Two clauses of one look still read as two: the first stops short.
+    #[test]
+    fn neighbouring_clauses_leave_a_gap() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let whole = composition_ink(
+                mode,
+                "あいうえお",
+                &[one_clause(0, 4, ClauseLook::Converted)],
+            );
+            let split = composition_ink(
+                mode,
+                "あいうえお",
+                &[
+                    one_clause(0, 2, ClauseLook::Converted),
+                    one_clause(2, 2, ClauseLook::Converted),
+                ],
+            );
+            let (_, whole_along) = across_and_along(mode, &whole);
+            let (_, split_along) = across_and_along(mode, &split);
+            assert!(
+                split_along.len() < whole_along.len(),
+                "{mode:?}: 文節の境目が空く"
+            );
+        }
+    }
+
+    /// A composition that wraps is lined on each of its lines, beside its own text.
+    #[test]
+    fn a_wrapped_composition_is_lined_on_every_line() {
+        let source = "あ".repeat(60);
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let ink = composition_ink(mode, &source, &[one_clause(0, 60, ClauseLook::Converted)]);
+            let (across, _) = across_and_along(mode, &ink);
+            // 線が引かれた帯の数＝行の数。1行目だけでなく折り返した先にも引かれる。
+            let bands = across
+                .windows(2)
+                .filter(|pair| pair[1] > pair[0] + 4)
+                .count()
+                + 1;
+            assert!(bands >= 2, "{mode:?}: 折り返した行にも線 {across:?}");
+        }
+    }
+
+    /// Moving to the next clause changes no character, only which line is thick.
+    #[test]
+    fn a_new_target_clause_is_a_new_tile() {
+        let spec = Typography::new(22.0);
+        let engine = engine_set(
+            WritingMode::Horizontal,
+            StyledText::plain("あいうえお"),
+            &spec,
+        );
+        let tile = engine.visible_tiles(0.0, engine.total_flow_size() as f32, 0, 0.0, 800.0)[0];
+        let first = [
+            one_clause(0, 2, ClauseLook::Target),
+            one_clause(2, 3, ClauseLook::Converted),
+        ];
+        let second = [
+            one_clause(0, 2, ClauseLook::Converted),
+            one_clause(2, 3, ClauseLook::Target),
+        ];
+        assert_ne!(
+            engine.tile_signature(tile, &first),
+            engine.tile_signature(tile, &second)
+        );
+    }
+
     /// 要件 9（2026-09-07追加）: **番号が画素に届いている。**組版が知っていることと
     /// 描かれることは別（表の罫で一度やった）。ここは余白の中の墨だけを見る。
     #[test]
@@ -9514,7 +9821,7 @@ mod tests {
             );
             let mut drawn = DrawnTiles::default();
             engine
-                .render_tiles(&tiles, None, &mut drawn)
+                .render_tiles(&tiles, &[], &mut drawn)
                 .expect("tile render");
             let mut ink = 0;
             for (span, width, height, bgra) in &drawn.tiles {
@@ -9561,7 +9868,7 @@ mod tests {
                         LINE_EXTENT as f32,
                     );
                     let mut drawn = DrawnTiles::default();
-                    engine.render_tiles(&tiles, None, &mut drawn).unwrap();
+                    engine.render_tiles(&tiles, &[], &mut drawn).unwrap();
                     (
                         flow,
                         drawn
@@ -9606,9 +9913,7 @@ mod tests {
                 LINE_EXTENT as f32,
             );
             let mut drawn = DrawnTiles::default();
-            engine
-                .render_tiles(&tiles, None, &mut drawn)
-                .expect("tiles");
+            engine.render_tiles(&tiles, &[], &mut drawn).expect("tiles");
             let mut ink = 0;
             for (_, width, _, bgra) in &drawn.tiles {
                 for row in bgra.chunks_exact(*width as usize * 4) {
@@ -9827,9 +10132,7 @@ mod tests {
                 LINE_EXTENT as f32,
             );
             let mut drawn = DrawnTiles::default();
-            engine
-                .render_tiles(&tiles, None, &mut drawn)
-                .expect("tiles");
+            engine.render_tiles(&tiles, &[], &mut drawn).expect("tiles");
             let mut ink: Vec<u32> = Vec::new();
             for (_, width, _, bgra) in &drawn.tiles {
                 let width = *width as usize;
@@ -9924,9 +10227,7 @@ mod tests {
                 LINE_EXTENT as f32,
             );
             let mut drawn = DrawnTiles::default();
-            engine
-                .render_tiles(&tiles, None, &mut drawn)
-                .expect("tiles");
+            engine.render_tiles(&tiles, &[], &mut drawn).expect("tiles");
             let mut ink: Vec<u32> = Vec::new();
             for (_, width, _, bgra) in &drawn.tiles {
                 let width = *width as usize;
@@ -10017,9 +10318,7 @@ mod tests {
                 LINE_EXTENT as f32,
             );
             let mut drawn = DrawnTiles::default();
-            engine
-                .render_tiles(&tiles, None, &mut drawn)
-                .expect("tiles");
+            engine.render_tiles(&tiles, &[], &mut drawn).expect("tiles");
             // 行の軸（縦書きなら画面のy）に沿って、墨のある範囲の長さ。
             let mut lowest = u32::MAX;
             let mut highest = 0;
@@ -10083,9 +10382,7 @@ mod tests {
                 LINE_EXTENT as f32,
             );
             let mut drawn = DrawnTiles::default();
-            engine
-                .render_tiles(&tiles, None, &mut drawn)
-                .expect("tiles");
+            engine.render_tiles(&tiles, &[], &mut drawn).expect("tiles");
             let mut ink = 0;
             for (_, width, _, bgra) in &drawn.tiles {
                 for row in bgra.chunks_exact(*width as usize * 4) {
@@ -10124,9 +10421,7 @@ mod tests {
                 LINE_EXTENT as f32,
             );
             let mut drawn = DrawnTiles::default();
-            engine
-                .render_tiles(&tiles, None, &mut drawn)
-                .expect("tiles");
+            engine.render_tiles(&tiles, &[], &mut drawn).expect("tiles");
             let mut ink = 0;
             for (_, width, _, bgra) in &drawn.tiles {
                 for row in bgra.chunks_exact(*width as usize * 4) {
@@ -10181,7 +10476,7 @@ mod tests {
         let mut longest = 0_u32;
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, &mut drawn)
+            .render_tiles(&tiles, &[], &mut drawn)
             .expect("vertical tile render");
         for (_, width, _, bgra) in &drawn.tiles {
             for row in bgra.chunks_exact(*width as usize * 4) {
@@ -10325,7 +10620,7 @@ mod tests {
         let mut found = Vec::new();
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, &mut drawn)
+            .render_tiles(&tiles, &[], &mut drawn)
             .expect("tile render");
         for (span, width, height, bgra) in &drawn.tiles {
             let (across, along) = match mode {
@@ -10413,7 +10708,7 @@ mod tests {
         let mut first_glyph = usize::MAX;
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, &mut drawn)
+            .render_tiles(&tiles, &[], &mut drawn)
             .expect("tile render");
         for (span, width, height, bgra) in &drawn.tiles {
             for y in 0..*height as usize {
@@ -10498,7 +10793,7 @@ mod tests {
         let mut longest = 0_u32;
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles, None, &mut drawn)
+            .render_tiles(&tiles, &[], &mut drawn)
             .expect("horizontal tile render");
         for (_, width, _, bgra) in &drawn.tiles {
             for row in bgra.chunks_exact(*width as usize * 4) {
@@ -11486,7 +11781,7 @@ mod tests {
 
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&[tile], None, &mut drawn)
+            .render_tiles(&[tile], &[], &mut drawn)
             .expect("visible tile render");
 
         assert_eq!(drawn.tiles.len(), 1);
@@ -11534,7 +11829,7 @@ mod tests {
 
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&tiles[..1], None, &mut drawn)
+            .render_tiles(&tiles[..1], &[], &mut drawn)
             .expect("far slice render");
         let (span, width, height, pixels) = &drawn.tiles[0];
         assert_eq!(
@@ -11568,7 +11863,7 @@ mod tests {
 
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&[tile], None, &mut drawn)
+            .render_tiles(&[tile], &[], &mut drawn)
             .expect("horizontal tile render");
 
         let (span, width, height, ref pixels) = *drawn.tiles.first().expect("one tile rendered");
@@ -11696,8 +11991,8 @@ mod tests {
             .expect("タイルがある");
 
         assert_ne!(
-            with_dot.tile_signature(span, None),
-            with_ring.tile_signature(span, None),
+            with_dot.tile_signature(span, &[]),
+            with_ring.tile_signature(span, &[]),
             "印を替えたら、その絵はもう古い"
         );
     }
@@ -12186,7 +12481,7 @@ mod tests {
         assert_eq!(all.len(), 1);
         let mut drawn = DrawnTiles::default();
         engine
-            .render_tiles(&all, None, &mut drawn)
+            .render_tiles(&all, &[], &mut drawn)
             .expect("tile render");
         let ink = drawn
             .tiles
@@ -12224,7 +12519,7 @@ mod tests {
                 );
                 let mut drawn = DrawnTiles::default();
                 engine
-                    .render_tiles(&tiles, None, &mut drawn)
+                    .render_tiles(&tiles, &[], &mut drawn)
                     .expect("link pixels");
                 let wanted: [f32; 3] = if invalid {
                     [0.8, 0.12, 0.18]
@@ -12277,7 +12572,7 @@ mod tests {
             );
             let mut drawn = DrawnTiles::default();
             engine
-                .render_tiles(&tiles, None, &mut drawn)
+                .render_tiles(&tiles, &[], &mut drawn)
                 .expect("tile render");
 
             let wanted = plain().comment_ink();
@@ -12350,8 +12645,8 @@ mod tests {
             edited_tile.block_index, distant_tile.block_index,
             "the tiles must show different blocks"
         );
-        let edited_before = engine.tile_signature(edited_tile, None);
-        let distant_before = engine.tile_signature(distant_tile, None);
+        let edited_before = engine.tile_signature(edited_tile, &[]);
+        let distant_before = engine.tile_signature(distant_tile, &[]);
         let width_before = engine.total_flow_size();
 
         let edited = text.replacen("確認", "検証", 1);
@@ -12368,12 +12663,12 @@ mod tests {
             "swapping one ideograph for another must not move any column"
         );
         assert_ne!(
-            engine.tile_signature(edited_tile, None),
+            engine.tile_signature(edited_tile, &[]),
             edited_before,
             "the tile showing the edit must be redrawn"
         );
         assert_eq!(
-            engine.tile_signature(distant_tile, None),
+            engine.tile_signature(distant_tile, &[]),
             distant_before,
             "a tile whose block did not change must keep its signature"
         );
@@ -12422,7 +12717,7 @@ mod tests {
                 LINE_EXTENT as f32,
             )
             .into_iter()
-            .map(|tile| (tile, engine.tile_signature(tile, None)))
+            .map(|tile| (tile, engine.tile_signature(tile, &[])))
             .collect::<Vec<_>>();
         let width_before = engine.total_flow_size();
 
@@ -12471,7 +12766,7 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                engine.tile_signature(*now, None),
+                engine.tile_signature(*now, &[]),
                 *signature,
                 "block {} kept its text but lost its tile",
                 now.block_index

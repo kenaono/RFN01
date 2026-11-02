@@ -138,7 +138,7 @@ impl Editor {
         screen.selection_rects = ModelRc::new(VecModel::from(rects));
         let (tiles, _) = editor_render::tiles(
             &mut self.graphics,
-            self.view.preedit_range,
+            &self.view.preedit_lines,
             editor_render::TileViewport {
                 scroll: screen.scroll_y,
                 shown_flow: screen.shown_height,
@@ -232,7 +232,10 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
             editor_interaction::select_range(&editor.session.state, &before, at, at);
         }
         Action::Text(text) => editor.insert(&text),
-        Action::Preedit(text) => editor.session.state.borrow_mut().preedit = text,
+        Action::Preedit(text) => {
+            editor.view.ime_clauses = crate::ime::clauses(window.window(), &text);
+            editor.session.state.borrow_mut().preedit = text;
+        }
         Action::Delete(backwards) => editor.remove(backwards),
         Action::Undo(forwards) => {
             editor.session.undo(forwards);
