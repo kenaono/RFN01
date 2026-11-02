@@ -434,6 +434,11 @@ export component AppWindow inherits Window {
     /// (書き手の求め 2026-11-02: 検索パネルは以前のまま、前回の結果を残す).
     callback tree-search-opened();
     callback tree-search-closed();
+    /// RFN01-75/76: a key pressed in a field of the left pane, asked whether it
+    /// is one of the left pane's own operations (検索・置換・Explore Paneへ) as
+    /// the writer has them assigned. **Only those**: `Ctrl+Z` in the field is
+    /// the field's, not the document's.
+    callback left-field-shortcut(string, bool, bool, bool) -> bool;
 
     /// Start searching the tree showing, from empty and over all of it.
     public function open-tree-search() {
@@ -460,6 +465,10 @@ export component AppWindow inherits Window {
     /// pane is closed — the Explorer is what opens; the Search panel when
     /// another panel (Outline, Tags…) is up, which is not a list of files.
     public function open-folder-search() {
+        // **Search only**: from a search that has the replace field out, this
+        // key puts it away (`Ctrl+Shift+H` puts it back) — the way the two keys
+        // switch between the two in VS Code.
+        root.tree-replacing = false;
         if root.tree-open && root.left-tab == 1 {
             root.left-field-generation += 1;
         } else if root.tree-open && (root.left-tab == 0 || root.left-tab == 4) {
@@ -473,6 +482,16 @@ export component AppWindow inherits Window {
             root.left-tab = 1;
             root.left-tab-chosen(1);
             root.left-field-generation += 1;
+        }
+    }
+
+    /// `Ctrl+Shift+H`: the same, with the replace field out (書き手の求め
+    /// 2026-11-02: 置換の入口が分からなかった). The Search panel shows its
+    /// replace field always.
+    public function open-folder-replace() {
+        root.open-folder-search();
+        if root.tree-searching {
+            root.tree-replacing = true;
         }
     }
 
@@ -2433,10 +2452,14 @@ export component AppWindow inherits Window {
                                 escaped => { root.left-field-escaped(); }
                                 property <int> asked: root.left-field-generation;
                                 changed asked => { self.take-focus(); }
+                                shortcut(event) => {
+                                    if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
+                                    return reject;
+                                }
                             }
                             IconButton {
                                 icon: "M2 5h10l-3-3M14 11H4l3 3";
-                                tip: @tr("Replace with…");
+                                tip: @tr("Replace");
                                 checked: root.tree-replacing;
                                 clicked => { root.tree-replacing = !root.tree-replacing; }
                             }
@@ -2449,6 +2472,10 @@ export component AppWindow inherits Window {
                                 text <=> root.folder-replacement;
                                 accepted => { root.folder-replace-requested(); }
                                 escaped => { root.left-field-escaped(); }
+                                shortcut(event) => {
+                                    if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
+                                    return reject;
+                                }
                             }
                             TextButton {
                                 title: @tr("Replace All");
@@ -2482,6 +2509,10 @@ export component AppWindow inherits Window {
                         escaped => { root.left-field-escaped(); }
                         property <int> asked: root.left-field-generation;
                         changed asked => { self.take-focus(); }
+                        shortcut(event) => {
+                            if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
+                            return reject;
+                        }
                     }
                     // 要件 7.7: the question this panel asks is about the
                     // work folder, so it has its own field. The find bar above
@@ -2510,6 +2541,10 @@ export component AppWindow inherits Window {
                                 escaped => { root.left-field-escaped(); }
                                 property <int> asked: root.left-field-generation;
                                 changed asked => { self.take-focus(); }
+                                shortcut(event) => {
+                                    if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
+                                    return reject;
+                                }
                             }
 
                             // RFN01-70: 置換後の語。**いつも出しておく**（書き手の判断

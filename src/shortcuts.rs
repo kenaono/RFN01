@@ -310,6 +310,13 @@ const PANE_ACTIONS: &[MenuAction] = &[
         "Ctrl+Shift+E",
         ShortcutAction::ExplorePane
     ),
+    // 書き手の求め 2026-11-02: 置換の入口をキーにも。末尾へ足す。
+    menu_action!(
+        "フォルダ内を置換",
+        "Replace in Folder",
+        "Ctrl+Shift+H",
+        ShortcutAction::ReplaceInFolder
+    ),
 ];
 /// ファイルの分類に並べる、メニューから来た操作。
 ///
@@ -919,6 +926,25 @@ pub fn wire(app: &AppWindow, live: &Live) {
             ))
             .into(),
         );
+    });
+    // RFN01-75/76: from a field of the left pane, only the left pane's own
+    // operations — as assigned, so a key the writer moved works there too.
+    let weak = app.as_weak();
+    app.on_left_field_shortcut(move |text, control, alt, shift| {
+        let Some(app) = weak.upgrade() else {
+            return false;
+        };
+        let command = resolve(&app.get_shortcut_bindings(), 0, &text, control, alt, shift);
+        let Some((action, _)) = usize::try_from(command).ok().and_then(menu_at) else {
+            return false;
+        };
+        match action.action {
+            ShortcutAction::SearchInFolder => app.invoke_open_folder_search(),
+            ShortcutAction::ReplaceInFolder => app.invoke_open_folder_replace(),
+            ShortcutAction::ExplorePane => app.invoke_focus_explore(),
+            _ => return false,
+        }
+        true
     });
     let weak = app.as_weak();
     let keyed_live = live.clone();
