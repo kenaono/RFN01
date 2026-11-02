@@ -69,6 +69,8 @@ fn the_print_preview_shows_a_sheet_and_turns_it() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),

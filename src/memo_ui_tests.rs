@@ -221,6 +221,8 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&memo),
         folder: Rc::default(),
         tree_paths: Rc::default(),
@@ -1020,6 +1022,8 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&memo),
         folder: Rc::default(),
         tree_paths: Rc::default(),

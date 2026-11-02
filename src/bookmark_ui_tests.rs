@@ -256,6 +256,8 @@ fn a_bookmark_is_added_moved_opened_lit_and_let_go() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),

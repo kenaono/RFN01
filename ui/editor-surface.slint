@@ -544,7 +544,15 @@ export component EditorSurface inherits Rectangle {
                         if (root.takes-focus) {
                             // Reissue focus even if Slint still records this field
                             // as focused after a tab/direction change.
-                            ime-input.clear-focus();
+                            //
+                            // RFN01-79: **not while a conversion is up.** Taking
+                            // the focus away throws the conversion out, and the
+                            // tab that was pressed bumps this before Rust has
+                            // committed it where it was typed. The field has the
+                            // focus already — that is where the conversion is.
+                            if (ime-input.preedit-text == "") {
+                                ime-input.clear-focus();
+                            }
                             ime-input.focus();
                         }
                     }

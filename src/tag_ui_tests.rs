@@ -179,6 +179,8 @@ fn tags_are_indexed_shown_searched_and_offered() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),

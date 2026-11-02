@@ -66,6 +66,8 @@ fn an_unsaved_heading_reaches_the_completion_popup() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&review),
         folder: Rc::default(),
         tree_paths: Rc::default(),
@@ -249,6 +251,8 @@ fn local_links_open_without_losing_the_source() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&memo),
         folder: Rc::default(),
         tree_paths: Rc::default(),
