@@ -69,6 +69,7 @@ fn a_new_vertical_tab_opens_at_the_start() {
         tree_paths: Rc::default(),
         workspace_ids: Rc::default(),
         results: Rc::default(),
+        results_roots: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
         find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),

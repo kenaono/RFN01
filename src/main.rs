@@ -1943,6 +1943,7 @@ fn main() -> Result<(), slint::PlatformError> {
         workspace_ids: Rc::new(RefCell::new(WorkspaceManagerIds::default())),
         preview: Rc::default(),
         results: Rc::new(RefCell::new(Vec::new())),
+        results_roots: Rc::default(),
         recent: Rc::new(RefCell::new(remembered)),
         recent_folders: Rc::new(RefCell::new(visited)),
         find_terms: Rc::new(RefCell::new(find::Terms::restored(needles))),
@@ -4935,6 +4936,11 @@ struct Live {
     /// same reason as `tree_paths`: the window draws lines, and a place in a
     /// document is not one.
     results: Rc<RefCell<Vec<ResultRow>>>,
+    /// The folders `results` were searched in (RFN01-75). **The search panel
+    /// shows whichever tree it stands in for**, and results found in the
+    /// Workspace are not an answer about the Explorer's folder: when the two
+    /// differ the search is run again (`publish_left`).
+    results_roots: Rc<RefCell<Vec<PathBuf>>>,
     /// The files opened most recently, newest first (要件 7.7). Both the 履歴
     /// panel's rows and what each of them stands for: one path is all a row
     /// needs.
@@ -7047,6 +7053,9 @@ fn publish_left(window: &AppWindow, live: &Live) {
             .borrow_mut()
             .set_workspace_view(tab == LeftTab::Workspace);
     }
+    if tab == LeftTab::Search {
+        search_in_new_place(window, live);
+    }
     show_searched_folder(window, live);
     match LeftTab::from_index(window.get_left_tab()) {
         LeftTab::Explorer => publish_tree(window, live),
@@ -7061,6 +7070,37 @@ fn publish_left(window: &AppWindow, live: &Live) {
         LeftTab::Tags => publish_tags(window, live),
         LeftTab::Backups => backup_ui::publish_pane(window, live),
         LeftTab::Git => git_ui::publish(window, live),
+    }
+}
+
+/// RFN01-75: put the search panel on the tree it stands in for, and search
+/// again when that is not where the results it holds came from.
+///
+/// **Which tree, then which results.** A search opened in the Explorer's
+/// place searches the Explorer's folder even when the Workspace was the last
+/// tree shown — the left pane may have been closed on it. Then: results found
+/// in other folders are not this tree's answer (書き手の報告 2026-11-02:
+/// Workspaceの結果がExplorerの検索に出る), so the same words are looked for
+/// again here, or the list is emptied when there are none. **Emptied first
+/// either way**: the answer comes from another thread, and until it does the
+/// other tree's results would stand under this tree's name.
+fn search_in_new_place(window: &AppWindow, live: &Live) {
+    match window.get_search_from() {
+        0 => live.folder.borrow_mut().set_workspace_view(false),
+        4 => live.folder.borrow_mut().set_workspace_view(true),
+        _ => {}
+    }
+    let needle = window.get_folder_needle().to_string();
+    let roots = folder_search_roots(live, &needle);
+    if roots.is_empty() || *live.results_roots.borrow() == roots {
+        return;
+    }
+    live.results.borrow_mut().clear();
+    *live.results_roots.borrow_mut() = roots;
+    if needle.is_empty() {
+        window.set_folder_status(SharedString::new());
+    } else {
+        search_work_folder(window, live);
     }
 }
 
@@ -7817,6 +7857,7 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
     }
     let generation = live.searched.get() + 1;
     live.searched.set(generation);
+    *live.results_roots.borrow_mut() = roots.clone();
     let job = SearchJob {
         exclusions: window.get_search_exclusions().to_string(),
         roots,

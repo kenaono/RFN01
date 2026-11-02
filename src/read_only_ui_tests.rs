@@ -73,6 +73,7 @@ fn read_only_follows_a_growing_file_until_scrolled_away() {
         tree_paths: Rc::default(),
         workspace_ids: Rc::default(),
         results: Rc::default(),
+        results_roots: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
         find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),

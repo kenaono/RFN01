@@ -112,6 +112,7 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         tree_paths: Rc::default(),
         workspace_ids: Rc::default(),
         results: Rc::default(),
+        results_roots: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
         find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
