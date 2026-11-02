@@ -13490,11 +13490,20 @@ fn close_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool 
 }
 
 fn close_tab_content(window: &AppWindow, live: &Live, id: PaneId, index: usize) -> bool {
-    // Brought to the front first: a question about a document nobody can see is
-    // a question about nothing, and it makes the tab being closed the one in
-    // front of the pane, so saving it means the ordinary save.
-    switch_to_tab(window, live, id, index);
-    let Some(document) = live.tabs.borrow().of(id).current().map(PaneTab::document) else {
+    // RFN01-74: **brought to the front only to be asked about.** A question about
+    // a document nobody can see is a question about nothing, and it makes the
+    // tab being closed the one in front of the pane, so saving it means the
+    // ordinary save. A tab that just closes — its × is on every tab under the
+    // pointer now — goes from where it is, and the tab the writer was in stays
+    // in front (`active_after_close`).
+    let Some(document) = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .get(index)
+        .map(PaneTab::document)
+    else {
         return false;
     };
     // **Nothing is lost while another pane still holds it.** The question is
@@ -13514,6 +13523,7 @@ fn close_tab_content(window: &AppWindow, live: &Live, id: PaneId, index: usize) 
             finish_close(window, live, id, index);
             return false;
         }
+        switch_to_tab(window, live, id, index);
         window.set_focused_pane(id.index());
         ask_question(
             window,
@@ -13537,6 +13547,7 @@ fn close_tab_content(window: &AppWindow, live: &Live, id: PaneId, index: usize) 
         finish_close(window, live, id, index);
         return false;
     }
+    switch_to_tab(window, live, id, index);
     // The pane the question is about becomes the pane the writer is in.
     // **A run of closes can be asked for from a pane the writer is not in**
     // (`start_close_run`, from that pane's menu), and the answer
