@@ -157,7 +157,8 @@ use std::{
 use buffer::DocumentFile;
 use diag::{DiagLog, RollingLog as PerfLog};
 use directwrite_render::{
-    CaretGeometry, LineFit, SelectionRect, TextEngine, TileSink, WritingMode, cells,
+    CaretGeometry, ClauseLook, ImeClause, LineFit, SelectionRect, TextEngine, TileSink,
+    WritingMode, cells,
 };
 use document::{PreviewDocument, caret_place};
 use i18n::pick;
@@ -1148,7 +1149,12 @@ struct PaneView {
     /// read it back rather than asking again: the pane has been laid out by the
     /// time the writer can press a key, and asking twice could answer twice.
     selection_source: Vec<(usize, usize)>,
-    preedit_range: Option<(u32, u32)>,
+    /// What the IME said each clause of the composition is, counted from the
+    /// composition's own start (RFN01-77). Set with the composition's text, and
+    /// only believed while its lengths add up to that text (`place_clauses`).
+    ime_clauses: Vec<ImeClause>,
+    /// The composition's lines, placed at the caret in the laid-out text.
+    preedit_lines: Vec<ImeClause>,
     /// ReadOnlyが最下行を追うか決めたときの、面の高さ（追加要件 2026-09-15）。
     ///
     /// **面が縮んだのは、書き手が上へスクロールしたのではない。**窓を縮めても
@@ -2978,10 +2984,15 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // RFN01-77: the pane a conversion is in, for when the IME moves to another
+    // clause without changing the text (`ime::ClauseWatch`).
+    let composing_pane: Rc<Cell<Option<PaneId>>> = Rc::default();
+    watch_clauses(&window, &pane_states, &render_cache, &composing_pane);
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let typed_live = live.clone();
+    let composing_in = composing_pane.clone();
     window.on_pane_preedit_changed(move |pane, text| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
@@ -3007,6 +3018,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if !text.is_empty() {
                 answer_new_tab(&window, &typed_live, id, None);
             }
+            composing_in.set(Some(id));
             let document = states.document(id);
             let state = states.of(id);
             set_pane_preedit(&window, id, &document, &state, &cache, text.as_str());
@@ -17815,7 +17827,7 @@ impl RenderCache {
         let pane = self.pane(id);
         let (tiles, counts) = editor_render::tiles(
             &mut pane.graphics,
-            pane.view.preedit_range,
+            &pane.view.preedit_lines,
             viewport,
             prefetch,
         )?;
@@ -22959,6 +22971,54 @@ fn move_pane_to_line_edge(
     }
 }
 
+/// RFN01-77: redraw a composition when the IME moves to another clause.
+///
+/// Put on once the window has a native handle. **It lives as long as the
+/// window**, so it is never dropped: the subclass takes itself off when the
+/// window is destroyed.
+fn watch_clauses(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    composing: &Rc<Cell<Option<PaneId>>>,
+) {
+    let weak = window.as_weak();
+    let states = states.clone();
+    let cache = cache.clone();
+    let composing = composing.clone();
+    let _ = slint::spawn_local(async move {
+        use slint::winit_030::WinitWindowAccessor;
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        if window.window().winit_window().await.is_err() {
+            return;
+        }
+        let weak = window.as_weak();
+        let watch = ime::ClauseWatch::install(window.window(), move || {
+            let (Some(window), Some(id)) = (weak.upgrade(), composing.get()) else {
+                return;
+            };
+            let state = states.of(id);
+            let text = state.borrow().preedit.clone();
+            if text.is_empty() {
+                return;
+            }
+            let Ok(mut borrowed) = cache.try_borrow_mut() else {
+                return;
+            };
+            let unchanged =
+                borrowed.pane(id).view.ime_clauses == ime::clauses(window.window(), &text);
+            drop(borrowed);
+            if !unchanged {
+                let document = states.document(id);
+                set_pane_preedit(&window, id, &document, &state, &cache, &text);
+            }
+        });
+        std::mem::forget(watch);
+    });
+}
+
 /// Show what the IME is composing in a pane, without committing it.
 ///
 /// The string is not in the document and must not reach it: it goes to the
@@ -22981,6 +23041,16 @@ fn set_pane_preedit(
     let revealed = PaneId::revealed_line(id.vertical(window), state, &source).unwrap_or(line);
     let selection = pane_selection(&state.borrow());
     let preedit = text.to_string();
+    // RFN01-77: which clause is which, asked while the IME still holds them.
+    // **Logged as looks only, never the text**: whether Windows answered at
+    // all is what tells a missing line from a wrong one.
+    let clauses = ime::clauses(window.window(), &preedit);
+    {
+        let mut cache = cache.borrow_mut();
+        let looks = ime::describe(&clauses);
+        cache.log_diag("spec.ime", &format!("clauses={looks}"));
+        cache.pane(id).view.ime_clauses = clauses;
+    }
     {
         let mut state = state.borrow_mut();
         state.caret_source_byte = Some(caret);
