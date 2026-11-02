@@ -10,7 +10,7 @@ struct Editor {
     refresh_pending: bool,
     /// RFN01-77: put on with the first report of where the IME is, since the
     /// window has no handle before it is shown.
-    ime_watch: Option<Box<ime::ClauseWatch>>,
+    ime_watch: Option<Box<ime::ImeWatch>>,
     /// RFN01-79: the IME's copy of a conversion a click already put in.
     settled: ime::Settled,
 }
@@ -424,6 +424,72 @@ fn clauses_moved(window: &QuickDraft, editor: &Rc<RefCell<Editor>>) {
     }
 }
 
+/// The same answers the main window gives the IME (`watch_ime`), for the one
+/// editor this window has.
+fn ime_host(
+    weak: &slint::Weak<QuickDraft>,
+    editor: &std::rc::Weak<RefCell<Editor>>,
+) -> ime::ImeHost {
+    let offered: Rc<Cell<usize>> = Rc::default();
+    let changed = {
+        let (weak, editor) = (weak.clone(), editor.clone());
+        move || {
+            if let (Some(window), Some(editor)) = (weak.upgrade(), editor.upgrade()) {
+                clauses_moved(&window, &editor);
+            }
+        }
+    };
+    let around = {
+        let (editor, offered) = (editor.clone(), offered.clone());
+        move |_feed: bool| {
+            let editor = editor.upgrade()?;
+            let editor = editor.try_borrow().ok()?;
+            let document = editor.session.document();
+            let source = document.text.text.try_borrow().ok()?;
+            let state = editor.session.state.try_borrow().ok()?;
+            let (around, from) = editor_interaction::ime_around(&state, &source);
+            offered.set(from);
+            Some(around)
+        }
+    };
+    let choose = {
+        let (weak, editor) = (weak.clone(), editor.clone());
+        move |start: u32, end: u32| {
+            let (Some(window), Some(editor)) = (weak.upgrade(), editor.upgrade()) else {
+                return false;
+            };
+            let chosen = {
+                let Ok(held) = editor.try_borrow() else {
+                    return false;
+                };
+                let source = held.session.document().text.borrow().clone();
+                editor_interaction::ime_choose(
+                    &held.session.state,
+                    &source,
+                    offered.get(),
+                    start,
+                    end,
+                )
+            };
+            if chosen {
+                let weak = window.as_weak();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(window) = weak.upgrade() {
+                        run(&window, &editor, Action::Refresh(true));
+                    }
+                });
+            }
+            chosen
+        }
+    };
+    ime::ImeHost {
+        changed: Rc::new(changed),
+        around: Box::new(around),
+        choose: Box::new(choose),
+        log: Box::new(|_: &str| {}),
+    }
+}
+
 pub(crate) fn install(window: &QuickDraft) {
     let document = OpenDocument::with_events(
         DocumentFile::untitled(0),
@@ -453,11 +519,7 @@ pub(crate) fn install(window: &QuickDraft) {
         if held.ime_watch.is_none() {
             let weak = window.as_weak();
             let editor = Rc::downgrade(&editor);
-            held.ime_watch = ime::ClauseWatch::install(window.window(), move || {
-                if let (Some(window), Some(editor)) = (weak.upgrade(), editor.upgrade()) {
-                    clauses_moved(&window, &editor);
-                }
-            });
+            held.ime_watch = ime::ImeWatch::install(window.window(), ime_host(&weak, &editor));
         }
     });
     macro_rules! wire {

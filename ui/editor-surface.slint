@@ -1138,6 +1138,13 @@ export component EditorSurface inherits Rectangle {
                                         root.enter-pressed(root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.Backspace {
+                                        // RFN01-78: **Ctrl+Backspaceは直前の語を消す**（Notepadと
+                                        // 同じ）。ここへ来るのはIMEが受けなかったとき——ATOKの
+                                        // 確定アンドゥは、確定した直後ならIMEが先に受ける。
+                                        // 選んでいれば、選んだものを消すだけ。
+                                        if event.modifiers.control && !root.has-selection {
+                                            root.move-caret(-3, true);
+                                        }
                                         root.backspace-pressed();
                                         accept
                                     } else if event.text == Key.Tab {

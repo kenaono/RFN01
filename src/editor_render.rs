@@ -162,7 +162,23 @@ pub(crate) fn layout(
             .filter(|(_, length)| *length > 0)
             .collect()
     };
-    let (render_text, render_caret, preedit_range) = text_with_preedit(&shown, caret, preedit);
+    // RFN01-78: **a conversion over a selection stands in its place** — the
+    // selection is what the committed text replaces. Only within one line: the
+    // per-line marks are held back for the caret's line alone (below), and a
+    // reconversion is never offered more than one.
+    let replacing = selection_utf16
+        .filter(|_| !preedit.is_empty() && !selection.rectangular)
+        .filter(|(start, end)| {
+            start < end && {
+                let from = shown.shown_byte_at_utf16(*start as usize);
+                let to = shown.shown_byte_at_utf16(*end as usize);
+                !shown.text()[from..to].contains('\n')
+            }
+        });
+    // The selection it replaces is not shown either: it is not on the page.
+    let selection_utf16 = selection_utf16.filter(|_| replacing.is_none());
+    let (render_text, render_caret, preedit_range) =
+        text_with_composition(&shown, caret, preedit, replacing);
     let preview_ms = elapsed_ms(preview_started);
 
     let layout_started = Instant::now();
