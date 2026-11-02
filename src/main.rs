@@ -6814,6 +6814,22 @@ impl WorkFolder {
             searching: self.searching.clone(),
         }
     }
+    /// RFN01-75: a search narrowed to a folder outside the tree that is showing
+    /// is not this tree's search — the narrowing is let go (書き手の報告
+    /// 2026-11-02: Explorerの外の検索対象フォルダが残り、結果がずれる).
+    /// `true` when there was one to let go.
+    fn drop_scope_outside_tree(&mut self) -> bool {
+        let Some(scope) = self.searching.as_ref() else {
+            return false;
+        };
+        let (roots, _) = tree_roots(self);
+        if roots.iter().any(|root| file_tree::is_within(root, scope)) {
+            return false;
+        }
+        self.searching = None;
+        true
+    }
+
     fn set_workspace_view(&mut self, workspace: bool) {
         if self.workspace_view == workspace {
             return;
@@ -7089,6 +7105,9 @@ fn search_in_new_place(window: &AppWindow, live: &Live) {
         0 => live.folder.borrow_mut().set_workspace_view(false),
         4 => live.folder.borrow_mut().set_workspace_view(true),
         _ => {}
+    }
+    if live.folder.borrow_mut().drop_scope_outside_tree() {
+        write_session(window, live);
     }
     let needle = window.get_folder_needle().to_string();
     let roots = folder_search_roots(live, &needle);
@@ -11120,6 +11139,12 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
                 return;
             };
             search_in_folder(window, live, Some(into));
+            // RFN01-75: in the tree's place, like 🔍 — 🔍 again or Escape gives
+            // the tree back.
+            let tab = window.get_left_tab();
+            if tab == LeftTab::Explorer.index() || tab == LeftTab::Workspace.index() {
+                window.set_search_from(tab);
+            }
             window.set_left_tab(LeftTab::Search.index());
             publish_left(window, live);
         }
