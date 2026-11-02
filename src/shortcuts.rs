@@ -927,6 +927,25 @@ pub fn wire(app: &AppWindow, live: &Live) {
             .into(),
         );
     });
+    // RFN01-75/76: from a field of the left pane, only the left pane's own
+    // operations — as assigned, so a key the writer moved works there too.
+    let weak = app.as_weak();
+    app.on_left_field_shortcut(move |text, control, alt, shift| {
+        let Some(app) = weak.upgrade() else {
+            return false;
+        };
+        let command = resolve(&app.get_shortcut_bindings(), 0, &text, control, alt, shift);
+        let Some((action, _)) = usize::try_from(command).ok().and_then(menu_at) else {
+            return false;
+        };
+        match action.action {
+            ShortcutAction::SearchInFolder => app.invoke_open_folder_search(),
+            ShortcutAction::ReplaceInFolder => app.invoke_open_folder_replace(),
+            ShortcutAction::ExplorePane => app.invoke_focus_explore(),
+            _ => return false,
+        }
+        true
+    });
     let weak = app.as_weak();
     let keyed_live = live.clone();
     app.on_shortcut_key(move |text, control, alt, shift| {
