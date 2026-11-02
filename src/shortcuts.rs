@@ -294,6 +294,23 @@ const RUN_ACTIONS: &[MenuAction] = &[
         ShortcutAction::ReadAloud
     ),
 ];
+/// Pane・TABの分類に足す、左のPaneの操作（RFN01-75/76、書き手と合意 2026-11-02）。
+/// **idは末尾へ足す**——設定は番号で持っているので、途中に入れると後ろの割り当てがずれる。
+const PANE_CATEGORY: i32 = 4;
+const PANE_ACTIONS: &[MenuAction] = &[
+    menu_action!(
+        "フォルダ内を検索",
+        "Search in Folder",
+        "Ctrl+Shift+F",
+        ShortcutAction::SearchInFolder
+    ),
+    menu_action!(
+        "Explore Paneへ",
+        "To Explore Pane",
+        "Ctrl+Shift+E",
+        ShortcutAction::ExplorePane
+    ),
+];
 /// ファイルの分類に並べる、メニューから来た操作。
 ///
 /// **新規文書だけは既定を持つ**（`Ctrl+N`、書き手の合意 2026-09-21）——Windowsの
@@ -417,7 +434,7 @@ const INSERT_ACTIONS: &[MenuAction] = &[
 ];
 /// 変更できる操作の数——既存の46枠と、メニューから来た分。
 fn count() -> usize {
-    NAMES.len() + FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len()
+    NAMES.len() + FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len() + PANE_ACTIONS.len()
 }
 /// idがメニューから来たものなら、その1つと分類の番号。
 fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
@@ -434,6 +451,12 @@ fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
             RUN_ACTIONS
                 .get(index - FILE_ACTIONS.len() - INSERT_ACTIONS.len())
                 .map(|action| (action, RUN_CATEGORY))
+        })
+        .or_else(|| {
+            let before = FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len();
+            PANE_ACTIONS
+                .get(index - before)
+                .map(|action| (action, PANE_CATEGORY))
         })
 }
 fn name_at(id: usize) -> (&'static str, &'static str) {

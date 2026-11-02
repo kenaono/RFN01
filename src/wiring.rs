@@ -1808,6 +1808,23 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
             let Some(chosen) = file_dialog::open_folder_at(owner, from.as_deref()) else {
                 return;
             };
+            // RFN01-75: **only inside the tree being searched.** A folder outside
+            // it would have the results stand under the tree's name without
+            // being any of its files.
+            let roots = crate::tree_roots(&scope_live.folder.borrow()).0;
+            if !roots
+                .iter()
+                .any(|root| crate::file_tree::is_within(root, &chosen))
+            {
+                window.set_folder_status(
+                    crate::pick(
+                        "表示しているフォルダの外は選べません。その中のフォルダを選んでください。",
+                        "Choose a folder inside the one shown; folders outside it cannot be searched here.",
+                    )
+                    .into(),
+                );
+                return;
+            }
             search_in_folder(&window, &scope_live, Some(chosen));
         }
     });

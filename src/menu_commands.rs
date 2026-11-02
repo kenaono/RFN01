@@ -100,6 +100,10 @@ pub enum ShortcutAction {
     SpellingStep(bool),
     /// RFN01-62: 読み上げを始める／止める。
     ReadAloud,
+    /// RFN01-75/76: フォルダ内を検索する（木を見ていればその場所で）。
+    SearchInFolder,
+    /// RFN01-76: キーボードをExplore Paneの絞り込み欄へ。
+    ExplorePane,
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -2363,6 +2367,13 @@ unsafe extern "system" fn menu_filter(
 /// 捕まえるが、キーには捕まえる瞬間が無い。押せない条件（選んだ字が要る形など）は
 /// それぞれの実行先が同じ判定を持っているので、ここでは断らない。
 pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
+    // RFN01-75/76: **the left pane's, not a document's** — no Pane or TAB is
+    // acted on, so none has to be valid.
+    match action {
+        ShortcutAction::SearchInFolder => return window.invoke_open_folder_search(),
+        ShortcutAction::ExplorePane => return window.invoke_focus_explore(),
+        _ => {}
+    }
     let target = Target::for_shortcut(window, live);
     if !target.valid(window, live) {
         return;
@@ -2380,6 +2391,7 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::Renumber => Command::List(2, -1),
         ShortcutAction::SpellingStep(back) => Command::SpellingStep(back),
         ShortcutAction::ReadAloud => Command::ReadAloud,
+        ShortcutAction::SearchInFolder | ShortcutAction::ExplorePane => return,
     };
     execute(window, live, &target, command);
 }

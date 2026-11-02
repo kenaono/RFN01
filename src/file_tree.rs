@@ -357,6 +357,20 @@ pub fn path_key(path: &Path) -> String {
     text.replace('/', "\\").to_lowercase()
 }
 
+/// Whether `path` is `root` or somewhere inside it (RFN01-75), compared the way
+/// the tree compares paths ([`path_key`]): with or without `\\?\`, in either
+/// letter case. **A name that only begins the same is not inside**:
+/// `D:\原稿2` is not in `D:\原稿`.
+pub fn is_within(root: &Path, path: &Path) -> bool {
+    let root = path_key(root);
+    let root = root.trim_end_matches('\\');
+    let path = path_key(path);
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
 /// The folder a new file or folder is made in (要件 5.2).
 ///
 /// The selected folder itself, the selected file's folder, or the work folder
@@ -581,6 +595,32 @@ pub fn files_under(
 ///
 /// Files and directories are deduplicated by canonical identity, regardless
 /// of the registration order of overlapping roots.
+#[cfg(test)]
+mod within_tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_is_within_itself_and_its_parents_only() {
+        let root = Path::new(r"D:\原稿");
+        assert!(is_within(root, Path::new(r"D:\原稿")));
+        assert!(is_within(root, Path::new(r"D:\原稿\第1章")));
+        assert!(
+            is_within(root, Path::new(r"\\?\d:\原稿\第1章")),
+            "書き方の違いは同じ場所"
+        );
+        assert!(is_within(
+            Path::new(r"D:\原稿\"),
+            Path::new(r"D:\原稿\第1章")
+        ));
+        assert!(
+            !is_within(root, Path::new(r"D:\原稿2")),
+            "名前の頭が同じだけ"
+        );
+        assert!(!is_within(root, Path::new(r"D:\資料")));
+        assert!(!is_within(root, Path::new(r"D:\")), "親は中ではない");
+    }
+}
+
 #[cfg(test)]
 pub fn files_under_many(
     roots: &[PathBuf],
