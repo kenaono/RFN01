@@ -310,6 +310,13 @@ const PANE_ACTIONS: &[MenuAction] = &[
         "Ctrl+Shift+E",
         ShortcutAction::ExplorePane
     ),
+    // 書き手の求め 2026-11-02: 置換の入口をキーにも。末尾へ足す。
+    menu_action!(
+        "フォルダ内を置換",
+        "Replace in Folder",
+        "Ctrl+Shift+H",
+        ShortcutAction::ReplaceInFolder
+    ),
 ];
 /// ファイルの分類に並べる、メニューから来た操作。
 ///

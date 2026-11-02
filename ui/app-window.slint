@@ -476,6 +476,16 @@ export component AppWindow inherits Window {
         }
     }
 
+    /// `Ctrl+Shift+H`: the same, with the replace field out (書き手の求め
+    /// 2026-11-02: 置換の入口が分からなかった). The Search panel shows its
+    /// replace field always.
+    public function open-folder-replace() {
+        root.open-folder-search();
+        if root.tree-searching {
+            root.tree-replacing = true;
+        }
+    }
+
     /// RFN01-76 (`Ctrl+Shift+E`): the keyboard to the Explore pane — its
     /// filter field, the one thing in it that takes keys (the tree has no
     /// keyboard of its own). A Workspace showing stays; anything else is
@@ -2436,7 +2446,7 @@ export component AppWindow inherits Window {
                             }
                             IconButton {
                                 icon: "M2 5h10l-3-3M14 11H4l3 3";
-                                tip: @tr("Replace with…");
+                                tip: @tr("Replace");
                                 checked: root.tree-replacing;
                                 clicked => { root.tree-replacing = !root.tree-replacing; }
                             }

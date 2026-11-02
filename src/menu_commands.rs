@@ -104,6 +104,8 @@ pub enum ShortcutAction {
     SearchInFolder,
     /// RFN01-76: キーボードをExplore Paneの絞り込み欄へ。
     ExplorePane,
+    /// RFN01-75: フォルダ内を置換する（検索に置換欄を出して開く）。
+    ReplaceInFolder,
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -2372,6 +2374,7 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
     match action {
         ShortcutAction::SearchInFolder => return window.invoke_open_folder_search(),
         ShortcutAction::ExplorePane => return window.invoke_focus_explore(),
+        ShortcutAction::ReplaceInFolder => return window.invoke_open_folder_replace(),
         _ => {}
     }
     let target = Target::for_shortcut(window, live);
@@ -2391,7 +2394,9 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::Renumber => Command::List(2, -1),
         ShortcutAction::SpellingStep(back) => Command::SpellingStep(back),
         ShortcutAction::ReadAloud => Command::ReadAloud,
-        ShortcutAction::SearchInFolder | ShortcutAction::ExplorePane => return,
+        ShortcutAction::SearchInFolder
+        | ShortcutAction::ExplorePane
+        | ShortcutAction::ReplaceInFolder => return,
     };
     execute(window, live, &target, command);
 }
