@@ -3001,8 +3001,8 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     // RFN01-77: the pane a conversion is in, for when the IME moves to another
-    // clause without changing the text (`ime::ClauseWatch`).
-    watch_clauses(&window, &pane_states, &render_cache, &live.composing);
+    // clause without changing the text (`ime::ImeWatch`).
+    watch_ime(&window, &pane_states, &render_cache, &live.composing);
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
@@ -3052,7 +3052,15 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let document = states.document(id);
+            // RFN01-78: a Backspace during a conversion is the IME taking out
+            // what it committed (ATOK's 確定アンドゥ). The conversion stays:
+            // editing clears it, so it is put back once the character is gone.
+            let state = states.of(id);
+            let composing = state.borrow().preedit.clone();
             delete_adjacent_grapheme(&window, id, &document, &states, &cache, true);
+            if !composing.is_empty() {
+                set_pane_preedit(&window, id, &document, &state, &cache, &composing);
+            }
         }
     });
 
@@ -21368,12 +21376,36 @@ fn marks_without_line(marks: &[Vec<Emphasis>], line: usize) -> Vec<Vec<Emphasis>
 /// One function for both panes. The only thing that differed between them was
 /// how a position in the shown text becomes a byte in it, and `PaneText`
 /// answers that — the preview by its own index, the source by walking.
-fn text_with_preedit<'a>(
+/// RFN01-78: and when `replacing` is given, the composition stands **in place
+/// of** that stretch of the shown text rather than at the caret.
+///
+/// **What a conversion over a selection looks like.** The selection is what
+/// the committed text will replace (`insert_pane_text`), so while the
+/// conversion is up the selected characters are not shown and the conversion
+/// stands where they were — the IME is converting *them* when it reconverts,
+/// and showing both would have the writer read the same words twice. Cancel
+/// the conversion and the selection is shown again, untouched.
+fn text_with_composition<'a>(
     shown: &PaneText<'a>,
     caret_utf16: Option<u32>,
     preedit: &str,
+    replacing: Option<(u32, u32)>,
 ) -> (Cow<'a, str>, Option<u32>, Option<(u32, u32)>) {
     let text = shown.text();
+    if let (Some((start, end)), false) = (replacing, preedit.is_empty()) {
+        let from = shown.shown_byte_at_utf16(start as usize);
+        let to = shown.shown_byte_at_utf16(end as usize);
+        let mut rendered = String::with_capacity(text.len() + preedit.len());
+        rendered.push_str(&text[..from]);
+        rendered.push_str(preedit);
+        rendered.push_str(&text[to..]);
+        let preedit_length = preedit.encode_utf16().count() as u32;
+        return (
+            Cow::Owned(rendered),
+            Some(start + preedit_length),
+            Some((start, preedit_length)),
+        );
+    }
     let Some(caret) = caret_utf16 else {
         return (Cow::Borrowed(text), None, None);
     };
@@ -23048,12 +23080,14 @@ fn settle_composition(
     });
 }
 
-/// RFN01-77: redraw a composition when the IME moves to another clause.
+/// What the editor answers the IME with, beyond what winit passes on
+/// (`ime::ImeWatch`): a composition's clauses moving (RFN01-77), and the text
+/// around the caret for a reconversion (RFN01-78).
 ///
 /// Put on once the window has a native handle. **It lives as long as the
 /// window**, so it is never dropped: the subclass takes itself off when the
 /// window is destroyed.
-fn watch_clauses(
+fn watch_ime(
     window: &AppWindow,
     states: &PaneStates,
     cache: &Rc<RefCell<RenderCache>>,
@@ -23071,35 +23105,122 @@ fn watch_clauses(
         if window.window().winit_window().await.is_err() {
             return;
         }
-        let weak = window.as_weak();
-        let watch = ime::ClauseWatch::install(window.window(), move || {
-            let (Some(window), Some(id)) = (weak.upgrade(), composing.get()) else {
-                return;
-            };
-            let state = states.of(id);
-            let text = state.borrow().preedit.clone();
-            if text.is_empty() {
-                return;
+        // Where the text last shown to the IME started, and in which pane:
+        // what a confirmed reconversion counts from.
+        let offered: Rc<Cell<Option<(PaneId, usize)>>> = Rc::default();
+        let changed = {
+            let weak = window.as_weak();
+            let states = states.clone();
+            let cache = cache.clone();
+            let composing = composing.clone();
+            move || {
+                let (Some(window), Some(id)) = (weak.upgrade(), composing.get()) else {
+                    return;
+                };
+                let state = states.of(id);
+                let text = state.borrow().preedit.clone();
+                if text.is_empty() {
+                    return;
+                }
+                let Ok(mut borrowed) = cache.try_borrow_mut() else {
+                    return;
+                };
+                let unchanged =
+                    borrowed.pane(id).view.ime_clauses == ime::clauses(window.window(), &text);
+                drop(borrowed);
+                if !unchanged {
+                    let document = states.document(id);
+                    set_pane_preedit(&window, id, &document, &state, &cache, &text);
+                }
             }
-            let Ok(mut borrowed) = cache.try_borrow_mut() else {
-                return;
-            };
-            let unchanged =
-                borrowed.pane(id).view.ime_clauses == ime::clauses(window.window(), &text);
-            drop(borrowed);
-            if !unchanged {
+        };
+        let around = {
+            let weak = window.as_weak();
+            let states = states.clone();
+            let cache = cache.clone();
+            let offered = offered.clone();
+            move |feed: bool| {
+                let window = weak.upgrade()?;
+                let id = PaneId::from_index(window.get_focused_pane());
+                // **A shell has no text to offer**: what is in its grid is
+                // not something the writer can reconvert.
+                if cache.try_borrow_mut().ok()?.pane(id).terminal.is_some() {
+                    return None;
+                }
                 let document = states.document(id);
-                set_pane_preedit(&window, id, &document, &state, &cache, &text);
+                let state = states.of(id);
+                let state = state.try_borrow().ok()?;
+                let source = document.text.text.try_borrow().ok()?;
+                let (around, from) = editor_interaction::ime_around(&state, &source);
+                offered.set(Some((id, from)));
+                if !feed {
+                    // **Logged as positions only, never the text.**
+                    let line = format!(
+                        "asked reconvert pane={} caret={} selection={:?}",
+                        id.log_name(),
+                        around.caret,
+                        around.selection
+                    );
+                    cache.borrow_mut().log_diag("spec.ime", &line);
+                }
+                Some(around)
             }
-        });
-        std::mem::forget(watch);
+        };
+        let choose = {
+            let weak = window.as_weak();
+            let states = states.clone();
+            let cache = cache.clone();
+            let composing = composing.clone();
+            move |start: u32, end: u32| {
+                let (Some(window), Some((id, from))) = (weak.upgrade(), offered.get()) else {
+                    return false;
+                };
+                let document = states.document(id);
+                let state = states.of(id);
+                let Ok(source) = document.text.text.try_borrow().map(|text| text.clone()) else {
+                    return false;
+                };
+                let chosen = editor_interaction::ime_choose(&state, &source, from, start, end);
+                let line = format!(
+                    "confirm reconvert pane={} range={start}..{end} chosen={chosen}",
+                    id.log_name()
+                );
+                cache.borrow_mut().log_diag("spec.ime", &line);
+                if !chosen {
+                    return false;
+                }
+                composing.set(Some(id));
+                // Drawn from the event loop: the IME is still waiting on this
+                // answer, and the conversion it starts next redraws anyway.
+                let weak = window.as_weak();
+                let cache = cache.clone();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(window) = weak.upgrade() {
+                        let source = document.text.borrow().clone();
+                        refresh_pane_from_state(&window, &cache, &document, id, &state, &source);
+                    }
+                });
+                true
+            }
+        };
+        let host = ime::ImeHost {
+            changed: Rc::new(changed),
+            around: Box::new(around),
+            choose: Box::new(choose),
+            log: Box::new(move |line: &str| {
+                if let Ok(mut cache) = cache.try_borrow_mut() {
+                    cache.log_diag("spec.ime", line);
+                }
+            }),
+        };
+        std::mem::forget(ime::ImeWatch::install(window.window(), host));
     });
 }
 
 /// Show what the IME is composing in a pane, without committing it.
 ///
 /// The string is not in the document and must not reach it: it goes to the
-/// layout only, spliced in at the caret by `text_with_preedit`.
+/// layout only, spliced in at the caret by `text_with_composition`.
 fn set_pane_preedit(
     window: &AppWindow,
     id: PaneId,
@@ -23902,7 +24023,7 @@ mod tests {
         let preview = PreviewDocument::from_source("# 見出し");
         let shown = PaneText::Preview(&preview);
 
-        let (text, caret, range) = text_with_preedit(&shown, Some(2), "変換");
+        let (text, caret, range) = text_with_composition(&shown, Some(2), "変換", None);
 
         assert_eq!(preview.text, "見出し");
         assert_eq!(text, "見出変換し");
@@ -23911,11 +24032,28 @@ mod tests {
     }
 
     #[test]
+    fn a_composition_over_a_selection_stands_in_its_place() {
+        let shown = PaneText::Source("今日はいい天気");
+        // 「いい」(3..5) を選んで再変換している。
+        let (text, caret, range) = text_with_composition(&shown, Some(5), "良い", Some((3, 5)));
+        assert_eq!(
+            text, "今日は良い天気",
+            "選んだ字は隠れ、変換中の字がそこに立つ"
+        );
+        assert_eq!(caret, Some(5));
+        assert_eq!(range, Some((3, 2)));
+        // 変換が終われば（取り消しても）選んだ字はそのまま見える。
+        let (text, _, range) = text_with_composition(&shown, Some(5), "", Some((3, 5)));
+        assert_eq!(text, "今日はいい天気");
+        assert_eq!(range, None);
+    }
+
+    #[test]
     fn borrows_the_preview_when_there_is_no_preedit() {
         let preview = PreviewDocument::from_source("# 見出し\n本文");
         let shown = PaneText::Preview(&preview);
 
-        let (text, _, range) = text_with_preedit(&shown, Some(1), "");
+        let (text, _, range) = text_with_composition(&shown, Some(1), "", None);
 
         assert!(
             matches!(text, Cow::Borrowed(_)),
@@ -24304,7 +24442,8 @@ mod tests {
         let caret = utf16_at_byte(source, "本文".len()) as u32;
 
         let shown = PaneText::Source(source);
-        let (rendered, render_caret, range) = text_with_preedit(&shown, Some(caret), "かん");
+        let (rendered, render_caret, range) =
+            text_with_composition(&shown, Some(caret), "かん", None);
 
         assert_eq!(rendered, "本文かんです");
         assert_eq!(
@@ -24315,7 +24454,7 @@ mod tests {
         assert_eq!(range, Some((caret, 2)));
         assert_eq!(source, "本文です", "the document itself is untouched");
 
-        let (borrowed, _, none) = text_with_preedit(&shown, Some(caret), "");
+        let (borrowed, _, none) = text_with_composition(&shown, Some(caret), "", None);
         assert!(
             matches!(borrowed, Cow::Borrowed(_)),
             "a keystroke without IME must not copy the document"

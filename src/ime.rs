@@ -23,12 +23,13 @@ use windows::Win32::{
         Input::Ime::{
             ATTR_CONVERTED, ATTR_FIXEDCONVERTED, ATTR_INPUT_ERROR, ATTR_TARGET_CONVERTED,
             ATTR_TARGET_NOTCONVERTED, CPS_COMPLETE, GCS_COMPATTR, GCS_COMPSTR,
-            IME_COMPOSITION_STRING, ImmGetCompositionStringW, ImmGetContext,
-            ImmGetConversionStatus, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionFontW,
-            NI_COMPOSITIONSTR,
+            IME_COMPOSITION_STRING, IMR_CONFIRMRECONVERTSTRING, IMR_DOCUMENTFEED,
+            IMR_RECONVERTSTRING, ImmGetCompositionStringW, ImmGetContext, ImmGetConversionStatus,
+            ImmNotifyIME, ImmReleaseContext, ImmSetCompositionFontW, NI_COMPOSITIONSTR,
+            RECONVERTSTRING,
         },
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
-        WindowsAndMessaging::{WM_IME_COMPOSITION, WM_NCDESTROY},
+        WindowsAndMessaging::{WM_IME_COMPOSITION, WM_IME_REQUEST, WM_NCDESTROY},
     },
 };
 
@@ -262,38 +263,59 @@ impl Settled {
     }
 }
 
-/// RFN01-77: tells the editor when the IME's clauses change under a text that
-/// did not.
+/// The editor's side of what the IME asks the window (RFN01-77, RFN01-78).
+pub(crate) struct ImeHost {
+    /// The clauses may have changed under a text that did not (RFN01-77).
+    pub changed: Rc<dyn Fn()>,
+    /// The text around the caret, for a reconversion (`false`) or for the IME
+    /// to read before it converts (`true`, a document feed). `None` declines:
+    /// a shell, or state being changed.
+    pub around: Box<dyn Fn(bool) -> Option<Around>>,
+    /// Select this stretch of the text `around` last offered, in UTF-16 units:
+    /// it is what the IME is about to reconvert.
+    pub choose: Box<dyn Fn(u32, u32) -> bool>,
+    /// A line for the diagnostic log: which requests came, and the answers.
+    pub log: Box<dyn Fn(&str)>,
+}
+
+/// The text the IME is shown (RFN01-78), positions in UTF-16 units of `text`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Around {
+    pub text: String,
+    pub caret: u32,
+    pub selection: Option<(u32, u32)>,
+    /// What is being converted, which is not in `text`.
+    pub composition: String,
+}
+
+/// Watches the window's own IME messages for what winit does not pass on.
 ///
-/// **Moving to the next clause changes no character.** winit passes the
-/// composition on as a string, Slint reports a change only when the string
+/// RFN01-77: **moving to the next clause changes no character.** winit passes
+/// the composition on as a string, Slint reports a change only when the string
 /// changes, and so the thick line stayed on the first clause however often the
-/// writer pressed `→`. This watches the window's own `WM_IME_COMPOSITION`: each
-/// one that carries attributes asks `changed` to look again.
+/// writer pressed `→`. Each `WM_IME_COMPOSITION` that carries attributes asks
+/// `changed` to look again — **from the event loop, not from inside the
+/// message**: it arrives while winit is dispatching, and an IME can send it
+/// from inside a call the editor makes with its state borrowed.
 ///
-/// **`changed` runs from the event loop, not from inside the message.** The
-/// message arrives while winit is dispatching, and an IME can send it from
-/// inside a call the editor makes with its state borrowed; looking then would
-/// trip over that borrow.
-pub(crate) struct ClauseWatch {
+/// RFN01-78: **reconversion is the IME asking**, with `WM_IME_REQUEST`, for
+/// the text around the caret, and then telling which stretch of it it will
+/// convert again. Nothing in winit or Slint answered, so ATOK's 確定アンドゥ
+/// (Ctrl+Backspace) and the 変換 key on a selection did nothing. These are
+/// answered here, at once: the IME waits for the answer.
+pub(crate) struct ImeWatch {
     hwnd: HWND,
-    changed: Rc<dyn Fn()>,
+    host: ImeHost,
 }
 
 /// "RFNI": one subclass per purpose, apart from the title bar's.
 const WATCH_ID: usize = 0x52464e49;
 
-impl ClauseWatch {
+impl ImeWatch {
     /// Start watching `window`, or `None` if it is not a Win32 window yet.
-    pub(crate) fn install(
-        window: &slint::Window,
-        changed: impl Fn() + 'static,
-    ) -> Option<Box<Self>> {
+    pub(crate) fn install(window: &slint::Window, host: ImeHost) -> Option<Box<Self>> {
         let hwnd = native_handle(window)?;
-        let watch = Box::new(Self {
-            hwnd,
-            changed: Rc::new(changed),
-        });
+        let watch = Box::new(Self { hwnd, host });
         // SAFETY: the box is not moved while installed — the subclass holds
         // its address, and `Drop` takes the subclass off before it goes.
         let installed = unsafe {
@@ -308,7 +330,7 @@ impl ClauseWatch {
     }
 }
 
-impl Drop for ClauseWatch {
+impl Drop for ImeWatch {
     fn drop(&mut self) {
         // SAFETY: removing a subclass that may already be gone is harmless.
         unsafe {
@@ -330,16 +352,123 @@ unsafe extern "system" fn watch_proc(
             let _ = RemoveWindowSubclass(hwnd, Some(watch_proc), WATCH_ID);
             return DefSubclassProc(hwnd, message, w, l);
         }
+        let watch = &*(data as *const ImeWatch);
+        if message == WM_IME_REQUEST {
+            let answer = answer_request(&watch.host, w.0 as u32, l.0);
+            let result = match answer {
+                Some(answer) => LRESULT(answer),
+                None => DefSubclassProc(hwnd, message, w, l),
+            };
+            // Only a reconversion's two steps: the position queries and the
+            // document feed come with every key and would drown the log.
+            if matches!(w.0 as u32, IMR_RECONVERTSTRING | IMR_CONFIRMRECONVERTSTRING) {
+                let line = format!("request {} buffer={} result={}", w.0, l.0 != 0, result.0);
+                (watch.host.log)(&line);
+            }
+            return result;
+        }
         // winit first: it is what turns the message into the composition the
         // editor shows, and the attributes are read against that.
         let result = DefSubclassProc(hwnd, message, w, l);
         if message == WM_IME_COMPOSITION && (l.0 as u32 & GCS_COMPATTR.0) != 0 {
-            let watch = &*(data as *const ClauseWatch);
-            let changed = watch.changed.clone();
+            let changed = watch.host.changed.clone();
             slint::Timer::single_shot(Duration::ZERO, move || changed());
         }
         result
     }
+}
+
+/// RFN01-78: answer one `WM_IME_REQUEST`, or `None` to leave it to Windows.
+///
+/// # Safety
+/// `buffer` is the message's `lParam`: null, or a `RECONVERTSTRING` the IME
+/// owns, of the size its `dwSize` says.
+unsafe fn answer_request(host: &ImeHost, request: u32, buffer: isize) -> Option<isize> {
+    match request {
+        IMR_RECONVERTSTRING | IMR_DOCUMENTFEED => {
+            let feed = request == IMR_DOCUMENTFEED;
+            let Some(around) = (host.around)(feed) else {
+                return Some(0);
+            };
+            let (text, offered) = offered_text(&around, feed);
+            let bytes = reconvert_bytes(&text, offered);
+            if buffer == 0 {
+                return Some(bytes.len() as isize);
+            }
+            let target = buffer as *mut u8;
+            // SAFETY: the IME's buffer, which says its own size first.
+            let room = unsafe { (*(buffer as *const RECONVERTSTRING)).dwSize } as usize;
+            if room < bytes.len() {
+                return Some(0);
+            }
+            // SAFETY: checked against the room the IME gave.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len()) };
+            Some(bytes.len() as isize)
+        }
+        IMR_CONFIRMRECONVERTSTRING => {
+            if buffer == 0 {
+                return Some(0);
+            }
+            // SAFETY: as above; only the header is read.
+            let header = unsafe { &*(buffer as *const RECONVERTSTRING) };
+            let (start, end) = confirmed_range(header);
+            Some((host.choose)(start, end) as isize)
+        }
+        _ => None,
+    }
+}
+
+/// The text a request is answered with, in UTF-16, and the stretch in it the
+/// IME is pointed at — `(start, length)` (RFN01-78).
+///
+/// A reconversion points at the selection, or at nothing at the caret and lets
+/// the IME pick the word there. **A document feed has the conversion in it**,
+/// where it stands — over the selection it will replace, or at the caret — so
+/// the IME reads the words on either side of what it is converting.
+pub(crate) fn offered_text(around: &Around, feed: bool) -> (Vec<u16>, (u32, u32)) {
+    let units: Vec<u16> = around.text.encode_utf16().collect();
+    let length = units.len() as u32;
+    let (start, end) = around.selection.unwrap_or((around.caret, around.caret));
+    let (start, end) = (start.min(length), end.min(length).max(start.min(length)));
+    if feed && !around.composition.is_empty() {
+        let composing: Vec<u16> = around.composition.encode_utf16().collect();
+        let mut text = units[..start as usize].to_vec();
+        text.extend_from_slice(&composing);
+        text.extend_from_slice(&units[end as usize..]);
+        return (text, (start, composing.len() as u32));
+    }
+    (units, (start, end - start))
+}
+
+/// A `RECONVERTSTRING` with its text after it, as the IME reads it: lengths in
+/// characters, offsets in bytes, the stretch counted from the text's start.
+pub(crate) fn reconvert_bytes(text: &[u16], (start, length): (u32, u32)) -> Vec<u8> {
+    let header = std::mem::size_of::<RECONVERTSTRING>() as u32;
+    let size = header + (text.len() as u32 + 1) * 2;
+    let fields = [
+        size,
+        0,
+        text.len() as u32,
+        header,
+        length,
+        start * 2,
+        length,
+        start * 2,
+    ];
+    let mut bytes = Vec::with_capacity(size as usize);
+    for field in fields {
+        bytes.extend_from_slice(&field.to_le_bytes());
+    }
+    for unit in text.iter().chain(std::iter::once(&0)) {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+/// The stretch the IME settled on, `(start, end)` in UTF-16 units of the text.
+fn confirmed_range(header: &RECONVERTSTRING) -> (u32, u32) {
+    let start = header.dwCompStrOffset / 2;
+    (start, start + header.dwCompStrLen)
 }
 
 /// Runs of the same attribute, as clauses (RFN01-77).
@@ -428,6 +557,70 @@ mod tests {
         assert_eq!(look_of(4), ClauseLook::Error);
         assert_eq!(look_of(5), ClauseLook::Converted);
         assert!(clauses_from_attributes(&[]).is_empty());
+    }
+
+    fn around(text: &str, caret: u32, selection: Option<(u32, u32)>, composition: &str) -> Around {
+        Around {
+            text: text.to_owned(),
+            caret,
+            selection,
+            composition: composition.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_reconversion_points_at_the_selection_or_the_caret() {
+        let units = |text: &str| text.encode_utf16().collect::<Vec<_>>();
+        let selected = around("今日はいい天気", 5, Some((3, 5)), "");
+        assert_eq!(
+            offered_text(&selected, false),
+            (units("今日はいい天気"), (3, 2))
+        );
+        let at_caret = around("今日はいい天気", 3, None, "");
+        assert_eq!(
+            offered_text(&at_caret, false),
+            (units("今日はいい天気"), (3, 0))
+        );
+    }
+
+    #[test]
+    fn a_document_feed_has_the_conversion_where_it_stands() {
+        let units = |text: &str| text.encode_utf16().collect::<Vec<_>>();
+        let typing = around("今日は天気", 3, None, "いい");
+        assert_eq!(
+            offered_text(&typing, true),
+            (units("今日はいい天気"), (3, 2))
+        );
+        // 選んだ字を置き換える変換は、選んだ字の代わりに立つ。
+        let over = around("今日はよい天気", 5, Some((3, 5)), "いい");
+        assert_eq!(offered_text(&over, true), (units("今日はいい天気"), (3, 2)));
+        // 変換していなければ、再変換と同じ。
+        let idle = around("今日は", 3, None, "");
+        assert_eq!(offered_text(&idle, true), (units("今日は"), (3, 0)));
+    }
+
+    #[test]
+    fn the_reconvert_string_is_laid_out_as_windows_reads_it() {
+        let text: Vec<u16> = "あいう".encode_utf16().collect();
+        let bytes = reconvert_bytes(&text, (1, 2));
+        let field = |at: usize| u32::from_le_bytes(bytes[at * 4..at * 4 + 4].try_into().unwrap());
+        assert_eq!(bytes.len(), 32 + 4 * 2, "見出し32バイト＋3字＋終端");
+        assert_eq!(field(0), bytes.len() as u32, "dwSize");
+        assert_eq!(field(2), 3, "dwStrLen は字数");
+        assert_eq!(field(3), 32, "dwStrOffset はバイト");
+        assert_eq!(
+            (field(4), field(5)),
+            (2, 2),
+            "dwCompStrLen は字数、Offset はバイト"
+        );
+        assert_eq!((field(6), field(7)), (2, 2));
+        assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 'い' as u16);
+        let header = RECONVERTSTRING {
+            dwCompStrOffset: 2,
+            dwCompStrLen: 2,
+            ..Default::default()
+        };
+        assert_eq!(confirmed_range(&header), (1, 3));
     }
 
     #[test]

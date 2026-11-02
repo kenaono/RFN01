@@ -668,7 +668,8 @@ export component EditorPane inherits Rectangle {
             return accept;
         }
         if (event.modifiers.control
-            && (event.text == "h" || event.text == "H" || event.text == "\u{8}")) {
+            && (event.text == "h" || event.text == "H")) {
+            // RFN01-78: `\u{8}`はBackspaceでもあるので受けない。
             root.focus-trace("bar-ctrl-h-received");
             root.find-requested(true);
             return accept;

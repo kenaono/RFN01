@@ -231,3 +231,142 @@ pub(crate) fn pointer(
         selection,
     }
 }
+
+/// RFN01-78: how far either side of the caret the IME is shown, in bytes.
+/// A paragraph can be a whole novel on one line; the IME needs the sentence.
+const IME_REACH: usize = 3000;
+
+/// What the IME is shown of `source` around the caret (RFN01-78), and the byte
+/// the shown text starts at — the place [`ime_choose`] counts from.
+///
+/// **The caret's own line, never more**: a reconversion that crossed a line
+/// would replace a line break, and the composition is drawn in place of the
+/// selection only within one line (`text_with_composition`).
+pub(crate) fn ime_around(state: &EditorState, source: &str) -> (ime::Around, usize) {
+    let caret = floor_boundary(source, state.caret_source_byte.unwrap_or(0));
+    let line_start = source_line_start(source, caret);
+    let line_end = source[caret..]
+        .find('\n')
+        .map_or(source.len(), |at| caret + at);
+    let from = floor_boundary(source, caret.saturating_sub(IME_REACH).max(line_start));
+    let to = ceil_boundary(source, (caret + IME_REACH).min(line_end));
+    let units = |text: &str| text.encode_utf16().count() as u32;
+    let selection = selection_source_range(state)
+        .filter(|(start, end)| *start >= from && *end <= to)
+        .map(|(start, end)| (units(&source[from..start]), units(&source[from..end])));
+    let around = ime::Around {
+        text: source[from..to].to_owned(),
+        caret: units(&source[from..caret]),
+        selection,
+        composition: state.preedit.clone(),
+    };
+    (around, from)
+}
+
+/// Select what the IME is about to reconvert (RFN01-78): `start..end` in
+/// UTF-16 units of the text [`ime_around`] offered from byte `from`.
+///
+/// **Selected, not taken out.** The conversion is drawn in its place while it
+/// is up, the committed text replaces it as typing over a selection does — one
+/// step to undo — and a cancelled conversion leaves it as it was.
+pub(crate) fn ime_choose(
+    state: &Rc<RefCell<EditorState>>,
+    source: &str,
+    from: usize,
+    start: u32,
+    end: u32,
+) -> bool {
+    let Some(text) = source.get(from..) else {
+        return false;
+    };
+    let byte_at = |target: u32| {
+        let mut units = 0;
+        for (at, character) in text.char_indices() {
+            if units >= target {
+                return Some(from + at);
+            }
+            units += character.len_utf16() as u32;
+        }
+        (units >= target).then_some(source.len())
+    };
+    let (Some(start), Some(end)) = (byte_at(start), byte_at(end)) else {
+        return false;
+    };
+    if end < start || source[start..end].contains('\n') {
+        return false;
+    }
+    select_range(state, source, start, end);
+    true
+}
+
+fn floor_boundary(text: &str, byte: usize) -> usize {
+    let mut byte = byte.min(text.len());
+    while !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte
+}
+
+fn ceil_boundary(text: &str, byte: usize) -> usize {
+    let mut byte = byte.min(text.len());
+    while !text.is_char_boundary(byte) {
+        byte += 1;
+    }
+    byte
+}
+
+#[cfg(test)]
+mod ime_tests {
+    use super::*;
+
+    fn state_at(caret: usize, anchor: Option<usize>) -> EditorState {
+        EditorState {
+            caret_source_byte: Some(caret),
+            selection_anchor_source_byte: anchor,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_ime_is_shown_the_caret_line_only() {
+        let source = "一行目\n今日はいい天気\n三行目";
+        let caret = source.find("天").unwrap();
+        let (around, from) = ime_around(&state_at(caret, None), source);
+        assert_eq!(around.text, "今日はいい天気");
+        assert_eq!(from, source.find("今").unwrap());
+        assert_eq!(around.caret, 5);
+        assert_eq!(around.selection, None);
+    }
+
+    #[test]
+    fn the_selection_is_shown_in_utf16_units() {
+        let source = "今日はいい天気";
+        let start = source.find("い").unwrap();
+        let end = source.find("天").unwrap();
+        let (around, _) = ime_around(&state_at(end, Some(start)), source);
+        assert_eq!(around.selection, Some((3, 5)));
+    }
+
+    #[test]
+    fn a_long_line_is_cut_around_the_caret() {
+        let source = "あ".repeat(5000);
+        let caret = 3 * 2500;
+        let (around, from) = ime_around(&state_at(caret, None), &source);
+        assert_eq!(from, caret - IME_REACH);
+        assert_eq!(around.text.len(), 2 * IME_REACH);
+        assert_eq!(around.caret, 1000);
+    }
+
+    #[test]
+    fn the_stretch_the_ime_chose_is_selected() {
+        let source = "一行目\n今日はいい天気";
+        let state = Rc::new(RefCell::new(state_at(source.len(), None)));
+        let from = source.find("今").unwrap();
+        assert!(ime_choose(&state, source, from, 3, 5));
+        let chosen = selection_source_range(&state.borrow()).unwrap();
+        assert_eq!(&source[chosen.0..chosen.1], "いい");
+        // 行をまたぐ・本文の外は選ばない。
+        assert!(!ime_choose(&state, source, 0, 2, 5));
+        assert!(!ime_choose(&state, source, from, 3, 99));
+    }
+}
