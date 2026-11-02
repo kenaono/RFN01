@@ -405,56 +405,65 @@ export component AppWindow inherits Window {
     property <bool> workspace-filter-visible: true;
     callback tree-filter-changed();
 
-    /// RFN01-75: the tree a folder search was opened from — 0 Explorer, 4
-    /// Workspace — or -1 when the search is the Search panel itself.
-    ///
-    /// **The search stands in the tree's place** (書き手の選択 2026-11-02:
-    /// 同じ場所で切り替える). It is the Search panel, shown under the tree's own
-    /// rail button; pressing 🔍 again or Escape puts the tree back, open as it
-    /// was and scrolled where it was (`tree-scroll-kept`).
-    in-out property <int> search-from: -1;
+    /// RFN01-75: the tree is being searched — the search field stands over it
+    /// and the tree shows only the files the words were found in, with the
+    /// lines under each (書き手の合意 2026-11-02: 検索してもTreeは見えたまま、
+    /// 新しいWindowは開かない). **Each time from empty**: 🔍 again or Escape
+    /// clears the words and the results, and the whole tree comes back.
+    in-out property <bool> tree-searching;
+    /// The replace field under the search field, shown when asked for.
+    property <bool> tree-replacing;
     property <length> tree-scroll-kept;
-    // **Any other panel ends it**, whoever switched — Rust switches too (a
-    // document shown in the tree, a folder searched from a row).
+    // **Another tree ends it**: its results would be another folder's answer.
     changed left-tab => {
-        if root.left-tab != 1 {
-            root.search-from = -1;
+        if root.tree-searching {
+            root.close-tree-search();
         }
     }
     /// Bumped to put the keyboard in the left pane's first field: the search
-    /// field when a search is showing, the filter when a tree is (RFN01-76).
+    /// field when the tree is being searched, the filter otherwise (RFN01-76).
     property <int> left-field-generation;
 
-    function enter-tree-search(from: int) {
-        root.search-from = from;
-        root.tree-open = true;
-        root.left-tab = 1;
-        root.left-tab-chosen(1);
+    /// Put the keyboard in that field (Rust: a folder searched from a row).
+    public function focus-left-field() {
         root.left-field-generation += 1;
     }
 
-    /// Put the tree back in the search's place, if the search came from one.
-    public function leave-tree-search() {
-        if root.search-from >= 0 {
-            root.left-tab = root.search-from;
-            root.search-from = -1;
-            root.left-tab-chosen(root.left-tab);
+    /// Start searching the tree showing, from empty and over all of it.
+    public function open-tree-search() {
+        root.tree-searching = true;
+        root.tree-replacing = false;
+        root.folder-needle = "";
+        root.search-folder-reset();
+        root.left-field-generation += 1;
+    }
+
+    /// Stop searching: the words and results go, the whole tree comes back.
+    public function close-tree-search() {
+        if !root.tree-searching {
+            return;
         }
+        root.tree-searching = false;
+        root.tree-replacing = false;
+        root.folder-needle = "";
+        root.folder-search-requested();
     }
 
     /// RFN01-75/76 (`Ctrl+Shift+F`): search the folder from wherever the
-    /// writer is. **In the tree's place when a tree is showing**, or when the
-    /// left pane is closed — the Explorer is what opens; the Search panel when
+    /// writer is. **Over the tree when a tree is showing**, or when the left
+    /// pane is closed — the Explorer is what opens; the Search panel when
     /// another panel (Outline, Tags…) is up, which is not a list of files.
     public function open-folder-search() {
         if root.tree-open && root.left-tab == 1 {
             root.left-field-generation += 1;
         } else if root.tree-open && (root.left-tab == 0 || root.left-tab == 4) {
-            root.enter-tree-search(root.left-tab);
+            root.open-tree-search();
         } else if !root.tree-open {
-            root.enter-tree-search(0);
+            root.tree-open = true;
+            root.left-tab = 0;
+            root.left-tab-chosen(0);
+            root.open-tree-search();
         } else {
-            root.search-from = -1;
             root.left-tab = 1;
             root.left-tab-chosen(1);
             root.left-field-generation += 1;
@@ -466,7 +475,7 @@ export component AppWindow inherits Window {
     /// keyboard of its own). A Workspace showing stays; anything else is
     /// replaced by the Explorer.
     public function focus-explore() {
-        root.leave-tree-search();
+        root.close-tree-search();
         if !root.tree-open || (root.left-tab != 0 && root.left-tab != 4) {
             root.tree-open = true;
             root.left-tab = 0;
@@ -479,9 +488,9 @@ export component AppWindow inherits Window {
     }
 
     /// Escape in a field of the left pane: the keyboard back to the text, and
-    /// the tree back if a search had taken its place (RFN01-76).
+    /// the whole tree back if it was being searched (RFN01-76).
     function left-field-escaped() {
-        root.leave-tree-search();
+        root.close-tree-search();
         root.focus-generation += 1;
     }
 
@@ -1660,10 +1669,9 @@ export component AppWindow inherits Window {
                     x: 7px; y: root.custom-title ? 4px : 40px;
                     icon: "M1 1h5v5H1zM10 1h5v5h-5zM1 10h5v5H1zM10 10h5v5h-5z";
                     tip: @tr("Workspace");
-                    checked: root.tree-open && (root.left-tab == 4 || (root.left-tab == 1 && root.search-from == 4));
+                    checked: root.tree-open && root.left-tab == 4;
                     clicked => {
-                        root.tree-open = !(root.tree-open && (root.left-tab == 4 || root.search-from == 4));
-                        root.search-from = -1;
+                        root.tree-open = !(root.tree-open && root.left-tab == 4);
                         root.left-tab = 4;
                         root.left-tab-chosen(4);
                         root.focus-generation += 1;
@@ -1679,10 +1687,9 @@ export component AppWindow inherits Window {
                     y: root.custom-title ? 34px : 70px;
                     icon: Icons.folder;
                     tip: @tr("Explorer");
-                    checked: root.tree-open && (root.left-tab == 0 || (root.left-tab == 1 && root.search-from == 0));
+                    checked: root.tree-open && root.left-tab == 0;
                     clicked => {
-                        root.tree-open = !(root.tree-open && (root.left-tab == 0 || root.search-from == 0));
-                        root.search-from = -1;
+                        root.tree-open = !(root.tree-open && root.left-tab == 0);
                         root.left-tab = 0;
                         root.left-tab-chosen(0);
                         root.focus-generation += 1;
@@ -1694,10 +1701,9 @@ export component AppWindow inherits Window {
                     y: root.custom-title ? 64px : 100px;
                     icon: Icons.search;
                     tip: @tr("Search");
-                    checked: root.tree-open && root.left-tab == 1 && root.search-from < 0;
+                    checked: root.tree-open && root.left-tab == 1;
                     clicked => {
-                        root.tree-open = !(root.tree-open && root.left-tab == 1 && root.search-from < 0);
-                        root.search-from = -1;
+                        root.tree-open = !(root.tree-open && root.left-tab == 1);
                         root.left-tab = 1;
                         root.left-tab-chosen(1);
                         root.focus-generation += 1;
@@ -2085,7 +2091,7 @@ export component AppWindow inherits Window {
                         }
                             IconButton { icon: Icons.plus; tip: @tr("Add Folder…"); clicked => { root.workspace-tree-command(0); } }
                             IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
-                            IconButton { icon: Icons.search; tip: @tr("Search in Folder"); clicked => { root.enter-tree-search(4); } }
+                            IconButton { icon: Icons.search; tip: @tr("Search in Folder"); checked: root.tree-searching; clicked => { if root.tree-searching { root.close-tree-search(); } else { root.open-tree-search(); } } }
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
                     }
@@ -2301,7 +2307,14 @@ export component AppWindow inherits Window {
                             if root.work-folder != "": IconButton {
                                 icon: Icons.search;
                                 tip: @tr("Search in Folder");
-                                clicked => { root.enter-tree-search(0); }
+                                checked: root.tree-searching;
+                                clicked => {
+                                    if root.tree-searching {
+                                        root.close-tree-search();
+                                    } else {
+                                        root.open-tree-search();
+                                    }
+                                }
                             }
                             if root.work-folder != "": IconButton {
                                 icon: "M8 1v3M8 12v3M1 8h3M12 8h3M3.5 3.5h9v9h-9z";
@@ -2397,7 +2410,64 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.left-tab == 0 || (root.left-tab == 4 && root.workspace-active && root.workspace-filter-visible): Field {
+                    // RFN01-75: the search over the tree. **One field at a time** — the
+                    // file-name filter steps aside while the words are being looked for.
+                    if root.tree-searching && (root.left-tab == 0 || (root.left-tab == 4 && root.workspace-active)): VerticalLayout {
+                        // Its own height and no more: the tree below takes the rest.
+                        vertical-stretch: 0;
+                        spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 2px;
+                            Field {
+                                height: 28px;
+                                placeholder: @tr("Search in folder");
+                                text <=> root.folder-needle;
+                                init => { self.take-focus(); }
+                                accepted => { root.folder-search-requested(); }
+                                escaped => { root.left-field-escaped(); }
+                                property <int> asked: root.left-field-generation;
+                                changed asked => { self.take-focus(); }
+                            }
+                            IconButton {
+                                icon: "M2 5h10l-3-3M14 11H4l3 3";
+                                tip: @tr("Replace with…");
+                                checked: root.tree-replacing;
+                                clicked => { root.tree-replacing = !root.tree-replacing; }
+                            }
+                        }
+                        if root.tree-replacing: HorizontalLayout {
+                            spacing: 4px;
+                            Field {
+                                height: 28px;
+                                placeholder: @tr("Replace with…");
+                                text <=> root.folder-replacement;
+                                accepted => { root.folder-replace-requested(); }
+                                escaped => { root.left-field-escaped(); }
+                            }
+                            TextButton {
+                                title: @tr("Replace All");
+                                clicked => { root.folder-replace-requested(); }
+                            }
+                        }
+                        // Where it looks, when narrowed to one folder, and what it found.
+                        if root.search-folder-scoped || root.folder-status != "": HorizontalLayout {
+                            height: 22px;
+                            spacing: 4px;
+                            if root.search-folder-scoped: TextButton {
+                                title: root.search-folder + " ×";
+                                clicked => { root.search-folder-reset(); }
+                            }
+                            Text {
+                                text: root.folder-status;
+                                color: Tok.accent;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    if !root.tree-searching && (root.left-tab == 0 || (root.left-tab == 4 && root.workspace-active && root.workspace-filter-visible)): Field {
                         height: 28px;
                         placeholder: @tr("Filter files…");
                         text <=> root.tree-filter;
@@ -2411,28 +2481,6 @@ export component AppWindow inherits Window {
                     // work folder, so it has its own field. The find bar above
                     // the editor asks about one document; the two are different
                     // questions and share nothing.
-                    // RFN01-75: a search that took a tree's place says whose place,
-                    // and gives it back with the same 🔍 that opened it.
-                    if root.left-tab == 1 && root.search-from >= 0: HorizontalLayout {
-                        height: 34px;
-                        padding-left: 10px;
-                        padding-right: 4px;
-                        spacing: 2px;
-                        Text {
-                            text: root.search-from == 4 ? @tr("Workspace") : @tr("Explorer");
-                            color: Tok.ink-muted;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                            overflow: elide;
-                        }
-                        IconButton {
-                            icon: Icons.search;
-                            tip: @tr("Back to Tree");
-                            checked: true;
-                            clicked => { root.leave-tree-search(); }
-                        }
-                    }
                     if root.left-tab == 1: Rectangle {
                         background: Tok.accent-faint;
                         vertical-stretch: 0;
@@ -2607,12 +2655,12 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
-                        // RFN01-75: **the tree comes back where it was.** One list
-                        // serves every panel, so the search's rows would leave
-                        // it scrolled wherever the results were.
-                        property <int> searching-from: root.search-from;
-                        changed searching-from => {
-                            if self.searching-from >= 0 {
+                        // RFN01-75: **the tree comes back where it was.** The search
+                        // shows the found files in these same rows, which would leave
+                        // the tree scrolled wherever the results were.
+                        property <bool> searching: root.tree-searching;
+                        changed searching => {
+                            if self.searching {
                                 root.tree-scroll-kept = self.viewport-y;
                             } else {
                                 scroll-back.running = true;

@@ -2184,8 +2184,12 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(error) = wallpaper::refresh_if_changed(&window) {
                 report_wallpaper_error(&window, &watch_live.cache, &error);
             }
+            // RFN01-75: not over a search — its rows are the found files, drawn
+            // again whenever the search answers, and the plain tree read here
+            // would put the whole tree back under the search field.
             if window.get_tree_open()
                 && matches!(window.get_left_tab(), 0 | 4)
+                && !window.get_tree_searching()
                 && !window.get_tree_refresh_blocked()
                 && !window.get_question_open()
                 && !window.get_diff_active()
@@ -6749,6 +6753,10 @@ fn editor_area(window: &AppWindow) -> Rect {
 /// The work folder, and which of its folders the writer has opened.
 #[derive(Default)]
 struct WorkFolder {
+    /// RFN01-75: while the tree is searched, which result each drawn row is —
+    /// a found file's row or one of its lines — and `None` for a folder.
+    /// Empty when the tree is not searched.
+    search_rows: Vec<Option<usize>>,
     /// RFN01-70: 一括置換の結果。置換のあとの探し直しの答えに添えて言う——答えは
     /// 後から届くので、先に言っておいても上書きされる。
     replaced_note: Option<String>,
@@ -6823,7 +6831,9 @@ impl WorkFolder {
             return false;
         };
         let (roots, _) = tree_roots(self);
-        if roots.iter().any(|root| file_tree::is_within(root, scope)) {
+        // With no tree there is nothing to be outside of: the narrowed folder
+        // is the whole of what can be searched.
+        if roots.is_empty() || roots.iter().any(|root| file_tree::is_within(root, scope)) {
             return false;
         }
         self.searching = None;
@@ -7101,11 +7111,6 @@ fn publish_left(window: &AppWindow, live: &Live) {
 /// either way**: the answer comes from another thread, and until it does the
 /// other tree's results would stand under this tree's name.
 fn search_in_new_place(window: &AppWindow, live: &Live) {
-    match window.get_search_from() {
-        0 => live.folder.borrow_mut().set_workspace_view(false),
-        4 => live.folder.borrow_mut().set_workspace_view(true),
-        _ => {}
-    }
     if live.folder.borrow_mut().drop_scope_outside_tree() {
         write_session(window, live);
     }
@@ -7847,6 +7852,10 @@ fn folder_search_roots(live: &Live, needle: &str) -> Vec<PathBuf> {
 }
 
 fn search_work_folder(window: &AppWindow, live: &Live) {
+    // RFN01-75: never a folder outside the tree being searched.
+    if live.folder.borrow_mut().drop_scope_outside_tree() {
+        show_searched_folder(window, live);
+    }
     let needle = window.get_folder_needle().to_string();
     let roots = folder_search_roots(live, &needle);
     if roots.is_empty() {
@@ -8099,19 +8108,95 @@ fn publish_tree(window: &AppWindow, live: &Live) {
         live.tree_paths.borrow_mut().clear();
         return;
     }
+    if let Some((rows, found)) = searched_tree_rows(window, live, &roots, multi) {
+        drop(folder);
+        live.folder.borrow_mut().search_rows = found;
+        publish_tree_rows(window, live, rows);
+        return;
+    }
     let rows = if multi {
         file_tree::multi_rows(&roots, &folder.expanded, &file_tree::read_folder)
     } else {
         file_tree::rows(&roots[0], &folder.expanded, &file_tree::read_folder)
     };
     drop(folder);
+    live.folder.borrow_mut().search_rows.clear();
     publish_tree_rows(window, live, rows);
+}
+
+/// RFN01-75: the tree as the search over it shows it — the folders holding
+/// what was found, each found file, and under it the lines the words are on
+/// (書き手の合意 2026-11-02). Beside the rows, which result each one is.
+///
+/// `None` when the tree is not being searched, or nothing has been asked
+/// yet: the whole tree is what shows then.
+fn searched_tree_rows(
+    window: &AppWindow,
+    live: &Live,
+    roots: &[PathBuf],
+    multi: bool,
+) -> Option<(Vec<file_tree::Row>, Vec<Option<usize>>)> {
+    if !window.get_tree_searching() || window.get_folder_needle().is_empty() {
+        return None;
+    }
+    let results = live.results.borrow();
+    // The results come as a file's row followed by its lines.
+    let mut files: Vec<(PathBuf, usize, Vec<usize>)> = Vec::new();
+    for (index, row) in results.iter().enumerate() {
+        if !row.under_file {
+            files.push((row.path.clone(), index, Vec::new()));
+        } else if let Some(file) = files.last_mut() {
+            file.2.push(index);
+        }
+    }
+    let paths: Vec<PathBuf> = files.iter().map(|file| file.0.clone()).collect();
+    let tree = file_tree::rows_holding(roots, multi, &paths, &file_tree::read_folder);
+    let by_key: HashMap<String, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(at, file)| (file_tree::path_key(&file.0), at))
+        .collect();
+    let mut rows = Vec::with_capacity(tree.len() + results.len());
+    let mut found = Vec::with_capacity(tree.len() + results.len());
+    for row in tree {
+        let file = (!row.folder)
+            .then(|| by_key.get(&file_tree::path_key(&row.path)))
+            .flatten();
+        let Some(&file) = file else {
+            rows.push(row);
+            found.push(None);
+            continue;
+        };
+        let (_, own, lines) = &files[file];
+        let depth = row.depth;
+        let path = row.path.clone();
+        rows.push(file_tree::Row {
+            name: format!("{}  ({})", row.name, lines.len()),
+            ..row
+        });
+        found.push(Some(*own));
+        for &line in lines {
+            rows.push(file_tree::Row {
+                name: results[line].text.clone(),
+                path: path.clone(),
+                folder: false,
+                depth: depth + 1,
+                open: false,
+                is_root: false,
+            });
+            found.push(Some(line));
+        }
+    }
+    Some((rows, found))
 }
 
 fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::Row>) {
     let mut folder = live.folder.borrow_mut();
+    // RFN01-75: a searched tree is already cut down, and its rows are counted
+    // against the results (`search_rows`) — nothing is taken out or put in.
+    let searched = !folder.search_rows.is_empty();
     let filter = folder.tree_filter.trim().to_lowercase();
-    if !filter.is_empty() {
+    if !filter.is_empty() && !searched {
         // Keep folders as navigation and section boundaries; filter only visible files.
         rows.retain(|row| row.folder || row.name.to_lowercase().contains(&filter));
     }
@@ -8119,7 +8204,7 @@ fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::R
     if roots.is_empty() {
         return;
     }
-    if let Some((parent, is_folder)) = &folder.creating {
+    if let Some((parent, is_folder)) = folder.creating.as_ref().filter(|_| !searched) {
         let (at, depth) = rows
             .iter()
             .position(|row| &row.path == parent)
@@ -9615,6 +9700,19 @@ fn workspace_reset_after_read_error(window: &AppWindow, live: &Live) {
 /// file already open somewhere is not opened twice — the tab holding it is
 /// brought forward instead, which is what 要件 6.3 means by a tab per file.
 fn activate_tree_row(window: &AppWindow, live: &Live, index: usize) {
+    // RFN01-75: a found file or line in the searched tree goes where the
+    // search panel's row would.
+    let found = live
+        .folder
+        .borrow()
+        .search_rows
+        .get(index)
+        .copied()
+        .flatten();
+    if let Some(result) = found {
+        open_result(window, live, result);
+        return;
+    }
     let Some(path) = live.tree_paths.borrow().get(index).cloned() else {
         return;
     };
@@ -11138,14 +11236,12 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             let Some(into) = into else {
                 return;
             };
+            // RFN01-75: **over the tree**, like 🔍 — narrowed to the row's
+            // folder, from empty, with the keyboard in the field.
+            window.set_folder_needle(SharedString::new());
+            window.set_tree_searching(true);
             search_in_folder(window, live, Some(into));
-            // RFN01-75: in the tree's place, like 🔍 — 🔍 again or Escape gives
-            // the tree back.
-            let tab = window.get_left_tab();
-            if tab == LeftTab::Explorer.index() || tab == LeftTab::Workspace.index() {
-                window.set_search_from(tab);
-            }
-            window.set_left_tab(LeftTab::Search.index());
+            window.invoke_focus_left_field();
             publish_left(window, live);
         }
     }
