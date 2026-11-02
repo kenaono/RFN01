@@ -12,14 +12,21 @@
 //! of 2700 (270 degrees, in tenths) turns it. MS-IME and ATOK both answer by
 //! turning their candidate list.
 
+use std::rc::Rc;
+use std::time::Duration;
+
 use slint::ComponentHandle;
 use windows::Win32::{
-    Foundation::HWND,
+    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     Graphics::Gdi::{DEFAULT_CHARSET, LOGFONTW, SHIFTJIS_CHARSET},
-    UI::Input::Ime::{
-        ATTR_CONVERTED, ATTR_FIXEDCONVERTED, ATTR_INPUT_ERROR, ATTR_TARGET_CONVERTED,
-        ATTR_TARGET_NOTCONVERTED, GCS_COMPATTR, GCS_COMPSTR, IME_COMPOSITION_STRING,
-        ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, ImmSetCompositionFontW,
+    UI::{
+        Input::Ime::{
+            ATTR_CONVERTED, ATTR_FIXEDCONVERTED, ATTR_INPUT_ERROR, ATTR_TARGET_CONVERTED,
+            ATTR_TARGET_NOTCONVERTED, GCS_COMPATTR, GCS_COMPSTR, IME_COMPOSITION_STRING,
+            ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, ImmSetCompositionFontW,
+        },
+        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+        WindowsAndMessaging::{WM_IME_COMPOSITION, WM_NCDESTROY},
     },
 };
 
@@ -176,6 +183,86 @@ pub(crate) fn clauses(window: &slint::Window, text: &str) -> Vec<ImeClause> {
             return Vec::new();
         }
         clauses_from_attributes(&attributes)
+    }
+}
+
+/// RFN01-77: tells the editor when the IME's clauses change under a text that
+/// did not.
+///
+/// **Moving to the next clause changes no character.** winit passes the
+/// composition on as a string, Slint reports a change only when the string
+/// changes, and so the thick line stayed on the first clause however often the
+/// writer pressed `→`. This watches the window's own `WM_IME_COMPOSITION`: each
+/// one that carries attributes asks `changed` to look again.
+///
+/// **`changed` runs from the event loop, not from inside the message.** The
+/// message arrives while winit is dispatching, and an IME can send it from
+/// inside a call the editor makes with its state borrowed; looking then would
+/// trip over that borrow.
+pub(crate) struct ClauseWatch {
+    hwnd: HWND,
+    changed: Rc<dyn Fn()>,
+}
+
+/// "RFNI": one subclass per purpose, apart from the title bar's.
+const WATCH_ID: usize = 0x52464e49;
+
+impl ClauseWatch {
+    /// Start watching `window`, or `None` if it is not a Win32 window yet.
+    pub(crate) fn install(
+        window: &slint::Window,
+        changed: impl Fn() + 'static,
+    ) -> Option<Box<Self>> {
+        let hwnd = native_handle(window)?;
+        let watch = Box::new(Self {
+            hwnd,
+            changed: Rc::new(changed),
+        });
+        // SAFETY: the box is not moved while installed — the subclass holds
+        // its address, and `Drop` takes the subclass off before it goes.
+        let installed = unsafe {
+            SetWindowSubclass(
+                hwnd,
+                Some(watch_proc),
+                WATCH_ID,
+                (&*watch as *const Self) as usize,
+            )
+        };
+        installed.as_bool().then_some(watch)
+    }
+}
+
+impl Drop for ClauseWatch {
+    fn drop(&mut self) {
+        // SAFETY: removing a subclass that may already be gone is harmless.
+        unsafe {
+            let _ = RemoveWindowSubclass(self.hwnd, Some(watch_proc), WATCH_ID);
+        }
+    }
+}
+
+unsafe extern "system" fn watch_proc(
+    hwnd: HWND,
+    message: u32,
+    w: WPARAM,
+    l: LPARAM,
+    _: usize,
+    data: usize,
+) -> LRESULT {
+    unsafe {
+        if message == WM_NCDESTROY {
+            let _ = RemoveWindowSubclass(hwnd, Some(watch_proc), WATCH_ID);
+            return DefSubclassProc(hwnd, message, w, l);
+        }
+        // winit first: it is what turns the message into the composition the
+        // editor shows, and the attributes are read against that.
+        let result = DefSubclassProc(hwnd, message, w, l);
+        if message == WM_IME_COMPOSITION && (l.0 as u32 & GCS_COMPATTR.0) != 0 {
+            let watch = &*(data as *const ClauseWatch);
+            let changed = watch.changed.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || changed());
+        }
+        result
     }
 }
 

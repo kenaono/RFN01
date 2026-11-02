@@ -8,6 +8,9 @@ struct Editor {
     timer: Timer,
     publishing: Rc<Cell<bool>>,
     refresh_pending: bool,
+    /// RFN01-77: put on with the first report of where the IME is, since the
+    /// window has no handle before it is shown.
+    ime_watch: Option<Box<ime::ClauseWatch>>,
 }
 
 enum Action {
@@ -390,13 +393,21 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
     handled
 }
 
+/// RFN01-77: the IME moved to another clause without changing the text.
+fn clauses_moved(window: &QuickDraft, editor: &Rc<RefCell<Editor>>) {
+    let Ok(held) = editor.try_borrow() else {
+        return;
+    };
+    let text = held.session.state.borrow().preedit.clone();
+    let unchanged =
+        text.is_empty() || held.view.ime_clauses == ime::clauses(window.window(), &text);
+    drop(held);
+    if !unchanged {
+        run(window, editor, Action::Preedit(text));
+    }
+}
+
 pub(crate) fn install(window: &QuickDraft) {
-    let weak = window.as_weak();
-    window.on_editor_ime_area(move |x, y, w, h, vertical| {
-        if let Some(window) = weak.upgrade() {
-            ime::candidate_area(window.window(), x, y, w, h, vertical);
-        }
-    });
     let document = OpenDocument::with_events(
         DocumentFile::untitled(0),
         window.get_text().to_string(),
@@ -409,7 +420,28 @@ pub(crate) fn install(window: &QuickDraft) {
         timer: Timer::default(),
         publishing: Rc::new(Cell::new(false)),
         refresh_pending: false,
+        ime_watch: None,
     }));
+    let weak = window.as_weak();
+    let editor = Rc::downgrade(&held);
+    window.on_editor_ime_area(move |x, y, w, h, vertical| {
+        let (Some(window), Some(editor)) = (weak.upgrade(), editor.upgrade()) else {
+            return;
+        };
+        ime::candidate_area(window.window(), x, y, w, h, vertical);
+        let Ok(mut held) = editor.try_borrow_mut() else {
+            return;
+        };
+        if held.ime_watch.is_none() {
+            let weak = window.as_weak();
+            let editor = Rc::downgrade(&editor);
+            held.ime_watch = ime::ClauseWatch::install(window.window(), move || {
+                if let (Some(window), Some(editor)) = (weak.upgrade(), editor.upgrade()) {
+                    clauses_moved(&window, &editor);
+                }
+            });
+        }
+    });
     macro_rules! wire {
         ($method:ident, || $action:expr) => {{
             let weak = window.as_weak(); let editor = held.clone();
