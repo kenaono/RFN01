@@ -405,6 +405,86 @@ export component AppWindow inherits Window {
     property <bool> workspace-filter-visible: true;
     callback tree-filter-changed();
 
+    /// RFN01-75: the tree a folder search was opened from — 0 Explorer, 4
+    /// Workspace — or -1 when the search is the Search panel itself.
+    ///
+    /// **The search stands in the tree's place** (書き手の選択 2026-11-02:
+    /// 同じ場所で切り替える). It is the Search panel, shown under the tree's own
+    /// rail button; pressing 🔍 again or Escape puts the tree back, open as it
+    /// was and scrolled where it was (`tree-scroll-kept`).
+    in-out property <int> search-from: -1;
+    property <length> tree-scroll-kept;
+    // **Any other panel ends it**, whoever switched — Rust switches too (a
+    // document shown in the tree, a folder searched from a row).
+    changed left-tab => {
+        if root.left-tab != 1 {
+            root.search-from = -1;
+        }
+    }
+    /// Bumped to put the keyboard in the left pane's first field: the search
+    /// field when a search is showing, the filter when a tree is (RFN01-76).
+    property <int> left-field-generation;
+
+    function enter-tree-search(from: int) {
+        root.search-from = from;
+        root.tree-open = true;
+        root.left-tab = 1;
+        root.left-tab-chosen(1);
+        root.left-field-generation += 1;
+    }
+
+    /// Put the tree back in the search's place, if the search came from one.
+    public function leave-tree-search() {
+        if root.search-from >= 0 {
+            root.left-tab = root.search-from;
+            root.search-from = -1;
+            root.left-tab-chosen(root.left-tab);
+        }
+    }
+
+    /// RFN01-75/76 (`Ctrl+Shift+F`): search the folder from wherever the
+    /// writer is. **In the tree's place when a tree is showing**, or when the
+    /// left pane is closed — the Explorer is what opens; the Search panel when
+    /// another panel (Outline, Tags…) is up, which is not a list of files.
+    public function open-folder-search() {
+        if root.tree-open && root.left-tab == 1 {
+            root.left-field-generation += 1;
+        } else if root.tree-open && (root.left-tab == 0 || root.left-tab == 4) {
+            root.enter-tree-search(root.left-tab);
+        } else if !root.tree-open {
+            root.enter-tree-search(0);
+        } else {
+            root.search-from = -1;
+            root.left-tab = 1;
+            root.left-tab-chosen(1);
+            root.left-field-generation += 1;
+        }
+    }
+
+    /// RFN01-76 (`Ctrl+Shift+E`): the keyboard to the Explore pane — its
+    /// filter field, the one thing in it that takes keys (the tree has no
+    /// keyboard of its own). A Workspace showing stays; anything else is
+    /// replaced by the Explorer.
+    public function focus-explore() {
+        root.leave-tree-search();
+        if !root.tree-open || (root.left-tab != 0 && root.left-tab != 4) {
+            root.tree-open = true;
+            root.left-tab = 0;
+            root.left-tab-chosen(0);
+        }
+        if root.left-tab == 4 {
+            root.workspace-filter-visible = true;
+        }
+        root.left-field-generation += 1;
+    }
+
+    /// Escape in a field of the left pane: the keyboard back to the text, and
+    /// the tree back if a search had taken its place (RFN01-76).
+    function left-field-escaped() {
+        root.leave-tree-search();
+        root.focus-generation += 1;
+    }
+
     /// 要件 5.2: the row being carried through the tree, and where the hand is.
     ///
     /// **Held by the window** for the reason a carried tab's point is (要件
@@ -1580,9 +1660,10 @@ export component AppWindow inherits Window {
                     x: 7px; y: root.custom-title ? 4px : 40px;
                     icon: "M1 1h5v5H1zM10 1h5v5h-5zM1 10h5v5H1zM10 10h5v5h-5z";
                     tip: @tr("Workspace");
-                    checked: root.tree-open && root.left-tab == 4;
+                    checked: root.tree-open && (root.left-tab == 4 || (root.left-tab == 1 && root.search-from == 4));
                     clicked => {
-                        root.tree-open = !(root.tree-open && root.left-tab == 4);
+                        root.tree-open = !(root.tree-open && (root.left-tab == 4 || root.search-from == 4));
+                        root.search-from = -1;
                         root.left-tab = 4;
                         root.left-tab-chosen(4);
                         root.focus-generation += 1;
@@ -1598,9 +1679,10 @@ export component AppWindow inherits Window {
                     y: root.custom-title ? 34px : 70px;
                     icon: Icons.folder;
                     tip: @tr("Explorer");
-                    checked: root.tree-open && root.left-tab == 0;
+                    checked: root.tree-open && (root.left-tab == 0 || (root.left-tab == 1 && root.search-from == 0));
                     clicked => {
-                        root.tree-open = !(root.tree-open && root.left-tab == 0);
+                        root.tree-open = !(root.tree-open && (root.left-tab == 0 || root.search-from == 0));
+                        root.search-from = -1;
                         root.left-tab = 0;
                         root.left-tab-chosen(0);
                         root.focus-generation += 1;
@@ -1612,9 +1694,10 @@ export component AppWindow inherits Window {
                     y: root.custom-title ? 64px : 100px;
                     icon: Icons.search;
                     tip: @tr("Search");
-                    checked: root.tree-open && root.left-tab == 1;
+                    checked: root.tree-open && root.left-tab == 1 && root.search-from < 0;
                     clicked => {
-                        root.tree-open = !(root.tree-open && root.left-tab == 1);
+                        root.tree-open = !(root.tree-open && root.left-tab == 1 && root.search-from < 0);
+                        root.search-from = -1;
                         root.left-tab = 1;
                         root.left-tab-chosen(1);
                         root.focus-generation += 1;
@@ -2002,6 +2085,7 @@ export component AppWindow inherits Window {
                         }
                             IconButton { icon: Icons.plus; tip: @tr("Add Folder…"); clicked => { root.workspace-tree-command(0); } }
                             IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
+                            IconButton { icon: Icons.search; tip: @tr("Search in Folder"); clicked => { root.enter-tree-search(4); } }
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
                     }
@@ -2213,6 +2297,12 @@ export component AppWindow inherits Window {
                             // The three never appear together: with no work
                             // folder there is nothing to create in, and opening
                             // one is the only thing left to do.
+                            // RFN01-75: 木の場所で、フォルダの中を探す。
+                            if root.work-folder != "": IconButton {
+                                icon: Icons.search;
+                                tip: @tr("Search in Folder");
+                                clicked => { root.enter-tree-search(0); }
+                            }
                             if root.work-folder != "": IconButton {
                                 icon: "M8 1v3M8 12v3M1 8h3M12 8h3M3.5 3.5h9v9h-9z";
                                 tip: @tr("Show Current Document in Tree");
@@ -2312,11 +2402,37 @@ export component AppWindow inherits Window {
                         placeholder: @tr("Filter files…");
                         text <=> root.tree-filter;
                         edited => { root.tree-filter-changed(); }
+                        // RFN01-76
+                        escaped => { root.left-field-escaped(); }
+                        property <int> asked: root.left-field-generation;
+                        changed asked => { self.take-focus(); }
                     }
                     // 要件 7.7: the question this panel asks is about the
                     // work folder, so it has its own field. The find bar above
                     // the editor asks about one document; the two are different
                     // questions and share nothing.
+                    // RFN01-75: a search that took a tree's place says whose place,
+                    // and gives it back with the same 🔍 that opened it.
+                    if root.left-tab == 1 && root.search-from >= 0: HorizontalLayout {
+                        height: 34px;
+                        padding-left: 10px;
+                        padding-right: 4px;
+                        spacing: 2px;
+                        Text {
+                            text: root.search-from == 4 ? @tr("Workspace") : @tr("Explorer");
+                            color: Tok.ink-muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        IconButton {
+                            icon: Icons.search;
+                            tip: @tr("Back to Tree");
+                            checked: true;
+                            clicked => { root.leave-tree-search(); }
+                        }
+                    }
                     if root.left-tab == 1: Rectangle {
                         background: Tok.accent-faint;
                         vertical-stretch: 0;
@@ -2336,6 +2452,10 @@ export component AppWindow inherits Window {
                                 accepted => {
                                     root.folder-search-requested();
                                 }
+                                // RFN01-76
+                                escaped => { root.left-field-escaped(); }
+                                property <int> asked: root.left-field-generation;
+                                changed asked => { self.take-focus(); }
                             }
 
                             // RFN01-70: 置換後の語。**いつも出しておく**（書き手の判断
@@ -2346,6 +2466,7 @@ export component AppWindow inherits Window {
                                 accepted => {
                                     root.folder-replace-requested();
                                 }
+                                escaped => { root.left-field-escaped(); }
                             }
 
                             // RFN01-70: 探し方。本文の検索帯と同じ字と同じ部品。切り替えたら
@@ -2486,6 +2607,27 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                     tree-view := ScrollView {
+                        // RFN01-75: **the tree comes back where it was.** One list
+                        // serves every panel, so the search's rows would leave
+                        // it scrolled wherever the results were.
+                        property <int> searching-from: root.search-from;
+                        changed searching-from => {
+                            if self.searching-from >= 0 {
+                                root.tree-scroll-kept = self.viewport-y;
+                            } else {
+                                scroll-back.running = true;
+                            }
+                        }
+                        // After the tree's rows are back (Rust publishes them on
+                        // the next tick), not before: an empty list clamps to 0.
+                        scroll-back := Timer {
+                            interval: 60ms;
+                            running: false;
+                            triggered => {
+                                self.running = false;
+                                tree-view.viewport-y = root.tree-scroll-kept;
+                            }
+                        }
                         // 5 Bookmarks と 7 Backups は自分の面を持つ（RFN01-61：出したままだと高さを
                         // 半分ずつ取り合い、Backups の行が下半分へ押し出された）。
                         visible: (root.left-tab != 4 || root.workspace-active) && root.left-tab != 5

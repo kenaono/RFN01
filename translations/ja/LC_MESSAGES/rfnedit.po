@@ -1539,3 +1539,10 @@ msgstr "親Commit"
 # RFN01-67 PR 3: File の「Git History…」。
 msgid "Git History"
 msgstr "Gitの履歴"
+
+# RFN01-75: Explorer・Workspaceの見出しの🔍と、木へ戻る🔍。
+msgid "Search in Folder"
+msgstr "フォルダー内を検索"
+
+msgid "Back to Tree"
+msgstr "ツリーに戻る"
