@@ -2618,6 +2618,11 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_editor_ime_area(move |x, y, w, h, vertical| {
         if let Some(window) = ime_weak.upgrade() {
             ime::candidate_area(window.window(), x, y, w, h, vertical);
+            // RFN01-81: `x, y` is the caret on the window, and the caret is
+            // the pane's `caret_x, caret_y` on its page — the difference is
+            // where the page starts, which a composition's characters share.
+            let screen = focused_pane(&window).screen(&window);
+            ime::remember_page_origin(x - screen.caret_x, y - screen.caret_y);
         }
     });
     let focus_cache = render_cache.clone();
@@ -23399,10 +23404,42 @@ fn watch_ime(
                 true
             }
         };
+        // RFN01-81: a character of the composition, where the page draws it.
+        let char_rect = {
+            let weak = window.as_weak();
+            let cache = cache.clone();
+            let composing = composing.clone();
+            move |nth: u32| {
+                let window = weak.upgrade()?;
+                let id = composing.get()?;
+                let (left, top) = ime::page_origin()?;
+                let geometry = {
+                    let mut borrowed = cache.try_borrow_mut().ok()?;
+                    let pane = borrowed.pane(id);
+                    let lines = &pane.view.preedit_lines;
+                    let start = lines.first()?.start;
+                    let end = lines.last().map(|line| line.start + line.length)?;
+                    pane.graphics
+                        .engine
+                        .caret_geometry((start + nth).min(end))
+                        .ok()?
+                };
+                let shift = id.page_shift(&window);
+                let scale = window.window().scale_factor();
+                Some(ime::CharRect {
+                    x: (left + geometry.x + shift) * scale,
+                    y: (top + geometry.y) * scale,
+                    width: geometry.width * scale,
+                    height: geometry.height * scale,
+                    vertical: id.vertical(&window),
+                })
+            }
+        };
         let host = ime::ImeHost {
             changed: Rc::new(changed),
             around: Box::new(around),
             choose: Box::new(choose),
+            char_rect: Box::new(char_rect),
             log: Box::new(move |line: &str| {
                 if let Ok(mut cache) = cache.try_borrow_mut() {
                     cache.log_diag("spec.ime", line);
