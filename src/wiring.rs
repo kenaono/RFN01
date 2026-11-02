@@ -1772,6 +1772,31 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
         });
     });
 
+    // RFN01-75: the tree's search starts and ends. From the event loop, like
+    // a panel being chosen: both put new rows in the list being drawn.
+    let weak = window.as_weak();
+    let tree_live = live.clone();
+    window.on_tree_search_opened(move || {
+        let weak = weak.clone();
+        let live = tree_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::tree_search_opened(&window, &live);
+            }
+        });
+    });
+    let weak = window.as_weak();
+    let tree_live = live.clone();
+    window.on_tree_search_closed(move || {
+        let weak = weak.clone();
+        let live = tree_live.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                crate::tree_search_closed(&window, &live);
+            }
+        });
+    });
+
     // 要件 7.7: the whole work folder, not the document in front.
     let weak = window.as_weak();
     let search_live = live.clone();
@@ -1812,7 +1837,8 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
             // it would have the results stand under the tree's name without
             // being any of its files.
             let roots = crate::tree_roots(&scope_live.folder.borrow()).0;
-            if !roots
+            if window.get_tree_searching()
+                && !roots
                 .iter()
                 .any(|root| crate::file_tree::is_within(root, &chosen))
             {

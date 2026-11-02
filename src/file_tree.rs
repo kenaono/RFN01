@@ -10,7 +10,7 @@
 //! in, how deep each one is — is arithmetic over what that function returned,
 //! and is tested without a disk at all.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -123,6 +123,84 @@ pub fn multi_rows(
         push_rows(root, 0, expanded, read, &mut out);
     }
     out
+}
+
+/// RFN01-75: the tree cut down to `files` and the folders that hold them —
+/// what a search over the tree shows (書き手の合意 2026-11-02).
+///
+/// **Every folder on the way is open**, whether or not it was: a word found
+/// four folders down is the point of the search, not something to unfold.
+/// The rows have the shape [`rows`] and [`multi_rows`] give, so the tree reads
+/// the same with or without a search over it. Paths are compared as
+/// [`path_key`]s: what the search found and what the disk lists can be spelt
+/// differently for the same file.
+pub fn rows_holding(
+    roots: &[PathBuf],
+    multi: bool,
+    files: &[PathBuf],
+    read: &dyn Fn(&Path) -> Vec<Node>,
+) -> Vec<Row> {
+    let wanted: HashSet<String> = files.iter().map(|file| path_key(file)).collect();
+    let mut holders: HashSet<String> = HashSet::new();
+    for file in files {
+        let mut at = file.parent();
+        while let Some(folder) = at {
+            if !roots.iter().any(|root| is_within(root, folder)) {
+                break;
+            }
+            holders.insert(path_key(folder));
+            at = folder.parent();
+        }
+    }
+    let keep = |node: &Node| {
+        let key = path_key(&node.path);
+        if node.folder {
+            holders.contains(&key)
+        } else {
+            wanted.contains(&key)
+        }
+    };
+    let mut out = Vec::new();
+    for root in roots {
+        if multi {
+            out.push(Row {
+                name: root.display().to_string(),
+                path: root.clone(),
+                folder: true,
+                depth: 0,
+                open: true,
+                is_root: true,
+            });
+        }
+        push_holding(root, 0, &keep, read, &mut out);
+        if !multi {
+            break;
+        }
+    }
+    out
+}
+
+fn push_holding(
+    directory: &Path,
+    depth: usize,
+    keep: &dyn Fn(&Node) -> bool,
+    read: &dyn Fn(&Path) -> Vec<Node>,
+    out: &mut Vec<Row>,
+) {
+    for node in read(directory).into_iter().filter(|node| keep(node)) {
+        let folder = node.folder;
+        out.push(Row {
+            name: node.name,
+            path: node.path.clone(),
+            folder,
+            depth,
+            open: folder,
+            is_root: false,
+        });
+        if folder {
+            push_holding(&node.path, depth + 1, keep, read, out);
+        }
+    }
 }
 
 fn push_rows(
@@ -598,6 +676,69 @@ pub fn files_under(
 #[cfg(test)]
 mod within_tests {
     use super::*;
+
+    /// A disk of two folders, read the way `read_folder` would.
+    fn disk(directory: &Path) -> Vec<Node> {
+        let node = |name: &str, folder: bool| Node {
+            name: name.to_owned(),
+            path: directory.join(name),
+            folder,
+        };
+        match directory.to_string_lossy().as_ref() {
+            r"D:\原稿" => vec![
+                node("第1部", true),
+                node("資料", true),
+                node("序.md", false),
+            ],
+            r"D:\原稿\第1部" => vec![node("第1章.md", false), node("第2章.md", false)],
+            r"D:\原稿\資料" => vec![node("年表.md", false)],
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_searched_tree_keeps_only_the_found_files_and_their_folders() {
+        let root = PathBuf::from(r"D:\原稿");
+        // 書き方の違う同じファイル（\\?\付き）でも見つかる。
+        let files = [
+            PathBuf::from(r"\\?\D:\原稿\第1部\第2章.md"),
+            PathBuf::from(r"D:\原稿\序.md"),
+        ];
+        let rows = rows_holding(&[root], false, &files, &disk);
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.depth, row.open))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("第1部", 0, true),
+                ("第2章.md", 1, false),
+                ("序.md", 0, false)
+            ],
+            "資料と第1章は消え、第1部は閉じていても開いて出る"
+        );
+    }
+
+    #[test]
+    fn a_searched_workspace_keeps_its_root_rows() {
+        let roots = [PathBuf::from(r"D:\原稿"), PathBuf::from(r"D:\別")];
+        let files = [PathBuf::from(r"D:\原稿\資料\年表.md")];
+        let rows = rows_holding(&roots, true, &files, &disk);
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.is_root))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (r"D:\原稿", true),
+                ("資料", false),
+                ("年表.md", false),
+                (r"D:\別", true)
+            ]
+        );
+    }
 
     #[test]
     fn a_folder_is_within_itself_and_its_parents_only() {

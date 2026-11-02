@@ -482,7 +482,6 @@ fn dragging_the_corner_of_a_picture_writes_its_width() {
         workspace_ids: Rc::default(),
         preview: Rc::default(),
         results: Rc::default(),
-        results_roots: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
         find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),
