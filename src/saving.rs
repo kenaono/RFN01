@@ -2029,6 +2029,8 @@ mod folder_auto_save_tests {
             let live = Live {
                 preview: Rc::default(),
                 closed_tabs: Rc::default(),
+                composing: Rc::default(),
+                settled: Rc::default(),
                 states: crate::PaneStates::new(&document),
                 folder: Rc::default(),
                 tree_paths: Rc::default(),

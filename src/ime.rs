@@ -22,8 +22,10 @@ use windows::Win32::{
     UI::{
         Input::Ime::{
             ATTR_CONVERTED, ATTR_FIXEDCONVERTED, ATTR_INPUT_ERROR, ATTR_TARGET_CONVERTED,
-            ATTR_TARGET_NOTCONVERTED, GCS_COMPATTR, GCS_COMPSTR, IME_COMPOSITION_STRING,
-            ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, ImmSetCompositionFontW,
+            ATTR_TARGET_NOTCONVERTED, CPS_COMPLETE, GCS_COMPATTR, GCS_COMPSTR,
+            IME_COMPOSITION_STRING, ImmGetCompositionStringW, ImmGetContext,
+            ImmGetConversionStatus, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionFontW,
+            NI_COMPOSITIONSTR,
         },
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{WM_IME_COMPOSITION, WM_NCDESTROY},
@@ -183,6 +185,80 @@ pub(crate) fn clauses(window: &slint::Window, text: &str) -> Vec<ImeClause> {
             return Vec::new();
         }
         clauses_from_attributes(&attributes)
+    }
+}
+
+/// RFN01-79: tell the IME to commit the conversion it is holding.
+///
+/// **The text it sends back arrives late**, through winit's queue, after the
+/// click that asked for it has moved the caret; the editor has already put the
+/// text where it was typed, and drops this copy once ([`Settled`]).
+///
+/// **A commit, not a cancel**: it is what Notepad's click does, and the IME
+/// learns from it. Asked to end a conversion either way, ATOK goes back to the
+/// input method it is set to (measured 2026-11-02: a romaji switched on by key
+/// fell back to the configured kana input, mode 25 → 9). That is ATOK's own
+/// rule, and the writer's configured method is kept.
+pub(crate) fn complete(window: &slint::Window) {
+    let Some(hwnd) = native_handle(window) else {
+        return;
+    };
+    // SAFETY: The handle belongs to a window that is alive for this call, and
+    // the context is released on every path out.
+    unsafe {
+        let context = ImmGetContext(hwnd);
+        if context.is_invalid() {
+            return;
+        }
+        let _ = ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
+        let _ = ImmReleaseContext(hwnd, context);
+    }
+}
+
+/// The IME's conversion mode as Windows holds it (`IME_CMODE_*`), for the log.
+///
+/// RFN01-79: whether committing from the editor leaves the writer's mode alone
+/// — romaji stays romaji — is a question only a real IME answers.
+pub(crate) fn conversion_mode(window: &slint::Window) -> Option<u32> {
+    let hwnd = native_handle(window)?;
+    // SAFETY: as in `clauses`.
+    unsafe {
+        let context = ImmGetContext(hwnd);
+        if context.is_invalid() {
+            return None;
+        }
+        let mut mode = Default::default();
+        let read = ImmGetConversionStatus(context, Some(&mut mode), None).as_bool();
+        let _ = ImmReleaseContext(hwnd, context);
+        read.then_some(mode.0)
+    }
+}
+
+/// RFN01-79: a conversion the editor committed itself, whose copy from the IME
+/// is still on its way.
+///
+/// **Dropped once, and only if it is the same text.** Anything else the IME
+/// commits is the writer's and goes in; a new conversion starting means the
+/// copy is not coming, and `forget` lets it go.
+#[derive(Default)]
+pub(crate) struct Settled(std::cell::RefCell<Option<String>>);
+
+impl Settled {
+    pub(crate) fn expect(&self, text: &str) {
+        *self.0.borrow_mut() = Some(text.to_owned());
+    }
+
+    /// Whether `text` is the copy being waited for. Either way, it is no
+    /// longer waited for.
+    pub(crate) fn is_copy(&self, text: &str) -> bool {
+        self.0
+            .borrow_mut()
+            .take()
+            .is_some_and(|expected| expected == text)
+    }
+
+    pub(crate) fn forget(&self) {
+        self.0.borrow_mut().take();
     }
 }
 
@@ -352,6 +428,20 @@ mod tests {
         assert_eq!(look_of(4), ClauseLook::Error);
         assert_eq!(look_of(5), ClauseLook::Converted);
         assert!(clauses_from_attributes(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_settled_conversion_drops_its_copy_once() {
+        let settled = Settled::default();
+        settled.expect("今日は");
+        assert!(settled.is_copy("今日は"), "IMEから届いた写しは捨てる");
+        assert!(!settled.is_copy("今日は"), "2度目は書き手が打ったもの");
+        settled.expect("今日は");
+        assert!(!settled.is_copy("明日は"), "違う字は書き手のもの");
+        assert!(!settled.is_copy("今日は"), "違う字が来たら待つのをやめる");
+        settled.expect("今日は");
+        settled.forget();
+        assert!(!settled.is_copy("今日は"), "新しい変換が始まったら待たない");
     }
 
     #[test]

@@ -227,6 +227,8 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),
@@ -653,6 +655,8 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),
@@ -1266,6 +1270,8 @@ fn the_find_bar_searches_the_settings() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),
@@ -1417,6 +1423,8 @@ fn the_left_pane_has_its_own_look() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),

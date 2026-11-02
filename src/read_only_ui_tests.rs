@@ -66,6 +66,8 @@ fn read_only_follows_a_growing_file_until_scrolled_away() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: PaneStates::new(&document),
         folder: Rc::default(),
         tree_paths: Rc::default(),

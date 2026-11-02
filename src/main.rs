@@ -1935,6 +1935,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let draft = Rc::new(RefCell::new(quick_draft::QuickDraftWindow::default()));
     let live = Live {
         closed_tabs: Rc::default(),
+        composing: Rc::default(),
+        settled: Rc::default(),
         states: pane_states.clone(),
         folder: Rc::new(RefCell::new(work_folder)),
         tree_paths: Rc::new(RefCell::new(Vec::new())),
@@ -2229,6 +2231,10 @@ fn main() -> Result<(), slint::PlatformError> {
                     .log_diag("tab", &format!("choose pane={} at={index}", id.log_name()));
                 // 別の文書へ移るなら、前の文書についての知らせは畳む。
                 forget_render_status(&window);
+                // RFN01-79: 変換中の字は、移る前の文書の打っていた位置で確定する。
+                // 変換は焦点を取り直しても消えない（`editor-surface.slint`）。
+                let settled = &live.settled;
+                settle_composition(&window, &live.states, &live.cache, &live.composing, settled);
                 switch_to_tab(&window, &live, id, index);
             }
         });
@@ -2735,8 +2741,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    let composing = live.composing.clone();
+    let settled = live.settled.clone();
     window.on_pane_selection_start(move |pane, x, y, extend, rectangle| {
         if let Some(window) = weak.upgrade() {
+            // RFN01-79: a conversion is committed where it was typed, before
+            // the click moves anything — in this pane or the other one.
+            settle_composition(&window, &states, &cache, &composing, &settled);
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             // **押した場所までを選ぶのは、Shiftを押しているときだけ。**届いた旗を
@@ -2929,6 +2940,11 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             let text = text.as_str();
+            // RFN01-79: the IME's copy of a conversion a click already put in.
+            if committed && typed_live.settled.is_copy(text) {
+                id.set_ime_buffer(&window, "");
+                return;
+            }
             // **A conversion committed into a shell is typing, not editing.**
             // The keys themselves never reach here — the pane sends those
             // straight on — but what an IME hands over arrives by this door
@@ -2986,13 +3002,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // RFN01-77: the pane a conversion is in, for when the IME moves to another
     // clause without changing the text (`ime::ClauseWatch`).
-    let composing_pane: Rc<Cell<Option<PaneId>>> = Rc::default();
-    watch_clauses(&window, &pane_states, &render_cache, &composing_pane);
+    watch_clauses(&window, &pane_states, &render_cache, &live.composing);
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let typed_live = live.clone();
-    let composing_in = composing_pane.clone();
+    let composing_in = live.composing.clone();
+    let settled_in = live.settled.clone();
     window.on_pane_preedit_changed(move |pane, text| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
@@ -3019,6 +3035,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 answer_new_tab(&window, &typed_live, id, None);
             }
             composing_in.set(Some(id));
+            if !text.is_empty() {
+                // A new conversion: the copy of the last one is not coming.
+                settled_in.forget();
+            }
             let document = states.document(id);
             let state = states.of(id);
             set_pane_preedit(&window, id, &document, &state, &cache, text.as_str());
@@ -4881,6 +4901,13 @@ impl Tabs {
 #[derive(Clone)]
 struct Live {
     closed_tabs: Rc<RefCell<Vec<PaneTab>>>,
+    /// The pane a conversion was last shown in (RFN01-77, RFN01-79): where the
+    /// IME's clauses are looked up again, and where a conversion is committed
+    /// when the writer clicks away from it.
+    composing: Rc<Cell<Option<PaneId>>>,
+    /// RFN01-79: the conversion a click committed, whose copy from the IME is
+    /// still to come and is dropped.
+    settled: Rc<ime::Settled>,
     states: PaneStates,
     /// The work folder and which of its folders are open (要件 5.1, 5.2).
     /// **One folder per window** — 要件 5.1 says so, and the tree is what the
@@ -22969,6 +22996,56 @@ fn move_pane_to_line_edge(
     if !PaneId::reveals_while_moving(id.vertical(window)) {
         schedule_active_line_reveal(reveal, window, id, state, cache, document);
     }
+}
+
+/// RFN01-79: commit a conversion where it was being typed, before the writer
+/// moves away from it with the mouse — a click in either pane, or another tab.
+///
+/// **The editor inserts the text itself, then asks the IME to commit**
+/// (`ime::complete`) and drops the copy the IME sends (`ime::Settled`). The
+/// IME's own commit cannot be the one that goes in: it arrives through winit's
+/// queue after this handler, by when the caret, or the tab, or the focused
+/// pane, is already the new one.
+fn settle_composition(
+    window: &AppWindow,
+    states: &PaneStates,
+    cache: &Rc<RefCell<RenderCache>>,
+    composing: &Cell<Option<PaneId>>,
+    settled: &ime::Settled,
+) {
+    let Some(id) = composing.take() else {
+        return;
+    };
+    let state = states.of(id);
+    let text = std::mem::take(&mut state.borrow_mut().preedit);
+    if text.is_empty() {
+        return;
+    }
+    settled.expect(&text);
+    let mode = ime::conversion_mode(window.window());
+    ime::complete(window.window());
+    cache.borrow_mut().pane(id).view.ime_clauses.clear();
+    let length = text.chars().count();
+    let document = states.document(id);
+    insert_pane_text(window, id, &document, states, cache, &text, false);
+    cache.borrow_mut().log_diag(
+        "spec.ime",
+        &format!(
+            "settled pane={} chars={length} mode={mode:?}",
+            id.log_name()
+        ),
+    );
+    // The mode once the IME has answered the commit, which is after this.
+    let weak = window.as_weak();
+    let cache = cache.clone();
+    Timer::single_shot(Duration::from_millis(200), move || {
+        if let Some(window) = weak.upgrade() {
+            let mode = ime::conversion_mode(window.window());
+            cache
+                .borrow_mut()
+                .log_diag("spec.ime", &format!("settled after mode={mode:?}"));
+        }
+    });
 }
 
 /// RFN01-77: redraw a composition when the IME moves to another clause.

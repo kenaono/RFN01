@@ -11,6 +11,8 @@ struct Editor {
     /// RFN01-77: put on with the first report of where the IME is, since the
     /// window has no handle before it is shown.
     ime_watch: Option<Box<ime::ClauseWatch>>,
+    /// RFN01-79: the IME's copy of a conversion a click already put in.
+    settled: ime::Settled,
 }
 
 enum Action {
@@ -234,8 +236,15 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
             let at = floor_char_boundary(&before, at.max(0) as usize);
             editor_interaction::select_range(&editor.session.state, &before, at, at);
         }
-        Action::Text(text) => editor.insert(&text),
+        Action::Text(text) => {
+            if !editor.settled.is_copy(&text) {
+                editor.insert(&text);
+            }
+        }
         Action::Preedit(text) => {
+            if !text.is_empty() {
+                editor.settled.forget();
+            }
             editor.view.ime_clauses = crate::ime::clauses(window.window(), &text);
             editor.session.state.borrow_mut().preedit = text;
         }
@@ -315,7 +324,15 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
             }
         }
         Action::Pointer(x, y, phase) => {
-            editor.session.state.borrow_mut().preedit.clear();
+            let pending = std::mem::take(&mut editor.session.state.borrow_mut().preedit);
+            // RFN01-79: a press (not a drag or a release) commits the conversion
+            // where it was typed, before the caret moves (`settle_composition`).
+            if !pending.is_empty() && !matches!(phase, 1 | 2) {
+                editor.view.ime_clauses.clear();
+                editor.insert(&pending);
+                editor.settled.expect(&pending);
+                ime::complete(window.window());
+            }
             if editor.layout(window).is_ok() && editor.graphics.engine.point_ready(x, y) {
                 if let Ok(hit) = editor.graphics.engine.hit_test(x, y) {
                     let phase = match phase {
@@ -421,6 +438,7 @@ pub(crate) fn install(window: &QuickDraft) {
         publishing: Rc::new(Cell::new(false)),
         refresh_pending: false,
         ime_watch: None,
+        settled: ime::Settled::default(),
     }));
     let weak = window.as_weak();
     let editor = Rc::downgrade(&held);
