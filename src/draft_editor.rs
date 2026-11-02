@@ -493,6 +493,8 @@ fn ime_host(
         around: Box::new(around),
         choose: Box::new(choose),
         log: Box::new(|_: &str| {}),
+        // RFN01-81: not answered here; the IME falls back on the caret.
+        char_rect: Box::new(|_| None),
     }
 }
 

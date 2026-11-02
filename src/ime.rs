@@ -17,19 +17,19 @@ use std::time::Duration;
 
 use slint::ComponentHandle;
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-    Graphics::Gdi::{DEFAULT_CHARSET, LOGFONTW, SHIFTJIS_CHARSET},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::Gdi::{ClientToScreen, DEFAULT_CHARSET, LOGFONTW, SHIFTJIS_CHARSET},
     UI::{
         Input::Ime::{
             ATTR_CONVERTED, ATTR_FIXEDCONVERTED, ATTR_INPUT_ERROR, ATTR_TARGET_CONVERTED,
             ATTR_TARGET_NOTCONVERTED, CPS_COMPLETE, GCS_COMPATTR, GCS_COMPSTR,
-            IME_COMPOSITION_STRING, IMR_CONFIRMRECONVERTSTRING, IMR_DOCUMENTFEED,
-            IMR_RECONVERTSTRING, ImmGetCompositionStringW, ImmGetContext, ImmGetConversionStatus,
-            ImmNotifyIME, ImmReleaseContext, ImmSetCompositionFontW, NI_COMPOSITIONSTR,
-            RECONVERTSTRING,
+            IME_COMPOSITION_STRING, IMECHARPOSITION, IMR_CONFIRMRECONVERTSTRING, IMR_DOCUMENTFEED,
+            IMR_QUERYCHARPOSITION, IMR_RECONVERTSTRING, ImmGetCompositionStringW, ImmGetContext,
+            ImmGetConversionStatus, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionFontW,
+            NI_COMPOSITIONSTR, RECONVERTSTRING,
         },
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
-        WindowsAndMessaging::{WM_IME_COMPOSITION, WM_IME_REQUEST, WM_NCDESTROY},
+        WindowsAndMessaging::{GetClientRect, WM_IME_COMPOSITION, WM_IME_REQUEST, WM_NCDESTROY},
     },
 };
 
@@ -276,6 +276,35 @@ pub(crate) struct ImeHost {
     pub choose: Box<dyn Fn(u32, u32) -> bool>,
     /// A line for the diagnostic log: which requests came, and the answers.
     pub log: Box<dyn Fn(&str)>,
+    /// RFN01-81: where the composition's `n`th character is drawn, in the
+    /// window's client area, physical pixels. `None` declines.
+    pub char_rect: Box<dyn Fn(u32) -> Option<CharRect>>,
+}
+
+/// One character of a composition on screen (RFN01-81), client pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CharRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub vertical: bool,
+}
+
+thread_local! {
+    /// RFN01-81: where the page of the pane being typed in starts, in the
+    /// window's logical pixels — what the caret's own report to the IME was
+    /// measured from (`candidate_area`), so a character can be put where the
+    /// caret would be put.
+    static PAGE_ORIGIN: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn remember_page_origin(x: f32, y: f32) {
+    PAGE_ORIGIN.with(|origin| origin.set(Some((x, y))));
+}
+
+pub(crate) fn page_origin() -> Option<(f32, f32)> {
+    PAGE_ORIGIN.with(std::cell::Cell::get)
 }
 
 /// The text the IME is shown (RFN01-78), positions in UTF-16 units of `text`.
@@ -353,6 +382,14 @@ unsafe extern "system" fn watch_proc(
             return DefSubclassProc(hwnd, message, w, l);
         }
         let watch = &*(data as *const ImeWatch);
+        if message == WM_IME_REQUEST && w.0 as u32 == IMR_QUERYCHARPOSITION {
+            // Answered here rather than in `answer_request`: it needs the
+            // window, to put client pixels on the screen.
+            if let Some(answered) = answer_char_position(hwnd, &watch.host, l.0) {
+                return LRESULT(answered);
+            }
+            return DefSubclassProc(hwnd, message, w, l);
+        }
         if message == WM_IME_REQUEST {
             let answer = answer_request(&watch.host, w.0 as u32, l.0);
             let result = match answer {
@@ -376,6 +413,52 @@ unsafe extern "system" fn watch_proc(
         }
         result
     }
+}
+
+/// RFN01-81: where a character of the composition is, for the IME to put its
+/// windows by — the new Microsoft IME places its prediction list from this
+/// answer and not from the caret position the window reports.
+///
+/// The point is the character's top left on the screen, the line height runs
+/// across the line (a column's width in vertical writing), and the document is
+/// the window's client area.
+///
+/// # Safety
+/// `buffer` is the message's `lParam`: null, or an `IMECHARPOSITION` the IME
+/// owns.
+unsafe fn answer_char_position(hwnd: HWND, host: &ImeHost, buffer: isize) -> Option<isize> {
+    if buffer == 0 {
+        return None;
+    }
+    // SAFETY: the IME's own structure, of the size it says.
+    let position = unsafe { &mut *(buffer as *mut IMECHARPOSITION) };
+    let rect = (host.char_rect)(position.dwCharPos)?;
+    let mut point = POINT {
+        x: rect.x.round() as i32,
+        y: rect.y.round() as i32,
+    };
+    let mut client = RECT::default();
+    let mut corner = POINT::default();
+    // SAFETY: a live window, and points this function owns.
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut point);
+        let _ = GetClientRect(hwnd, &mut client);
+        let _ = ClientToScreen(hwnd, &mut corner);
+    }
+    position.pt = point;
+    let line = if rect.vertical {
+        rect.width
+    } else {
+        rect.height
+    };
+    position.cLineHeight = line.round().max(1.0) as u32;
+    position.rcDocument = RECT {
+        left: corner.x,
+        top: corner.y,
+        right: corner.x + client.right,
+        bottom: corner.y + client.bottom,
+    };
+    Some(1)
 }
 
 /// RFN01-78: answer one `WM_IME_REQUEST`, or `None` to leave it to Windows.
