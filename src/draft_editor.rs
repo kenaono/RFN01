@@ -248,7 +248,13 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
             editor.view.ime_clauses = crate::ime::clauses(window.window(), &text);
             editor.session.state.borrow_mut().preedit = text;
         }
-        Action::Delete(backwards) => editor.remove(backwards),
+        Action::Delete(backwards) => {
+            // RFN01-78: the IME taking out what it committed; the conversion
+            // stays (`on_pane_backspace`).
+            let composing = editor.session.state.borrow().preedit.clone();
+            editor.remove(backwards);
+            editor.session.state.borrow_mut().preedit = composing;
+        }
         Action::Undo(forwards) => {
             editor.session.undo(forwards);
         }

@@ -3051,8 +3051,20 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_backspace(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
+            // TEMPORARY (RFN01-78 確定アンドゥ)
+            cache
+                .borrow_mut()
+                .log_diag("spec.ime", "trace editor backspace");
             let document = states.document(id);
+            // RFN01-78: a Backspace during a conversion is the IME taking out
+            // what it committed (ATOK's 確定アンドゥ). The conversion stays:
+            // editing clears it, so it is put back once the character is gone.
+            let state = states.of(id);
+            let composing = state.borrow().preedit.clone();
             delete_adjacent_grapheme(&window, id, &document, &states, &cache, true);
+            if !composing.is_empty() {
+                set_pane_preedit(&window, id, &document, &state, &cache, &composing);
+            }
         }
     });
 
@@ -3073,6 +3085,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let reveal = reveal_timer.clone();
     window.on_pane_move(move |pane, direction, extend_selection| {
         if let Some(window) = weak.upgrade() {
+            if direction == -3 {
+                // TEMPORARY (RFN01-78 確定アンドゥ)
+                cache
+                    .borrow_mut()
+                    .log_diag("spec.ime", "trace editor word-back");
+            }
             let id = PaneId::from_index(pane);
             let document = states.document(id);
             let state = states.of(id);

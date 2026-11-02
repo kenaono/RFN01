@@ -893,6 +893,16 @@ export component EditorSurface inherits Rectangle {
                                     }
                                     return reject;
                                 }
+                                // RFN01-78: **変換中に届いたBackspaceは、IMEが確定した字を消している。**
+                                // 変換中に書き手が押したBackspaceはIMEが受ける（ここへは来ない）。
+                                // ATOKの確定アンドゥは、確定した字の数だけBackspaceを送ってから
+                                // 変換に戻すが、変換が先に立つことがある——それを捨てると
+                                // 「今日は今日は」になった（書き手の報告 2026-11-02）。
+                                if event.text == Key.Backspace && self.preedit-text != ""
+                                    && !root.terminal && !root.settings {
+                                    root.backspace-pressed();
+                                    return accept;
+                                }
                                 if self.preedit-text == "" && self.text == "" {
                                     // 追加要件 Terminal: the strip along the
                                     // foot, on the key every terminal uses for
@@ -1141,13 +1151,9 @@ export component EditorSurface inherits Rectangle {
                                         root.enter-pressed(root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.text == Key.Backspace {
-                                        // RFN01-78: **Ctrl+Backspaceは直前の語を消す**（Notepadと
-                                        // 同じ）。ここへ来るのはIMEが受けなかったとき——ATOKの
-                                        // 確定アンドゥは、確定した直後ならIMEが先に受ける。
-                                        // 選んでいれば、選んだものを消すだけ。
-                                        if event.modifiers.control && !root.has-selection {
-                                            root.move-caret(-3, true);
-                                        }
+                                        // RFN01-78: **Ctrl+Backspaceも1字だけ消す。**語を消すと、
+                                        // ATOKの確定アンドゥが送るBackspace（書き手がCtrlを押した
+                                        // ままだとCtrl付きで届く）が、1字ごとに1語を消してしまう。
                                         root.backspace-pressed();
                                         accept
                                     } else if event.text == Key.Tab {
