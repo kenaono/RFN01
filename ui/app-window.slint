@@ -429,12 +429,19 @@ export component AppWindow inherits Window {
         root.left-field-generation += 1;
     }
 
+    /// RFN01-75: **the Search panel's own search is put aside**, not lost —
+    /// its words, results and folder come back when the tree's search ends
+    /// (書き手の求め 2026-11-02: 検索パネルは以前のまま、前回の結果を残す).
+    callback tree-search-opened();
+    callback tree-search-closed();
+
     /// Start searching the tree showing, from empty and over all of it.
     public function open-tree-search() {
-        root.tree-searching = true;
-        root.tree-replacing = false;
-        root.folder-needle = "";
-        root.search-folder-reset();
+        if !root.tree-searching {
+            root.tree-searching = true;
+            root.tree-replacing = false;
+            root.tree-search-opened();
+        }
         root.left-field-generation += 1;
     }
 
@@ -445,8 +452,7 @@ export component AppWindow inherits Window {
         }
         root.tree-searching = false;
         root.tree-replacing = false;
-        root.folder-needle = "";
-        root.folder-search-requested();
+        root.tree-search-closed();
     }
 
     /// RFN01-75/76 (`Ctrl+Shift+F`): search the folder from wherever the

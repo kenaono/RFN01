@@ -263,7 +263,6 @@ fn a_bookmark_is_added_moved_opened_lit_and_let_go() {
         tree_paths: Rc::default(),
         workspace_ids: Rc::default(),
         results: Rc::default(),
-        results_roots: Rc::default(),
         recent: Rc::default(),
         recent_folders: Rc::default(),
         find_terms: Rc::new(RefCell::new(find::Terms::restored(Vec::new()))),

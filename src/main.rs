@@ -1943,7 +1943,6 @@ fn main() -> Result<(), slint::PlatformError> {
         workspace_ids: Rc::new(RefCell::new(WorkspaceManagerIds::default())),
         preview: Rc::default(),
         results: Rc::new(RefCell::new(Vec::new())),
-        results_roots: Rc::default(),
         recent: Rc::new(RefCell::new(remembered)),
         recent_folders: Rc::new(RefCell::new(visited)),
         find_terms: Rc::new(RefCell::new(find::Terms::restored(needles))),
@@ -4940,11 +4939,6 @@ struct Live {
     /// same reason as `tree_paths`: the window draws lines, and a place in a
     /// document is not one.
     results: Rc<RefCell<Vec<ResultRow>>>,
-    /// The folders `results` were searched in (RFN01-75). **The search panel
-    /// shows whichever tree it stands in for**, and results found in the
-    /// Workspace are not an answer about the Explorer's folder: when the two
-    /// differ the search is run again (`publish_left`).
-    results_roots: Rc<RefCell<Vec<PathBuf>>>,
     /// The files opened most recently, newest first (要件 7.7). Both the 履歴
     /// panel's rows and what each of them stands for: one path is all a row
     /// needs.
@@ -6757,6 +6751,8 @@ struct WorkFolder {
     /// a found file's row or one of its lines — and `None` for a folder.
     /// Empty when the tree is not searched.
     search_rows: Vec<Option<usize>>,
+    /// RFN01-75: the Search panel's search while the tree's is up.
+    panel_search: Option<PanelSearch>,
     /// RFN01-70: 一括置換の結果。置換のあとの探し直しの答えに添えて言う——答えは
     /// 後から届くので、先に言っておいても上書きされる。
     replaced_note: Option<String>,
@@ -7079,9 +7075,6 @@ fn publish_left(window: &AppWindow, live: &Live) {
             .borrow_mut()
             .set_workspace_view(tab == LeftTab::Workspace);
     }
-    if tab == LeftTab::Search {
-        search_in_new_place(window, live);
-    }
     show_searched_folder(window, live);
     match LeftTab::from_index(window.get_left_tab()) {
         LeftTab::Explorer => publish_tree(window, live),
@@ -7099,33 +7092,61 @@ fn publish_left(window: &AppWindow, live: &Live) {
     }
 }
 
-/// RFN01-75: put the search panel on the tree it stands in for, and search
-/// again when that is not where the results it holds came from.
-///
-/// **Which tree, then which results.** A search opened in the Explorer's
-/// place searches the Explorer's folder even when the Workspace was the last
-/// tree shown — the left pane may have been closed on it. Then: results found
-/// in other folders are not this tree's answer (書き手の報告 2026-11-02:
-/// Workspaceの結果がExplorerの検索に出る), so the same words are looked for
-/// again here, or the list is emptied when there are none. **Emptied first
-/// either way**: the answer comes from another thread, and until it does the
-/// other tree's results would stand under this tree's name.
-fn search_in_new_place(window: &AppWindow, live: &Live) {
-    if live.folder.borrow_mut().drop_scope_outside_tree() {
-        write_session(window, live);
+/// RFN01-75: the Search panel's own search, put aside while the tree is being
+/// searched — the two share the field, the list and the narrowed folder, and
+/// the panel keeps what it had (書き手の求め 2026-11-02: 検索パネルは以前のまま、
+/// 開いたフォルダ以外も対象にでき、前回の検索結果が残る).
+#[derive(Default)]
+struct PanelSearch {
+    needle: SharedString,
+    replacement: SharedString,
+    results: Vec<ResultRow>,
+    searching: Option<PathBuf>,
+    status: SharedString,
+}
+
+/// The tree's search starts: the panel's search is put aside, and the tree's
+/// starts from nothing — no words, no results, the whole tree.
+fn tree_search_opened(window: &AppWindow, live: &Live) {
+    {
+        let mut folder = live.folder.borrow_mut();
+        if folder.panel_search.is_none() {
+            let kept = PanelSearch {
+                needle: window.get_folder_needle(),
+                replacement: window.get_folder_replacement(),
+                results: std::mem::take(&mut *live.results.borrow_mut()),
+                searching: folder.searching.take(),
+                status: window.get_folder_status(),
+            };
+            folder.panel_search = Some(kept);
+        }
     }
-    let needle = window.get_folder_needle().to_string();
-    let roots = folder_search_roots(live, &needle);
-    if roots.is_empty() || *live.results_roots.borrow() == roots {
-        return;
-    }
+    // An answer still on its way belongs to the panel's search.
+    live.searched.set(live.searched.get() + 1);
     live.results.borrow_mut().clear();
-    *live.results_roots.borrow_mut() = roots;
-    if needle.is_empty() {
-        window.set_folder_status(SharedString::new());
-    } else {
-        search_work_folder(window, live);
-    }
+    window.set_folder_needle(SharedString::new());
+    window.set_folder_replacement(SharedString::new());
+    window.set_folder_status(SharedString::new());
+    show_searched_folder(window, live);
+    publish_left(window, live);
+}
+
+/// The tree's search ends: what it found goes, and the panel's comes back.
+fn tree_search_closed(window: &AppWindow, live: &Live) {
+    live.searched.set(live.searched.get() + 1);
+    let kept = live
+        .folder
+        .borrow_mut()
+        .panel_search
+        .take()
+        .unwrap_or_default();
+    *live.results.borrow_mut() = kept.results;
+    live.folder.borrow_mut().searching = kept.searching;
+    window.set_folder_needle(kept.needle);
+    window.set_folder_replacement(kept.replacement);
+    window.set_folder_status(kept.status);
+    show_searched_folder(window, live);
+    publish_left(window, live);
 }
 
 /// 書き手の求め 2026-09-23: the Tag View — the active Workspace's tags as a
@@ -7852,8 +7873,9 @@ fn folder_search_roots(live: &Live, needle: &str) -> Vec<PathBuf> {
 }
 
 fn search_work_folder(window: &AppWindow, live: &Live) {
-    // RFN01-75: never a folder outside the tree being searched.
-    if live.folder.borrow_mut().drop_scope_outside_tree() {
+    // RFN01-75: the tree's search never reaches outside the tree. The Search
+    // panel's may — that is what narrowing it to a folder is for.
+    if window.get_tree_searching() && live.folder.borrow_mut().drop_scope_outside_tree() {
         show_searched_folder(window, live);
     }
     let needle = window.get_folder_needle().to_string();
@@ -7885,7 +7907,6 @@ fn search_work_folder(window: &AppWindow, live: &Live) {
     }
     let generation = live.searched.get() + 1;
     live.searched.set(generation);
-    *live.results_roots.borrow_mut() = roots.clone();
     let job = SearchJob {
         exclusions: window.get_search_exclusions().to_string(),
         roots,
@@ -11238,8 +11259,10 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             };
             // RFN01-75: **over the tree**, like 🔍 — narrowed to the row's
             // folder, from empty, with the keyboard in the field.
-            window.set_folder_needle(SharedString::new());
-            window.set_tree_searching(true);
+            if !window.get_tree_searching() {
+                window.set_tree_searching(true);
+                tree_search_opened(window, live);
+            }
             search_in_folder(window, live, Some(into));
             window.invoke_focus_left_field();
             publish_left(window, live);
