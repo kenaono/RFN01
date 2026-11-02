@@ -353,23 +353,6 @@ unsafe extern "system" fn watch_proc(
             return DefSubclassProc(hwnd, message, w, l);
         }
         let watch = &*(data as *const ImeWatch);
-        // TEMPORARY (RFN01-78 確定アンドゥ): the order ATOK sends things in.
-        match message {
-            0x0100 | 0x0101 if matches!(w.0, 0x08 | 0x11 | 0xE5) => {
-                (watch.host.log)(&format!(
-                    "trace key {} vk={:#x}",
-                    if message == 0x0100 { "down" } else { "up" },
-                    w.0
-                ));
-            }
-            0x0102 if w.0 == 0x08 || w.0 == 0x7f => {
-                (watch.host.log)(&format!("trace char {:#x}", w.0));
-            }
-            0x010D => (watch.host.log)("trace start-composition"),
-            0x010E => (watch.host.log)("trace end-composition"),
-            0x010F => (watch.host.log)(&format!("trace composition flags={:#x}", l.0)),
-            _ => {}
-        }
         if message == WM_IME_REQUEST {
             let answer = answer_request(&watch.host, w.0 as u32, l.0);
             let result = match answer {
