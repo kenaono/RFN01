@@ -3415,6 +3415,17 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    window.on_pane_select_line(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            let id = PaneId::from_index(pane);
+            let document = states.document(id);
+            select_line(&window, &document, &states.of(id), &cache, id);
+        }
+    });
+
+    let weak = window.as_weak();
+    let states = pane_states.clone();
+    let cache = render_cache.clone();
     window.on_pane_select_all(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
@@ -4357,6 +4368,117 @@ fn main() -> Result<(), slint::PlatformError> {
 /// next has to replace and what an arrow key has to collapse from. The other
 /// pane keeps its own caret and selection: the two are separate by design
 /// (技術検証 3.7), and selecting here says nothing about there.
+/// RFN01-82 (`Ctrl+L`, VS Codeの「Select current line」): **キャレットの行を、行末の
+/// 改行まで選ぶ。**もう選んでいれば、選びの終わりの行まで広げる——押すたびに1行ずつ
+/// 下へ伸びる。行は原文の行（改行から改行まで）で、折り返しの1行ではない。
+fn line_selection(source: &str, anchor: Option<usize>, caret: usize) -> (usize, usize) {
+    let caret = caret.min(source.len());
+    let line_end = |at: usize| source[at..].find('\n').map_or(source.len(), |i| at + i + 1);
+    match anchor.filter(|anchor| *anchor != caret) {
+        Some(anchor) => {
+            let start = anchor.min(caret).min(source.len());
+            let end = anchor.max(caret).min(source.len());
+            (source_line_start(source, start), line_end(end))
+        }
+        None => (source_line_start(source, caret), line_end(caret)),
+    }
+}
+
+#[cfg(test)]
+mod line_selection_tests {
+    use super::line_selection;
+
+    /// RFN01-82 (`Ctrl+L`): the caret's line with its line break, then one more
+    /// line on each press, and the last line has no break to take.
+    #[test]
+    fn ctrl_l_takes_the_line_and_then_the_next() {
+        let text = "一行目\n二行目\n三行目";
+        let second = "一行目\n".len();
+        let third = "一行目\n二行目\n".len();
+        // In the middle of the second line, nothing selected.
+        let (start, end) = line_selection(text, None, second + 3);
+        assert_eq!((start, end), (second, third));
+        // Pressed again: the third line too, which ends without a break.
+        assert_eq!(line_selection(text, Some(start), end), (second, text.len()));
+        // An anchor equal to the caret is no selection.
+        assert_eq!(line_selection(text, Some(3), 3), (0, second));
+        // A selection made by hand inside one line grows to whole lines.
+        assert_eq!(
+            line_selection(text, Some(second + 6), second + 3),
+            (second, third)
+        );
+    }
+}
+
+fn select_line(
+    window: &AppWindow,
+    document: &Rc<OpenDocument>,
+    state: &Rc<RefCell<EditorState>>,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+) {
+    let source = document.text.borrow().clone();
+    {
+        let mut pane = state.borrow_mut();
+        let caret = pane.caret_source_byte.unwrap_or(0);
+        let (start, end) = line_selection(&source, pane.selection_anchor_source_byte, caret);
+        pane.selection_anchor_source_byte = Some(start);
+        pane.caret_source_byte = Some(end);
+        pane.preferred_line = None;
+        pane.mark = false;
+        pane.rectangular = false;
+        if !PaneId::reveals_while_moving(id.vertical(window)) {
+            pane.active_line_start = Some(source_line_start(&source, end));
+        }
+    }
+    refresh_pane_from_state(window, cache, document, id, state, &source);
+}
+
+/// RFN01-82: 横書きで、画面の一番上の行から次の行（`down`）／前の行までの送り。
+/// **行ごとに送りが違う**（見出し・行間）ので、その場の2行から測る。測れなければ`None`。
+fn line_pitch_at(engine: &mut TextEngine, top: f32, down: bool) -> Option<f32> {
+    let x = 1.0;
+    let here = engine.hit_test(x, top + 1.0).ok()?.utf16_position;
+    let line = engine.caret_geometry(here).ok()?;
+    let probe = if down {
+        line.y + line.height + 1.0
+    } else {
+        line.y - 1.0
+    };
+    let other = engine.hit_test(x, probe).ok()?.utf16_position;
+    let neighbour = engine.caret_geometry(other).ok()?;
+    let pitch = (neighbour.y - line.y).abs();
+    (pitch > 1.0).then_some(pitch)
+}
+
+/// RFN01-82 (`Ctrl+↑`／`Ctrl+↓`, VS Codeの「Scroll Line Up/Down」): 横書きで本文を
+/// 1行ぶん動かす。**キャレットは動かさない。**1行は画面の一番上の行の送り。
+/// 縦書きは呼ばれない（`shortcuts`が矢印のまま通す）。
+pub(crate) fn scroll_by_line(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    down: bool,
+) {
+    if id.vertical(window) {
+        return;
+    }
+    let fallback = id.screen(window).caret_height.max(8.0);
+    let top = -id.scroll(window);
+    let (step, total) = {
+        let mut borrowed = cache.borrow_mut();
+        let engine = &mut borrowed.pane(id).graphics.engine;
+        (
+            line_pitch_at(engine, top, down).unwrap_or(fallback),
+            engine.total_flow_size() as f32,
+        )
+    };
+    let visible = id.viewport_flow(window);
+    let (low, high) = id.scroll_range(window, visible, total);
+    let offset = id.scroll(window) + if down { -step } else { step };
+    id.set_scroll(window, offset.clamp(low, high));
+}
+
 fn select_whole_document(
     window: &AppWindow,
     document: &Rc<OpenDocument>,

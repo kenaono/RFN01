@@ -107,7 +107,8 @@ const DEFAULTS: &[&str] = &[
     "",
     "",
     "",
-    "",
+    // RFN01-82: VS Codeの「Toggle Markdown Preview」と同じ。
+    "Ctrl+Shift+V",
     "",
     "Ctrl+P",
 ];
@@ -318,11 +319,62 @@ const PANE_ACTIONS: &[MenuAction] = &[
         ShortcutAction::ReplaceInFolder
     ),
     // RFN01-82（書き手の求め 2026-11-03）: 左ペインの開閉をキーにも。末尾へ足す。
+    // **キーはVS Codeの「Toggle Sidebar Visibility」**（最初はCtrl+Alt+L、同じ日に替えた）。
     menu_action!(
         "左ペインを開く・閉じる",
         "Show or Hide Left Pane",
-        "Ctrl+Alt+L",
+        "Ctrl+B",
         ShortcutAction::ToggleLeftPane
+    ),
+    // RFN01-82: VS Codeの既定に合わせて足す（書き手と合意 2026-11-03）。末尾へ。
+    menu_action!(
+        "Outlineを開く",
+        "Show Outline",
+        "Ctrl+Shift+O",
+        ShortcutAction::ShowLeftTab(3)
+    ),
+    menu_action!(
+        "Git Changesを開く",
+        "Show Git Changes",
+        "Ctrl+Shift+G",
+        ShortcutAction::ShowLeftTab(8)
+    ),
+    menu_action!(
+        "設定を開く",
+        "Open Settings",
+        "Ctrl+,",
+        ShortcutAction::OpenSettings
+    ),
+    menu_action!(
+        "右に分割",
+        "Split Right",
+        "Ctrl+\\",
+        ShortcutAction::SplitRight
+    ),
+];
+/// 本文の操作の分類に足す、VS Codeに合わせた操作（RFN01-82、書き手と合意 2026-11-03）。
+/// **idは末尾へ足す。**
+const TEXT_CATEGORY: i32 = 0;
+const TEXT_ACTIONS: &[MenuAction] = &[
+    // 横書きで本文を1行ぶん動かす。キャレットは動かさない。縦書きでは画面の上下へ
+    // 動かす先が無いので、これまでどおり矢印として効く。
+    menu_action!(
+        "1行上へスクロール",
+        "Scroll Line Up",
+        "Ctrl+Up",
+        ShortcutAction::ScrollLine(false)
+    ),
+    menu_action!(
+        "1行下へスクロール",
+        "Scroll Line Down",
+        "Ctrl+Down",
+        ShortcutAction::ScrollLine(true)
+    ),
+    menu_action!(
+        "行を選択",
+        "Select Line",
+        "Ctrl+L",
+        ShortcutAction::SelectLine
     ),
 ];
 /// ファイルの分類に並べる、メニューから来た操作。
@@ -336,9 +388,12 @@ const FILE_ACTIONS: &[MenuAction] = &[
         "New Terminal",
         ShortcutAction::NewTerminal
     ),
+    // RFN01-82: VS Codeの「Open New Command Prompt」（Ctrl+Shift+C）に当たる。
+    // Quick Draftの全文コピーとTerminalのコピーも同じキーだが、場面が違う。
     menu_action!(
         "文書のフォルダでTerminal起動",
         "Terminal in Document Folder",
+        "Ctrl+Shift+C",
         ShortcutAction::FolderTerminal
     ),
 ];
@@ -448,7 +503,12 @@ const INSERT_ACTIONS: &[MenuAction] = &[
 ];
 /// 変更できる操作の数——既存の46枠と、メニューから来た分。
 fn count() -> usize {
-    NAMES.len() + FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len() + PANE_ACTIONS.len()
+    NAMES.len()
+        + FILE_ACTIONS.len()
+        + INSERT_ACTIONS.len()
+        + RUN_ACTIONS.len()
+        + PANE_ACTIONS.len()
+        + TEXT_ACTIONS.len()
 }
 /// idがメニューから来たものなら、その1つと分類の番号。
 fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
@@ -471,6 +531,13 @@ fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
             PANE_ACTIONS
                 .get(index - before)
                 .map(|action| (action, PANE_CATEGORY))
+        })
+        .or_else(|| {
+            let before =
+                FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len() + PANE_ACTIONS.len();
+            TEXT_ACTIONS
+                .get(index - before)
+                .map(|action| (action, TEXT_CATEGORY))
         })
 }
 fn name_at(id: usize) -> (&'static str, &'static str) {
@@ -531,6 +598,8 @@ fn key_token(token: &str) -> Option<String> {
         "TAB" => "Tab",
         "SPACE" => "Space",
         "`" => "`",
+        "," => ",",
+        "\\" => "\\",
         "LEFT" => "Left",
         "RIGHT" => "Right",
         "UP" => "Up",
@@ -646,6 +715,8 @@ fn chord(text: &str, control: bool, alt: bool, shift: bool) -> Option<String> {
         match c {
             ' ' => "Space".to_owned(),
             '`' => "`".to_owned(),
+            ',' => ",".to_owned(),
+            '\\' => "\\".to_owned(),
             _ if c.is_ascii_alphanumeric() => c.to_ascii_uppercase().to_string(),
             _ => return None,
         }
@@ -669,6 +740,37 @@ fn conflict(keys: &[String], i: usize, key: &str) -> Option<usize> {
         .enumerate()
         .position(|(other, value)| other != i && scope_at(other) == scope_at(i) && value == key)
 }
+/// RFN01-82: 割り当ての書き方の版。**保存はどの枠も明示して書く**ので（`i=`は
+/// 「キーなし」）、既定を替えても、前に保存した書き手には古い既定が残る。この印の
+/// 無い割り当ては、[`migrations`]の古い既定のままの枠だけを新しい既定へ移す。
+/// 印は保存のたびに書くので、移すのは一度きり——後で書き手が外した枠は外れたまま。
+const BINDINGS_VERSION: &str = "v=2";
+/// 既定を替えた枠と、その前の既定（RFN01-82、2026-11-03：VS Codeに合わせた）。
+fn migrations() -> Vec<(usize, &'static str)> {
+    let mut moved = vec![(43, "")];
+    for (action, before) in [
+        (ShortcutAction::FolderTerminal, ""),
+        (ShortcutAction::ToggleLeftPane, "Ctrl+Alt+L"),
+    ] {
+        if let Some(id) = id_of(action) {
+            moved.push((id, before));
+        }
+    }
+    moved
+}
+/// メニューから来た操作のid。
+fn id_of(action: ShortcutAction) -> Option<usize> {
+    (NAMES.len()..count()).find(|id| menu_at(*id).is_some_and(|(held, _)| held.action == action))
+}
+/// 保存する形。[`BINDINGS_VERSION`]を添える。
+fn encode(keys: &[String]) -> String {
+    keys.iter()
+        .enumerate()
+        .map(|(i, k)| format!("{i}={k}"))
+        .chain(std::iter::once(BINDINGS_VERSION.to_owned()))
+        .collect::<Vec<_>>()
+        .join(";")
+}
 fn bindings(raw: &str) -> Vec<String> {
     let mut keys: Vec<_> = (0..count()).map(|i| default_at(i).to_string()).collect();
     for entry in raw.split(';') {
@@ -677,6 +779,13 @@ fn bindings(raw: &str) -> Vec<String> {
                 if i < keys.len() {
                     keys[i] = key;
                 }
+            }
+        }
+    }
+    if !raw.trim().is_empty() && !raw.split(';').any(|entry| entry == BINDINGS_VERSION) {
+        for (id, before) in migrations() {
+            if keys.get(id).is_some_and(|key| key == before) {
+                keys[id] = default_at(id).to_owned();
             }
         }
     }
@@ -876,12 +985,14 @@ pub fn wire(app: &AppWindow, live: &Live) {
         if i >= count() {
             return;
         }
+        // **既定へ戻すときは綴りを確かめない**——既定には、書き手が自分では選べない
+        // キー（`Ctrl+Shift+C`、`TAKEN`）もある。
         let typed = if reset {
-            default_at(i).to_owned()
+            Some(default_at(i).to_owned())
         } else {
-            app.get_shortcut_edit().to_string()
+            normalize(&app.get_shortcut_edit())
         };
-        let Some(key) = normalize(&typed) else {
+        let Some(key) = typed else {
             app.set_shortcut_status(
                 shown((
                     "修飾キー付き（Ctrl／Alt／Shift）かF1〜F12を指定してください",
@@ -899,14 +1010,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return;
         }
         keys[i] = key.clone();
-        app.set_shortcut_bindings(
-            keys.iter()
-                .enumerate()
-                .map(|(i, k)| format!("{i}={k}"))
-                .collect::<Vec<_>>()
-                .join(";")
-                .into(),
-        );
+        app.set_shortcut_bindings(encode(&keys).into());
         app.set_shortcut_edit(key.into());
         publish(&app);
         crate::write_session(&app, &saved_live);
@@ -950,6 +1054,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
             ShortcutAction::ReplaceInFolder => app.invoke_open_folder_replace(),
             ShortcutAction::ExplorePane => app.invoke_focus_explore(),
             ShortcutAction::ToggleLeftPane => app.invoke_toggle_left_pane(),
+            ShortcutAction::ShowLeftTab(tab) => app.invoke_show_left_tab(tab),
             _ => return false,
         }
         true
@@ -982,6 +1087,15 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return false;
         }
         let pane = crate::focused_pane(&app);
+        // RFN01-82: **縦書きのCtrl+↑↓は矢印のまま**——画面の上下へ動かす先が無い。
+        if usize::try_from(command)
+            .ok()
+            .and_then(menu_at)
+            .is_some_and(|(action, _)| matches!(action.action, ShortcutAction::ScrollLine(_)))
+            && pane.vertical(&app)
+        {
+            return false;
+        }
         let on_settings = keyed_live
             .tabs
             .borrow()
@@ -1191,23 +1305,84 @@ mod tests {
         assert_eq!(resolve("", 0, "n", true, false, false), new_file);
     }
 
-    /// RFN01-82: `Ctrl+Alt+L`は既定で左ペインの開閉。**この枠を知らない版が保存した
-    /// 割り当てでも効き、ほかの割り当ては動かない**（idは末尾へ足した）。
+    /// RFN01-82: VS Codeの既定に合わせたキー（書き手と合意 2026-11-03）。
     #[test]
-    fn ctrl_alt_l_shows_or_hides_the_left_pane_by_default() {
-        let toggle = (NAMES.len()..count())
-            .find(|id| {
-                menu_at(*id).is_some_and(|(held, _)| held.action == ShortcutAction::ToggleLeftPane)
-            })
-            .expect("the action is listed") as i32;
-        assert_eq!(resolve("", 0, "l", true, true, false), toggle);
-        // 以前の版が保存した割り当て（この操作の枠を知らない）。
-        let saved = "0=Ctrl+O;13=Ctrl+Alt+Left;45=Ctrl+P";
-        assert_eq!(resolve(saved, 0, "l", true, true, false), toggle);
-        assert_eq!(bindings(saved)[13], "Ctrl+Alt+Left");
-        // 書き手が外せば効かない。
-        let unassigned = format!("{toggle}=");
-        assert_ne!(resolve(&unassigned, 0, "l", true, true, false), toggle);
+    fn vs_code_keys_are_the_defaults() {
+        let id = |action| id_of(action).expect("the action is listed") as i32;
+        assert_eq!(
+            resolve("", 0, "b", true, false, false),
+            id(ShortcutAction::ToggleLeftPane)
+        );
+        assert_eq!(resolve("", 0, "V", true, false, true), 43);
+        assert_eq!(
+            resolve("", 0, "O", true, false, true),
+            id(ShortcutAction::ShowLeftTab(3))
+        );
+        assert_eq!(
+            resolve("", 0, "G", true, false, true),
+            id(ShortcutAction::ShowLeftTab(8))
+        );
+        assert_eq!(
+            resolve("", 0, ",", true, false, false),
+            id(ShortcutAction::OpenSettings)
+        );
+        assert_eq!(
+            resolve("", 0, "\\", true, false, false),
+            id(ShortcutAction::SplitRight)
+        );
+        assert_eq!(
+            resolve("", 0, "l", true, false, false),
+            id(ShortcutAction::SelectLine)
+        );
+        let up: slint::SharedString = slint::platform::Key::UpArrow.into();
+        let down: slint::SharedString = slint::platform::Key::DownArrow.into();
+        assert_eq!(
+            resolve("", 0, &up, true, false, false),
+            id(ShortcutAction::ScrollLine(false))
+        );
+        assert_eq!(
+            resolve("", 0, &down, true, false, false),
+            id(ShortcutAction::ScrollLine(true))
+        );
+        // Ctrl+Shift+Cは場面で分かれる：本文ではTerminal起動、Quick Draftでは全文コピー。
+        assert_eq!(
+            resolve("", 0, "C", true, false, true),
+            id(ShortcutAction::FolderTerminal)
+        );
+        assert_eq!(resolve("", 1, "C", true, false, true), 38);
+        // Ctrl+Alt+Lはもう何にも当たっていない。
+        assert_eq!(resolve("", 0, "l", true, true, false), -1);
+    }
+
+    /// RFN01-82: **前の版が保存した割り当てでも、新しい既定が効く。**保存はどの枠も
+    /// 明示して書くので、古い既定（空やCtrl+Alt+L）がそのまま残っている。移すのは
+    /// 古い既定のままの枠だけで、書き手が替えたキーは残す。印を付けて保存したあとは
+    /// 移さない——後で外した枠は外れたまま。
+    #[test]
+    fn bindings_saved_before_the_change_take_the_new_defaults_once() {
+        let toggle = id_of(ShortcutAction::ToggleLeftPane).unwrap();
+        let folder = id_of(ShortcutAction::FolderTerminal).unwrap();
+        // 書き手のセッションと同じ形：どの枠も書いてあり、ふたつは自分で決めたキー。
+        let mut saved: Vec<String> = (0..count())
+            .map(|i| format!("{i}={}", default_at(i)))
+            .collect();
+        saved[43] = "43=".into();
+        saved[folder] = format!("{folder}=");
+        saved[toggle] = format!("{toggle}=Ctrl+Alt+L");
+        saved[10] = "10=F5".into();
+        let saved = saved.join(";");
+        let keys = bindings(&saved);
+        assert_eq!(keys[43], "Ctrl+Shift+V");
+        assert_eq!(keys[folder], "Ctrl+Shift+C");
+        assert_eq!(keys[toggle], "Ctrl+B");
+        assert_eq!(keys[10], "F5", "the writer's own key stays");
+        // 印のある保存では、空は「外した」の意味で、そのまま。
+        let mut after = keys.clone();
+        after[43].clear();
+        let encoded = encode(&after);
+        assert!(encoded.ends_with(BINDINGS_VERSION));
+        assert_eq!(bindings(&encoded)[43], "");
+        assert_eq!(bindings(&encoded)[toggle], "Ctrl+B");
     }
 
     /// RFN01-82: 開閉しても、出ていた面はそのまま。
