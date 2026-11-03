@@ -1,6 +1,7 @@
 # RFN Edit Windows transparency patch
 
-Based on the cached crates.io release `i-slint-backend-winit 1.17.1`.
+Based on the crates.io release `i-slint-backend-winit 1.18.1` (rebased from
+1.17.1 on 2026-11-03).
 Original source and license notices are retained.
 
 Changes: Windows features in Cargo.toml; renderer/sw.rs dispatches to
@@ -13,6 +14,19 @@ The original OpenGL renderer is unchanged.
 
 When upgrading Slint, rebase this small presentation patch and re-run native
 transparency, menu, IME, resize/maximize and long-document checks.
+
+`renderer/sw_softbuffer.rs` is upstream's `renderer/sw.rs` of the same release,
+unchanged: copy it over on each upgrade. The other renderer files follow the
+upstream `WinitCompatibleRenderer` trait; 1.18 added the window adapter's weak
+reference to `resume`, which `sw_composition.rs` takes and does not use.
+
+How the 1.17.1 → 1.18.1 rebase was done: a three-way merge per file (base =
+upstream 1.17.1, ours = this folder in Git, LF line endings; theirs = upstream
+1.18.1). `lib.rs` and `Cargo.toml` merged cleanly. `winitwindowadapter.rs` had
+two conflicts: the window-created hook now runs after upstream's new
+`first_frame_presented` reset, and upstream's own `try_borrow_mut` in
+`handle_focus_change` still drops a busy notification, so the deferral below is
+kept.
 
 ## Accessibility focus reentrancy
 

@@ -66,8 +66,8 @@ export component DiffView inherits Rectangle {
         }
     }
     changed selected-row => {
-        if root.selected-row >= 0 && (root.selected-row * 26px < -lines.viewport-y || (root.selected-row + 1) * 26px > -lines.viewport-y + lines.visible-height) {
-            lines.viewport-y = -min(root.selected-row * 26px, max(0px, lines.viewport-height - lines.visible-height));
+        if root.selected-row >= 0 && (root.selected-row * 26px < -lines.content-y || (root.selected-row + 1) * 26px > -lines.content-y + lines.visible-height) {
+            lines.content-y = -min(root.selected-row * 26px, max(0px, lines.content-height - lines.visible-height));
         }
     }
     VerticalLayout {
@@ -121,7 +121,7 @@ export component DiffView inherits Rectangle {
                 }
         }
         lines := ListView {
-            viewport-width: self.visible-width;
+            content-width: self.visible-width;
             for row[index] in root.rows: Rectangle {
                 height: 26px;
                 width: lines.visible-width;
@@ -138,7 +138,7 @@ export component DiffView inherits Rectangle {
                             width: max(0px, parent.width - (root.merge-enabled ? 84px : 62px));
                             height: parent.height;
                             clip: true;
-                            Text { x: horizontal.viewport-x; width: root.content-width * 0.5px; height: parent.height; text: row.left; color: Tok.ink; font-family: "Yu Gothic UI"; font-size: 14px; vertical-alignment: center; }
+                            Text { x: horizontal.content-x; width: root.content-width * 0.5px; height: parent.height; text: row.left; color: Tok.ink; font-family: "Yu Gothic UI"; font-size: 14px; vertical-alignment: center; }
                         }
                     }
                     Rectangle {
@@ -151,7 +151,7 @@ export component DiffView inherits Rectangle {
                             width: max(0px, parent.width - (root.merge-enabled ? 84px : 62px));
                             height: parent.height;
                             clip: true;
-                            Text { x: horizontal.viewport-x; width: root.content-width * 0.5px; height: parent.height; text: row.right; color: Tok.ink; font-family: "Yu Gothic UI"; font-size: 14px; vertical-alignment: center; }
+                            Text { x: horizontal.content-x; width: root.content-width * 0.5px; height: parent.height; text: row.right; color: Tok.ink; font-family: "Yu Gothic UI"; font-size: 14px; vertical-alignment: center; }
                         }
                     }
                 }
@@ -188,8 +188,8 @@ export component DiffView inherits Rectangle {
         }
         horizontal := ScrollView {
             height: 24px;
-            viewport-height: self.visible-height;
-            viewport-width: self.visible-width + max(0px, root.content-width * 0.5px - lines.visible-width / 2);
+            content-height: self.visible-height;
+            content-width: self.visible-width + max(0px, root.content-width * 0.5px - lines.visible-width / 2);
         }
         Rectangle {
             height: 30px;

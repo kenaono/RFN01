@@ -1183,7 +1183,7 @@ Slintのレイアウトで2回はまっているので、部品を足す前に�
 
 - Windows 11
 - Rust stable（MSVC）
-- Slint 1.17.1
+- Slint 1.18.1
 - windows-rs 0.62.2
 
 実行ファイルのアイコンは`ui/icon.ico`です。`ui/make-icon.ps1`が`ui/icon.png`から作り

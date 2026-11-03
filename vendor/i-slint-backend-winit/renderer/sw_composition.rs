@@ -312,6 +312,7 @@ impl WinitCompatibleRenderer for WinitSoftwareRenderer {
         &self,
         active: &ActiveEventLoop,
         attrs: winit::window::WindowAttributes,
+        _window_adapter_weak: std::rc::Weak<crate::winitwindowadapter::WinitWindowAdapter>,
     ) -> Result<Arc<winit::window::Window>, PlatformError> {
         let window = Arc::new(
             active

@@ -235,8 +235,8 @@ export component GitRepositoryView inherits Rectangle {
 
     changed scroll-generation => {
         let top = root.scroll-row * root.row-height;
-        if top < -list.viewport-y || top + root.row-height > -list.viewport-y + list.visible-height {
-            list.viewport-y = min(0px, max(list.visible-height - list.viewport-height, -(top - list.visible-height / 2)));
+        if top < -list.content-y || top + root.row-height > -list.content-y + list.visible-height {
+            list.content-y = min(0px, max(list.visible-height - list.content-height, -(top - list.visible-height / 2)));
         }
     }
     changed focus-generation => {
