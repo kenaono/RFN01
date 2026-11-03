@@ -80,7 +80,7 @@ pub trait Document {
 
 #[path = "tsf_plan.rs"]
 mod plan;
-use plan::{Event, Plan, Source, Text, unit_at};
+use plan::{Event, Notice, Plan, Source, Text, unit_at};
 
 // ---------------------------------------------------------------------------
 // The COM side.
@@ -153,7 +153,8 @@ struct State {
     text: RefCell<Text>,
     sink: RefCell<Option<ITextStoreACPSink>>,
     lock: Cell<u32>,
-    pending: Cell<u32>,
+    /// Locks granted later, one grant per request, in the order asked.
+    pending: RefCell<std::collections::VecDeque<u32>>,
     edited: Cell<bool>,
     focused: Cell<bool>,
     vertical: Cell<bool>,
@@ -339,7 +340,7 @@ fn refresh_with(state: &Rc<State>, props: Option<&corelib::window::InputMethodPr
             Some((props.text.to_string(), props.cursor_position, props.anchor_position));
     }
     let field = state.field.borrow().clone();
-    let changed = match (&document, field) {
+    let notice = match (&document, field) {
         (Some(document), _) => {
             // Busy: what the IME has is kept, and asked again next time.
             let Some(around) = document.around() else { return };
@@ -355,29 +356,36 @@ fn refresh_with(state: &Rc<State>, props: Option<&corelib::window::InputMethodPr
             let base = text.encode_utf16().collect();
             state.text.borrow_mut().take(Source::Field, base, text, caret, anchor)
         }
-        (None, None) => false,
+        (None, None) => Notice::Nothing,
     };
-    if changed {
-        notify(state);
+    if notice != Notice::Nothing {
+        notify(state, notice);
     }
 }
 
-/// Tell the IME the whole text and the selection changed.
-fn notify(state: &Rc<State>) {
+/// Tell the IME what changed: a stretch of the text, or only the selection.
+fn notify(state: &Rc<State>, notice: Notice) {
     if state.lock.get() != 0 {
         // Not while it holds a lock: once it lets go.
         let state = state.clone();
-        corelib::timers::Timer::single_shot(Duration::ZERO, move || notify(&state));
+        corelib::timers::Timer::single_shot(Duration::ZERO, move || notify(&state, notice));
         return;
     }
     let Some(sink) = state.sink.borrow().clone() else { return };
-    let length = state.text.borrow().text.len() as i32;
-    let change = TS_TEXTCHANGE { acpStart: 0, acpOldEnd: length.max(0), acpNewEnd: length };
     // SAFETY: the sink TSF gave this store.
     unsafe {
-        let _ = sink.OnTextChange(TEXT_STORE_TEXT_CHANGE_FLAGS(0), &change);
+        if let Notice::Text(start, old_end, new_end) = notice {
+            let change = TS_TEXTCHANGE {
+                acpStart: start as i32,
+                acpOldEnd: old_end as i32,
+                acpNewEnd: new_end as i32,
+            };
+            let _ = sink.OnTextChange(TEXT_STORE_TEXT_CHANGE_FLAGS(0), &change);
+        }
         let _ = sink.OnSelectionChange();
-        let _ = sink.OnLayoutChange(TS_LC_CHANGE, 1);
+        if matches!(notice, Notice::Text(..)) {
+            let _ = sink.OnLayoutChange(TS_LC_CHANGE, 1);
+        }
     }
 }
 
@@ -396,6 +404,8 @@ pub fn set_document(winit_window: &winit::window::Window, document: Rc<dyn Docum
     if let Some(hwnd) = hwnd_of(winit_window) {
         DOCUMENTS.with(|d| d.borrow_mut().insert(hwnd.0 as isize, document));
     }
+    // A field may have the keys already, as the window's first: read again.
+    document_changed(winit_window);
 }
 
 /// Whether the document's text runs vertically: the IME lays its candidate
@@ -752,9 +762,14 @@ fn grant_later(state: &Rc<State>) {
             grant_later(&state);
             return;
         }
-        let flags = state.pending.replace(0);
-        if flags != 0 {
+        // **One grant per request**, as TSF expects: two requests answered
+        // with one grant would leave one of the IME's edit sessions unrun.
+        let next = state.pending.borrow_mut().pop_front();
+        if let Some(flags) = next {
             let _ = grant(&state, flags);
+            if !state.pending.borrow().is_empty() {
+                grant_later(&state);
+            }
         }
     });
 }
@@ -790,11 +805,15 @@ impl ITextStoreACP_Impl for Store_Impl {
     fn RequestLock(&self, flags: u32) -> windows_core::Result<HRESULT> {
         let state = &self.state;
         let sync = flags & TS_LF_SYNC != 0;
-        if state.lock.get() != 0 || (inside() && !state.allow_sync.get()) {
+        // A read-only lock changes nothing here or in the application, so it
+        // is granted at once even from inside a call (Copilot Keyboard asks for
+        // synchronous ones after a layout change).
+        let read_only = flags & TS_LF_READWRITE.0 == TS_LF_READ.0;
+        if state.lock.get() != 0 || (inside() && !state.allow_sync.get() && !read_only) {
             if sync {
                 return Ok(TS_E_SYNCHRONOUS);
             }
-            state.pending.set(state.pending.get() | flags);
+            state.pending.borrow_mut().push_back(flags);
             grant_later(state);
             return Ok(TS_S_ASYNC);
         }
