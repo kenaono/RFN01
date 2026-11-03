@@ -473,6 +473,10 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 /// re-wrap about 0.3s after launch; laid out at once, the first real size is
 /// done before the window is created (about 20ms, 2026-09-23の計測).
 const STARTUP_RESIZE: Duration = Duration::from_secs(2);
+/// How long after the left pane opens or closes the panes' resizes are taken as
+/// that change, laid out at once rather than after [`RESIZE_SETTLE`] (RFN01-82).
+/// Every pane hears of it within the same frame or two.
+const LEFT_PANE_RESIZE: Duration = Duration::from_millis(100);
 
 /// Lets the panes be laid out when it is dropped, if nothing has yet
 /// ([`AWAITING_FIRST_SIZE`]). Held by the title bar's setup, which ends — by
@@ -2727,6 +2731,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    // RFN01-82（書き手の報告 2026-11-03）: **the left pane put away or brought
+    // back is one change, not a drag**, so the panes are laid out for it at
+    // once. Waiting out the settle showed the old lines centred in the wider
+    // pane for 150ms and then jumped them left — in horizontal writing, where
+    // the width is the line's length. A pane's width changes with the left pane
+    // only this way; dragging its edge keeps it open and keeps the settle.
+    let left_pane_was_open = Cell::new(window.get_tree_open());
+    let left_pane_changed_at = Rc::new(Cell::new(None::<Instant>));
     window.on_pane_resized(move |pane| {
         if WINDOW_SHAPED.get() {
             AWAITING_FIRST_SIZE.set(false);
@@ -2739,7 +2751,19 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut timers = timers.borrow_mut();
             timers.entry(id.0).or_default().clone()
         };
-        let settle = if launched.elapsed() < STARTUP_RESIZE {
+        // Every pane the change resizes hears of it, one after another: the
+        // first to notice the left pane has changed marks the moment for the
+        // rest.
+        if let Some(window) = weak.upgrade() {
+            let open = window.get_tree_open();
+            if left_pane_was_open.replace(open) != open {
+                left_pane_changed_at.set(Some(Instant::now()));
+            }
+        }
+        let with_left_pane = left_pane_changed_at
+            .get()
+            .is_some_and(|at| at.elapsed() < LEFT_PANE_RESIZE);
+        let settle = if launched.elapsed() < STARTUP_RESIZE || with_left_pane {
             Duration::ZERO
         } else {
             RESIZE_SETTLE

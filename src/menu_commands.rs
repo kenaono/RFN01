@@ -106,6 +106,8 @@ pub enum ShortcutAction {
     ExplorePane,
     /// RFN01-75: フォルダ内を置換する（検索に置換欄を出して開く）。
     ReplaceInFolder,
+    /// RFN01-82: 左ペインを開く・閉じる（縦列で、いま見ている面をもう一度押すのと同じ）。
+    ToggleLeftPane,
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -2375,6 +2377,7 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::SearchInFolder => return window.invoke_open_folder_search(),
         ShortcutAction::ExplorePane => return window.invoke_focus_explore(),
         ShortcutAction::ReplaceInFolder => return window.invoke_open_folder_replace(),
+        ShortcutAction::ToggleLeftPane => return window.invoke_toggle_left_pane(),
         _ => {}
     }
     let target = Target::for_shortcut(window, live);
@@ -2396,7 +2399,8 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::ReadAloud => Command::ReadAloud,
         ShortcutAction::SearchInFolder
         | ShortcutAction::ExplorePane
-        | ShortcutAction::ReplaceInFolder => return,
+        | ShortcutAction::ReplaceInFolder
+        | ShortcutAction::ToggleLeftPane => return,
     };
     execute(window, live, &target, command);
 }

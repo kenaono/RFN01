@@ -520,6 +520,18 @@ export component AppWindow inherits Window {
         root.left-field-generation += 1;
     }
 
+    /// RFN01-82 (`Ctrl+Alt+L`): the left pane put away or brought back — what
+    /// pressing the rail's lit icon again does, so the panel that comes back is
+    /// the one that went. **The keyboard goes to the text** either way, as from
+    /// the rail; a field of the pane that had it is gone with the pane.
+    public function toggle-left-pane() {
+        root.tree-open = !root.tree-open;
+        if root.tree-open {
+            root.left-tab-chosen(root.left-tab);
+        }
+        root.focus-generation += 1;
+    }
+
     /// Escape in a field of the left pane: the keyboard back to the text, and
     /// the whole tree back if it was being searched (RFN01-76).
     function left-field-escaped() {
