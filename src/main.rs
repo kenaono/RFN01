@@ -23552,6 +23552,11 @@ fn watch_ime(
         let active = {
             let weak = window.as_weak();
             let cache = cache.clone();
+            // **The last answer when the cache is busy** (書き手の報告
+            // 2026-11-03：再変換ができない): answering "not a page" then made the
+            // IME see the hidden field's empty text for a moment, and a
+            // reconversion asked for in that moment had nothing to convert.
+            let last = Cell::new(true);
             move || {
                 let Some(window) = weak.upgrade() else {
                     return false;
@@ -23560,9 +23565,10 @@ fn watch_ime(
                     return false;
                 }
                 let id = PaneId::from_index(window.get_focused_pane());
-                cache
-                    .try_borrow_mut()
-                    .is_ok_and(|mut cache| cache.pane(id).terminal.is_none())
+                if let Ok(mut cache) = cache.try_borrow_mut() {
+                    last.set(cache.pane(id).terminal.is_none());
+                }
+                last.get()
             }
         };
         let host = ime::ImeHost {

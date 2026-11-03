@@ -71,6 +71,15 @@ pub(crate) struct Event {
     pub(crate) cursor: Option<i32>,
 }
 
+/// What the IME has to be told after [`Text::take`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Notice {
+    Nothing,
+    Selection,
+    /// `start..old_end` of the old text became `start..new_end` (UTF-16).
+    Text(u32, u32, u32),
+}
+
 /// The store's state: what Slint or the document holds (`base`), and what the
 /// IME has made of it (`text`, with the composition in it).
 #[derive(Clone, Debug, Default)]
@@ -88,6 +97,9 @@ pub(crate) struct Text {
     pub(crate) composing: bool,
     /// The stretch of the document already chosen for this composition.
     pub(crate) chosen: Option<(u32, u32)>,
+    /// The document's text before a commit it has not taken yet: read back
+    /// unchanged, it is the document being late, not the commit undone.
+    pub(crate) stale: Option<Vec<u16>>,
 }
 
 impl Text {
@@ -147,6 +159,34 @@ impl Text {
                 self.base_cursor = caret;
                 self.base_anchor = caret;
             }
+            Source::Document
+                if !composing
+                    && let Some((from, to)) = self.chosen
+                    && let Some(length) =
+                        (committed.len() + (to - from) as usize).checked_sub(self.base.len())
+                    && from as usize + length <= committed.len() =>
+            {
+                // A reconversion ends: **what it made replaces what it took**,
+                // even when that is the same text — the stretch is selected in
+                // the document, and an empty commit would leave it selected,
+                // for the next Space to convert again (書き手の報告 2026-11-03).
+                let made = &committed[from as usize..from as usize + length];
+                plan.event = Some(Event {
+                    commit: true,
+                    text: String::from_utf16_lossy(made),
+                    replace: None,
+                    preedit: String::new(),
+                    preedit_selection: None,
+                    cursor: None,
+                });
+                if changed {
+                    self.stale = Some(std::mem::take(&mut self.base));
+                }
+                self.base = committed;
+                self.base_cursor = from + length as u32;
+                self.base_anchor = self.base_cursor;
+                self.chosen = None;
+            }
             Source::Document => {
                 let selection = (
                     self.base_cursor.min(self.base_anchor),
@@ -179,6 +219,9 @@ impl Text {
                     });
                     // What the document will hold once it has taken the commit;
                     // `refresh` reads it back from the document itself.
+                    if changed {
+                        self.stale = Some(std::mem::take(&mut self.base));
+                    }
                     self.base = committed;
                     self.base_cursor = (start + inserted.len()) as u32;
                     self.base_anchor = self.base_cursor;
@@ -190,8 +233,12 @@ impl Text {
         plan
     }
 
-    /// Take what Slint or the document holds now. `true` when the IME has to be
-    /// told the text changed.
+    /// Take what Slint or the document holds now, and say what the IME has to
+    /// be told.
+    ///
+    /// **Only what changed**: TSF keeps what it knows of the text — the
+    /// reading each word was typed with — on the ranges it was told about, and
+    /// "everything changed" throws it all away, which a reconversion may need.
     ///
     /// **Not while composing**: the composition is the IME's, and what it is
     /// compared against has to stay the text it was made in — a caret moved by
@@ -204,24 +251,44 @@ impl Text {
         field: String,
         cursor: u32,
         anchor: u32,
-    ) -> bool {
+    ) -> Notice {
         if self.comp.is_some() {
-            return false;
+            return Notice::Nothing;
         }
-        let same = self.source == Some(source)
-            && self.base == base
-            && self.base_cursor == cursor
-            && self.base_anchor == anchor;
+        let switched = self.source != Some(source);
+        // The document read back before it took the commit: wait for it.
+        // (Telling the IME the commit went away and came back drops what it
+        // knows of the committed words.)
+        if !switched && source == Source::Document && self.stale.as_ref() == Some(&base) {
+            return Notice::Nothing;
+        }
+        self.stale = None;
         self.source = Some(source);
         self.base = base;
         self.field = field;
         self.base_cursor = cursor;
         self.base_anchor = anchor;
         let sel = (cursor.min(anchor), cursor.max(anchor));
-        let changed = !same || self.text != self.base || self.sel != sel;
+        let (start, old_end, inserted) = diff(&self.text, &self.base);
+        let text_changed = start != old_end || !inserted.is_empty();
+        let notice = if switched || text_changed {
+            if switched {
+                Notice::Text(0, self.text.len() as u32, self.base.len() as u32)
+            } else {
+                Notice::Text(
+                    start as u32,
+                    old_end as u32,
+                    (start + inserted.len()) as u32,
+                )
+            }
+        } else if self.sel != sel {
+            Notice::Selection
+        } else {
+            Notice::Nothing
+        };
         self.text = self.base.clone();
         self.sel = sel;
-        changed
+        notice
     }
 }
 
@@ -358,13 +425,16 @@ mod tests {
         t.comp = Some((0, 3));
         t.plan();
         // The writer clicked into another paragraph while converting.
-        assert!(!t.take(
-            Source::Document,
-            units("# 見出しの段落"),
-            String::new(),
-            3,
-            3
-        ));
+        assert_eq!(
+            t.take(
+                Source::Document,
+                units("# 見出しの段落"),
+                String::new(),
+                3,
+                3
+            ),
+            Notice::Nothing
+        );
         // The IME commits the composition where it was made.
         t.comp = None;
         let plan = t.plan();
@@ -373,21 +443,122 @@ mod tests {
         assert!(event.commit);
         assert_eq!(event.text, "のんら");
         // Then the new paragraph is taken.
-        assert!(t.take(
+        assert_eq!(
+            t.take(
+                Source::Document,
+                units("# 見出しの段落"),
+                String::new(),
+                3,
+                3
+            ),
+            Notice::Text(0, 3, 8)
+        );
+        assert_eq!(t.text, units("# 見出しの段落"));
+    }
+
+    #[test]
+    fn only_the_changed_range_is_reported() {
+        let mut t = Text::default();
+        t.take(
             Source::Document,
-            units("# 見出しの段落"),
+            units("今日はいい天気"),
             String::new(),
             3,
-            3
-        ));
-        assert_eq!(t.text, units("# 見出しの段落"));
+            3,
+        );
+        // The document took a commit of「とても」at the caret.
+        assert_eq!(
+            t.take(
+                Source::Document,
+                units("今日はとてもいい天気"),
+                String::new(),
+                6,
+                6
+            ),
+            Notice::Text(3, 3, 6)
+        );
+        // Switching to a field is everything.
+        assert_eq!(
+            t.take(Source::Field, units("x"), "x".into(), 1, 1),
+            Notice::Text(0, 10, 1)
+        );
+    }
+
+    #[test]
+    fn a_document_read_back_before_it_took_the_commit_is_not_a_change() {
+        let mut t = Text::default();
+        t.take(Source::Document, units(""), String::new(), 0, 0);
+        t.text = units("のち");
+        t.comp = Some((0, 2));
+        t.plan();
+        t.text = units("後");
+        t.comp = None;
+        t.sel = (1, 1);
+        assert!(t.plan().event.unwrap().commit);
+        // Still the old text: the document has not taken the commit yet.
+        assert_eq!(
+            t.take(Source::Document, units(""), String::new(), 0, 0),
+            Notice::Nothing
+        );
+        assert_eq!(t.text, units("後"));
+        // Now it has: nothing to tell either.
+        assert_eq!(
+            t.take(Source::Document, units("後"), String::new(), 1, 1),
+            Notice::Nothing
+        );
+        // From here on, the old text is a real change.
+        assert_eq!(
+            t.take(Source::Document, units(""), String::new(), 0, 0),
+            Notice::Text(0, 1, 0)
+        );
+    }
+
+    #[test]
+    fn a_reconversion_committed_unchanged_still_replaces_the_selection() {
+        let mut t = Text::default();
+        // 「今日は」selected, and converted again.
+        t.take(Source::Document, units("今日は"), String::new(), 3, 0);
+        t.comp = Some((0, 3));
+        assert_eq!(t.plan().choose, None);
+        // Committed as it was.
+        t.comp = None;
+        t.sel = (3, 3);
+        let event = t.plan().event.unwrap();
+        assert!(event.commit);
+        assert_eq!(event.text, "今日は");
+        assert_eq!((t.base_cursor, t.base_anchor), (3, 3));
+    }
+
+    #[test]
+    fn a_reconversion_committed_changed_replaces_the_whole_selection() {
+        let mut t = Text::default();
+        t.take(Source::Document, units("今日は晴れ"), String::new(), 3, 0);
+        t.comp = Some((0, 3));
+        t.plan();
+        t.text = units("きょうは晴れ");
+        t.comp = Some((0, 4));
+        t.plan();
+        t.comp = None;
+        let plan = t.plan();
+        assert_eq!(plan.choose, None);
+        assert_eq!(plan.event.unwrap().text, "きょうは");
     }
 
     #[test]
     fn nothing_changed_is_nothing_to_say() {
         let mut t = field("ab", 1);
         assert_eq!(t.plan(), Plan::default());
-        assert!(!t.take(Source::Field, units("ab"), "ab".into(), 1, 1));
-        assert!(t.take(Source::Field, units("abc"), "abc".into(), 3, 3));
+        assert_eq!(
+            t.take(Source::Field, units("ab"), "ab".into(), 1, 1),
+            Notice::Nothing
+        );
+        assert_eq!(
+            t.take(Source::Field, units("ab"), "ab".into(), 2, 2),
+            Notice::Selection
+        );
+        assert_eq!(
+            t.take(Source::Field, units("abc"), "abc".into(), 3, 3),
+            Notice::Text(2, 2, 3)
+        );
     }
 }
