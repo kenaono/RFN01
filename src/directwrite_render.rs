@@ -1504,6 +1504,31 @@ fn apply_marker_boxes(
     // 3桁ぶんの深さ59pxのはずが26pxだった）。幅0の箱にはその症状が出ないし、
     // 出たとしても送りが0なので何も動かない。
     let width_less = box_of(0.0, typography.font_size);
+    // RFN01-90（書き手の報告 2026-11-03：「1. 」と打つと行が狭くなり、字が半分見えない）:
+    // **記号の箱は字の行より低い**（高さが字の大きさで、行の上下の余りを持たない）。
+    // 中身の字がまだ無い項目では、行の高さがその箱だけで決まって狭くなり、溝に描く
+    // 記号が行の外へはみ出して切れていた。**箱を張る前の行の高さを覚えておき**、張った
+    // あとで低くなっていたら戻す。字のある行は字が高さを決めるので、低くならない。
+    let list_line = runs.iter().any(|run| {
+        matches!(
+            run.ornament,
+            Some(
+                Ornament::Bullet
+                    | Ornament::TaskOpen
+                    | Ornament::TaskDone
+                    | Ornament::Number
+                    | Ornament::Markup
+            )
+        )
+    });
+    // **行ごとに比べる**（書き手の報告 2026-11-04：「1. テスト」で改行して入った「2. 」の行が
+    // 半分見えない）。続けて書いた項目は前の項目と同じブロックの2行目になるので、1行の
+    // ブロックだけ見ていたのでは効かなかった。
+    let before = if list_line {
+        Some(line_metrics(layout)?)
+    } else {
+        None
+    };
     // 追加要件 2026-09-15: **絵の行は、行の高さを絵に合わせる。**本文の行は字の大きさから決めた一様な
     // 行送り（`apply_line_height`）で組むが、それでは箱の高さが行に効かず、絵が次の行に重なる。
     // 絵の行はブロックが分かれている（`split_blocks`）ので、ここで中身に合わせる送りへ替えても本文には効かない。
@@ -1644,6 +1669,36 @@ fn apply_marker_boxes(
         // SAFETY: `style_runs` keeps every range inside the block's own text,
         // and both objects outlive the call.
         unsafe { layout.SetInlineObject(&object, range)? };
+    }
+    if let Some(before) = before {
+        let after = line_metrics(layout)?;
+        // 縮んだ行があれば、**箱を張る前のいちばん高い行の高さで揃える**——字の行の高さである。
+        // 縮んだ行の無いブロック（項目にどれも字がある）は触らない。縦書きでは、英数字だけの
+        // 列が漢字の列より細いので、張る前から高さが揃っているとは限らない。
+        let shrunk = after.len() == before.len()
+            && after
+                .iter()
+                .zip(&before)
+                .any(|(after, before)| after.height + 0.5 < before.height);
+        let tallest = before
+            .iter()
+            .max_by(|a, b| a.height.total_cmp(&b.height))
+            .map(|line| (line.height, line.baseline));
+        if let Some((height, baseline)) = tallest.filter(|_| shrunk) {
+            let spacing = DWRITE_LINE_SPACING {
+                method: DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                height,
+                baseline,
+                leadingBefore: 0.0,
+                fontLineGapUsage: DWRITE_FONT_LINE_GAP_USAGE_DEFAULT,
+            };
+            // SAFETY: The layout is alive for this call, and the struct is read before it returns.
+            unsafe {
+                layout
+                    .cast::<IDWriteTextLayout3>()?
+                    .SetLineSpacing(&spacing)?
+            };
+        }
     }
     // 書き手の求め 2026-09-23: **畳む行のブロックは場所を取らない**（フロントマター、整形表示）。
     // 字は上で箱に隠れ、行送りをほぼ0にする。そのブロックは畳む行だけでできている
@@ -12531,6 +12586,37 @@ mod tests {
 
         assert_eq!(hit.utf16_position, 5, "カーソルは字の後ろへ送られる");
         assert_eq!(hit.utf16_letter, 4, "押されたのは`e`そのもの");
+    }
+
+    /// RFN01-90（書き手の報告 2026-11-03）: **中身のまだ無い項目の行も、字の行と同じ高さ。**
+    /// 「1. 」と打った直後は、行の高さが番号の箱だけで決まって狭くなり、番号の下半分が
+    /// 切れていた。箇条書き・番号・チェックボックス、縦書き・横書きとも。
+    #[test]
+    fn an_empty_list_item_is_as_tall_as_one_with_text() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            for marker in ["1. ", "- ", "- [ ] "] {
+                let height = |source: &str| {
+                    let (preview, styles) = preview_of(source);
+                    let styled = StyledText::marked(&preview.text, &styles, preview.marks())
+                        .with_markers(preview.markers());
+                    engine_set(mode, styled, &plain()).total_flow_size()
+                };
+                let empty = height(&format!("本文\n{marker}"));
+                let filled = height(&format!("本文\n{marker}字"));
+                assert!(
+                    empty + 1 >= filled,
+                    "{mode:?} {marker:?}: an empty item takes {empty}, one with text {filled}"
+                );
+                // 続けて書いた項目の2行目（改行で次の番号が入った直後）も。
+                let next = marker.replace("1.", "2.");
+                let empty = height(&format!("本文\n{marker}字\n{next}"));
+                let filled = height(&format!("本文\n{marker}字\n{next}字"));
+                assert!(
+                    empty + 1 >= filled,
+                    "{mode:?} {next:?} after an item: {empty} against {filled}"
+                );
+            }
+        }
     }
 
     /// RFN01-86: how many characters one line holds, found by laying out a

@@ -10,7 +10,9 @@
 //! 続いた1枚のまま、何も変わらない。
 use std::rc::Rc;
 
-use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{
+    ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
+};
 
 use crate::directwrite_render::print::{self, Destination, Paper, Printer, Trim};
 use crate::directwrite_render::{LineFit, TextEngine, WritingMode};
@@ -138,9 +140,12 @@ fn draw(window: &AppWindow, live: &Live) {
         return;
     };
     let count = count.min(preview.pages - at.min(preview.pages));
-    // 紙1枚を何倍の細かさで描くか。映る大きさの1.5倍まで——拡大したときに粗く
-    // 見えない程度で、縮めたときは無駄に描かない。
-    let scale = (sheet_width / preview.paper.width.max(1.0) * 1.5).clamp(0.4, 2.0);
+    // 紙1枚を何倍の細かさで描くか。**映る大きさの画素そのまま**（RFN01-91、書き手の報告
+    // 2026-11-03：「印刷プレビューの文字が擦れる」）。1.5倍で描いて窓に縮めさせていたが、
+    // 窓の縮め方は画素を間引くので、細い字の線が抜けて擦れて見えた。画面の画素と1対1なら
+    // 縮める処理そのものが要らない。窓の倍率（高DPI）も掛ける。
+    let device = window.window().scale_factor();
+    let scale = (sheet_width * device / preview.paper.width.max(1.0)).clamp(0.1, 4.0);
     let mut sheets = Vec::with_capacity(count);
     for page in at..at + count {
         match print::render_page(
