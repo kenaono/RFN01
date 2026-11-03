@@ -130,6 +130,9 @@ export struct LeftRow {
     // header above the rows is not a valid drop target while any root row is
     // shown. Only the tree ever sets this; the other panels leave it false.
     is-root: bool,
+    // RFN01-85: a file outside the Workspace in use, which a click will not
+    // open — drawn faint. Only the Explorer's own tree sets it.
+    outside: bool,
 }
 
 export component AppWindow inherits Window {
@@ -316,12 +319,17 @@ export component AppWindow inherits Window {
     callback workspace-manager-closed();
     callback workspace-open-selected();
     callback workspace-leave-requested();
+    // RFN01-85: the same leave, from the Explorer's band; the Explorer stays.
+    callback explorer-workspace-leave-requested();
     callback workspace-tree-command(int);
     in property <bool> workspace-context-folder;
     in property <bool> workspace-context-auto;
     // RFN01-61: 右クリックしたフォルダが自動バックアップか。自動保存とは排他。
     in property <bool> workspace-context-backup;
     in property <bool> workspace-active;
+    // RFN01-85: the Workspace in use while the Explorer lists files outside
+    // it, and empty otherwise. The band over the tree says so.
+    in property <string> explorer-outside-workspace;
     in-out property <bool> workspace-manager-open;
     in property <bool> workspace-read-error;
     in property <string> workspace-read-error-text;
@@ -2514,6 +2522,31 @@ export component AppWindow inherits Window {
                             return reject;
                         }
                     }
+                    // RFN01-85 (書き手の確認 2026-11-03): while a Workspace is in
+                    // use, the files outside it are listed but do not open. Say
+                    // so where they are, and put the way out beside it — the
+                    // same leave the Workspace view's own button asks for.
+                    if root.left-tab == 0 && root.explorer-outside-workspace != "": Rectangle {
+                        background: Tok.accent-faint;
+                        vertical-stretch: 0;
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 4px;
+                            Text {
+                                text: @tr("Using Workspace \"{}\". Dimmed files can't be opened here.", root.explorer-outside-workspace);
+                                color: Tok.ink-muted;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                TextButton {
+                                    title: @tr("Close Workspace");
+                                    clicked => { root.explorer-workspace-leave-requested(); }
+                                }
+                            }
+                        }
+                    }
                     // 要件 7.7: the question this panel asks is about the
                     // work folder, so it has its own field. The find bar above
                     // the editor asks about one document; the two are different
@@ -3000,6 +3033,7 @@ export component AppWindow inherits Window {
                                     // 追加要件 2026-09-15: フォルダとファイルで色を分けられる（Explorerの面）。
                                     color: row.folder
                                         ? (root.left-folder-own ? root.left-folder-ink : root.left-ink)
+                                        : row.outside ? Tok.ink-faint
                                         : ((root.left-tab == 0 || root.left-tab == 4) && root.left-file-own ? root.left-file-ink : root.left-ink);
                                     font-size: root.left-size * 1px;
                                     vertical-alignment: center;

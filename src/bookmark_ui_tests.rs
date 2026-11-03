@@ -34,6 +34,7 @@ fn left_row(name: &str, depth: i32, folder: bool, open: bool) -> LeftRow {
         open,
         parent: -1,
         is_root: false,
+        outside: false,
     }
 }
 
