@@ -317,6 +317,13 @@ const PANE_ACTIONS: &[MenuAction] = &[
         "Ctrl+Shift+H",
         ShortcutAction::ReplaceInFolder
     ),
+    // RFN01-82（書き手の求め 2026-11-03）: 左ペインの開閉をキーにも。末尾へ足す。
+    menu_action!(
+        "左ペインを開く・閉じる",
+        "Show or Hide Left Pane",
+        "Ctrl+Alt+L",
+        ShortcutAction::ToggleLeftPane
+    ),
 ];
 /// ファイルの分類に並べる、メニューから来た操作。
 ///
@@ -942,6 +949,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
             ShortcutAction::SearchInFolder => app.invoke_open_folder_search(),
             ShortcutAction::ReplaceInFolder => app.invoke_open_folder_replace(),
             ShortcutAction::ExplorePane => app.invoke_focus_explore(),
+            ShortcutAction::ToggleLeftPane => app.invoke_toggle_left_pane(),
             _ => return false,
         }
         true
@@ -1181,6 +1189,51 @@ mod tests {
         assert_eq!(resolve("", 0, "u", true, false, true), -1);
         // 新規文書の`Ctrl+N`は既定のまま効く。
         assert_eq!(resolve("", 0, "n", true, false, false), new_file);
+    }
+
+    /// RFN01-82: `Ctrl+Alt+L`は既定で左ペインの開閉。**この枠を知らない版が保存した
+    /// 割り当てでも効き、ほかの割り当ては動かない**（idは末尾へ足した）。
+    #[test]
+    fn ctrl_alt_l_shows_or_hides_the_left_pane_by_default() {
+        let toggle = (NAMES.len()..count())
+            .find(|id| {
+                menu_at(*id).is_some_and(|(held, _)| held.action == ShortcutAction::ToggleLeftPane)
+            })
+            .expect("the action is listed") as i32;
+        assert_eq!(resolve("", 0, "l", true, true, false), toggle);
+        // 以前の版が保存した割り当て（この操作の枠を知らない）。
+        let saved = "0=Ctrl+O;13=Ctrl+Alt+Left;45=Ctrl+P";
+        assert_eq!(resolve(saved, 0, "l", true, true, false), toggle);
+        assert_eq!(bindings(saved)[13], "Ctrl+Alt+Left");
+        // 書き手が外せば効かない。
+        let unassigned = format!("{toggle}=");
+        assert_ne!(resolve(&unassigned, 0, "l", true, true, false), toggle);
+    }
+
+    /// RFN01-82: 開閉しても、出ていた面はそのまま。
+    #[test]
+    fn toggling_the_left_pane_keeps_the_panel_it_showed() {
+        use slint::platform::software_renderer::MinimalSoftwareWindow;
+        struct Offscreen(std::rc::Rc<MinimalSoftwareWindow>);
+        impl slint::platform::Platform for Offscreen {
+            fn create_window_adapter(
+                &self,
+            ) -> Result<std::rc::Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError>
+            {
+                Ok(self.0.clone())
+            }
+        }
+        let surface = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(Offscreen(surface))).unwrap();
+        let window = AppWindow::new().unwrap();
+        window.set_tree_open(true);
+        window.set_left_tab(2);
+        window.invoke_toggle_left_pane();
+        assert!(!window.get_tree_open());
+        assert_eq!(window.get_left_tab(), 2);
+        window.invoke_toggle_left_pane();
+        assert!(window.get_tree_open());
+        assert_eq!(window.get_left_tab(), 2);
     }
 
     /// 挿入の操作は、`document::INSERT_EDITS`と`LINE_NOTE_EDITS`の**形を1つずつ
