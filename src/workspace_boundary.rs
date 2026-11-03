@@ -44,6 +44,27 @@ pub fn save_target_allowed(roots: &[PathBuf], path: &Path) -> bool {
     }
 }
 
+/// RFN01-85: the registered folders resolved once, for marking many tree rows.
+/// A root that is missing or cannot be resolved is left out, as
+/// [`within_roots`] would refuse it.
+pub fn resolved_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| root.is_dir())
+        .filter_map(|root| root.canonicalize().ok())
+        .collect()
+}
+
+/// RFN01-85: whether the files of `folder` lie inside the Workspace, for
+/// drawing them. **Display only** — asked once per folder rather than once per
+/// file, so a file that is itself a link out is not caught here. Opening still
+/// goes through [`existing_file_allowed`], file by file.
+pub fn folder_within_resolved(resolved: &[PathBuf], folder: &Path) -> bool {
+    folder
+        .canonicalize()
+        .is_ok_and(|folder| resolved.iter().any(|root| folder.starts_with(root)))
+}
+
 fn within_roots(roots: &[PathBuf], path: &Path) -> bool {
     roots.iter().any(|root| {
         root.is_dir()
@@ -104,6 +125,27 @@ mod tests {
         ));
         assert!(!existing_file_allowed(&f.roots(), &f.0.join("root/sub")));
         assert!(!existing_file_allowed(&[], &f.0.join("root/inside.md")));
+    }
+
+    #[test]
+    fn folders_are_marked_against_the_roots_resolved_once() {
+        let f = Fixture::new();
+        let resolved = resolved_roots(&f.roots());
+        assert!(folder_within_resolved(&resolved, &f.0.join("root")));
+        assert!(folder_within_resolved(&resolved, &f.0.join("root/sub")));
+        assert!(!folder_within_resolved(
+            &resolved,
+            &f.0.join("root-sibling")
+        ));
+        // A parent of the root holds files outside it.
+        assert!(!folder_within_resolved(&resolved, &f.0));
+        assert!(!folder_within_resolved(
+            &resolved,
+            &f.0.join("root/missing")
+        ));
+        let gone = resolved_roots(&[f.0.join("not-there")]);
+        assert!(gone.is_empty());
+        assert!(!folder_within_resolved(&gone, &f.0.join("root")));
     }
 
     #[test]

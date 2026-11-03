@@ -6875,6 +6875,9 @@ enum WorkspaceCleanup {
     Remove(workspace::WorkspaceId),
     Reset(workspace::WorkspaceId),
     Detach(workspace::WorkspaceId, workspace::FolderId),
+    /// RFN01-85: left from the Explorer's band, so the Explorer stays in front
+    /// rather than the Workspace chooser `switch_workspace` would show.
+    BackToExplorer,
 }
 
 fn observe_folder_autosave(window: &AppWindow, live: &Live) {
@@ -7199,6 +7202,7 @@ fn draw_tags(window: &AppWindow, live: &Live, entries: &[workspace_index::Entry]
             open: row.open,
             parent: -1,
             is_root: false,
+            outside: false,
         })
         .collect::<Vec<_>>();
     window.set_tag_counts(ModelRc::new(VecModel::from(counts)));
@@ -7429,6 +7433,7 @@ fn draw_outline(
                 open: row.open,
                 parent: -1,
                 is_root: false,
+                outside: false,
             }
         })
         .collect::<Vec<_>>();
@@ -7528,6 +7533,7 @@ fn publish_results(window: &AppWindow, live: &Live) {
             open: false,
             parent: -1,
             is_root: false,
+            outside: false,
         })
         .collect::<Vec<_>>();
     // The file commands act on the tree, and nothing here is a row of it.
@@ -7592,6 +7598,7 @@ fn publish_recent(window: &AppWindow, live: &Live) {
             open: false,
             parent: -1,
             is_root: false,
+            outside: false,
         })
         .collect::<Vec<_>>();
     window.set_tree_selected(-1);
@@ -8131,6 +8138,7 @@ fn publish_tree(window: &AppWindow, live: &Live) {
         window.set_tree_pane_root_indices(ModelRc::new(VecModel::from(Vec::<i32>::new())));
         window.set_left_rows(ModelRc::new(VecModel::from(Vec::<LeftRow>::new())));
         window.set_tree_selected(-1);
+        window.set_explorer_outside_workspace(SharedString::new());
         live.tree_paths.borrow_mut().clear();
         return;
     }
@@ -8216,6 +8224,44 @@ fn searched_tree_rows(
     Some((rows, found))
 }
 
+/// RFN01-85: the Workspace in use, and which rows lie outside its folders —
+/// rows a click will not open (`admit_workspace_path`). `None` while no
+/// Workspace is in use, and for the Workspace's own tree, whose rows are all
+/// inside it.
+///
+/// Folders are never marked: they still open and close, and are how the writer
+/// finds the folders that are inside. Each folder of files is resolved once.
+fn outside_workspace(folder: &WorkFolder, rows: &[file_tree::Row]) -> Option<(String, Vec<bool>)> {
+    if folder.workspace_view {
+        return None;
+    }
+    let runtime = folder.workspace.as_ref()?.borrow();
+    let id = runtime.active_workspace()?;
+    let name = runtime
+        .registry()
+        .workspace(id)
+        .map(|workspace| workspace.name.clone())
+        .unwrap_or_default();
+    let resolved = workspace_boundary::resolved_roots(&runtime.active_roots());
+    let mut known: HashMap<PathBuf, bool> = HashMap::new();
+    let marks = rows
+        .iter()
+        .map(|row| {
+            if row.folder {
+                return false;
+            }
+            let Some(parent) = row.path.parent() else {
+                return true;
+            };
+            let inside = *known
+                .entry(parent.to_path_buf())
+                .or_insert_with(|| workspace_boundary::folder_within_resolved(&resolved, parent));
+            !inside
+        })
+        .collect();
+    Some((name, marks))
+}
+
 fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::Row>) {
     let mut folder = live.folder.borrow_mut();
     // RFN01-75: a searched tree is already cut down, and its rows are counted
@@ -8273,16 +8319,25 @@ fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::R
     }
     window.set_tree_selected(selected.map_or(-1, |at| at as i32));
     let holders = file_tree::holders(&rows);
+    let outside = outside_workspace(&folder, &rows);
+    let in_use = outside
+        .as_ref()
+        .filter(|(_, marks)| marks.iter().any(|&mark| mark))
+        .map(|(name, _)| name.clone())
+        .unwrap_or_default();
+    window.set_explorer_outside_workspace(in_use.into());
     let drawn = rows
         .iter()
         .zip(&holders)
-        .map(|(row, &parent)| LeftRow {
+        .enumerate()
+        .map(|(at, (row, &parent))| LeftRow {
             name: row.name.clone().into(),
             depth: row.depth as i32,
             folder: row.folder,
             open: row.open,
             parent,
             is_root: row.is_root,
+            outside: outside.as_ref().is_some_and(|(_, marks)| marks[at]),
         })
         .collect::<Vec<_>>();
     let name = if multi {
@@ -8927,6 +8982,18 @@ fn workspace_leave_requested(window: &AppWindow, live: &Live) {
     request_workspace_change(window, live, None);
 }
 
+/// RFN01-85: the band over the Explorer's tree leaves the Workspace — the same
+/// leave, unsaved documents asked about the same way — and keeps the Explorer
+/// showing, where the files it named are now opened by a click.
+fn explorer_workspace_leave_requested(window: &AppWindow, live: &Live) {
+    request_workspace_change_with_cleanup(
+        window,
+        live,
+        None,
+        Some(WorkspaceCleanup::BackToExplorer),
+    );
+}
+
 fn workspace_has_unsaved(live: &Live) -> bool {
     open_documents(live).iter().any(|doc| {
         doc.text.edited() || (doc.file.borrow().path().is_none() && !doc.text.borrow().is_empty())
@@ -9062,6 +9129,10 @@ fn finish_workspace_change_confirmed(
             WorkspaceCleanup::Detach(id, folder_id) => {
                 workspace_detach_root(window, live, id, folder_id);
                 switch_workspace(window, live, Some(id));
+            }
+            WorkspaceCleanup::BackToExplorer => {
+                window.set_left_tab(LeftTab::Explorer.index());
+                publish_left(window, live);
             }
         }
     }

@@ -1546,3 +1546,6 @@ msgstr "フォルダー内を検索"
 
 msgid "Back to Tree"
 msgstr "ツリーに戻る"
+
+msgid "Using Workspace \"{}\". Dimmed files can't be opened here."
+msgstr "Workspace『{}』を使用中です。薄い色のファイルは開けません。"
