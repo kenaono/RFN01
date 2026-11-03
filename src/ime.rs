@@ -1,95 +1,42 @@
-//! Telling the IME which way the text runs.
+//! The editor's side of the IME (RFN01-83: through TSF).
+//!
+//! The window's TSF document lives in the vendored winit backend
+//! (`i_slint_backend_winit::tsf`), shared by every text field. What the editor
+//! adds is its own text: the body is drawn by the editor, and a hidden
+//! `TextInput` only receives its keys, so [`ImeWatch`] offers the IME the text
+//! around the caret instead, says where each character of a composition is
+//! drawn, and selects what a reconversion picks.
 //!
 //! 一太郎 and Word put the candidate list beside the column being written, and
-//! **the list itself runs vertically**. That is why it fits there: a vertical
-//! list is narrow and grows downwards, so it does not expand over the text the
-//! way a horizontal one does. Without it there is no good place to put the list
-//! in vertical writing — every attempt trades covering the text for appearing a
-//! dozen columns away (技術検証 7.2).
-//!
-//! The switch is the composition font. A face name beginning with `@` is the
-//! long-standing way to say "this run is vertical" on Windows, and an escapement
-//! of 2700 (270 degrees, in tenths) turns it. MS-IME and ATOK both answer by
-//! turning their candidate list.
+//! **the list itself runs vertically** (技術検証 7.2). Under TSF that is one
+//! attribute the IME asks the document for, `TSATTRID_Text_VerticalWriting`
+//! ([`set_vertical`]); MS-IME and ATOK both answer by turning their list.
 
 use std::rc::Rc;
-use std::time::Duration;
 
+use i_slint_backend_winit::tsf;
 use slint::ComponentHandle;
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
-    Graphics::Gdi::{ClientToScreen, DEFAULT_CHARSET, LOGFONTW, SHIFTJIS_CHARSET},
-    UI::{
-        Input::Ime::{
-            ATTR_CONVERTED, ATTR_FIXEDCONVERTED, ATTR_INPUT_ERROR, ATTR_TARGET_CONVERTED,
-            ATTR_TARGET_NOTCONVERTED, CPS_COMPLETE, GCS_COMPATTR, GCS_COMPSTR,
-            IME_COMPOSITION_STRING, IMECHARPOSITION, IMR_CONFIRMRECONVERTSTRING, IMR_DOCUMENTFEED,
-            IMR_QUERYCHARPOSITION, IMR_RECONVERTSTRING, ImmGetCompositionStringW, ImmGetContext,
-            ImmGetConversionStatus, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionFontW,
-            NI_COMPOSITIONSTR, RECONVERTSTRING,
-        },
-        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
-        WindowsAndMessaging::{GetClientRect, WM_IME_COMPOSITION, WM_IME_REQUEST, WM_NCDESTROY},
+    Foundation::HWND,
+    UI::Input::Ime::{
+        ATTR_CONVERTED, ATTR_FIXEDCONVERTED, ATTR_INPUT_ERROR, ATTR_TARGET_CONVERTED,
+        ATTR_TARGET_NOTCONVERTED,
     },
 };
 
 use crate::AppWindow;
 use crate::directwrite_render::{ClauseLook, ImeClause};
 
-/// The composition font's face, with and without the vertical marker.
-///
-/// The same family either way: this is not about what the IME draws — the
-/// editor draws the text itself — but about what it is being told the run is.
-const VERTICAL_FACE: &str = "@Yu Mincho";
-const HORIZONTAL_FACE: &str = "Yu Mincho";
-
-/// Tell the IME whether the text being composed runs vertically.
-///
-/// Best effort, and silent about failure. A composition font that cannot be set
-/// leaves the IME laying its windows out as it did, which is the behaviour this
-/// improves on rather than depends on.
-pub fn set_vertical(window: &AppWindow, vertical: bool) {
-    set_composition_font(window.window(), vertical, 22.0);
+fn with_winit(window: &slint::Window, f: impl FnOnce(&slint::winit_030::winit::window::Window)) {
+    use slint::winit_030::WinitWindowAccessor;
+    window.with_winit_window(|native| f(native));
 }
 
-fn set_composition_font(window: &slint::Window, vertical: bool, size: f32) {
-    let Some(hwnd) = native_handle(window) else {
-        return;
-    };
-    let mut font = LOGFONTW {
-        lfHeight: -(size * window.scale_factor()).round().max(1.0) as i32,
-        lfCharSet: if vertical {
-            SHIFTJIS_CHARSET
-        } else {
-            DEFAULT_CHARSET
-        },
-        ..Default::default()
-    };
-    // Tenths of a degree, counted anticlockwise: 2700 lays the run top to
-    // bottom. Both fields are set because IMEs have been seen to read either.
-    if vertical {
-        font.lfEscapement = 2700;
-        font.lfOrientation = 2700;
-    }
-    let face = if vertical {
-        VERTICAL_FACE
-    } else {
-        HORIZONTAL_FACE
-    };
-    for (slot, unit) in font.lfFaceName.iter_mut().zip(face.encode_utf16()) {
-        *slot = unit;
-    }
-
-    // SAFETY: The handle belongs to a window that is alive for this call, and
-    // the context is released on every path out.
-    unsafe {
-        let context = ImmGetContext(hwnd);
-        if context.is_invalid() {
-            return;
-        }
-        let _ = ImmSetCompositionFontW(context, &font);
-        let _ = ImmReleaseContext(hwnd, context);
-    }
+/// Tell the IME whether the text being composed runs vertically.
+pub fn set_vertical(window: &AppWindow, vertical: bool) {
+    with_winit(window.window(), |native| {
+        tsf::set_vertical(native, vertical)
+    });
 }
 
 /// The window's own handle, or `None` if this is not a Win32 window.
@@ -112,8 +59,13 @@ fn native_handle(window: &slint::Window) -> Option<HWND> {
     }
 }
 
-/// Exclude the rendered cell, not the invisible 1px TextInput cursor. Keeping
-/// this in the host adapter also works for a standalone Quick Draft window.
+/// Where the caret's cell is, in the window's logical pixels: what the IME
+/// places its windows beside. Exclude the rendered cell, not the invisible 1px
+/// TextInput cursor. Keeping this in the host adapter also works for a
+/// standalone Quick Draft window.
+///
+/// The caret moving is also when the text around it may have: the IME is told
+/// to read it again.
 pub(crate) fn candidate_area(
     window: &slint::Window,
     x: f32,
@@ -122,117 +74,75 @@ pub(crate) fn candidate_area(
     height: f32,
     vertical: bool,
 ) {
-    use slint::winit_030::{
-        WinitWindowAccessor,
-        winit::dpi::{LogicalPosition, LogicalSize},
-    };
     if ![x, y, width, height].iter().all(|v| v.is_finite()) {
         return;
     }
+    let scale = window.scale_factor();
     let width = width.max(1.0);
     let height = height.max(1.0);
-    set_composition_font(window, vertical, if vertical { width } else { height });
-    window.with_winit_window(|native| {
-        native.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(width, height));
+    with_winit(window, |native| {
+        tsf::set_vertical(native, vertical);
+        tsf::set_text_area(
+            native,
+            [x * scale, y * scale, width * scale, height * scale],
+        );
+        tsf::document_changed(native);
     });
+}
+
+/// RFN01-83: the text the IME is shown may be another one now — a page's,
+/// or a field's: it reads it again.
+pub(crate) fn text_changed(window: &slint::Window) {
+    with_winit(window, tsf::document_changed);
 }
 
 /// RFN01-77: what the IME says each clause of `text` is.
 ///
-/// winit hands over the composition as a string and nothing else, so every
-/// clause used to get the same line. The IME still holds the attributes while
-/// its text is being shown: one byte per UTF-16 unit of the composition.
-///
 /// **Empty unless the IME's own composition is `text`** — the caller then
-/// draws the one line it always did. That covers a window that is not Win32,
-/// an IME that keeps no IMM context, and a text that has moved on since.
+/// draws the one line it always did.
 pub(crate) fn clauses(window: &slint::Window, text: &str) -> Vec<ImeClause> {
     if text.is_empty() {
         return Vec::new();
     }
-    let Some(hwnd) = native_handle(window) else {
-        return Vec::new();
-    };
-    // SAFETY: The handle belongs to a window that is alive for this call, and
-    // the context is released on every path out.
-    unsafe {
-        let context = ImmGetContext(hwnd);
-        if context.is_invalid() {
-            return Vec::new();
+    let mut found = Vec::new();
+    with_winit(window, |native| {
+        if let Some((composition, attributes)) = tsf::composition_attributes(native)
+            && composition == text
+            && attributes.len() == text.encode_utf16().count()
+        {
+            found = clauses_from_attributes(&attributes);
         }
-        let read = |kind: IME_COMPOSITION_STRING| -> Vec<u8> {
-            let size = ImmGetCompositionStringW(context, kind, None, 0);
-            if size <= 0 {
-                return Vec::new();
-            }
-            let mut bytes = vec![0_u8; size as usize];
-            let got = ImmGetCompositionStringW(
-                context,
-                kind,
-                Some(bytes.as_mut_ptr().cast()),
-                size as u32,
-            );
-            bytes.truncate(got.max(0) as usize);
-            bytes
-        };
-        let composed = read(GCS_COMPSTR);
-        let attributes = read(GCS_COMPATTR);
-        let _ = ImmReleaseContext(hwnd, context);
-        let units: Vec<u16> = composed
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
-        if !text.encode_utf16().eq(units.iter().copied()) {
-            return Vec::new();
+    });
+    found
+}
+
+/// RFN01-83: where the caret is in the composition `text`, in UTF-16 units —
+/// `None` unless the IME's own composition is `text`.
+pub(crate) fn composition_caret(window: &slint::Window, text: &str) -> Option<u32> {
+    let mut found = None;
+    with_winit(window, |native| {
+        if let Some((composition, caret)) = tsf::composition_caret(native)
+            && composition == text
+        {
+            found = Some(caret);
         }
-        clauses_from_attributes(&attributes)
-    }
+    });
+    found
 }
 
 /// RFN01-79: tell the IME to commit the conversion it is holding.
 ///
-/// **The text it sends back arrives late**, through winit's queue, after the
+/// **The text it sends back arrives late**, from the event loop, after the
 /// click that asked for it has moved the caret; the editor has already put the
 /// text where it was typed, and drops this copy once ([`Settled`]).
-///
-/// **A commit, not a cancel**: it is what Notepad's click does, and the IME
-/// learns from it. Asked to end a conversion either way, ATOK goes back to the
-/// input method it is set to (measured 2026-11-02: a romaji switched on by key
-/// fell back to the configured kana input, mode 25 → 9). That is ATOK's own
-/// rule, and the writer's configured method is kept.
 pub(crate) fn complete(window: &slint::Window) {
-    let Some(hwnd) = native_handle(window) else {
-        return;
-    };
-    // SAFETY: The handle belongs to a window that is alive for this call, and
-    // the context is released on every path out.
-    unsafe {
-        let context = ImmGetContext(hwnd);
-        if context.is_invalid() {
-            return;
-        }
-        let _ = ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
-        let _ = ImmReleaseContext(hwnd, context);
-    }
+    with_winit(window, tsf::complete);
 }
 
-/// The IME's conversion mode as Windows holds it (`IME_CMODE_*`), for the log.
-///
-/// RFN01-79: whether committing from the editor leaves the writer's mode alone
-/// — romaji stays romaji — is a question only a real IME answers.
-pub(crate) fn conversion_mode(window: &slint::Window) -> Option<u32> {
-    let hwnd = native_handle(window)?;
-    // SAFETY: as in `clauses`.
-    unsafe {
-        let context = ImmGetContext(hwnd);
-        if context.is_invalid() {
-            return None;
-        }
-        let mut mode = Default::default();
-        let read = ImmGetConversionStatus(context, Some(&mut mode), None).as_bool();
-        let _ = ImmReleaseContext(hwnd, context);
-        read.then_some(mode.0)
-    }
+/// The IME's conversion mode (`TF_CONVERSIONMODE_*`, the same bits as
+/// `IME_CMODE_*`), for the log.
+pub(crate) fn conversion_mode(_window: &slint::Window) -> Option<u32> {
+    tsf::conversion_mode()
 }
 
 /// RFN01-79: a conversion the editor committed itself, whose copy from the IME
@@ -263,8 +173,12 @@ impl Settled {
     }
 }
 
-/// The editor's side of what the IME asks the window (RFN01-77, RFN01-78).
+/// The editor's side of what the IME asks the window (RFN01-77, 78, 81, 83).
 pub(crate) struct ImeHost {
+    /// RFN01-83: whether the keys go to a page's own text now — its hidden
+    /// field has the focus and the pane is not a shell. Otherwise the IME
+    /// works on whichever text field has the focus, as Slint reports it.
+    pub active: Box<dyn Fn() -> bool>,
     /// The clauses may have changed under a text that did not (RFN01-77).
     pub changed: Rc<dyn Fn()>,
     /// The text around the caret, for a reconversion (`false`) or for the IME
@@ -317,241 +231,61 @@ pub(crate) struct Around {
     pub composition: String,
 }
 
-/// Watches the window's own IME messages for what winit does not pass on.
+/// The editor's text, registered with the window's TSF document.
 ///
-/// RFN01-77: **moving to the next clause changes no character.** winit passes
-/// the composition on as a string, Slint reports a change only when the string
-/// changes, and so the thick line stayed on the first clause however often the
-/// writer pressed `→`. Each `WM_IME_COMPOSITION` that carries attributes asks
-/// `changed` to look again — **from the event loop, not from inside the
-/// message**: it arrives while winit is dispatching, and an IME can send it
-/// from inside a call the editor makes with its state borrowed.
-///
-/// RFN01-78: **reconversion is the IME asking**, with `WM_IME_REQUEST`, for
-/// the text around the caret, and then telling which stretch of it it will
-/// convert again. Nothing in winit or Slint answered, so ATOK's 確定アンドゥ
-/// (Ctrl+Backspace) and the 変換 key on a selection did nothing. These are
-/// answered here, at once: the IME waits for the answer.
-pub(crate) struct ImeWatch {
-    hwnd: HWND,
-    host: ImeHost,
-}
+/// RFN01-78: **reconversion is the IME choosing a stretch of this text** and
+/// converting it again; [`ImeHost::choose`] selects it, and the conversion
+/// then replaces the selection as any conversion over a selection does. RFN01-81:
+/// the IME places its prediction list from where each character is drawn.
+pub(crate) struct ImeWatch;
 
-/// "RFNI": one subclass per purpose, apart from the title bar's.
-const WATCH_ID: usize = 0x52464e49;
+struct HostDocument(ImeHost);
+
+impl tsf::Document for HostDocument {
+    fn active(&self) -> bool {
+        (self.0.active)()
+    }
+
+    fn around(&self) -> Option<tsf::Around> {
+        let around = (self.0.around)(true)?;
+        let (caret, anchor) = match around.selection {
+            Some((start, end)) if around.caret == start => (start, Some(end)),
+            Some((start, end)) => (end, Some(start)),
+            None => (around.caret, None),
+        };
+        Some(tsf::Around {
+            text: around.text,
+            caret,
+            anchor,
+        })
+    }
+
+    fn choose(&self, start: u32, end: u32) -> bool {
+        (self.0.choose)(start, end)
+    }
+
+    fn char_rect(&self, nth: u32) -> Option<[f32; 4]> {
+        let rect = (self.0.char_rect)(nth)?;
+        Some([rect.x, rect.y, rect.width, rect.height])
+    }
+
+    fn changed(&self) {
+        (self.0.changed)();
+    }
+
+    fn log(&self, line: &str) {
+        (self.0.log)(line);
+    }
+}
 
 impl ImeWatch {
-    /// Start watching `window`, or `None` if it is not a Win32 window yet.
+    /// Offer `window`'s text to the IME. `None` if it is not a Win32 window yet.
     pub(crate) fn install(window: &slint::Window, host: ImeHost) -> Option<Box<Self>> {
-        let hwnd = native_handle(window)?;
-        let watch = Box::new(Self { hwnd, host });
-        // SAFETY: the box is not moved while installed — the subclass holds
-        // its address, and `Drop` takes the subclass off before it goes.
-        let installed = unsafe {
-            SetWindowSubclass(
-                hwnd,
-                Some(watch_proc),
-                WATCH_ID,
-                (&*watch as *const Self) as usize,
-            )
-        };
-        installed.as_bool().then_some(watch)
+        native_handle(window)?;
+        let document: Rc<dyn tsf::Document> = Rc::new(HostDocument(host));
+        with_winit(window, |native| tsf::set_document(native, document));
+        Some(Box::new(Self))
     }
-}
-
-impl Drop for ImeWatch {
-    fn drop(&mut self) {
-        // SAFETY: removing a subclass that may already be gone is harmless.
-        unsafe {
-            let _ = RemoveWindowSubclass(self.hwnd, Some(watch_proc), WATCH_ID);
-        }
-    }
-}
-
-unsafe extern "system" fn watch_proc(
-    hwnd: HWND,
-    message: u32,
-    w: WPARAM,
-    l: LPARAM,
-    _: usize,
-    data: usize,
-) -> LRESULT {
-    unsafe {
-        if message == WM_NCDESTROY {
-            let _ = RemoveWindowSubclass(hwnd, Some(watch_proc), WATCH_ID);
-            return DefSubclassProc(hwnd, message, w, l);
-        }
-        let watch = &*(data as *const ImeWatch);
-        if message == WM_IME_REQUEST && w.0 as u32 == IMR_QUERYCHARPOSITION {
-            // Answered here rather than in `answer_request`: it needs the
-            // window, to put client pixels on the screen.
-            if let Some(answered) = answer_char_position(hwnd, &watch.host, l.0) {
-                return LRESULT(answered);
-            }
-            return DefSubclassProc(hwnd, message, w, l);
-        }
-        if message == WM_IME_REQUEST {
-            let answer = answer_request(&watch.host, w.0 as u32, l.0);
-            let result = match answer {
-                Some(answer) => LRESULT(answer),
-                None => DefSubclassProc(hwnd, message, w, l),
-            };
-            // Only a reconversion's two steps: the position queries and the
-            // document feed come with every key and would drown the log.
-            if matches!(w.0 as u32, IMR_RECONVERTSTRING | IMR_CONFIRMRECONVERTSTRING) {
-                let line = format!("request {} buffer={} result={}", w.0, l.0 != 0, result.0);
-                (watch.host.log)(&line);
-            }
-            return result;
-        }
-        // winit first: it is what turns the message into the composition the
-        // editor shows, and the attributes are read against that.
-        let result = DefSubclassProc(hwnd, message, w, l);
-        if message == WM_IME_COMPOSITION && (l.0 as u32 & GCS_COMPATTR.0) != 0 {
-            let changed = watch.host.changed.clone();
-            slint::Timer::single_shot(Duration::ZERO, move || changed());
-        }
-        result
-    }
-}
-
-/// RFN01-81: where a character of the composition is, for the IME to put its
-/// windows by — the new Microsoft IME places its prediction list from this
-/// answer and not from the caret position the window reports.
-///
-/// The point is the character's top left on the screen, the line height runs
-/// across the line (a column's width in vertical writing), and the document is
-/// the window's client area.
-///
-/// # Safety
-/// `buffer` is the message's `lParam`: null, or an `IMECHARPOSITION` the IME
-/// owns.
-unsafe fn answer_char_position(hwnd: HWND, host: &ImeHost, buffer: isize) -> Option<isize> {
-    if buffer == 0 {
-        return None;
-    }
-    // SAFETY: the IME's own structure, of the size it says.
-    let position = unsafe { &mut *(buffer as *mut IMECHARPOSITION) };
-    let rect = (host.char_rect)(position.dwCharPos)?;
-    let mut point = POINT {
-        x: rect.x.round() as i32,
-        y: rect.y.round() as i32,
-    };
-    let mut client = RECT::default();
-    let mut corner = POINT::default();
-    // SAFETY: a live window, and points this function owns.
-    unsafe {
-        let _ = ClientToScreen(hwnd, &mut point);
-        let _ = GetClientRect(hwnd, &mut client);
-        let _ = ClientToScreen(hwnd, &mut corner);
-    }
-    position.pt = point;
-    let line = if rect.vertical {
-        rect.width
-    } else {
-        rect.height
-    };
-    position.cLineHeight = line.round().max(1.0) as u32;
-    position.rcDocument = RECT {
-        left: corner.x,
-        top: corner.y,
-        right: corner.x + client.right,
-        bottom: corner.y + client.bottom,
-    };
-    Some(1)
-}
-
-/// RFN01-78: answer one `WM_IME_REQUEST`, or `None` to leave it to Windows.
-///
-/// # Safety
-/// `buffer` is the message's `lParam`: null, or a `RECONVERTSTRING` the IME
-/// owns, of the size its `dwSize` says.
-unsafe fn answer_request(host: &ImeHost, request: u32, buffer: isize) -> Option<isize> {
-    match request {
-        IMR_RECONVERTSTRING | IMR_DOCUMENTFEED => {
-            let feed = request == IMR_DOCUMENTFEED;
-            let Some(around) = (host.around)(feed) else {
-                return Some(0);
-            };
-            let (text, offered) = offered_text(&around, feed);
-            let bytes = reconvert_bytes(&text, offered);
-            if buffer == 0 {
-                return Some(bytes.len() as isize);
-            }
-            let target = buffer as *mut u8;
-            // SAFETY: the IME's buffer, which says its own size first.
-            let room = unsafe { (*(buffer as *const RECONVERTSTRING)).dwSize } as usize;
-            if room < bytes.len() {
-                return Some(0);
-            }
-            // SAFETY: checked against the room the IME gave.
-            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len()) };
-            Some(bytes.len() as isize)
-        }
-        IMR_CONFIRMRECONVERTSTRING => {
-            if buffer == 0 {
-                return Some(0);
-            }
-            // SAFETY: as above; only the header is read.
-            let header = unsafe { &*(buffer as *const RECONVERTSTRING) };
-            let (start, end) = confirmed_range(header);
-            Some((host.choose)(start, end) as isize)
-        }
-        _ => None,
-    }
-}
-
-/// The text a request is answered with, in UTF-16, and the stretch in it the
-/// IME is pointed at — `(start, length)` (RFN01-78).
-///
-/// A reconversion points at the selection, or at nothing at the caret and lets
-/// the IME pick the word there. **A document feed has the conversion in it**,
-/// where it stands — over the selection it will replace, or at the caret — so
-/// the IME reads the words on either side of what it is converting.
-pub(crate) fn offered_text(around: &Around, feed: bool) -> (Vec<u16>, (u32, u32)) {
-    let units: Vec<u16> = around.text.encode_utf16().collect();
-    let length = units.len() as u32;
-    let (start, end) = around.selection.unwrap_or((around.caret, around.caret));
-    let (start, end) = (start.min(length), end.min(length).max(start.min(length)));
-    if feed && !around.composition.is_empty() {
-        let composing: Vec<u16> = around.composition.encode_utf16().collect();
-        let mut text = units[..start as usize].to_vec();
-        text.extend_from_slice(&composing);
-        text.extend_from_slice(&units[end as usize..]);
-        return (text, (start, composing.len() as u32));
-    }
-    (units, (start, end - start))
-}
-
-/// A `RECONVERTSTRING` with its text after it, as the IME reads it: lengths in
-/// characters, offsets in bytes, the stretch counted from the text's start.
-pub(crate) fn reconvert_bytes(text: &[u16], (start, length): (u32, u32)) -> Vec<u8> {
-    let header = std::mem::size_of::<RECONVERTSTRING>() as u32;
-    let size = header + (text.len() as u32 + 1) * 2;
-    let fields = [
-        size,
-        0,
-        text.len() as u32,
-        header,
-        length,
-        start * 2,
-        length,
-        start * 2,
-    ];
-    let mut bytes = Vec::with_capacity(size as usize);
-    for field in fields {
-        bytes.extend_from_slice(&field.to_le_bytes());
-    }
-    for unit in text.iter().chain(std::iter::once(&0)) {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    bytes
-}
-
-/// The stretch the IME settled on, `(start, end)` in UTF-16 units of the text.
-fn confirmed_range(header: &RECONVERTSTRING) -> (u32, u32) {
-    let start = header.dwCompStrOffset / 2;
-    (start, start + header.dwCompStrLen)
 }
 
 /// Runs of the same attribute, as clauses (RFN01-77).
@@ -640,70 +374,6 @@ mod tests {
         assert_eq!(look_of(4), ClauseLook::Error);
         assert_eq!(look_of(5), ClauseLook::Converted);
         assert!(clauses_from_attributes(&[]).is_empty());
-    }
-
-    fn around(text: &str, caret: u32, selection: Option<(u32, u32)>, composition: &str) -> Around {
-        Around {
-            text: text.to_owned(),
-            caret,
-            selection,
-            composition: composition.to_owned(),
-        }
-    }
-
-    #[test]
-    fn a_reconversion_points_at_the_selection_or_the_caret() {
-        let units = |text: &str| text.encode_utf16().collect::<Vec<_>>();
-        let selected = around("今日はいい天気", 5, Some((3, 5)), "");
-        assert_eq!(
-            offered_text(&selected, false),
-            (units("今日はいい天気"), (3, 2))
-        );
-        let at_caret = around("今日はいい天気", 3, None, "");
-        assert_eq!(
-            offered_text(&at_caret, false),
-            (units("今日はいい天気"), (3, 0))
-        );
-    }
-
-    #[test]
-    fn a_document_feed_has_the_conversion_where_it_stands() {
-        let units = |text: &str| text.encode_utf16().collect::<Vec<_>>();
-        let typing = around("今日は天気", 3, None, "いい");
-        assert_eq!(
-            offered_text(&typing, true),
-            (units("今日はいい天気"), (3, 2))
-        );
-        // 選んだ字を置き換える変換は、選んだ字の代わりに立つ。
-        let over = around("今日はよい天気", 5, Some((3, 5)), "いい");
-        assert_eq!(offered_text(&over, true), (units("今日はいい天気"), (3, 2)));
-        // 変換していなければ、再変換と同じ。
-        let idle = around("今日は", 3, None, "");
-        assert_eq!(offered_text(&idle, true), (units("今日は"), (3, 0)));
-    }
-
-    #[test]
-    fn the_reconvert_string_is_laid_out_as_windows_reads_it() {
-        let text: Vec<u16> = "あいう".encode_utf16().collect();
-        let bytes = reconvert_bytes(&text, (1, 2));
-        let field = |at: usize| u32::from_le_bytes(bytes[at * 4..at * 4 + 4].try_into().unwrap());
-        assert_eq!(bytes.len(), 32 + 4 * 2, "見出し32バイト＋3字＋終端");
-        assert_eq!(field(0), bytes.len() as u32, "dwSize");
-        assert_eq!(field(2), 3, "dwStrLen は字数");
-        assert_eq!(field(3), 32, "dwStrOffset はバイト");
-        assert_eq!(
-            (field(4), field(5)),
-            (2, 2),
-            "dwCompStrLen は字数、Offset はバイト"
-        );
-        assert_eq!((field(6), field(7)), (2, 2));
-        assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 'い' as u16);
-        let header = RECONVERTSTRING {
-            dwCompStrOffset: 2,
-            dwCompStrLen: 2,
-            ..Default::default()
-        };
-        assert_eq!(confirmed_range(&header), (1, 3));
     }
 
     #[test]

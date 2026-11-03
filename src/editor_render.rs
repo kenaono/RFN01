@@ -178,7 +178,7 @@ pub(crate) fn layout(
     // The selection it replaces is not shown either: it is not on the page.
     let selection_utf16 = selection_utf16.filter(|_| replacing.is_none());
     let (render_text, render_caret, preedit_range) =
-        text_with_composition(&shown, caret, preedit, replacing);
+        text_with_composition(&shown, caret, preedit, replacing, view.ime_caret);
     let preview_ms = elapsed_ms(preview_started);
 
     let layout_started = Instant::now();

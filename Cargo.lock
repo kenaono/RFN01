@@ -1706,6 +1706,7 @@ dependencies = [
  "web-sys",
  "webbrowser",
  "windows",
+ "windows-core",
  "winit",
  "zbus",
 ]

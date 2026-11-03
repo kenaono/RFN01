@@ -246,6 +246,7 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
                 editor.settled.forget();
             }
             editor.view.ime_clauses = crate::ime::clauses(window.window(), &text);
+            editor.view.ime_caret = crate::ime::composition_caret(window.window(), &text);
             editor.session.state.borrow_mut().preedit = text;
         }
         Action::Delete(backwards) => {
@@ -335,6 +336,7 @@ fn run(window: &QuickDraft, held: &Rc<RefCell<Editor>>, action: Action) -> bool 
             // where it was typed, before the caret moves (`settle_composition`).
             if !pending.is_empty() && !matches!(phase, 1 | 2) {
                 editor.view.ime_clauses.clear();
+                editor.view.ime_caret = None;
                 editor.insert(&pending);
                 editor.settled.expect(&pending);
                 ime::complete(window.window());
@@ -422,8 +424,9 @@ fn clauses_moved(window: &QuickDraft, editor: &Rc<RefCell<Editor>>) {
         return;
     };
     let text = held.session.state.borrow().preedit.clone();
-    let unchanged =
-        text.is_empty() || held.view.ime_clauses == ime::clauses(window.window(), &text);
+    let unchanged = text.is_empty()
+        || (held.view.ime_clauses == ime::clauses(window.window(), &text)
+            && held.view.ime_caret == ime::composition_caret(window.window(), &text));
     drop(held);
     if !unchanged {
         run(window, editor, Action::Preedit(text));
@@ -489,6 +492,8 @@ fn ime_host(
         }
     };
     ime::ImeHost {
+        // RFN01-83: the editor is this window's only text field.
+        active: Box::new(|| true),
         changed: Rc::new(changed),
         around: Box::new(around),
         choose: Box::new(choose),
