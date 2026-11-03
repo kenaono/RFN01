@@ -1248,6 +1248,12 @@ impl WinitWindowAdapter {
         self.window().dispatch_event(WindowEvent::internal(event));
     }
 
+    /// RFN Edit (RFN01-83): a composition event from the window's TSF document.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn dispatch_ime_event(&self, event: corelib::input::InternalKeyEvent) {
+        self.dispatch_internal_event(event);
+    }
+
     /// Handles a winit window event for this window: applies the window event filter, feeds
     /// accesskit, updates the cursor and dispatches the corresponding Slint event.
     /// The event loop is needed to create the custom cursor.
@@ -2114,6 +2120,28 @@ impl WindowAdapterInternal for WinitWindowAdapter {
     }
 
     fn input_method_request(&self, request: corelib::window::InputMethodRequest) {
+        // RFN Edit (RFN01-83): TSF, not winit's IMM32, on Windows. IMM32 stays
+        // off for the window (`set_ime_allowed(false)`), so the IME's only
+        // document is the one `tsf` focuses.
+        #[cfg(target_os = "windows")]
+        if let Some(winit_window) = self.winit_window_or_none.borrow().as_window() {
+            let Some(adapter) = self.self_weak.upgrade() else { return };
+            let scale = self.window().scale_factor();
+            match &request {
+                corelib::window::InputMethodRequest::Enable(props) => {
+                    winit_window.set_ime_allowed(false);
+                    crate::tsf::enable(&adapter, &winit_window, props, scale, true);
+                }
+                corelib::window::InputMethodRequest::Update(props) => {
+                    crate::tsf::enable(&adapter, &winit_window, props, scale, false);
+                }
+                corelib::window::InputMethodRequest::Disable => {
+                    crate::tsf::disable(&winit_window);
+                }
+                _ => {}
+            }
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(winit_window) = self.winit_window_or_none.borrow().as_window() {
             let props = match &request {

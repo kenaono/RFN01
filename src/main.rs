@@ -135,6 +135,10 @@ mod word_marks;
 mod word_ui_tests;
 mod workspace;
 mod workspace_boundary;
+// RFN01-83: the TSF plan lives in the vendored backend, which cannot run tests.
+#[cfg(test)]
+#[path = "../vendor/i-slint-backend-winit/tsf_plan.rs"]
+mod tsf_plan;
 mod workspace_clone;
 mod workspace_index;
 mod workspace_links;
@@ -1153,6 +1157,9 @@ struct PaneView {
     /// composition's own start (RFN01-77). Set with the composition's text, and
     /// only believed while its lengths add up to that text (`place_clauses`).
     ime_clauses: Vec<ImeClause>,
+    /// RFN01-83: where the caret stands in the composition, UTF-16 units from
+    /// its start; `None` puts it at the end.
+    ime_caret: Option<u32>,
     /// The composition's lines, placed at the caret in the laid-out text.
     preedit_lines: Vec<ImeClause>,
     /// ReadOnlyが最下行を追うか決めたときの、面の高さ（追加要件 2026-09-15）。
@@ -2626,7 +2633,25 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let focus_cache = render_cache.clone();
+    // RFN01-83: whether a page's hidden field has the keys — only it reports
+    // `gained` and `lost`. The IME is offered the page's text while it does.
+    // **A page has them to begin with**: it takes the focus as it is made, and
+    // a field already focused never changes, so neither is reported.
+    let ime_focus: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+    let trace_focus = ime_focus.clone();
+    let trace_weak = window.as_weak();
     window.on_pane_focus_trace(move |pane, event| {
+        let page = match event.as_str() {
+            "gained" => Some(true),
+            "lost" => Some(false),
+            _ => None,
+        };
+        if let Some(page) = page
+            && trace_focus.replace(page) != page
+            && let Some(window) = trace_weak.upgrade()
+        {
+            ime::text_changed(window.window());
+        }
         if let Some(window) = weak.upgrade()
             && let Ok(mut cache) = focus_cache.try_borrow_mut()
         {
@@ -3011,7 +3036,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // RFN01-77: the pane a conversion is in, for when the IME moves to another
     // clause without changing the text (`ime::ImeWatch`).
-    watch_ime(&window, &pane_states, &render_cache, &live.composing);
+    watch_ime(
+        &window,
+        &pane_states,
+        &render_cache,
+        &live.composing,
+        &ime_focus,
+    );
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
@@ -21662,8 +21693,13 @@ fn text_with_composition<'a>(
     caret_utf16: Option<u32>,
     preedit: &str,
     replacing: Option<(u32, u32)>,
+    preedit_caret: Option<u32>,
 ) -> (Cow<'a, str>, Option<u32>, Option<(u32, u32)>) {
     let text = shown.text();
+    // RFN01-83: the caret stands where the IME says it is in the composition —
+    // the writer moves it with ← and → while the reading is being typed.
+    let preedit_length = preedit.encode_utf16().count() as u32;
+    let inside = preedit_caret.map_or(preedit_length, |at| at.min(preedit_length));
     if let (Some((start, end)), false) = (replacing, preedit.is_empty()) {
         let from = shown.shown_byte_at_utf16(start as usize);
         let to = shown.shown_byte_at_utf16(end as usize);
@@ -21671,10 +21707,9 @@ fn text_with_composition<'a>(
         rendered.push_str(&text[..from]);
         rendered.push_str(preedit);
         rendered.push_str(&text[to..]);
-        let preedit_length = preedit.encode_utf16().count() as u32;
         return (
             Cow::Owned(rendered),
-            Some(start + preedit_length),
+            Some(start + inside),
             Some((start, preedit_length)),
         );
     }
@@ -21687,10 +21722,9 @@ fn text_with_composition<'a>(
 
     let mut rendered = text.to_owned();
     rendered.insert_str(shown.shown_byte_at_utf16(caret as usize), preedit);
-    let preedit_length = preedit.encode_utf16().count() as u32;
     (
         Cow::Owned(rendered),
-        Some(caret + preedit_length),
+        Some(caret + inside),
         Some((caret, preedit_length)),
     )
 }
@@ -23328,7 +23362,12 @@ fn settle_composition(
     settled.expect(&text);
     let mode = ime::conversion_mode(window.window());
     ime::complete(window.window());
-    cache.borrow_mut().pane(id).view.ime_clauses.clear();
+    {
+        let mut cache = cache.borrow_mut();
+        let view = &mut cache.pane(id).view;
+        view.ime_clauses.clear();
+        view.ime_caret = None;
+    }
     let length = text.chars().count();
     let document = states.document(id);
     insert_pane_text(window, id, &document, states, cache, &text, false);
@@ -23364,11 +23403,13 @@ fn watch_ime(
     states: &PaneStates,
     cache: &Rc<RefCell<RenderCache>>,
     composing: &Rc<Cell<Option<PaneId>>>,
+    ime_focus: &Rc<Cell<bool>>,
 ) {
     let weak = window.as_weak();
     let states = states.clone();
     let cache = cache.clone();
     let composing = composing.clone();
+    let ime_focus = ime_focus.clone();
     let _ = slint::spawn_local(async move {
         use slint::winit_030::WinitWindowAccessor;
         let Some(window) = weak.upgrade() else {
@@ -23397,8 +23438,9 @@ fn watch_ime(
                 let Ok(mut borrowed) = cache.try_borrow_mut() else {
                     return;
                 };
-                let unchanged =
-                    borrowed.pane(id).view.ime_clauses == ime::clauses(window.window(), &text);
+                let view = &borrowed.pane(id).view;
+                let unchanged = view.ime_clauses == ime::clauses(window.window(), &text)
+                    && view.ime_caret == ime::composition_caret(window.window(), &text);
                 drop(borrowed);
                 if !unchanged {
                     let document = states.document(id);
@@ -23506,7 +23548,25 @@ fn watch_ime(
                 })
             }
         };
+        // RFN01-83: a page has the keys, and it is not a shell's.
+        let active = {
+            let weak = window.as_weak();
+            let cache = cache.clone();
+            move || {
+                let Some(window) = weak.upgrade() else {
+                    return false;
+                };
+                if !ime_focus.get() {
+                    return false;
+                }
+                let id = PaneId::from_index(window.get_focused_pane());
+                cache
+                    .try_borrow_mut()
+                    .is_ok_and(|mut cache| cache.pane(id).terminal.is_none())
+            }
+        };
         let host = ime::ImeHost {
+            active: Box::new(active),
             changed: Rc::new(changed),
             around: Box::new(around),
             choose: Box::new(choose),
@@ -23551,7 +23611,10 @@ fn set_pane_preedit(
         let mut cache = cache.borrow_mut();
         let looks = ime::describe(&clauses);
         cache.log_diag("spec.ime", &format!("clauses={looks}"));
-        cache.pane(id).view.ime_clauses = clauses;
+        let caret = ime::composition_caret(window.window(), &preedit);
+        let view = &mut cache.pane(id).view;
+        view.ime_clauses = clauses;
+        view.ime_caret = caret;
     }
     {
         let mut state = state.borrow_mut();
@@ -24327,7 +24390,7 @@ mod tests {
         let preview = PreviewDocument::from_source("# 見出し");
         let shown = PaneText::Preview(&preview);
 
-        let (text, caret, range) = text_with_composition(&shown, Some(2), "変換", None);
+        let (text, caret, range) = text_with_composition(&shown, Some(2), "変換", None, None);
 
         assert_eq!(preview.text, "見出し");
         assert_eq!(text, "見出変換し");
@@ -24336,10 +24399,24 @@ mod tests {
     }
 
     #[test]
+    fn the_caret_stands_where_the_ime_puts_it_in_the_composition() {
+        let preview = PreviewDocument::from_source("# 見出し");
+        let shown = PaneText::Preview(&preview);
+        // RFN01-83: ← twice while typing the reading「へんかん」.
+        let (_, caret, range) = text_with_composition(&shown, Some(2), "へんかん", None, Some(2));
+        assert_eq!(caret, Some(4));
+        assert_eq!(range, Some((2, 4)));
+        // Past the end is the end.
+        let (_, caret, _) = text_with_composition(&shown, Some(2), "へん", None, Some(9));
+        assert_eq!(caret, Some(4));
+    }
+
+    #[test]
     fn a_composition_over_a_selection_stands_in_its_place() {
         let shown = PaneText::Source("今日はいい天気");
         // 「いい」(3..5) を選んで再変換している。
-        let (text, caret, range) = text_with_composition(&shown, Some(5), "良い", Some((3, 5)));
+        let (text, caret, range) =
+            text_with_composition(&shown, Some(5), "良い", Some((3, 5)), None);
         assert_eq!(
             text, "今日は良い天気",
             "選んだ字は隠れ、変換中の字がそこに立つ"
@@ -24347,7 +24424,7 @@ mod tests {
         assert_eq!(caret, Some(5));
         assert_eq!(range, Some((3, 2)));
         // 変換が終われば（取り消しても）選んだ字はそのまま見える。
-        let (text, _, range) = text_with_composition(&shown, Some(5), "", Some((3, 5)));
+        let (text, _, range) = text_with_composition(&shown, Some(5), "", Some((3, 5)), None);
         assert_eq!(text, "今日はいい天気");
         assert_eq!(range, None);
     }
@@ -24357,7 +24434,7 @@ mod tests {
         let preview = PreviewDocument::from_source("# 見出し\n本文");
         let shown = PaneText::Preview(&preview);
 
-        let (text, _, range) = text_with_composition(&shown, Some(1), "", None);
+        let (text, _, range) = text_with_composition(&shown, Some(1), "", None, None);
 
         assert!(
             matches!(text, Cow::Borrowed(_)),
@@ -24747,7 +24824,7 @@ mod tests {
 
         let shown = PaneText::Source(source);
         let (rendered, render_caret, range) =
-            text_with_composition(&shown, Some(caret), "かん", None);
+            text_with_composition(&shown, Some(caret), "かん", None, None);
 
         assert_eq!(rendered, "本文かんです");
         assert_eq!(
@@ -24758,7 +24835,7 @@ mod tests {
         assert_eq!(range, Some((caret, 2)));
         assert_eq!(source, "本文です", "the document itself is untouched");
 
-        let (borrowed, _, none) = text_with_composition(&shown, Some(caret), "", None);
+        let (borrowed, _, none) = text_with_composition(&shown, Some(caret), "", None, None);
         assert!(
             matches!(borrowed, Cow::Borrowed(_)),
             "a keystroke without IME must not copy the document"

@@ -32,6 +32,9 @@ mod clipboard;
 mod drag_resize_window;
 mod winit_compat;
 mod winitwindowadapter;
+/// RFN Edit (RFN01-83): TSF for every `TextInput`; see `RFN-PATCH.md`.
+#[cfg(target_os = "windows")]
+pub mod tsf;
 use winitwindowadapter::*;
 pub(crate) mod event_loop;
 mod frame_throttle;

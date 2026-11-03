@@ -425,4 +425,14 @@ features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_DirectComposition",
+    # RFN Edit (RFN01-83): the window's own TSF document (`tsf.rs`).
+    "Win32_UI_TextServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
 ]
+
+# RFN Edit (RFN01-83): `#[implement]` expands to `::windows_core` paths.
+[target.'cfg(target_os = "windows")'.dependencies.windows-core]
+version = "0.62"

@@ -63,3 +63,38 @@ each new winit window right after it is created and before it is first shown
 frame). RFN Edit installs its title bar, restores the window place and reports
 the resulting client size there, so the first visible frame already has its
 final frame, place and layout (2026-09-23).
+
+## TSF for every TextInput (RFN01-83, 2026-11-03)
+
+`tsf.rs` (new, Windows only) is the window's own Text Services Framework
+document, and `input_method_request` uses it instead of winit's IMM32 on
+Windows: Enable/Update focus it (`ITfThreadMgr::AssociateFocus` + `SetFocus`)
+and Disable takes it off (`AssociateFocus(NULL)`, which turns the IME off as
+Slint has it). IMM32 stays off for the window (`set_ime_allowed(false)`).
+
+* One `ITextStoreACP` + `ITfContextOwnerCompositionSink` per window. What the
+  IME edits becomes Slint's own composition events (`UpdateComposition` /
+  `CommitComposition` with `replacement_range`, `preedit_selection` and
+  `cursor_position`) through `WinitWindowAdapter::dispatch_ime_event`.
+* The text the IME is shown is the focused field's (`InputMethodProperties`),
+  or an application `tsf::Document` registered for the window while it says it
+  is the one being typed in (RFN Edit's body text). The application also tells
+  the backend the writing direction (`TSATTRID_Text_VerticalWriting`), the
+  caret cell, when its text changed, and can end the composition.
+* Display attributes (`GUID_PROP_ATTRIBUTE`) are read in a read-only edit
+  session and handed out as `TF_DA_ATTR_INFO` values, the same numbers as
+  IMM32's `ATTR_*`.
+* Locks asked for while Slint or the application is calling in are granted
+  from the event loop; a lock from the IME's own keystroke handling is granted
+  at once and its events dispatched at once, so a commit reaches Slint before
+  the Enter key after it. A composition is settled as soon as it ends
+  (`OnEndComposition`), against the text it was made in, before another one
+  starts in the same lock.
+* `tsf_plan.rs` is the part without COM: what a set of edits means. RFN Edit's
+  own test run includes it (`src/main.rs`), since this crate has no test setup.
+
+On upgrade: check whether winit or Slint has gained a TSF path of its own, and
+re-run the IME checks in `work/probe/ime_cases.ps1` with ATOK and the new
+Microsoft IME — horizontal and vertical, the click and the tab switch during a
+conversion, reconversion, ATOK's Ctrl+Backspace, a search field, ← and →
+inside the reading.
