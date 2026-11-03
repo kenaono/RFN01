@@ -207,28 +207,53 @@ enum Chosen {
 /// The files a name search looks through, recent ones first.
 fn file_candidates(live: &Live) -> Vec<FileCandidate> {
     let (roots, indexed) = search_scope(live);
+    let roots: Vec<PathBuf> = roots.iter().map(|root| same_form(root)).collect();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    // **探した登録フォルダの名前と、その中の場所**（例：`原稿\第1章`）。外にある最近の
+    // ファイル（Explorerのとき）は、フォルダをそのまま。
     let folder_of = |path: &Path| -> String {
         let parent = path.parent().unwrap_or(Path::new(""));
         roots
             .iter()
-            .find_map(|root| parent.strip_prefix(root).ok())
-            .map(|relative| relative.display().to_string())
+            .find_map(|root| {
+                let relative = parent.strip_prefix(root).ok()?;
+                let name = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                let name = name.unwrap_or_else(|| root.display().to_string());
+                Some(if relative.as_os_str().is_empty() {
+                    name
+                } else {
+                    format!("{name}\\{}", relative.display())
+                })
+            })
             .unwrap_or_else(|| parent.display().to_string())
     };
+    // 書き手の求め 2026-11-03: **開けないファイルは出さない**——Workspaceを使っているあいだは
+    // 登録フォルダの外のファイルを開かない（`workspace_boundary`）ので、最近開いたファイルも
+    // その中のものだけにする。Explorerなら、どのファイルも開ける。
+    let openable = |path: &Path| match &indexed {
+        Some(_) => crate::workspace_boundary::existing_file_allowed(&roots, path),
+        None => path.is_file(),
+    };
     for path in live.recent.borrow().iter() {
-        if path.is_file() && seen.insert(path.clone()) {
+        if !openable(path) {
+            continue;
+        }
+        let path = same_form(path);
+        if seen.insert(path.clone()) {
             out.push(FileCandidate {
-                name: entry_name(path),
-                folder: folder_of(path),
-                path: path.clone(),
+                name: entry_name(&path),
+                folder: folder_of(&path),
+                path,
                 recent: true,
             });
         }
     }
     let mut rest: Vec<PathBuf> = match indexed {
-        Some(entries) => entries,
+        // The index's paths are resolved already: only the prefix comes off.
+        Some(entries) => entries.iter().map(|path| without_verbatim(path)).collect(),
         None => walk(&roots),
     };
     rest.sort_by_key(|path| entry_name(path).to_lowercase());
@@ -243,6 +268,22 @@ fn file_candidates(live: &Live) -> Vec<FileCandidate> {
         }
     }
     out
+}
+
+/// A path in the one form every list here is compared in: resolved, and without
+/// the `\\?\` Windows puts in front of a resolved path. **The index holds the
+/// resolved form and the history the form it was opened by**, so the same file
+/// was listed twice — once as a recent file and once from the index.
+fn same_form(path: &Path) -> PathBuf {
+    without_verbatim(&path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+fn without_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Where files are looked for: the active Workspace's registered folders, with
@@ -467,8 +508,12 @@ fn command_rows(
 /// RFN01-87（書き手の決定 2026-11-03）: **上の段に表示の言葉、下の段にもう一方の言葉。**
 /// 日本語の画面では上が日本語・下が英語、英語の画面では上が英語・下が日本語。探すのは
 /// どちらの言葉でも。言葉が増えたら、下の段は英語にする（いまは日本語と英語だけ）。
+///
+/// **英語の画面では英語の1段だけ**（書き手の決定 2026-11-03）。下の段の日本語は、
+/// 英語で使う人には読めない字が並ぶだけになる。探すのは、それでも両方の言葉で。
 fn two_lines(shown: &str, other: &str) -> (String, String) {
-    if other.is_empty() || other == shown {
+    let english_shown = crate::i18n::pick("ja", "en") == "en";
+    if english_shown || other.is_empty() || other == shown {
         return (shown.to_owned(), String::new());
     }
     (shown.to_owned(), other.to_owned())
@@ -490,6 +535,23 @@ mod tests {
         // Case and full-width forms are the same letters.
         assert!(score("ＭＥＭＯ", "Memo.md").is_some());
         assert_eq!(score("", "anything"), Some(0));
+    }
+
+    /// RFN01-87: the index's `\\?\D:\…` and the history's `D:\…` are one file.
+    #[test]
+    fn a_resolved_path_loses_its_prefix() {
+        assert_eq!(
+            without_verbatim(Path::new(r"\\?\D:\原稿\第1章.md")),
+            PathBuf::from(r"D:\原稿\第1章.md")
+        );
+        assert_eq!(
+            without_verbatim(Path::new(r"\\?\UNC\server\share\a.md")),
+            PathBuf::from(r"\\?\UNC\server\share\a.md")
+        );
+        assert_eq!(
+            without_verbatim(Path::new(r"D:\a.md")),
+            PathBuf::from(r"D:\a.md")
+        );
     }
 
     /// RFN01-87: an empty search keeps the recent-first order; a search

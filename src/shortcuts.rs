@@ -106,7 +106,8 @@ const DEFAULTS: &[&str] = &[
     "",
     "",
     "",
-    "",
+    // RFN01-87（書き手の求め 2026-11-03）: 縦書き・横書きの切り替え。
+    "Ctrl+R",
     // RFN01-82: VS Codeの「Toggle Markdown Preview」と同じ。
     "Ctrl+Shift+V",
     "",
@@ -758,13 +759,14 @@ fn conflict(keys: &[String], i: usize, key: &str) -> Option<usize> {
 /// 「キーなし」）、既定を替えても、前に保存した書き手には古い既定が残る。この印の
 /// 無い割り当ては、[`migrations`]の古い既定のままの枠だけを新しい既定へ移す。
 /// 印は保存のたびに書くので、移すのは一度きり——後で書き手が外した枠は外れたまま。
-const BINDINGS_VERSION: u32 = 3;
+const BINDINGS_VERSION: u32 = 4;
 /// 既定を替えた枠と、その前の既定、替えた版。
 ///
 /// 2：VS Codeに合わせた（RFN01-82、2026-11-03）。3：Ctrl+Pをファイル名で開くへ
-/// 譲り、印刷プレビューはキーなし（RFN01-87、2026-11-03）。
+/// 譲り、印刷プレビューはキーなし（RFN01-87、2026-11-03）。4：縦書き・横書きの
+/// 切り替えにCtrl+R（同）。
 fn migrations() -> Vec<(u32, usize, &'static str)> {
-    let mut moved = vec![(2, 43, ""), (3, 45, "Ctrl+P")];
+    let mut moved = vec![(2, 43, ""), (3, 45, "Ctrl+P"), (4, 42, "")];
     for (version, action, before) in [
         (2, ShortcutAction::FolderTerminal, ""),
         (2, ShortcutAction::ToggleLeftPane, "Ctrl+Alt+L"),
@@ -1336,7 +1338,10 @@ mod tests {
         }
         assert_eq!(resolve(settings, 0, "r", true, true, false), 42);
         assert_eq!(resolve(settings, 0, "p", true, true, false), 43);
-        assert_eq!(resolve(settings, 0, "r", true, false, false), -1);
+        // RFN01-87: Ctrl+Rは縦書き・横書きの既定。書き手が別のキーへ移したあとは、
+        // 古い処理へ回さずに飲み込む（`-2`、既定のキーの扱いと同じ）。
+        assert_eq!(resolve(settings, 0, "r", true, false, false), -2);
+        assert_eq!(resolve("", 0, "r", true, false, false), 42);
     }
 
     /// RFN01-18: **メニューから来た操作は、既定では何も決まっていない。**
@@ -1453,9 +1458,14 @@ mod tests {
         let commands = id_of(ShortcutAction::Palette(true)).unwrap();
         assert_eq!(resolve("", 0, "p", true, false, false), quick as i32);
         assert_eq!(resolve("", 0, "P", true, false, true), commands as i32);
-        for saved in ["0=Ctrl+O;45=Ctrl+P;94=F5", "0=Ctrl+O;45=Ctrl+P;94=F5;v=2"] {
+        for saved in [
+            "0=Ctrl+O;42=;45=Ctrl+P;94=F5",
+            "0=Ctrl+O;42=;45=Ctrl+P;94=F5;v=2",
+        ] {
             let keys = bindings(saved);
             assert_eq!(keys[45], "", "{saved}");
+            // 版4：縦書き・横書きの切り替えにCtrl+R。空のまま保存していた書き手にも付く。
+            assert_eq!(keys[42], "Ctrl+R", "{saved}");
             assert_eq!(keys[quick], "Ctrl+P", "{saved}");
             assert_eq!(keys[94], "F5", "{saved}");
         }
