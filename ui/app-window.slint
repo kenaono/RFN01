@@ -35,6 +35,13 @@ export { BookmarkRow } from "bookmark-view.slint";
 ///
 /// **語か、覚え書きか。**`#`で始まる行は覚え書きで、木には積まれず、語数にも
 /// 数えられない——一覧の中では見出しとして立つ。
+/// RFN01-87: コマンドパレットの候補の1行。ファイルなら名前とフォルダ、操作なら
+/// メニューの道と割り当て済みのキー。
+export struct PaletteRow {
+    title: string,
+    detail: string,
+    key: string,
+}
 // Keys の面の1行（書き手の求め 2026-09-15）。分類の見出しか、キーの行か。
 export struct ShortcutItem {
     id: int,
@@ -157,6 +164,22 @@ export component AppWindow inherits Window {
     /// 決定 2026-09-21。開けるかどうかはRustが本文を見て決めるので、ここは置き場。
     in-out property <[bool]> title-menu-openable: [true, true, true, true, true, true, true];
     callback title-menu-visibility(bool);
+    // RFN01-87: コマンドパレット（タイトルバーの枠と、その下の候補）。
+    in-out property <bool> palette-open: false;
+    in-out property <string> palette-text;
+    in property <[PaletteRow]> palette-rows;
+    in-out property <int> palette-selected: 0;
+    in property <string> palette-note;
+    in-out property <int> palette-focus-generation: 0;
+    /// `true`は操作を探す（「>」入り）、`false`はファイル名。
+    callback palette-requested(bool);
+    callback palette-edited(string);
+    callback palette-accepted();
+    callback palette-cancelled();
+    callback palette-span(length, length);
+    private property <length> palette-box-x;
+    private property <length> palette-box-width;
+    private property <length> palette-pitch: 34px;
     in-out property <int> menu-pane: -1;
     in-out property <int> menu-action: 0;
     in-out property <int> menu-generation: 0;
@@ -1648,8 +1671,26 @@ export component AppWindow inherits Window {
         requested(index) => { root.title-menu-requested(index); }
         dismissed => { root.title-menu-dismissed(); }
         toggled => {
+            if root.palette-open { root.palette-cancelled(); }
             if root.title-menu-visible { root.title-menu-dismissed(); }
             else { root.title-menu-visible = true; }
+        }
+        palette-open: root.palette-open;
+        palette-text <=> root.palette-text;
+        palette-focus-generation: root.palette-focus-generation;
+        palette-requested => { root.palette-requested(false); }
+        palette-edited(text) => { root.palette-edited(text); }
+        palette-step(delta) => {
+            if root.palette-rows.length > 0 {
+                root.palette-selected = max(0, min(root.palette-rows.length - 1, root.palette-selected + delta));
+            }
+        }
+        palette-accepted => { root.palette-accepted(); }
+        palette-cancelled => { root.palette-cancelled(); }
+        palette-span(x, width) => {
+            root.palette-box-x = x;
+            root.palette-box-width = width;
+            root.palette-span(x, width);
         }
     }
     // 書式のツールバー（2026-09-23）。メニューの下に窓の幅いっぱいで1本。
@@ -7462,4 +7503,90 @@ export component AppWindow inherits Window {
         }
     }
 
+    // RFN01-87: パレットの候補。**枠のすぐ下に、枠と同じ幅で重ねる**。外を押せば閉じる。
+    // **窓の中身の一番最後に置く**——後に書いたものが上に描かれるので、ペインより
+    // 前に置くと、候補がペインの下に透けて見えた。
+    if root.palette-open && root.custom-title: TouchArea {
+        y: root.title-height;
+        height: root.height - root.title-height;
+        clicked => { root.palette-cancelled(); }
+    }
+    if root.palette-open && root.custom-title: Rectangle {
+        x: root.palette-box-x;
+        y: root.title-height - 2px;
+        width: root.palette-box-width;
+        height: min(root.height - root.title-height - 40px,
+            max(1, root.palette-rows.length) * root.palette-pitch + 12px + (root.palette-note != "" ? 22px : 0px));
+        background: Tok.paper;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Tok.rule-strong;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000030;
+        drop-shadow-offset-y: 3px;
+        TouchArea { }
+        palette-list := Flickable {
+            x: 4px; y: 6px;
+            width: parent.width - 8px;
+            height: parent.height - 12px - (root.palette-note != "" ? 22px : 0px);
+            content-height: root.palette-rows.length * root.palette-pitch;
+            for row[index] in root.palette-rows: Rectangle {
+                y: index * root.palette-pitch;
+                height: root.palette-pitch;
+                width: parent.width;
+                border-radius: 4px;
+                background: index == root.palette-selected ? Tok.accent-soft : (palette-row-touch.has-hover ? Tok.accent-faint : transparent);
+                Text {
+                    x: 10px; y: 2px;
+                    width: parent.width - 20px - (row.key != "" ? 110px : 0px);
+                    height: row.detail != "" ? 17px : parent.height - 4px;
+                    text: row.title;
+                    color: Tok.ink;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if row.detail != "": Text {
+                    x: 10px; y: 18px;
+                    width: parent.width - 20px - (row.key != "" ? 110px : 0px);
+                    height: 14px;
+                    text: row.detail;
+                    color: Tok.ink-faint;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if row.key != "": Text {
+                    x: parent.width - 120px; width: 110px; height: parent.height;
+                    text: row.key;
+                    color: Tok.ink-faint;
+                    font-size: 11px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                palette-row-touch := TouchArea {
+                    clicked => {
+                        root.palette-selected = index;
+                        root.palette-accepted();
+                    }
+                }
+            }
+        }
+        // 選んだ行が見えるように、一覧を追う。
+        property <int> follow: root.palette-selected;
+        changed follow => {
+            let top = root.palette-selected * root.palette-pitch;
+            if top + palette-list.content-y < 0px { palette-list.content-y = -top; }
+            if top + root.palette-pitch + palette-list.content-y > palette-list.height {
+                palette-list.content-y = palette-list.height - top - root.palette-pitch;
+            }
+        }
+        if root.palette-note != "": Text {
+            x: 12px; y: parent.height - 24px; width: parent.width - 24px; height: 18px;
+            text: root.palette-note;
+            color: Tok.ink-faint;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
 }

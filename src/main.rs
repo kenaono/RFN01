@@ -28,6 +28,7 @@ mod backup_ui;
 mod buffer;
 mod clipboard;
 mod code_page;
+mod command_palette;
 mod comparison;
 #[cfg(test)]
 mod comparison_ui_tests;
@@ -4128,8 +4129,20 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     menu_commands::install(&window, &live, &kill_ring);
+    command_palette::install(&window, &live, &kill_ring);
     // Winit creates its HWND only after entering the event loop.
     let chrome: Rc<RefCell<Option<Box<window_chrome::Chrome>>>> = Rc::default();
+    // RFN01-87: the palette's frame is the app's to press, not the title row's.
+    // The frame is drawn only once the chrome is on the window (`custom-title`),
+    // so its first report finds the chrome there.
+    {
+        let held = chrome.clone();
+        window.on_palette_span(move |x, width| {
+            if let Some(chrome) = held.borrow().as_ref() {
+                chrome.set_palette_span(x, x + width);
+            }
+        });
+    }
     let held = chrome.clone();
     // タイトル行のうち、どこまでを「押せる場所」にするか（RFN01-44）。**2つの状態から
     // 1つを決める**——書き手を2人にしない。メニューが閉じた知らせが、印刷の知らせより

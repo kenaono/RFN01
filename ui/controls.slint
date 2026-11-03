@@ -233,6 +233,8 @@ export global MenuInput {
 /// ありえない負の数にしてある。
 export global Selection {
     out property <int> everything: -1;
+    /// RFN01-87: 何も選ばず、カーソルを末尾へ（コマンドパレットの「> 」の後ろ）。
+    out property <int> at-end: -2;
 }
 
 // A line of text the writer types into.
@@ -331,6 +333,15 @@ export component Field inherits Rectangle {
         root.arrive(Selection.everything);
     }
 
+    /// RFN01-87: 鍵盤をここへ置き、カーソルを末尾へ。**入っている字は選ばない**
+    /// ——打った字は後ろに続く（パレットの「> 」のあとに操作の名前を打つ）。
+    /// 位置は字の数で数えるので、入っている字が1バイトの字であるときに使う。
+    public function take-focus-at-end() {
+        input.focus();
+        input.set-selection-offsets(root.text.character-count, root.text.character-count);
+        root.arrive(Selection.at-end);
+    }
+
     /// 鍵盤がプログラムから来たときに要る2つ。
     ///
     /// 1. **IMEを横書きへ**。`changed has-focus`に任せていたが、**生まれたときから
@@ -371,6 +382,8 @@ export component Field inherits Rectangle {
                 // 空でも必ず届く一手を先に。`select-all`は空だと何もしない。
                 input.set-selection-offsets(0, 0);
                 input.select-all();
+            } else if (root.settle-end == Selection.at-end) {
+                input.set-selection-offsets(root.text.character-count, root.text.character-count);
             } else if (root.settle-end > 0) {
                 input.set-selection-offsets(0, root.settle-end);
             } else if (root.text == "") {

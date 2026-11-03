@@ -65,6 +65,9 @@ pub struct Chrome {
     window: slint::Weak<super::AppWindow>,
     // UI geometry, logical pixels. Only accessed on the window's owning thread.
     interactive_end: Cell<f32>,
+    // RFN01-87: the command palette's frame in the middle of the title row,
+    // left edge and right edge. Pressing it is pressing the app, not the frame.
+    palette: Cell<(f32, f32)>,
     // 1 minimise, 2 maximise, 3 close, 0 nothing: which caption button the
     // pointer is over and which one is held down.
     hot: Cell<u32>,
@@ -82,6 +85,7 @@ impl Chrome {
             hwnd,
             window,
             interactive_end: Cell::new(36.),
+            palette: Cell::new((0., 0.)),
             hot: Cell::new(0),
             pressed: Cell::new(0),
             sent: Cell::new((0, 0)),
@@ -112,6 +116,11 @@ impl Chrome {
 
     pub fn set_interactive_end(&self, x: f32) {
         self.interactive_end.set(x.max(36.));
+    }
+
+    /// RFN01-87: where the command palette's frame is, in logical pixels.
+    pub fn set_palette_span(&self, start: f32, end: f32) {
+        self.palette.set((start, end));
     }
 
     /// Send the caption state to the UI if it differs from the last one posted.
@@ -217,7 +226,7 @@ impl Drop for Chrome {
 }
 
 /// Pure hit testing, also used by tests at negative screen origins after mapping.
-fn title_hit(x: f32, y: f32, width: f32, interactive_end: f32) -> u32 {
+fn title_hit(x: f32, y: f32, width: f32, interactive_end: f32, palette: (f32, f32)) -> u32 {
     if !(0. ..TITLE_HEIGHT).contains(&y) || x < 0. || x >= width {
         return HTCLIENT;
     }
@@ -227,7 +236,7 @@ fn title_hit(x: f32, y: f32, width: f32, interactive_end: f32) -> u32 {
         HTMAXBUTTON
     } else if x >= width - 3. * BUTTON_WIDTH {
         HTMINBUTTON
-    } else if x < 32. || x < interactive_end {
+    } else if x < 32. || x < interactive_end || (palette.0..palette.1).contains(&x) {
         // The app icon (the first 32px) opens the title menu; Alt+Space retains
         // the system menu. Past it, whatever the menu bar or a print view reaches.
         HTCLIENT
@@ -309,6 +318,7 @@ unsafe extern "system" fn frame_proc(
                     y / scale,
                     rect.right as f32 / scale,
                     chrome.interactive_end.get(),
+                    chrome.palette.get(),
                 ) == pressed
             {
                 let command = match pressed {
@@ -419,6 +429,7 @@ unsafe extern "system" fn frame_proc(
                 point.y as f32 / scale,
                 rect.right as f32 / scale,
                 chrome.interactive_end.get(),
+                chrome.palette.get(),
             ) as isize);
         }
         let mut native = LRESULT(0);
@@ -444,14 +455,18 @@ mod tests {
 
     #[test]
     fn menus_do_not_drag_and_caption_buttons_do_not_run_commands() {
-        assert_eq!(title_hit(16., 18., 640., 36.), HTCLIENT);
-        assert_eq!(title_hit(60., 20., 640., 380.), HTCLIENT);
-        assert_eq!(title_hit(410., 20., 640., 380.), HTCAPTION);
-        assert_eq!(title_hit(520., 20., 640., 380.), HTMINBUTTON);
-        assert_eq!(title_hit(570., 20., 640., 380.), HTMAXBUTTON);
-        assert_eq!(title_hit(620., 20., 640., 380.), HTCLOSE);
-        assert_eq!(title_hit(60., 36., 640., 380.), HTCLIENT);
-        assert_eq!(title_hit(-10., 20., 640., 380.), HTCLIENT);
+        assert_eq!(title_hit(16., 18., 640., 36., (0., 0.)), HTCLIENT);
+        assert_eq!(title_hit(60., 20., 640., 380., (0., 0.)), HTCLIENT);
+        // RFN01-87: the palette's frame is pressed as the app, the rest of the
+        // row past the menu still drags the window.
+        assert_eq!(title_hit(300., 20., 640., 36., (250., 390.)), HTCLIENT);
+        assert_eq!(title_hit(400., 20., 640., 36., (250., 390.)), HTCAPTION);
+        assert_eq!(title_hit(410., 20., 640., 380., (0., 0.)), HTCAPTION);
+        assert_eq!(title_hit(520., 20., 640., 380., (0., 0.)), HTMINBUTTON);
+        assert_eq!(title_hit(570., 20., 640., 380., (0., 0.)), HTMAXBUTTON);
+        assert_eq!(title_hit(620., 20., 640., 380., (0., 0.)), HTCLOSE);
+        assert_eq!(title_hit(60., 36., 640., 380., (0., 0.)), HTCLIENT);
+        assert_eq!(title_hit(-10., 20., 640., 380., (0., 0.)), HTCLIENT);
     }
 
     /// Only the three caption buttons light up. Windows sends its own hit-test

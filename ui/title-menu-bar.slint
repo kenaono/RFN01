@@ -1,4 +1,4 @@
-import { AppMark } from "controls.slint";
+import { AppMark, Field, Icon, Icons } from "controls.slint";
 import { Tok } from "tokens.slint";
 export component TitleMenuBar inherits Rectangle {
     in property <bool> menu-visible;
@@ -20,6 +20,27 @@ export component TitleMenuBar inherits Rectangle {
     callback requested(int);
     callback dismissed();
     callback toggled();
+    // RFN01-87: コマンドパレット。**ふだんはファイル名を淡く出す枠**で、押すか
+    // Ctrl+P／Ctrl+Shift+Pで入力欄になる（書き手の決定 2026-11-03）。メニューを
+    // 出している間は隠す。
+    in property <bool> palette-open;
+    in-out property <string> palette-text;
+    in property <int> palette-focus-generation;
+    callback palette-requested();
+    callback palette-edited(string);
+    callback palette-step(int);
+    callback palette-accepted();
+    callback palette-cancelled();
+    /// 枠の左端と幅。**窓がタイトル行として扱う場所から、この範囲だけを外す**
+    /// （`window_chrome`）——外さないと、押してもWindowsが窓のドラッグにしてしまう。
+    callback palette-span(length, length);
+    out property <length> palette-x: palette-box.x;
+    out property <length> palette-width: palette-box.width;
+    // 「> 」入りで開いたときは、その後ろへ打てるように（選んでしまうと打った字で消える）。
+    changed palette-focus-generation => {
+        if root.palette-text == "" { palette-field.take-focus(); }
+        else { palette-field.take-focus-at-end(); }
+    }
     // Windows標準のキャプションボタンに合わせる。ホバーは薄い灰、閉じるだけ
     // 赤で記号が白へ変わる。押下はその一段暗い色。**`blocked`では止めない**——
     // 質問・印刷・比較の間もこのボタンのヒット領域は生きているので、面だけ
@@ -48,10 +69,60 @@ export component TitleMenuBar inherits Rectangle {
         enabled: !root.blocked;
         clicked => { root.toggled(); }
     }
-    if !root.menu-visible: Text {
-        x: 36px; y: 0px; width: max(0px, root.width - 184px); height: root.height;
-        text: root.document-title + " - RFN Edit";
-        color: Tok.ink; font-size: 12px; vertical-alignment: center; overflow: elide;
+    // 枠は窓の中央。**左のアイコンとメニュー、右の3つの釦に掛からない**幅に縮める。
+    palette-box := Rectangle {
+        property <length> room: max(0px, root.width - 2 * 184px);
+        width: min(560px, max(min(240px, self.room), root.width * 0.4), self.room);
+        x: (root.width - self.width) / 2;
+        y: 5px;
+        height: root.height - 10px;
+        visible: !root.menu-visible && self.width > 60px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: root.palette-open ? Tok.accent : Tok.rule;
+        background: root.palette-open ? Tok.paper : Tok.chrome-sunken;
+        changed x => { root.palette-span(self.visible ? self.x : 0px, self.visible ? self.width : 0px); }
+        changed width => { root.palette-span(self.visible ? self.x : 0px, self.visible ? self.width : 0px); }
+        changed visible => { root.palette-span(self.visible ? self.x : 0px, self.visible ? self.width : 0px); }
+        init => { root.palette-span(self.visible ? self.x : 0px, self.visible ? self.width : 0px); }
+        if !root.palette-open: HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 6px;
+            alignment: center;
+            Icon { commands: Icons.search; tint: Tok.ink-faint; width: 13px; height: 13px; y: (parent.height - 13px) / 2; }
+            Text {
+                text: root.document-title;
+                color: Tok.ink-faint;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        if !root.palette-open: TouchArea {
+            enabled: !root.blocked;
+            mouse-cursor: pointer;
+            clicked => { root.palette-requested(); }
+        }
+        palette-field := Field {
+            visible: root.palette-open;
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            border-width: 0px;
+            background: transparent;
+            text <=> root.palette-text;
+            placeholder: @tr("Search files by name (type > for commands)");
+            edited => { root.palette-edited(self.text); }
+            accepted => { root.palette-accepted(); }
+            escaped => { root.palette-cancelled(); }
+            focus-lost => { if root.palette-open { root.palette-cancelled(); } }
+            shortcut(event) => {
+                if event.text == Key.UpArrow { root.palette-step(-1); return accept; }
+                if event.text == Key.DownArrow { root.palette-step(1); return accept; }
+                if event.text == Key.PageUp { root.palette-step(-10); return accept; }
+                if event.text == Key.PageDown { root.palette-step(10); return accept; }
+                reject
+            }
+        }
     }
     if root.menu-visible: HorizontalLayout {
         x: 36px; y: 0px; width: 336px; height: root.height; spacing: 0px;
