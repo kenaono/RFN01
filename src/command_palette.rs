@@ -424,13 +424,13 @@ fn command_rows(
         names.insert(same_name(leaf));
         let points = score(query, &entry.title).or_else(|| score(query, &entry.other));
         if let Some(points) = points {
-            let (english, japanese) = english_first(&entry.title, &entry.other);
+            let (upper, lower) = two_lines(&entry.title, &entry.other);
             found.push((
                 points,
                 Shown::Menu(at),
                 PaletteRow {
-                    title: english.into(),
-                    detail: japanese.into(),
+                    title: upper.into(),
+                    detail: lower.into(),
                     key: entry.key.clone().into(),
                 },
             ));
@@ -442,13 +442,13 @@ fn command_rows(
         }
         let points = score(query, &action.title).or_else(|| score(query, &action.other));
         if let Some(points) = points {
-            let (english, japanese) = english_first(&action.title, &action.other);
+            let (upper, lower) = two_lines(&action.title, &action.other);
             found.push((
                 points,
                 Shown::Action(at),
                 PaletteRow {
-                    title: english.into(),
-                    detail: japanese.into(),
+                    title: upper.into(),
+                    detail: lower.into(),
                     key: action.key.clone().into(),
                 },
             ));
@@ -464,19 +464,14 @@ fn command_rows(
         .unzip()
 }
 
-/// RFN01-87（書き手の求め 2026-11-03：コマンドは英語のほうが分かりやすい、日本語と両方で）:
-/// **上の段に英語、下の段に日本語。**画面の言葉がどちらでも同じ並び。
-fn english_first(shown: &str, other: &str) -> (String, String) {
-    let japanese_shown = crate::i18n::pick("ja", "en") == "ja";
-    let (english, japanese) = if japanese_shown {
-        (other, shown)
-    } else {
-        (shown, other)
-    };
-    if english.is_empty() || english == japanese {
+/// RFN01-87（書き手の決定 2026-11-03）: **上の段に表示の言葉、下の段にもう一方の言葉。**
+/// 日本語の画面では上が日本語・下が英語、英語の画面では上が英語・下が日本語。探すのは
+/// どちらの言葉でも。言葉が増えたら、下の段は英語にする（いまは日本語と英語だけ）。
+fn two_lines(shown: &str, other: &str) -> (String, String) {
+    if other.is_empty() || other == shown {
         return (shown.to_owned(), String::new());
     }
-    (english.to_owned(), japanese.to_owned())
+    (shown.to_owned(), other.to_owned())
 }
 
 #[cfg(test)]
