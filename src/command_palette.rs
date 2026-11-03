@@ -45,6 +45,9 @@ struct FileCandidate {
     /// searched, or whole for a recent file outside it.
     folder: String,
     recent: bool,
+    /// 探す範囲（開いているフォルダ・登録フォルダ）の中か。外にあるのは、Explorerの
+    /// ときの最近のファイルだけ。
+    inside: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -246,6 +249,7 @@ fn file_candidates(live: &Live) -> Vec<FileCandidate> {
             out.push(FileCandidate {
                 name: entry_name(&path),
                 folder: folder_of(&path),
+                inside: roots.iter().any(|root| path.starts_with(root)),
                 path,
                 recent: true,
             });
@@ -264,6 +268,7 @@ fn file_candidates(live: &Live) -> Vec<FileCandidate> {
                 folder: folder_of(&path),
                 path,
                 recent: false,
+                inside: true,
             });
         }
     }
@@ -416,6 +421,11 @@ fn file_rows(files: &[FileCandidate], query: &str) -> (Vec<PaletteRow>, Vec<Show
             if query.is_empty() {
                 return Some((0, at));
             }
+            // 書き手の決定 2026-11-03: **字を打って探すのは、開いているフォルダの中だけ。**
+            // 空の欄では、外のフォルダの最近のファイルも出す（Explorerのときだけある）。
+            if !file.inside {
+                return None;
+            }
             let by_name = score(query, &file.name);
             // The folder only counts when the letters are there together: spread
             // over a long path, any three letters are found somewhere.
@@ -563,6 +573,7 @@ mod tests {
             name: name.to_owned(),
             folder: String::new(),
             recent,
+            inside: true,
         };
         let files = vec![
             file("b-notes.md", true),
@@ -577,5 +588,19 @@ mod tests {
         assert_eq!(rows[0].title, "chapter.md");
         let (rows, _) = file_rows(&files, "notes");
         assert_eq!(rows[0].title, "b-notes.md", "the recent one wins the tie");
+        // A recent file outside the folder: listed while nothing is typed, not
+        // found by a search.
+        let mut files = files;
+        files.insert(
+            0,
+            FileCandidate {
+                inside: false,
+                ..file("outside-notes.md", true)
+            },
+        );
+        let (rows, _) = file_rows(&files, "");
+        assert_eq!(rows[0].title, "outside-notes.md");
+        let (rows, _) = file_rows(&files, "notes");
+        assert!(rows.iter().all(|row| row.title != "outside-notes.md"));
     }
 }
