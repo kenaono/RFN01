@@ -79,6 +79,10 @@ enum Command {
     /// 書式のツールバー・パレットを出す／しまう（2026-09-23）。
     Toolbar,
     Palette,
+    /// RFN01-82: 横書きで本文を1行ぶん動かす（`true`で下へ）。
+    ScrollLine(bool),
+    /// RFN01-82: キャレットの行を選ぶ。
+    SelectLine,
 }
 
 /// 設定から割り当てたキーで走らせる、メニューの操作（RFN01-18）。
@@ -108,6 +112,16 @@ pub enum ShortcutAction {
     ReplaceInFolder,
     /// RFN01-82: 左ペインを開く・閉じる（縦列で、いま見ている面をもう一度押すのと同じ）。
     ToggleLeftPane,
+    /// RFN01-82: 左ペインにこの面を出す（閉じていれば開く。出ていればそのまま）。
+    ShowLeftTab(i32),
+    /// RFN01-82: Settings を開く。
+    OpenSettings,
+    /// RFN01-82: いまのペインを右に分割する。
+    SplitRight,
+    /// RFN01-82: 横書きで本文を1行ぶん動かす（`true`で下へ）。キャレットは動かさない。
+    ScrollLine(bool),
+    /// RFN01-82: キャレットの行を選ぶ。行を選んでいれば次の行まで広げる。
+    SelectLine,
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -2378,6 +2392,8 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::ExplorePane => return window.invoke_focus_explore(),
         ShortcutAction::ReplaceInFolder => return window.invoke_open_folder_replace(),
         ShortcutAction::ToggleLeftPane => return window.invoke_toggle_left_pane(),
+        ShortcutAction::ShowLeftTab(tab) => return window.invoke_show_left_tab(tab),
+        ShortcutAction::OpenSettings => return window.invoke_settings_requested(),
         _ => {}
     }
     let target = Target::for_shortcut(window, live);
@@ -2397,10 +2413,15 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::Renumber => Command::List(2, -1),
         ShortcutAction::SpellingStep(back) => Command::SpellingStep(back),
         ShortcutAction::ReadAloud => Command::ReadAloud,
+        ShortcutAction::SplitRight => Command::Split(true),
+        ShortcutAction::ScrollLine(down) => Command::ScrollLine(down),
+        ShortcutAction::SelectLine => Command::SelectLine,
         ShortcutAction::SearchInFolder
         | ShortcutAction::ExplorePane
         | ShortcutAction::ReplaceInFolder
-        | ShortcutAction::ToggleLeftPane => return,
+        | ShortcutAction::ToggleLeftPane
+        | ShortcutAction::ShowLeftTab(_)
+        | ShortcutAction::OpenSettings => return,
     };
     execute(window, live, &target, command);
 }
@@ -2510,6 +2531,8 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         }
         Command::CopyBody => window.invoke_pane_copy_body(p),
         Command::SelectAll => window.invoke_pane_select_all(p),
+        Command::SelectLine => window.invoke_pane_select_line(p),
+        Command::ScrollLine(down) => crate::scroll_by_line(window, &live.cache, t.id, down),
         Command::Find(replace) => {
             if t.id.screen(window).terminal || matches!(t.spot, TerminalSpot::Below) {
                 terminal_workflow::action(window, live, t.parent, t.spot, 0)

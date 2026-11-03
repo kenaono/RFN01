@@ -532,6 +532,16 @@ export component AppWindow inherits Window {
         root.focus-generation += 1;
     }
 
+    /// RFN01-82 (`Ctrl+Shift+O`, `Ctrl+Shift+G`): this panel in the left
+    /// pane, opened if it was closed — VS Code's "Show" rather than the rail's
+    /// press, which puts away the panel already showing.
+    public function show-left-tab(tab: int) {
+        root.tree-open = true;
+        root.left-tab = tab;
+        root.left-tab-chosen(tab);
+        root.focus-generation += 1;
+    }
+
     /// Escape in a field of the left pane: the keyboard back to the text, and
     /// the whole tree back if it was being searched (RFN01-76).
     function left-field-escaped() {
@@ -863,6 +873,8 @@ export component AppWindow inherits Window {
     callback pane-picture-resize(int, int, int, float, float);
     callback pane-table-resize(int, int, int, float, float);
     callback pane-select-all(int);
+    /// RFN01-82 (`Ctrl+L`): the caret's line selected, or the next one added.
+    callback pane-select-line(int);
     callback pane-scroll-changed(int, float);
     callback pane-across-scroll-changed(int, float);
     /// 要件 8.5: the pane was told to move the view, and this is where it
