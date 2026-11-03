@@ -159,6 +159,34 @@ impl Text {
                 self.base_cursor = caret;
                 self.base_anchor = caret;
             }
+            Source::Document
+                if !composing
+                    && let Some((from, to)) = self.chosen
+                    && let Some(length) =
+                        (committed.len() + (to - from) as usize).checked_sub(self.base.len())
+                    && from as usize + length <= committed.len() =>
+            {
+                // A reconversion ends: **what it made replaces what it took**,
+                // even when that is the same text — the stretch is selected in
+                // the document, and an empty commit would leave it selected,
+                // for the next Space to convert again (書き手の報告 2026-11-03).
+                let made = &committed[from as usize..from as usize + length];
+                plan.event = Some(Event {
+                    commit: true,
+                    text: String::from_utf16_lossy(made),
+                    replace: None,
+                    preedit: String::new(),
+                    preedit_selection: None,
+                    cursor: None,
+                });
+                if changed {
+                    self.stale = Some(std::mem::take(&mut self.base));
+                }
+                self.base = committed;
+                self.base_cursor = from + length as u32;
+                self.base_anchor = self.base_cursor;
+                self.chosen = None;
+            }
             Source::Document => {
                 let selection = (
                     self.base_cursor.min(self.base_anchor),
@@ -483,6 +511,37 @@ mod tests {
             t.take(Source::Document, units(""), String::new(), 0, 0),
             Notice::Text(0, 1, 0)
         );
+    }
+
+    #[test]
+    fn a_reconversion_committed_unchanged_still_replaces_the_selection() {
+        let mut t = Text::default();
+        // 「今日は」selected, and converted again.
+        t.take(Source::Document, units("今日は"), String::new(), 3, 0);
+        t.comp = Some((0, 3));
+        assert_eq!(t.plan().choose, None);
+        // Committed as it was.
+        t.comp = None;
+        t.sel = (3, 3);
+        let event = t.plan().event.unwrap();
+        assert!(event.commit);
+        assert_eq!(event.text, "今日は");
+        assert_eq!((t.base_cursor, t.base_anchor), (3, 3));
+    }
+
+    #[test]
+    fn a_reconversion_committed_changed_replaces_the_whole_selection() {
+        let mut t = Text::default();
+        t.take(Source::Document, units("今日は晴れ"), String::new(), 3, 0);
+        t.comp = Some((0, 3));
+        t.plan();
+        t.text = units("きょうは晴れ");
+        t.comp = Some((0, 4));
+        t.plan();
+        t.comp = None;
+        let plan = t.plan();
+        assert_eq!(plan.choose, None);
+        assert_eq!(plan.event.unwrap().text, "きょうは");
     }
 
     #[test]
