@@ -1676,6 +1676,10 @@ export component AppWindow inherits Window {
             else { root.title-menu-visible = true; }
         }
         palette-open: root.palette-open;
+        // 書き手の求め 2026-11-03: **パレットが探す範囲の名前**——Workspaceを使っていればその名前、
+        // でなければExplorerのフォルダ名。
+        palette-caption: root.workspace-active && root.workspace-current-label != "" ? root.workspace-current-label
+            : root.work-folder != "" ? root.work-folder : "RFN Edit";
         palette-text <=> root.palette-text;
         palette-focus-generation: root.palette-focus-generation;
         palette-requested => { root.palette-requested(false); }

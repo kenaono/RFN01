@@ -24,6 +24,8 @@ export component TitleMenuBar inherits Rectangle {
     // Ctrl+P／Ctrl+Shift+Pで入力欄になる（書き手の決定 2026-11-03）。メニューを
     // 出している間は隠す。
     in property <bool> palette-open;
+    /// 枠にふだん出す名前（書き手の求め 2026-11-03：ファイル名はTABにあるので、探す範囲の名前を）。
+    in property <string> palette-caption;
     in-out property <string> palette-text;
     in property <int> palette-focus-generation;
     callback palette-requested();
@@ -92,7 +94,7 @@ export component TitleMenuBar inherits Rectangle {
             alignment: center;
             Icon { commands: Icons.search; tint: Tok.ink-faint; width: 13px; height: 13px; y: (parent.height - 13px) / 2; }
             Text {
-                text: root.document-title;
+                text: root.palette-caption;
                 color: Tok.ink-faint;
                 font-size: 12px;
                 vertical-alignment: center;

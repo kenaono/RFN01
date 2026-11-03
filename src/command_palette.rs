@@ -350,6 +350,12 @@ pub(crate) fn score(query: &str, text: &str) -> Option<i64> {
     Some(points)
 }
 
+/// 同じ操作かを名前で見るときの形。**末尾の「…」は見ない**——メニューの「行へ移動…」と
+/// キーの一覧の「行へ移動」は同じ操作である。
+fn same_name(text: &str) -> String {
+    fold(text.trim_end_matches(['…', '.']))
+}
+
 fn fold(text: &str) -> String {
     text.chars()
         .map(|c| match c {
@@ -415,32 +421,34 @@ fn command_rows(
             continue;
         }
         let leaf = entry.title.rsplit(" › ").next().unwrap_or(&entry.title);
-        names.insert(fold(leaf));
+        names.insert(same_name(leaf));
         let points = score(query, &entry.title).or_else(|| score(query, &entry.other));
         if let Some(points) = points {
+            let (english, japanese) = english_first(&entry.title, &entry.other);
             found.push((
                 points,
                 Shown::Menu(at),
                 PaletteRow {
-                    title: entry.title.clone().into(),
-                    detail: SharedString::default(),
+                    title: english.into(),
+                    detail: japanese.into(),
                     key: entry.key.clone().into(),
                 },
             ));
         }
     }
     for (at, action) in actions.iter().enumerate() {
-        if names.contains(&fold(&action.title)) {
+        if names.contains(&same_name(&action.title)) {
             continue;
         }
         let points = score(query, &action.title).or_else(|| score(query, &action.other));
         if let Some(points) = points {
+            let (english, japanese) = english_first(&action.title, &action.other);
             found.push((
                 points,
                 Shown::Action(at),
                 PaletteRow {
-                    title: action.title.clone().into(),
-                    detail: SharedString::default(),
+                    title: english.into(),
+                    detail: japanese.into(),
                     key: action.key.clone().into(),
                 },
             ));
@@ -454,6 +462,21 @@ fn command_rows(
         .into_iter()
         .map(|(_, shown, row)| (row, shown))
         .unzip()
+}
+
+/// RFN01-87（書き手の求め 2026-11-03：コマンドは英語のほうが分かりやすい、日本語と両方で）:
+/// **上の段に英語、下の段に日本語。**画面の言葉がどちらでも同じ並び。
+fn english_first(shown: &str, other: &str) -> (String, String) {
+    let japanese_shown = crate::i18n::pick("ja", "en") == "ja";
+    let (english, japanese) = if japanese_shown {
+        (other, shown)
+    } else {
+        (shown, other)
+    };
+    if english.is_empty() || english == japanese {
+        return (shown.to_owned(), String::new());
+    }
+    (english.to_owned(), japanese.to_owned())
 }
 
 #[cfg(test)]

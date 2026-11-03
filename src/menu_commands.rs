@@ -938,6 +938,20 @@ impl Popup {
         std::mem::forget(child); // Parent owns submenu after successful append.
         Ok(())
     }
+    /// 日本語と英語の名前を持つ下の段。表示はいまの言葉で、パレットが読むときだけ
+    /// もう一方の言葉を控える（RFN01-87、`menu_snapshot`）。
+    fn child_named(&self, ja: &str, en: &str, child: Popup) -> windows::core::Result<()> {
+        let shown = pick(ja, en);
+        OTHER_MENUS.with(|menus| {
+            if let Some(menus) = menus.borrow_mut().as_mut() {
+                menus.insert(
+                    shown.to_owned(),
+                    if shown == ja { en } else { ja }.to_owned(),
+                );
+            }
+        });
+        self.child(shown, child)
+    }
 }
 impl Drop for Popup {
     fn drop(&mut self) {
@@ -955,7 +969,7 @@ pub(crate) struct MenuEntry {
     pub key: String,
     /// メニューで押せるか。押せない行はパレットに出さない。
     pub enabled: bool,
-    /// 行の名前の、表示していない側の言葉。**日本語でも英語でも探せる**ように。
+    /// 同じ道の、表示していない側の言葉。**日本語でも英語でも探せ、両方を見せる**ように。
     pub other: String,
     id: usize,
 }
@@ -988,6 +1002,8 @@ pub(crate) fn menu_snapshot(
     let mut commands = Vec::new();
     let mut entries = Vec::new();
     let mut others = Vec::new();
+    OTHER_MENUS.with(|menus| *menus.borrow_mut() = Some(Default::default()));
+    let mut groups = Vec::new();
     for group in 0..MENU_GROUPS {
         OTHER_NAMES.with(|names| *names.borrow_mut() = Some(Vec::new()));
         let built = build(window, live, kills, &target, group);
@@ -998,21 +1014,45 @@ pub(crate) fn menu_snapshot(
             continue;
         };
         let offset = commands.len();
-        let path = vec![
-            pick(
-                GROUP_TITLES[group as usize].0,
-                GROUP_TITLES[group as usize].1,
-            )
-            .to_owned(),
-        ];
-        read_menu(root.handle, &path, offset, &mut entries);
+        let (ja, en) = GROUP_TITLES[group as usize];
+        let shown = pick(ja, en);
+        groups.push((
+            shown.to_owned(),
+            if shown == ja { en } else { ja }.to_owned(),
+        ));
+        read_menu(root.handle, &[shown.to_owned()], offset, &mut entries);
         commands.extend(group_commands);
         others.extend(group_others);
     }
+    let menus = OTHER_MENUS
+        .with(|menus| menus.borrow_mut().take())
+        .unwrap_or_default();
     for entry in &mut entries {
-        if let Some(other) = entry.id.checked_sub(1).and_then(|at| others.get(at)) {
-            entry.other = other.clone();
+        // **もう一方の言葉の道**：分類と下の段は控えた名前で、行は`menu_row`が控えた
+        // 名前で。控えの無いものは、表示の名前のまま。
+        let leaf = entry
+            .id
+            .checked_sub(1)
+            .and_then(|at| others.get(at))
+            .cloned();
+        let mut parts: Vec<String> = entry.title.split(" › ").map(str::to_owned).collect();
+        let last = parts.len() - 1;
+        for (at, part) in parts.iter_mut().enumerate() {
+            let other = if at == 0 {
+                groups
+                    .iter()
+                    .find(|(shown, _)| shown == part)
+                    .map(|(_, other)| other.clone())
+            } else if at == last {
+                leaf.clone()
+            } else {
+                menus.get(part.as_str()).cloned()
+            };
+            if let Some(other) = other.filter(|other| !other.is_empty()) {
+                *part = other;
+            }
         }
+        entry.other = parts.join(" › ");
     }
     MenuSnapshot {
         target,
@@ -1166,6 +1206,9 @@ thread_local! {
     /// RFN01-87: `menu_row`が足した行の、表示していない側の言葉（`commands`と同じ並び）。
     /// `None`のあいだは控えない——ふだんのメニューは読まれないので要らない。
     static OTHER_NAMES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    /// RFN01-87: 下の段の名前の、表示していない側の言葉（表示の名前から引く）。
+    static OTHER_MENUS: RefCell<Option<std::collections::HashMap<String, String>>> =
+        const { RefCell::new(None) };
 }
 
 /// タイトルバーで、段落注記の中をもう1段分ける組（A案の並び）。右クリックの
@@ -1215,7 +1258,7 @@ fn insert_commands(
                     let wanted = title_submenu(item.0);
                     if nested.as_ref().map(|(title, _)| *title) != wanted {
                         if let Some(((ja, en), popup)) = nested.take() {
-                            group.child(pick(ja, en), popup)?;
+                            group.child_named(ja, en, popup)?;
                         }
                         if let Some(title) = wanted {
                             nested = Some((title, Popup::new()?));
@@ -1225,9 +1268,9 @@ fn insert_commands(
                     row(into, commands, *item)?;
                 }
                 if let Some(((ja, en), popup)) = nested {
-                    group.child(pick(ja, en), popup)?;
+                    group.child_named(ja, en, popup)?;
                 }
-                menu.child(pick(ja, en), group)?;
+                menu.child_named(ja, en, group)?;
             }
         }
     }
@@ -1539,7 +1582,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(pick("新しいTerminal", "New Terminal"), shells)?;
+            root.child_named("新しいTerminal", "New Terminal", shells)?;
             add!(
                 "文書のフォルダでTerminal起動",
                 "Terminal in Document Folder",
@@ -1561,7 +1604,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(pick("最近のフォルダ", "Recent Folders"), recent)?;
+            root.child_named("最近のフォルダ", "Recent Folders", recent)?;
             add!("Workspaces…", "Workspaces…", Command::Workspaces, true);
             // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
             add!(
@@ -1650,10 +1693,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(
-                pick("文字コードを指定して開き直す", "Reopen with Encoding"),
-                enc,
-            )?;
+            root.child_named("文字コードを指定して開き直す", "Reopen with Encoding", enc)?;
             // RFN01-61（書き手の求め 2026-09-27）: バックアップの履歴は File から（今のTABのファイル）。
             add!(
                 "バックアップの履歴…",
@@ -1754,7 +1794,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(pick("行操作", "Lines"), lines)?;
+            root.child_named("行操作", "Lines", lines)?;
             add!(
                 "選択を開始・解除",
                 "Start / Cancel Selection",
@@ -1819,7 +1859,7 @@ fn build(
                     pane_word_mode(live, t.id) == mode.id,
                 )?;
             }
-            root.child(pick("単語チェック", "Word Check"), words)?;
+            root.child_named("単語チェック", "Word Check", words)?;
         }
         2 => {
             // RFN01-38: リンク・ルビ・注記・行の体裁が実行できる。**矩形選択のときは
@@ -1939,7 +1979,7 @@ fn build(
                     window.get_tree_open() && window.get_left_tab() == n,
                 )?;
             }
-            root.child(pick("サイドバー", "Sidebar"), side)?;
+            root.child_named("サイドバー", "Sidebar", side)?;
             // 書き手の求め 2026-09-23: 挿入メニューの全部をアイコンで。**どちらか
             // 片方でも、両方でもよい**ので、2つは別の行である。
             row(
@@ -2092,7 +2132,7 @@ fn build(
                 text && can_forward,
                 false,
             )?;
-            root.child(pick("移動", "Go To"), go)?;
+            root.child_named("移動", "Go To", go)?;
             add!(
                 "下段を表示・閉じる",
                 "Show / Hide Panel",
@@ -2138,7 +2178,7 @@ fn build(
                     t.id.zoom(window) == percent,
                 )?;
             }
-            root.child(pick("倍率", "Zoom"), zoom)?;
+            root.child_named("倍率", "Zoom", zoom)?;
         }
         5 => {
             add!(
@@ -2262,7 +2302,7 @@ fn build(
                         false,
                     )?;
                 }
-                root.child(pick("シェル切替", "Switch Shell"), shells)?;
+                root.child_named("シェル切替", "Switch Shell", shells)?;
             }
             if t.id.is_panel() {
                 add!(
