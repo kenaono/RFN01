@@ -122,6 +122,8 @@ pub enum ShortcutAction {
     ScrollLine(bool),
     /// RFN01-82: キャレットの行を選ぶ。行を選んでいれば次の行まで広げる。
     SelectLine,
+    /// RFN01-87: コマンドパレットを開く。`true`は操作を探す（「>」入り）、`false`はファイル名。
+    Palette(bool),
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -936,12 +938,183 @@ impl Popup {
         std::mem::forget(child); // Parent owns submenu after successful append.
         Ok(())
     }
+    /// 日本語と英語の名前を持つ下の段。表示はいまの言葉で、パレットが読むときだけ
+    /// もう一方の言葉を控える（RFN01-87、`menu_snapshot`）。
+    fn child_named(&self, ja: &str, en: &str, child: Popup) -> windows::core::Result<()> {
+        let shown = pick(ja, en);
+        OTHER_MENUS.with(|menus| {
+            if let Some(menus) = menus.borrow_mut().as_mut() {
+                menus.insert(
+                    shown.to_owned(),
+                    if shown == ja { en } else { ja }.to_owned(),
+                );
+            }
+        });
+        self.child(shown, child)
+    }
 }
 impl Drop for Popup {
     fn drop(&mut self) {
         unsafe {
             let _ = DestroyMenu(self.handle);
         }
+    }
+}
+
+/// RFN01-87: コマンドパレットに並べる、タイトルバーのメニューの1行。
+pub(crate) struct MenuEntry {
+    /// 分類から行までの道（例：「表示 › 縦書き」）。
+    pub title: String,
+    /// 割り当て済みのキー。無ければ空。
+    pub key: String,
+    /// メニューで押せるか。押せない行はパレットに出さない。
+    pub enabled: bool,
+    /// 同じ道の、表示していない側の言葉。**日本語でも英語でも探せ、両方を見せる**ように。
+    pub other: String,
+    id: usize,
+}
+
+/// RFN01-87: **タイトルバーのメニューを、開いた時点のペインで組んで読み取ったもの。**
+/// 行と操作の対応はメニューと同じ（`build`）なので、パレットで選んだ行はメニューで
+/// 選んだのと同じに効く。対象のペインもメニューと同じく、組んだ時点で捕まえておく。
+pub(crate) struct MenuSnapshot {
+    target: Target,
+    commands: Vec<Command>,
+    pub entries: Vec<MenuEntry>,
+}
+
+const GROUP_TITLES: [Title; MENU_GROUPS as usize] = [
+    ("ファイル", "File"),
+    ("編集", "Edit"),
+    ("挿入", "Insert"),
+    ("レイアウト", "Layout"),
+    ("表示", "View"),
+    ("実行", "Run"),
+    ("ヘルプ", "Help"),
+];
+
+pub(crate) fn menu_snapshot(
+    window: &AppWindow,
+    live: &Live,
+    kills: &Rc<RefCell<Kills>>,
+) -> MenuSnapshot {
+    let target = Target::for_shortcut(window, live);
+    let mut commands = Vec::new();
+    let mut entries = Vec::new();
+    let mut others = Vec::new();
+    OTHER_MENUS.with(|menus| *menus.borrow_mut() = Some(Default::default()));
+    let mut groups = Vec::new();
+    for group in 0..MENU_GROUPS {
+        OTHER_NAMES.with(|names| *names.borrow_mut() = Some(Vec::new()));
+        let built = build(window, live, kills, &target, group);
+        let group_others = OTHER_NAMES
+            .with(|names| names.borrow_mut().take())
+            .unwrap_or_default();
+        let Ok(Some((root, group_commands))) = built else {
+            continue;
+        };
+        let offset = commands.len();
+        let (ja, en) = GROUP_TITLES[group as usize];
+        let shown = pick(ja, en);
+        groups.push((
+            shown.to_owned(),
+            if shown == ja { en } else { ja }.to_owned(),
+        ));
+        read_menu(root.handle, &[shown.to_owned()], offset, &mut entries);
+        commands.extend(group_commands);
+        others.extend(group_others);
+    }
+    let menus = OTHER_MENUS
+        .with(|menus| menus.borrow_mut().take())
+        .unwrap_or_default();
+    for entry in &mut entries {
+        // **もう一方の言葉の道**：分類と下の段は控えた名前で、行は`menu_row`が控えた
+        // 名前で。控えの無いものは、表示の名前のまま。
+        let leaf = entry
+            .id
+            .checked_sub(1)
+            .and_then(|at| others.get(at))
+            .cloned();
+        let mut parts: Vec<String> = entry.title.split(" › ").map(str::to_owned).collect();
+        let last = parts.len() - 1;
+        for (at, part) in parts.iter_mut().enumerate() {
+            let other = if at == 0 {
+                groups
+                    .iter()
+                    .find(|(shown, _)| shown == part)
+                    .map(|(_, other)| other.clone())
+            } else if at == last {
+                leaf.clone()
+            } else {
+                menus.get(part.as_str()).cloned()
+            };
+            if let Some(other) = other.filter(|other| !other.is_empty()) {
+                *part = other;
+            }
+        }
+        entry.other = parts.join(" › ");
+    }
+    MenuSnapshot {
+        target,
+        commands,
+        entries,
+    }
+}
+
+/// 組んだメニューを上から読む。**項目のidは`commands`の並び（1から）**——`menu_row`が
+/// 足すときにそう決めている。
+fn read_menu(menu: HMENU, path: &[String], offset: usize, out: &mut Vec<MenuEntry>) {
+    // SAFETY: `menu` is a live menu `build` made, read only while it is held.
+    let count = unsafe { GetMenuItemCount(Some(menu)) };
+    for position in 0..count.max(0) as u32 {
+        let mut text = vec![0u16; 512];
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STRING | MIIM_ID | MIIM_STATE | MIIM_SUBMENU | MIIM_FTYPE,
+            dwTypeData: windows::core::PWSTR(text.as_mut_ptr()),
+            cch: text.len() as u32 - 1,
+            ..Default::default()
+        };
+        // SAFETY: the buffer outlives the call and `cch` leaves room for the end.
+        if unsafe { GetMenuItemInfoW(menu, position, true, &mut info) }.is_err() {
+            continue;
+        }
+        if info.fType.contains(MFT_SEPARATOR) {
+            continue;
+        }
+        let written = String::from_utf16_lossy(&text[..info.cch as usize]).replace("&&", "&");
+        let (title, key) = written
+            .split_once('\t')
+            .map_or((written.as_str(), ""), |(title, key)| (title, key));
+        let mut here = path.to_vec();
+        here.push(title.to_owned());
+        if !info.hSubMenu.is_invalid() {
+            read_menu(info.hSubMenu, &here, offset, out);
+            continue;
+        }
+        out.push(MenuEntry {
+            title: here.join(" › "),
+            key: key.to_owned(),
+            enabled: !info.fState.contains(MFS_DISABLED),
+            other: String::new(),
+            id: offset + info.wID as usize,
+        });
+    }
+}
+
+impl MenuSnapshot {
+    /// パレットで選んだ行を、メニューで選んだのと同じに走らせる。
+    pub(crate) fn run(&self, window: &AppWindow, live: &Live, entry: usize) {
+        let Some(id) = self.entries.get(entry).map(|entry| entry.id) else {
+            return;
+        };
+        let Some(command) = id.checked_sub(1).and_then(|at| self.commands.get(at)) else {
+            return;
+        };
+        if !self.target.valid(window, live) {
+            return;
+        }
+        execute(window, live, &self.target, command.clone());
     }
 }
 
@@ -1019,7 +1192,23 @@ fn menu_row(
         format!("{}\t{key}", pick(ja, en))
     };
     commands.push(command);
+    // RFN01-87: パレットが読むときだけ、もう一方の言葉を控える（`menu_snapshot`）。
+    OTHER_NAMES.with(|names| {
+        if let Some(names) = names.borrow_mut().as_mut() {
+            let shown = pick(ja, en);
+            names.push(if shown == ja { en } else { ja }.to_owned());
+        }
+    });
     menu.row(&title, commands.len(), enabled, checked)
+}
+
+thread_local! {
+    /// RFN01-87: `menu_row`が足した行の、表示していない側の言葉（`commands`と同じ並び）。
+    /// `None`のあいだは控えない——ふだんのメニューは読まれないので要らない。
+    static OTHER_NAMES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    /// RFN01-87: 下の段の名前の、表示していない側の言葉（表示の名前から引く）。
+    static OTHER_MENUS: RefCell<Option<std::collections::HashMap<String, String>>> =
+        const { RefCell::new(None) };
 }
 
 /// タイトルバーで、段落注記の中をもう1段分ける組（A案の並び）。右クリックの
@@ -1069,7 +1258,7 @@ fn insert_commands(
                     let wanted = title_submenu(item.0);
                     if nested.as_ref().map(|(title, _)| *title) != wanted {
                         if let Some(((ja, en), popup)) = nested.take() {
-                            group.child(pick(ja, en), popup)?;
+                            group.child_named(ja, en, popup)?;
                         }
                         if let Some(title) = wanted {
                             nested = Some((title, Popup::new()?));
@@ -1079,9 +1268,9 @@ fn insert_commands(
                     row(into, commands, *item)?;
                 }
                 if let Some(((ja, en), popup)) = nested {
-                    group.child(pick(ja, en), popup)?;
+                    group.child_named(ja, en, popup)?;
                 }
-                menu.child(pick(ja, en), group)?;
+                menu.child_named(ja, en, group)?;
             }
         }
     }
@@ -1393,7 +1582,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(pick("新しいTerminal", "New Terminal"), shells)?;
+            root.child_named("新しいTerminal", "New Terminal", shells)?;
             add!(
                 "文書のフォルダでTerminal起動",
                 "Terminal in Document Folder",
@@ -1415,7 +1604,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(pick("最近のフォルダ", "Recent Folders"), recent)?;
+            root.child_named("最近のフォルダ", "Recent Folders", recent)?;
             add!("Workspaces…", "Workspaces…", Command::Workspaces, true);
             // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
             add!(
@@ -1504,10 +1693,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(
-                pick("文字コードを指定して開き直す", "Reopen with Encoding"),
-                enc,
-            )?;
+            root.child_named("文字コードを指定して開き直す", "Reopen with Encoding", enc)?;
             // RFN01-61（書き手の求め 2026-09-27）: バックアップの履歴は File から（今のTABのファイル）。
             add!(
                 "バックアップの履歴…",
@@ -1608,7 +1794,7 @@ fn build(
                     false,
                 )?;
             }
-            root.child(pick("行操作", "Lines"), lines)?;
+            root.child_named("行操作", "Lines", lines)?;
             add!(
                 "選択を開始・解除",
                 "Start / Cancel Selection",
@@ -1673,7 +1859,7 @@ fn build(
                     pane_word_mode(live, t.id) == mode.id,
                 )?;
             }
-            root.child(pick("単語チェック", "Word Check"), words)?;
+            root.child_named("単語チェック", "Word Check", words)?;
         }
         2 => {
             // RFN01-38: リンク・ルビ・注記・行の体裁が実行できる。**矩形選択のときは
@@ -1793,7 +1979,7 @@ fn build(
                     window.get_tree_open() && window.get_left_tab() == n,
                 )?;
             }
-            root.child(pick("サイドバー", "Sidebar"), side)?;
+            root.child_named("サイドバー", "Sidebar", side)?;
             // 書き手の求め 2026-09-23: 挿入メニューの全部をアイコンで。**どちらか
             // 片方でも、両方でもよい**ので、2つは別の行である。
             row(
@@ -1946,7 +2132,7 @@ fn build(
                 text && can_forward,
                 false,
             )?;
-            root.child(pick("移動", "Go To"), go)?;
+            root.child_named("移動", "Go To", go)?;
             add!(
                 "下段を表示・閉じる",
                 "Show / Hide Panel",
@@ -1992,7 +2178,7 @@ fn build(
                     t.id.zoom(window) == percent,
                 )?;
             }
-            root.child(pick("倍率", "Zoom"), zoom)?;
+            root.child_named("倍率", "Zoom", zoom)?;
         }
         5 => {
             add!(
@@ -2116,7 +2302,7 @@ fn build(
                         false,
                     )?;
                 }
-                root.child(pick("シェル切替", "Switch Shell"), shells)?;
+                root.child_named("シェル切替", "Switch Shell", shells)?;
             }
             if t.id.is_panel() {
                 add!(
@@ -2394,6 +2580,9 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         ShortcutAction::ToggleLeftPane => return window.invoke_toggle_left_pane(),
         ShortcutAction::ShowLeftTab(tab) => return window.invoke_show_left_tab(tab),
         ShortcutAction::OpenSettings => return window.invoke_settings_requested(),
+        ShortcutAction::Palette(commands) => {
+            return crate::command_palette::open(window, live, commands);
+        }
         _ => {}
     }
     let target = Target::for_shortcut(window, live);
@@ -2421,7 +2610,8 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         | ShortcutAction::ReplaceInFolder
         | ShortcutAction::ToggleLeftPane
         | ShortcutAction::ShowLeftTab(_)
-        | ShortcutAction::OpenSettings => return,
+        | ShortcutAction::OpenSettings
+        | ShortcutAction::Palette(_) => return,
     };
     execute(window, live, &target, command);
 }

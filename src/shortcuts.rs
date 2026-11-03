@@ -106,11 +106,13 @@ const DEFAULTS: &[&str] = &[
     "",
     "",
     "",
-    "",
+    // RFN01-87（書き手の求め 2026-11-03）: 縦書き・横書きの切り替え。
+    "Ctrl+R",
     // RFN01-82: VS Codeの「Toggle Markdown Preview」と同じ。
     "Ctrl+Shift+V",
     "",
-    "Ctrl+P",
+    // RFN01-87（書き手の決定 2026-11-03）: Ctrl+Pはファイル名で開くへ。印刷プレビューはキーなし。
+    "",
 ];
 const CATEGORIES: &[i32] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
@@ -375,6 +377,19 @@ const TEXT_ACTIONS: &[MenuAction] = &[
         "Select Line",
         "Ctrl+L",
         ShortcutAction::SelectLine
+    ),
+    // RFN01-87: コマンドパレット。VS Codeの「Go to File」と「Show All Commands」。
+    menu_action!(
+        "ファイル名で開く",
+        "Go to File",
+        "Ctrl+P",
+        ShortcutAction::Palette(false)
+    ),
+    menu_action!(
+        "コマンドパレット",
+        "Command Palette",
+        "Ctrl+Shift+P",
+        ShortcutAction::Palette(true)
     ),
 ];
 /// ファイルの分類に並べる、メニューから来た操作。
@@ -744,19 +759,29 @@ fn conflict(keys: &[String], i: usize, key: &str) -> Option<usize> {
 /// 「キーなし」）、既定を替えても、前に保存した書き手には古い既定が残る。この印の
 /// 無い割り当ては、[`migrations`]の古い既定のままの枠だけを新しい既定へ移す。
 /// 印は保存のたびに書くので、移すのは一度きり——後で書き手が外した枠は外れたまま。
-const BINDINGS_VERSION: &str = "v=2";
-/// 既定を替えた枠と、その前の既定（RFN01-82、2026-11-03：VS Codeに合わせた）。
-fn migrations() -> Vec<(usize, &'static str)> {
-    let mut moved = vec![(43, "")];
-    for (action, before) in [
-        (ShortcutAction::FolderTerminal, ""),
-        (ShortcutAction::ToggleLeftPane, "Ctrl+Alt+L"),
+const BINDINGS_VERSION: u32 = 4;
+/// 既定を替えた枠と、その前の既定、替えた版。
+///
+/// 2：VS Codeに合わせた（RFN01-82、2026-11-03）。3：Ctrl+Pをファイル名で開くへ
+/// 譲り、印刷プレビューはキーなし（RFN01-87、2026-11-03）。4：縦書き・横書きの
+/// 切り替えにCtrl+R（同）。
+fn migrations() -> Vec<(u32, usize, &'static str)> {
+    let mut moved = vec![(2, 43, ""), (3, 45, "Ctrl+P"), (4, 42, "")];
+    for (version, action, before) in [
+        (2, ShortcutAction::FolderTerminal, ""),
+        (2, ShortcutAction::ToggleLeftPane, "Ctrl+Alt+L"),
     ] {
         if let Some(id) = id_of(action) {
-            moved.push((id, before));
+            moved.push((version, id, before));
         }
     }
     moved
+}
+/// 保存した割り当ての版。印が無ければ1（RFN01-82より前）。
+fn saved_version(raw: &str) -> u32 {
+    raw.split(';')
+        .find_map(|entry| entry.strip_prefix("v=")?.parse().ok())
+        .unwrap_or(1)
 }
 /// メニューから来た操作のid。
 fn id_of(action: ShortcutAction) -> Option<usize> {
@@ -767,7 +792,7 @@ fn encode(keys: &[String]) -> String {
     keys.iter()
         .enumerate()
         .map(|(i, k)| format!("{i}={k}"))
-        .chain(std::iter::once(BINDINGS_VERSION.to_owned()))
+        .chain(std::iter::once(format!("v={BINDINGS_VERSION}")))
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -782,9 +807,10 @@ fn bindings(raw: &str) -> Vec<String> {
             }
         }
     }
-    if !raw.trim().is_empty() && !raw.split(';').any(|entry| entry == BINDINGS_VERSION) {
-        for (id, before) in migrations() {
-            if keys.get(id).is_some_and(|key| key == before) {
+    if !raw.trim().is_empty() {
+        let saved = saved_version(raw);
+        for (version, id, before) in migrations() {
+            if version > saved && keys.get(id).is_some_and(|key| key == before) {
                 keys[id] = default_at(id).to_owned();
             }
         }
@@ -1108,83 +1134,118 @@ pub fn wire(app: &AppWindow, live: &Live) {
         let weak = weak.clone();
         let live = keyed_live.clone();
         slint::Timer::single_shot(std::time::Duration::ZERO, move || {
-            let Some(app) = weak.upgrade() else {
-                return;
-            };
-            match command {
-                0 => app.invoke_open_file_requested(),
-                1 => app.invoke_save_requested(),
-                2 => app.invoke_save_as_requested(),
-                3 => {
-                    let at = live.tabs.borrow().of(pane).active;
-                    crate::close_tab(&app, &live, pane, at);
-                }
-                4 => app.invoke_toggle_find(pane.index(), false),
-                5 => app.invoke_toggle_find(pane.index(), true),
-                6 => app.invoke_goto_requested(false),
-                7 => crate::reopen_closed_tab(&app, &live),
-                8 => app.invoke_pane_undo(pane.index(), false),
-                9 => app.invoke_pane_undo(pane.index(), true),
-                10 => app.invoke_quick_draft_requested(),
-                11 => app.invoke_pane_tab_stepped(pane.index(), false),
-                12 => app.invoke_pane_tab_stepped(pane.index(), true),
-                13 => app.invoke_pane_focus_moved(pane.index(), 0),
-                14 => app.invoke_pane_focus_moved(pane.index(), 1),
-                15 => app.invoke_pane_focus_moved(pane.index(), 2),
-                16 => {
-                    if crate::below_kind(live.cache.borrow_mut().pane(pane)) != 0 {
-                        app.invoke_pane_below_focus(pane.index(), true);
-                    } else {
-                        app.invoke_pane_focus_moved(pane.index(), 3);
-                    }
-                }
-                17 => app.invoke_pane_below_toggled(pane.index()),
-                18 => {} // Reserved: New Tab is the + button only.
-                19 => app.invoke_pane_navigate(pane.index(), false),
-                20 => app.invoke_pane_navigate(pane.index(), true),
-                21 => app.invoke_pane_delete(pane.index()),
-                22 => app.invoke_pane_move(pane.index(), 3, false),
-                23 => app.invoke_pane_move(pane.index(), -3, false),
-                24 => app.invoke_pane_kill(pane.index(), 0),
-                25 => app.invoke_pane_mark_toggled(pane.index(), false),
-                26 => app.invoke_pane_mark_toggled(pane.index(), true),
-                27 => app.invoke_pane_kill(pane.index(), 1),
-                28 => app.invoke_pane_kill(pane.index(), 2),
-                29 => app.invoke_pane_kill(pane.index(), 3),
-                30 => app.invoke_pane_kill(pane.index(), 4),
-                31 => app.invoke_pane_move(pane.index(), 3, true),
-                32 => app.invoke_pane_move(pane.index(), -3, true),
-                33 => app.invoke_pane_line_edit(pane.index(), 4),
-                34 => app.invoke_pane_line_edit(pane.index(), 0),
-                35 => app.invoke_pane_line_edit(pane.index(), 1),
-                36 => app.invoke_pane_line_edit(pane.index(), 2),
-                37 => app.invoke_pane_line_edit(pane.index(), 3),
-                42 => app.invoke_pane_direction_toggled(pane.index()),
-                43 => {
-                    // ReadOnlyはViewerを抜けずに断る（追加要件 2026-09-15）——抜けて
-                    // プレビューへ回すと、読むだけのつもりの面が書ける面になる。
-                    let viewer = live.states.of(pane).borrow().viewer;
-                    if viewer && !pane.reads_only(&app) {
-                        app.invoke_pane_viewer_toggled(pane.index());
-                    }
-                    app.invoke_pane_preview_toggled(pane.index());
-                }
-                44 => app.invoke_pane_viewer_toggled(pane.index()),
-                // 要件 7.10: 紙の形で見る。**入口は窓に一つ**なので、どの面から
-                // 押しても同じ——刷るのは前に出ている文書である。
-                45 => app.invoke_print_requested(),
-                // RFN01-18: メニューから来た操作は、メニューと同じ道で実行する
-                // （`menu_at`が`None`を返す18・38〜41番は、これまでどおり何もしない）。
-                _ => {
-                    if let Some(action) = menu_at(command as usize).map(|(action, _)| action.action)
-                    {
-                        crate::menu_commands::run_shortcut(&app, &live, action);
-                    }
-                }
+            if let Some(app) = weak.upgrade() {
+                run_command(&app, &live, pane, command);
             }
         });
         true
     });
+}
+/// RFN01-87: コマンドパレットに並べる、キーの一覧の操作。
+pub(crate) struct PaletteAction {
+    pub title: String,
+    /// 表示していない側の言葉。
+    pub other: String,
+    pub key: String,
+    pub id: i32,
+}
+
+/// RFN01-87: 本文の場面の操作を、いまの割り当てと一緒に。**パレットを開く操作自身と、
+/// 枠だけの18番は除く。**メニューにもある操作は、パレットの側で名前を見て重ねない。
+pub(crate) fn palette_actions(app: &AppWindow) -> Vec<PaletteAction> {
+    let keys = bindings(&app.get_shortcut_bindings());
+    (0..count())
+        .filter(|id| *id != 18 && scope_at(*id) == 0)
+        .filter(|id| {
+            !menu_at(*id)
+                .is_some_and(|(action, _)| matches!(action.action, ShortcutAction::Palette(_)))
+        })
+        .map(|id| {
+            let (ja, en) = name_at(id);
+            let title = shown((ja, en));
+            PaletteAction {
+                title: title.to_owned(),
+                other: if title == ja { en } else { ja }.to_owned(),
+                key: keys[id].clone(),
+                id: id as i32,
+            }
+        })
+        .collect()
+}
+
+/// 割り当ての一覧のidで、その操作を走らせる。キーからも、コマンドパレットからも
+/// （RFN01-87）——**同じ道**なので、パレットで選んだ操作はキーと同じに効く。
+pub(crate) fn run_command(app: &AppWindow, live: &Live, pane: crate::PaneId, command: i32) {
+    match command {
+        0 => app.invoke_open_file_requested(),
+        1 => app.invoke_save_requested(),
+        2 => app.invoke_save_as_requested(),
+        3 => {
+            let at = live.tabs.borrow().of(pane).active;
+            crate::close_tab(&app, &live, pane, at);
+        }
+        4 => app.invoke_toggle_find(pane.index(), false),
+        5 => app.invoke_toggle_find(pane.index(), true),
+        6 => app.invoke_goto_requested(false),
+        7 => crate::reopen_closed_tab(&app, &live),
+        8 => app.invoke_pane_undo(pane.index(), false),
+        9 => app.invoke_pane_undo(pane.index(), true),
+        10 => app.invoke_quick_draft_requested(),
+        11 => app.invoke_pane_tab_stepped(pane.index(), false),
+        12 => app.invoke_pane_tab_stepped(pane.index(), true),
+        13 => app.invoke_pane_focus_moved(pane.index(), 0),
+        14 => app.invoke_pane_focus_moved(pane.index(), 1),
+        15 => app.invoke_pane_focus_moved(pane.index(), 2),
+        16 => {
+            if crate::below_kind(live.cache.borrow_mut().pane(pane)) != 0 {
+                app.invoke_pane_below_focus(pane.index(), true);
+            } else {
+                app.invoke_pane_focus_moved(pane.index(), 3);
+            }
+        }
+        17 => app.invoke_pane_below_toggled(pane.index()),
+        18 => {} // Reserved: New Tab is the + button only.
+        19 => app.invoke_pane_navigate(pane.index(), false),
+        20 => app.invoke_pane_navigate(pane.index(), true),
+        21 => app.invoke_pane_delete(pane.index()),
+        22 => app.invoke_pane_move(pane.index(), 3, false),
+        23 => app.invoke_pane_move(pane.index(), -3, false),
+        24 => app.invoke_pane_kill(pane.index(), 0),
+        25 => app.invoke_pane_mark_toggled(pane.index(), false),
+        26 => app.invoke_pane_mark_toggled(pane.index(), true),
+        27 => app.invoke_pane_kill(pane.index(), 1),
+        28 => app.invoke_pane_kill(pane.index(), 2),
+        29 => app.invoke_pane_kill(pane.index(), 3),
+        30 => app.invoke_pane_kill(pane.index(), 4),
+        31 => app.invoke_pane_move(pane.index(), 3, true),
+        32 => app.invoke_pane_move(pane.index(), -3, true),
+        33 => app.invoke_pane_line_edit(pane.index(), 4),
+        34 => app.invoke_pane_line_edit(pane.index(), 0),
+        35 => app.invoke_pane_line_edit(pane.index(), 1),
+        36 => app.invoke_pane_line_edit(pane.index(), 2),
+        37 => app.invoke_pane_line_edit(pane.index(), 3),
+        42 => app.invoke_pane_direction_toggled(pane.index()),
+        43 => {
+            // ReadOnlyはViewerを抜けずに断る（追加要件 2026-09-15）——抜けて
+            // プレビューへ回すと、読むだけのつもりの面が書ける面になる。
+            let viewer = live.states.of(pane).borrow().viewer;
+            if viewer && !pane.reads_only(&app) {
+                app.invoke_pane_viewer_toggled(pane.index());
+            }
+            app.invoke_pane_preview_toggled(pane.index());
+        }
+        44 => app.invoke_pane_viewer_toggled(pane.index()),
+        // 要件 7.10: 紙の形で見る。**入口は窓に一つ**なので、どの面から
+        // 押しても同じ——刷るのは前に出ている文書である。
+        45 => app.invoke_print_requested(),
+        // RFN01-18: メニューから来た操作は、メニューと同じ道で実行する
+        // （`menu_at`が`None`を返す18・38〜41番は、これまでどおり何もしない）。
+        _ => {
+            if let Some(action) = menu_at(command as usize).map(|(action, _)| action.action) {
+                crate::menu_commands::run_shortcut(&app, &live, action);
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1277,7 +1338,10 @@ mod tests {
         }
         assert_eq!(resolve(settings, 0, "r", true, true, false), 42);
         assert_eq!(resolve(settings, 0, "p", true, true, false), 43);
-        assert_eq!(resolve(settings, 0, "r", true, false, false), -1);
+        // RFN01-87: Ctrl+Rは縦書き・横書きの既定。書き手が別のキーへ移したあとは、
+        // 古い処理へ回さずに飲み込む（`-2`、既定のキーの扱いと同じ）。
+        assert_eq!(resolve(settings, 0, "r", true, false, false), -2);
+        assert_eq!(resolve("", 0, "r", true, false, false), 42);
     }
 
     /// RFN01-18: **メニューから来た操作は、既定では何も決まっていない。**
@@ -1380,9 +1444,36 @@ mod tests {
         let mut after = keys.clone();
         after[43].clear();
         let encoded = encode(&after);
-        assert!(encoded.ends_with(BINDINGS_VERSION));
+        assert!(encoded.ends_with(&format!("v={BINDINGS_VERSION}")));
         assert_eq!(bindings(&encoded)[43], "");
         assert_eq!(bindings(&encoded)[toggle], "Ctrl+B");
+    }
+
+    /// RFN01-87: Ctrl+Pはファイル名で開く、Ctrl+Shift+Pはコマンドパレット。**前に
+    /// 保存した割り当ての印刷プレビューのCtrl+Pは外す**——残すとぶつかって、
+    /// 割り当てが全部既定に戻ってしまう。v=2で保存した書き手も同じ。
+    #[test]
+    fn ctrl_p_goes_to_the_palette_and_print_preview_lets_it_go() {
+        let quick = id_of(ShortcutAction::Palette(false)).unwrap();
+        let commands = id_of(ShortcutAction::Palette(true)).unwrap();
+        assert_eq!(resolve("", 0, "p", true, false, false), quick as i32);
+        assert_eq!(resolve("", 0, "P", true, false, true), commands as i32);
+        for saved in [
+            "0=Ctrl+O;42=;45=Ctrl+P;94=F5",
+            "0=Ctrl+O;42=;45=Ctrl+P;94=F5;v=2",
+        ] {
+            let keys = bindings(saved);
+            assert_eq!(keys[45], "", "{saved}");
+            // 版4：縦書き・横書きの切り替えにCtrl+R。空のまま保存していた書き手にも付く。
+            assert_eq!(keys[42], "Ctrl+R", "{saved}");
+            assert_eq!(keys[quick], "Ctrl+P", "{saved}");
+            assert_eq!(keys[94], "F5", "{saved}");
+        }
+        // 版3のあとで書き手が印刷プレビューに戻したなら、それは書き手の決めたこと。
+        let mut keys = bindings("");
+        keys[quick].clear();
+        keys[45] = "Ctrl+P".into();
+        assert_eq!(bindings(&encode(&keys))[45], "Ctrl+P");
     }
 
     /// RFN01-82: 開閉しても、出ていた面はそのまま。

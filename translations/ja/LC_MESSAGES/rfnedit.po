@@ -1549,3 +1549,7 @@ msgstr "ツリーに戻る"
 
 msgid "Using Workspace \"{}\". Dimmed files can't be opened here."
 msgstr "Workspace『{}』を使用中です。薄い色のファイルは開けません。"
+
+# RFN01-87: タイトルバーのコマンドパレット。
+msgid "Search files by name (type > for commands)"
+msgstr "ファイル名で探す（> を打つと操作を探す）"
