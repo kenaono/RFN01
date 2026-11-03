@@ -2269,8 +2269,8 @@ export component AppWindow inherits Window {
                             && root.tree-carry-parent != -1
                             && root.tree-carry-x >= 0px
                             && root.tree-carry-x < self.width
-                            && root.tree-carry-y < -tree-view.viewport-y
-                            && root.tree-carry-y >= -tree-view.viewport-y - self.height;
+                            && root.tree-carry-y < -tree-view.content-y
+                            && root.tree-carry-y >= -tree-view.content-y - self.height;
                         // **Cleared by whoever set it**, so that leaving a
                         // target and entering another can happen in either
                         // order without the two undoing each other.
@@ -2702,7 +2702,7 @@ export component AppWindow inherits Window {
                         property <bool> searching: root.tree-searching;
                         changed searching => {
                             if self.searching {
-                                root.tree-scroll-kept = self.viewport-y;
+                                root.tree-scroll-kept = self.content-y;
                             } else {
                                 scroll-back.running = true;
                             }
@@ -2714,7 +2714,7 @@ export component AppWindow inherits Window {
                             running: false;
                             triggered => {
                                 self.running = false;
-                                tree-view.viewport-y = root.tree-scroll-kept;
+                                tree-view.content-y = root.tree-scroll-kept;
                             }
                         }
                         // 5 Bookmarks と 7 Backups は自分の面を持つ（RFN01-61：出したままだと高さを
@@ -2728,14 +2728,14 @@ export component AppWindow inherits Window {
                         // out of sight still has a place in the list**, and the
                         // point is in that same list — so the part of it that
                         // is on screen is asked for here, once, rather than by
-                        // every row. `viewport-y` is negative as the list is
-                        // scrolled, so the top of what is shown is `-viewport-y`
+                        // every row. `content-y` is negative as the list is
+                        // scrolled, so the top of what is shown is `-content-y`
                         // rows down.
                         property <bool> holds-carry: root.tree-carrying
                             && root.tree-carry-x >= 0px
                             && root.tree-carry-x < self.width
-                            && root.tree-carry-y >= -self.viewport-y
-                            && root.tree-carry-y < -self.viewport-y + self.visible-height;
+                            && root.tree-carry-y >= -self.content-y
+                            && root.tree-carry-y < -self.content-y + self.visible-height;
 
                         VerticalLayout {
                             alignment: start;
@@ -2746,7 +2746,7 @@ export component AppWindow inherits Window {
                                 property <int> reveal-generation: root.tree-reveal-generation;
                                 changed reveal-generation => {
                                     if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-selected {
-                                        tree-view.viewport-y = -min(self.y, max(0px, tree-view.viewport-height - tree-view.visible-height));
+                                        tree-view.content-y = -min(self.y, max(0px, tree-view.content-height - tree-view.visible-height));
                                     }
                                 }
                                 // 要件 5.2: what this row can be given. A file
@@ -3834,7 +3834,7 @@ export component AppWindow inherits Window {
                                     // 語が変われば中身の長さが変わる。前の位置のままだと何も無い所を見ている。
                                     property <string> query: root.settings-query;
                                     changed query => {
-                                        self.viewport-y = 0;
+                                        self.content-y = 0;
                                     }
 
                                     HorizontalLayout {

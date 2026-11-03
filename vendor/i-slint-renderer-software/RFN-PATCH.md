@@ -1,15 +1,19 @@
 # RFN Edit local patch
 
-Base: crates.io `i-slint-renderer-software` 1.17.1, copied without changes except
-the Parley text renderer in `lib.rs`. Existing upstream copyright and license
-headers are retained.
+Base: crates.io `i-slint-renderer-software` 1.18.1, copied without changes except
+`fill_rectangle` in `lib.rs`. Existing upstream copyright and license headers are
+retained.
 
-Long Editor Panel text can have glyph positions or scroll offsets outside i16.
-Previously these were narrowed independently, before clipping, causing a cast
-panic in release builds or arithmetic overflow in debug builds. Glyph placement
-now combines offsets in floating point and excludes offscreen glyphs before
-narrowing to framebuffer coordinates. Text selection/caret rectangles are also
-clipped before integer conversion.
+Long Editor Panel text can put selection, caret and text-decoration rectangles
+far outside i16. `fill_rectangle` narrows its rectangle to the i16
+`PhysicalRect` before the processor clips it, which panics in release builds or
+overflows in debug builds. The rectangle is now intersected with the clip while
+it is still floating point.
 
-Regression coverage lives in `src/terminal_ui_tests.rs` in the application.
-Remove/rebase this patch when upgrading Slint to a version that fixes this path.
+Glyphs needed the same fix up to 1.17.1. Slint 1.18 fixed that path upstream
+(#12994: glyph rectangles are i32 and clipped before narrowing), so the glyph
+part of this patch was dropped on the upgrade (2026-11-03).
+
+Regression coverage lives in `src/terminal_ui_tests.rs` in the application
+(`terminal_panel_long_text_click_and_end_render`). Remove this patch when
+upgrading Slint to a version that clips `fill_rectangle` before narrowing.

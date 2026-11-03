@@ -271,9 +271,9 @@ export component EditorSurface inherits Rectangle {
     private property <bool> commit-just-finished;
     private property <bool> dragging;
     function take-scroll() {
-        scroll.viewport-x = root.scroll-to-x;
-        scroll.viewport-y = root.scroll-to-y;
-        root.scroll-applied(root.scroll-to-y / 1px, scroll.viewport-y / 1px);
+        scroll.content-x = root.scroll-to-x;
+        scroll.content-y = root.scroll-to-y;
+        root.scroll-applied(root.scroll-to-y / 1px, scroll.content-y / 1px);
     }
     changed scroll-generation => { root.take-scroll(); }
     public function take-focus() { ime-input.focus(); }
@@ -397,10 +397,10 @@ export component EditorSurface inherits Rectangle {
                 vertical-stretch: 1;
                 horizontal-scrollbar-policy: as-needed;
                 vertical-scrollbar-policy: as-needed;
-                viewport-x <=> root.scroll-x;
-                viewport-y <=> root.scroll-y;
-                viewport-width: max(self.visible-width, root.content-width * 1px);
-                viewport-height: max(self.visible-height, root.content-height * 1px);
+                content-x <=> root.scroll-x;
+                content-y <=> root.scroll-y;
+                content-width: max(self.visible-width, root.content-width * 1px);
+                content-height: max(self.visible-height, root.content-height * 1px);
 
                 // Reported at `init` as well as on change, for the reason 6.7 and
                 // 6.11 both record: a pane is created when it becomes visible, so a
@@ -413,18 +413,18 @@ export component EditorSurface inherits Rectangle {
                     root.wrap-height = self.visible-height;
                     root.resized();
                 }
-                changed viewport-x => {
+                changed content-x => {
                     if (root.vertical) {
-                        root.scrolled(self.viewport-x / 1px);
+                        root.scrolled(self.content-x / 1px);
                     } else {
-                        root.across-scrolled(self.viewport-x / 1px);
+                        root.across-scrolled(self.content-x / 1px);
                     }
                 }
-                changed viewport-y => {
+                changed content-y => {
                     if (!root.vertical) {
-                        root.scrolled(self.viewport-y / 1px);
+                        root.scrolled(self.content-y / 1px);
                     } else {
-                        root.across-scrolled(self.viewport-y / 1px);
+                        root.across-scrolled(self.content-y / 1px);
                     }
                 }
                 // One of these two is the flow axis and re-lays out the document;
@@ -432,7 +432,7 @@ export component EditorSurface inherits Rectangle {
                 changed visible-width => {
                     root.shown-width = self.visible-width;
                     if (root.vertical) {
-                        root.scrolled(self.viewport-x / 1px);
+                        root.scrolled(self.content-x / 1px);
                     } else {
                         root.resized();
                     }
@@ -443,7 +443,7 @@ export component EditorSurface inherits Rectangle {
                     if (root.vertical) {
                         root.resized();
                     } else {
-                        root.scrolled(self.viewport-y / 1px);
+                        root.scrolled(self.content-y / 1px);
                     }
                 }
 
@@ -501,12 +501,12 @@ export component EditorSurface inherits Rectangle {
                     // タブがアクセントを着る条件とこの枠の条件が同じになった
                     // （同じことを2か所で別々に判じていた、6.15の形）。
                     paper-visible := Rectangle {
-                        x: clamp(-scroll.viewport-x - page.x, 0px, page.width);
-                        y: clamp(-scroll.viewport-y - page.y, 0px, page.height);
+                        x: clamp(-scroll.content-x - page.x, 0px, page.width);
+                        y: clamp(-scroll.content-y - page.y, 0px, page.height);
                         width: max(0px, min(page.width - self.x,
-                            scroll.visible-width - (page.x + scroll.viewport-x + self.x)));
+                            scroll.visible-width - (page.x + scroll.content-x + self.x)));
                         height: max(0px, min(page.height - self.y,
-                            scroll.visible-height - (page.y + scroll.viewport-y + self.y)));
+                            scroll.visible-height - (page.y + scroll.content-y + self.y)));
                         background: root.terminal || root.wall-kind != 0 || root.background-transparency > 0
                             ? transparent : root.page-background;
                         if !root.standalone && root.focused && !root.empty && self.width > 0px && self.height > 0px: Rectangle {
@@ -577,10 +577,10 @@ export component EditorSurface inherits Rectangle {
                             source: tile.source;
                             image-fit: fill;
                             visible: root.vertical
-                                ? (self.x + self.width + scroll.viewport-x >= 0px
-                                    && self.x + scroll.viewport-x <= scroll.visible-width)
-                                : (self.y + self.height + scroll.viewport-y >= 0px
-                                    && self.y + scroll.viewport-y <= scroll.visible-height);
+                                ? (self.x + self.width + scroll.content-x >= 0px
+                                    && self.x + scroll.content-x <= scroll.visible-width)
+                                : (self.y + self.height + scroll.content-y >= 0px
+                                    && self.y + scroll.content-y <= scroll.visible-height);
                         }
 
                         // E1: 範囲はいちばん下、いちばん薄く（書き手の求め
@@ -691,12 +691,12 @@ export component EditorSurface inherits Rectangle {
                             // tab changes and manual scrolling can leave the caret
                             // outside the viewport. Keep the invisible input inside
                             // it, without moving the document caret or scroll.
-                            x: max(-scroll.viewport-x - page.x,
+                            x: max(-scroll.content-x - page.x,
                                 min(root.ime-anchor-x * 1px,
-                                    -scroll.viewport-x - page.x + scroll.visible-width - self.width));
-                            y: max(-scroll.viewport-y - page.y + max(0px, root.find-bar-height - scroll.y),
+                                    -scroll.content-x - page.x + scroll.visible-width - self.width));
+                            y: max(-scroll.content-y - page.y + max(0px, root.find-bar-height - scroll.y),
                                 min(root.ime-anchor-y * 1px,
-                                    -scroll.viewport-y - page.y + scroll.visible-height - self.height));
+                                    -scroll.content-y - page.y + scroll.visible-height - self.height));
                             width: max(root.ime-anchor-width * 1px, 1px);
                             height: max(root.ime-anchor-height * 1px, 1px);
                             text <=> root.ime-buffer;
@@ -1247,12 +1247,12 @@ export component EditorSurface inherits Rectangle {
                                     // sideways. A wheel that only reports y still
                                     // has to work, so it is turned.
                                     let delta = event.delta-x != 0px ? event.delta-x : -event.delta-y;
-                                    let minimum-x = min(0px, scroll.visible-width - scroll.viewport-width);
-                                    scroll.viewport-x = max(minimum-x, min(0px, scroll.viewport-x + delta));
+                                    let minimum-x = min(0px, scroll.visible-width - scroll.content-width);
+                                    scroll.content-x = max(minimum-x, min(0px, scroll.content-x + delta));
                                 } else {
                                     let delta = event.delta-y != 0px ? event.delta-y : event.delta-x;
-                                    let minimum-y = min(0px, scroll.visible-height - scroll.viewport-height);
-                                    scroll.viewport-y = max(minimum-y, min(0px, scroll.viewport-y + delta));
+                                    let minimum-y = min(0px, scroll.visible-height - scroll.content-height);
+                                    scroll.content-y = max(minimum-y, min(0px, scroll.content-y + delta));
                                 }
                                 accept
                             }
@@ -1468,13 +1468,13 @@ export component EditorSurface inherits Rectangle {
                                     height: parent.arrow;
                                     visible: parent.overflows;
                                     clicked => {
-                                        menu-scroll.viewport-y = min(0px, menu-scroll.viewport-y + root.context-row-pitch);
+                                        menu-scroll.content-y = min(0px, menu-scroll.content-y + root.context-row-pitch);
                                     }
 
                                     Text {
                                         text: "▲";
                                         font-size: 9px;
-                                        color: menu-scroll.viewport-y < 0px ? Tok.ink : Tok.ink-faint;
+                                        color: menu-scroll.content-y < 0px ? Tok.ink : Tok.ink-faint;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -1482,9 +1482,9 @@ export component EditorSurface inherits Rectangle {
 
                                 Timer {
                                     interval: 16ms;
-                                    running: menu-up.has-hover && menu-scroll.viewport-y < 0px;
+                                    running: menu-up.has-hover && menu-scroll.content-y < 0px;
                                     triggered => {
-                                        menu-scroll.viewport-y = min(0px, menu-scroll.viewport-y + 4px);
+                                        menu-scroll.content-y = min(0px, menu-scroll.content-y + 4px);
                                     }
                                 }
 
@@ -1492,10 +1492,10 @@ export component EditorSurface inherits Rectangle {
                                     y: parent.overflows ? parent.arrow : 0px;
                                     width: parent.width;
                                     height: parent.height - (parent.overflows ? 2 * parent.arrow : 0px);
-                                    viewport-height: menu-rows.preferred-height;
+                                    content-height: menu-rows.preferred-height;
                                     // **流したら、開いていた面は畳む。**面は行の横に置いてあり、
                                     // 行と一緒には流れない。
-                                    changed viewport-y => {
+                                    changed content-y => {
                                         root.insert-open = -1;
                                         root.insert-rows-open = false;
                                         root.bullet-rows-open = false;
@@ -1897,13 +1897,13 @@ export component EditorSurface inherits Rectangle {
                                     height: parent.arrow;
                                     visible: parent.overflows;
                                     clicked => {
-                                        menu-scroll.viewport-y = max(menu-frame.lowest, menu-scroll.viewport-y - root.context-row-pitch);
+                                        menu-scroll.content-y = max(menu-frame.lowest, menu-scroll.content-y - root.context-row-pitch);
                                     }
 
                                     Text {
                                         text: "▼";
                                         font-size: 9px;
-                                        color: menu-scroll.viewport-y > menu-frame.lowest ? Tok.ink : Tok.ink-faint;
+                                        color: menu-scroll.content-y > menu-frame.lowest ? Tok.ink : Tok.ink-faint;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -1911,9 +1911,9 @@ export component EditorSurface inherits Rectangle {
 
                                 Timer {
                                     interval: 16ms;
-                                    running: menu-down.has-hover && menu-scroll.viewport-y > menu-frame.lowest;
+                                    running: menu-down.has-hover && menu-scroll.content-y > menu-frame.lowest;
                                     triggered => {
-                                        menu-scroll.viewport-y = max(menu-frame.lowest, menu-scroll.viewport-y - 4px);
+                                        menu-scroll.content-y = max(menu-frame.lowest, menu-scroll.content-y - 4px);
                                     }
                                 }
                             }

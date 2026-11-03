@@ -340,7 +340,7 @@ export component EditorPane inherits Rectangle {
     /// 要件 8.5: Rust has moved the view, and the pane has to follow.
     ///
     /// **Assigned, not left to the binding.** `Flickable` drops the binding on
-    /// its `viewport-x`/`viewport-y` the first time the writer presses inside it
+    /// its `content-x`/`content-y` the first time the writer presses inside it
     /// — `remove_binding()` in `i-slint-core/items/flickable.rs`, there to stop
     /// an animation — so from that press onwards nothing Rust writes reaches the
     /// view. Which is why restoring the scroll worked at startup and stopped
@@ -592,7 +592,7 @@ export component EditorPane inherits Rectangle {
     // 窓の座標へ直してから`absolute-position`で戻していたためで、
     // 変換が2つあれば片方が古いだけで離れる。横に流れているぶんだけは足す。
     function open-tab-menu(at-x: length, at-y: length) {
-        root.tab-menu-x = at-x + tabs-view.viewport-x;
+        root.tab-menu-x = at-x + tabs-view.content-x;
         root.tab-menu-y = at-y;
         tab-menu.show();
     }
@@ -747,9 +747,9 @@ export component EditorPane inherits Rectangle {
 
     // Bring the tab in front into view (要件 6.3).
     //
-    // `viewport-x` is zero or negative — how far the strip has been pushed to
-    // the left — so what is on screen is `-viewport-x` to
-    // `-viewport-x + visible-width`. A tab before that pulls the strip back to
+    // `content-x` is zero or negative — how far the strip has been pushed to
+    // the left — so what is on screen is `-content-x` to
+    // `-content-x + visible-width`. A tab before that pulls the strip back to
     // its own left edge; one after it pulls the strip up to its right edge.
     //
     // **Called by the tab, not by whatever chose it.** A tab is chosen from the
@@ -757,10 +757,10 @@ export component EditorPane inherits Rectangle {
     // being restored at startup; the one thing all of those have in common is
     // that the tab ends up in front, and only the tab knows where it is.
     function reveal-tab(at: length, wide: length) {
-        if (at < -tabs-view.viewport-x) {
-            tabs-view.viewport-x = -at;
-        } else if (at + wide > -tabs-view.viewport-x + tabs-view.visible-width) {
-            tabs-view.viewport-x = tabs-view.visible-width - at - wide;
+        if (at < -tabs-view.content-x) {
+            tabs-view.content-x = -at;
+        } else if (at + wide > -tabs-view.content-x + tabs-view.visible-width) {
+            tabs-view.content-x = tabs-view.visible-width - at - wide;
         }
     }
 
@@ -812,8 +812,8 @@ export component EditorPane inherits Rectangle {
                 // thing to aim at beside the tabs themselves.
                 horizontal-scrollbar-policy: always-off;
                 vertical-scrollbar-policy: always-off;
-                viewport-width: max(self.visible-width, strip.preferred-width);
-                viewport-height: self.visible-height;
+                content-width: max(self.visible-width, strip.preferred-width);
+                content-height: self.visible-height;
 
                 strip := HorizontalLayout {
                     padding-left: 5px;
@@ -1943,8 +1943,8 @@ export component EditorPane inherits Rectangle {
                     Text { text: root.below-kind == 1 ? "Terminal Panel" : "Editor Panel"; color: Tok.ink-faint; font-size: 10px; vertical-alignment: center; }
                     ScrollView {
                         horizontal-stretch: 1; min-width: 50px;
-                        viewport-width: panel-strip.preferred-width;
-                        viewport-height: 28px;
+                        content-width: panel-strip.preferred-width;
+                        content-height: 28px;
                         panel-strip := HorizontalLayout {
                             for title[index] in root.panel-tabs: Tab {
                                 title: title;
