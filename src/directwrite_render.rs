@@ -1521,10 +1521,11 @@ fn apply_marker_boxes(
             )
         )
     });
+    // **行ごとに比べる**（書き手の報告 2026-11-04：「1. テスト」で改行して入った「2. 」の行が
+    // 半分見えない）。続けて書いた項目は前の項目と同じブロックの2行目になるので、1行の
+    // ブロックだけ見ていたのでは効かなかった。
     let before = if list_line {
-        line_metrics(layout)?
-            .first()
-            .map(|line| (line.height, line.baseline))
+        Some(line_metrics(layout)?)
     } else {
         None
     };
@@ -1669,9 +1670,21 @@ fn apply_marker_boxes(
         // and both objects outlive the call.
         unsafe { layout.SetInlineObject(&object, range)? };
     }
-    if let Some((height, baseline)) = before {
+    if let Some(before) = before {
         let after = line_metrics(layout)?;
-        if after.len() == 1 && after[0].height + 0.5 < height {
+        // 縮んだ行があれば、**箱を張る前のいちばん高い行の高さで揃える**——字の行の高さである。
+        // 縮んだ行の無いブロック（項目にどれも字がある）は触らない。縦書きでは、英数字だけの
+        // 列が漢字の列より細いので、張る前から高さが揃っているとは限らない。
+        let shrunk = after.len() == before.len()
+            && after
+                .iter()
+                .zip(&before)
+                .any(|(after, before)| after.height + 0.5 < before.height);
+        let tallest = before
+            .iter()
+            .max_by(|a, b| a.height.total_cmp(&b.height))
+            .map(|line| (line.height, line.baseline));
+        if let Some((height, baseline)) = tallest.filter(|_| shrunk) {
             let spacing = DWRITE_LINE_SPACING {
                 method: DWRITE_LINE_SPACING_METHOD_UNIFORM,
                 height,
@@ -12593,6 +12606,14 @@ mod tests {
                 assert!(
                     empty + 1 >= filled,
                     "{mode:?} {marker:?}: an empty item takes {empty}, one with text {filled}"
+                );
+                // 続けて書いた項目の2行目（改行で次の番号が入った直後）も。
+                let next = marker.replace("1.", "2.");
+                let empty = height(&format!("本文\n{marker}字\n{next}"));
+                let filled = height(&format!("本文\n{marker}字\n{next}字"));
+                assert!(
+                    empty + 1 >= filled,
+                    "{mode:?} {next:?} after an item: {empty} against {filled}"
                 );
             }
         }
