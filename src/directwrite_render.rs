@@ -1397,6 +1397,79 @@ fn draw_pictures(
 /// the same place. That used to be the box's width; it is the block's indent
 /// now, so the box over a marker is width-less and only hides. See
 /// [`LineStyle::indent_cells`].
+/// RFN01-86: **an ideographic space is a character of the text, one em, and
+/// it wraps like one.** DirectWrite treats U+3000 as white space, and white
+/// space at the end of a line hangs past it: typed at a wrap point, the spaces
+/// went in and showed nothing, and the caret did not move (書き手の報告
+/// 2026-11-03). A manuscript uses it for the indent at the head of a paragraph
+/// and between words, and it belongs on the page.
+///
+/// What DirectWrite hangs is decided by the character itself, so the layout is
+/// given an ordinary ideograph in its place ([`layout_units`]) and that glyph
+/// is drawn in no ink ([`hide_space_stand_ins`]). Everything about the line is
+/// a character's — its advance, its height and baseline in both directions, its
+/// breaks — and the text is unchanged everywhere else: saved, counted,
+/// searched, copied. Positions are too: one unit for one. (A box laid over the
+/// space hung with it whatever its break conditions said, and down a column
+/// moved the line's baseline: 技術検証 4.15.)
+const IDEOGRAPHIC_SPACE: u16 = 0x3000;
+/// The ideograph laid out in its place: 「一」. A kanji rather than a kana,
+/// since a face with proportional kana still sets a kanji one em.
+const SPACE_STAND_IN: u16 = 0x4E00;
+
+/// The UTF-16 a layout is made from: `text`, with each ideographic space
+/// standing in as an ideograph. See [`IDEOGRAPHIC_SPACE`].
+fn layout_units(text: &str) -> Vec<u16> {
+    text.encode_utf16()
+        .map(|unit| {
+            if unit == IDEOGRAPHIC_SPACE {
+                SPACE_STAND_IN
+            } else {
+                unit
+            }
+        })
+        .collect()
+}
+
+/// Draw the ideographs standing in for `text`'s ideographic spaces in no ink
+/// (see [`IDEOGRAPHIC_SPACE`]). **Last of the drawing effects**, so no word or
+/// heading colour set after it shows the stand-in.
+///
+/// # Safety
+/// `layout` is `text`'s layout, alive for the call, on `target`.
+unsafe fn hide_space_stand_ins(
+    target: &ID2D1RenderTarget,
+    layout: &IDWriteTextLayout,
+    text: &str,
+) -> Result<()> {
+    if !text.contains('\u{3000}') {
+        return Ok(());
+    }
+    // SAFETY: a brush on the target the layout is drawn on.
+    let clear = unsafe {
+        target.CreateSolidColorBrush(
+            &D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+            None,
+        )?
+    };
+    for (at, unit) in text.encode_utf16().enumerate() {
+        if unit == IDEOGRAPHIC_SPACE {
+            let range = DWRITE_TEXT_RANGE {
+                startPosition: at as u32,
+                length: 1,
+            };
+            // SAFETY: one unit inside the layout's own text; the brush outlives the draw.
+            unsafe { layout.SetDrawingEffect(&clear, range)? };
+        }
+    }
+    Ok(())
+}
+
 fn apply_marker_boxes(
     layout: &IDWriteTextLayout,
     typography: &Typography,
@@ -1697,7 +1770,7 @@ fn cell_layout(
     room: f32,
     flow_room: f32,
 ) -> Result<IDWriteTextLayout> {
-    let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+    let utf16 = layout_units(text);
     // The box is given on the two axes and handed over as a width and a height,
     // which way round depending on the mode.
     //
@@ -3695,8 +3768,12 @@ fn draw_grid(
             margin + cell.line_start - page.line_origin,
         );
         let origin = windows_numerics::Vector2 { X: x, Y: y };
-        // SAFETY: The layout and the brush both outlive the draw.
+        let cell_text = &block_text[byte_at_utf16(block_text, cell.utf16_start)
+            ..byte_at_utf16(block_text, cell.utf16_start + cell.utf16_len)];
+        // SAFETY: The layout and the brush both outlive the draw, and the
+        // layout is the cell's own text's.
         unsafe {
+            hide_space_stand_ins(target, &layout, cell_text)?;
             target.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
         if typography.whitespace {
@@ -4445,7 +4522,7 @@ fn build_block_layout(
     tail_aligned: bool,
 ) -> Result<IDWriteTextLayout> {
     let format = graphics.text_format(typography, mode)?;
-    let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+    let utf16 = layout_units(text);
     // The layout box is the block's flow bound by its own line box, which way
     // round depending on the mode.
     let (max_width, max_height) = mode.to_screen(max_flow_size, line_box);
@@ -4992,6 +5069,8 @@ fn draw_block(
                     },
                 )?;
             }
+            // RFN01-86: the ideographs set in place of ideographic spaces.
+            hide_space_stand_ins(target, &layout, &task.text)?;
         }
         let inset = block_inset(&task.block.span, typography);
         // 要件 9: this tile holds one slice of the page across the flow, so the
@@ -8516,7 +8595,7 @@ fn wrap_offsets_in(
     let bound = block_flow_bound(styled, page.indented_extent(cells), typography);
     let line_box = page.indented_box(cells);
     let (max_width, max_height) = page.mode.to_screen(bound, line_box);
-    let utf16 = text.encode_utf16().collect::<Vec<u16>>();
+    let utf16 = layout_units(text);
     // SAFETY: The UTF-16 buffer outlives CreateTextLayout, and the format
     // is owned by the caller for the whole call.
     let layout = unsafe {
@@ -11844,6 +11923,46 @@ mod tests {
         );
     }
 
+    /// RFN01-86: the ideograph laid out in place of an ideographic space is
+    /// drawn in no ink — a page of spaces is blank paper, where a page of the
+    /// stand-in itself is not.
+    #[test]
+    fn an_ideographic_space_draws_no_ink() {
+        let inked = |text: &str, mode: WritingMode| {
+            let mut engine = engine_in(mode, text, 22.0);
+            let tiles = engine.visible_tiles(
+                -engine.flow_bounds().0,
+                engine.total_flow_size() as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
+            let mut drawn = DrawnTiles::default();
+            engine
+                .render_tiles(&tiles, &[], &mut drawn)
+                .expect("render");
+            drawn.tiles.iter().any(|(_, _, _, pixels)| {
+                let paper = &pixels[0..4];
+                pixels.chunks_exact(4).any(|point| point != paper)
+            })
+        };
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let spaces = "\u{3000}".repeat(30);
+            let stand_ins = char::from_u32(u32::from(SPACE_STAND_IN))
+                .unwrap()
+                .to_string()
+                .repeat(30);
+            assert!(
+                inked(&stand_ins, mode),
+                "{mode:?}: the stand-in itself has ink"
+            );
+            assert!(
+                !inked(&spaces, mode),
+                "{mode:?}: ideographic spaces leave the paper blank"
+            );
+        }
+    }
+
     /// The horizontal tile is the same slice turned a quarter: as wide as the
     /// pane and as tall as the tile reaches along the flow axis.
     #[test]
@@ -12412,6 +12531,113 @@ mod tests {
 
         assert_eq!(hit.utf16_position, 5, "カーソルは字の後ろへ送られる");
         assert_eq!(hit.utf16_letter, 4, "押されたのは`e`そのもの");
+    }
+
+    /// RFN01-86: how many characters one line holds, found by laying out a
+    /// long run of them and watching the caret leave the first line — the
+    /// position before the first character of the second line is reported on
+    /// the second line.
+    fn characters_per_line(mode: WritingMode, typography: &Typography) -> u32 {
+        let mut engine = engine_set(mode, StyledText::plain(&"あ".repeat(400)), typography);
+        let first = engine.caret_geometry(0).unwrap();
+        (1..400)
+            .find(|&at| {
+                let caret = engine.caret_geometry(at).unwrap();
+                match mode {
+                    WritingMode::Horizontal => (caret.y - first.y).abs() > 1.0,
+                    WritingMode::Vertical => (caret.x - first.x).abs() > 1.0,
+                }
+            })
+            .expect("the run wraps")
+    }
+
+    /// RFN01-86 (書き手の報告 2026-11-03): **an ideographic space typed at the
+    /// end of a line goes to the head of the next, one em wide**, rather than
+    /// hanging past the line where it shows nothing and the caret cannot follow.
+    #[test]
+    fn an_ideographic_space_at_the_end_of_a_line_starts_the_next() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let typography = Typography::new(22.0);
+            let cells = characters_per_line(mode, &typography);
+            let text = format!("{}\u{3000}\u{3000}い", "あ".repeat(cells as usize));
+            let mut engine = engine_set(mode, StyledText::plain(&text), &typography);
+            let first = engine.caret_geometry(0).unwrap();
+            let after_one = engine.caret_geometry(cells + 1).unwrap();
+            let after_two = engine.caret_geometry(cells + 2).unwrap();
+            let (one_along, one_across) = along_across(mode, first, after_one);
+            let (two_along, _) = along_across(mode, first, after_two);
+            assert!(one_across > 1.0, "{mode:?}: the space is on the next line");
+            assert!(
+                (one_along - 22.0).abs() < 1.0,
+                "{mode:?}: one em in, got {one_along}"
+            );
+            assert!(
+                (two_along - 44.0).abs() < 1.0,
+                "{mode:?}: two em in, got {two_along}"
+            );
+        }
+    }
+
+    /// RFN01-86: a line of nothing but ideographic spaces is as tall as a line
+    /// of text — the stand-in stands as a character does.
+    #[test]
+    fn a_line_of_ideographic_spaces_is_as_tall_as_a_line_of_text() {
+        for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+            let text = "あ\n\u{3000}\u{3000}\nい\nう";
+            let mut engine = engine_set(mode, StyledText::plain(text), &Typography::new(22.0));
+            let line = |engine: &mut TextEngine, at: u32| {
+                let caret = engine.caret_geometry(at).unwrap();
+                match mode {
+                    WritingMode::Horizontal => caret.y,
+                    WritingMode::Vertical => -caret.x,
+                }
+            };
+            let first = line(&mut engine, 0);
+            let spaces = line(&mut engine, 2);
+            let third = line(&mut engine, 5);
+            let fourth = line(&mut engine, 7);
+            assert!(
+                ((spaces - first) - (fourth - third)).abs() < 0.5,
+                "{mode:?}: the spaces' line is {} after the first, a text line {}",
+                spaces - first,
+                fourth - third
+            );
+            assert!(
+                ((third - spaces) - (fourth - third)).abs() < 0.5,
+                "{mode:?}: the line after the spaces is {} on, a text line {}",
+                third - spaces,
+                fourth - third
+            );
+        }
+    }
+
+    /// RFN01-86: mid-line, the space keeps the advance it always had — with the
+    /// writer's character spacing too.
+    #[test]
+    fn an_ideographic_space_is_as_wide_as_its_neighbours() {
+        for spacing in [0.0, 0.25] {
+            for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
+                let mut typography = Typography::new(22.0);
+                typography.character_spacing = spacing;
+                let mut engine = engine_set(mode, StyledText::plain("あ\u{3000}い"), &typography);
+                let carets: Vec<CaretGeometry> = (0..3)
+                    .map(|at| engine.caret_geometry(at).unwrap())
+                    .collect();
+                let (a, _) = along_across(mode, carets[0], carets[1]);
+                let (b, _) = along_across(mode, carets[0], carets[2]);
+                assert!(
+                    (b - 2.0 * a).abs() < 0.5,
+                    "{mode:?} spacing {spacing}: あ={a} あ＋空白={b}"
+                );
+            }
+        }
+    }
+
+    fn along_across(mode: WritingMode, from: CaretGeometry, to: CaretGeometry) -> (f32, f32) {
+        match mode {
+            WritingMode::Horizontal => (to.x - from.x, to.y - from.y),
+            WritingMode::Vertical => (to.y - from.y, from.x - to.x),
+        }
     }
 
     /// Hit testing and caret geometry must agree in horizontal writing too, which
