@@ -2182,6 +2182,12 @@ export component EditorPane inherits Rectangle {
                         }
 
                     key-pressed(event) => {
+                        // RFN01-102: Ctrl+Shift+W closes this strip's tab.
+                        if event.modifiers.control && event.modifiers.shift && !event.modifiers.alt
+                            && (event.text == "w" || event.text == "W" || event.text == "\u{17}") {
+                            root.terminal-action(1, 23);
+                            return accept;
+                        }
                         // RFN01-96: Ctrl+↑／Ctrl+↓ — the command before or after.
                         if event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift
                             && (event.text == Key.UpArrow || event.text == Key.DownArrow) {

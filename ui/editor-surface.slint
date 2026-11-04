@@ -865,6 +865,13 @@ export component EditorSurface inherits Rectangle {
                                     }
                                 }
                                 if (root.terminal) {
+                                    // RFN01-102（書き手と合意 2026-11-04）: Ctrl+Shift+W closes this
+                                    // tab. A shell reads it as Ctrl+W, which stays the shell's.
+                                    if event.modifiers.control && event.modifiers.shift && !event.modifiers.alt
+                                        && (event.text == "w" || event.text == "W" || event.text == "\u{17}") {
+                                        root.terminal-action(0, 23);
+                                        return accept;
+                                    }
                                     // RFN01-96: Ctrl+↑／Ctrl+↓ — the command before or after.
                                     if event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift
                                         && (event.text == Key.UpArrow || event.text == Key.DownArrow) {

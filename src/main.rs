@@ -19997,7 +19997,18 @@ fn toggle_below(window: &AppWindow, live: &Live, id: PaneId) {
             screen.below_focus_generation += 1;
         });
     } else {
+        // 書き手の報告 2026-11-04（RFN01-102の確認）:「閉じた後、文字入力も出来ない」。
+        // **閉じた段の欄がキーボードを持っていた**——今ここで本文へ戻しても、そのあと
+        // 欄が画面から消えたときにキーボードの行き先が無くなる。欄が消えてから戻す。
+        // 「キーボードは下段にある」という覚えも消す（残るとベルの印が消えなかった）。
+        terminal_workflow::below_closed(id);
         restore_editor_focus(window);
+        let weak = window.as_weak();
+        Timer::single_shot(Duration::from_millis(30), move || {
+            if let Some(window) = weak.upgrade() {
+                restore_editor_focus(&window);
+            }
+        });
     }
     live.cache.borrow_mut().log_diag(
         "terminal",

@@ -1515,7 +1515,7 @@ Terminalの右クリックから、履歴検索（Ctrl+Shift+F）、最新位置
 
 **エージェントを原稿の隣で**（RFN01-95）：Claude CodeやCodexなどを動かしても画面がちらつかないよう、一括更新（DECSET 2026）を待って描きます。見ていないTerminalが終わりの合図（ベル・OSC 9・OSC 777）を送ると、TABにベルの印が付き、そのTerminalにキーボードが入ると消えます。合図はエージェント側で有効にします（Claude Codeは`/config`の通知を「terminal bell」に、Codexは`config.toml`の`[tui] notifications = true`）。出力の`第一章.md:120`のようなファイル名はCtrl+クリックでその行を開きます（Ctrlを押して載せると下線）。相対パスは、上にある一番近いプロンプト（`ken@host:/mnt/d/原稿$`、`PS D:\原稿>`）のフォルダ、次にシェルの開始フォルダから探すので、`cd`したあとも開けます。WSLでは`~`の下（`~/novel`など）も、シンボリックリンクの先がWindowsのドライブ（`/mnt`の下）なら開けます。WSLの中にだけあるファイルは開きません。分割していれば隣のペインに開きます。
 
-**TABの名前**（RFN01-99）：TerminalのTABには、シェルの種類のアイコン（WSLはペンギン、PowerShellは`>_`）と、実行中のアプリが付けた名前が出ます。bashなら今いるフォルダの名前、Claude Codeなら会話の題です。題を送らないPowerShell・cmdは、プロンプトのフォルダ名を出します。縮めた名前の全体は、マウスを載せると出ます。Terminalの中でもCtrl+P・Ctrl+Shift+Pでコマンドパレットが開き、Ctrl+Nで新規文書、Ctrl+Tab／Ctrl+Shift+Tabで隣のTABへ移れます（RFN01-98・102）。ほかのキーはシェルに届きます。
+**TABの名前**（RFN01-99）：TerminalのTABには、シェルの種類のアイコン（WSLはペンギン、PowerShellは`>_`）と、実行中のアプリが付けた名前が出ます。bashなら今いるフォルダの名前、Claude Codeなら会話の題です。題を送らないPowerShell・cmdは、プロンプトのフォルダ名を出します。縮めた名前の全体は、マウスを載せると出ます。Terminalの中でもCtrl+P・Ctrl+Shift+Pでコマンドパレットが開き、Ctrl+Nで新規文書、Ctrl+Tab／Ctrl+Shift+Tabで隣のTABへ移れ、Ctrl+Shift+WでそのTerminalのTABを閉じます（RFN01-98・102）。ほかのキーはシェルに届きます。
 
 **コマンド単位で**（RFN01-96）：Terminalで`Ctrl+↑`／`Ctrl+↓`を押すと、前／次のコマンドが選択の色になり、画面より上にあればそこまでスクロールします。選ばれるのはプロンプトの後ろのコマンドだけなので、そのまま`Ctrl+Shift+C`で打ったコマンドをコピーできます。右クリックの「直前の出力をEditor Panelへ」「直前の出力をコピー」で、直前のコマンドの出力だけを取り出せます（コマンドの行は含みません）。プロンプトで区切るので、Claude Codeなど全画面のアプリの中では効きません。
 
