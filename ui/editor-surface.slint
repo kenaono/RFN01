@@ -78,6 +78,10 @@ export component EditorSurface inherits Rectangle {
     in property <int> default-shell;
     callback new-file-requested();
     callback new-terminal-requested(int);
+    /// RFN01-88（書き手の決定 2026-11-04）: the Workspace's templates, each a
+    /// way to start the untitled document from — by name.
+    in property <[string]> template-names;
+    callback new-from-template-requested(string);
     in property <int> below-kind;
     callback terminal-action(int, int);
     callback terminal-url(int, float, float);
@@ -2213,6 +2217,13 @@ export component EditorSurface inherits Rectangle {
                                     title: @tr("New File");
                                     clicked => {
                                         root.new-file-requested();
+                                    }
+                                }
+                                for name in root.template-names: LinkRow {
+                                    title: name;
+                                    hint: @tr("Template");
+                                    clicked => {
+                                        root.new-from-template-requested(name);
                                     }
                                 }
                                 LinkRow {

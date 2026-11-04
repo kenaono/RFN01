@@ -349,6 +349,12 @@ export component AppWindow inherits Window {
     in property <bool> workspace-context-auto;
     // RFN01-61: 右クリックしたフォルダが自動バックアップか。自動保存とは排他。
     in property <bool> workspace-context-backup;
+    // RFN01-88: the row right-clicked is a folder, and whether it is the
+    // Workspace's Templates Folder.
+    in property <bool> workspace-context-dir;
+    in property <bool> workspace-context-templates;
+    /// RFN01-88: the row of the Templates Folder, for its mark; -1 for none.
+    in property <int> tree-templates-index: -1;
     in property <bool> workspace-active;
     // RFN01-85: the Workspace in use while the Explorer lists files outside
     // it, and empty otherwise. The band over the tree says so.
@@ -1633,6 +1639,10 @@ export component AppWindow inherits Window {
     // **前に出ているタブがまだ何でもないなら、そのタブがそれになる**——
     // 何でもないタブが無ければ、これまでどおり新しいタブを開く。
     callback pane-new-file(int);
+    /// RFN01-88: the Workspace's templates by name, and one of them asked for
+    /// as a new untitled document in a pane.
+    in property <[string]> template-names;
+    callback pane-new-from-template(int, string);
     callback pane-new-terminal(int, int);
     callback pane-switch-shell(int, int);
     /// Publish the strips again. Called from Rust when a document's unsaved
@@ -2871,6 +2881,7 @@ export component AppWindow inherits Window {
                             for row[index] in root.left-rows: tree-row := Rectangle {
                                 // 追加要件 2026-09-15: 行の高さは字の大きさに合わせる（12pxで24px）。
                                 height: root.left-tab == 4 && row.is-root ? root.tree-root-row-height : max(24px, root.left-size * 2px);
+                                property <length> line-height: max(24px, root.left-size * 2px);
                                 property <int> reveal-generation: root.tree-reveal-generation;
                                 changed reveal-generation => {
                                     if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-selected {
@@ -3138,7 +3149,8 @@ export component AppWindow inherits Window {
                                     // after the area that opens the row to take
                                     // a click at all.
                                     width: parent.width - self.x
-                                        - ((root.left-tab == 0 || root.left-tab == 4) ? 28px : (root.left-tab == 6 ? 48px : 8px));
+                                        - ((root.left-tab == 0 || root.left-tab == 4) ? 28px : (root.left-tab == 6 ? 48px : 8px))
+                                        - ((root.left-tab == 0 || root.left-tab == 4) && index == root.tree-templates-index ? 72px : 0px);
                                 }
 
                                 // 書き手の求め 2026-09-22: 見出しの▸／▾を押すと、その下を畳む・開く。
@@ -3196,6 +3208,16 @@ export component AppWindow inherits Window {
                                     accepted => { root.tree-new-finished(true); }
                                     escaped => { root.tree-new-finished(false); }
                                     edited => { root.tree-new-error = ""; }
+                                }
+                                // RFN01-88: the Templates Folder's mark.
+                                if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-templates-index && index != root.tree-new-index: Text {
+                                    x: parent.width - self.width - 28px;
+                                    height: tree-row.line-height;
+                                    text: @tr("Templates");
+                                    color: Tok.ink-muted;
+                                    font-size: max(10px, root.left-size * 0.85px);
+                                    vertical-alignment: center;
+                                    opacity: tree-row.label-opacity;
                                 }
                                 // The same menu as the right button, for a
                                 // pointer that is already on the row. Only the
@@ -3751,6 +3773,12 @@ export component AppWindow inherits Window {
                         new-file-requested => {
                             root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-new-file(pane.id);
+                            root.focus-generation += 1;
+                        }
+                        template-names: root.template-names;
+                        new-from-template-requested(name) => {
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
+                            root.pane-new-from-template(pane.id, name);
                             root.focus-generation += 1;
                         }
                         new-terminal-requested(shell) => {
@@ -7498,6 +7526,8 @@ export component AppWindow inherits Window {
                     spacing: 1px;
                     MenuSep { }
                     Text { text: @tr("Workspace"); color: Tok.ink-muted; font-size: 11px; }
+                    // RFN01-88（書き手の決定 2026-11-04）: any folder of the Workspace.
+                    if root.workspace-context-dir: MenuRow { title: @tr("Templates Folder"); checked: root.workspace-context-templates; activated => { root.workspace-tree-command(8); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: root.workspace-context-auto ? "AutoSave ON" : "AutoSave OFF"; checked: root.workspace-context-auto; activated => { root.workspace-tree-command(2); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: root.workspace-context-backup ? "AutoBackup ON" : "AutoBackup OFF"; checked: root.workspace-context-backup; activated => { root.workspace-tree-command(7); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }

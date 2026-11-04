@@ -220,6 +220,9 @@ export component EditorPane inherits Rectangle {
     in property <int> default-shell;
     callback new-file-requested();
     callback new-terminal-requested(int);
+    /// RFN01-88: the templates a new document can start from (see the surface).
+    in property <[string]> template-names;
+    callback new-from-template-requested(string);
     /// 前に出ている端末のタブの接続先を替える（追加要件 2026-09-07）。
     callback tab-shell-chosen(int);
     /// 追加要件 Terminal: the strip along the foot of the pane. 0 nothing, 1 a
@@ -1787,6 +1790,8 @@ export component EditorPane inherits Rectangle {
             default-shell: root.default-shell;
             new-file-requested() => { root.new-file-requested(); }
             new-terminal-requested(a0) => { root.new-terminal-requested(a0); }
+            template-names: root.template-names;
+            new-from-template-requested(a0) => { root.new-from-template-requested(a0); }
             below-kind: root.below-kind;
             terminal-action(a0, a1) => { root.terminal-action(a0, a1); }
             terminal-url(a0, a1, a2) => { root.terminal-url(a0, a1, a2); }
@@ -2583,6 +2588,15 @@ export component EditorPane inherits Rectangle {
                     activated => {
                         strip-menu.close();
                         root.new-file-requested();
+                    }
+                }
+                // RFN01-88: each template, under New File.
+                for name in root.template-names: MenuRow {
+                    title: "    " + name;
+                    // 頼んでから閉じる（技術検証 6.24）——閉じるとこの行は消える。
+                    activated => {
+                        root.new-from-template-requested(name);
+                        strip-menu.close();
                     }
                 }
                 MenuRow {

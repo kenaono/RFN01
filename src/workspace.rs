@@ -69,6 +69,10 @@ pub struct Workspace {
     pub id: WorkspaceId,
     pub name: String,
     pub folders: Vec<FolderId>,
+    /// RFN01-88: the folder this Workspace's templates are in — any folder in
+    /// it (書き手の決定 2026-11-04), absolute. **The Workspace's own**, unlike
+    /// the save mode: another Workspace over the same folders keeps its own.
+    pub templates: Option<PathBuf>,
 }
 
 /// Everything wrong an operation on the ledger can report.
@@ -208,6 +212,7 @@ impl Registry {
             id,
             name,
             folders: Vec::new(),
+            templates: None,
         });
         Ok(id)
     }
@@ -251,11 +256,13 @@ impl Registry {
         }
         let index = self.workspace_index(source)?;
         let folders = self.workspaces[index].folders.clone();
+        let templates = self.workspaces[index].templates.clone();
         let id = self.take_workspace_id()?;
         self.workspaces.push(Workspace {
             id,
             name: new_name,
             folders,
+            templates,
         });
         Ok(id)
     }
@@ -407,6 +414,25 @@ impl Registry {
             self.workspace_index(id)?;
         }
         self.default = id;
+        Ok(())
+    }
+
+    /// RFN01-88: names the folder a Workspace's templates are in, or clears it
+    /// with `None`. The caller says which folder; whether it is inside the
+    /// Workspace is the screen's to know (it offers only folders shown in it).
+    pub fn set_templates(
+        &mut self,
+        id: WorkspaceId,
+        folder: Option<PathBuf>,
+    ) -> Result<(), RegistryError> {
+        if folder
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty() || !path.is_absolute())
+        {
+            return Err(RegistryError::PathNotAbsolute);
+        }
+        let index = self.workspace_index(id)?;
+        self.workspaces[index].templates = folder;
         Ok(())
     }
 
@@ -578,6 +604,12 @@ pub fn encode(registry: &Registry) -> String {
                 .join(" ");
             out.push_str(&format!("roots: {refs}\n"));
         }
+        if let Some(templates) = &workspace.templates {
+            let path = templates.to_string_lossy();
+            out.push_str(&format!("templates: {}\n", path.len()));
+            out.push_str(&path);
+            out.push('\n');
+        }
     }
     out
 }
@@ -673,6 +705,7 @@ pub fn decode(raw: &str) -> Option<Registry> {
                     id,
                     name: name.to_owned(),
                     folders: Vec::new(),
+                    templates: None,
                 });
                 at = end + 1;
             }
@@ -687,6 +720,19 @@ pub fn decode(raw: &str) -> Option<Registry> {
                 }
                 workspace.folders = ids;
                 at = next_at;
+            }
+            // RFN01-88: the Workspace's Templates Folder, length-prefixed like a
+            // folder's path.
+            "templates" => {
+                let workspace = registry.workspaces.last_mut()?;
+                let length: usize = value.parse().ok()?;
+                let end = next_at.checked_add(length)?;
+                let path = raw.get(next_at..end)?;
+                if raw.get(end..end + 1)? != "\n" {
+                    return None;
+                }
+                workspace.templates = Some(PathBuf::from(path));
+                at = end + 1;
             }
             // Anything else is either damage or a later format this build does
             // not know how to read faithfully; refused rather than silently
@@ -740,6 +786,13 @@ impl Registry {
                 return false;
             }
             if workspace.name.is_empty() {
+                return false;
+            }
+            if workspace
+                .templates
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty() || !path.is_absolute())
+            {
                 return false;
             }
             let mut referenced = HashSet::new();
@@ -1026,6 +1079,33 @@ mod tests {
         assert_eq!(read.workspaces(), registry.workspaces());
         assert_eq!(read.folders(), registry.folders());
         assert_eq!(read.default_workspace(), registry.default_workspace());
+    }
+
+    /// RFN01-88: **a Workspace's Templates Folder is its own** — written only
+    /// when there is one, read back the same, and cleared again.
+    #[test]
+    fn a_templates_folder_round_trips_and_is_written_only_when_set() {
+        let root = scratch_directory("templates 空白");
+        let mut registry = sample_registry(&root);
+        assert!(!encode(&registry).contains("templates:"));
+        let id = registry.workspaces()[0].id;
+        let folder = root.join("ひな形 フォルダ");
+        registry
+            .set_templates(id, Some(folder.clone()))
+            .expect("sets");
+        let read = decode(&encode(&registry)).expect("decodes");
+        assert_eq!(
+            read.workspace(id).unwrap().templates.as_ref(),
+            Some(&folder)
+        );
+        assert_eq!(read.workspaces(), registry.workspaces());
+        assert!(
+            registry
+                .set_templates(id, Some(PathBuf::from("相対")))
+                .is_err()
+        );
+        registry.set_templates(id, None).expect("clears");
+        assert!(!encode(&registry).contains("templates:"));
     }
 
     #[test]

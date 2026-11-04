@@ -34,6 +34,11 @@ struct Palette {
     files: Option<Vec<FileCandidate>>,
     menu: Option<menu_commands::MenuSnapshot>,
     actions: Vec<shortcuts::PaletteAction>,
+    /// RFN01-88: the templates of the Workspace in use, read when first asked.
+    templates: Option<Vec<crate::template::Template>>,
+    /// RFN01-88: opened from Insert ▸ Template…, the list is the templates
+    /// and nothing else.
+    only_templates: bool,
     shown: Vec<Shown>,
 }
 
@@ -55,6 +60,7 @@ enum Shown {
     File(usize),
     Menu(usize),
     Action(usize),
+    Template(usize),
 }
 
 pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
@@ -102,15 +108,56 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
                 files: None,
                 menu: None,
                 actions: Vec::new(),
+                templates: None,
+                only_templates: false,
                 shown: Vec::new(),
             })
         });
     }
+    PALETTE.with(|held| {
+        if let Some(palette) = held.borrow_mut().as_mut() {
+            palette.only_templates = false;
+        }
+    });
     let text = if commands { "> " } else { "" };
     window.set_palette_text(text.into());
     window.set_palette_open(true);
     refilter(window, live, text);
     window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
+}
+
+/// RFN01-88 (Insert ▸ Template…): the palette with the templates only, for
+/// `pane` — the one the template goes into.
+pub fn open_templates(window: &AppWindow, live: &Live, pane: PaneId) {
+    if window.get_title_menu_visible() {
+        window.invoke_title_menu_dismissed();
+    }
+    PALETTE.with(|held| {
+        *held.borrow_mut() = Some(Palette {
+            pane,
+            files: None,
+            menu: None,
+            actions: Vec::new(),
+            templates: None,
+            only_templates: true,
+            shown: Vec::new(),
+        })
+    });
+    window.set_palette_text("".into());
+    window.set_palette_open(true);
+    refilter(window, live, "");
+    window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
+    // **Asked again after the text has taken the keyboard back**: chosen from
+    // the palette itself ("> Insert › Template…"), the palette that closed
+    // has just sent the keyboard to the text, and that lands after this.
+    let weak = window.as_weak();
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        if let Some(window) = weak.upgrade() {
+            if window.get_palette_open() {
+                window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
+            }
+        }
+    });
 }
 
 /// Put the palette away and the keyboard back in the text.
@@ -129,6 +176,14 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
     let rows = PALETTE.with(|held| {
         let mut held = held.borrow_mut();
         let palette = held.as_mut()?;
+        if palette.only_templates {
+            let templates = palette
+                .templates
+                .get_or_insert_with(|| crate::templates_in_use(live));
+            let (rows, shown) = template_rows(templates, text.trim(), false);
+            palette.shown = shown;
+            return Some(rows);
+        }
         Some(match text.strip_prefix('>') {
             Some(query) => {
                 if palette.menu.is_none() {
@@ -137,7 +192,14 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                     palette.actions = shortcuts::palette_actions(window);
                 }
                 let menu = palette.menu.as_ref()?;
-                let (rows, shown) = command_rows(menu, &palette.actions, query.trim());
+                let (mut rows, mut shown) = command_rows(menu, &palette.actions, query.trim());
+                // RFN01-88: each template is an operation of its own here.
+                let templates = palette
+                    .templates
+                    .get_or_insert_with(|| crate::templates_in_use(live));
+                let (more_rows, more_shown) = template_rows(templates, query.trim(), true);
+                rows.extend(more_rows);
+                shown.extend(more_shown);
                 palette.shown = shown;
                 rows
             }
@@ -173,6 +235,9 @@ fn accept(window: &AppWindow, live: &Live) {
             Shown::File(at) => Chosen::File(palette.files.as_ref()?.get(at)?.path.clone()),
             Shown::Menu(at) => Chosen::Menu(at),
             Shown::Action(at) => Chosen::Action(palette.actions.get(at)?.id),
+            Shown::Template(at) => {
+                Chosen::Template(palette.templates.as_ref()?.get(at)?.path.clone())
+            }
         };
         Some((palette.pane, chosen))
     }) else {
@@ -197,6 +262,7 @@ fn accept(window: &AppWindow, live: &Live) {
                 }
             }
             Chosen::Action(id) => shortcuts::run_command(&window, &live, pane, id),
+            Chosen::Template(path) => crate::insert_template(&window, &live, pane, &path),
         }
     });
 }
@@ -205,6 +271,50 @@ enum Chosen {
     File(PathBuf),
     Menu(usize),
     Action(i32),
+    Template(PathBuf),
+}
+
+/// RFN01-88: the templates that match `query`. Among the operations (`named`)
+/// each is called "Insert Template: name"; listed alone, by its name.
+fn template_rows(
+    templates: &[crate::template::Template],
+    query: &str,
+    named: bool,
+) -> (Vec<PaletteRow>, Vec<Shown>) {
+    let mut found: Vec<(i64, Shown, PaletteRow)> = Vec::new();
+    for (at, template) in templates.iter().enumerate() {
+        let (title, other) = if named {
+            let ja = format!("テンプレートを挿入: {}", template.name);
+            let en = format!("Insert Template: {}", template.name);
+            if crate::i18n::japanese() {
+                (ja, en)
+            } else {
+                (en, ja)
+            }
+        } else {
+            (template.name.clone(), String::new())
+        };
+        let points = score(query, &title).or_else(|| score(query, &other));
+        if let Some(points) = points {
+            let (upper, lower) = two_lines(&title, &other);
+            found.push((
+                points,
+                Shown::Template(at),
+                PaletteRow {
+                    title: upper.into(),
+                    detail: lower.into(),
+                    key: SharedString::new(),
+                },
+            ));
+        }
+    }
+    if !query.is_empty() {
+        found.sort_by_key(|(points, _, _)| std::cmp::Reverse(*points));
+    }
+    found
+        .into_iter()
+        .map(|(_, shown, row)| (row, shown))
+        .unzip()
 }
 
 /// The files a name search looks through, recent ones first.

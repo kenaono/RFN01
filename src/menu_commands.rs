@@ -12,6 +12,8 @@ use windows::{
 #[derive(Clone)]
 enum Command {
     NewFile,
+    /// RFN01-88: 新規文書をテンプレートから（名前で）。
+    NewFromTemplate(String),
     NewTerminal(i32),
     Open,
     Folder,
@@ -136,8 +138,11 @@ pub enum InsertShape {
     Line(document::LineNoteEdit),
     /// 表（RFN01-49）。押すとマス目が開き、選んだ大きさの表を置く。
     Table,
-    /// 改ページ。並びの最後の1つである。
+    /// 改ページ。
     PageBreak,
+    /// RFN01-88: テンプレート。押すとパレットがテンプレートの一覧で開き、選んだものを
+    /// キャレットの所へ入れる。並びの最後の1つである。**書式のボタンには出さない**。
+    Template,
 }
 
 impl InsertShape {
@@ -433,6 +438,7 @@ const INSERT_MENU: &[InsertEntry] = &[
     ),
     InsertEntry::Row((InsertShape::Table, ("表", "Table"))),
     InsertEntry::Row((InsertShape::PageBreak, ("改ページ", "Page Break"))),
+    InsertEntry::Row((InsertShape::Template, ("テンプレート…", "Template…"))),
 ];
 
 /// その形が押せるか、いま効いているか（RFN01-47）。
@@ -473,6 +479,8 @@ fn context_insert_state(
         }
         InsertShape::PageBreak => (editable && places.page_break, false),
         InsertShape::Table => (editable && places.table, false),
+        // RFN01-88: Templates Folder が無ければ押せない（書き手の決定 2026-11-04）。
+        InsertShape::Template => (editable && places.template, false),
     }
 }
 
@@ -547,6 +555,7 @@ fn insert_inputs(
                 let styles = counts.get(&source, reading_of(window)).line_styles();
                 crate::table_edit::can_place_table(&source, styles, from, to)
             },
+            template: !crate::templates_in_use(live).is_empty(),
         },
     )
 }
@@ -557,6 +566,8 @@ fn insert_inputs(
 struct Places {
     page_break: bool,
     table: bool,
+    /// RFN01-88: 選べるテンプレートがあるか。
+    template: bool,
 }
 
 /// 本文の右クリックメニューの挿入の行を組み直す（RFN01-47）。
@@ -783,6 +794,8 @@ fn format_rows(
     let mut buttons: Vec<crate::FormatButton> = INSERT_MENU
         .iter()
         .zip(top)
+        // RFN01-88: テンプレートはメニューとパレットから（書式のボタンは持たない）。
+        .filter(|(entry, _)| !matches!(entry, InsertEntry::Row((InsertShape::Template, _))))
         .map(|(entry, row)| {
             let first = match entry {
                 InsertEntry::Row((shape, _)) => *shape,
@@ -1569,7 +1582,36 @@ fn build(
     }
     match group {
         0 => {
-            add!("新規文書", "New File", Command::NewFile, true);
+            // RFN01-88（書き手の決定 2026-11-04）: テンプレートがあれば「新規文書 ▸」の
+            // 中に空の文書と各テンプレートを並べる。Ctrl+Nは空の文書のまま。
+            let templates = crate::templates_in_use(live);
+            if templates.is_empty() {
+                add!("新規文書", "New File", Command::NewFile, true);
+            } else {
+                let documents = Popup::new()?;
+                row(
+                    &documents,
+                    &mut commands,
+                    "空の文書",
+                    "Blank Document",
+                    Command::NewFile,
+                    true,
+                    false,
+                )?;
+                documents.sep()?;
+                for template in templates {
+                    row(
+                        &documents,
+                        &mut commands,
+                        &template.name,
+                        &template.name,
+                        Command::NewFromTemplate(template.name.clone()),
+                        true,
+                        false,
+                    )?;
+                }
+                root.child_named("新規文書", "New File", documents)?;
+            }
             let shells = Popup::new()?;
             for (i, shell) in configured_shells(window).iter().enumerate() {
                 row(
@@ -2641,6 +2683,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     let parent = t.parent.index();
     match command {
         Command::NewFile => window.invoke_pane_new_file(p),
+        Command::NewFromTemplate(name) => crate::new_from_template(window, live, t.id, &name),
         Command::NewTerminal(i) => window.invoke_pane_new_terminal(parent, i),
         Command::Open => {
             if t.id.is_panel() {
@@ -2952,6 +2995,7 @@ mod tests {
         Places {
             page_break: open,
             table: open,
+            template: open,
         }
     }
 
@@ -2977,7 +3021,11 @@ mod tests {
                     .iter()
                     .map(|what| InsertShape::Line(*what)),
             )
-            .chain([InsertShape::Table, InsertShape::PageBreak])
+            .chain([
+                InsertShape::Table,
+                InsertShape::PageBreak,
+                InsertShape::Template,
+            ])
             .collect()
     }
 
@@ -3307,6 +3355,9 @@ mod tests {
                 InsertEntry::Row((shape, _)) => *shape,
                 InsertEntry::Group(_, items) => items[0].0,
             };
+            if first == InsertShape::Template {
+                continue;
+            }
             assert!(format_face(first).is_some(), "{first:?}");
         }
         let (buttons, _) = format_rows(
@@ -3316,7 +3367,8 @@ mod tests {
             (bare_notes(), places(true)),
             document::BulletMarks::all(),
         );
-        assert_eq!(buttons.len(), INSERT_MENU.len() + 3);
+        // テンプレートだけは書式のボタンを持たない（RFN01-88）。
+        assert_eq!(buttons.len(), INSERT_MENU.len() - 1 + 3);
         assert!(
             buttons.windows(2).all(|pair| pair[0].band <= pair[1].band),
             "束は前から順に"
@@ -3363,9 +3415,10 @@ mod tests {
             .chain(children.iter().map(|row| row.number))
             .filter(|&action| (0..FORMAT_LIST).contains(&action))
             .collect();
+        // テンプレートだけは書式のボタンを持たない（RFN01-88）。
         assert_eq!(
             inserts.len(),
-            insert_items().count(),
+            insert_items().count() - 1,
             "挿入の形はどれも1回ずつ"
         );
         for action in inserts {
@@ -3426,7 +3479,7 @@ mod tests {
         publish_format(&h.window, &h.live, &cache);
         assert_eq!(
             h.window.get_format_buttons().row_count(),
-            INSERT_MENU.len() + 3
+            INSERT_MENU.len() - 1 + 3
         );
 
         let ruby = InsertShape::Edit(document::InsertEdit::Ruby).number();

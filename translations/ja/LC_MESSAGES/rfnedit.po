@@ -1553,3 +1553,12 @@ msgstr "Workspace『{}』を使用中です。薄い色のファイルは開け�
 # RFN01-87: タイトルバーのコマンドパレット。
 msgid "Search files by name (type > for commands)"
 msgstr "ファイル名で探す（> を打つと操作を探す）"
+
+msgid "Templates Folder"
+msgstr "テンプレートフォルダー"
+
+msgid "Templates"
+msgstr "テンプレート"
+
+msgid "Template"
+msgstr "テンプレート"
