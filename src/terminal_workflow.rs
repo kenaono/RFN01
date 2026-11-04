@@ -368,6 +368,26 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
                 }
             }
         }
+        // RFN01-102: Ctrl+Shift+W — the tab the keyboard is in closes, as its ×
+        // would: the shell's own tab, or the strip's Terminal Panel tab. **On
+        // the next tick**, like every tab command: the strip is republished.
+        23 => {
+            let weak = window.as_weak();
+            let live = live.clone();
+            Timer::single_shot(Duration::ZERO, move || {
+                let Some(window) = weak.upgrade() else {
+                    return;
+                };
+                match spot {
+                    TerminalSpot::Front => {
+                        let index = live.tabs.borrow().of(id).active;
+                        close_tab(&window, &live, id, index);
+                    }
+                    TerminalSpot::Below => terminal_panels::action(&window, &live, id, 2, 0),
+                }
+            });
+            return;
+        }
         // RFN01-96: Copy Last Output.
         22 => {
             session.borrow_mut().drain();
@@ -479,7 +499,10 @@ pub(crate) fn settle_keyboard(window: &AppWindow, live: &Live) -> bool {
     if pane.is_panel() {
         pane = PaneId::from_index(pane.screen(window).panel_owner);
     }
-    let below = BELOW_KEYS.get() == Some(pane.index());
+    // **Only a strip that is open can have the keyboard** — a closed one's
+    // field said nothing as it went (書き手の報告 2026-11-04: the bell stayed).
+    let below =
+        BELOW_KEYS.get() == Some(pane.index()) && live.cache.borrow_mut().pane(pane).below_open;
     let keyed = live.tabs.borrow().of(pane).current().and_then(|tab| {
         if below {
             tab.below
@@ -533,6 +556,14 @@ fn terminal_selection_text_at(
     !crate::terminal_selection_text(session, picked)
         .trim()
         .is_empty()
+}
+
+/// The strip along `pane`'s foot was closed: its field no longer has the
+/// keyboard, whatever it last said.
+pub(crate) fn below_closed(pane: PaneId) {
+    if BELOW_KEYS.get() == Some(pane.index()) {
+        BELOW_KEYS.set(None);
+    }
 }
 
 /// RFN01-95: what a link in a shell opens, once it is known to be openable.

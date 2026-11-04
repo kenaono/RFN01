@@ -308,6 +308,20 @@ fn the_palette_keys_are_the_windows_in_a_shell() {
     };
     assert!(key("p", false), "Ctrl+P: files");
     assert!(key("P", true), "Ctrl+Shift+P: commands");
+    // RFN01-102: New File, and the way out to the next and previous tab.
+    assert!(key("n", false), "Ctrl+N: a new document");
+    let tab: SharedString = slint::platform::Key::Tab.into();
+    assert!(
+        h.window
+            .invoke_terminal_shortcut_key(tab.clone(), true, false, false),
+        "Ctrl+Tab"
+    );
+    assert!(
+        h.window
+            .invoke_terminal_shortcut_key(tab, true, false, true),
+        "Ctrl+Shift+Tab"
+    );
+    assert!(!key("w", false), "Ctrl+W stays bash's (delete a word)");
     assert!(!key("c", false), "Ctrl+C stays the shell's");
     assert!(!key("s", false), "so does Ctrl+S");
     assert!(!key("r", false), "and bash's Ctrl+R");
