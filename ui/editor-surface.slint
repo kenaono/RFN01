@@ -88,6 +88,8 @@ export component EditorSurface inherits Rectangle {
     /// RFN01-95: Ctrl over the shell — is there a link under the pointer? Rust
     /// underlines it (`terminal-link`).
     callback terminal-link-hover(float, float) -> bool;
+    /// RFN01-98: the window's keys a shell does not get (the palette).
+    callback terminal-shortcut(string, bool, bool, bool) -> bool;
     in property <[PreviewSelectionRect]> terminal-link;
     in property <PanelStyle> front-style;
     callback appearance-requested(bool);
@@ -856,6 +858,12 @@ export component EditorSurface inherits Rectangle {
                                     }
                                 }
                                 if (root.terminal) {
+                                    // RFN01-98（書き手の求め 2026-11-04）: **パレットはシェルより先**
+                                    // （VS Codeと同じ）。bashのCtrl+P（前の履歴）は↑で足りる。
+                                    if self.preedit-text == "" && (event.modifiers.control || event.modifiers.alt)
+                                        && root.terminal-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) {
+                                        return accept;
+                                    }
                                     if (event.modifiers.control && event.modifiers.shift && (event.text == "v" || event.text == "V")) { self.paste(); return accept; }
                                     if (event.modifiers.control && event.modifiers.shift && (event.text == "f" || event.text == "F" || event.text == "\u{6}")) { root.terminal-action(0, 0); return accept; }
                                     // 要件 11.2: **`Ctrl+V` is left to the

@@ -296,6 +296,23 @@ fn a_bell_marks_the_tab_until_the_keyboard_comes() {
     assert!(!marked(), "a bell where the writer is typing is not a call");
 }
 
+/// RFN01-98: in a shell, the palette's keys are the window's; every other
+/// chord still goes to the shell.
+#[test]
+fn the_palette_keys_are_the_windows_in_a_shell() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    crate::shortcuts::wire(&h.window, &h.live);
+    let key = |text: &str, shift| {
+        h.window
+            .invoke_terminal_shortcut_key(text.into(), true, false, shift)
+    };
+    assert!(key("p", false), "Ctrl+P: files");
+    assert!(key("P", true), "Ctrl+Shift+P: commands");
+    assert!(!key("c", false), "Ctrl+C stays the shell's");
+    assert!(!key("s", false), "so does Ctrl+S");
+    assert!(!key("r", false), "and bash's Ctrl+R");
+}
+
 /// RFN01-97: the shells along a document's foot come back as that strip's
 /// Terminal Panel tabs, in order, with the one in front in front — and are
 /// written down again the same way. **No shell is started**: they wait.
@@ -307,6 +324,8 @@ fn the_shells_along_a_foot_come_back_waiting() {
         command: "cmd.exe /Q /D /K".to_owned(),
         directory: String::new(),
         output: None,
+        // RFN01-99: the name the program had given it last run.
+        title: (name == "B").then(|| "ken@KN01: /mnt/d/原稿/第一部".to_owned()),
     };
     let stored = app_data::Session {
         layout: "P 0".to_owned(),
@@ -336,6 +355,21 @@ fn the_shells_along_a_foot_come_back_waiting() {
     let front = tab.below.shell.clone().expect("the one in front");
     assert_eq!(front.borrow().name(), "B");
     assert!(front.borrow().is_waiting(), "nothing has started");
+    // RFN01-99: named as the program named it, cut to the folder, with the
+    // whole of it for the tooltip; and the icon of the shell it was.
+    assert_eq!(
+        front.borrow().tab_name(),
+        (
+            "第一部".to_owned(),
+            "ken@KN01: /mnt/d/原稿/第一部".to_owned()
+        )
+    );
+    assert_eq!(front.borrow().shell_icon(), 3);
+    let first = tab.below.entries[0].borrow().shell.clone().unwrap();
+    assert!(
+        first.borrow().tab_name().0.starts_with("A:"),
+        "no title, the shell's name"
+    );
     let numbers: Vec<u32> = std::iter::once(tab.document.file.borrow().untitled_number())
         .chain(
             tab.below

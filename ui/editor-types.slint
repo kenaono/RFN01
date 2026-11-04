@@ -36,6 +36,11 @@ export struct TabInfo {
     /// RFN01-95: a shell in this tab rang or sent a notification while the
     /// keyboard was somewhere else. Cleared when the keyboard goes there.
     attention: bool,
+    /// RFN01-99: which shell this tab is — 0 not a shell, 1 Linux (WSL),
+    /// 2 PowerShell, 3 cmd, 4 another shell — and the whole of its name when
+    /// the tab shows it cut short.
+    shell-icon: int,
+    tip: string,
     // 追加要件 2026-09-06: whether this tab stands for a file on disk, and so
     // has a name the writer can change by holding the tab down. **Told rather
     // than guessed from the title**: 無題1 is a name like any other on screen,
@@ -282,6 +287,9 @@ export struct PaneScreen {
     below-link: [PreviewSelectionRect],
     /// RFN01-95: the same mark as `TabInfo.attention`, one per strip tab.
     panel-attention: [bool],
+    /// RFN01-99: the same icon and whole name, one per strip tab.
+    panel-icons: [int],
+    panel-tips: [string],
     panel-active: int,
     panel-read-only: bool,
     panel-follow: bool,

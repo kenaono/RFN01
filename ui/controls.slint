@@ -75,6 +75,12 @@ export global Icons {
     out property <string> split: "M1.5 2.5h13v11h-13zM8 2.5v11";
     out property <string> warning: "M8 2.5 14.5 13.5h-13zM8 6.5v3M8 11.4v0.1";
     out property <string> close: "M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5";
+    // RFN01-99（書き手の判断 2026-11-04）: which shell a tab is. A penguin for
+    // Linux (WSL), `>_` in a leaning frame for PowerShell, in a square for
+    // cmd, and bare for any other shell.
+    out property <string> powershell: "M4.5 3h10l-3 10h-10zM5.6 6l2.3 2-2.3 2M8.6 10.3h2.4";
+    out property <string> cmd-shell: "M2 3h12v10H2zM4.5 6l2 2-2 2M8 10.3h3.2";
+    out property <string> shell: "M3 4.5l3.5 3.5L3 11.5M8 12h5";
     // RFN01-95: a bell — a shell finished something while nobody was looking.
     out property <string> bell: "M4 11.5V7.5a4 4 0 0 1 8 0v4l1.5 1.5h-11zM6.5 13.5a1.5 1.5 0 0 0 3 0";
     // 検索の条件を捨てる（E1、書き手の求め 2026-09-09）。**閉じる×とは違う形**に
@@ -84,6 +90,43 @@ export global Icons {
 }
 
 // One line drawing, tinted by whoever holds it.
+// RFN01-99: the Linux penguin, **filled rather than stroked** — drawn in lines
+// at a tab's 14px it ran together into a dark blob (measured in the app,
+// 2026-11-04). A dark body, a white belly and eyes, a yellow beak and feet.
+export component PenguinIcon inherits Rectangle {
+    in property <brush> body: #1d1b22;
+
+    width: 14px;
+    height: 14px;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: root.body;
+        commands: "M8 1.2C5.9 1.2 4.8 2.8 4.8 4.9v1.5C3.5 7.9 2.7 9.6 2.7 11.4 2.7 13.2 3.8 14.3 5.4 14.3h5.2c1.6 0 2.7-1.1 2.7-2.9 0-1.8-.8-3.5-2.1-5V4.9C11.2 2.8 10.1 1.2 8 1.2z";
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: #ffffff;
+        commands: "M8 6.3c-1.7 0-2.7 2-2.7 4.3 0 2 .9 3.3 2.7 3.3s2.7-1.3 2.7-3.3c0-2.3-1-4.3-2.7-4.3zM6.2 4.3a.85 1 0 1 0 1.7 0 .85 1 0 1 0-1.7 0zM8.1 4.3a.85 1 0 1 0 1.7 0 .85 1 0 1 0-1.7 0z";
+    }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: #f2b01e;
+        commands: "M6.7 5.7h2.6L8 7zM2.8 15.2c.2-1.3 1.6-2 3-1.6l.7 1.6zM13.2 15.2c-.2-1.3-1.6-2-3-1.6l-.7 1.6z";
+    }
+}
+
 export component Icon inherits Rectangle {
     in property <string> commands;
     in property <brush> tint: Tok.ink-muted;
@@ -470,6 +513,10 @@ export component Tab inherits Rectangle {
     in property <bool> outside;
     /// RFN01-95: a shell in this tab wants the writer (a bell, a notification).
     in property <bool> attention;
+    /// RFN01-99: which shell (see `TabInfo.shell-icon`); 0 is no icon.
+    in property <int> shell-icon: 0;
+    /// RFN01-99: the whole name, when the tab shows it cut short.
+    in property <string> tip;
     in property <bool> current;
     /// This is the tab being written in: the one in front of the pane that has
     /// the keyboard (要件 6.3).
@@ -742,6 +789,29 @@ export component Tab inherits Rectangle {
         padding-right: 24px;
         spacing: 7px;
 
+        // RFN01-99: which shell, before its name.
+        if root.shell-icon == 1: Rectangle {
+            width: 14px;
+
+            PenguinIcon {
+                y: (parent.height - self.height) / 2;
+                body: root.dark ? #0b0a0d : #1d1b22;
+            }
+        }
+        if root.shell-icon > 1: Rectangle {
+            width: 14px;
+
+            Icon {
+                y: (parent.height - self.height) / 2;
+                width: 14px;
+                height: 14px;
+                commands: root.shell-icon == 2 ? Icons.powershell
+                    : root.shell-icon == 3 ? Icons.cmd-shell
+                    : Icons.shell;
+                tint: root.dark ? #e6e2da : (root.current ? Tok.ink-strong : Tok.ink-muted);
+            }
+        }
+
         Text {
             text: root.title;
             // Three steps, not two: the tab being written in, the tab in front
@@ -880,6 +950,13 @@ export component Tab inherits Rectangle {
         width: 2px;
         height: parent.height;
         background: Tok.accent;
+    }
+
+    // RFN01-99: the whole name over a name cut short. After the area that
+    // chooses the tab, for `IconButton`'s reason: it watches the pointer
+    // without taking the click.
+    if root.tip != "": Tooltip {
+        text: @markdown("\{root.tip}");
     }
 
     // After the area that chooses the tab, and that is the whole of why it

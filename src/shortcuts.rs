@@ -1087,6 +1087,33 @@ pub fn wire(app: &AppWindow, live: &Live) {
         }
         true
     });
+    // RFN01-98（書き手の求め 2026-11-04）: **a shell gets every key but the
+    // palette's** (as in VS Code). Whatever the palette is bound to now, so a
+    // writer who moved it takes it with them.
+    let weak = app.as_weak();
+    let palette_live = live.clone();
+    app.on_terminal_shortcut_key(move |text, control, alt, shift| {
+        let Some(app) = weak.upgrade() else {
+            return false;
+        };
+        let command = resolve(&app.get_shortcut_bindings(), 0, &text, control, alt, shift);
+        let palette = usize::try_from(command)
+            .ok()
+            .and_then(menu_at)
+            .is_some_and(|(action, _)| matches!(action.action, ShortcutAction::Palette(_)));
+        if !palette {
+            return false;
+        }
+        let pane = crate::focused_pane(&app);
+        let weak = weak.clone();
+        let live = palette_live.clone();
+        slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+            if let Some(app) = weak.upgrade() {
+                run_command(&app, &live, pane, command);
+            }
+        });
+        true
+    });
     let weak = app.as_weak();
     let keyed_live = live.clone();
     app.on_shortcut_key(move |text, control, alt, shift| {

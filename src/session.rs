@@ -545,6 +545,7 @@ fn session_shell(shell: &TerminalSession, keep_output: bool) -> Option<app_data:
         command: profile.command.clone(),
         directory: profile.directory.clone(),
         output: keep_output.then(|| output_name(shell)),
+        title: shell.given_title(),
     })
 }
 
@@ -619,9 +620,9 @@ fn waiting_shell(stored: &app_data::SessionShell) -> Rc<std::cell::RefCell<Termi
         .zip(app_data::app_directory())
         .and_then(|(name, directory)| app_data::read_terminal_output(&directory, name))
         .unwrap_or_default();
-    Rc::new(std::cell::RefCell::new(TerminalSession::waiting(
-        shell, folder, lines, when,
-    )))
+    let mut waiting = TerminalSession::waiting(shell, folder, lines, when);
+    waiting.set_restored_title(stored.title.clone());
+    Rc::new(std::cell::RefCell::new(waiting))
 }
 
 pub fn session_tab(tab: &PaneTab, keep_output: bool) -> app_data::SessionTab {
