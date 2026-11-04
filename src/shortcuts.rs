@@ -1088,8 +1088,13 @@ pub fn wire(app: &AppWindow, live: &Live) {
         true
     });
     // RFN01-98（書き手の求め 2026-11-04）: **a shell gets every key but the
-    // palette's** (as in VS Code). Whatever the palette is bound to now, so a
-    // writer who moved it takes it with them.
+    // window's few** (as in VS Code). Whatever those are bound to now, so a
+    // writer who moved one takes it with them.
+    //
+    // RFN01-102（同日）: the palette, New File, and Next/Previous Tab — the way
+    // out of a shell by keys when the window is not split. Everything else
+    // stays the shell's (Ctrl+W deletes a word in bash); the palette reaches
+    // the rest.
     let weak = app.as_weak();
     let palette_live = live.clone();
     app.on_terminal_shortcut_key(move |text, control, alt, shift| {
@@ -1097,11 +1102,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return false;
         };
         let command = resolve(&app.get_shortcut_bindings(), 0, &text, control, alt, shift);
-        let palette = usize::try_from(command)
-            .ok()
-            .and_then(menu_at)
-            .is_some_and(|(action, _)| matches!(action.action, ShortcutAction::Palette(_)));
-        if !palette {
+        if !passes_terminal(command) {
             return false;
         }
         let pane = crate::focused_pane(&app);
@@ -1170,6 +1171,22 @@ pub fn wire(app: &AppWindow, live: &Live) {
         true
     });
 }
+/// RFN01-98・102: the commands a shell does not get first — the palette, New
+/// File, Next Tab (11) and Previous Tab (12).
+fn passes_terminal(command: i32) -> bool {
+    command == 11
+        || command == 12
+        || usize::try_from(command)
+            .ok()
+            .and_then(menu_at)
+            .is_some_and(|(action, _)| {
+                matches!(
+                    action.action,
+                    ShortcutAction::Palette(_) | ShortcutAction::NewFile
+                )
+            })
+}
+
 /// RFN01-87: コマンドパレットに並べる、キーの一覧の操作。
 pub(crate) struct PaletteAction {
     pub title: String,
