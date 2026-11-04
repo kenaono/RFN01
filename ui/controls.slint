@@ -75,6 +75,8 @@ export global Icons {
     out property <string> split: "M1.5 2.5h13v11h-13zM8 2.5v11";
     out property <string> warning: "M8 2.5 14.5 13.5h-13zM8 6.5v3M8 11.4v0.1";
     out property <string> close: "M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5";
+    // RFN01-95: a bell — a shell finished something while nobody was looking.
+    out property <string> bell: "M4 11.5V7.5a4 4 0 0 1 8 0v4l1.5 1.5h-11zM6.5 13.5a1.5 1.5 0 0 0 3 0";
     // 検索の条件を捨てる（E1、書き手の求め 2026-09-09）。**閉じる×とは違う形**に
     // してある——隣り合って並ぶので、丸で囲んで「中身を捨てる」ほうだと分かる。
     out property <string> clear: "M8 2.6a5.4 5.4 0 1 0 0 10.8 5.4 5.4 0 1 0 0-10.8M6 6l4 4M10 6l-4 4";
@@ -466,6 +468,8 @@ export component Tab inherits Rectangle {
     in property <bool> edited;
     /// 要件 8.3（書き手のレビュー 2026-09-11、S2）: 外で変わったまま片付いていない。
     in property <bool> outside;
+    /// RFN01-95: a shell in this tab wants the writer (a bell, a notification).
+    in property <bool> attention;
     in property <bool> current;
     /// This is the tab being written in: the one in front of the pane that has
     /// the keyboard (要件 6.3).
@@ -776,6 +780,20 @@ export component Tab inherits Rectangle {
                 height: 6px;
                 border-radius: 3px;
                 background: Tok.accent;
+            }
+        }
+
+        // RFN01-95（書き手の判断 2026-11-04）: **ベルの形**。未保存の丸・外の⚠とは
+        // 別のことを言う——Terminalが終わって、書き手を呼んでいる。
+        if root.attention: Rectangle {
+            width: 13px;
+
+            Icon {
+                y: (parent.height - self.height) / 2;
+                width: 13px;
+                height: 13px;
+                commands: Icons.bell;
+                tint: Tok.accent;
             }
         }
     }

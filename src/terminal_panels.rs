@@ -172,6 +172,24 @@ fn new_document(live: &Live) -> Rc<OpenDocument> {
     )
 }
 
+/// RFN01-97: a Terminal Panel tab for a shell put back from the last run.
+pub(crate) fn restored_entry(
+    window: &AppWindow,
+    number: u32,
+    shell: Rc<RefCell<TerminalSession>>,
+) -> Rc<RefCell<PanelDocument>> {
+    let document = OpenDocument::with_events(
+        DocumentFile::untitled(number),
+        String::new(),
+        Default::default(),
+    );
+    Rc::new(RefCell::new(PanelDocument::new(
+        window,
+        document,
+        Some(shell),
+    )))
+}
+
 pub(crate) fn sync_entry(tab: &mut PaneTab) {
     if let Some(entry) = tab.below.entries.get(tab.below.active) {
         let mut entry = entry.borrow_mut();
@@ -212,6 +230,16 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         .iter()
         .map(|e| e.borrow().document.file.borrow().title().into())
         .collect();
+    let attention: Vec<bool> = below
+        .entries
+        .iter()
+        .map(|e| {
+            e.borrow()
+                .shell
+                .as_ref()
+                .is_some_and(|s| s.borrow().wants_attention())
+        })
+        .collect();
     let screen = id.screen(window);
     let read_only = entry.as_ref().is_some_and(|e| e.view.borrow().viewer);
     let follow = entry.as_ref().is_some_and(|e| e.view.borrow().follow);
@@ -220,7 +248,8 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         || screen
             .panel_file_names
             .iter()
-            .ne(file_names.iter().cloned());
+            .ne(file_names.iter().cloned())
+        || screen.panel_attention.iter().ne(attention.iter().copied());
     if !names_changed
         && screen.panel_active == below.active as i32
         && screen.panel_read_only == read_only
@@ -239,6 +268,7 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
                     .collect::<Vec<_>>(),
             ));
             screen.panel_file_names = ModelRc::new(VecModel::from(file_names));
+            screen.panel_attention = ModelRc::new(VecModel::from(attention));
         }
         screen.panel_active = below.active as i32;
         screen.panel_read_only = read_only;
@@ -955,10 +985,17 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
         .flat_map(|p| &p.tabs)
         .flat_map(|t| t.terminal.iter().chain(t.below.shell.iter()).cloned())
         .collect();
+    // RFN01-95: whether any tab's bell came or went, so the strips are
+    // published again only then. Who has the keyboard is settled first, so a
+    // bell where the writer is typing is answered as it arrives.
+    let mut marks_moved = crate::terminal_workflow::settle_keyboard(window, live);
     for session in sessions {
         let mut session = session.borrow_mut();
         session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
+        let before = session.wants_attention();
         session.drain();
+        session.settle_attention();
+        marks_moved |= session.wants_attention() != before;
         report_log_error(window, &mut session);
     }
     for entry in entries(live) {
@@ -966,7 +1003,10 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
         if let Some(shell) = &entry.shell {
             let mut shell = shell.borrow_mut();
             shell.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
+            let before = shell.wants_attention();
             shell.drain();
+            shell.settle_attention();
+            marks_moved |= shell.wants_attention() != before;
         }
         entry.history_limit = window.get_terminal_history_limit().max(0) as usize;
         entry.collect();
@@ -1007,6 +1047,9 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
         publish_source(window, live, id);
     }
     panel_source::sync(window, live);
+    if marks_moved {
+        crate::publish_tabs(window, live);
+    }
 }
 
 pub(crate) fn save(

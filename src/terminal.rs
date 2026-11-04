@@ -243,7 +243,87 @@ pub struct Screen {
     history_origin: u64,
     capture: Option<CapturedOutput>,
     file_capture: Option<CapturedOutput>,
+    /// RFN01-95: `ESC[?2026h` — the program is in the middle of one update and
+    /// asks not to be drawn half-way. **When it started**, so that a program
+    /// that never says it is done is drawn anyway after [`SYNCHRONIZED_HOLD`].
+    synchronized_since: Option<std::time::Instant>,
+    /// RFN01-95: how many times the program asked for attention — a bell, or a
+    /// notification (OSC 9, OSC 777). A count rather than a flag, so that a
+    /// pane can tell a new one from one it has already shown.
+    attention: u64,
 }
+
+/// What a Ctrl+click in the terminal would open (RFN01-95).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    Url(String),
+    /// Written like a file name. `line` and `column` count from 1.
+    Path {
+        text: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
+}
+
+/// A link and the cells it covers: `(row, first column, end column)` for each
+/// row it is on, the end not included. **A wrapped link is on more than one.**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLink {
+    pub target: LinkTarget,
+    pub cells: Vec<(usize, usize, usize)>,
+}
+
+/// The link in `text` that covers byte `at`, as its byte range and target.
+/// URLs first: `https://example.com/a.md` is not a file.
+fn find_link(text: &str, at: usize) -> Option<(usize, usize, LinkTarget)> {
+    use std::sync::OnceLock;
+    static URL: OnceLock<regex::Regex> = OnceLock::new();
+    static PATH: OnceLock<regex::Regex> = OnceLock::new();
+    let url = URL.get_or_init(|| regex::Regex::new(r#"https?://[^\s<>"']+"#).unwrap());
+    for found in url.find_iter(text) {
+        let trimmed = found
+            .as_str()
+            .trim_end_matches(['.', ',', ';', ')', ']', '}']);
+        if found.start() <= at && at < found.start() + trimmed.len() {
+            let end = found.start() + trimmed.len();
+            return Some((found.start(), end, LinkTarget::Url(trimmed.to_owned())));
+        }
+        if found.start() <= at && at < found.end() {
+            return None;
+        }
+    }
+    // A name with an extension, after an optional drive, `./`, `../`, `/` or
+    // `~/`, through folders, then `:line` and `:column`. **Japanese names are
+    // names**: only what cannot be in a file name ends one.
+    let path = PATH.get_or_init(|| {
+        let part = r#"[^\s\\/:*?"<>|()\[\]{}'`,;]"#;
+        regex::Regex::new(&format!(
+            r#"(?:[A-Za-z]:[\\/]|\.{{1,2}}[\\/]|[\\/]|~[\\/])?(?:{part}+[\\/])*{part}+\.[A-Za-z0-9]{{1,10}}(?::(\d+))?(?::(\d+))?"#
+        ))
+        .unwrap()
+    });
+    let found = path
+        .captures_iter(text)
+        .find(|c| c.get(0).is_some_and(|m| m.start() <= at && at < m.end()))?;
+    let whole = found.get(0)?;
+    let number = |index| found.get(index).and_then(|m| m.as_str().parse().ok());
+    let line = number(1);
+    let column = number(2);
+    let name_end = found.get(1).map_or(whole.end(), |m| m.start() - 1);
+    Some((
+        whole.start(),
+        whole.end(),
+        LinkTarget::Path {
+            text: text[whole.start()..name_end].to_owned(),
+            line,
+            column,
+        },
+    ))
+}
+
+/// RFN01-95: the longest a synchronized update is waited for before the
+/// screen is drawn as it stands.
+pub const SYNCHRONIZED_HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(Debug, Default)]
 struct CapturedOutput {
@@ -282,7 +362,50 @@ impl Screen {
             history_origin: 0,
             capture: None,
             file_capture: None,
+            synchronized_since: None,
+            attention: 0,
         }
+    }
+
+    /// RFN01-95: how much longer to wait before drawing, while the program is
+    /// in the middle of a synchronized update. `None` means draw now.
+    pub fn synchronized_wait(&self) -> Option<std::time::Duration> {
+        let since = self.synchronized_since?;
+        let waited = since.elapsed();
+        (waited < SYNCHRONIZED_HOLD).then(|| SYNCHRONIZED_HOLD - waited)
+    }
+
+    /// RFN01-97: everything this screen holds as plain lines, oldest first —
+    /// the history, then the primary screen (also while a full-screen program
+    /// has the other one up). **A wrapped row joins the next**, so the text is
+    /// laid out again at whatever width it is shown at; trailing blank lines
+    /// are left off.
+    pub fn plain_lines(&self) -> Vec<String> {
+        let screen = self.stowed.as_ref().unwrap_or(&self.lines);
+        let mut lines = Vec::new();
+        let mut pending = String::new();
+        for line in self.scrollback.iter().chain(screen.iter()) {
+            pending.push_str(&line.logical_text());
+            if !line.wrapped {
+                lines.push(std::mem::take(&mut pending).trim_end().to_owned());
+            }
+        }
+        if !pending.is_empty() {
+            lines.push(pending.trim_end().to_owned());
+        }
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+    }
+
+    /// RFN01-95: how many bells and notifications have arrived so far.
+    pub fn attention(&self) -> u64 {
+        self.attention
+    }
+
+    fn ask_attention(&mut self) {
+        self.attention = self.attention.wrapping_add(1);
     }
 
     pub fn columns(&self) -> usize {
@@ -494,13 +617,58 @@ impl Screen {
         matches
     }
 
+    #[cfg(test)]
     pub fn url_at(&self, row: usize, column: usize) -> Option<String> {
+        match self.link_at(row, column)?.target {
+            LinkTarget::Url(url) => Some(url),
+            LinkTarget::Path { .. } => None,
+        }
+    }
+
+    /// RFN01-95（案A、書き手と合意 2026-11-04）: the folder named by the nearest
+    /// prompt at or above `row` — `user@host:/mnt/d/x$` (bash), `PS D:\x>`
+    /// (PowerShell), `D:\x>` (cmd). **What the shell says where it is**, after
+    /// any `cd`, without asking it to say so in any other way. The text as
+    /// written; the pane turns it into a Windows folder.
+    pub fn prompt_folder_above(&self, row: usize) -> Option<String> {
+        use std::sync::OnceLock;
+        static PROMPT: OnceLock<regex::Regex> = OnceLock::new();
+        let prompt = PROMPT.get_or_init(|| {
+            regex::Regex::new(
+                r"^(?:[^\s@]+@[^\s:]+:(?P<bash>[~/][^$#]*)[$#](?:\s|$)|PS (?P<ps>[A-Za-z]:\\[^>]*)>|(?P<cmd>[A-Za-z]:\\[^>]*)>)",
+            )
+            .unwrap()
+        });
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let last = row.min(lines.len().checked_sub(1)?);
+        // Far enough for the output of one command; a hover asks on every move.
+        let first = last.saturating_sub(5_000);
+        (first..=last).rev().find_map(|at| {
+            let text = lines[at].text();
+            let found = prompt.captures(&text)?;
+            ["bash", "ps", "cmd"]
+                .iter()
+                .find_map(|name| found.name(name))
+                .map(|m| m.as_str().trim_end().to_owned())
+        })
+    }
+
+    /// What a Ctrl+click on this cell would open: a URL, or something written
+    /// like a file name with an optional `:line[:column]` (RFN01-95). **Rows
+    /// count from the top of the history**, as everywhere a view asks.
+    ///
+    /// Only the shape is read here. Whether such a file exists, and where it is
+    /// from, is the pane's question — this side knows no folders.
+    pub fn link_at(&self, row: usize, column: usize) -> Option<TerminalLink> {
         let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
         let mut first = row.min(lines.len().saturating_sub(1));
         while first > 0 && lines[first - 1].wrapped {
             first -= 1;
         }
         let mut text = String::new();
+        // Where each character of `text` came from: its byte, row, column and
+        // how many cells it takes.
+        let mut places: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut byte = None;
         for (at, line) in lines.iter().enumerate().skip(first) {
             for (col, cell) in line.cells.iter().enumerate() {
@@ -508,6 +676,7 @@ impl Screen {
                     byte = Some(text.len());
                 }
                 if !cell.trailing {
+                    places.push((text.len(), at, col, character_width(cell.text).max(1)));
                     text.push(cell.text);
                 }
             }
@@ -516,15 +685,18 @@ impl Screen {
             }
         }
         let byte = byte?;
-        let pattern = regex::Regex::new(r#"https?://[^\s<>\"']+"#).ok()?;
-        pattern
-            .find_iter(&text)
-            .find(|m| m.start() <= byte && byte < m.end())
-            .map(|m| {
-                m.as_str()
-                    .trim_end_matches(['.', ',', ';', ')', ']', '}'])
-                    .to_owned()
-            })
+        let (start, end, target) = find_link(&text, byte)?;
+        let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+        for &(at, row, col, width) in &places {
+            if at < start || at >= end {
+                continue;
+            }
+            match cells.last_mut() {
+                Some(last) if last.0 == row => last.2 = col + width,
+                _ => cells.push((row, col, col + width)),
+            }
+        }
+        Some(TerminalLink { target, cells })
     }
 
     /// What the shell asked for and has not been told yet. Send it up the pty.
@@ -1173,9 +1345,44 @@ impl Screen {
             // Cursor blinking and the Escape-key mode: nothing here to change.
             12 | 7727 => {}
             2004 => self.modes.bracketed_paste = on,
+            // RFN01-95: one update, drawn when it is finished. **A second `h`
+            // keeps the first start**, so a program repeating it cannot hold
+            // the screen for ever.
+            2026 => {
+                if on {
+                    self.synchronized_since
+                        .get_or_insert_with(std::time::Instant::now);
+                } else {
+                    self.synchronized_since = None;
+                    self.touch();
+                }
+            }
             9001 => self.modes.win32_input = on,
             _ => self.note_unhandled(format!("CSI ?{mode}{}", if on { 'h' } else { 'l' })),
         }
+    }
+
+    /// DECRQM for a private mode (`ESC[?Ps$p`): 1 set, 2 reset, 0 not known.
+    /// **Programs ask before they use synchronized updates** (RFN01-95), and
+    /// one that is not answered goes on drawing half-way.
+    fn report_private_mode(&mut self, mode: u16) {
+        let set = match mode {
+            1 => Some(self.modes.application_cursor_keys),
+            25 => Some(self.modes.cursor_visible),
+            1004 => Some(self.modes.focus_events),
+            1006 => Some(self.modes.mouse_sgr),
+            47 | 1047 | 1049 => Some(self.modes.alternate_screen),
+            2004 => Some(self.modes.bracketed_paste),
+            2026 => Some(self.synchronized_since.is_some()),
+            _ => None,
+        };
+        let value = match set {
+            Some(true) => 1,
+            Some(false) => 2,
+            None => 0,
+        };
+        let answer = format!("\x1b[?{mode};{value}$y");
+        self.replies.extend_from_slice(answer.as_bytes());
     }
 
     fn report(&mut self, kind: u16) {
@@ -1333,7 +1540,9 @@ impl Parser {
             0x09 => screen.tab(),
             0x0a..=0x0c => screen.line_feed(),
             0x0d => screen.carriage_return(),
-            // BEL and the rest of C0 say nothing about the screen.
+            // RFN01-95: a bell is how a program says it wants the writer.
+            0x07 => screen.ask_attention(),
+            // The rest of C0 says nothing about the screen.
             0x00..=0x1f | 0x7f => {}
             0x20..=0x7e => {
                 self.due = 0;
@@ -1507,6 +1716,9 @@ impl Parser {
                 screen.select_graphic_rendition(&groups);
                 self.groups = groups;
             }
+            b'p' if private && self.intermediate == Some(b'$') => {
+                screen.report_private_mode(self.at(0, 0));
+            }
             b'n' => screen.report(self.at(0, 0)),
             b'c' => {
                 if self.private.is_none() {
@@ -1549,6 +1761,16 @@ impl Parser {
         if kind == b"0" || kind == b"2" {
             screen.title = String::from_utf8_lossy(rest).into_owned();
             screen.touch();
+        }
+        // RFN01-95: a notification — OSC 9 (iTerm2, and what Codex sends) and
+        // OSC 777;notify (urxvt). **OSC 9 followed by a number and `;` is
+        // ConEmu's** (9;4 progress, 9;9 the folder), not a message.
+        let conemu = rest
+            .iter()
+            .position(|byte| *byte == b';')
+            .is_some_and(|at| at > 0 && rest[..at].iter().all(u8::is_ascii_digit));
+        if (kind == b"9" && !conemu) || (kind == b"777" && rest.starts_with(b"notify;")) {
+            screen.ask_attention();
         }
     }
 
@@ -1950,6 +2172,95 @@ mod tests {
         );
         terminal.screen.clear_screen();
         assert!(terminal.screen.search("example", false).is_empty());
+    }
+
+    /// RFN01-95（案A）: the folder the nearest prompt above names.
+    #[test]
+    fn prompts_say_which_folder_the_shell_is_in() {
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed("ken@KN01:/mnt/d/原稿$ cd 第一部\r\n".as_bytes());
+        terminal.feed("ken@KN01:/mnt/d/原稿/第一部$ ls\r\n第一章.md\r\n".as_bytes());
+        assert_eq!(
+            terminal.screen.prompt_folder_above(2).as_deref(),
+            Some("/mnt/d/原稿/第一部"),
+            "the nearest one, after the cd"
+        );
+        assert_eq!(
+            terminal.screen.prompt_folder_above(0).as_deref(),
+            Some("/mnt/d/原稿")
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"PS D:\\work\\book> dir\r\na.md\r\n");
+        assert_eq!(
+            terminal.screen.prompt_folder_above(1).as_deref(),
+            Some("D:\\work\\book")
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"D:\\work>type a.md\r\nhello\r\n");
+        assert_eq!(
+            terminal.screen.prompt_folder_above(1).as_deref(),
+            Some("D:\\work")
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"ken@KN01:~/notes$ ls\r\na.md\r\n");
+        assert_eq!(
+            terminal.screen.prompt_folder_above(1).as_deref(),
+            Some("~/notes"),
+            "read as written; the pane cannot use it"
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"just output\r\nmore\r\n");
+        assert_eq!(terminal.screen.prompt_folder_above(1), None);
+    }
+
+    /// RFN01-95: file names in what a shell or an agent printed, with the
+    /// cells to underline.
+    #[test]
+    fn file_names_with_lines_are_links() {
+        let path = |text: &str, line, column| LinkTarget::Path {
+            text: text.to_owned(),
+            line,
+            column,
+        };
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed("見て 第一章.md:120 と".as_bytes());
+        let link = terminal.screen.link_at(0, 6).unwrap();
+        assert_eq!(link.target, path("第一章.md", Some(120), None));
+        // 見て␣ is five cells; 第一章 six more; .md:120 seven.
+        assert_eq!(link.cells, vec![(0, 5, 18)]);
+        assert!(terminal.screen.link_at(0, 0).is_none(), "plain words");
+        assert!(terminal.screen.link_at(0, 19).is_none(), "after the name");
+
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed(b"Update(src/main.rs:45:7) done");
+        assert_eq!(
+            terminal.screen.link_at(0, 10).unwrap().target,
+            path("src/main.rs", Some(45), Some(7))
+        );
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed(b"D:\\work\\a b\\notes.txt, /mnt/d/x/y.md");
+        assert_eq!(
+            terminal.screen.link_at(0, 12).unwrap().target,
+            path("b\\notes.txt", None, None),
+            "a space ends a name"
+        );
+        assert_eq!(
+            terminal.screen.link_at(0, 25).unwrap().target,
+            path("/mnt/d/x/y.md", None, None)
+        );
+        // Wrapped onto the next row: both rows are underlined.
+        let mut terminal = Terminal::new(8, 3);
+        terminal.feed(b"abc/defgh.md:3");
+        let link = terminal.screen.link_at(1, 2).unwrap();
+        assert_eq!(link.target, path("abc/defgh.md", Some(3), None));
+        assert_eq!(link.cells, vec![(0, 0, 8), (1, 0, 6)]);
+        // A URL is not a file, even when it ends like one.
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed(b"https://example.com/a.md");
+        assert_eq!(
+            terminal.screen.link_at(0, 20).unwrap().target,
+            LinkTarget::Url("https://example.com/a.md".into())
+        );
     }
 
     #[test]
@@ -2404,6 +2715,54 @@ mod tests {
         assert_eq!(it.screen.cursor().row, 1);
     }
 
+    /// RFN01-95: programs ask whether synchronized updates are understood,
+    /// then use them; a program that never finishes one is drawn anyway.
+    #[test]
+    fn synchronized_updates_are_answered_and_end() {
+        let mut it = terminal(10, 2);
+        it.feed(b"\x1b[?2026$p");
+        assert_eq!(it.screen.take_replies(), b"\x1b[?2026;2$y");
+        it.feed(b"\x1b[?2026h");
+        assert!(it.screen.synchronized_wait().is_some());
+        it.feed(b"\x1b[?2026$p");
+        assert_eq!(it.screen.take_replies(), b"\x1b[?2026;1$y");
+        let before = it.screen.revision();
+        it.feed(b"\x1b[?2026l");
+        assert!(it.screen.synchronized_wait().is_none());
+        assert!(
+            it.screen.revision() > before,
+            "the finished update is drawn"
+        );
+        it.feed(b"\x1b[?9999$p");
+        assert_eq!(it.screen.take_replies(), b"\x1b[?9999;0$y");
+        it.feed(b"\x1b[?2026h");
+        std::thread::sleep(SYNCHRONIZED_HOLD + std::time::Duration::from_millis(20));
+        assert!(
+            it.screen.synchronized_wait().is_none(),
+            "an update that never ends is not waited for"
+        );
+    }
+
+    /// RFN01-95: a bell, OSC 9 and OSC 777;notify call for the writer; the
+    /// bell that ends an OSC, and ConEmu's OSC 9;4 progress, do not.
+    #[test]
+    fn bells_and_notifications_are_counted() {
+        let mut it = terminal(10, 2);
+        it.feed(b"\x1b]0;title\x07");
+        assert_eq!(it.screen.attention(), 0);
+        it.feed(b"\x1b]9;Codex is done\x07");
+        assert_eq!(it.screen.attention(), 1);
+        it.feed(b"\x1b]9;4;1;50\x07");
+        it.feed(b"\x1b]9;9;C:\\work\x1b\\");
+        assert_eq!(it.screen.attention(), 1, "ConEmu's progress and folder");
+        it.feed(b"\x1b]777;notify;Claude;done\x1b\\");
+        assert_eq!(it.screen.attention(), 2);
+        it.feed(b"\x1b]777;preexec\x07");
+        assert_eq!(it.screen.attention(), 2);
+        it.feed(b"\x07");
+        assert_eq!(it.screen.attention(), 3);
+    }
+
     #[test]
     fn nothing_visible_changes_without_the_revision_moving() {
         let mut it = terminal(10, 2);
@@ -2413,6 +2772,7 @@ mod tests {
         assert!(it.screen.revision() > before);
         let settled = it.screen.revision();
         it.feed(b"\x00\x07");
+        assert_eq!(it.screen.attention(), 1, "but it is a call for the writer");
         assert_eq!(
             it.screen.revision(),
             settled,

@@ -945,6 +945,8 @@ export component AppWindow inherits Window {
     callback terminal-focus(int, int, bool);
     /// The strip along the foot of a pane (追加要件 Terminal).
     callback terminal-url(int, int, float, float);
+    /// RFN01-95: Ctrl over a shell's link (pane, spot, x, y).
+    callback pane-terminal-link-hover(int, int, float, float) -> bool;
     callback terminal-action(int, int, int);
     callback panel-action(int, int, int);
     callback panel-scrolled(int, float, float);
@@ -1112,9 +1114,14 @@ export component AppWindow inherits Window {
     in-out property <string> shell-profile-directory;
     callback shell-profile-action(int, int);
     in-out property <bool> terminal-confirm-paste: true;
+    /// RFN01-97: write what the shells printed when the editor closes, and put
+    /// it back above the new shell next time. **On by default** (書き手の判断
+    /// 2026-11-04); off, only which shells were where comes back.
+    in-out property <bool> terminal-restore-output: true;
     in-out property <bool> terminal-confirm-close: true;
     in-out property <int> terminal-history-limit: 10000;
     changed terminal-confirm-paste => { root.terminal-settings-edited(); }
+    changed terminal-restore-output => { root.terminal-settings-edited(); }
     changed terminal-confirm-close => { root.terminal-settings-edited(); }
     changed terminal-history-limit => { root.terminal-settings-edited(); }
     /// What each log line starts with when a log is started with timestamps.
@@ -3554,6 +3561,9 @@ export component AppWindow inherits Window {
                         below-behind <=> pane.below-behind;
                         terminal-in-folder => { root.shell-profile-action(8, 0); }
                         terminal-url(spot, x, y) => { root.terminal-url(pane.id, spot, x, y); }
+                        terminal-link-hover(spot, x, y) => { return root.pane-terminal-link-hover(pane.id, spot, x, y); }
+                        terminal-link: pane.terminal-link;
+                        below-link: pane.below-link;
                         terminal-action(spot, action) => { root.terminal-action(pane.id, spot, action); }
                         terminal-new-output: pane.terminal-new-output;
                         below-new-output: pane.below-new-output;
@@ -3562,6 +3572,7 @@ export component AppWindow inherits Window {
                         appearance-requested(panel) => { root.appearance-requested(pane.embedded-panel ? pane.panel-owner : pane.id, pane.embedded-panel || panel ? 2 : 1); }
                         panel-caret <=> pane.panel-caret;
                         panel-tabs: pane.panel-tabs;
+                        panel-attention: pane.panel-attention;
                         panel-active: pane.panel-active;
                         panel-read-only: pane.panel-read-only;
                         panel-follow: pane.panel-follow;
@@ -4488,6 +4499,10 @@ export component AppWindow inherits Window {
                                             CheckBox {
                                                 text: @tr("Confirm shell termination");
                                                 checked <=> root.terminal-confirm-close;
+                                            }
+                                            CheckBox {
+                                                text: @tr("Restore output after restart");
+                                                checked <=> root.terminal-restore-output;
                                             }
                                             HorizontalLayout {
                                                 spacing: 12px;

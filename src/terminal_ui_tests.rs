@@ -239,6 +239,224 @@ fn terminal_new_tab_random_and_direct_file_capture() {
             .contains("DIRECT_CAPTURE")
     );
 }
+/// RFN01-95: a bell while the keyboard is elsewhere puts the bell on the tab;
+/// the keyboard coming to the shell takes it away.
+#[test]
+#[ignore = "starts real ConPTY shells; run explicitly"]
+fn a_bell_marks_the_tab_until_the_keyboard_comes() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    terminal_workflow::install(&h.window, &h.live);
+    let id = PaneId::FIRST;
+    new_terminal_tab(
+        &h.window,
+        &h.live,
+        id,
+        TerminalShell {
+            name: "QA".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        },
+    );
+    let source = h
+        .live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .unwrap()
+        .terminal
+        .clone()
+        .unwrap();
+    let shell_tab = h.live.tabs.borrow().of(id).active;
+    let marked = || {
+        publish_tabs(&h.window, &h.live);
+        let screen = id.screen(&h.window);
+        screen.tabs.row_data(shell_tab).unwrap().attention
+    };
+    assert!(!marked());
+    // The writer goes back to the document; the shell rings behind it.
+    switch_to_tab(&h.window, &h.live, id, 0);
+    source.borrow_mut().type_text("echo \x07\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until && !source.borrow().wants_attention() {
+        source.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+    }
+    assert!(marked(), "the bell is on the tab");
+    // **Opening the tab is the keyboard coming**: the same field keeps the
+    // focus, so no focus signal says so (measured in the app, 2026-11-04).
+    switch_to_tab(&h.window, &h.live, id, shell_tab);
+    assert!(!marked(), "the keyboard came, and the bell went");
+    source.borrow_mut().type_text("echo \x07\r");
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        source.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+    }
+    assert!(!marked(), "a bell where the writer is typing is not a call");
+}
+
+/// RFN01-97: the shells along a document's foot come back as that strip's
+/// Terminal Panel tabs, in order, with the one in front in front — and are
+/// written down again the same way. **No shell is started**: they wait.
+#[test]
+fn the_shells_along_a_foot_come_back_waiting() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let shell = |name: &str| app_data::SessionShell {
+        name: name.to_owned(),
+        command: "cmd.exe /Q /D /K".to_owned(),
+        directory: String::new(),
+        output: None,
+    };
+    let stored = app_data::Session {
+        layout: "P 0".to_owned(),
+        panes: vec![app_data::SessionPane {
+            tabs: vec![app_data::SessionTab {
+                // A file: an untitled tab with no work copy is not put back.
+                origin: Some(
+                    std::env::current_dir()
+                        .unwrap()
+                        .join("testdata")
+                        .join("00_この一式について.md"),
+                ),
+                below: true,
+                below_shells: vec![shell("A"), shell("B")],
+                below_active: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new());
+    let tab = &tabs.panes[0].tabs[0];
+    assert!(tab.below.open);
+    assert_eq!(tab.below.entries.len(), 2);
+    assert_eq!(tab.below.active, 1);
+    let front = tab.below.shell.clone().expect("the one in front");
+    assert_eq!(front.borrow().name(), "B");
+    assert!(front.borrow().is_waiting(), "nothing has started");
+    let numbers: Vec<u32> = std::iter::once(tab.document.file.borrow().untitled_number())
+        .chain(
+            tab.below
+                .entries
+                .iter()
+                .map(|e| e.borrow().document.file.borrow().untitled_number()),
+        )
+        .collect();
+    assert_eq!(numbers, vec![0, 1, 2], "no untitled number is taken twice");
+    let again = session::session_tab(tab, true);
+    assert_eq!(
+        again
+            .below_shells
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+    assert_eq!(again.below_active, 1);
+    assert!(again.below_shells.iter().all(|s| s.output.is_some()));
+    assert!(
+        session::session_tab(tab, false)
+            .below_shells
+            .iter()
+            .all(|s| s.output.is_none()),
+        "off, no output is named"
+    );
+}
+
+/// RFN01-97: a shell tab is written into the session with what it printed;
+/// read back, it waits until it is drawn, then starts below that output and
+/// a line saying where it ends.
+#[test]
+#[ignore = "starts real ConPTY shells; run explicitly"]
+fn a_shell_comes_back_after_a_restart_with_its_output() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    new_terminal_tab(
+        &h.window,
+        &h.live,
+        id,
+        TerminalShell {
+            name: "QA".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        },
+    );
+    let source = h
+        .live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .unwrap()
+        .terminal
+        .clone()
+        .unwrap();
+    source.borrow_mut().type_text("echo BEFORE_RESTART\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until
+        && !source
+            .borrow()
+            .output_lines(100)
+            .iter()
+            .any(|line| line == "BEFORE_RESTART")
+    {
+        source.borrow_mut().wait(Duration::from_millis(30));
+    }
+    session::write_terminal_outputs(&h.window, &h.live);
+    let stored = session::capture_session(&h.window, &h.live);
+    let tab = stored.panes[0]
+        .tabs
+        .iter()
+        .find(|tab| tab.shell.is_some())
+        .expect("the shell tab is written down");
+    assert_eq!(tab.shell.as_ref().unwrap().command, "cmd.exe /Q /D /K");
+    assert!(tab.shell.as_ref().unwrap().output.is_some());
+
+    // Off, only the arrangement is kept, and the files go.
+    h.window.set_terminal_restore_output(false);
+    let without = session::capture_session(&h.window, &h.live);
+    assert!(
+        without.panes[0]
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.shell.as_ref())
+            .all(|shell| shell.output.is_none())
+    );
+    h.window.set_terminal_restore_output(true);
+
+    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new());
+    let back = tabs.panes[0]
+        .tabs
+        .iter()
+        .find_map(|tab| tab.terminal.clone())
+        .expect("the shell tab comes back");
+    assert!(back.borrow().is_waiting(), "it waits to be drawn");
+    assert!(
+        back.borrow()
+            .output_lines(100)
+            .iter()
+            .any(|line| line == "BEFORE_RESTART")
+    );
+    back.borrow_mut().start_waiting(60, 12, || {}).unwrap();
+    assert!(!back.borrow().is_waiting());
+    back.borrow_mut().type_text("echo AFTER_RESTART\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    let read = || back.borrow().output_lines(100);
+    while Instant::now() < until && !read().iter().any(|line| line == "AFTER_RESTART") {
+        back.borrow_mut().wait(Duration::from_millis(30));
+    }
+    let lines = read();
+    let before = lines.iter().position(|l| l == "BEFORE_RESTART").unwrap();
+    let rule = lines
+        .iter()
+        .position(|l| l.starts_with("──── Restored · "))
+        .expect("the line where the last run ends");
+    let after = lines.iter().position(|l| l == "AFTER_RESTART").unwrap();
+    assert!(before < rule && rule < after, "{lines:#?}");
+}
+
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 struct Offscreen(Rc<MinimalSoftwareWindow>);
 

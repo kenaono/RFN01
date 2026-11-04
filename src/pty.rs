@@ -102,6 +102,20 @@ impl Pty {
         columns: u16,
         rows: u16,
     ) -> windows::core::Result<Self> {
+        Self::open_with(command, directory, columns, rows, false)
+    }
+
+    /// RFN01-97: `inherit_cursor` starts the console where the screen's cursor
+    /// already is (PSEUDOCONSOLE_INHERIT_CURSOR) instead of clearing it —
+    /// **what keeps the last run's output on the screen** above the new shell.
+    /// The console asks where that is (`ESC[6n`) and waits for the answer.
+    pub fn open_with(
+        command: &str,
+        directory: Option<&std::path::Path>,
+        columns: u16,
+        rows: u16,
+        inherit_cursor: bool,
+    ) -> windows::core::Result<Self> {
         unsafe {
             let (input_read, input_write) = pipe()?;
             let (output_read, output_write) = pipe()?;
@@ -109,7 +123,8 @@ impl Pty {
                 X: columns.max(1) as i16,
                 Y: rows.max(1) as i16,
             };
-            let console = CreatePseudoConsole(size, input_read.raw(), output_write.raw(), 0)?;
+            let flags = u32::from(inherit_cursor);
+            let console = CreatePseudoConsole(size, input_read.raw(), output_write.raw(), flags)?;
             drop(input_read);
             drop(output_write);
 

@@ -13,6 +13,40 @@ pub(crate) fn command_parts(command: &str) -> (&str, &str) {
         .map_or((command, ""), |(a, b)| (a, b.trim()))
 }
 
+/// RFN01-95: the Windows folder a shell started in, for reading the file
+/// names it prints. **Empty is the editor's own folder** (the shell inherits
+/// it); WSL's `/mnt/d/…` is `D:\…`; any other Linux folder has no Windows name
+/// this side can use.
+pub(crate) fn windows_folder(directory: &str) -> Option<PathBuf> {
+    let directory = directory.trim();
+    if directory.is_empty() {
+        return std::env::current_dir().ok();
+    }
+    if let Some(path) = wsl_mount(directory) {
+        return Some(path);
+    }
+    if directory.starts_with('/') || directory.starts_with('~') {
+        return None;
+    }
+    Some(PathBuf::from(directory))
+}
+
+/// `/mnt/d/x/y` as `D:\x\y`. Anything else is not a mounted Windows drive.
+pub(crate) fn wsl_mount(path: &str) -> Option<PathBuf> {
+    let rest = path.strip_prefix("/mnt/")?;
+    let mut chars = rest.chars();
+    let drive = chars.next().filter(char::is_ascii_alphabetic)?;
+    let after = chars.as_str();
+    if !(after.is_empty() || after.starts_with('/')) {
+        return None;
+    }
+    let tail = after.trim_start_matches('/').replace('/', "\\");
+    Some(PathBuf::from(format!(
+        "{}:\\{tail}",
+        drive.to_ascii_uppercase()
+    )))
+}
+
 pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
     let cwd = shell.directory.trim();
     let (program, args) = command_parts(&shell.command);

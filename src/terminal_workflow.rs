@@ -91,7 +91,10 @@ pub(crate) fn send(window: &AppWindow, live: &Live, input: Input) {
 
 pub(crate) fn needs_close(window: &AppWindow, tab: &PaneTab) -> bool {
     let shell = |s: &Rc<RefCell<TerminalSession>>| {
-        window.get_terminal_confirm_close() && !s.borrow().finished()
+        // RFN01-97: a shell put back from the last run and never shown has
+        // nothing running to lose.
+        let s = s.borrow();
+        window.get_terminal_confirm_close() && !s.finished() && !s.is_waiting()
     };
     tab.terminal
         .as_ref()
@@ -381,6 +384,279 @@ fn pointer(
     taken
 }
 
+thread_local! {
+    /// RFN01-95: the pane whose strip along the foot has the keyboard, if one
+    /// has. **Told by the strip's own field**, which is a separate element
+    /// and so does say when it takes and loses the keyboard.
+    static BELOW_KEYS: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// RFN01-95: tell every shell whether the keyboard is in it, and answer the
+/// bell of the one where it is. True when a mark went away.
+///
+/// **Worked out from where things are, not from focus signals.** Switching
+/// tabs inside one pane keeps the same field focused, so no signal says the
+/// keyboard moved from a document to the shell that took its place (measured
+/// in the app, 2026-11-04: the bell stayed after the tab was opened). The
+/// keyboard is in the shell in front of the pane that has it — the strip's
+/// when that has it.
+pub(crate) fn settle_keyboard(window: &AppWindow, live: &Live) -> bool {
+    let mut pane = focused_pane(window);
+    if pane.is_panel() {
+        pane = PaneId::from_index(pane.screen(window).panel_owner);
+    }
+    let below = BELOW_KEYS.get() == Some(pane.index());
+    let keyed = live.tabs.borrow().of(pane).current().and_then(|tab| {
+        if below {
+            tab.below
+                .entries
+                .get(tab.below.active)
+                .and_then(|entry| entry.borrow().shell.clone())
+                .or_else(|| tab.below.shell.clone())
+        } else {
+            tab.terminal.clone()
+        }
+    });
+    let mut answered = false;
+    let tabs = live.tabs.borrow();
+    let shells = tabs
+        .panes
+        .iter()
+        .flat_map(|strip| &strip.tabs)
+        .flat_map(|tab| {
+            tab.terminal
+                .iter()
+                .cloned()
+                .chain(tab.below.shell.iter().cloned())
+                .chain(
+                    tab.below
+                        .entries
+                        .iter()
+                        .filter_map(|entry| entry.borrow().shell.clone()),
+                )
+                .collect::<Vec<_>>()
+        });
+    for shell in shells {
+        let here = keyed
+            .as_ref()
+            .is_some_and(|keyed| Rc::ptr_eq(keyed, &shell));
+        answered |= shell.borrow_mut().set_keyboard(here);
+    }
+    answered
+}
+
+/// RFN01-95: what a link in a shell opens, once it is known to be openable.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Opens {
+    Url(String),
+    File {
+        path: PathBuf,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
+}
+
+/// RFN01-95: the file a name printed by a shell stands for — **only one that
+/// exists and that the editor opens as text.** A relative name is read from
+/// `folder`, the folder the shell started in; WSL's `/mnt/d/…` is `D:\…`;
+/// another Linux path, or `~`, has no Windows name here.
+pub(crate) fn resolve_path(text: &str, folder: Option<&Path>) -> Option<PathBuf> {
+    let path = if let Some(path) = terminal_shells::wsl_mount(text) {
+        path
+    } else if text.starts_with('/') || text.starts_with('~') {
+        return None;
+    } else {
+        let path = Path::new(text);
+        if path.has_root() || path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            folder?.join(path)
+        }
+    };
+    (path.is_file() && opens_as_text(&path)).then_some(path)
+}
+
+/// RFN01-95（案A）: a prompt's folder as a Windows folder. `/mnt/d/…` and
+/// `D:\…` are; `~` and other Linux folders are not.
+fn prompt_folder(written: &str) -> Option<PathBuf> {
+    if let Some(path) = terminal_shells::wsl_mount(written) {
+        return Some(path);
+    }
+    let path = Path::new(written);
+    path.is_absolute().then(|| path.to_path_buf())
+}
+
+/// Pictures and the usual binaries are not opened from a shell (RFN01-95: 「エディタで
+/// 開けないファイルは何もしない」).
+fn opens_as_text(path: &Path) -> bool {
+    const BINARY: [&str; 22] = [
+        "exe", "dll", "so", "o", "obj", "lib", "pdb", "bin", "zip", "7z", "gz", "tar", "rar",
+        "pdf", "docx", "xlsx", "pptx", "mp3", "mp4", "wav", "class", "jar",
+    ];
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    !workspace_index::is_image(path) && !BINARY.contains(&extension.as_str())
+}
+
+/// RFN01-95: the link under a point of a pane's shell, and the underline for it
+/// in the pane's coordinates. `None` when there is nothing there to open.
+fn link_under(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    spot: TerminalSpot,
+    x: f32,
+    y: f32,
+) -> Option<(Opens, Vec<PreviewSelectionRect>)> {
+    let (session, looking) = live
+        .cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .map(|v| (v.session.clone(), v.looking))?;
+    let look = terminal_appearance::look(window, id, spot);
+    let cell = cells::terminal_cell_size(&look).ok()?;
+    let session = session.borrow();
+    let screen = session.screen();
+    let top = screen.scrollback().len().saturating_sub(looking);
+    let row = top + (y.max(0.0) / cell.line) as usize;
+    let column = (x.max(0.0) / cell.advance) as usize;
+    let link = screen.link_at(row, column)?;
+    let opens = match link.target {
+        terminal::LinkTarget::Url(url) => Opens::Url(url),
+        terminal::LinkTarget::Path { text, line, column } => Opens::File {
+            // RFN01-95（案A、書き手と合意 2026-11-04）: **the folder the nearest
+            // prompt names first** — after a `cd` it is where the shell, and an
+            // agent started there, is; a name in both folders means the one
+            // the prompt is in. Then the folder the shell started in.
+            path: screen
+                .prompt_folder_above(row)
+                .and_then(|folder| prompt_folder(&folder))
+                .and_then(|folder| resolve_path(&text, Some(&folder)))
+                .or_else(|| resolve_path(&text, session.folder()))?,
+            line,
+            column,
+        },
+    };
+    let rows = screen.rows();
+    let underline = link
+        .cells
+        .iter()
+        .filter(|(at, _, _)| *at >= top && *at < top + rows)
+        .map(|&(at, from, to)| PreviewSelectionRect {
+            x: from as f32 * cell.advance,
+            y: (at - top + 1) as f32 * cell.line - 2.0,
+            width: (to - from) as f32 * cell.advance,
+            height: 1.0,
+        })
+        .collect();
+    Some((opens, underline))
+}
+
+/// RFN01-95: Ctrl held over a link underlines it, and says so (the pointer
+/// becomes a hand). True when there is a link there.
+fn hover(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSpot, x: f32, y: f32) -> bool {
+    thread_local! {
+        /// Some pane has an underline up. **Every movement of the pointer over
+        /// a shell asks**, and without Ctrl and with nothing to take down
+        /// there is nothing to do — not even reading the pane's row.
+        static UNDERLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    let control = input_platform::control_held();
+    if !control && !UNDERLINED.get() {
+        return false;
+    }
+    let underline = control
+        .then(|| link_under(window, live, id, spot, x, y))
+        .flatten()
+        .map(|(_, underline)| underline)
+        .unwrap_or_default();
+    let shown = !underline.is_empty();
+    UNDERLINED.set(shown);
+    let screen = id.screen(window);
+    let current = match spot {
+        TerminalSpot::Front => screen.terminal_link,
+        TerminalSpot::Below => screen.below_link,
+    };
+    if !current.iter().eq(underline.iter().cloned()) {
+        id.update_screen(window, |screen| {
+            let model = ModelRc::new(VecModel::from(underline));
+            match spot {
+                TerminalSpot::Front => screen.terminal_link = model,
+                TerminalSpot::Below => screen.below_link = model,
+            }
+        });
+    }
+    shown
+}
+
+/// RFN01-95: where a file named in a shell opens. **Beside the shell, when the
+/// window is split**: in another pane showing a document (the first of them),
+/// or else another pane; with one pane, a new tab in it.
+fn pane_for_file(window: &AppWindow, live: &Live, from: PaneId) -> PaneId {
+    let others: Vec<PaneId> = PaneId::all(window)
+        .into_iter()
+        .filter(|p| *p != from && !p.is_panel())
+        .collect();
+    let tabs = live.tabs.borrow();
+    others
+        .iter()
+        .copied()
+        .find(|p| {
+            tabs.of(*p)
+                .current()
+                .is_some_and(|t| !t.stands_in() && !t.empty)
+        })
+        .or_else(|| others.first().copied())
+        .unwrap_or(from)
+}
+
+/// RFN01-95: open `path` and put the caret on `line` (and `column`), both
+/// counted from 1 the way compilers and agents print them.
+fn open_file_at(
+    window: &AppWindow,
+    live: &Live,
+    from: PaneId,
+    path: &Path,
+    line: Option<usize>,
+    column: Option<usize>,
+) {
+    let target = pane_for_file(window, live, from);
+    window.set_focused_pane(target.index());
+    open_path_in_pane(window, live, target, path, Opening::Kept);
+    let document = live.states.document(target);
+    if document.file.borrow().path() != Some(path) {
+        return;
+    }
+    let source = document.text.borrow().clone();
+    let at = line.map_or(0, |line| byte_of(&source, line, column.unwrap_or(1)));
+    show_source_range(window, live, target, &source, at, at);
+    restore_editor_focus(window);
+}
+
+/// The byte where 1-based `line` and `column` (in characters) fall, held to
+/// the end of that line and of the text.
+pub(crate) fn byte_of(source: &str, line: usize, column: usize) -> usize {
+    let mut start = 0;
+    for _ in 1..line.max(1) {
+        match source[start..].find('\n') {
+            Some(at) => start += at + 1,
+            None => return source.len(),
+        }
+    }
+    let end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |at| start + at);
+    let line_text = source[start..end].trim_end_matches('\r');
+    start
+        + line_text
+            .char_indices()
+            .nth(column.max(1) - 1)
+            .map_or(line_text.len(), |(at, _)| at)
+}
+
 pub(crate) fn install(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
     let mouse_live = live.clone();
@@ -410,6 +686,7 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
         },
     );
     let focus_live = live.clone();
+    let focus_window = window.as_weak();
     window.on_terminal_focus(move |pane, spot, focused| {
         let spot = if spot == 0 {
             TerminalSpot::Front
@@ -423,10 +700,23 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
             .shell(spot)
             .map(|shell| shell.session.clone());
         if let Some(session) = session {
-            let mut session = session.borrow_mut();
-            if !session.finished() {
-                session.send_focus(focused);
+            let mut borrowed = session.borrow_mut();
+            if !borrowed.finished() {
+                borrowed.send_focus(focused);
             }
+            drop(borrowed);
+        }
+        // RFN01-95: the keyboard coming to a shell answers its bell. Which
+        // shell has it is worked out again rather than taken from this one
+        // signal (`settle_keyboard`).
+        if spot == TerminalSpot::Below {
+            BELOW_KEYS.set(focused.then_some(pane));
+        }
+        if let Some(window) = focus_window.upgrade()
+            && settle_keyboard(&window, &focus_live)
+        {
+            crate::publish_tabs(&window, &focus_live);
+            crate::refresh_terminal_panes(&window, &focus_live);
         }
     });
     let weak = window.as_weak();
@@ -441,37 +731,40 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
         } else {
             TerminalSpot::Below
         };
-        let Some((session, looking)) = url_live
-            .cache
-            .borrow_mut()
-            .pane(id)
-            .shell(spot)
-            .map(|v| (v.session.clone(), v.looking))
-        else {
-            return;
-        };
-        let look = terminal_appearance::look(&window, id, spot);
-        let Ok(cell) = cells::terminal_cell_size(&look) else {
-            return;
-        };
-        let session = session.borrow();
-        let top = session.screen().scrollback().len().saturating_sub(looking);
-        let row = top + (y.max(0.0) / cell.line) as usize;
-        let column = (x.max(0.0) / cell.advance) as usize;
-        if let Some(url) = session.screen().url_at(row, column) {
-            use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
-            use windows::core::{HSTRING, w};
-            unsafe {
-                ShellExecuteW(
-                    ime::window_handle(&window),
-                    w!("open"),
-                    &HSTRING::from(url),
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                );
+        match link_under(&window, &url_live, id, spot, x, y).map(|(opens, _)| opens) {
+            Some(Opens::Url(url)) => {
+                use windows::Win32::UI::{
+                    Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL,
+                };
+                use windows::core::{HSTRING, w};
+                unsafe {
+                    ShellExecuteW(
+                        ime::window_handle(&window),
+                        w!("open"),
+                        &HSTRING::from(url),
+                        None,
+                        None,
+                        SW_SHOWNORMAL,
+                    );
+                }
             }
+            Some(Opens::File { path, line, column }) => {
+                open_file_at(&window, &url_live, id, &path, line, column);
+            }
+            None => {}
         }
+    });
+    let weak = window.as_weak();
+    let hover_live = live.clone();
+    window.on_pane_terminal_link_hover(move |pane, spot, x, y| {
+        weak.upgrade().is_some_and(|window| {
+            let spot = if spot == 0 {
+                TerminalSpot::Front
+            } else {
+                TerminalSpot::Below
+            };
+            hover(&window, &hover_live, PaneId::from_index(pane), spot, x, y)
+        })
     });
     let weak = window.as_weak();
     let live = live.clone();
@@ -490,4 +783,96 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
             );
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFN01-95: a name printed by a shell opens only when it is a text file
+    /// that exists, read from the folder the shell started in.
+    #[test]
+    fn printed_names_resolve_to_files_that_exist() {
+        let folder = std::env::temp_dir().join(format!("rfn-links-{}", std::process::id()));
+        std::fs::create_dir_all(folder.join("src")).unwrap();
+        std::fs::write(folder.join("第一章.md"), "一\n二\n").unwrap();
+        std::fs::write(folder.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(folder.join("cover.png"), [0_u8; 4]).unwrap();
+        let base = Some(folder.as_path());
+        assert_eq!(
+            resolve_path("第一章.md", base),
+            Some(folder.join("第一章.md"))
+        );
+        assert_eq!(
+            resolve_path("src/main.rs", base),
+            Some(folder.join("src/main.rs"))
+        );
+        assert_eq!(resolve_path("ない.md", base), None, "not there");
+        assert_eq!(resolve_path("cover.png", base), None, "a picture");
+        assert_eq!(
+            resolve_path("第一章.md", None),
+            None,
+            "no folder to read from"
+        );
+        assert_eq!(resolve_path("~/notes.md", base), None);
+        assert_eq!(resolve_path("/home/me/notes.md", base), None);
+        let absolute = folder.join("第一章.md");
+        assert_eq!(
+            resolve_path(&absolute.to_string_lossy(), None),
+            Some(absolute)
+        );
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn wsl_mounts_and_start_folders_have_windows_names() {
+        assert_eq!(
+            terminal_shells::wsl_mount("/mnt/d/原稿/a.md"),
+            Some(PathBuf::from("D:\\原稿\\a.md"))
+        );
+        assert_eq!(
+            terminal_shells::wsl_mount("/mnt/c"),
+            Some(PathBuf::from("C:\\"))
+        );
+        assert_eq!(terminal_shells::wsl_mount("/mnt/data/x"), None);
+        assert_eq!(terminal_shells::windows_folder("~"), None);
+        assert_eq!(terminal_shells::windows_folder("/home/me"), None);
+        assert_eq!(
+            terminal_shells::windows_folder("D:\\原稿"),
+            Some(PathBuf::from("D:\\原稿"))
+        );
+        assert_eq!(
+            terminal_shells::windows_folder(""),
+            std::env::current_dir().ok()
+        );
+    }
+
+    #[test]
+    fn prompt_folders_have_windows_names() {
+        assert_eq!(
+            prompt_folder("/mnt/d/原稿/第一部"),
+            Some(PathBuf::from("D:\\原稿\\第一部"))
+        );
+        assert_eq!(
+            prompt_folder("D:\\work\\book"),
+            Some(PathBuf::from("D:\\work\\book"))
+        );
+        assert_eq!(prompt_folder("~/notes"), None);
+        assert_eq!(prompt_folder("/home/ken"), None);
+    }
+
+    #[test]
+    fn lines_and_columns_count_from_one() {
+        let source = "一行目\r\n二行目です\nthird";
+        assert_eq!(byte_of(source, 1, 1), 0);
+        assert_eq!(byte_of(source, 2, 1), "一行目\r\n".len());
+        assert_eq!(byte_of(source, 2, 3), "一行目\r\n二行".len());
+        assert_eq!(
+            byte_of(source, 2, 99),
+            "一行目\r\n二行目です".len(),
+            "held to the end of the line"
+        );
+        assert_eq!(byte_of(source, 9, 1), source.len(), "held to the end");
+        assert_eq!(byte_of(source, 0, 0), 0);
+    }
 }

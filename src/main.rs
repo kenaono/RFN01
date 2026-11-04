@@ -1258,6 +1258,13 @@ struct TerminalView {
     history_origin: u64,
     last_revision: u64,
     unseen: bool,
+    /// RFN01-95: a draw is waiting for the end of a synchronized update, and a
+    /// timer is already set to make it.
+    held: bool,
+    /// RFN01-97: when a shell put back from the last run was first asked to be
+    /// drawn. It starts [`SETTLE_BEFORE_START`] later, at the size the pane has
+    /// settled at.
+    waiting_since: Option<Instant>,
     /// What the IME is composing, before it is anything the shell has heard of
     /// (要件 7.2's problem, in a terminal).
     ///
@@ -1289,6 +1296,8 @@ impl TerminalView {
             history_origin: session.borrow().screen().history_origin(),
             last_revision: session.borrow().screen().revision(),
             unseen: false,
+            held: false,
+            waiting_since: None,
             preedit: String::new(),
             drawn: 0,
             counted_since: None,
@@ -4364,6 +4373,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // `×`を押すと、そのぶんだけがどこにも書かれないまま消えていた。ここで
     // 一度に書けば、時計が回りきらなかったぶんが行列に乗る。
     write_work_copy_now(&window, &live);
+    // RFN01-97: what the shells printed, for the next run to put back. **Before
+    // the shells are let go** and only here, at the close.
+    session::write_terminal_outputs(&window, &live);
     write_session(&window, &live);
     // 要件 12.4: and the draft, which is otherwise waiting on a two-second
     // timer that the end of the process will not let run.
@@ -12403,6 +12415,9 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
 /// and it is the focused pane's — the one whose tabs the buttons above would
 /// act on. Moving them inside the panes is the next step (ペイン分割設計 6).
 fn publish_tabs(window: &AppWindow, live: &Live) {
+    // RFN01-95: a tab that has just come to the front with the keyboard has
+    // answered its shell's bell.
+    terminal_workflow::settle_keyboard(window, live);
     publish_workspace_root_highlights(window, live);
     publish_search_highlights(window, live);
     observe_folder_autosave(window, live);
@@ -12471,6 +12486,19 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                     // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **外で変わった
                     // まま片付いていない。**端末のタブは文書を持たないので出ない。
                     outside: !tab.stands_in() && !tab.empty && tab.document.outside.get(),
+                    // RFN01-95: a shell of this tab — its own, or one in the
+                    // strip along its foot — called while nobody was there.
+                    attention: tab
+                        .terminal
+                        .iter()
+                        .chain(tab.below.shell.iter())
+                        .any(|s| s.borrow().wants_attention())
+                        || tab.below.entries.iter().any(|e| {
+                            e.borrow()
+                                .shell
+                                .as_ref()
+                                .is_some_and(|s| s.borrow().wants_attention())
+                        }),
                     // 追加要件 2026-09-06: only a tab standing for a file has a
                     // name on disk to change. 無題1 reads like a name on screen,
                     // and nothing is filed under it.
@@ -16800,6 +16828,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_terminal_confirm_close().to_string(),
     ));
     values.push((
+        "terminal.restore_output".into(),
+        window.get_terminal_restore_output().to_string(),
+    ));
+    values.push((
         "terminal.history_limit".into(),
         window.get_terminal_history_limit().to_string(),
     ));
@@ -17082,6 +17114,10 @@ fn apply_settings(
         }
         if written == "terminal.confirm_paste" {
             window.set_terminal_confirm_paste(value != "false");
+            continue;
+        }
+        if written == "terminal.restore_output" {
+            window.set_terminal_restore_output(value != "false");
             continue;
         }
         if written == "terminal.confirm_close" {
@@ -18936,6 +18972,41 @@ fn lay_out_pane(
 /// texture (measured, 181×85); paying that for every chunk of output is what
 /// makes a program that redraws itself look broken rather than slow. Each band
 /// is keyed by what is in it, so a keystroke redraws one.
+/// RFN01-97: how long a shell put back from the last run waits, after it is
+/// first asked to be drawn, before it starts.
+const SETTLE_BEFORE_START: Duration = Duration::from_millis(300);
+
+/// RFN01-95: draw this shell again once the synchronized update it is in has
+/// had `wait` to finish. **One timer at a time**: output keeps arriving during
+/// an update, and each chunk would otherwise set another.
+fn hold_terminal(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    spot: TerminalSpot,
+    wait: Duration,
+) {
+    let first = cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .is_some_and(|shell| !std::mem::replace(&mut shell.held, true));
+    if !first {
+        return;
+    }
+    let weak = window.as_weak();
+    let cache = cache.clone();
+    Timer::single_shot(wait, move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        if let Some(shell) = cache.borrow_mut().pane(id).shell(spot) {
+            shell.held = false;
+        }
+        refresh_terminal(&window, &cache, id, spot);
+    });
+}
+
 fn refresh_terminal(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
@@ -18962,8 +19033,48 @@ fn refresh_terminal(
     };
     let (columns, rows) = cell.grid_for(id.shown_width(window), extent);
     let mut session = session.borrow_mut();
+    // RFN01-97: **a shell from the last run starts the first time it is
+    // drawn**, at the size it is drawn at — every shell on every tab at once
+    // would be a dozen processes for a window showing one of them.
+    if session.is_waiting() {
+        // **Not at the first draw**: at startup that comes before the window
+        // has its size (measured: 77×6 for a pane that settles at 140×34), and
+        // what the last run printed would be laid out on six rows and pushed
+        // into the history. The pane is given a moment to settle first.
+        let since = cache
+            .borrow_mut()
+            .pane(id)
+            .shell(spot)
+            .map(|shell| *shell.waiting_since.get_or_insert_with(Instant::now));
+        let waited = since.map_or(SETTLE_BEFORE_START, |since| since.elapsed());
+        if waited < SETTLE_BEFORE_START {
+            drop(session);
+            hold_terminal(window, cache, id, spot, SETTLE_BEFORE_START - waited);
+            return;
+        }
+        let weak = window.as_weak();
+        let wake = move || {
+            let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
+        };
+        let started = session.start_waiting(columns, rows, wake);
+        cache.borrow_mut().log_diag(
+            "terminal",
+            &match started {
+                Ok(()) => format!("restored start pane={} {columns}x{rows}", id.log_name()),
+                Err(error) => format!("restored start failed: {error}"),
+            },
+        );
+    }
     session.resize(columns, rows);
     session.drain();
+    // RFN01-95: **the program is half-way through one update** (DECSET 2026).
+    // Drawn now, the writer sees it half-drawn — the flicker an agent's screen
+    // makes. Drawn when it ends, or after the hold whatever happens.
+    if let Some(wait) = session.screen().synchronized_wait() {
+        drop(session);
+        hold_terminal(window, cache, id, spot, wait);
+        return;
+    }
     let screen = session.screen();
 
     // **What this shell is being looked at from**: the last `rows` of the
@@ -19476,6 +19587,10 @@ fn start_shell(
     ) {
         Ok(mut session) => {
             session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
+            session.set_profile(
+                shell.clone(),
+                terminal_shells::windows_folder(&shell.directory),
+            );
             live.cache.borrow_mut().log_diag(
                 "terminal",
                 &format!(
