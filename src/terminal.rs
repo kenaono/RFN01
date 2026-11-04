@@ -688,6 +688,38 @@ impl Screen {
             .collect()
     }
 
+    /// RFN01-96（書き手の求め 2026-11-04：コマンドだけをコピーしたい）: the
+    /// column where the command typed after the prompt on `row` begins — past
+    /// `user@host:folder$ `, `PS D:\folder> `, `D:\folder>`. `None` when `row`
+    /// is not a prompt.
+    pub fn command_column(&self, row: usize) -> Option<usize> {
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let line = lines.get(row)?;
+        let text = line.text();
+        let found = prompt_pattern().find(&text)?;
+        // Bytes of text to cells: a wide character is two cells.
+        let mut bytes = 0;
+        let mut column = 0;
+        for cell in &line.cells {
+            if bytes >= found.end() {
+                break;
+            }
+            column += 1;
+            if !cell.trailing {
+                bytes += cell.text.len_utf8();
+            }
+        }
+        // The space a prompt ends with is the prompt's, not the command's.
+        while line
+            .cells
+            .get(column)
+            .is_some_and(|cell| cell.text == ' ' && !cell.trailing)
+        {
+            column += 1;
+        }
+        Some(column)
+    }
+
     /// RFN01-96: the last row of the line that starts at `row` (a long command
     /// line wraps onto the rows after it).
     pub fn logical_end(&self, row: usize) -> usize {
@@ -2285,6 +2317,9 @@ mod tests {
         let mut it = Terminal::new(40, 10);
         it.feed(b"ken@KN01:~/Dev$ echo one\r\none\r\nken@KN01:~/Dev$ ls\r\na.md\r\nb.md\r\n\r\nken@KN01:~/Dev$ ");
         assert_eq!(it.screen.prompt_rows(), vec![0, 2, 6]);
+        // The command begins after the prompt and its space.
+        assert_eq!(it.screen.command_column(0), Some("ken@KN01:~/Dev$ ".len()));
+        assert_eq!(it.screen.command_column(1), None, "not a prompt");
         assert_eq!(it.screen.last_output().as_deref(), Some("a.md\nb.md\n"));
         // Still running: what it has printed so far.
         it.feed(b"cat x\r\nline 1\r\nline 2");

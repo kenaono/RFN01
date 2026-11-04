@@ -325,10 +325,26 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
             let columns = screen.columns();
             let waiting = screen.cursor_line();
             if let Some(view) = live.cache.borrow_mut().pane(id).shell(spot) {
+                // RFN01-96（書き手の求め 2026-11-04）: **the command, not the
+                // prompt in front of it**, so Ctrl+Shift+C copies what was
+                // typed. A prompt where nothing was typed is selected whole, so
+                // where it is still shows.
+                let span = |row: usize| {
+                    let end = (screen.logical_end(row), columns);
+                    let start = screen
+                        .command_column(row)
+                        .map(|column| (row, column))
+                        .filter(|start| terminal_selection_text_at(&session, *start, end))
+                        .unwrap_or((row, 0));
+                    TerminalSelection {
+                        anchor: start,
+                        head: end,
+                    }
+                };
                 // The command selected now, if the selection is one of these.
                 let marked = view
                     .selection
-                    .filter(|s| s.anchor.1 == 0 && prompts.contains(&s.anchor.0))
+                    .filter(|s| prompts.contains(&s.anchor.0) && *s == span(s.anchor.0))
                     .map(|s| s.anchor.0);
                 let target = if action == 20 {
                     let from = marked.unwrap_or(waiting);
@@ -338,10 +354,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
                 };
                 match target {
                     Some(row) if row < waiting => {
-                        view.selection = Some(TerminalSelection {
-                            anchor: (row, 0),
-                            head: (screen.logical_end(row), columns),
-                        });
+                        view.selection = Some(span(row));
                         let top = history - view.looking.min(history);
                         if row < top || row >= top + rows {
                             view.looking = history.saturating_sub(row);
@@ -504,6 +517,22 @@ pub(crate) fn settle_keyboard(window: &AppWindow, live: &Live) -> bool {
         answered |= shell.borrow_mut().set_keyboard(here);
     }
     answered
+}
+
+/// RFN01-96: whether anything but blanks lies from `start` to `end` — a
+/// command was typed after this prompt.
+fn terminal_selection_text_at(
+    session: &TerminalSession,
+    start: (usize, usize),
+    end: (usize, usize),
+) -> bool {
+    let picked = TerminalSelection {
+        anchor: start,
+        head: end,
+    };
+    !crate::terminal_selection_text(session, picked)
+        .trim()
+        .is_empty()
 }
 
 /// RFN01-95: what a link in a shell opens, once it is known to be openable.
