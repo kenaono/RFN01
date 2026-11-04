@@ -1643,6 +1643,10 @@ export component AppWindow inherits Window {
     // **前に出ているタブがまだ何でもないなら、そのタブがそれになる**——
     // 何でもないタブが無ければ、これまでどおり新しいタブを開く。
     callback pane-new-file(int);
+    /// RFN01-88: the Workspace's templates by name, and one of them asked for
+    /// as a new untitled document in a pane.
+    in property <[string]> template-names;
+    callback pane-new-from-template(int, string);
     callback pane-new-terminal(int, int);
     callback pane-switch-shell(int, int);
     /// Publish the strips again. Called from Rust when a document's unsaved
@@ -3842,6 +3846,12 @@ export component AppWindow inherits Window {
                         new-file-requested => {
                             root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-new-file(pane.id);
+                            root.focus-generation += 1;
+                        }
+                        template-names: root.template-names;
+                        new-from-template-requested(name) => {
+                            root.focused-pane = pane.id; root.focused-pane-row = index;
+                            root.pane-new-from-template(pane.id, name);
                             root.focus-generation += 1;
                         }
                         new-terminal-requested(shell) => {

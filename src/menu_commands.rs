@@ -12,6 +12,8 @@ use windows::{
 #[derive(Clone)]
 enum Command {
     NewFile,
+    /// RFN01-88: 新規文書をテンプレートから（名前で）。
+    NewFromTemplate(String),
     NewTerminal(i32),
     Open,
     Folder,
@@ -30,8 +32,6 @@ enum Command {
     Print,
     Exit,
     FolderTerminal,
-    /// RFN01-88: 左の木の「新しいファイル…」——作り先のフォルダに名前欄を出す。
-    TreeNewFile,
     Undo(bool),
     Copy(bool),
     Paste,
@@ -1582,15 +1582,36 @@ fn build(
     }
     match group {
         0 => {
-            add!("新規文書", "New File", Command::NewFile, true);
-            // RFN01-88（書き手の決定 2026-11-04）: 木の「新しいファイル…」をメニュー
-            // （とパレット）からも。テンプレートから作る入口がここにある。
-            add!(
-                "新しいファイル…",
-                "New File in Folder…",
-                Command::TreeNewFile,
-                crate::tree_new_file_ready(live)
-            );
+            // RFN01-88（書き手の決定 2026-11-04）: テンプレートがあれば「新規文書 ▸」の
+            // 中に空の文書と各テンプレートを並べる。Ctrl+Nは空の文書のまま。
+            let templates = crate::templates_in_use(live);
+            if templates.is_empty() {
+                add!("新規文書", "New File", Command::NewFile, true);
+            } else {
+                let documents = Popup::new()?;
+                row(
+                    &documents,
+                    &mut commands,
+                    "空の文書",
+                    "Blank Document",
+                    Command::NewFile,
+                    true,
+                    false,
+                )?;
+                documents.sep()?;
+                for template in templates {
+                    row(
+                        &documents,
+                        &mut commands,
+                        &template.name,
+                        &template.name,
+                        Command::NewFromTemplate(template.name.clone()),
+                        true,
+                        false,
+                    )?;
+                }
+                root.child_named("新規文書", "New File", documents)?;
+            }
             let shells = Popup::new()?;
             for (i, shell) in configured_shells(window).iter().enumerate() {
                 row(
@@ -2662,6 +2683,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     let parent = t.parent.index();
     match command {
         Command::NewFile => window.invoke_pane_new_file(p),
+        Command::NewFromTemplate(name) => crate::new_from_template(window, live, t.id, &name),
         Command::NewTerminal(i) => window.invoke_pane_new_terminal(parent, i),
         Command::Open => {
             if t.id.is_panel() {
@@ -2707,7 +2729,6 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
             }
         }
         Command::FolderTerminal => terminal_shells::action(window, live, 8, 0),
-        Command::TreeNewFile => crate::tree_new_file_from_menu(window, live),
         Command::Undo(redo) => window.invoke_pane_undo(p, redo),
         Command::Paste => ui_action(
             window,

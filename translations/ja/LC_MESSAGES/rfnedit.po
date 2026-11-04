@@ -1562,3 +1562,6 @@ msgstr "テンプレート"
 
 msgid "Template:"
 msgstr "テンプレート："
+
+msgid "Template"
+msgstr "テンプレート"

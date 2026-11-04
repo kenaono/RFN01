@@ -2593,6 +2593,14 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = window.as_weak();
+    let template_live = live.clone();
+    window.on_pane_new_from_template(move |pane, name| {
+        if let Some(window) = weak.upgrade() {
+            new_from_template(&window, &template_live, PaneId::from_index(pane), &name);
+        }
+    });
+
+    let weak = window.as_weak();
     let answer_live = live.clone();
     let switch_live = live.clone();
     // 追加要件 2026-09-07: **走っているタブの接続先を替える。**タブはそのまま、
@@ -8318,6 +8326,58 @@ fn workspace_heading_label(folder: &WorkFolder) -> String {
 }
 
 fn publish_tree(window: &AppWindow, live: &Live) {
+    publish_tree_now(window, live);
+    publish_template_names(window, live);
+}
+
+/// RFN01-88: the templates' names, for the New File rows (File ▸ New File,
+/// the New Tab, the tab strip's menu). **Read again whenever the tree is** —
+/// a Workspace switched, a folder chosen, a file put in the folder — and set
+/// only when they changed, so the rows are not rebuilt for nothing.
+fn publish_template_names(window: &AppWindow, live: &Live) {
+    let names: Vec<SharedString> = templates_in_use(live)
+        .into_iter()
+        .map(|template| template.name.into())
+        .collect();
+    let shown = window.get_template_names();
+    if shown.iter().eq(names.iter().cloned()) {
+        return;
+    }
+    window.set_template_names(ModelRc::from(Rc::new(VecModel::from(names))));
+}
+
+/// RFN01-88: a new untitled document that starts as the template `name` — in
+/// the asking New Tab when that is in front, in a new tab otherwise, the way
+/// New File does.
+fn new_from_template(window: &AppWindow, live: &Live, id: PaneId, name: &str) {
+    let Some(found) = templates_in_use(live)
+        .into_iter()
+        .find(|template| template.name == name)
+    else {
+        window.tell_tab(
+            say!(
+                "テンプレート「{name}」がありません",
+                "No template \"{name}\""
+            )
+            .into(),
+        );
+        return;
+    };
+    let asking = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.empty);
+    if asking {
+        answer_new_tab(window, live, id, None);
+    } else {
+        new_file_tab(window, live, id);
+    }
+    insert_template(window, live, id, &found.path);
+}
+
+fn publish_tree_now(window: &AppWindow, live: &Live) {
     let folder = live.folder.borrow();
     window.set_tree_filter(folder.tree_filter.clone().into());
     let (roots, multi) = tree_roots(&folder);
@@ -11612,44 +11672,6 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             publish_left(window, live);
         }
     }
-}
-
-/// RFN01-88: whether there is a folder for File ▸ New File in Folder… to make
-/// a file in — the Workspace in use, or the Explorer's folder.
-fn tree_new_file_ready(live: &Live) -> bool {
-    let folder = live.folder.borrow();
-    let workspace = folder.workspace.as_ref().is_some_and(|runtime| {
-        let runtime = runtime.borrow();
-        runtime.active_workspace().is_some() && !runtime.active_roots().is_empty()
-    });
-    workspace || folder.root.is_some()
-}
-
-/// RFN01-88 (File ▸ New File in Folder…): the tree's New File…, from the menu.
-/// **The tree is put in front first** — the Workspace's while one is in use,
-/// the Explorer otherwise — since the name is typed in its row. The folder is
-/// the one the tree's own button would use: the selected row's.
-fn tree_new_file_from_menu(window: &AppWindow, live: &Live) {
-    let tab = window.get_left_tab();
-    if !window.get_tree_open() || (tab != 0 && tab != 4) {
-        let wanted = if window.get_workspace_active() { 4 } else { 0 };
-        window.set_tree_open(true);
-        window.set_left_tab(wanted);
-        publish_left(window, live);
-    }
-    // **With nothing chosen in the tree, beside the document in front** — the
-    // folder a writer asking from the menu is working in — when it is in the
-    // tree. Otherwise the tree's own rule (ask, with more than one folder).
-    if live.folder.borrow().selected.is_none() {
-        let document = live.states.document(focused_pane(window));
-        let path = document.file.borrow().path().map(Path::to_path_buf);
-        let (roots, _) = tree_roots(&live.folder.borrow());
-        if let Some(path) = path.filter(|path| roots.iter().any(|root| path.starts_with(root))) {
-            live.folder.borrow_mut().selected = Some(path);
-            publish_tree(window, live);
-        }
-    }
-    tree_command(window, live, TreeCommand::NewFile);
 }
 
 /// Make the file or folder the writer has just named (要件 5.2).
