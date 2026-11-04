@@ -311,6 +311,45 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
                 * if action == 8 { 1.0 } else { -1.0 };
             scroll_terminal(window, live, id, spot, amount);
         }
+        // RFN01-96: Ctrl+↑／Ctrl+↓ — the prompt before or after the one at the
+        // top of the view comes to the top. Past the last, the latest.
+        20 | 21 => {
+            let (prompts, history) = {
+                let session = session.borrow();
+                let screen = session.screen();
+                (screen.prompt_rows(), screen.scrollback().len())
+            };
+            if let Some(view) = live.cache.borrow_mut().pane(id).shell(spot) {
+                let top = history - view.looking.min(history);
+                let target = if action == 20 {
+                    prompts.iter().rev().find(|row| **row < top).copied()
+                } else {
+                    prompts.iter().find(|row| **row > top).copied()
+                };
+                match target {
+                    Some(row) if row < history => view.looking = history - row,
+                    _ if action == 21 => view.looking = 0,
+                    _ => {}
+                }
+            }
+        }
+        // RFN01-96: Copy Last Output.
+        22 => {
+            session.borrow_mut().drain();
+            let text = session.borrow().screen().last_output();
+            match text {
+                Some(text) => {
+                    clipboard::put_text(ime::window_handle(window), &text);
+                }
+                None => window.tell(
+                    pick(
+                        "直前のコマンドの出力が見つかりません",
+                        "No output from a last command",
+                    )
+                    .into(),
+                ),
+            }
+        }
         _ => {}
     }
     refresh_terminal(window, &live.cache, id, spot);

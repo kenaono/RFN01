@@ -1113,6 +1113,12 @@ msgstr "選択範囲をEditor Panelへ"
 msgid "History to Editor Panel"
 msgstr "保持履歴をEditor Panelへ"
 
+msgid "Last Output to Editor Panel"
+msgstr "直前の出力をEditor Panelへ"
+
+msgid "Copy Last Output"
+msgstr "直前の出力をコピー"
+
 msgid "Capture Log to Editor Panel"
 msgstr "Editor Panelへのログ出力を開始"
 
