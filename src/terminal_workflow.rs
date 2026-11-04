@@ -410,6 +410,7 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
         },
     );
     let focus_live = live.clone();
+    let focus_window = window.as_weak();
     window.on_terminal_focus(move |pane, spot, focused| {
         let spot = if spot == 0 {
             TerminalSpot::Front
@@ -423,9 +424,16 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
             .shell(spot)
             .map(|shell| shell.session.clone());
         if let Some(session) = session {
-            let mut session = session.borrow_mut();
-            if !session.finished() {
-                session.send_focus(focused);
+            let mut borrowed = session.borrow_mut();
+            if !borrowed.finished() {
+                borrowed.send_focus(focused);
+            }
+            // RFN01-95: the keyboard coming here answers the bell.
+            let answered = borrowed.set_keyboard(focused);
+            drop(borrowed);
+            if answered && let Some(window) = focus_window.upgrade() {
+                crate::publish_tabs(&window, &focus_live);
+                crate::refresh_terminal_panes(&window, &focus_live);
             }
         }
     });

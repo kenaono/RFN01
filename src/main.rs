@@ -1258,6 +1258,9 @@ struct TerminalView {
     history_origin: u64,
     last_revision: u64,
     unseen: bool,
+    /// RFN01-95: a draw is waiting for the end of a synchronized update, and a
+    /// timer is already set to make it.
+    held: bool,
     /// What the IME is composing, before it is anything the shell has heard of
     /// (要件 7.2's problem, in a terminal).
     ///
@@ -1289,6 +1292,7 @@ impl TerminalView {
             history_origin: session.borrow().screen().history_origin(),
             last_revision: session.borrow().screen().revision(),
             unseen: false,
+            held: false,
             preedit: String::new(),
             drawn: 0,
             counted_since: None,
@@ -12471,6 +12475,19 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                     // 要件 8.3（書き手のレビュー 2026-09-11、S2）: **外で変わった
                     // まま片付いていない。**端末のタブは文書を持たないので出ない。
                     outside: !tab.stands_in() && !tab.empty && tab.document.outside.get(),
+                    // RFN01-95: a shell of this tab — its own, or one in the
+                    // strip along its foot — called while nobody was there.
+                    attention: tab
+                        .terminal
+                        .iter()
+                        .chain(tab.below.shell.iter())
+                        .any(|s| s.borrow().wants_attention())
+                        || tab.below.entries.iter().any(|e| {
+                            e.borrow()
+                                .shell
+                                .as_ref()
+                                .is_some_and(|s| s.borrow().wants_attention())
+                        }),
                     // 追加要件 2026-09-06: only a tab standing for a file has a
                     // name on disk to change. 無題1 reads like a name on screen,
                     // and nothing is filed under it.
@@ -18936,6 +18953,37 @@ fn lay_out_pane(
 /// texture (measured, 181×85); paying that for every chunk of output is what
 /// makes a program that redraws itself look broken rather than slow. Each band
 /// is keyed by what is in it, so a keystroke redraws one.
+/// RFN01-95: draw this shell again once the synchronized update it is in has
+/// had `wait` to finish. **One timer at a time**: output keeps arriving during
+/// an update, and each chunk would otherwise set another.
+fn hold_terminal(
+    window: &AppWindow,
+    cache: &Rc<RefCell<RenderCache>>,
+    id: PaneId,
+    spot: TerminalSpot,
+    wait: Duration,
+) {
+    let first = cache
+        .borrow_mut()
+        .pane(id)
+        .shell(spot)
+        .is_some_and(|shell| !std::mem::replace(&mut shell.held, true));
+    if !first {
+        return;
+    }
+    let weak = window.as_weak();
+    let cache = cache.clone();
+    Timer::single_shot(wait, move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        if let Some(shell) = cache.borrow_mut().pane(id).shell(spot) {
+            shell.held = false;
+        }
+        refresh_terminal(&window, &cache, id, spot);
+    });
+}
+
 fn refresh_terminal(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
@@ -18964,6 +19012,14 @@ fn refresh_terminal(
     let mut session = session.borrow_mut();
     session.resize(columns, rows);
     session.drain();
+    // RFN01-95: **the program is half-way through one update** (DECSET 2026).
+    // Drawn now, the writer sees it half-drawn — the flicker an agent's screen
+    // makes. Drawn when it ends, or after the hold whatever happens.
+    if let Some(wait) = session.screen().synchronized_wait() {
+        drop(session);
+        hold_terminal(window, cache, id, spot, wait);
+        return;
+    }
     let screen = session.screen();
 
     // **What this shell is being looked at from**: the last `rows` of the

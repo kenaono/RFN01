@@ -239,6 +239,62 @@ fn terminal_new_tab_random_and_direct_file_capture() {
             .contains("DIRECT_CAPTURE")
     );
 }
+/// RFN01-95: a bell while the keyboard is elsewhere puts the bell on the tab;
+/// the keyboard coming to the shell takes it away.
+#[test]
+#[ignore = "starts real ConPTY shells; run explicitly"]
+fn a_bell_marks_the_tab_until_the_keyboard_comes() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    terminal_workflow::install(&h.window, &h.live);
+    let id = PaneId::FIRST;
+    new_terminal_tab(
+        &h.window,
+        &h.live,
+        id,
+        TerminalShell {
+            name: "QA".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        },
+    );
+    let source = h
+        .live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .unwrap()
+        .terminal
+        .clone()
+        .unwrap();
+    let marked = || {
+        publish_tabs(&h.window, &h.live);
+        let screen = id.screen(&h.window);
+        screen
+            .tabs
+            .row_data(screen.active_tab as usize)
+            .unwrap()
+            .attention
+    };
+    assert!(!marked());
+    source.borrow_mut().type_text("echo \x07\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until && !source.borrow().wants_attention() {
+        source.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+    }
+    assert!(marked(), "the bell is on the tab");
+    h.window.invoke_terminal_focus(id.index(), 0, true);
+    assert!(!marked(), "the keyboard came, and the bell went");
+    source.borrow_mut().type_text("echo \x07\r");
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        source.borrow_mut().wait(Duration::from_millis(30));
+        terminal_panels::drain(&h.window, &h.live);
+    }
+    assert!(!marked(), "a bell where the writer is typing is not a call");
+}
+
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 struct Offscreen(Rc<MinimalSoftwareWindow>);
 

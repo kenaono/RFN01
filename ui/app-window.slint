@@ -3562,6 +3562,7 @@ export component AppWindow inherits Window {
                         appearance-requested(panel) => { root.appearance-requested(pane.embedded-panel ? pane.panel-owner : pane.id, pane.embedded-panel || panel ? 2 : 1); }
                         panel-caret <=> pane.panel-caret;
                         panel-tabs: pane.panel-tabs;
+                        panel-attention: pane.panel-attention;
                         panel-active: pane.panel-active;
                         panel-read-only: pane.panel-read-only;
                         panel-follow: pane.panel-follow;

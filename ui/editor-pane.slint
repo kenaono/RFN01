@@ -247,6 +247,7 @@ export component EditorPane inherits Rectangle {
     callback appearance-requested(bool);
     in-out property <int> panel-caret;
     in property <[string]> panel-tabs;
+    in property <[bool]> panel-attention;
     in property <[string]> panel-file-names;
     in property <[int]> panel-file-stems;
     in property <string> panel-log-destination;
@@ -832,6 +833,7 @@ export component EditorPane inherits Rectangle {
                         title: tab.title;
                         edited: tab.edited;
                         outside: tab.outside;
+                        attention: tab.attention;
                         provisional: tab.provisional;
                         own: tab.colour-own;
                         own-colour: tab.colour;
@@ -1953,6 +1955,7 @@ export component EditorPane inherits Rectangle {
                         panel-strip := HorizontalLayout {
                             for title[index] in root.panel-tabs: Tab {
                                 title: title;
+                                attention: root.panel-attention[index];
                                 edit-title: root.panel-file-names[index];
                                 stem-length: root.panel-file-stems[index];
                                 current: index == root.panel-active;

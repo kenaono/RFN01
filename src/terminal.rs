@@ -243,7 +243,19 @@ pub struct Screen {
     history_origin: u64,
     capture: Option<CapturedOutput>,
     file_capture: Option<CapturedOutput>,
+    /// RFN01-95: `ESC[?2026h` — the program is in the middle of one update and
+    /// asks not to be drawn half-way. **When it started**, so that a program
+    /// that never says it is done is drawn anyway after [`SYNCHRONIZED_HOLD`].
+    synchronized_since: Option<std::time::Instant>,
+    /// RFN01-95: how many times the program asked for attention — a bell, or a
+    /// notification (OSC 9, OSC 777). A count rather than a flag, so that a
+    /// pane can tell a new one from one it has already shown.
+    attention: u64,
 }
+
+/// RFN01-95: the longest a synchronized update is waited for before the
+/// screen is drawn as it stands.
+pub const SYNCHRONIZED_HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(Debug, Default)]
 struct CapturedOutput {
@@ -282,7 +294,26 @@ impl Screen {
             history_origin: 0,
             capture: None,
             file_capture: None,
+            synchronized_since: None,
+            attention: 0,
         }
+    }
+
+    /// RFN01-95: how much longer to wait before drawing, while the program is
+    /// in the middle of a synchronized update. `None` means draw now.
+    pub fn synchronized_wait(&self) -> Option<std::time::Duration> {
+        let since = self.synchronized_since?;
+        let waited = since.elapsed();
+        (waited < SYNCHRONIZED_HOLD).then(|| SYNCHRONIZED_HOLD - waited)
+    }
+
+    /// RFN01-95: how many bells and notifications have arrived so far.
+    pub fn attention(&self) -> u64 {
+        self.attention
+    }
+
+    fn ask_attention(&mut self) {
+        self.attention = self.attention.wrapping_add(1);
     }
 
     pub fn columns(&self) -> usize {
@@ -1173,9 +1204,44 @@ impl Screen {
             // Cursor blinking and the Escape-key mode: nothing here to change.
             12 | 7727 => {}
             2004 => self.modes.bracketed_paste = on,
+            // RFN01-95: one update, drawn when it is finished. **A second `h`
+            // keeps the first start**, so a program repeating it cannot hold
+            // the screen for ever.
+            2026 => {
+                if on {
+                    self.synchronized_since
+                        .get_or_insert_with(std::time::Instant::now);
+                } else {
+                    self.synchronized_since = None;
+                    self.touch();
+                }
+            }
             9001 => self.modes.win32_input = on,
             _ => self.note_unhandled(format!("CSI ?{mode}{}", if on { 'h' } else { 'l' })),
         }
+    }
+
+    /// DECRQM for a private mode (`ESC[?Ps$p`): 1 set, 2 reset, 0 not known.
+    /// **Programs ask before they use synchronized updates** (RFN01-95), and
+    /// one that is not answered goes on drawing half-way.
+    fn report_private_mode(&mut self, mode: u16) {
+        let set = match mode {
+            1 => Some(self.modes.application_cursor_keys),
+            25 => Some(self.modes.cursor_visible),
+            1004 => Some(self.modes.focus_events),
+            1006 => Some(self.modes.mouse_sgr),
+            47 | 1047 | 1049 => Some(self.modes.alternate_screen),
+            2004 => Some(self.modes.bracketed_paste),
+            2026 => Some(self.synchronized_since.is_some()),
+            _ => None,
+        };
+        let value = match set {
+            Some(true) => 1,
+            Some(false) => 2,
+            None => 0,
+        };
+        let answer = format!("\x1b[?{mode};{value}$y");
+        self.replies.extend_from_slice(answer.as_bytes());
     }
 
     fn report(&mut self, kind: u16) {
@@ -1333,7 +1399,9 @@ impl Parser {
             0x09 => screen.tab(),
             0x0a..=0x0c => screen.line_feed(),
             0x0d => screen.carriage_return(),
-            // BEL and the rest of C0 say nothing about the screen.
+            // RFN01-95: a bell is how a program says it wants the writer.
+            0x07 => screen.ask_attention(),
+            // The rest of C0 says nothing about the screen.
             0x00..=0x1f | 0x7f => {}
             0x20..=0x7e => {
                 self.due = 0;
@@ -1507,6 +1575,9 @@ impl Parser {
                 screen.select_graphic_rendition(&groups);
                 self.groups = groups;
             }
+            b'p' if private && self.intermediate == Some(b'$') => {
+                screen.report_private_mode(self.at(0, 0));
+            }
             b'n' => screen.report(self.at(0, 0)),
             b'c' => {
                 if self.private.is_none() {
@@ -1549,6 +1620,16 @@ impl Parser {
         if kind == b"0" || kind == b"2" {
             screen.title = String::from_utf8_lossy(rest).into_owned();
             screen.touch();
+        }
+        // RFN01-95: a notification — OSC 9 (iTerm2, and what Codex sends) and
+        // OSC 777;notify (urxvt). **OSC 9 followed by a number and `;` is
+        // ConEmu's** (9;4 progress, 9;9 the folder), not a message.
+        let conemu = rest
+            .iter()
+            .position(|byte| *byte == b';')
+            .is_some_and(|at| at > 0 && rest[..at].iter().all(u8::is_ascii_digit));
+        if (kind == b"9" && !conemu) || (kind == b"777" && rest.starts_with(b"notify;")) {
+            screen.ask_attention();
         }
     }
 
@@ -2404,6 +2485,54 @@ mod tests {
         assert_eq!(it.screen.cursor().row, 1);
     }
 
+    /// RFN01-95: programs ask whether synchronized updates are understood,
+    /// then use them; a program that never finishes one is drawn anyway.
+    #[test]
+    fn synchronized_updates_are_answered_and_end() {
+        let mut it = terminal(10, 2);
+        it.feed(b"\x1b[?2026$p");
+        assert_eq!(it.screen.take_replies(), b"\x1b[?2026;2$y");
+        it.feed(b"\x1b[?2026h");
+        assert!(it.screen.synchronized_wait().is_some());
+        it.feed(b"\x1b[?2026$p");
+        assert_eq!(it.screen.take_replies(), b"\x1b[?2026;1$y");
+        let before = it.screen.revision();
+        it.feed(b"\x1b[?2026l");
+        assert!(it.screen.synchronized_wait().is_none());
+        assert!(
+            it.screen.revision() > before,
+            "the finished update is drawn"
+        );
+        it.feed(b"\x1b[?9999$p");
+        assert_eq!(it.screen.take_replies(), b"\x1b[?9999;0$y");
+        it.feed(b"\x1b[?2026h");
+        std::thread::sleep(SYNCHRONIZED_HOLD + std::time::Duration::from_millis(20));
+        assert!(
+            it.screen.synchronized_wait().is_none(),
+            "an update that never ends is not waited for"
+        );
+    }
+
+    /// RFN01-95: a bell, OSC 9 and OSC 777;notify call for the writer; the
+    /// bell that ends an OSC, and ConEmu's OSC 9;4 progress, do not.
+    #[test]
+    fn bells_and_notifications_are_counted() {
+        let mut it = terminal(10, 2);
+        it.feed(b"\x1b]0;title\x07");
+        assert_eq!(it.screen.attention(), 0);
+        it.feed(b"\x1b]9;Codex is done\x07");
+        assert_eq!(it.screen.attention(), 1);
+        it.feed(b"\x1b]9;4;1;50\x07");
+        it.feed(b"\x1b]9;9;C:\\work\x1b\\");
+        assert_eq!(it.screen.attention(), 1, "ConEmu's progress and folder");
+        it.feed(b"\x1b]777;notify;Claude;done\x1b\\");
+        assert_eq!(it.screen.attention(), 2);
+        it.feed(b"\x1b]777;preexec\x07");
+        assert_eq!(it.screen.attention(), 2);
+        it.feed(b"\x07");
+        assert_eq!(it.screen.attention(), 3);
+    }
+
     #[test]
     fn nothing_visible_changes_without_the_revision_moving() {
         let mut it = terminal(10, 2);
@@ -2413,6 +2542,7 @@ mod tests {
         assert!(it.screen.revision() > before);
         let settled = it.screen.revision();
         it.feed(b"\x00\x07");
+        assert_eq!(it.screen.attention(), 1, "but it is a call for the writer");
         assert_eq!(
             it.screen.revision(),
             settled,

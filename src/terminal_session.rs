@@ -70,6 +70,12 @@ pub struct TerminalSession {
     /// The cell the last pointer movement was reported from, so that moving
     /// within one cell is not a report per pixel.
     mouse_at: Option<(usize, usize)>,
+    /// RFN01-95: the keyboard is in this shell (the pane says so as its field
+    /// takes and loses the focus).
+    keyboard: bool,
+    /// RFN01-95: the screen's call count when the writer last had the keyboard
+    /// here. A higher count is a call nobody has answered yet.
+    attention_seen: u64,
 }
 
 impl TerminalSession {
@@ -137,6 +143,8 @@ impl TerminalSession {
             output,
             finished: false,
             mouse_at: None,
+            keyboard: false,
+            attention_seen: 0,
         })
     }
 
@@ -380,6 +388,29 @@ impl TerminalSession {
     }
 
     /// The pane gained or lost the keyboard.
+    /// RFN01-95: a bell or a notification arrived while the keyboard was
+    /// somewhere else, and the writer has not been here since.
+    pub fn wants_attention(&self) -> bool {
+        self.terminal.screen.attention() != self.attention_seen
+    }
+
+    /// RFN01-95: the keyboard came here or left. **Coming here answers every
+    /// call so far.** True when that took a mark away.
+    pub fn set_keyboard(&mut self, here: bool) -> bool {
+        self.keyboard = here;
+        self.settle_attention()
+    }
+
+    /// RFN01-95: a call that arrives while the writer is typing here is
+    /// answered as it arrives. True when a mark went away.
+    pub fn settle_attention(&mut self) -> bool {
+        let wanted = self.wants_attention();
+        if self.keyboard {
+            self.attention_seen = self.terminal.screen.attention();
+        }
+        wanted && !self.wants_attention()
+    }
+
     pub fn send_focus(&mut self, focused: bool) {
         let bytes = encode_focus(focused, self.terminal.screen.modes());
         self.send(&bytes);
