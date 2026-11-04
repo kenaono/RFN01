@@ -9,7 +9,7 @@ import { TitleMenuBar } from "title-menu-bar.slint";
 import { PresetRow } from "preset-row.slint";
 import { FormatButton, FormatButtons } from "format-bar.slint";
 export { FormatButton } from "format-bar.slint";
-import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow, ToggleChip } from "controls.slint";
+import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuInput, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow, ToggleChip } from "controls.slint";
 // **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
 // 窓の外から見えない。
 export { Ime }
@@ -729,6 +729,10 @@ export component AppWindow inherits Window {
     // modal dialog taking the window's focus away and giving it back, both
     // leave the editor unable to receive a keystroke until it is clicked again.
     in-out property <int> focus-generation: 0;
+    // RFN01-93: Escape in a settings field gives the keyboard back to the pane,
+    // so that the next one closes the settings.
+    property <int> field-left: MenuInput.field-left;
+    changed field-left => { root.focus-generation += 1; }
     // Which pane last held the keyboard, so that restoring it does not move it
     // to the other one in Split. Readable from Rust because leaving Split has
     // to carry the caret from the pane that was being written in (要件 7.2).

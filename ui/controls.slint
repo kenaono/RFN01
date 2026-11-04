@@ -227,6 +227,9 @@ export global MenuInput {
     in-out property <int> generation: 0;
     callback open-menu();
     callback dismiss-menu() -> bool;
+    /// RFN01-93: 設定の欄でEscapeを押した——鍵盤をペインへ戻す合図。
+    /// 窓がこれを見て`focus-generation`を進める。
+    in-out property <int> field-left: 0;
 }
 
 /// 「終わりまで」を表す選択の終端（`Field`）。**位置ではなく合図**なので、
@@ -1345,6 +1348,8 @@ export component NumberField inherits Rectangle {
     in property <string> unit;
     in property <length> field-width: 50px;
     callback committed(string);
+    /// 打ちかけを戻したあと（RFN01-93）。
+    callback escaped();
 
     property <bool> focused: field.has-focus;
     changed shown => {
@@ -1378,6 +1383,7 @@ export component NumberField inherits Rectangle {
             }
             escaped => {
                 self.text = root.shown;
+                root.escaped();
             }
         }
 
@@ -1874,6 +1880,9 @@ export component TextRow inherits Rectangle {
             committed(text) => {
                 root.typed(text);
             }
+            escaped => {
+                MenuInput.field-left += 1;
+            }
         }
 
         IconButton {
@@ -1897,6 +1906,9 @@ export component TextRow inherits Rectangle {
             unit: "pt";
             committed(text) => {
                 root.typed-points(text);
+            }
+            escaped => {
+                MenuInput.field-left += 1;
             }
         }
 

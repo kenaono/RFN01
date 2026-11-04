@@ -357,6 +357,22 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
         draw();
         assert_eq!(&*typed.borrow(), &[(0, 4, "250".to_owned())]);
 
+        // RFN01-93: Escape in a field gives the keyboard back to the pane, and
+        // the next one reaches the pane's way out instead of being swallowed
+        // with the other keys a settings tab keeps from the document.
+        let escapes = Rc::new(Cell::new(0));
+        let seen = escapes.clone();
+        window.on_pane_escaped(move |_| {
+            seen.set(seen.get() + 1);
+            true
+        });
+        key(Key::Escape.into());
+        draw();
+        assert_eq!(escapes.get(), 0, "the field's Escape only leaves the field");
+        key(Key::Escape.into());
+        draw();
+        assert_eq!(escapes.get(), 1);
+
         window.hide().unwrap();
     }
 
