@@ -253,6 +253,74 @@ pub struct Screen {
     attention: u64,
 }
 
+/// What a Ctrl+click in the terminal would open (RFN01-95).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    Url(String),
+    /// Written like a file name. `line` and `column` count from 1.
+    Path {
+        text: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
+}
+
+/// A link and the cells it covers: `(row, first column, end column)` for each
+/// row it is on, the end not included. **A wrapped link is on more than one.**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLink {
+    pub target: LinkTarget,
+    pub cells: Vec<(usize, usize, usize)>,
+}
+
+/// The link in `text` that covers byte `at`, as its byte range and target.
+/// URLs first: `https://example.com/a.md` is not a file.
+fn find_link(text: &str, at: usize) -> Option<(usize, usize, LinkTarget)> {
+    use std::sync::OnceLock;
+    static URL: OnceLock<regex::Regex> = OnceLock::new();
+    static PATH: OnceLock<regex::Regex> = OnceLock::new();
+    let url = URL.get_or_init(|| regex::Regex::new(r#"https?://[^\s<>"']+"#).unwrap());
+    for found in url.find_iter(text) {
+        let trimmed = found
+            .as_str()
+            .trim_end_matches(['.', ',', ';', ')', ']', '}']);
+        if found.start() <= at && at < found.start() + trimmed.len() {
+            let end = found.start() + trimmed.len();
+            return Some((found.start(), end, LinkTarget::Url(trimmed.to_owned())));
+        }
+        if found.start() <= at && at < found.end() {
+            return None;
+        }
+    }
+    // A name with an extension, after an optional drive, `./`, `../`, `/` or
+    // `~/`, through folders, then `:line` and `:column`. **Japanese names are
+    // names**: only what cannot be in a file name ends one.
+    let path = PATH.get_or_init(|| {
+        let part = r#"[^\s\\/:*?"<>|()\[\]{}'`,;]"#;
+        regex::Regex::new(&format!(
+            r#"(?:[A-Za-z]:[\\/]|\.{{1,2}}[\\/]|[\\/]|~[\\/])?(?:{part}+[\\/])*{part}+\.[A-Za-z0-9]{{1,10}}(?::(\d+))?(?::(\d+))?"#
+        ))
+        .unwrap()
+    });
+    let found = path
+        .captures_iter(text)
+        .find(|c| c.get(0).is_some_and(|m| m.start() <= at && at < m.end()))?;
+    let whole = found.get(0)?;
+    let number = |index| found.get(index).and_then(|m| m.as_str().parse().ok());
+    let line = number(1);
+    let column = number(2);
+    let name_end = found.get(1).map_or(whole.end(), |m| m.start() - 1);
+    Some((
+        whole.start(),
+        whole.end(),
+        LinkTarget::Path {
+            text: text[whole.start()..name_end].to_owned(),
+            line,
+            column,
+        },
+    ))
+}
+
 /// RFN01-95: the longest a synchronized update is waited for before the
 /// screen is drawn as it stands.
 pub const SYNCHRONIZED_HOLD: std::time::Duration = std::time::Duration::from_millis(200);
@@ -525,13 +593,30 @@ impl Screen {
         matches
     }
 
+    #[cfg(test)]
     pub fn url_at(&self, row: usize, column: usize) -> Option<String> {
+        match self.link_at(row, column)?.target {
+            LinkTarget::Url(url) => Some(url),
+            LinkTarget::Path { .. } => None,
+        }
+    }
+
+    /// What a Ctrl+click on this cell would open: a URL, or something written
+    /// like a file name with an optional `:line[:column]` (RFN01-95). **Rows
+    /// count from the top of the history**, as everywhere a view asks.
+    ///
+    /// Only the shape is read here. Whether such a file exists, and where it is
+    /// from, is the pane's question — this side knows no folders.
+    pub fn link_at(&self, row: usize, column: usize) -> Option<TerminalLink> {
         let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
         let mut first = row.min(lines.len().saturating_sub(1));
         while first > 0 && lines[first - 1].wrapped {
             first -= 1;
         }
         let mut text = String::new();
+        // Where each character of `text` came from: its byte, row, column and
+        // how many cells it takes.
+        let mut places: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut byte = None;
         for (at, line) in lines.iter().enumerate().skip(first) {
             for (col, cell) in line.cells.iter().enumerate() {
@@ -539,6 +624,7 @@ impl Screen {
                     byte = Some(text.len());
                 }
                 if !cell.trailing {
+                    places.push((text.len(), at, col, character_width(cell.text).max(1)));
                     text.push(cell.text);
                 }
             }
@@ -547,15 +633,18 @@ impl Screen {
             }
         }
         let byte = byte?;
-        let pattern = regex::Regex::new(r#"https?://[^\s<>\"']+"#).ok()?;
-        pattern
-            .find_iter(&text)
-            .find(|m| m.start() <= byte && byte < m.end())
-            .map(|m| {
-                m.as_str()
-                    .trim_end_matches(['.', ',', ';', ')', ']', '}'])
-                    .to_owned()
-            })
+        let (start, end, target) = find_link(&text, byte)?;
+        let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+        for &(at, row, col, width) in &places {
+            if at < start || at >= end {
+                continue;
+            }
+            match cells.last_mut() {
+                Some(last) if last.0 == row => last.2 = col + width,
+                _ => cells.push((row, col, col + width)),
+            }
+        }
+        Some(TerminalLink { target, cells })
     }
 
     /// What the shell asked for and has not been told yet. Send it up the pty.
@@ -2031,6 +2120,56 @@ mod tests {
         );
         terminal.screen.clear_screen();
         assert!(terminal.screen.search("example", false).is_empty());
+    }
+
+    /// RFN01-95: file names in what a shell or an agent printed, with the
+    /// cells to underline.
+    #[test]
+    fn file_names_with_lines_are_links() {
+        let path = |text: &str, line, column| LinkTarget::Path {
+            text: text.to_owned(),
+            line,
+            column,
+        };
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed("見て 第一章.md:120 と".as_bytes());
+        let link = terminal.screen.link_at(0, 6).unwrap();
+        assert_eq!(link.target, path("第一章.md", Some(120), None));
+        // 見て␣ is five cells; 第一章 six more; .md:120 seven.
+        assert_eq!(link.cells, vec![(0, 5, 18)]);
+        assert!(terminal.screen.link_at(0, 0).is_none(), "plain words");
+        assert!(terminal.screen.link_at(0, 19).is_none(), "after the name");
+
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed(b"Update(src/main.rs:45:7) done");
+        assert_eq!(
+            terminal.screen.link_at(0, 10).unwrap().target,
+            path("src/main.rs", Some(45), Some(7))
+        );
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed(b"D:\\work\\a b\\notes.txt, /mnt/d/x/y.md");
+        assert_eq!(
+            terminal.screen.link_at(0, 12).unwrap().target,
+            path("b\\notes.txt", None, None),
+            "a space ends a name"
+        );
+        assert_eq!(
+            terminal.screen.link_at(0, 25).unwrap().target,
+            path("/mnt/d/x/y.md", None, None)
+        );
+        // Wrapped onto the next row: both rows are underlined.
+        let mut terminal = Terminal::new(8, 3);
+        terminal.feed(b"abc/defgh.md:3");
+        let link = terminal.screen.link_at(1, 2).unwrap();
+        assert_eq!(link.target, path("abc/defgh.md", Some(3), None));
+        assert_eq!(link.cells, vec![(0, 0, 8), (1, 0, 6)]);
+        // A URL is not a file, even when it ends like one.
+        let mut terminal = Terminal::new(40, 3);
+        terminal.feed(b"https://example.com/a.md");
+        assert_eq!(
+            terminal.screen.link_at(0, 20).unwrap().target,
+            LinkTarget::Url("https://example.com/a.md".into())
+        );
     }
 
     #[test]

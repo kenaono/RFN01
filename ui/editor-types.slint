@@ -276,6 +276,10 @@ export struct PaneScreen {
     pane-paper: color,
     panel-caret: int,
     panel-tabs: [string],
+    /// RFN01-95: the link under the pointer while Ctrl is held, underlined —
+    /// in the tab's own shell and in the one along the foot.
+    terminal-link: [PreviewSelectionRect],
+    below-link: [PreviewSelectionRect],
     /// RFN01-95: the same mark as `TabInfo.attention`, one per strip tab.
     panel-attention: [bool],
     panel-active: int,

@@ -239,6 +239,11 @@ export component EditorPane inherits Rectangle {
     in-out property <int> below-behind;
     callback terminal-action(int, int);
     callback terminal-url(int, float, float);
+    /// RFN01-95: Ctrl over a shell (0 the tab's, 1 the one along the foot).
+    callback terminal-link-hover(int, float, float) -> bool;
+    in property <[PreviewSelectionRect]> terminal-link;
+    in property <[PreviewSelectionRect]> below-link;
+    property <bool> below-over-link: false;
     callback terminal-in-folder();
     in property <bool> terminal-new-output;
     in property <bool> below-new-output;
@@ -1797,6 +1802,8 @@ export component EditorPane inherits Rectangle {
             below-kind: root.below-kind;
             terminal-action(a0, a1) => { root.terminal-action(a0, a1); }
             terminal-url(a0, a1, a2) => { root.terminal-url(a0, a1, a2); }
+            terminal-link-hover(x, y) => { return root.terminal-link-hover(0, x, y); }
+            terminal-link: root.terminal-link;
             front-style: root.front-style;
             appearance-requested(a0) => { root.appearance-requested(a0); }
             panel-action(a0, a1) => { root.panel-action(a0, a1); }
@@ -2205,7 +2212,7 @@ export component EditorPane inherits Rectangle {
                     }
 
                     below-pointer := TouchArea {
-                        mouse-cursor: text;
+                        mouse-cursor: root.below-over-link ? MouseCursor.pointer : MouseCursor.text;
                         scroll-event(event) => {
                             if !event.modifiers.shift && root.terminal-mouse(
                                 1, 3, 3, self.mouse-x / 1px, self.mouse-y / 1px,
@@ -2224,6 +2231,21 @@ export component EditorPane inherits Rectangle {
                             if self.has-hover && !self.pressed {
                                 root.terminal-mouse(1, 2, 3, self.mouse-x / 1px, self.mouse-y / 1px, 0,
                                     false, false, false);
+                            }
+                            root.below-over-link = self.has-hover && !self.pressed
+                                && root.terminal-link-hover(1, self.mouse-x / 1px, self.mouse-y / 1px);
+                        }
+                        changed has-hover => {
+                            if !self.has-hover { root.below-over-link = false; }
+                        }
+                        // RFN01-95: the link Ctrl is over, underlined.
+                        if root.below-over-link: Rectangle {
+                            for line in root.below-link: Rectangle {
+                                x: line.x * 1px;
+                                y: line.y * 1px;
+                                width: line.width * 1px;
+                                height: line.height * 1px;
+                                background: root.panel-style.ink;
                             }
                         }
                         pointer-event(event) => {

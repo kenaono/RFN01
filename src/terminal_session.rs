@@ -76,6 +76,10 @@ pub struct TerminalSession {
     /// RFN01-95: the screen's call count when the writer last had the keyboard
     /// here. A higher count is a call nobody has answered yet.
     attention_seen: u64,
+    /// RFN01-95/97: the shell this was started as, and the Windows folder it
+    /// started in when one is known — where a file name it prints is looked
+    /// for, and what a restart starts again.
+    profile: Option<(crate::TerminalShell, Option<std::path::PathBuf>)>,
 }
 
 impl TerminalSession {
@@ -145,6 +149,7 @@ impl TerminalSession {
             mouse_at: None,
             keyboard: false,
             attention_seen: 0,
+            profile: None,
         })
     }
 
@@ -388,6 +393,22 @@ impl TerminalSession {
     }
 
     /// The pane gained or lost the keyboard.
+    /// RFN01-95/97: what this shell was started as, and where.
+    pub fn set_profile(&mut self, shell: crate::TerminalShell, folder: Option<std::path::PathBuf>) {
+        self.profile = Some((shell, folder));
+    }
+
+    pub fn profile(&self) -> Option<&crate::TerminalShell> {
+        self.profile.as_ref().map(|(shell, _)| shell)
+    }
+
+    /// RFN01-95: the Windows folder relative file names are read from.
+    pub fn folder(&self) -> Option<&std::path::Path> {
+        self.profile
+            .as_ref()
+            .and_then(|(_, folder)| folder.as_deref())
+    }
+
     /// RFN01-95: a bell or a notification arrived while the keyboard was
     /// somewhere else, and the writer has not been here since.
     pub fn wants_attention(&self) -> bool {

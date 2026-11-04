@@ -85,6 +85,10 @@ export component EditorSurface inherits Rectangle {
     in property <int> below-kind;
     callback terminal-action(int, int);
     callback terminal-url(int, float, float);
+    /// RFN01-95: Ctrl over the shell — is there a link under the pointer? Rust
+    /// underlines it (`terminal-link`).
+    callback terminal-link-hover(float, float) -> bool;
+    in property <[PreviewSelectionRect]> terminal-link;
     in property <PanelStyle> front-style;
     callback appearance-requested(bool);
     callback panel-action(int, int);
@@ -765,8 +769,10 @@ export component EditorSurface inherits Rectangle {
                             }
                             key-pressed(event) => {
                                 // 書き手の求め 2026-09-22: 止まったポインタの下でも、Ctrlを押せば手の形に。
-                                if event.text == Key.Control && root.pointer-inside && !root.terminal {
-                                    root.over-link = root.link-hover(root.pointer-at-x, root.pointer-at-y);
+                                if event.text == Key.Control && root.pointer-inside {
+                                    root.over-link = root.terminal
+                                        ? root.terminal-link-hover(root.pointer-at-x, root.pointer-at-y)
+                                        : root.link-hover(root.pointer-at-x, root.pointer-at-y);
                                 }
                                 // RFN01-49: キャレットの所の表のマス目は、キーを押せば閉じる。Escはそこで止め、
                                 // ほかのキーは閉じてからいつもどおり効く。
@@ -1369,13 +1375,25 @@ export component EditorSurface inherits Rectangle {
                                     root.terminal-mouse(2, 3, self.mouse-x / 1px, self.mouse-y / 1px, 0,
                                         false, false, false);
                                 }
-                                root.over-link = self.has-hover && !self.pressed && !root.terminal
-                                    && root.link-hover(root.pointer-at-x, root.pointer-at-y);
+                                root.over-link = self.has-hover && !self.pressed
+                                    && (root.terminal
+                                        ? root.terminal-link-hover(root.pointer-at-x, root.pointer-at-y)
+                                        : root.link-hover(root.pointer-at-x, root.pointer-at-y));
                             }
                             changed has-hover => {
                                 root.pointer-inside = self.has-hover;
                                 if !self.has-hover {
                                     root.over-link = false;
+                                }
+                            }
+                            // RFN01-95: the link Ctrl is over, underlined in the shell's ink.
+                            if root.terminal && root.over-link: Rectangle {
+                                for line in root.terminal-link: Rectangle {
+                                    x: line.x * 1px;
+                                    y: line.y * 1px;
+                                    width: line.width * 1px;
+                                    height: line.height * 1px;
+                                    background: root.front-style.ink;
                                 }
                             }
                         }

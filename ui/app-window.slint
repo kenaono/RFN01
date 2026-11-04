@@ -945,6 +945,8 @@ export component AppWindow inherits Window {
     callback terminal-focus(int, int, bool);
     /// The strip along the foot of a pane (追加要件 Terminal).
     callback terminal-url(int, int, float, float);
+    /// RFN01-95: Ctrl over a shell's link (pane, spot, x, y).
+    callback pane-terminal-link-hover(int, int, float, float) -> bool;
     callback terminal-action(int, int, int);
     callback panel-action(int, int, int);
     callback panel-scrolled(int, float, float);
@@ -3554,6 +3556,9 @@ export component AppWindow inherits Window {
                         below-behind <=> pane.below-behind;
                         terminal-in-folder => { root.shell-profile-action(8, 0); }
                         terminal-url(spot, x, y) => { root.terminal-url(pane.id, spot, x, y); }
+                        terminal-link-hover(spot, x, y) => { return root.pane-terminal-link-hover(pane.id, spot, x, y); }
+                        terminal-link: pane.terminal-link;
+                        below-link: pane.below-link;
                         terminal-action(spot, action) => { root.terminal-action(pane.id, spot, action); }
                         terminal-new-output: pane.terminal-new-output;
                         below-new-output: pane.below-new-output;

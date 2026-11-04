@@ -19532,6 +19532,10 @@ fn start_shell(
     ) {
         Ok(mut session) => {
             session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
+            session.set_profile(
+                shell.clone(),
+                terminal_shells::windows_folder(&shell.directory),
+            );
             live.cache.borrow_mut().log_diag(
                 "terminal",
                 &format!(
