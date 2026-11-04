@@ -986,8 +986,9 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
         .flat_map(|t| t.terminal.iter().chain(t.below.shell.iter()).cloned())
         .collect();
     // RFN01-95: whether any tab's bell came or went, so the strips are
-    // published again only then.
-    let mut marks_moved = false;
+    // published again only then. Who has the keyboard is settled first, so a
+    // bell where the writer is typing is answered as it arrives.
+    let mut marks_moved = crate::terminal_workflow::settle_keyboard(window, live);
     for session in sessions {
         let mut session = session.borrow_mut();
         session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);

@@ -1261,6 +1261,10 @@ struct TerminalView {
     /// RFN01-95: a draw is waiting for the end of a synchronized update, and a
     /// timer is already set to make it.
     held: bool,
+    /// RFN01-97: when a shell put back from the last run was first asked to be
+    /// drawn. It starts [`SETTLE_BEFORE_START`] later, at the size the pane has
+    /// settled at.
+    waiting_since: Option<Instant>,
     /// What the IME is composing, before it is anything the shell has heard of
     /// (要件 7.2's problem, in a terminal).
     ///
@@ -1293,6 +1297,7 @@ impl TerminalView {
             last_revision: session.borrow().screen().revision(),
             unseen: false,
             held: false,
+            waiting_since: None,
             preedit: String::new(),
             drawn: 0,
             counted_since: None,
@@ -12410,6 +12415,9 @@ fn sync_active_tab(window: &AppWindow, live: &Live) {
 /// and it is the focused pane's — the one whose tabs the buttons above would
 /// act on. Moving them inside the panes is the next step (ペイン分割設計 6).
 fn publish_tabs(window: &AppWindow, live: &Live) {
+    // RFN01-95: a tab that has just come to the front with the keyboard has
+    // answered its shell's bell.
+    terminal_workflow::settle_keyboard(window, live);
     publish_workspace_root_highlights(window, live);
     publish_search_highlights(window, live);
     observe_folder_autosave(window, live);
@@ -18964,6 +18972,10 @@ fn lay_out_pane(
 /// texture (measured, 181×85); paying that for every chunk of output is what
 /// makes a program that redraws itself look broken rather than slow. Each band
 /// is keyed by what is in it, so a keystroke redraws one.
+/// RFN01-97: how long a shell put back from the last run waits, after it is
+/// first asked to be drawn, before it starts.
+const SETTLE_BEFORE_START: Duration = Duration::from_millis(300);
+
 /// RFN01-95: draw this shell again once the synchronized update it is in has
 /// had `wait` to finish. **One timer at a time**: output keeps arriving during
 /// an update, and each chunk would otherwise set another.
@@ -19025,6 +19037,21 @@ fn refresh_terminal(
     // drawn**, at the size it is drawn at — every shell on every tab at once
     // would be a dozen processes for a window showing one of them.
     if session.is_waiting() {
+        // **Not at the first draw**: at startup that comes before the window
+        // has its size (measured: 77×6 for a pane that settles at 140×34), and
+        // what the last run printed would be laid out on six rows and pushed
+        // into the history. The pane is given a moment to settle first.
+        let since = cache
+            .borrow_mut()
+            .pane(id)
+            .shell(spot)
+            .map(|shell| *shell.waiting_since.get_or_insert_with(Instant::now));
+        let waited = since.map_or(SETTLE_BEFORE_START, |since| since.elapsed());
+        if waited < SETTLE_BEFORE_START {
+            drop(session);
+            hold_terminal(window, cache, id, spot, SETTLE_BEFORE_START - waited);
+            return;
+        }
         let weak = window.as_weak();
         let wake = move || {
             let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());

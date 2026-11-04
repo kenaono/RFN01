@@ -384,6 +384,67 @@ fn pointer(
     taken
 }
 
+thread_local! {
+    /// RFN01-95: the pane whose strip along the foot has the keyboard, if one
+    /// has. **Told by the strip's own field**, which is a separate element
+    /// and so does say when it takes and loses the keyboard.
+    static BELOW_KEYS: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// RFN01-95: tell every shell whether the keyboard is in it, and answer the
+/// bell of the one where it is. True when a mark went away.
+///
+/// **Worked out from where things are, not from focus signals.** Switching
+/// tabs inside one pane keeps the same field focused, so no signal says the
+/// keyboard moved from a document to the shell that took its place (measured
+/// in the app, 2026-11-04: the bell stayed after the tab was opened). The
+/// keyboard is in the shell in front of the pane that has it — the strip's
+/// when that has it.
+pub(crate) fn settle_keyboard(window: &AppWindow, live: &Live) -> bool {
+    let mut pane = focused_pane(window);
+    if pane.is_panel() {
+        pane = PaneId::from_index(pane.screen(window).panel_owner);
+    }
+    let below = BELOW_KEYS.get() == Some(pane.index());
+    let keyed = live.tabs.borrow().of(pane).current().and_then(|tab| {
+        if below {
+            tab.below
+                .entries
+                .get(tab.below.active)
+                .and_then(|entry| entry.borrow().shell.clone())
+                .or_else(|| tab.below.shell.clone())
+        } else {
+            tab.terminal.clone()
+        }
+    });
+    let mut answered = false;
+    let tabs = live.tabs.borrow();
+    let shells = tabs
+        .panes
+        .iter()
+        .flat_map(|strip| &strip.tabs)
+        .flat_map(|tab| {
+            tab.terminal
+                .iter()
+                .cloned()
+                .chain(tab.below.shell.iter().cloned())
+                .chain(
+                    tab.below
+                        .entries
+                        .iter()
+                        .filter_map(|entry| entry.borrow().shell.clone()),
+                )
+                .collect::<Vec<_>>()
+        });
+    for shell in shells {
+        let here = keyed
+            .as_ref()
+            .is_some_and(|keyed| Rc::ptr_eq(keyed, &shell));
+        answered |= shell.borrow_mut().set_keyboard(here);
+    }
+    answered
+}
+
 /// RFN01-95: what a link in a shell opens, once it is known to be openable.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Opens {
@@ -625,13 +686,19 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
             if !borrowed.finished() {
                 borrowed.send_focus(focused);
             }
-            // RFN01-95: the keyboard coming here answers the bell.
-            let answered = borrowed.set_keyboard(focused);
             drop(borrowed);
-            if answered && let Some(window) = focus_window.upgrade() {
-                crate::publish_tabs(&window, &focus_live);
-                crate::refresh_terminal_panes(&window, &focus_live);
-            }
+        }
+        // RFN01-95: the keyboard coming to a shell answers its bell. Which
+        // shell has it is worked out again rather than taken from this one
+        // signal (`settle_keyboard`).
+        if spot == TerminalSpot::Below {
+            BELOW_KEYS.set(focused.then_some(pane));
+        }
+        if let Some(window) = focus_window.upgrade()
+            && settle_keyboard(&window, &focus_live)
+        {
+            crate::publish_tabs(&window, &focus_live);
+            crate::refresh_terminal_panes(&window, &focus_live);
         }
     });
     let weak = window.as_weak();

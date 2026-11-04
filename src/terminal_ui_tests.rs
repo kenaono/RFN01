@@ -267,16 +267,15 @@ fn a_bell_marks_the_tab_until_the_keyboard_comes() {
         .terminal
         .clone()
         .unwrap();
+    let shell_tab = h.live.tabs.borrow().of(id).active;
     let marked = || {
         publish_tabs(&h.window, &h.live);
         let screen = id.screen(&h.window);
-        screen
-            .tabs
-            .row_data(screen.active_tab as usize)
-            .unwrap()
-            .attention
+        screen.tabs.row_data(shell_tab).unwrap().attention
     };
     assert!(!marked());
+    // The writer goes back to the document; the shell rings behind it.
+    switch_to_tab(&h.window, &h.live, id, 0);
     source.borrow_mut().type_text("echo \x07\r");
     let until = Instant::now() + Duration::from_secs(5);
     while Instant::now() < until && !source.borrow().wants_attention() {
@@ -284,7 +283,9 @@ fn a_bell_marks_the_tab_until_the_keyboard_comes() {
         terminal_panels::drain(&h.window, &h.live);
     }
     assert!(marked(), "the bell is on the tab");
-    h.window.invoke_terminal_focus(id.index(), 0, true);
+    // **Opening the tab is the keyboard coming**: the same field keeps the
+    // focus, so no focus signal says so (measured in the app, 2026-11-04).
+    switch_to_tab(&h.window, &h.live, id, shell_tab);
     assert!(!marked(), "the keyboard came, and the bell went");
     source.borrow_mut().type_text("echo \x07\r");
     let until = Instant::now() + Duration::from_secs(2);
@@ -293,6 +294,75 @@ fn a_bell_marks_the_tab_until_the_keyboard_comes() {
         terminal_panels::drain(&h.window, &h.live);
     }
     assert!(!marked(), "a bell where the writer is typing is not a call");
+}
+
+/// RFN01-97: the shells along a document's foot come back as that strip's
+/// Terminal Panel tabs, in order, with the one in front in front — and are
+/// written down again the same way. **No shell is started**: they wait.
+#[test]
+fn the_shells_along_a_foot_come_back_waiting() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let shell = |name: &str| app_data::SessionShell {
+        name: name.to_owned(),
+        command: "cmd.exe /Q /D /K".to_owned(),
+        directory: String::new(),
+        output: None,
+    };
+    let stored = app_data::Session {
+        layout: "P 0".to_owned(),
+        panes: vec![app_data::SessionPane {
+            tabs: vec![app_data::SessionTab {
+                // A file: an untitled tab with no work copy is not put back.
+                origin: Some(
+                    std::env::current_dir()
+                        .unwrap()
+                        .join("testdata")
+                        .join("00_この一式について.md"),
+                ),
+                below: true,
+                below_shells: vec![shell("A"), shell("B")],
+                below_active: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new());
+    let tab = &tabs.panes[0].tabs[0];
+    assert!(tab.below.open);
+    assert_eq!(tab.below.entries.len(), 2);
+    assert_eq!(tab.below.active, 1);
+    let front = tab.below.shell.clone().expect("the one in front");
+    assert_eq!(front.borrow().name(), "B");
+    assert!(front.borrow().is_waiting(), "nothing has started");
+    let numbers: Vec<u32> = std::iter::once(tab.document.file.borrow().untitled_number())
+        .chain(
+            tab.below
+                .entries
+                .iter()
+                .map(|e| e.borrow().document.file.borrow().untitled_number()),
+        )
+        .collect();
+    assert_eq!(numbers, vec![0, 1, 2], "no untitled number is taken twice");
+    let again = session::session_tab(tab, true);
+    assert_eq!(
+        again
+            .below_shells
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+    assert_eq!(again.below_active, 1);
+    assert!(again.below_shells.iter().all(|s| s.output.is_some()));
+    assert!(
+        session::session_tab(tab, false)
+            .below_shells
+            .iter()
+            .all(|s| s.output.is_none()),
+        "off, no output is named"
+    );
 }
 
 /// RFN01-97: a shell tab is written into the session with what it printed;
