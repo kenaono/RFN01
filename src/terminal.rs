@@ -625,6 +625,34 @@ impl Screen {
         }
     }
 
+    /// RFN01-95（案A、書き手と合意 2026-11-04）: the folder named by the nearest
+    /// prompt at or above `row` — `user@host:/mnt/d/x$` (bash), `PS D:\x>`
+    /// (PowerShell), `D:\x>` (cmd). **What the shell says where it is**, after
+    /// any `cd`, without asking it to say so in any other way. The text as
+    /// written; the pane turns it into a Windows folder.
+    pub fn prompt_folder_above(&self, row: usize) -> Option<String> {
+        use std::sync::OnceLock;
+        static PROMPT: OnceLock<regex::Regex> = OnceLock::new();
+        let prompt = PROMPT.get_or_init(|| {
+            regex::Regex::new(
+                r"^(?:[^\s@]+@[^\s:]+:(?P<bash>[~/][^$#]*)[$#](?:\s|$)|PS (?P<ps>[A-Za-z]:\\[^>]*)>|(?P<cmd>[A-Za-z]:\\[^>]*)>)",
+            )
+            .unwrap()
+        });
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let last = row.min(lines.len().checked_sub(1)?);
+        // Far enough for the output of one command; a hover asks on every move.
+        let first = last.saturating_sub(5_000);
+        (first..=last).rev().find_map(|at| {
+            let text = lines[at].text();
+            let found = prompt.captures(&text)?;
+            ["bash", "ps", "cmd"]
+                .iter()
+                .find_map(|name| found.name(name))
+                .map(|m| m.as_str().trim_end().to_owned())
+        })
+    }
+
     /// What a Ctrl+click on this cell would open: a URL, or something written
     /// like a file name with an optional `:line[:column]` (RFN01-95). **Rows
     /// count from the top of the history**, as everywhere a view asks.
@@ -2144,6 +2172,45 @@ mod tests {
         );
         terminal.screen.clear_screen();
         assert!(terminal.screen.search("example", false).is_empty());
+    }
+
+    /// RFN01-95（案A）: the folder the nearest prompt above names.
+    #[test]
+    fn prompts_say_which_folder_the_shell_is_in() {
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed("ken@KN01:/mnt/d/原稿$ cd 第一部\r\n".as_bytes());
+        terminal.feed("ken@KN01:/mnt/d/原稿/第一部$ ls\r\n第一章.md\r\n".as_bytes());
+        assert_eq!(
+            terminal.screen.prompt_folder_above(2).as_deref(),
+            Some("/mnt/d/原稿/第一部"),
+            "the nearest one, after the cd"
+        );
+        assert_eq!(
+            terminal.screen.prompt_folder_above(0).as_deref(),
+            Some("/mnt/d/原稿")
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"PS D:\\work\\book> dir\r\na.md\r\n");
+        assert_eq!(
+            terminal.screen.prompt_folder_above(1).as_deref(),
+            Some("D:\\work\\book")
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"D:\\work>type a.md\r\nhello\r\n");
+        assert_eq!(
+            terminal.screen.prompt_folder_above(1).as_deref(),
+            Some("D:\\work")
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"ken@KN01:~/notes$ ls\r\na.md\r\n");
+        assert_eq!(
+            terminal.screen.prompt_folder_above(1).as_deref(),
+            Some("~/notes"),
+            "read as written; the pane cannot use it"
+        );
+        let mut terminal = Terminal::new(60, 12);
+        terminal.feed(b"just output\r\nmore\r\n");
+        assert_eq!(terminal.screen.prompt_folder_above(1), None);
     }
 
     /// RFN01-95: file names in what a shell or an agent printed, with the

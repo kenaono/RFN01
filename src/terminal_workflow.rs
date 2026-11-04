@@ -476,6 +476,16 @@ pub(crate) fn resolve_path(text: &str, folder: Option<&Path>) -> Option<PathBuf>
     (path.is_file() && opens_as_text(&path)).then_some(path)
 }
 
+/// RFN01-95（案A）: a prompt's folder as a Windows folder. `/mnt/d/…` and
+/// `D:\…` are; `~` and other Linux folders are not.
+fn prompt_folder(written: &str) -> Option<PathBuf> {
+    if let Some(path) = terminal_shells::wsl_mount(written) {
+        return Some(path);
+    }
+    let path = Path::new(written);
+    path.is_absolute().then(|| path.to_path_buf())
+}
+
 /// Pictures and the usual binaries are not opened from a shell (RFN01-95: 「エディタで
 /// 開けないファイルは何もしない」).
 fn opens_as_text(path: &Path) -> bool {
@@ -517,7 +527,15 @@ fn link_under(
     let opens = match link.target {
         terminal::LinkTarget::Url(url) => Opens::Url(url),
         terminal::LinkTarget::Path { text, line, column } => Opens::File {
-            path: resolve_path(&text, session.folder())?,
+            // RFN01-95（案A、書き手と合意 2026-11-04）: **the folder the nearest
+            // prompt names first** — after a `cd` it is where the shell, and an
+            // agent started there, is; a name in both folders means the one
+            // the prompt is in. Then the folder the shell started in.
+            path: screen
+                .prompt_folder_above(row)
+                .and_then(|folder| prompt_folder(&folder))
+                .and_then(|folder| resolve_path(&text, Some(&folder)))
+                .or_else(|| resolve_path(&text, session.folder()))?,
             line,
             column,
         },
@@ -827,6 +845,20 @@ mod tests {
             terminal_shells::windows_folder(""),
             std::env::current_dir().ok()
         );
+    }
+
+    #[test]
+    fn prompt_folders_have_windows_names() {
+        assert_eq!(
+            prompt_folder("/mnt/d/原稿/第一部"),
+            Some(PathBuf::from("D:\\原稿\\第一部"))
+        );
+        assert_eq!(
+            prompt_folder("D:\\work\\book"),
+            Some(PathBuf::from("D:\\work\\book"))
+        );
+        assert_eq!(prompt_folder("~/notes"), None);
+        assert_eq!(prompt_folder("/home/ken"), None);
     }
 
     #[test]
