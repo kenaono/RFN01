@@ -2097,13 +2097,24 @@ export component EditorPane inherits Rectangle {
                         }
                     }
 
-                    for tile in root.below-tiles: Image {
-                        x: tile.x * 1px;
-                        y: tile.y * 1px;
-                        width: tile.width * 1px;
-                        height: tile.height * 1px;
-                        source: tile.source;
-                        image-fit: fill;
+                    // RFN01-103: the band at the top stands partly above the strip,
+                    // so the pictures are clipped here — **only the pictures**: the
+                    // hidden field beside them must not be (see the note above).
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        clip: true;
+
+                        for tile in root.below-tiles: Image {
+                            x: tile.x * 1px;
+                            y: tile.y * 1px;
+                            width: tile.width * 1px;
+                            height: tile.height * 1px;
+                            source: tile.source;
+                            image-fit: fill;
+                        }
                     }
 
                     // **The strip has a hidden field of its own** (書き手の
