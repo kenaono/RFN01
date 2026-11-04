@@ -253,6 +253,11 @@ export component EditorPane inherits Rectangle {
     in-out property <int> panel-caret;
     in property <[string]> panel-tabs;
     in property <[bool]> panel-attention;
+    in property <[int]> panel-icons;
+    in property <[string]> panel-tips;
+    /// RFN01-98: a key pressed in a shell — is it one the window takes first
+    /// (the palette)?
+    callback terminal-shortcut(string, bool, bool, bool) -> bool;
     in property <[string]> panel-file-names;
     in property <[int]> panel-file-stems;
     in property <string> panel-log-destination;
@@ -839,6 +844,8 @@ export component EditorPane inherits Rectangle {
                         edited: tab.edited;
                         outside: tab.outside;
                         attention: tab.attention;
+                        shell-icon: tab.shell-icon;
+                        tip: tab.tip;
                         provisional: tab.provisional;
                         own: tab.colour-own;
                         own-colour: tab.colour;
@@ -1803,6 +1810,7 @@ export component EditorPane inherits Rectangle {
             terminal-action(a0, a1) => { root.terminal-action(a0, a1); }
             terminal-url(a0, a1, a2) => { root.terminal-url(a0, a1, a2); }
             terminal-link-hover(x, y) => { return root.terminal-link-hover(0, x, y); }
+            terminal-shortcut(t, c, a, s) => { return root.terminal-shortcut(t, c, a, s); }
             terminal-link: root.terminal-link;
             front-style: root.front-style;
             appearance-requested(a0) => { root.appearance-requested(a0); }
@@ -1963,6 +1971,8 @@ export component EditorPane inherits Rectangle {
                             for title[index] in root.panel-tabs: Tab {
                                 title: title;
                                 attention: root.panel-attention[index];
+                                shell-icon: root.panel-icons[index];
+                                tip: root.panel-tips[index];
                                 edit-title: root.panel-file-names[index];
                                 stem-length: root.panel-file-stems[index];
                                 current: index == root.panel-active;
@@ -2171,6 +2181,11 @@ export component EditorPane inherits Rectangle {
                         }
 
                     key-pressed(event) => {
+                        // RFN01-98: the palette before the shell, as in VS Code.
+                        if self.preedit-text == "" && (event.modifiers.control || event.modifiers.alt)
+                            && root.terminal-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) {
+                            return accept;
+                        }
                         if (event.modifiers.control && event.modifiers.shift && (event.text == "f" || event.text == "F" || event.text == "\u{6}")) { root.terminal-action(1, 0); return accept; }
                         if (event.modifiers.control && event.modifiers.shift && (event.text == "v" || event.text == "V")) { self.paste(); return accept; }
                         if (event.modifiers.control && event.text == "`") {

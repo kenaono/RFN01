@@ -70,6 +70,9 @@ pub struct TerminalSession {
     /// RFN01-97: the last run's output, put on the screen just before the shell
     /// starts (so it is laid out at the width it is shown at).
     restored: Option<(Vec<String>, String)>,
+    /// RFN01-99: the name the program had given this shell last run, shown
+    /// until it gives one again.
+    restored_title: Option<String>,
     terminal: Terminal,
     output: Receiver<Vec<u8>>,
     /// The shell has exited. **The screen stays** — what it last said is often
@@ -125,6 +128,7 @@ impl TerminalSession {
             pty: Some(pty),
             idle: None,
             restored: None,
+            restored_title: None,
             terminal: Terminal::new(columns, rows),
             output,
             finished: false,
@@ -153,6 +157,7 @@ impl TerminalSession {
             pty: None,
             idle: Some(idle),
             restored: Some((lines, when)),
+            restored_title: None,
             terminal: Terminal::new(80, 24),
             output,
             finished: false,
@@ -227,6 +232,46 @@ impl TerminalSession {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// RFN01-99: what the tab is called, and the whole of it for the tooltip
+    /// (empty when the two are the same). **The program's own name for it**
+    /// when it gave one — bash's `user@host: /mnt/d/原稿` cut to `原稿`, Claude
+    /// Code's thread as it is — and the shell's name and number otherwise.
+    pub fn tab_name(&self) -> (String, String) {
+        let title = self.given_title();
+        match title {
+            Some(title) => {
+                let shown = short_title(&title);
+                let tip = if shown == title { String::new() } else { title };
+                (shown, tip)
+            }
+            None => (self.title(), String::new()),
+        }
+    }
+
+    /// RFN01-99: the name the program gave this shell, if any — the one it
+    /// gave last run while it has not given one yet.
+    pub fn given_title(&self) -> Option<String> {
+        let now = self.terminal.screen.title().trim();
+        if now.is_empty() {
+            self.restored_title.clone()
+        } else {
+            Some(now.to_owned())
+        }
+    }
+
+    /// RFN01-99: put back the name from the last run.
+    pub fn set_restored_title(&mut self, title: Option<String>) {
+        self.restored_title = title.filter(|title| !title.trim().is_empty());
+    }
+
+    /// RFN01-99: which icon the tab carries — 1 Linux (WSL, bash), 2
+    /// PowerShell, 3 cmd, 4 any other shell. From the first word of the
+    /// command the shell was started with.
+    pub fn shell_icon(&self) -> i32 {
+        self.profile()
+            .map_or(4, |shell| shell_icon_for(&shell.command))
     }
 
     /// Unique within this run (the number in its title).
@@ -603,6 +648,49 @@ fn read_in_background(
     Ok(output)
 }
 
+/// RFN01-99: the icon for a shell started with `command` (see
+/// [`TerminalSession::shell_icon`]).
+pub fn shell_icon_for(command: &str) -> i32 {
+    let (program, _) = crate::terminal_shells::command_parts(command);
+    let stem = Path::new(program)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match stem.as_str() {
+        "wsl" | "bash" => 1,
+        "powershell" | "pwsh" => 2,
+        "cmd" => 3,
+        _ => 4,
+    }
+}
+
+/// RFN01-99（書き手の判断 2026-11-04：縮める）: a title that names a folder,
+/// cut to the folder's own name — `ken@KN01: /mnt/d/原稿/第一部` and
+/// `D:\原稿\第一部` are both `第一部`. Anything else is kept as it is.
+pub fn short_title(title: &str) -> String {
+    let title = title.trim();
+    // bash's `user@host: path` (Ubuntu's default), and `user@host:path`.
+    let path = match title.split_once(':') {
+        Some((who, rest))
+            if who.contains('@') && !who.contains(char::is_whitespace) && !rest.is_empty() =>
+        {
+            rest.trim()
+        }
+        _ => title,
+    };
+    let windows =
+        path.len() > 2 && path.as_bytes()[0].is_ascii_alphabetic() && path[1..].starts_with(":\\");
+    let unix = path.starts_with('/') || path == "~" || path.starts_with("~/");
+    if !(windows || unix) {
+        return title.to_owned();
+    }
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    match trimmed.rsplit(['/', '\\']).next() {
+        Some(last) if !last.is_empty() => last.to_owned(),
+        _ => path.to_owned(),
+    }
+}
+
 /// RFN01-97: the last run's lines as the screen is fed them — faint grey, then
 /// `──── Restored · <when> ────`, then the pen put back for the new shell.
 pub fn restored_screen(lines: &[String], when: &str) -> Vec<u8> {
@@ -619,6 +707,51 @@ pub fn restored_screen(lines: &[String], when: &str) -> Vec<u8> {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.stop_file_log();
+    }
+}
+
+#[cfg(test)]
+mod tab_names {
+    use super::*;
+
+    /// RFN01-99: a title naming a folder is cut to the folder; anything else
+    /// is kept.
+    #[test]
+    fn folder_titles_are_cut_to_the_folder() {
+        assert_eq!(short_title("ken@KN01: /mnt/d/原稿/第一部"), "第一部");
+        assert_eq!(short_title("ken@KN01:~/novel"), "novel");
+        assert_eq!(short_title("ken@KN01: ~"), "~");
+        assert_eq!(short_title("D:\\原稿\\第一部\\"), "第一部");
+        assert_eq!(short_title("/mnt/d/My Docs"), "My Docs");
+        assert_eq!(
+            short_title("C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+            "powershell.exe"
+        );
+        assert_eq!(short_title("✳ 第一章の推敲"), "✳ 第一章の推敲");
+        assert_eq!(
+            short_title("vim: notes.md"),
+            "vim: notes.md",
+            "no user@host"
+        );
+        assert_eq!(short_title("  Windows PowerShell "), "Windows PowerShell");
+    }
+
+    #[test]
+    fn the_command_says_which_icon() {
+        assert_eq!(shell_icon_for("wsl.exe"), 1);
+        assert_eq!(shell_icon_for("wsl -d Ubuntu"), 1);
+        assert_eq!(
+            shell_icon_for("C:\\Program Files\\Git\\bin\\bash.exe --login"),
+            4
+        );
+        assert_eq!(
+            shell_icon_for("\"C:\\Program Files\\Git\\bin\\bash.exe\" --login"),
+            1
+        );
+        assert_eq!(shell_icon_for("powershell.exe -NoLogo"), 2);
+        assert_eq!(shell_icon_for("pwsh.exe -NoLogo"), 2);
+        assert_eq!(shell_icon_for("cmd.exe /K"), 3);
+        assert_eq!(shell_icon_for("nu.exe"), 4);
     }
 }
 

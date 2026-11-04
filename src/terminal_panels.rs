@@ -211,9 +211,10 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         .iter()
         .map(|entry| {
             let entry = entry.borrow();
+            // RFN01-99: a shell's tab is named the way the strip above names one.
             let mut title = entry.shell.as_ref().map_or_else(
                 || entry.document.file.borrow().title(),
-                |s| s.borrow().title(),
+                |s| s.borrow().tab_name().0,
             );
             if entry.document.text.edited() {
                 title.push('*');
@@ -229,6 +230,28 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
         .entries
         .iter()
         .map(|e| e.borrow().document.file.borrow().title().into())
+        .collect();
+    let icons: Vec<i32> = below
+        .entries
+        .iter()
+        .map(|e| {
+            e.borrow()
+                .shell
+                .as_ref()
+                .map_or(0, |s| s.borrow().shell_icon())
+        })
+        .collect();
+    let tips: Vec<SharedString> = below
+        .entries
+        .iter()
+        .map(|e| {
+            e.borrow()
+                .shell
+                .as_ref()
+                .map(|s| s.borrow().tab_name().1)
+                .unwrap_or_default()
+                .into()
+        })
         .collect();
     let attention: Vec<bool> = below
         .entries
@@ -249,7 +272,9 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
             .panel_file_names
             .iter()
             .ne(file_names.iter().cloned())
-        || screen.panel_attention.iter().ne(attention.iter().copied());
+        || screen.panel_attention.iter().ne(attention.iter().copied())
+        || screen.panel_icons.iter().ne(icons.iter().copied())
+        || screen.panel_tips.iter().ne(tips.iter().cloned());
     if !names_changed
         && screen.panel_active == below.active as i32
         && screen.panel_read_only == read_only
@@ -269,6 +294,8 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
             ));
             screen.panel_file_names = ModelRc::new(VecModel::from(file_names));
             screen.panel_attention = ModelRc::new(VecModel::from(attention));
+            screen.panel_icons = ModelRc::new(VecModel::from(icons));
+            screen.panel_tips = ModelRc::new(VecModel::from(tips));
         }
         screen.panel_active = below.active as i32;
         screen.panel_read_only = read_only;
@@ -993,9 +1020,11 @@ pub(crate) fn drain(window: &AppWindow, live: &Live) {
         let mut session = session.borrow_mut();
         session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
         let before = session.wants_attention();
+        let named = session.tab_name();
         session.drain();
         session.settle_attention();
-        marks_moved |= session.wants_attention() != before;
+        // RFN01-99: the program renamed itself — the tab follows.
+        marks_moved |= session.wants_attention() != before || session.tab_name() != named;
         report_log_error(window, &mut session);
     }
     for entry in entries(live) {

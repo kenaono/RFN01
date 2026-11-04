@@ -144,6 +144,9 @@ pub struct SessionShell {
     pub command: String,
     pub directory: String,
     pub output: Option<String>,
+    /// RFN01-99: what the program running there had named it, shown on the
+    /// tab until it names it again.
+    pub title: Option<String>,
 }
 
 /// RFN01-97: where what the shells printed is kept between runs, one file each,
@@ -496,6 +499,13 @@ fn encode_shell(out: &mut String, key: &str, shell: &SessionShell) {
     if let Some(output) = &shell.output {
         out.push_str(&format!("{key}-output: {}\n", line(output)));
     }
+    if let Some(title) = shell
+        .title
+        .as_deref()
+        .filter(|title| !line(title).is_empty())
+    {
+        out.push_str(&format!("{key}-title: {}\n", line(title)));
+    }
 }
 
 /// 1行に収まる字か（E1の④）。
@@ -644,6 +654,8 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "shell-command"
             | "shell-folder"
             | "shell-output"
+            | "shell-title"
+            | "below-shell-title"
             | "below-shell-command"
             | "below-shell-folder"
             | "below-shell-output" => {
@@ -661,6 +673,7 @@ pub fn decode_session(raw: &str) -> Option<Session> {
                     match key.rsplit('-').next() {
                         Some("command") => shell.command = value.to_owned(),
                         Some("folder") => shell.directory = value.to_owned(),
+                        Some("title") => shell.title = Some(value.to_owned()),
                         _ => shell.output = Some(value.to_owned()),
                     }
                 }
@@ -1596,6 +1609,7 @@ mod tests {
                 String::new()
             },
             output: output.map(str::to_owned),
+            title: output.map(|_| format!("ken@KN01: /mnt/d/{name}")),
         };
         let mut session = session();
         session.panes[0].tabs[0].shell = Some(shell("WSL", Some("1-2.txt")));

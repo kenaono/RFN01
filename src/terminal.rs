@@ -424,7 +424,8 @@ impl Screen {
         self.modes
     }
 
-    #[cfg(test)]
+    /// What the program running here calls itself (OSC 0/2). RFN01-99: the
+    /// tab is named from it.
     pub fn title(&self) -> &str {
         &self.title
     }

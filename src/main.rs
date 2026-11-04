@@ -12499,6 +12499,14 @@ fn publish_tabs(window: &AppWindow, live: &Live) {
                                 .as_ref()
                                 .is_some_and(|s| s.borrow().wants_attention())
                         }),
+                    // RFN01-99: which shell, and its whole name when cut short.
+                    shell_icon: tab.terminal.as_ref().map_or(0, |s| s.borrow().shell_icon()),
+                    tip: tab
+                        .terminal
+                        .as_ref()
+                        .map(|s| s.borrow().tab_name().1)
+                        .unwrap_or_default()
+                        .into(),
                     // 追加要件 2026-09-06: only a tab standing for a file has a
                     // name on disk to change. 無題1 reads like a name on screen,
                     // and nothing is filed under it.
@@ -12689,7 +12697,8 @@ fn told_no_way(window: &AppWindow, forward: bool) {
 /// the list of all tabs must not disagree about it.
 fn tab_title(tab: &PaneTab) -> String {
     match &tab.terminal {
-        Some(session) => session.borrow().title(),
+        // RFN01-99: what the program running there calls it, or the shell.
+        Some(session) => session.borrow().tab_name().0,
         None if tab.empty => new_tab_name().to_owned(),
         None if tab.settings => settings_tab_name().to_owned(),
         None => tab
