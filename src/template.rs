@@ -6,8 +6,8 @@
 //! - The templates are the `.md` files directly in that folder; the folders
 //!   below it are not looked into. A template is called by its file name
 //!   without the `.md`.
-//! - A file made from a template is a `.md` file. A name typed without an
-//!   extension is given `.md`; a name with another extension is refused.
+//! - A template starts an untitled document (File ▸ New File ▸, the New Tab,
+//!   the tab strip's menu) or is put in at the caret (Insert ▸ Template…).
 //! - `{{title}}`, `{{date}}` and `{{time}}` are replaced, nothing else.
 
 use std::path::{Path, PathBuf};
@@ -46,19 +46,6 @@ fn markdown_stem(path: &Path) -> Option<String> {
         return None;
     }
     Some(path.file_stem()?.to_string_lossy().into_owned())
-}
-
-/// The name a file made from a template is given, or `None` when the writer
-/// typed another extension than `.md`.
-pub fn file_name(typed: &str) -> Option<String> {
-    match Path::new(typed)
-        .extension()
-        .and_then(|extension| extension.to_str())
-    {
-        None => Some(format!("{typed}.md")),
-        Some(extension) if extension.eq_ignore_ascii_case("md") => Some(typed.to_owned()),
-        Some(_) => None,
-    }
 }
 
 /// What a template says, with its three words replaced. `title` is the file's
@@ -109,15 +96,6 @@ mod tests {
         );
         assert_eq!(fill("{{title}}", "", at(14, 30)), "");
         assert_eq!(fill("{{time}}", "", at(14, 30)), "14:30");
-    }
-
-    #[test]
-    fn a_file_from_a_template_is_markdown() {
-        assert_eq!(file_name("メモ").as_deref(), Some("メモ.md"));
-        assert_eq!(file_name("メモ.md").as_deref(), Some("メモ.md"));
-        assert_eq!(file_name("メモ.MD").as_deref(), Some("メモ.MD"));
-        assert_eq!(file_name("メモ.txt"), None);
-        assert_eq!(file_name("v1.2"), None);
     }
 
     #[test]

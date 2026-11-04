@@ -11686,17 +11686,6 @@ fn begin_tree_entry(window: &AppWindow, live: &Live, parent: PathBuf, folder: bo
     );
     window.set_tree_new_name(suggested.into());
     window.set_tree_new_error("".into());
-    // RFN01-88: the templates a new file can start from — none for a folder.
-    let names: Vec<SharedString> = if folder {
-        Vec::new()
-    } else {
-        templates_in_use(live)
-            .into_iter()
-            .map(|template| template.name.into())
-            .collect()
-    };
-    window.set_tree_new_templates(ModelRc::from(Rc::new(VecModel::from(names))));
-    window.set_tree_new_template(-1);
     {
         let mut state = live.folder.borrow_mut();
         state.expanded.insert(parent.clone());
@@ -11726,52 +11715,11 @@ fn finish_tree_entry(window: &AppWindow, live: &Live, accept: bool) {
             return;
         }
     };
-    // RFN01-88: the template chosen under the name, by its name.
-    let chosen = usize::try_from(window.get_tree_new_template())
-        .ok()
-        .filter(|_| !folder)
-        .and_then(|at| window.get_tree_new_templates().row_data(at));
-    let mut filled = None;
-    let name = match &chosen {
-        None => name.to_owned(),
-        Some(chosen) => {
-            let Some(name) = template::file_name(name) else {
-                window.set_tree_new_error(
-                    pick(
-                        "テンプレートからは .md ファイルを作ります。",
-                        "Templates make .md files.",
-                    )
-                    .into(),
-                );
-                return;
-            };
-            let text = templates_in_use(live)
-                .into_iter()
-                .find(|template| template.name == chosen.as_str())
-                .and_then(|template| template::read(&template.path));
-            let Some(text) = text else {
-                window.set_tree_new_error(
-                    say!(
-                        "テンプレート「{chosen}」を読めません",
-                        "Cannot read the template \"{chosen}\""
-                    )
-                    .into(),
-                );
-                return;
-            };
-            let title = template::title_of(Some(Path::new(&name)));
-            filled = Some(template::fill(&text, &title, timestamp::now()));
-            name
-        }
-    };
     let path = parent.join(name);
     let result = if folder {
         file_tree::create_folder(&path)
     } else {
-        file_tree::create_file(&path).and_then(|()| match &filled {
-            Some(text) => std::fs::write(&path, text),
-            None => Ok(()),
-        })
+        file_tree::create_file(&path)
     };
     if let Err(error) = result {
         window.set_tree_new_error(say!("作れません: {error}", "Cannot create: {error}").into());

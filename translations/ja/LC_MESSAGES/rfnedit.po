@@ -1560,8 +1560,5 @@ msgstr "テンプレートフォルダー"
 msgid "Templates"
 msgstr "テンプレート"
 
-msgid "Template:"
-msgstr "テンプレート："
-
 msgid "Template"
 msgstr "テンプレート"

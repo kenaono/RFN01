@@ -428,10 +428,6 @@ export component AppWindow inherits Window {
     in-out property <int> tree-new-index: -1;
     in-out property <string> tree-new-name;
     in-out property <string> tree-new-error;
-    /// RFN01-88: the templates a new file can start from, and which is chosen
-    /// (-1: None). Empty for a folder, or with no Templates Folder.
-    in property <[string]> tree-new-templates;
-    in-out property <int> tree-new-template: -1;
     callback tree-new-finished(bool);
     callback tree-command(int);
     callback explorer-command(int);
@@ -2884,12 +2880,7 @@ export component AppWindow inherits Window {
 
                             for row[index] in root.left-rows: tree-row := Rectangle {
                                 // 追加要件 2026-09-15: 行の高さは字の大きさに合わせる（12pxで24px）。
-                                height: (root.left-tab == 4 && row.is-root ? root.tree-root-row-height : max(24px, root.left-size * 2px))
-                                    + (self.choosing-template ? 30px : 0px);
-                                // RFN01-88: the new file's row has the template
-                                // line under its name, when there are templates.
-                                property <bool> choosing-template: (root.left-tab == 0 || root.left-tab == 4)
-                                    && index == root.tree-new-index && root.tree-new-templates.length > 0;
+                                height: root.left-tab == 4 && row.is-root ? root.tree-root-row-height : max(24px, root.left-size * 2px);
                                 property <length> line-height: max(24px, root.left-size * 2px);
                                 property <int> reveal-generation: root.tree-reveal-generation;
                                 changed reveal-generation => {
@@ -3210,7 +3201,6 @@ export component AppWindow inherits Window {
 
                                 if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-new-index: Field {
                                     x: 8px + row.depth * root.left-size * 7px / 6 + root.left-size * 2.75px;
-                                    y: (tree-row.line-height - self.height) / 2;
                                     width: max(20px, parent.width - self.x - 4px);
                                     height: 24px;
                                     text <=> root.tree-new-name;
@@ -3218,69 +3208,6 @@ export component AppWindow inherits Window {
                                     accepted => { root.tree-new-finished(true); }
                                     escaped => { root.tree-new-finished(false); }
                                     edited => { root.tree-new-error = ""; }
-                                }
-                                // RFN01-88（書き手の決定 2026-11-04）: the template
-                                // the new file starts from, under its name.
-                                if tree-row.choosing-template: HorizontalLayout {
-                                    x: 8px + row.depth * root.left-size * 7px / 6 + root.left-size * 2.75px;
-                                    y: tree-row.line-height + 2px;
-                                    width: max(20px, parent.width - self.x - 4px);
-                                    height: 26px;
-                                    spacing: 6px;
-                                    Text {
-                                        text: @tr("Template:");
-                                        color: Tok.ink-muted;
-                                        font-size: 12px;
-                                        vertical-alignment: center;
-                                    }
-                                    Rectangle {
-                                        horizontal-stretch: 1;
-                                        TextButton {
-                                            width: parent.width;
-                                            wide: true;
-                                            title: root.tree-new-template >= 0 ? root.tree-new-templates[root.tree-new-template] : @tr("None");
-                                            clicked => { template-menu.show(); }
-                                        }
-                                        Icon {
-                                            x: parent.width - self.width - 8px;
-                                            y: (parent.height - self.height) / 2;
-                                            width: 12px;
-                                            height: 12px;
-                                            commands: Icons.down;
-                                            tint: Tok.ink-muted;
-                                        }
-                                        template-menu := PopupWindow {
-                                            x: 0px;
-                                            y: 28px;
-                                            width: max(160px, parent.width);
-                                            close-policy: close-on-click-outside;
-                                            MenuFrame {
-                                                width: max(160px, parent.width);
-                                                VerticalLayout {
-                                                    padding: 6px;
-                                                    spacing: 1px;
-                                                    MenuRow {
-                                                        title: @tr("None");
-                                                        checked: root.tree-new-template < 0;
-                                                        activated => {
-                                                            root.tree-new-template = -1;
-                                                            root.tree-new-error = "";
-                                                            template-menu.close();
-                                                        }
-                                                    }
-                                                    for name[at] in root.tree-new-templates: MenuRow {
-                                                        title: name;
-                                                        checked: at == root.tree-new-template;
-                                                        activated => {
-                                                            root.tree-new-template = at;
-                                                            root.tree-new-error = "";
-                                                            template-menu.close();
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                                 // RFN01-88: the Templates Folder's mark.
                                 if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-templates-index && index != root.tree-new-index: Text {
