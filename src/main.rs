@@ -11614,6 +11614,44 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
     }
 }
 
+/// RFN01-88: whether there is a folder for File ▸ New File in Folder… to make
+/// a file in — the Workspace in use, or the Explorer's folder.
+fn tree_new_file_ready(live: &Live) -> bool {
+    let folder = live.folder.borrow();
+    let workspace = folder.workspace.as_ref().is_some_and(|runtime| {
+        let runtime = runtime.borrow();
+        runtime.active_workspace().is_some() && !runtime.active_roots().is_empty()
+    });
+    workspace || folder.root.is_some()
+}
+
+/// RFN01-88 (File ▸ New File in Folder…): the tree's New File…, from the menu.
+/// **The tree is put in front first** — the Workspace's while one is in use,
+/// the Explorer otherwise — since the name is typed in its row. The folder is
+/// the one the tree's own button would use: the selected row's.
+fn tree_new_file_from_menu(window: &AppWindow, live: &Live) {
+    let tab = window.get_left_tab();
+    if !window.get_tree_open() || (tab != 0 && tab != 4) {
+        let wanted = if window.get_workspace_active() { 4 } else { 0 };
+        window.set_tree_open(true);
+        window.set_left_tab(wanted);
+        publish_left(window, live);
+    }
+    // **With nothing chosen in the tree, beside the document in front** — the
+    // folder a writer asking from the menu is working in — when it is in the
+    // tree. Otherwise the tree's own rule (ask, with more than one folder).
+    if live.folder.borrow().selected.is_none() {
+        let document = live.states.document(focused_pane(window));
+        let path = document.file.borrow().path().map(Path::to_path_buf);
+        let (roots, _) = tree_roots(&live.folder.borrow());
+        if let Some(path) = path.filter(|path| roots.iter().any(|root| path.starts_with(root))) {
+            live.folder.borrow_mut().selected = Some(path);
+            publish_tree(window, live);
+        }
+    }
+    tree_command(window, live, TreeCommand::NewFile);
+}
+
 /// Make the file or folder the writer has just named (要件 5.2).
 fn begin_tree_entry(window: &AppWindow, live: &Live, parent: PathBuf, folder: bool) {
     let suggested = file_tree::unique_name(

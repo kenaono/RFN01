@@ -30,6 +30,8 @@ enum Command {
     Print,
     Exit,
     FolderTerminal,
+    /// RFN01-88: 左の木の「新しいファイル…」——作り先のフォルダに名前欄を出す。
+    TreeNewFile,
     Undo(bool),
     Copy(bool),
     Paste,
@@ -1581,6 +1583,14 @@ fn build(
     match group {
         0 => {
             add!("新規文書", "New File", Command::NewFile, true);
+            // RFN01-88（書き手の決定 2026-11-04）: 木の「新しいファイル…」をメニュー
+            // （とパレット）からも。テンプレートから作る入口がここにある。
+            add!(
+                "新しいファイル…",
+                "New File in Folder…",
+                Command::TreeNewFile,
+                crate::tree_new_file_ready(live)
+            );
             let shells = Popup::new()?;
             for (i, shell) in configured_shells(window).iter().enumerate() {
                 row(
@@ -2697,6 +2707,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
             }
         }
         Command::FolderTerminal => terminal_shells::action(window, live, 8, 0),
+        Command::TreeNewFile => crate::tree_new_file_from_menu(window, live),
         Command::Undo(redo) => window.invoke_pane_undo(p, redo),
         Command::Paste => ui_action(
             window,
