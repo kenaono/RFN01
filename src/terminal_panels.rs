@@ -172,6 +172,24 @@ fn new_document(live: &Live) -> Rc<OpenDocument> {
     )
 }
 
+/// RFN01-97: a Terminal Panel tab for a shell put back from the last run.
+pub(crate) fn restored_entry(
+    window: &AppWindow,
+    number: u32,
+    shell: Rc<RefCell<TerminalSession>>,
+) -> Rc<RefCell<PanelDocument>> {
+    let document = OpenDocument::with_events(
+        DocumentFile::untitled(number),
+        String::new(),
+        Default::default(),
+    );
+    Rc::new(RefCell::new(PanelDocument::new(
+        window,
+        document,
+        Some(shell),
+    )))
+}
+
 pub(crate) fn sync_entry(tab: &mut PaneTab) {
     if let Some(entry) = tab.below.entries.get(tab.below.active) {
         let mut entry = entry.borrow_mut();

@@ -91,7 +91,10 @@ pub(crate) fn send(window: &AppWindow, live: &Live, input: Input) {
 
 pub(crate) fn needs_close(window: &AppWindow, tab: &PaneTab) -> bool {
     let shell = |s: &Rc<RefCell<TerminalSession>>| {
-        window.get_terminal_confirm_close() && !s.borrow().finished()
+        // RFN01-97: a shell put back from the last run and never shown has
+        // nothing running to lose.
+        let s = s.borrow();
+        window.get_terminal_confirm_close() && !s.finished() && !s.is_waiting()
     };
     tab.terminal
         .as_ref()

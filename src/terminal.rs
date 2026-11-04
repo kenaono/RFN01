@@ -375,6 +375,30 @@ impl Screen {
         (waited < SYNCHRONIZED_HOLD).then(|| SYNCHRONIZED_HOLD - waited)
     }
 
+    /// RFN01-97: everything this screen holds as plain lines, oldest first —
+    /// the history, then the primary screen (also while a full-screen program
+    /// has the other one up). **A wrapped row joins the next**, so the text is
+    /// laid out again at whatever width it is shown at; trailing blank lines
+    /// are left off.
+    pub fn plain_lines(&self) -> Vec<String> {
+        let screen = self.stowed.as_ref().unwrap_or(&self.lines);
+        let mut lines = Vec::new();
+        let mut pending = String::new();
+        for line in self.scrollback.iter().chain(screen.iter()) {
+            pending.push_str(&line.logical_text());
+            if !line.wrapped {
+                lines.push(std::mem::take(&mut pending).trim_end().to_owned());
+            }
+        }
+        if !pending.is_empty() {
+            lines.push(pending.trim_end().to_owned());
+        }
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+    }
+
     /// RFN01-95: how many bells and notifications have arrived so far.
     pub fn attention(&self) -> u64 {
         self.attention

@@ -167,6 +167,7 @@ pub fn wire_terminal_look(
             window.set_terminal_size(crate::TERMINAL_SIZE_DEFAULT);
             window.set_terminal_confirm_paste(true);
             window.set_terminal_confirm_close(true);
+            window.set_terminal_restore_output(true);
             window.set_terminal_history_limit(10_000);
             window.set_terminal_timestamp_format(crate::timestamp::DEFAULT_FORMAT.into());
             window.set_panel_defaults(Default::default());

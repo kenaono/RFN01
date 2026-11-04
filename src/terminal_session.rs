@@ -61,7 +61,15 @@ pub struct TerminalSession {
     number: u64,
     file_log: Option<FileLog>,
     log_error: Option<String>,
-    pty: Pty,
+    /// `None` while a shell put back from the last run is waiting to be shown
+    /// (RFN01-97): **it starts when it is first drawn** ([`Self::start_waiting`]).
+    pty: Option<Pty>,
+    /// Held while waiting, so the channel stays open and the empty shell is not
+    /// taken for one that ended.
+    idle: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    /// RFN01-97: the last run's output, put on the screen just before the shell
+    /// starts (so it is laid out at the width it is shown at).
+    restored: Option<(Vec<String>, String)>,
     terminal: Terminal,
     output: Receiver<Vec<u8>>,
     /// The shell has exited. **The screen stays** — what it last said is often
@@ -108,41 +116,15 @@ impl TerminalSession {
         wake: impl Fn() + Send + 'static,
     ) -> windows::core::Result<Self> {
         let mut pty = Pty::open_in(command, directory, columns as u16, rows as u16)?;
-        let reader = pty
-            .take_reader()
-            .expect("a freshly opened pty still has its reader");
-        let (sender, output) = channel::<Vec<u8>>();
-        let spawned = thread::Builder::new()
-            .name("rfnedit-terminal".to_owned())
-            .spawn(move || {
-                let mut buffer = vec![0_u8; CHUNK];
-                loop {
-                    // **Blocking, and that is the point**: nothing here spins,
-                    // and a shell that says nothing for an hour costs nothing.
-                    let read = match reader.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => read,
-                    };
-                    if sender.send(buffer[..read].to_vec()).is_err() {
-                        break;
-                    }
-                    wake();
-                }
-            });
-        if spawned.is_err() {
-            // Without the thread there is no terminal — reading on the window's
-            // thread is exactly what must not happen.
-            return Err(windows::core::Error::new(
-                windows::Win32::Foundation::E_FAIL,
-                "the terminal's reading thread could not be started",
-            ));
-        }
+        let output = read_in_background(&mut pty, wake)?;
         Ok(Self {
             name: name.to_owned(),
             number: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
             file_log: None,
             log_error: None,
-            pty,
+            pty: Some(pty),
+            idle: None,
+            restored: None,
             terminal: Terminal::new(columns, rows),
             output,
             finished: false,
@@ -153,8 +135,103 @@ impl TerminalSession {
         })
     }
 
+    /// RFN01-97: a shell from the last run, **not started yet**. It holds what
+    /// that run printed (`lines`, oldest first) and when it was put away
+    /// (`when`), and starts the first time it is drawn.
+    pub fn waiting(
+        shell: crate::TerminalShell,
+        folder: Option<std::path::PathBuf>,
+        lines: Vec<String>,
+        when: String,
+    ) -> Self {
+        let (idle, output) = channel::<Vec<u8>>();
+        Self {
+            name: shell.name.clone(),
+            number: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
+            file_log: None,
+            log_error: None,
+            pty: None,
+            idle: Some(idle),
+            restored: Some((lines, when)),
+            terminal: Terminal::new(80, 24),
+            output,
+            finished: false,
+            mouse_at: None,
+            keyboard: false,
+            attention_seen: 0,
+            profile: Some((shell, folder)),
+        }
+    }
+
+    /// RFN01-97: still waiting to be shown for the first time.
+    pub fn is_waiting(&self) -> bool {
+        self.pty.is_none() && !self.finished
+    }
+
+    /// RFN01-97: start a shell that was waiting. The last run's output goes on
+    /// the screen first, faint, with a line saying where it ends; the console
+    /// then starts below it.
+    pub fn start_waiting(
+        &mut self,
+        columns: usize,
+        rows: usize,
+        wake: impl Fn() + Send + 'static,
+    ) -> windows::core::Result<()> {
+        let Some((shell, _)) = self.profile.clone() else {
+            self.finished = true;
+            return Ok(());
+        };
+        self.terminal.screen.resize(columns, rows);
+        if let Some((lines, when)) = self.restored.take()
+            && !lines.is_empty()
+        {
+            self.terminal.feed(&restored_screen(&lines, &when));
+        }
+        let (command, directory) = crate::terminal_shells::launch(&shell);
+        let started = Pty::open_with(
+            &command,
+            directory.as_deref(),
+            columns as u16,
+            rows as u16,
+            true,
+        )
+        .and_then(|mut pty| read_in_background(&mut pty, wake).map(|output| (pty, output)));
+        match started {
+            Ok((pty, output)) => {
+                self.pty = Some(pty);
+                self.output = output;
+                self.idle = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.finished = true;
+                self.idle = None;
+                Err(error)
+            }
+        }
+    }
+
+    /// RFN01-97: what this shell printed, as lines of plain text, oldest first
+    /// and at most `limit` of them — the history and then the screen. A shell
+    /// that never started gives back what it was put back with.
+    pub fn output_lines(&self, limit: usize) -> Vec<String> {
+        let mut lines = match &self.restored {
+            Some((lines, _)) => lines.clone(),
+            None => self.terminal.screen.plain_lines(),
+        };
+        if lines.len() > limit {
+            lines.drain(..lines.len() - limit);
+        }
+        lines
+    }
+
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Unique within this run (the number in its title).
+    pub fn number(&self) -> u64 {
+        self.number
     }
 
     pub fn title(&self) -> String {
@@ -283,7 +360,7 @@ impl TerminalSession {
         }
         self.answer();
         self.collect_file_log();
-        if applied == 0 && (closed || self.pty.exited()) {
+        if applied == 0 && (closed || self.pty.as_ref().is_some_and(Pty::exited)) {
             self.finished = true;
             self.finish_file_log();
         }
@@ -319,8 +396,10 @@ impl TerminalSession {
     /// happens on every drain rather than when somebody thinks to do it.
     fn answer(&mut self) {
         let replies = self.terminal.screen.take_replies();
-        if !replies.is_empty() {
-            let _ = self.pty.write(&replies);
+        if let Some(pty) = &mut self.pty
+            && !replies.is_empty()
+        {
+            let _ = pty.write(&replies);
         }
     }
 
@@ -465,7 +544,9 @@ impl TerminalSession {
         if bytes.is_empty() {
             return;
         }
-        let _ = self.pty.write(bytes);
+        if let Some(pty) = &mut self.pty {
+            let _ = pty.write(bytes);
+        }
     }
 
     /// The pane changed size (要件 6.4).
@@ -479,8 +560,60 @@ impl TerminalSession {
             return;
         }
         self.terminal.screen.resize(columns, rows);
-        let _ = self.pty.resize(columns as u16, rows as u16);
+        if let Some(pty) = &mut self.pty {
+            let _ = pty.resize(columns as u16, rows as u16);
+        }
     }
+}
+
+/// Read the console's output on a thread of its own, waking the window for
+/// each chunk. **Without the thread there is no terminal** — reading on the
+/// window's thread is exactly what must not happen.
+fn read_in_background(
+    pty: &mut Pty,
+    wake: impl Fn() + Send + 'static,
+) -> windows::core::Result<Receiver<Vec<u8>>> {
+    let reader = pty
+        .take_reader()
+        .expect("a freshly opened pty still has its reader");
+    let (sender, output) = channel::<Vec<u8>>();
+    let spawned = thread::Builder::new()
+        .name("rfnedit-terminal".to_owned())
+        .spawn(move || {
+            let mut buffer = vec![0_u8; CHUNK];
+            loop {
+                // **Blocking, and that is the point**: nothing here spins,
+                // and a shell that says nothing for an hour costs nothing.
+                let read = match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                if sender.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+                wake();
+            }
+        });
+    if spawned.is_err() {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            "the terminal's reading thread could not be started",
+        ));
+    }
+    Ok(output)
+}
+
+/// RFN01-97: the last run's lines as the screen is fed them — faint grey, then
+/// `──── Restored · <when> ────`, then the pen put back for the new shell.
+pub fn restored_screen(lines: &[String], when: &str) -> Vec<u8> {
+    let mut out = String::from("\x1b[0m\x1b[90m");
+    for line in lines {
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out.push_str(&format!("──── Restored · {when} ────"));
+    out.push_str("\x1b[0m\r\n");
+    out.into_bytes()
 }
 
 impl Drop for TerminalSession {

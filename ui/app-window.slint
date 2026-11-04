@@ -1114,9 +1114,14 @@ export component AppWindow inherits Window {
     in-out property <string> shell-profile-directory;
     callback shell-profile-action(int, int);
     in-out property <bool> terminal-confirm-paste: true;
+    /// RFN01-97: write what the shells printed when the editor closes, and put
+    /// it back above the new shell next time. **On by default** (書き手の判断
+    /// 2026-11-04); off, only which shells were where comes back.
+    in-out property <bool> terminal-restore-output: true;
     in-out property <bool> terminal-confirm-close: true;
     in-out property <int> terminal-history-limit: 10000;
     changed terminal-confirm-paste => { root.terminal-settings-edited(); }
+    changed terminal-restore-output => { root.terminal-settings-edited(); }
     changed terminal-confirm-close => { root.terminal-settings-edited(); }
     changed terminal-history-limit => { root.terminal-settings-edited(); }
     /// What each log line starts with when a log is started with timestamps.
@@ -4494,6 +4499,10 @@ export component AppWindow inherits Window {
                                             CheckBox {
                                                 text: @tr("Confirm shell termination");
                                                 checked <=> root.terminal-confirm-close;
+                                            }
+                                            CheckBox {
+                                                text: @tr("Restore output after restart");
+                                                checked <=> root.terminal-restore-output;
                                             }
                                             HorizontalLayout {
                                                 spacing: 12px;

@@ -22,6 +22,7 @@ use slint::{ComponentHandle, PhysicalPosition, PhysicalSize};
 use crate::buffer::DocumentFile;
 use crate::open_document::OpenDocument;
 use crate::pane_layout::Layout;
+use crate::terminal_session::TerminalSession;
 use crate::{
     AppWindow, EditorState, Live, MAX_DOCUMENT_CHARACTERS, PaneId, PaneTab, PaneTabs,
     SAMPLE_MARKDOWN, TabBelow, TabView, Tabs, app_data, focused_pane, next_untitled_number,
@@ -59,10 +60,33 @@ pub fn open_session(
     // there are panes, and the tabs of the ones past the end go into the last
     // pane rather than being dropped.
     let last = PaneId(strips.len() as u32 - 1);
+    // RFN01-97: the untitled numbers the session and the work copies already
+    // use, so a shell's stand-in document takes none of them.
+    let mut reserved: Vec<u32> = session
+        .panes
+        .iter()
+        .flat_map(|pane| &pane.tabs)
+        .filter(|tab| tab.shell.is_none())
+        .map(|tab| tab.untitled)
+        .chain(
+            restored
+                .iter()
+                .map(|(document, _)| document.file.borrow().untitled_number()),
+        )
+        .collect();
     for (position, stored) in session.panes.iter().enumerate() {
         let id = PaneId::from_index(position as i32).min(last);
         for tab in &stored.tabs {
-            let Some(document) = document_for(window, tab, &restored, &placed) else {
+            // A shell's tab carries an empty untitled stand-in, which no work
+            // copy holds; it is made again rather than looked for.
+            let document = if tab.shell.is_some() {
+                let number = next_untitled_number(&reserved);
+                reserved.push(number);
+                Some(OpenDocument::untitled(number, window.as_weak()))
+            } else {
+                document_for(window, tab, &restored, &placed)
+            };
+            let Some(document) = document else {
                 continue;
             };
             if !placed.iter().any(|held| Rc::ptr_eq(held, &document)) {
@@ -95,19 +119,51 @@ pub fn open_session(
                 empty: tab.empty,
                 settings: false,
                 provisional: Cell::new(false),
-                // A session remembers documents. **A shell is not one** — it is
-                // a process that ended when the editor did, so a restored
-                // terminal tab would be a name with nothing behind it.
-                terminal: None,
-                // **The strip comes back empty and opens itself when the tab
-                // does.** Starting a shell for every restored tab at once would
-                // be a dozen processes for a window showing one of them.
+                // RFN01-97: **the shell this tab was, waiting to be shown** —
+                // it starts the first time it is drawn, with what it printed
+                // last time above it.
+                terminal: tab.shell.as_ref().map(waiting_shell),
+                // The strip opens itself when the tab does; its shells, too,
+                // wait to be drawn (RFN01-97).
                 below: TabBelow {
                     open: tab.below,
                     height: tab.below_height as f32,
                     ..TabBelow::default()
                 },
             });
+            if !tab.below_shells.is_empty() {
+                // **Numbered past every untitled document so far**, the strips'
+                // own and the panels' — the number names a work copy.
+                let mut taken: Vec<u32> = strips
+                    .iter()
+                    .flat_map(|strip| &strip.tabs)
+                    .flat_map(|tab| {
+                        std::iter::once(tab.document.file.borrow().untitled_number()).chain(
+                            tab.below
+                                .entries
+                                .iter()
+                                .map(|e| e.borrow().document.file.borrow().untitled_number()),
+                        )
+                    })
+                    .collect();
+                let strip = &mut strips[id.index() as usize];
+                let mut entries = Vec::new();
+                for stored in &tab.below_shells {
+                    let number = next_untitled_number(&taken);
+                    taken.push(number);
+                    entries.push(crate::terminal_panels::restored_entry(
+                        window,
+                        number,
+                        waiting_shell(stored),
+                    ));
+                }
+                if let Some(restored) = strip.tabs.last_mut() {
+                    let active = tab.below_active.min(entries.len() - 1);
+                    restored.below.shell = entries[active].borrow().shell.clone();
+                    restored.below.active = active;
+                    restored.below.entries = entries;
+                }
+            }
         }
         let strip = &mut strips[id.index() as usize];
         strip.active = stored.active.min(strip.tabs.len().saturating_sub(1));
@@ -278,6 +334,7 @@ pub fn open_without_session(
 
 /// What is on screen, in the form the session keeps it (要件 8.5).
 pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
+    let keep_output = window.get_terminal_restore_output();
     let tabs = live.tabs.borrow();
     let panes = PaneId::all(window)
         .iter()
@@ -288,30 +345,26 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
                     .tabs
                     .iter()
                     .take(strip.active)
-                    .filter(|tab| !tab.stands_in() && !tab.document.read_only())
+                    .filter(|tab| remembered(tab))
                     .count()
                     .min(
                         strip
                             .tabs
                             .iter()
-                            .filter(|tab| !tab.stands_in() && !tab.document.read_only())
+                            .filter(|tab| remembered(tab))
                             .count()
                             .saturating_sub(1),
                     ),
                 zoom: id.zoom(window),
                 paper: to_stored(&strip.paper),
-                // **A shell is not written down** (追加要件 Terminal). The
-                // process ends with the editor, so a remembered terminal tab
-                // would come back as its stand-in document — an empty 無題
-                // nobody asked for.
+                // RFN01-97（2026-11-04、書き手との合意）: **シェルのTABも書く**——
+                // 前は書かなかった（終われば中身の無いTABになる）。いまは
+                // どのシェルだったかを書き、次の起動で同じシェルを始め直す。
                 tabs: strip
                     .tabs
                     .iter()
-                    // 設定のTABも同じ（追加要件 2026-09-14）：開き直せば済み、
-                    // 戻ってきても代役の空文書でしかない。
-                    .filter(|tab| !tab.stands_in())
-                    .filter(|tab| !tab.document.read_only())
-                    .map(session_tab)
+                    .filter(|tab| remembered(tab))
+                    .map(|tab| session_tab(tab, keep_output))
                     .collect(),
             }
         })
@@ -456,9 +509,141 @@ pub fn window_place(window: &AppWindow) -> Option<app_data::WindowPlace> {
 ///
 /// The document is named the way a work copy names one — by its file, or by its
 /// untitled number — so that the two are matched up when they come back.
-pub fn session_tab(tab: &PaneTab) -> app_data::SessionTab {
+/// Whether a tab is written into the session. **The settings are not**
+/// (追加要件 2026-09-14: 開き直せば済む), nor a document only being viewed; a
+/// shell is, when it is known which shell it was (RFN01-97).
+fn remembered(tab: &PaneTab) -> bool {
+    !tab.settings
+        && !tab.document.read_only()
+        && tab
+            .terminal
+            .as_ref()
+            .is_none_or(|shell| shell.borrow().profile().is_some())
+}
+
+/// RFN01-97: the run this is, for naming output files. **A number per run**, so
+/// a session written before a crash cannot name the file of another run.
+fn run_number() -> u128 {
+    static RUN: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    *RUN.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis())
+    })
+}
+
+/// RFN01-97: the file a shell's output is kept in when the editor closes.
+fn output_name(shell: &TerminalSession) -> String {
+    format!("{}-{}.txt", run_number(), shell.number())
+}
+
+/// RFN01-97: one shell as the session writes it.
+fn session_shell(shell: &TerminalSession, keep_output: bool) -> Option<app_data::SessionShell> {
+    let profile = shell.profile()?;
+    Some(app_data::SessionShell {
+        name: profile.name.clone(),
+        command: profile.command.clone(),
+        directory: profile.directory.clone(),
+        output: keep_output.then(|| output_name(shell)),
+    })
+}
+
+/// RFN01-97: the shells along a tab's foot, in the strip's order, and the
+/// place of the one in front among them.
+fn below_shells(tab: &PaneTab) -> Vec<Rc<std::cell::RefCell<TerminalSession>>> {
+    let mut shells: Vec<_> = tab
+        .below
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.borrow();
+            entry
+                .source_id
+                .is_none()
+                .then(|| entry.shell.clone())
+                .flatten()
+        })
+        .collect();
+    if shells.is_empty()
+        && let Some(shell) = &tab.below.shell
+    {
+        shells.push(shell.clone());
+    }
+    shells
+}
+
+/// RFN01-97: write what every remembered shell printed, and take away the
+/// files of shells that are gone. **Only when the editor closes** — the
+/// session itself is written far more often, and this can be megabytes.
+pub fn write_terminal_outputs(window: &AppWindow, live: &Live) {
+    let Some(directory) = app_data::app_directory() else {
+        return;
+    };
+    let mut outputs = Vec::new();
+    if window.get_terminal_restore_output() {
+        let when = crate::timestamp::format("yyyy-MM-dd HH:mm", crate::timestamp::now());
+        let limit = window.get_terminal_history_limit().max(0) as usize;
+        let tabs = live.tabs.borrow();
+        for tab in tabs.panes.iter().flat_map(|strip| &strip.tabs) {
+            if !remembered(tab) {
+                continue;
+            }
+            for shell in tab.terminal.iter().cloned().chain(below_shells(tab)) {
+                let shell = shell.borrow();
+                if shell.profile().is_some() {
+                    outputs.push((output_name(&shell), when.clone(), shell.output_lines(limit)));
+                }
+            }
+        }
+    }
+    if let Err(error) = app_data::replace_terminal_outputs(&directory, &outputs) {
+        live.cache.borrow_mut().log_diag(
+            "session",
+            &format!("terminal output save failed error={error}"),
+        );
+    }
+}
+
+/// RFN01-97: a shell from the session, waiting to be started when it is
+/// first shown, with what it had printed.
+fn waiting_shell(stored: &app_data::SessionShell) -> Rc<std::cell::RefCell<TerminalSession>> {
+    let shell = crate::TerminalShell {
+        name: stored.name.clone(),
+        command: stored.command.clone(),
+        directory: stored.directory.clone(),
+    };
+    let folder = crate::terminal_shells::windows_folder(&shell.directory);
+    let (when, lines) = stored
+        .output
+        .as_deref()
+        .zip(app_data::app_directory())
+        .and_then(|(name, directory)| app_data::read_terminal_output(&directory, name))
+        .unwrap_or_default();
+    Rc::new(std::cell::RefCell::new(TerminalSession::waiting(
+        shell, folder, lines, when,
+    )))
+}
+
+pub fn session_tab(tab: &PaneTab, keep_output: bool) -> app_data::SessionTab {
     let file = tab.document.file.borrow();
+    let below = below_shells(tab);
+    let in_front = tab
+        .below
+        .entries
+        .get(tab.below.active)
+        .and_then(|entry| entry.borrow().shell.clone());
     app_data::SessionTab {
+        shell: tab
+            .terminal
+            .as_ref()
+            .and_then(|shell| session_shell(&shell.borrow(), keep_output)),
+        below_active: in_front
+            .and_then(|front| below.iter().position(|shell| Rc::ptr_eq(shell, &front)))
+            .unwrap_or(0),
+        below_shells: below
+            .iter()
+            .filter_map(|shell| session_shell(&shell.borrow(), keep_output))
+            .collect(),
         // 要件 7.9（2026-09-08）: この文書のモード。**名前で覚える**——番号は
         // モードを作り消しすれば別のものを指す。
         word_mode: tab.word_mode,

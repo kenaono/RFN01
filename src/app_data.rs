@@ -126,6 +126,99 @@ pub struct SessionTab {
     pub paper: Paper,
     /// 追加要件 2026-09-15: TAB（見出し）そのものの色。無ければ背景に合わせる。
     pub tab_colour: Option<[u8; 3]>,
+    /// RFN01-97: this tab was a shell — which one, so a restart starts it again.
+    pub shell: Option<SessionShell>,
+    /// RFN01-97: the shells in the strip along the foot of a document's tab, in
+    /// the strip's order, and which of them was in front.
+    pub below_shells: Vec<SessionShell>,
+    pub below_active: usize,
+}
+
+/// RFN01-97: one shell as a session remembers it. **The process is not**: it
+/// ended with the editor. What comes back is the shell to start and, unless
+/// the writer turned it off, what it had printed (`output`, a file in
+/// [`TERMINAL_OUTPUT_DIRECTORY`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionShell {
+    pub name: String,
+    pub command: String,
+    pub directory: String,
+    pub output: Option<String>,
+}
+
+/// RFN01-97: where what the shells printed is kept between runs, one file each,
+/// beside the session. Written when the editor closes.
+pub const TERMINAL_OUTPUT_DIRECTORY: &str = "terminal-output";
+const TERMINAL_OUTPUT_MAGIC: &str = "RFN-EDIT-TERMINAL 1";
+
+/// RFN01-97: one shell's output, with when it was put away on the line after
+/// the magic.
+pub fn encode_terminal_output(when: &str, lines: &[String]) -> String {
+    let mut out = format!(
+        "{TERMINAL_OUTPUT_MAGIC}\n{}\n",
+        when.replace(['\n', '\r'], "")
+    );
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+pub fn decode_terminal_output(raw: &str) -> Option<(String, Vec<String>)> {
+    let mut lines = raw.split('\n');
+    if lines.next()? != TERMINAL_OUTPUT_MAGIC {
+        return None;
+    }
+    let when = lines.next()?.to_owned();
+    let mut body: Vec<String> = lines.map(str::to_owned).collect();
+    if body.last().is_some_and(String::is_empty) {
+        body.pop();
+    }
+    Some((when, body))
+}
+
+/// RFN01-97: a file name the session may name — no folders, nothing odd.
+pub fn is_output_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.ends_with(".txt")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+}
+
+pub fn read_terminal_output(directory: &Path, name: &str) -> Option<(String, Vec<String>)> {
+    if !is_output_name(name) {
+        return None;
+    }
+    let raw = fs::read_to_string(directory.join(TERMINAL_OUTPUT_DIRECTORY).join(name)).ok()?;
+    decode_terminal_output(&raw)
+}
+
+/// RFN01-97: write these outputs, and remove every other one — **a closed tab's
+/// output, or one cleared, does not outlive it.** `outputs` is `(file name,
+/// when, lines)`.
+pub fn replace_terminal_outputs(
+    directory: &Path,
+    outputs: &[(String, String, Vec<String>)],
+) -> io::Result<()> {
+    let folder = directory.join(TERMINAL_OUTPUT_DIRECTORY);
+    if outputs.is_empty() && !folder.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(&folder)?;
+    for (name, when, lines) in outputs {
+        if is_output_name(name) {
+            fs::write(folder.join(name), encode_terminal_output(when, lines))?;
+        }
+    }
+    for entry in fs::read_dir(&folder)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !outputs.iter().any(|(kept, _, _)| *kept == name) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
 }
 
 /// TAB・Paneに付けた紙の色（横書き、縦書き）。`None`は「付けていない」。
@@ -376,9 +469,33 @@ pub fn encode_session(session: &Session) -> String {
                     tab.below_height
                 ));
             }
+            // RFN01-97: the shell this tab was, then the ones along its foot.
+            // **Each starts with its name**, and the lines after belong to it.
+            if let Some(shell) = &tab.shell {
+                encode_shell(&mut out, "shell", shell);
+            }
+            for shell in &tab.below_shells {
+                encode_shell(&mut out, "below-shell", shell);
+            }
+            if !tab.below_shells.is_empty() {
+                out.push_str(&format!("below-active: {}\n", tab.below_active));
+            }
         }
     }
     out
+}
+
+/// RFN01-97: `shell: name`, then its command, folder and output.
+fn encode_shell(out: &mut String, key: &str, shell: &SessionShell) {
+    let line = |value: &str| value.replace(['\n', '\r'], "");
+    out.push_str(&format!("{key}: {}\n", line(&shell.name)));
+    out.push_str(&format!("{key}-command: {}\n", line(&shell.command)));
+    if !shell.directory.is_empty() {
+        out.push_str(&format!("{key}-folder: {}\n", line(&shell.directory)));
+    }
+    if let Some(output) = &shell.output {
+        out.push_str(&format!("{key}-output: {}\n", line(output)));
+    }
 }
 
 /// 1行に収まる字か（E1の④）。
@@ -510,6 +627,47 @@ pub fn decode_session(raw: &str) -> Option<Session> {
                 let mut fields = value.split(' ');
                 tab.below = fields.next() == Some("1");
                 tab.below_height = fields.next().and_then(|it| it.parse().ok()).unwrap_or(0);
+            }
+            // RFN01-97: a shell begins with its name; the rest follow it.
+            "shell" | "below-shell" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                let shell = SessionShell {
+                    name: value.to_owned(),
+                    ..SessionShell::default()
+                };
+                if key == "shell" {
+                    tab.shell = Some(shell);
+                } else {
+                    tab.below_shells.push(shell);
+                }
+            }
+            "shell-command"
+            | "shell-folder"
+            | "shell-output"
+            | "below-shell-command"
+            | "below-shell-folder"
+            | "below-shell-output" => {
+                // **A stray line is dropped, not the session**: the layout is
+                // worth more than one shell.
+                let tab = session.panes.last_mut().and_then(|p| p.tabs.last_mut());
+                let shell = tab.and_then(|tab| {
+                    if key.starts_with("below-") {
+                        tab.below_shells.last_mut()
+                    } else {
+                        tab.shell.as_mut()
+                    }
+                });
+                if let Some(shell) = shell {
+                    match key.rsplit('-').next() {
+                        Some("command") => shell.command = value.to_owned(),
+                        Some("folder") => shell.directory = value.to_owned(),
+                        _ => shell.output = Some(value.to_owned()),
+                    }
+                }
+            }
+            "below-active" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                tab.below_active = value.parse().unwrap_or(0);
             }
             // A field this build does not know is from a later one, and the
             // rest of the arrangement is still worth having.
@@ -1423,6 +1581,74 @@ mod tests {
         let second = read.panes[0].tabs[1].origin.as_deref();
         assert_eq!(second, Some(Path::new("D:\\書きかけ\\第一章.md")));
         assert_eq!(read.panes[1].tabs[0].caret, None);
+    }
+
+    /// RFN01-97: a shell tab and the shells along a document's foot come back
+    /// as the shells they were, with the names of their output files.
+    #[test]
+    fn shells_round_trip_with_their_output() {
+        let shell = |name: &str, output: Option<&str>| SessionShell {
+            name: name.to_owned(),
+            command: format!("{name}.exe -l"),
+            directory: if name == "WSL" {
+                "/mnt/d/原稿".into()
+            } else {
+                String::new()
+            },
+            output: output.map(str::to_owned),
+        };
+        let mut session = session();
+        session.panes[0].tabs[0].shell = Some(shell("WSL", Some("1-2.txt")));
+        session.panes[0].tabs[1].below_shells =
+            vec![shell("PowerShell", None), shell("cmd", Some("1-5.txt"))];
+        session.panes[0].tabs[1].below_active = 1;
+        let written = encode_session(&session);
+        assert_eq!(decode_session(&written), Some(session));
+        // A stray line from a hand edit costs that line, not the session.
+        let stray =
+            format!("{SESSION_MAGIC}\nlayout: P 0\npane: 0\ntab: 1 0 0 0\nshell-command: x\n");
+        assert!(decode_session(&stray).is_some());
+    }
+
+    /// RFN01-97: an output file reads back as it was written, and only plain
+    /// names in the output folder are read.
+    #[test]
+    fn terminal_output_round_trips_and_names_are_plain() {
+        let lines = vec!["$ ls".to_owned(), String::new(), "第一章.md".to_owned()];
+        let raw = encode_terminal_output("2026-11-04 18:30", &lines);
+        assert_eq!(
+            decode_terminal_output(&raw),
+            Some(("2026-11-04 18:30".to_owned(), lines))
+        );
+        assert_eq!(decode_terminal_output("nonsense"), None);
+        assert!(is_output_name("1730000000-3.txt"));
+        assert!(!is_output_name("..\\session.rfnsession"));
+        assert!(!is_output_name("a/b.txt"));
+        let directory = std::env::temp_dir().join(format!("rfn-outputs-{}", std::process::id()));
+        fs::create_dir_all(directory.join(TERMINAL_OUTPUT_DIRECTORY)).unwrap();
+        fs::write(
+            directory.join(TERMINAL_OUTPUT_DIRECTORY).join("old-1.txt"),
+            "x",
+        )
+        .unwrap();
+        let kept = vec![(
+            "new-1.txt".to_owned(),
+            "now".to_owned(),
+            vec!["a".to_owned()],
+        )];
+        replace_terminal_outputs(&directory, &kept).unwrap();
+        assert_eq!(
+            read_terminal_output(&directory, "new-1.txt"),
+            Some(("now".to_owned(), vec!["a".to_owned()]))
+        );
+        assert!(
+            !directory
+                .join(TERMINAL_OUTPUT_DIRECTORY)
+                .join("old-1.txt")
+                .exists(),
+            "a closed tab's output goes"
+        );
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     /// A file this build cannot make sense of is not a reason to refuse to

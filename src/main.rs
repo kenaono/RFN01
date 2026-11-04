@@ -4368,6 +4368,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // `×`を押すと、そのぶんだけがどこにも書かれないまま消えていた。ここで
     // 一度に書けば、時計が回りきらなかったぶんが行列に乗る。
     write_work_copy_now(&window, &live);
+    // RFN01-97: what the shells printed, for the next run to put back. **Before
+    // the shells are let go** and only here, at the close.
+    session::write_terminal_outputs(&window, &live);
     write_session(&window, &live);
     // 要件 12.4: and the draft, which is otherwise waiting on a two-second
     // timer that the end of the process will not let run.
@@ -16817,6 +16820,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_terminal_confirm_close().to_string(),
     ));
     values.push((
+        "terminal.restore_output".into(),
+        window.get_terminal_restore_output().to_string(),
+    ));
+    values.push((
         "terminal.history_limit".into(),
         window.get_terminal_history_limit().to_string(),
     ));
@@ -17099,6 +17106,10 @@ fn apply_settings(
         }
         if written == "terminal.confirm_paste" {
             window.set_terminal_confirm_paste(value != "false");
+            continue;
+        }
+        if written == "terminal.restore_output" {
+            window.set_terminal_restore_output(value != "false");
             continue;
         }
         if written == "terminal.confirm_close" {
@@ -19010,6 +19021,23 @@ fn refresh_terminal(
     };
     let (columns, rows) = cell.grid_for(id.shown_width(window), extent);
     let mut session = session.borrow_mut();
+    // RFN01-97: **a shell from the last run starts the first time it is
+    // drawn**, at the size it is drawn at — every shell on every tab at once
+    // would be a dozen processes for a window showing one of them.
+    if session.is_waiting() {
+        let weak = window.as_weak();
+        let wake = move || {
+            let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
+        };
+        let started = session.start_waiting(columns, rows, wake);
+        cache.borrow_mut().log_diag(
+            "terminal",
+            &match started {
+                Ok(()) => format!("restored start pane={} {columns}x{rows}", id.log_name()),
+                Err(error) => format!("restored start failed: {error}"),
+            },
+        );
+    }
     session.resize(columns, rows);
     session.drain();
     // RFN01-95: **the program is half-way through one update** (DECSET 2026).

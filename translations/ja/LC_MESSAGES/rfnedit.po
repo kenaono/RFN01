@@ -1161,6 +1161,9 @@ msgstr "改行を含む送信を確認"
 msgid "Confirm shell termination"
 msgstr "シェルの終了を確認"
 
+msgid "Restore output after restart"
+msgstr "再起動後に前回の出力を戻す"
+
 msgid "History lines"
 msgstr "履歴の保持行数"
 

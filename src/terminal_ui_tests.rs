@@ -295,6 +295,98 @@ fn a_bell_marks_the_tab_until_the_keyboard_comes() {
     assert!(!marked(), "a bell where the writer is typing is not a call");
 }
 
+/// RFN01-97: a shell tab is written into the session with what it printed;
+/// read back, it waits until it is drawn, then starts below that output and
+/// a line saying where it ends.
+#[test]
+#[ignore = "starts real ConPTY shells; run explicitly"]
+fn a_shell_comes_back_after_a_restart_with_its_output() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    new_terminal_tab(
+        &h.window,
+        &h.live,
+        id,
+        TerminalShell {
+            name: "QA".into(),
+            command: "cmd.exe /Q /D /K".into(),
+            directory: String::new(),
+        },
+    );
+    let source = h
+        .live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .unwrap()
+        .terminal
+        .clone()
+        .unwrap();
+    source.borrow_mut().type_text("echo BEFORE_RESTART\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until
+        && !source
+            .borrow()
+            .output_lines(100)
+            .iter()
+            .any(|line| line == "BEFORE_RESTART")
+    {
+        source.borrow_mut().wait(Duration::from_millis(30));
+    }
+    session::write_terminal_outputs(&h.window, &h.live);
+    let stored = session::capture_session(&h.window, &h.live);
+    let tab = stored.panes[0]
+        .tabs
+        .iter()
+        .find(|tab| tab.shell.is_some())
+        .expect("the shell tab is written down");
+    assert_eq!(tab.shell.as_ref().unwrap().command, "cmd.exe /Q /D /K");
+    assert!(tab.shell.as_ref().unwrap().output.is_some());
+
+    // Off, only the arrangement is kept, and the files go.
+    h.window.set_terminal_restore_output(false);
+    let without = session::capture_session(&h.window, &h.live);
+    assert!(
+        without.panes[0]
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.shell.as_ref())
+            .all(|shell| shell.output.is_none())
+    );
+    h.window.set_terminal_restore_output(true);
+
+    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new());
+    let back = tabs.panes[0]
+        .tabs
+        .iter()
+        .find_map(|tab| tab.terminal.clone())
+        .expect("the shell tab comes back");
+    assert!(back.borrow().is_waiting(), "it waits to be drawn");
+    assert!(
+        back.borrow()
+            .output_lines(100)
+            .iter()
+            .any(|line| line == "BEFORE_RESTART")
+    );
+    back.borrow_mut().start_waiting(60, 12, || {}).unwrap();
+    assert!(!back.borrow().is_waiting());
+    back.borrow_mut().type_text("echo AFTER_RESTART\r");
+    let until = Instant::now() + Duration::from_secs(5);
+    let read = || back.borrow().output_lines(100);
+    while Instant::now() < until && !read().iter().any(|line| line == "AFTER_RESTART") {
+        back.borrow_mut().wait(Duration::from_millis(30));
+    }
+    let lines = read();
+    let before = lines.iter().position(|l| l == "BEFORE_RESTART").unwrap();
+    let rule = lines
+        .iter()
+        .position(|l| l.starts_with("──── Restored · "))
+        .expect("the line where the last run ends");
+    let after = lines.iter().position(|l| l == "AFTER_RESTART").unwrap();
+    assert!(before < rule && rule < after, "{lines:#?}");
+}
+
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 struct Offscreen(Rc<MinimalSoftwareWindow>);
 
