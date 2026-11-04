@@ -865,6 +865,12 @@ export component EditorSurface inherits Rectangle {
                                     }
                                 }
                                 if (root.terminal) {
+                                    // RFN01-96: Ctrl+↑／Ctrl+↓ — the command before or after.
+                                    if event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift
+                                        && (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                                        root.terminal-action(0, event.text == Key.UpArrow ? 20 : 21);
+                                        return accept;
+                                    }
                                     // RFN01-98（書き手の求め 2026-11-04）: **パレットはシェルより先**
                                     // （VS Codeと同じ）。bashのCtrl+P（前の履歴）は↑で足りる。
                                     if self.preedit-text == "" && (event.modifiers.control || event.modifiers.alt)
@@ -1673,6 +1679,15 @@ export component EditorSurface inherits Rectangle {
                                         if root.terminal: MenuRow {
                                             title: @tr("History to Editor Panel");
                                             activated => { root.panel-action(8, 0); context-menu.close(); }
+                                        }
+                                        // RFN01-96: the last command's output, without its command.
+                                        if root.terminal: MenuRow {
+                                            title: @tr("Last Output to Editor Panel");
+                                            activated => { root.panel-action(15, 0); context-menu.close(); }
+                                        }
+                                        if root.terminal: MenuRow {
+                                            title: @tr("Copy Last Output");
+                                            activated => { root.terminal-action(0, 22); context-menu.close(); }
                                         }
                                         if root.terminal: MenuRow { title: root.terminal-file-logging ? @tr("Stop File Log") : @tr("Capture Log to File…"); activated => { root.panel-action(root.terminal-file-logging ? 14 : 10, 0); context-menu.close(); } }
                                         if root.terminal: MenuRow {

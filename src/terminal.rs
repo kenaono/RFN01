@@ -253,6 +253,19 @@ pub struct Screen {
     attention: u64,
 }
 
+/// The prompt lines a shell writes by default (RFN01-95 案A, RFN01-96, 101):
+/// bash's `user@host:folder$`, PowerShell's `PS D:\folder>`, cmd's `D:\folder>`.
+fn prompt_pattern() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static PROMPT: OnceLock<regex::Regex> = OnceLock::new();
+    PROMPT.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:[^\s@]+@[^\s:]+:(?P<bash>[~/][^$#]*)[$#](?:\s|$)|PS (?P<ps>[A-Za-z]:\\[^>]*)>|(?P<cmd>[A-Za-z]:\\[^>]*)>)",
+        )
+        .unwrap()
+    })
+}
+
 /// What a Ctrl+click in the terminal would open (RFN01-95).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkTarget {
@@ -644,14 +657,7 @@ impl Screen {
     }
 
     fn prompt_folder_within(&self, row: usize, reach: usize) -> Option<String> {
-        use std::sync::OnceLock;
-        static PROMPT: OnceLock<regex::Regex> = OnceLock::new();
-        let prompt = PROMPT.get_or_init(|| {
-            regex::Regex::new(
-                r"^(?:[^\s@]+@[^\s:]+:(?P<bash>[~/][^$#]*)[$#](?:\s|$)|PS (?P<ps>[A-Za-z]:\\[^>]*)>|(?P<cmd>[A-Za-z]:\\[^>]*)>)",
-            )
-            .unwrap()
-        });
+        let prompt = prompt_pattern();
         let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
         let last = row.min(lines.len().checked_sub(1)?);
         // Far enough for the output of one command; a hover asks on every move.
@@ -664,6 +670,123 @@ impl Screen {
                 .find_map(|name| found.name(name))
                 .map(|m| m.as_str().trim_end().to_owned())
         })
+    }
+
+    /// RFN01-96: the rows where a command was typed — the prompt lines
+    /// (`user@host:…$`, `PS D:\…>`, `D:\…>`), counted from the top of the
+    /// history, oldest first. **None while a full-screen program has the
+    /// screen** (書き手 2026-11-04: Claude Codeの中では効かなくてよい).
+    pub fn prompt_rows(&self) -> Vec<usize> {
+        if self.modes.alternate_screen {
+            return Vec::new();
+        }
+        let prompt = prompt_pattern();
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        (0..lines.len())
+            .filter(|&at| at == 0 || !lines[at - 1].wrapped)
+            .filter(|&at| prompt.is_match(&lines[at].text()))
+            .collect()
+    }
+
+    /// RFN01-96（書き手の求め 2026-11-04：コマンドだけをコピーしたい）: the
+    /// column where the command typed after the prompt on `row` begins — past
+    /// `user@host:folder$ `, `PS D:\folder> `, `D:\folder>`. `None` when `row`
+    /// is not a prompt.
+    pub fn command_column(&self, row: usize) -> Option<usize> {
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let line = lines.get(row)?;
+        let text = line.text();
+        let found = prompt_pattern().find(&text)?;
+        // Bytes of text to cells: a wide character is two cells.
+        let mut bytes = 0;
+        let mut column = 0;
+        for cell in &line.cells {
+            if bytes >= found.end() {
+                break;
+            }
+            column += 1;
+            if !cell.trailing {
+                bytes += cell.text.len_utf8();
+            }
+        }
+        // The space a prompt ends with is the prompt's, not the command's.
+        while line
+            .cells
+            .get(column)
+            .is_some_and(|cell| cell.text == ' ' && !cell.trailing)
+        {
+            column += 1;
+        }
+        Some(column)
+    }
+
+    /// RFN01-96: the last row of the line that starts at `row` (a long command
+    /// line wraps onto the rows after it).
+    pub fn logical_end(&self, row: usize) -> usize {
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let mut at = row.min(lines.len().saturating_sub(1));
+        while at + 1 < lines.len() && lines[at].wrapped {
+            at += 1;
+        }
+        at
+    }
+
+    /// RFN01-96: the row of the line the cursor is on, counted from the top of
+    /// the history — where the shell is waiting for the next command.
+    pub fn cursor_line(&self) -> usize {
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let mut at = self.scrollback.len() + self.cursor.row;
+        while at > 0 && lines[at - 1].wrapped {
+            at -= 1;
+        }
+        at
+    }
+
+    /// RFN01-96: what the last command printed — the lines between the last
+    /// two prompts, **without the command's own line**. While a command is
+    /// still running, what it has printed so far.
+    pub fn last_output(&self) -> Option<String> {
+        let prompts = self.prompt_rows();
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let start_of = |mut at: usize| {
+            while at > 0 && lines[at - 1].wrapped {
+                at -= 1;
+            }
+            at
+        };
+        let end_of = |mut at: usize| {
+            while at + 1 < lines.len() && lines[at].wrapped {
+                at += 1;
+            }
+            at
+        };
+        let cursor = start_of(self.scrollback.len() + self.cursor.row);
+        let last = *prompts.last()?;
+        // Waiting at a prompt: the output is above it, after the one before.
+        let (from, to) = if last == cursor {
+            let before = *prompts.iter().rev().nth(1)?;
+            (end_of(before) + 1, last)
+        } else {
+            (end_of(last) + 1, end_of(cursor) + 1)
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut pending = String::new();
+        for line in lines.get(from..to.min(lines.len()))? {
+            pending.push_str(&line.logical_text());
+            if !line.wrapped {
+                out.push(std::mem::take(&mut pending).trim_end().to_owned());
+            }
+        }
+        if !pending.is_empty() {
+            out.push(pending.trim_end().to_owned());
+        }
+        while out.last().is_some_and(String::is_empty) {
+            out.pop();
+        }
+        while out.first().is_some_and(String::is_empty) {
+            out.remove(0);
+        }
+        (!out.is_empty()).then(|| out.join("\n") + "\n")
     }
 
     /// What a Ctrl+click on this cell would open: a URL, or something written
@@ -2185,6 +2308,31 @@ mod tests {
         );
         terminal.screen.clear_screen();
         assert!(terminal.screen.search("example", false).is_empty());
+    }
+
+    /// RFN01-96: commands are told apart by their prompts, and the last one's
+    /// output is what lies between the last two.
+    #[test]
+    fn the_last_commands_output_lies_between_its_prompts() {
+        let mut it = Terminal::new(40, 10);
+        it.feed(b"ken@KN01:~/Dev$ echo one\r\none\r\nken@KN01:~/Dev$ ls\r\na.md\r\nb.md\r\n\r\nken@KN01:~/Dev$ ");
+        assert_eq!(it.screen.prompt_rows(), vec![0, 2, 6]);
+        // The command begins after the prompt and its space.
+        assert_eq!(it.screen.command_column(0), Some("ken@KN01:~/Dev$ ".len()));
+        assert_eq!(it.screen.command_column(1), None, "not a prompt");
+        assert_eq!(it.screen.last_output().as_deref(), Some("a.md\nb.md\n"));
+        // Still running: what it has printed so far.
+        it.feed(b"cat x\r\nline 1\r\nline 2");
+        assert_eq!(it.screen.last_output().as_deref(), Some("line 1\nline 2\n"));
+        // A command with no output has none.
+        let mut it = Terminal::new(40, 10);
+        it.feed(b"PS D:\\x> cd ..\r\nPS D:\\> ");
+        assert_eq!(it.screen.last_output(), None);
+        // Inside a full-screen program, there are no commands.
+        let mut it = Terminal::new(40, 10);
+        it.feed(b"D:\\x>vim\r\n\x1b[?1049h");
+        assert!(it.screen.prompt_rows().is_empty());
+        assert_eq!(it.screen.last_output(), None);
     }
 
     /// RFN01-95（案A）: the folder the nearest prompt above names.

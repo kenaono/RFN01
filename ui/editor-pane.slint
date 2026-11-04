@@ -2182,6 +2182,12 @@ export component EditorPane inherits Rectangle {
                         }
 
                     key-pressed(event) => {
+                        // RFN01-96: Ctrl+↑／Ctrl+↓ — the command before or after.
+                        if event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift
+                            && (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                            root.terminal-action(1, event.text == Key.UpArrow ? 20 : 21);
+                            return accept;
+                        }
                         // RFN01-98: the palette before the shell, as in VS Code.
                         if self.preedit-text == "" && (event.modifiers.control || event.modifiers.alt)
                             && root.terminal-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) {

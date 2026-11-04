@@ -429,7 +429,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
                 save(window, live, &entry, true);
             }
         }
-        7..=9 => {
+        7..=9 | 15 => {
             import(window, live, id, action);
             return;
         }
@@ -504,6 +504,23 @@ fn import(window: &AppWindow, live: &Live, id: PaneId, action: i32) {
     } else {
         let text = if action == 8 {
             source.borrow().screen().retained_text()
+        } else if action == 15 {
+            // RFN01-96: Last Output to Editor Panel — where the selection goes.
+            source.borrow_mut().drain();
+            let found = source.borrow().screen().last_output();
+            match found {
+                Some(text) => text,
+                None => {
+                    window.tell(
+                        pick(
+                            "直前のコマンドの出力が見つかりません",
+                            "No output from a last command",
+                        )
+                        .into(),
+                    );
+                    return;
+                }
+            }
         } else {
             let selection = live
                 .cache

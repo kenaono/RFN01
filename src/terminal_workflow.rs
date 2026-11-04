@@ -311,6 +311,80 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
                 * if action == 8 { 1.0 } else { -1.0 };
             scroll_terminal(window, live, id, spot, amount);
         }
+        // RFN01-96（書き手と合意 2026-11-04）: Ctrl+↑／Ctrl+↓ — the command
+        // before or after **is selected**, so something always shows where it
+        // is (scrolling alone did nothing while every prompt was on screen),
+        // and it is scrolled to the top only when it is above the view. Past
+        // the last, the selection goes and the view is the latest again.
+        20 | 21 => {
+            let session = session.borrow();
+            let screen = session.screen();
+            let prompts = screen.prompt_rows();
+            let history = screen.scrollback().len();
+            let rows = screen.rows();
+            let columns = screen.columns();
+            let waiting = screen.cursor_line();
+            if let Some(view) = live.cache.borrow_mut().pane(id).shell(spot) {
+                // RFN01-96（書き手の求め 2026-11-04）: **the command, not the
+                // prompt in front of it**, so Ctrl+Shift+C copies what was
+                // typed. A prompt where nothing was typed is selected whole, so
+                // where it is still shows.
+                let span = |row: usize| {
+                    let end = (screen.logical_end(row), columns);
+                    let start = screen
+                        .command_column(row)
+                        .map(|column| (row, column))
+                        .filter(|start| terminal_selection_text_at(&session, *start, end))
+                        .unwrap_or((row, 0));
+                    TerminalSelection {
+                        anchor: start,
+                        head: end,
+                    }
+                };
+                // The command selected now, if the selection is one of these.
+                let marked = view
+                    .selection
+                    .filter(|s| prompts.contains(&s.anchor.0) && *s == span(s.anchor.0))
+                    .map(|s| s.anchor.0);
+                let target = if action == 20 {
+                    let from = marked.unwrap_or(waiting);
+                    prompts.iter().rev().find(|row| **row < from).copied()
+                } else {
+                    marked.and_then(|from| prompts.iter().find(|row| **row > from).copied())
+                };
+                match target {
+                    Some(row) if row < waiting => {
+                        view.selection = Some(span(row));
+                        let top = history - view.looking.min(history);
+                        if row < top || row >= top + rows {
+                            view.looking = history.saturating_sub(row);
+                        }
+                    }
+                    _ if action == 21 => {
+                        view.selection = None;
+                        view.looking = 0;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // RFN01-96: Copy Last Output.
+        22 => {
+            session.borrow_mut().drain();
+            let text = session.borrow().screen().last_output();
+            match text {
+                Some(text) => {
+                    clipboard::put_text(ime::window_handle(window), &text);
+                }
+                None => window.tell(
+                    pick(
+                        "直前のコマンドの出力が見つかりません",
+                        "No output from a last command",
+                    )
+                    .into(),
+                ),
+            }
+        }
         _ => {}
     }
     refresh_terminal(window, &live.cache, id, spot);
@@ -443,6 +517,22 @@ pub(crate) fn settle_keyboard(window: &AppWindow, live: &Live) -> bool {
         answered |= shell.borrow_mut().set_keyboard(here);
     }
     answered
+}
+
+/// RFN01-96: whether anything but blanks lies from `start` to `end` — a
+/// command was typed after this prompt.
+fn terminal_selection_text_at(
+    session: &TerminalSession,
+    start: (usize, usize),
+    end: (usize, usize),
+) -> bool {
+    let picked = TerminalSelection {
+        anchor: start,
+        head: end,
+    };
+    !crate::terminal_selection_text(session, picked)
+        .trim()
+        .is_empty()
 }
 
 /// RFN01-95: what a link in a shell opens, once it is known to be openable.
