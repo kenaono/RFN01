@@ -454,10 +454,22 @@ export component AppWindow inherits Window {
     /// Bumped to put the keyboard in the left pane's first field: the search
     /// field when the tree is being searched, the filter otherwise (RFN01-76).
     property <int> left-field-generation;
+    /// RFN01-89: **the ask outlives a field not yet built.** Switching to the
+    /// Explorer and asking for its filter happen together, and the filter is
+    /// made after — it starts from the bumped generation and never sees it
+    /// change. It reads this when it is made instead, and whichever field
+    /// takes the keyboard puts the ask down. **Only asked where a field will
+    /// be**: an ask left lying would take the keyboard from the text later,
+    /// when the field is shown for some other reason.
+    property <bool> left-field-wanted;
+    /// Whether the tree's fields are shown at all: not on the Workspace view
+    /// with no Workspace in use.
+    property <bool> left-fields-shown: root.left-tab == 0 || (root.left-tab == 4 && root.workspace-active);
 
     /// Put the keyboard in that field (Rust: a folder searched from a row).
     public function focus-left-field() {
         root.left-field-generation += 1;
+        root.left-field-wanted = true;
     }
 
     /// RFN01-75: **the Search panel's own search is put aside**, not lost —
@@ -479,6 +491,7 @@ export component AppWindow inherits Window {
             root.tree-search-opened();
         }
         root.left-field-generation += 1;
+        root.left-field-wanted = root.left-fields-shown;
     }
 
     /// Stop searching: the words and results go, the whole tree comes back.
@@ -502,6 +515,7 @@ export component AppWindow inherits Window {
         root.tree-replacing = false;
         if root.tree-open && root.left-tab == 1 {
             root.left-field-generation += 1;
+            root.left-field-wanted = true;
         } else if root.tree-open && (root.left-tab == 0 || root.left-tab == 4) {
             root.open-tree-search();
         } else if !root.tree-open {
@@ -513,6 +527,7 @@ export component AppWindow inherits Window {
             root.left-tab = 1;
             root.left-tab-chosen(1);
             root.left-field-generation += 1;
+            root.left-field-wanted = true;
         }
     }
 
@@ -541,6 +556,7 @@ export component AppWindow inherits Window {
             root.workspace-filter-visible = true;
         }
         root.left-field-generation += 1;
+        root.left-field-wanted = root.left-fields-shown;
     }
 
     /// RFN01-82 (`Ctrl+Alt+L`): the left pane put away or brought back — what
@@ -2524,11 +2540,11 @@ export component AppWindow inherits Window {
                                 height: 28px;
                                 placeholder: @tr("Search in folder");
                                 text <=> root.folder-needle;
-                                init => { self.take-focus(); }
+                                init => { root.left-field-wanted = false; self.take-focus(); }
                                 accepted => { root.folder-search-requested(); }
                                 escaped => { root.left-field-escaped(); }
                                 property <int> asked: root.left-field-generation;
-                                changed asked => { self.take-focus(); }
+                                changed asked => { root.left-field-wanted = false; self.take-focus(); }
                                 shortcut(event) => {
                                     if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
                                     return reject;
@@ -2585,7 +2601,16 @@ export component AppWindow inherits Window {
                         // RFN01-76
                         escaped => { root.left-field-escaped(); }
                         property <int> asked: root.left-field-generation;
-                        changed asked => { self.take-focus(); }
+                        init => {
+                            if root.left-field-wanted {
+                                root.left-field-wanted = false;
+                                self.take-focus();
+                            }
+                        }
+                        changed asked => {
+                            root.left-field-wanted = false;
+                            self.take-focus();
+                        }
                         shortcut(event) => {
                             if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
                             return reject;
@@ -2634,6 +2659,7 @@ export component AppWindow inherits Window {
                                 // Built when the panel is, so asking for it is
                                 // enough to type into it.
                                 init => {
+                                    root.left-field-wanted = false;
                                     self.take-focus();
                                 }
                                 accepted => {
@@ -2642,7 +2668,7 @@ export component AppWindow inherits Window {
                                 // RFN01-76
                                 escaped => { root.left-field-escaped(); }
                                 property <int> asked: root.left-field-generation;
-                                changed asked => { self.take-focus(); }
+                                changed asked => { root.left-field-wanted = false; self.take-focus(); }
                                 shortcut(event) => {
                                     if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
                                     return reject;
