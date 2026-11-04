@@ -115,6 +115,7 @@ mod table_ui_tests;
 #[cfg(test)]
 mod tag_ui_tests;
 mod tags;
+mod template;
 mod terminal;
 mod terminal_appearance;
 mod terminal_panels;
@@ -8516,6 +8517,20 @@ fn publish_tree_rows(window: &AppWindow, live: &Live, mut rows: Vec<file_tree::R
         .map(|(name, _)| name.clone())
         .unwrap_or_default();
     window.set_explorer_outside_workspace(in_use.into());
+    // RFN01-88: which row is the Templates Folder, for its mark.
+    let templates = folder
+        .workspace
+        .as_ref()
+        .and_then(|runtime| {
+            let runtime = runtime.borrow();
+            let id = runtime.active_workspace()?;
+            runtime.registry().workspace(id)?.templates.clone()
+        })
+        .and_then(|templates| {
+            rows.iter()
+                .position(|row| row.folder && row.path == templates)
+        });
+    window.set_tree_templates_index(templates.map_or(-1, |at| at as i32));
     let drawn = rows
         .iter()
         .zip(&holders)
@@ -10082,6 +10097,68 @@ fn workspace_context_requested(window: &AppWindow, live: &Live, index: i32) {
     let mode = context.map(|(_, _, mode)| mode);
     window.set_workspace_context_auto(mode == Some(workspace::SaveMode::AutoSave));
     window.set_workspace_context_backup(mode == Some(workspace::SaveMode::AutoBackup));
+    // RFN01-88: **any folder of the Workspace** can hold its templates.
+    let selected = live.folder.borrow().selected.clone();
+    let shown = workspace_view_shown(live);
+    window.set_workspace_context_dir(shown && selected.as_ref().is_some_and(|path| path.is_dir()));
+    window.set_workspace_context_templates(
+        shown && selected.is_some() && selected == templates_folder(live),
+    );
+}
+
+/// Whether the Workspace's own tree is the one showing (the rows a Templates
+/// Folder is chosen from).
+fn workspace_view_shown(live: &Live) -> bool {
+    live.folder.borrow().workspace_view
+}
+
+/// RFN01-88: the Templates Folder of the Workspace in use, as it was chosen
+/// from the tree's rows. `None` while no Workspace is in use.
+fn templates_folder(live: &Live) -> Option<PathBuf> {
+    let folder = live.folder.borrow();
+    let runtime = folder.workspace.as_ref()?.borrow();
+    let id = runtime.active_workspace()?;
+    runtime.registry().workspace(id)?.templates.clone()
+}
+
+/// RFN01-88: the templates there are to choose from now.
+fn templates_in_use(live: &Live) -> Vec<template::Template> {
+    templates_folder(live)
+        .map(|folder| template::list(&folder))
+        .unwrap_or_default()
+}
+
+/// RFN01-88: the selected folder made the Workspace's Templates Folder, or —
+/// when it already is — no longer.
+fn toggle_templates_folder(window: &AppWindow, live: &Live) {
+    let Some(path) = live.folder.borrow().selected.clone() else {
+        return;
+    };
+    if !path.is_dir() {
+        return;
+    }
+    let Some(runtime_rc) = live.folder.borrow().workspace.clone() else {
+        return;
+    };
+    let Some(id) = runtime_rc.borrow().active_workspace() else {
+        return;
+    };
+    let next = (templates_folder(live).as_ref() != Some(&path)).then_some(path);
+    let chosen = next.is_some();
+    // See `workspace_create`'s comment: never match the borrow directly.
+    let result = runtime_rc
+        .borrow_mut()
+        .edit(|registry| registry.set_templates(id, next));
+    match result {
+        Ok(()) => {
+            live.cache.borrow_mut().log_diag(
+                "spec.template",
+                &format!("folder chosen={}", u8::from(chosen)),
+            );
+            publish_tree(window, live);
+        }
+        Err(error) => window.tell(workspace_edit_error_message(&error).into()),
+    }
 }
 
 fn workspace_tree_command(window: &AppWindow, live: &Live, command: i32) {
@@ -10092,6 +10169,7 @@ fn workspace_tree_command(window: &AppWindow, live: &Live, command: i32) {
         0 => workspace_folder_add_requested(window, live),
         1 => workspace_clone_requested(window, live),
         4 => workspace_reset_view_requested(window, live),
+        8 => toggle_templates_folder(window, live),
         2 | 3 | 5 | 6 | 7 => {
             let Some((index, _, _)) = workspace_context_folder(live) else {
                 return;
@@ -11548,6 +11626,17 @@ fn begin_tree_entry(window: &AppWindow, live: &Live, parent: PathBuf, folder: bo
     );
     window.set_tree_new_name(suggested.into());
     window.set_tree_new_error("".into());
+    // RFN01-88: the templates a new file can start from — none for a folder.
+    let names: Vec<SharedString> = if folder {
+        Vec::new()
+    } else {
+        templates_in_use(live)
+            .into_iter()
+            .map(|template| template.name.into())
+            .collect()
+    };
+    window.set_tree_new_templates(ModelRc::from(Rc::new(VecModel::from(names))));
+    window.set_tree_new_template(-1);
     {
         let mut state = live.folder.borrow_mut();
         state.expanded.insert(parent.clone());
@@ -11577,11 +11666,52 @@ fn finish_tree_entry(window: &AppWindow, live: &Live, accept: bool) {
             return;
         }
     };
+    // RFN01-88: the template chosen under the name, by its name.
+    let chosen = usize::try_from(window.get_tree_new_template())
+        .ok()
+        .filter(|_| !folder)
+        .and_then(|at| window.get_tree_new_templates().row_data(at));
+    let mut filled = None;
+    let name = match &chosen {
+        None => name.to_owned(),
+        Some(chosen) => {
+            let Some(name) = template::file_name(name) else {
+                window.set_tree_new_error(
+                    pick(
+                        "テンプレートからは .md ファイルを作ります。",
+                        "Templates make .md files.",
+                    )
+                    .into(),
+                );
+                return;
+            };
+            let text = templates_in_use(live)
+                .into_iter()
+                .find(|template| template.name == chosen.as_str())
+                .and_then(|template| template::read(&template.path));
+            let Some(text) = text else {
+                window.set_tree_new_error(
+                    say!(
+                        "テンプレート「{chosen}」を読めません",
+                        "Cannot read the template \"{chosen}\""
+                    )
+                    .into(),
+                );
+                return;
+            };
+            let title = template::title_of(Some(Path::new(&name)));
+            filled = Some(template::fill(&text, &title, timestamp::now()));
+            name
+        }
+    };
     let path = parent.join(name);
     let result = if folder {
         file_tree::create_folder(&path)
     } else {
-        file_tree::create_file(&path)
+        file_tree::create_file(&path).and_then(|()| match &filled {
+            Some(text) => std::fs::write(&path, text),
+            None => Ok(()),
+        })
     };
     if let Err(error) = result {
         window.set_tree_new_error(say!("作れません: {error}", "Cannot create: {error}").into());
@@ -22335,6 +22465,27 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_comma
         }
         return;
     }
+    // RFN01-88: **テンプレートは選んでから入れる**——パレットが一覧で開く。
+    if shape == InsertShape::Template {
+        let document = live.states.document(id);
+        if document.read_only() || id.screen(window).viewer {
+            window.tell_tab(viewer_cannot_edit().into());
+            return;
+        }
+        // キーとパレットの操作の一覧は、メニューの灰色を通らずに来る。
+        if templates_in_use(live).is_empty() {
+            window.tell_tab(
+                pick(
+                    "テンプレートがありません。Workspace面でフォルダを右クリックし、「テンプレートフォルダー」を選んでください。",
+                    "No templates. In the Workspace view, right-click a folder and choose Templates Folder.",
+                )
+                .into(),
+            );
+            return;
+        }
+        command_palette::open_templates(window, live, id);
+        return;
+    }
     // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
     answer_new_tab(window, live, id, None);
     let document = live.states.document(id);
@@ -22347,7 +22498,7 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_comma
             document::line_note_edit(&source, from, to, what, reading_of(window))
         }
         InsertShape::PageBreak => document::page_break_edit(&source, from, to),
-        InsertShape::Table => None,
+        InsertShape::Table | InsertShape::Template => None,
     };
     let Some((region, text, chosen)) = edit else {
         // **範囲の字下げの中は触らない**（書き手の合意 2026-09-21）——理由を言う。
@@ -22441,6 +22592,40 @@ fn table_edit_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: table_e
         return;
     };
     apply_span_edit(window, live, id, &source, region, &text, chosen, &told);
+}
+
+/// RFN01-88: テンプレートを、このPaneのキャレットの所へ入れる。選んだ字があれば
+/// 置き換える。**編集の道は1本**（[`apply_span_edit`]）なので、取り消しは1回で戻る。
+fn insert_template(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
+    let Some(text) = template::read(path) else {
+        window.tell_tab(
+            say!(
+                "テンプレートを読めません: {}",
+                "Cannot read the template: {}",
+                path.display()
+            )
+            .into(),
+        );
+        return;
+    };
+    answer_new_tab(window, live, id, None);
+    let document = live.states.document(id);
+    let title = template::title_of(document.file.borrow().path());
+    let text = template::fill(&text, &title, timestamp::now());
+    let source = document.text.borrow().clone();
+    let (from, to) = chosen_source_range(&live.states.of(id).borrow(), source.len());
+    let (from, to) = (from.min(to), from.max(to));
+    let end = from + text.len();
+    apply_span_edit(
+        window,
+        live,
+        id,
+        &source,
+        from..to,
+        &text,
+        (end, end),
+        "template",
+    );
 }
 
 /// 本文のひと続きを、別の字で置き換える——1回の編集として（E3）。
