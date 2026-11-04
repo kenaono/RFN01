@@ -264,6 +264,12 @@ export global Ime {
     callback settled();
 }
 
+/// RFN01-100: bumped when an answer about a link arrives later (WSL was asked
+/// on a thread), so a pointer resting on it is measured again.
+export global TerminalLinks {
+    in-out property <int> generation: 0;
+}
+
 // Commands go to the last real input, never to a document behind an input field.
 export global MenuInput {
     in-out property <int> next-id: 1;

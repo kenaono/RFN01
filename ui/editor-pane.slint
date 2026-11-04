@@ -2,7 +2,7 @@ import { EditorSurface } from "editor-surface.slint";
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
 import { LinkCompletion } from "link-completion.slint";
-import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, MenuInput, Role, Slider, Tab, TextButton, ToggleChip } from "controls.slint";
+import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, MenuInput, Role, Slider, Tab, TerminalLinks, TextButton, ToggleChip } from "controls.slint";
 
 // One editing pane.
 //
@@ -244,6 +244,7 @@ export component EditorPane inherits Rectangle {
     in property <[PreviewSelectionRect]> terminal-link;
     in property <[PreviewSelectionRect]> below-link;
     property <bool> below-over-link: false;
+
     callback terminal-in-folder();
     in property <bool> terminal-new-output;
     in property <bool> below-new-output;
@@ -2252,6 +2253,13 @@ export component EditorPane inherits Rectangle {
                         }
                         changed has-hover => {
                             if !self.has-hover { root.below-over-link = false; }
+                        }
+                        // RFN01-100: an answer came in later — measure the resting pointer again.
+                        property <int> link-generation: TerminalLinks.generation;
+                        changed link-generation => {
+                            if self.has-hover {
+                                root.below-over-link = root.terminal-link-hover(1, self.mouse-x / 1px, self.mouse-y / 1px);
+                            }
                         }
                         // RFN01-95: the link Ctrl is over, underlined.
                         if root.below-over-link: Rectangle {

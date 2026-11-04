@@ -478,12 +478,60 @@ pub(crate) fn resolve_path(text: &str, folder: Option<&Path>) -> Option<PathBuf>
 
 /// RFN01-95（案A）: a prompt's folder as a Windows folder. `/mnt/d/…` and
 /// `D:\…` are; `~` and other Linux folders are not.
-fn prompt_folder(written: &str) -> Option<PathBuf> {
+fn prompt_folder(written: &str, wsl: Option<&WslAsk>) -> Option<PathBuf> {
     if let Some(path) = terminal_shells::wsl_mount(written) {
         return Some(path);
     }
+    if is_linux_path(written) {
+        // RFN01-100: `~/Dev/10_Editor` is wherever WSL says it is.
+        return wsl?.windows(written);
+    }
     let path = Path::new(written);
     path.is_absolute().then(|| path.to_path_buf())
+}
+
+/// RFN01-100: a path only WSL can name — `~`, or Linux's own folders (not a
+/// mounted Windows drive).
+fn is_linux_path(text: &str) -> bool {
+    text == "~"
+        || text.starts_with("~/")
+        || (text.starts_with('/') && terminal_shells::wsl_mount(text).is_none())
+}
+
+/// RFN01-100: asking WSL from a shell that is WSL. **Without waiting from the
+/// pointer** (the answer comes back on a thread and the window measures
+/// again), waiting from a click.
+struct WslAsk {
+    distribution: Option<String>,
+    wait: bool,
+    window: slint::Weak<AppWindow>,
+}
+
+impl WslAsk {
+    fn of(window: &AppWindow, session: &TerminalSession, wait: bool) -> Option<Self> {
+        let distribution = terminal_shells::wsl_distribution(&session.profile()?.command)?;
+        Some(Self {
+            distribution,
+            wait,
+            window: window.as_weak(),
+        })
+    }
+
+    fn windows(&self, linux: &str) -> Option<PathBuf> {
+        let weak = self.window.clone();
+        terminal_shells::wsl_windows_path(
+            self.distribution.as_deref(),
+            linux,
+            self.wait,
+            move || {
+                // The pointer resting on the link is measured again.
+                let _ = weak.upgrade_in_event_loop(|window| {
+                    let links = window.global::<TerminalLinks>();
+                    links.set_generation(links.get_generation() + 1);
+                });
+            },
+        )
+    }
 }
 
 /// Pictures and the usual binaries are not opened from a shell (RFN01-95: 「エディタで
@@ -509,6 +557,7 @@ fn link_under(
     spot: TerminalSpot,
     x: f32,
     y: f32,
+    wait: bool,
 ) -> Option<(Opens, Vec<PreviewSelectionRect>)> {
     let (session, looking) = live
         .cache
@@ -531,11 +580,24 @@ fn link_under(
             // prompt names first** — after a `cd` it is where the shell, and an
             // agent started there, is; a name in both folders means the one
             // the prompt is in. Then the folder the shell started in.
-            path: screen
-                .prompt_folder_above(row)
-                .and_then(|folder| prompt_folder(&folder))
-                .and_then(|folder| resolve_path(&text, Some(&folder)))
-                .or_else(|| resolve_path(&text, session.folder()))?,
+            //
+            // RFN01-100: a Linux path — `~/…`, `/home/…` — is asked of WSL,
+            // which follows its links; only one that lands on a Windows drive
+            // opens.
+            path: {
+                let wsl = WslAsk::of(window, &session, wait);
+                if is_linux_path(&text) {
+                    wsl.as_ref()
+                        .and_then(|wsl| wsl.windows(&text))
+                        .filter(|path| path.is_file() && opens_as_text(path))?
+                } else {
+                    screen
+                        .prompt_folder_above(row)
+                        .and_then(|folder| prompt_folder(&folder, wsl.as_ref()))
+                        .and_then(|folder| resolve_path(&text, Some(&folder)))
+                        .or_else(|| resolve_path(&text, session.folder()))?
+                }
+            },
             line,
             column,
         },
@@ -569,7 +631,7 @@ fn hover(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSpot, x: f32
         return false;
     }
     let underline = control
-        .then(|| link_under(window, live, id, spot, x, y))
+        .then(|| link_under(window, live, id, spot, x, y, false))
         .flatten()
         .map(|(_, underline)| underline)
         .unwrap_or_default();
@@ -731,7 +793,7 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
         } else {
             TerminalSpot::Below
         };
-        match link_under(&window, &url_live, id, spot, x, y).map(|(opens, _)| opens) {
+        match link_under(&window, &url_live, id, spot, x, y, true).map(|(opens, _)| opens) {
             Some(Opens::Url(url)) => {
                 use windows::Win32::UI::{
                     Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL,
@@ -850,15 +912,17 @@ mod tests {
     #[test]
     fn prompt_folders_have_windows_names() {
         assert_eq!(
-            prompt_folder("/mnt/d/原稿/第一部"),
+            prompt_folder("/mnt/d/原稿/第一部", None),
             Some(PathBuf::from("D:\\原稿\\第一部"))
         );
         assert_eq!(
-            prompt_folder("D:\\work\\book"),
+            prompt_folder("D:\\work\\book", None),
             Some(PathBuf::from("D:\\work\\book"))
         );
-        assert_eq!(prompt_folder("~/notes"), None);
-        assert_eq!(prompt_folder("/home/ken"), None);
+        assert_eq!(prompt_folder("~/notes", None), None, "not a WSL shell");
+        assert_eq!(prompt_folder("/home/ken", None), None);
+        assert!(is_linux_path("~") && is_linux_path("~/a") && is_linux_path("/home/ken"));
+        assert!(!is_linux_path("/mnt/d/x") && !is_linux_path("a/b") && !is_linux_path("D:\\x"));
     }
 
     #[test]

@@ -1513,9 +1513,9 @@ Terminalの右クリックから、履歴検索（Ctrl+Shift+F）、最新位置
 
 下段はEditor Panel／Terminal Panelです。「＋」で下段TABを追加し、「...」から保存・ReadOnly・取り込み停止・外観・TABを閉じる操作を行います。上段TABごとに保持し、非表示にしてもシェルや取り込みは継続します。上段Terminalの右クリックには「選択出力の挿入」「履歴の取り込み」「ログ取り込み」「ファイルへのログ保存」があります。継続取り込みは新規Editor Panelへ固定し、取り込み中はReadOnlyです。停止後に編集できます。保持したいPanel文書は保存してください。
 
-**エージェントを原稿の隣で**（RFN01-95）：Claude CodeやCodexなどを動かしても画面がちらつかないよう、一括更新（DECSET 2026）を待って描きます。見ていないTerminalが終わりの合図（ベル・OSC 9・OSC 777）を送ると、TABにベルの印が付き、そのTerminalにキーボードが入ると消えます。合図はエージェント側で有効にします（Claude Codeは`/config`の通知を「terminal bell」に、Codexは`config.toml`の`[tui] notifications = true`）。出力の`第一章.md:120`のようなファイル名はCtrl+クリックでその行を開きます（Ctrlを押して載せると下線）。相対パスは、上にある一番近いプロンプト（`ken@host:/mnt/d/原稿$`、`PS D:\原稿>`）のフォルダ、次にシェルの開始フォルダから探すので、`cd`したあとも開けます。プロンプトが`~`の下にあるときは開けません。分割していれば隣のペインに開きます。
+**エージェントを原稿の隣で**（RFN01-95）：Claude CodeやCodexなどを動かしても画面がちらつかないよう、一括更新（DECSET 2026）を待って描きます。見ていないTerminalが終わりの合図（ベル・OSC 9・OSC 777）を送ると、TABにベルの印が付き、そのTerminalにキーボードが入ると消えます。合図はエージェント側で有効にします（Claude Codeは`/config`の通知を「terminal bell」に、Codexは`config.toml`の`[tui] notifications = true`）。出力の`第一章.md:120`のようなファイル名はCtrl+クリックでその行を開きます（Ctrlを押して載せると下線）。相対パスは、上にある一番近いプロンプト（`ken@host:/mnt/d/原稿$`、`PS D:\原稿>`）のフォルダ、次にシェルの開始フォルダから探すので、`cd`したあとも開けます。WSLでは`~`の下（`~/novel`など）も、シンボリックリンクの先がWindowsのドライブ（`/mnt`の下）なら開けます。WSLの中にだけあるファイルは開きません。分割していれば隣のペインに開きます。
 
-**TABの名前**（RFN01-99）：TerminalのTABには、シェルの種類のアイコン（WSLはペンギン、PowerShellは`>_`）と、実行中のアプリが付けた名前が出ます。bashなら今いるフォルダの名前、Claude Codeなら会話の題です。縮めた名前の全体は、マウスを載せると出ます。Terminalの中でもCtrl+P・Ctrl+Shift+Pでコマンドパレットが開きます（RFN01-98）。
+**TABの名前**（RFN01-99）：TerminalのTABには、シェルの種類のアイコン（WSLはペンギン、PowerShellは`>_`）と、実行中のアプリが付けた名前が出ます。bashなら今いるフォルダの名前、Claude Codeなら会話の題です。題を送らないPowerShell・cmdは、プロンプトのフォルダ名を出します。縮めた名前の全体は、マウスを載せると出ます。Terminalの中でもCtrl+P・Ctrl+Shift+Pでコマンドパレットが開きます（RFN01-98）。
 
 **再起動後に戻す**（RFN01-97）：上段のTerminalのTABと、文書の下段のTerminal PanelのTABは、次の起動で同じシェル・同じ開始フォルダで戻ります。シェルはTABを開いたときに始まり、前回の出力が薄い字で上に残ります（「──── Restored · 日時 ────」の下が新しいシェル）。前回のコマンドは実行し直しません。出力を残したくなければ、設定 → Terminal「Restore output after restart」をオフにします。
 
