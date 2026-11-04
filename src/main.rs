@@ -19016,6 +19016,43 @@ fn hold_terminal(
     });
 }
 
+/// RFN01-103: where a second of terminal work went, written beside the frame
+/// count (`frames … cost=`). **Measured before anything is changed** — the
+/// guesses about what is slow have been wrong before (README 計測).
+#[derive(Default)]
+struct TerminalCost {
+    wakes: u32,
+    /// `terminal_panels::drain`: every shell's output parsed, panels, tabs.
+    panels: f64,
+    /// `refresh_terminal`'s own drain (normally nothing left by then).
+    parse: f64,
+    /// Rendering the bands that changed.
+    draw: f64,
+    /// All of `refresh_terminal_panes`, the panels' drain included.
+    whole: f64,
+    /// Bands drawn again, and bands placed as they were.
+    redrawn: u32,
+    reused: u32,
+    /// The history's length and how much of it had been thrown away, at the
+    /// last draw — whether the output scrolled at all.
+    history: usize,
+    origin: u64,
+}
+
+thread_local! {
+    static TERMINAL_COST: RefCell<TerminalCost> = RefCell::default();
+}
+
+/// Adds the time from its start to `whole` when dropped.
+struct TerminalCostSpan(Instant);
+
+impl Drop for TerminalCostSpan {
+    fn drop(&mut self) {
+        let spent = self.0.elapsed().as_secs_f64() * 1000.0;
+        TERMINAL_COST.with(|cost| cost.borrow_mut().whole += spent);
+    }
+}
+
 fn refresh_terminal(
     window: &AppWindow,
     cache: &Rc<RefCell<RenderCache>>,
@@ -19075,7 +19112,9 @@ fn refresh_terminal(
         );
     }
     session.resize(columns, rows);
+    let parsing = Instant::now();
     session.drain();
+    TERMINAL_COST.with(|cost| cost.borrow_mut().parse += parsing.elapsed().as_secs_f64() * 1000.0);
     // RFN01-95: **the program is half-way through one update** (DECSET 2026).
     // Drawn now, the writer sees it half-drawn — the flicker an agent's screen
     // makes. Drawn when it ends, or after the hold whatever happens.
@@ -19194,13 +19233,26 @@ fn refresh_terminal(
     // are already drawn. The two at the edges are cut short by the view, and
     // they are the only ones a scroll has to draw again.
     let total = history + rows;
-    let first_band = top / TERMINAL_BAND_ROWS;
-    let last_band = (top + rows).div_ceil(TERMINAL_BAND_ROWS);
+    // RFN01-103: **bands are counted from the first row the shell ever wrote**,
+    // not from the first row still held. Once the history is full every new
+    // row throws the oldest away, and counted from what is held every band
+    // moved by a row each time — all of them drawn again, every frame (measured:
+    // 260ms a second while output streamed).
+    let origin = screen.history_origin() as usize;
+    let first_band = (origin + top) / TERMINAL_BAND_ROWS;
+    let last_band = (origin + top + rows).div_ceil(TERMINAL_BAND_ROWS);
+    let drawing = Instant::now();
     let mut tiles: Vec<PreviewTile> = Vec::new();
     let mut wanted: Vec<usize> = Vec::new();
     for band in first_band..last_band {
-        let from = (band * TERMINAL_BAND_ROWS).max(top);
-        let to = ((band + 1) * TERMINAL_BAND_ROWS).min(top + rows).min(total);
+        // RFN01-103: **whole at the top**, and placed partly above the view
+        // (the pane clips it), so a view that moves by a row does not make the
+        // top band a different picture. Cut at the bottom as before: below the
+        // view is history the writer scrolled back past.
+        let from = (band * TERMINAL_BAND_ROWS).max(origin) - origin;
+        let to = ((band + 1) * TERMINAL_BAND_ROWS - origin)
+            .min(top + rows)
+            .min(total);
         if to <= from {
             continue;
         }
@@ -19233,8 +19285,9 @@ fn refresh_terminal(
             }
             picked.hash(&mut hasher);
             // The trim, so a band the view cuts short is not mistaken for the
-            // same band whole.
-            (from, to).hash(&mut hasher);
+            // same band whole — counted from the band's own start, which does
+            // not move as the history fills.
+            (origin + from, to - from).hash(&mut hasher);
             inside
                 .map(|(row, column)| (history + row - from, column))
                 .hash(&mut hasher);
@@ -19256,8 +19309,12 @@ fn refresh_terminal(
         let image = match held {
             // **The same cells drawn the same way**: nothing to do but place it
             // again, which costs one property assignment.
-            Some((was, image)) if was == signature && image.size().width == width => image,
+            Some((was, image)) if was == signature && image.size().width == width => {
+                TERMINAL_COST.with(|cost| cost.borrow_mut().reused += 1);
+                image
+            }
             _ => {
+                TERMINAL_COST.with(|cost| cost.borrow_mut().redrawn += 1);
                 let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
                 // Copied only for the band being drawn: the rows this one
                 // holds, and never the screenful.
@@ -19295,7 +19352,8 @@ fn refresh_terminal(
         };
         tiles.push(PreviewTile {
             x: 0,
-            y: ((from - top) as f32 * line) as i32,
+            // Above the view for the band the top cuts through (RFN01-103).
+            y: ((from as f32 - top as f32) * line) as i32,
             width: width as i32,
             height: height as i32,
             source: image,
@@ -19306,6 +19364,12 @@ fn refresh_terminal(
     if let Some(shell) = cache.borrow_mut().pane(id).shell(spot) {
         shell.bands.bands.retain(|band, _| wanted.contains(band));
     }
+    TERMINAL_COST.with(|cost| {
+        let mut cost = cost.borrow_mut();
+        cost.draw += drawing.elapsed().as_secs_f64() * 1000.0;
+        cost.history = history;
+        cost.origin = origin as u64;
+    });
 
     // **どれだけ描いているかを、秒ごとにひとことだけ**（2026-09-08追加）。
     // 帯に切ってあるのは升目を描く費用を抑えるためで（この関数の注記）、
@@ -19319,11 +19383,21 @@ fn refresh_terminal(
             .and_then(|shell| shell.drew(now))
     };
     if let Some((drawn, span)) = counted {
+        let cost = TERMINAL_COST.with(|cost| std::mem::take(&mut *cost.borrow_mut()));
         cache.borrow_mut().log_diag(
             "terminal",
             &format!(
-                "frames pane={} spot={spot:?} drawn={drawn} in={span:.1}s",
-                id.log_name()
+                "frames pane={} spot={spot:?} drawn={drawn} in={span:.1}s cost wakes={} panels={:.0}ms parse={:.0}ms draw={:.0}ms whole={:.0}ms bands={}/{} history={} origin={}",
+                id.log_name(),
+                cost.wakes,
+                cost.panels,
+                cost.parse,
+                cost.draw,
+                cost.whole,
+                cost.redrawn,
+                cost.redrawn + cost.reused,
+                cost.history,
+                cost.origin,
             ),
         );
     }
@@ -20287,7 +20361,14 @@ fn send_draft(window: &AppWindow, live: &Live, id: PaneId) {
 /// cheaper than carrying an answer across a thread that could be stale by the
 /// time it lands.
 fn refresh_terminal_panes(window: &AppWindow, live: &Live) {
+    let started = Instant::now();
     terminal_panels::drain(window, live);
+    TERMINAL_COST.with(|cost| {
+        let mut cost = cost.borrow_mut();
+        cost.wakes += 1;
+        cost.panels += started.elapsed().as_secs_f64() * 1000.0;
+    });
+    let _whole = TerminalCostSpan(started);
     for id in PaneId::all(window) {
         if live.cache.borrow_mut().pane(id).terminal.is_some() {
             refresh_terminal(window, &live.cache, id, TerminalSpot::Front);
