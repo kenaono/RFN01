@@ -688,6 +688,28 @@ impl Screen {
             .collect()
     }
 
+    /// RFN01-96: the last row of the line that starts at `row` (a long command
+    /// line wraps onto the rows after it).
+    pub fn logical_end(&self, row: usize) -> usize {
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let mut at = row.min(lines.len().saturating_sub(1));
+        while at + 1 < lines.len() && lines[at].wrapped {
+            at += 1;
+        }
+        at
+    }
+
+    /// RFN01-96: the row of the line the cursor is on, counted from the top of
+    /// the history — where the shell is waiting for the next command.
+    pub fn cursor_line(&self) -> usize {
+        let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
+        let mut at = self.scrollback.len() + self.cursor.row;
+        while at > 0 && lines[at - 1].wrapped {
+            at -= 1;
+        }
+        at
+    }
+
     /// RFN01-96: what the last command printed — the lines between the last
     /// two prompts, **without the command's own line**. While a command is
     /// still running, what it has printed so far.
