@@ -254,7 +254,22 @@ impl TerminalSession {
     /// gave last run while it has not given one yet.
     pub fn given_title(&self) -> Option<String> {
         let now = self.terminal.screen.title().trim();
-        if now.is_empty() {
+        // **The console's own default is not a name**: PowerShell and cmd are
+        // titled with the path of their program until something says
+        // otherwise (seen in the app, 2026-11-04: `powershell.exe`), which
+        // says less than the shell's name does.
+        let program = self
+            .profile()
+            .map(|shell| crate::terminal_shells::command_parts(&shell.command).0)
+            .and_then(|program| Path::new(program).file_name())
+            .map(|name| name.to_string_lossy().to_ascii_lowercase());
+        let defaulted = program.is_some_and(|program| {
+            let now = now.to_ascii_lowercase();
+            now == program
+                || now.ends_with(&format!("\\{program}"))
+                || now == program.trim_end_matches(".exe")
+        });
+        if now.is_empty() || defaulted {
             self.restored_title.clone()
         } else {
             Some(now.to_owned())
@@ -734,6 +749,30 @@ mod tab_names {
             "no user@host"
         );
         assert_eq!(short_title("  Windows PowerShell "), "Windows PowerShell");
+    }
+
+    /// RFN01-99: the console's default title (the program's path) is not a
+    /// name; one a program gives is.
+    #[test]
+    fn a_default_console_title_leaves_the_shells_name() {
+        let mut shell = TerminalSession::waiting(
+            crate::TerminalShell {
+                name: "PowerShell".into(),
+                command: "powershell.exe -NoLogo".into(),
+                directory: String::new(),
+            },
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        let own = format!("PowerShell:{}", shell.number());
+        assert_eq!(shell.tab_name().0, own);
+        shell
+            .terminal
+            .feed(b"\x1b]0;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\x07");
+        assert_eq!(shell.tab_name(), (own, String::new()));
+        shell.terminal.feed("\x1b]0;✳ 第一章の推敲\x07".as_bytes());
+        assert_eq!(shell.tab_name().0, "✳ 第一章の推敲");
     }
 
     #[test]
