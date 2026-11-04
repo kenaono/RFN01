@@ -2,7 +2,7 @@ import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
 import { LinkCompletion } from "link-completion.slint";
 import { TablePicker } from "table-picker.slint";
-import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Role, Slider, Tab, TextButton, ToggleChip } from "controls.slint";
+import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Role, Slider, Tab, TerminalLinks, TextButton, ToggleChip } from "controls.slint";
 import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
 
 // The shared text surface: tiles, selection, IME, scrolling and body actions.
@@ -88,6 +88,13 @@ export component EditorSurface inherits Rectangle {
     /// RFN01-95: Ctrl over the shell — is there a link under the pointer? Rust
     /// underlines it (`terminal-link`).
     callback terminal-link-hover(float, float) -> bool;
+    // RFN01-100: an answer came in later — measure the resting pointer again.
+    property <int> link-generation: TerminalLinks.generation;
+    changed link-generation => {
+        if root.terminal && root.pointer-inside {
+            root.over-link = root.terminal-link-hover(root.pointer-at-x, root.pointer-at-y);
+        }
+    }
     /// RFN01-98: the window's keys a shell does not get (the palette).
     callback terminal-shortcut(string, bool, bool, bool) -> bool;
     in property <[PreviewSelectionRect]> terminal-link;

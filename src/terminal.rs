@@ -632,6 +632,18 @@ impl Screen {
     /// any `cd`, without asking it to say so in any other way. The text as
     /// written; the pane turns it into a Windows folder.
     pub fn prompt_folder_above(&self, row: usize) -> Option<String> {
+        self.prompt_folder_within(row, 5_000)
+    }
+
+    /// RFN01-101: the folder the newest prompt on the screen names — for a
+    /// shell that does not name itself (PowerShell, cmd). **Only the screen is
+    /// looked through**: the tab asks after every chunk of output.
+    pub fn latest_prompt_folder(&self) -> Option<String> {
+        let row = self.scrollback.len() + self.cursor.row;
+        self.prompt_folder_within(row, self.rows)
+    }
+
+    fn prompt_folder_within(&self, row: usize, reach: usize) -> Option<String> {
         use std::sync::OnceLock;
         static PROMPT: OnceLock<regex::Regex> = OnceLock::new();
         let prompt = PROMPT.get_or_init(|| {
@@ -643,7 +655,7 @@ impl Screen {
         let lines: Vec<_> = self.scrollback.iter().chain(self.lines.iter()).collect();
         let last = row.min(lines.len().checked_sub(1)?);
         // Far enough for the output of one command; a hover asks on every move.
-        let first = last.saturating_sub(5_000);
+        let first = last.saturating_sub(reach);
         (first..=last).rev().find_map(|at| {
             let text = lines[at].text();
             let found = prompt.captures(&text)?;

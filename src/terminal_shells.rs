@@ -47,6 +47,124 @@ pub(crate) fn wsl_mount(path: &str) -> Option<PathBuf> {
     )))
 }
 
+/// RFN01-100: this shell is WSL, and which distribution it runs (`-d`,
+/// `--distribution`); `Some(None)` is the default one.
+pub(crate) fn wsl_distribution(command: &str) -> Option<Option<String>> {
+    let (program, args) = command_parts(command);
+    let wsl = Path::new(program)
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("wsl"));
+    if !wsl {
+        return None;
+    }
+    let mut words = args.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "-d" || word == "--distribution" {
+            return Some(words.next().map(|name| name.trim_matches('"').to_owned()));
+        }
+        if word == "--" || word == "-e" || word == "--exec" {
+            break;
+        }
+    }
+    Some(None)
+}
+
+/// RFN01-100: what WSL said a Linux path is, or that it is still being asked.
+#[derive(Clone, Debug, PartialEq)]
+enum Lookup {
+    Asking,
+    Known(Option<PathBuf>),
+}
+
+type Lookups = std::sync::Mutex<std::collections::HashMap<(Option<String>, String), Lookup>>;
+
+fn lookups() -> &'static Lookups {
+    static LOOKUPS: std::sync::OnceLock<Lookups> = std::sync::OnceLock::new();
+    LOOKUPS.get_or_init(Default::default)
+}
+
+/// RFN01-100（書き手と合意 2026-11-04）: a Linux path in WSL — `~/Dev/x`,
+/// `/home/ken/novel` — as the Windows file it is, **following symbolic
+/// links**. Only a file on a Windows drive (under `/mnt`) has an answer: one
+/// that is really inside WSL (`\\wsl.localhost\…`) is not opened (書き手：
+/// 「あくまで、Windowsに共有されているmnt配下のみ」).
+///
+/// Each path is asked once and remembered. With `wait` false the first ask
+/// happens on a thread of its own, and `None` comes back at once; `answered`
+/// runs when the answer is in, so the pointer's question can be asked again.
+pub(crate) fn wsl_windows_path(
+    distribution: Option<&str>,
+    linux: &str,
+    wait: bool,
+    answered: impl FnOnce() + Send + 'static,
+) -> Option<PathBuf> {
+    let key = (distribution.map(str::to_owned), linux.to_owned());
+    let known = lookups().lock().ok()?.get(&key).cloned();
+    match known {
+        Some(Lookup::Known(answer)) => return answer,
+        Some(Lookup::Asking) if !wait => return None,
+        _ => {}
+    }
+    if wait {
+        let answer = ask_wsl(key.0.as_deref(), &key.1);
+        if let Ok(mut table) = lookups().lock() {
+            table.insert(key, Lookup::Known(answer.clone()));
+        }
+        return answer;
+    }
+    if let Ok(mut table) = lookups().lock() {
+        table.insert(key.clone(), Lookup::Asking);
+    }
+    let _ = std::thread::Builder::new()
+        .name("rfnedit-wslpath".to_owned())
+        .spawn(move || {
+            let answer = ask_wsl(key.0.as_deref(), &key.1);
+            if let Ok(mut table) = lookups().lock() {
+                table.insert(key, Lookup::Known(answer));
+            }
+            answered();
+        });
+    None
+}
+
+/// Ask WSL once: `~` as the home, links followed (`realpath -m`), then the
+/// Windows name (`wslpath -w`). About 0.08s while WSL is running.
+fn ask_wsl(distribution: Option<&str>, linux: &str) -> Option<PathBuf> {
+    let mut command = std::process::Command::new("wsl.exe");
+    if let Some(name) = distribution {
+        command.args(["-d", name]);
+    }
+    command
+        .args([
+            "-e",
+            "sh",
+            "-c",
+            r#"p="$1"; case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#"~/"}";; esac; wslpath -w "$(realpath -m -- "$p")""#,
+            "sh",
+            linux,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // コンソールの窓を一瞬でも出さない（git.rsと同じ）。
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    windows_drive_path(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// `D:\…` only — not `\\wsl.localhost\…` nor anything else.
+pub(crate) fn windows_drive_path(text: &str) -> Option<PathBuf> {
+    let bytes = text.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &text[1..3] == ":\\")
+        .then(|| PathBuf::from(text))
+}
+
 pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
     let cwd = shell.directory.trim();
     let (program, args) = command_parts(&shell.command);
@@ -237,6 +355,75 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFN01-100: which shells are WSL, and which distribution they run.
+    #[test]
+    fn wsl_and_its_distribution_are_read_from_the_command() {
+        assert_eq!(wsl_distribution("wsl.exe"), Some(None));
+        assert_eq!(
+            wsl_distribution("wsl -d Ubuntu-24.04"),
+            Some(Some("Ubuntu-24.04".to_owned()))
+        );
+        assert_eq!(
+            wsl_distribution("wsl.exe --distribution Debian --cd ~"),
+            Some(Some("Debian".to_owned()))
+        );
+        assert_eq!(wsl_distribution("wsl.exe -- bash -d x"), Some(None));
+        assert_eq!(wsl_distribution("powershell.exe -NoLogo"), None);
+        assert_eq!(wsl_distribution("cmd.exe"), None);
+    }
+
+    /// RFN01-100: only a Windows drive is an answer.
+    #[test]
+    fn only_a_windows_drive_is_opened() {
+        assert_eq!(
+            windows_drive_path("D:\\Projects\\原稿"),
+            Some(PathBuf::from("D:\\Projects\\原稿"))
+        );
+        assert_eq!(
+            windows_drive_path("\\\\wsl.localhost\\Ubuntu\\home\\ken"),
+            None
+        );
+        assert_eq!(windows_drive_path(""), None);
+        assert_eq!(windows_drive_path("/home/ken"), None);
+    }
+
+    /// RFN01-100: WSL itself follows a link onto a Windows drive, and a folder
+    /// that is really inside WSL has no answer.
+    #[test]
+    #[ignore = "asks the real WSL; run explicitly"]
+    fn wsl_follows_links_onto_windows_drives() {
+        let made = std::process::Command::new("wsl.exe")
+            .args(["-e", "ln", "-sfn", "/mnt/c/Windows", "/tmp/rfn-link-test"])
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let answer = wsl_windows_path(None, "/tmp/rfn-link-test/System32", true, || {});
+        assert_eq!(
+            answer.map(|p| p.to_string_lossy().to_ascii_lowercase()),
+            Some("c:\\windows\\system32".to_owned())
+        );
+        assert_eq!(
+            wsl_windows_path(None, "~", true, || {}),
+            None,
+            "the home is WSL's own"
+        );
+        // Asked again, it is remembered (and answered without waiting).
+        assert!(wsl_windows_path(None, "/tmp/rfn-link-test/System32", false, || {}).is_some());
+        // Not asked yet and not waited for: nothing now, the answer arrives.
+        let (told, heard) = std::sync::mpsc::channel();
+        assert_eq!(
+            wsl_windows_path(None, "/tmp/rfn-link-test", false, move || {
+                let _ = told.send(());
+            }),
+            None
+        );
+        heard
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(wsl_windows_path(None, "/tmp/rfn-link-test", false, || {}).is_some());
+    }
+
     #[test]
     fn quoted_program_and_japanese_directory_roundtrip() {
         let shell = TerminalShell {

@@ -246,7 +246,20 @@ impl TerminalSession {
                 let tip = if shown == title { String::new() } else { title };
                 (shown, tip)
             }
-            None => (self.title(), String::new()),
+            // RFN01-101: a shell that names nothing still says where it is,
+            // in its prompt (`PS D:\原稿\第一部>`).
+            None => match self.terminal.screen.latest_prompt_folder() {
+                Some(folder) => {
+                    let shown = short_title(&folder);
+                    let tip = if shown == folder {
+                        String::new()
+                    } else {
+                        folder
+                    };
+                    (shown, tip)
+                }
+                None => (self.title(), String::new()),
+            },
         }
     }
 
@@ -771,8 +784,16 @@ mod tab_names {
             .terminal
             .feed(b"\x1b]0;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\x07");
         assert_eq!(shell.tab_name(), (own, String::new()));
+        // RFN01-101: no name given, the prompt says where it is.
+        shell.terminal.feed("PS D:\\原稿\\第一部> ".as_bytes());
+        assert_eq!(
+            shell.tab_name(),
+            ("第一部".to_owned(), "D:\\原稿\\第一部".to_owned())
+        );
+        shell.terminal.feed("cd ..\r\nPS D:\\原稿> ".as_bytes());
+        assert_eq!(shell.tab_name().0, "原稿", "the newest prompt");
         shell.terminal.feed("\x1b]0;✳ 第一章の推敲\x07".as_bytes());
-        assert_eq!(shell.tab_name().0, "✳ 第一章の推敲");
+        assert_eq!(shell.tab_name().0, "✳ 第一章の推敲", "a name given wins");
     }
 
     #[test]
