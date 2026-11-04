@@ -357,6 +357,22 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
         draw();
         assert_eq!(&*typed.borrow(), &[(0, 4, "250".to_owned())]);
 
+        // RFN01-93: Escape in a field gives the keyboard back to the pane, and
+        // the next one reaches the pane's way out instead of being swallowed
+        // with the other keys a settings tab keeps from the document.
+        let escapes = Rc::new(Cell::new(0));
+        let seen = escapes.clone();
+        window.on_pane_escaped(move |_| {
+            seen.set(seen.get() + 1);
+            true
+        });
+        key(Key::Escape.into());
+        draw();
+        assert_eq!(escapes.get(), 0, "the field's Escape only leaves the field");
+        key(Key::Escape.into());
+        draw();
+        assert_eq!(escapes.get(), 1);
+
         window.hide().unwrap();
     }
 
@@ -490,6 +506,23 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     reset_all_settings(&window, &live);
     assert_eq!(live.tabs.borrow().panes[0].tabs[0].word_mode, 0);
     assert_eq!(id.screen(&window).word_mode, 0);
+
+    // RFN01-93: Escape closes the settings — only when the settings are the tab
+    // in front, and through the tab's own close on the next tick.
+    switch_to_tab(&window, &live, id, 0);
+    assert!(!escape_closes_settings(&window, &live, id));
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        strip(),
+        (vec![false, true], 0),
+        "a document tab is left alone"
+    );
+    switch_to_tab(&window, &live, id, 1);
+    assert!(escape_closes_settings(&window, &live, id));
+    slint::platform::update_timers_and_animations();
+    assert_eq!(strip(), (vec![false], 0));
+    assert!(!id.screen(&window).settings);
+    assert_eq!(&*document.text.borrow(), "本文");
 
     // Nothing to reopen next time: the session names the document only.
     let session = session::capture_session(&window, &live);

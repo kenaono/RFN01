@@ -3526,6 +3526,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let states = pane_states.clone();
     let cache = render_cache.clone();
+    let escape_live = live.clone();
     window.on_pane_escaped(move |pane| {
         let Some(window) = weak.upgrade() else {
             return false;
@@ -3536,6 +3537,9 @@ fn main() -> Result<(), slint::PlatformError> {
             // 書き手の求め 2026-09-22: nothing chosen to let go of, so the lit
             // bookmark section is.
             || bookmark_ui::let_go_in(&window, &cache, &states, id)
+            // RFN01-93（書き手）:「設定WindowはESCで閉じるようにする」。
+            // 畳むものが何も残っていなければ、設定のTABを閉じる。
+            || escape_closes_settings(&window, &escape_live, id)
     });
 
     let weak = window.as_weak();
@@ -14047,6 +14051,37 @@ fn reopen_as_asked(window: &AppWindow, live: &Live, encoding: file_io::Encoding)
         ],
         1,
     );
+}
+
+/// RFN01-93: Escape in the Settings tab closes it, once nothing else in the pane
+/// wanted the key (menus, the find bar, a selection, a lit bookmark section).
+///
+/// The close goes through [`close_tab`] like the tab's ×, on the next tick for
+/// the same reason as every other tab command: the strip is republished, and
+/// the key is still being delivered inside one of its rows (6.18).
+fn escape_closes_settings(window: &AppWindow, live: &Live, id: PaneId) -> bool {
+    if id.is_panel() {
+        return false;
+    }
+    let Some(index) = ({
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(id);
+        strip
+            .tabs
+            .get(strip.active)
+            .filter(|tab| tab.settings)
+            .map(|_| strip.active)
+    }) else {
+        return false;
+    };
+    let weak = window.as_weak();
+    let live = live.clone();
+    Timer::single_shot(Duration::ZERO, move || {
+        if let Some(window) = weak.upgrade() {
+            close_tab(&window, &live, id, index);
+        }
+    });
+    true
 }
 
 /// Close a tab (要件 6.3).

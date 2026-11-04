@@ -799,6 +799,15 @@ export component EditorSurface inherits Rectangle {
                                 // 決める（`shortcuts::wire`）。残りの鍵は、ここで
                                 // 飲む：本文へ落ちれば代役の文書に字が入る。
                                 if (root.settings) {
+                                    // RFN01-93: Escapeは飲まずに、本文と同じ順で
+                                    // 畳む道へ渡す——最後に設定のTABを閉じる。
+                                    if (event.text == Key.Escape && self.preedit-text == "") {
+                                        self.text = "";
+                                        if (!root.escaped() && !root.dismiss-menus()) {
+                                            root.selection-escaped();
+                                        }
+                                        return accept;
+                                    }
                                     if (self.preedit-text == "") {
                                         root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
                                     }
