@@ -1513,6 +1513,10 @@ Terminalの右クリックから、履歴検索（Ctrl+Shift+F）、最新位置
 
 下段はEditor Panel／Terminal Panelです。「＋」で下段TABを追加し、「...」から保存・ReadOnly・取り込み停止・外観・TABを閉じる操作を行います。上段TABごとに保持し、非表示にしてもシェルや取り込みは継続します。上段Terminalの右クリックには「選択出力の挿入」「履歴の取り込み」「ログ取り込み」「ファイルへのログ保存」があります。継続取り込みは新規Editor Panelへ固定し、取り込み中はReadOnlyです。停止後に編集できます。保持したいPanel文書は保存してください。
 
+**エージェントを原稿の隣で**（RFN01-95）：Claude CodeやCodexなどを動かしても画面がちらつかないよう、一括更新（DECSET 2026）を待って描きます。見ていないTerminalが終わりの合図（ベル・OSC 9・OSC 777）を送ると、TABにベルの印が付き、そのTerminalにキーボードが入ると消えます。合図はエージェント側で有効にします（Claude Codeは`/config`の通知を「terminal bell」に、Codexは`config.toml`の`[tui] notifications = true`）。出力の`第一章.md:120`のようなファイル名はCtrl+クリックでその行を開きます（Ctrlを押して載せると下線）。分割していれば隣のペインに開きます。
+
+**再起動後に戻す**（RFN01-97）：上段のTerminalのTABと、文書の下段のTerminal PanelのTABは、次の起動で同じシェル・同じ開始フォルダで戻ります。シェルはTABを開いたときに始まり、前回の出力が薄い字で上に残ります（「──── Restored · 日時 ────」の下が新しいシェル）。前回のコマンドは実行し直しません。出力を残したくなければ、設定 → Terminal「Restore output after restart」をオフにします。
+
 設定 → Terminalではシェルプロファイル（名前・実行ファイル・引数・開始フォルダ）を編集できます。編集欄の変更は「適用」で確定します。Explorerや文書Paneのメニューから、そのフォルダを開始場所として新しいTerminalを開けます。WSLの開始フォルダにはWindowsパスまたはLinuxの絶対パス／`~`を指定できます。
 
 Terminal・Editor Panel・Terminal Panelの外観既定は設定 → Terminalにあります。Editorの既定は既存のText／Page設定です。各TABの右クリックでは個別外観を指定できます。Pane背景変更は上段・下段へ一括適用し、個別の背景指定だけを解除します。文字書式と透過度は維持します。ログにはタイムスタンプを付けられます（2026-09-23）。付けるかどうかはログを始めるたびに選びます：ファイルは保存ダイアログの「タイムスタンプ」（前回の選択を覚える）、Editor Panelは開始時の問い（付ける／付けない／キャンセル）。付けると、確定した各行（折り返しは1行、空行も含む）の先頭に、その行が改行で確定した時刻が入り、停止時は未確定の最終行にも停止時刻を付けます。書式は設定 → Terminalの「タイムスタンプの書式」（既定`[yyyy-MM-dd HH:mm:ss] `、`yyyy MM dd HH mm ss fff`を置換、他の文字はそのまま）。書式はログ開始時のものを使います。処理は`src/timestamp.rs`と`Screen`の取り込み（`CapturedOutput.stamp`）。
