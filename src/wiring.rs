@@ -1702,7 +1702,20 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
                         .any(|tab| tab.document.file.borrow().path() == Some(path.as_path()))
                 });
                 activate_left_row(&window, &live, index);
-                if file {
+                // RFN01-92: **a first click that opened nothing leaves nothing to
+                // double.** A file outside the Workspace in use is refused, and
+                // the second click of its double would otherwise be taken for
+                // "another view of what is in front" — the Workspace's file.
+                let opened = file
+                    && live.tree_paths.borrow().get(index).is_some_and(|path| {
+                        live.tabs.borrow().of(id).current().is_some_and(|tab| {
+                            tab.document.file.borrow().path() == Some(path.as_path())
+                        })
+                    });
+                if file && !opened {
+                    *first_click.borrow_mut() = None;
+                }
+                if opened {
                     let provisional = live
                         .tabs
                         .borrow()
