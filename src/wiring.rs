@@ -120,41 +120,6 @@ pub fn wire_terminal_look(
     live: &Live,
     render_cache: &Rc<RefCell<RenderCache>>,
 ) {
-    // **黒地と紙を、ひとまとめで置く。**背景だけ黒くして文字が黒のままの画面は
-    // 読めない——その状態を通らせない。
-    let weak = window.as_weak();
-    let cache = render_cache.clone();
-    window.on_terminal_theme_chosen(move |dark| {
-        if let Some(window) = weak.upgrade() {
-            let (paper, ink) = if dark {
-                ([0.09, 0.09, 0.10], [0.88, 0.87, 0.85])
-            } else {
-                (
-                    crate::text_blocks::DEFAULT_PAPER,
-                    crate::text_blocks::DEFAULT_INK,
-                )
-            };
-            window.set_terminal_paper(slint_colour(paper));
-            window.set_terminal_ink(slint_colour(ink));
-            cache
-                .borrow_mut()
-                .log_diag("spec", &format!("terminal theme dark={}", u8::from(dark)));
-            after_terminal_look(&window, &cache);
-        }
-    });
-
-    let weak = window.as_weak();
-    window.on_terminal_font_picked(move || {
-        if let Some(window) = weak.upgrade() {
-            fill_font_names(&window);
-            // **どちらの欄のために開いたかを旗で言う。**一覧は要件 9 のものと
-            // 同じ`font-menu`で、選ばれた家名が戻る先だけが違う。
-            window.set_font_for_terminal(true);
-            let standing = window.get_terminal_font();
-            window.set_font_current(standing);
-        }
-    });
-
     // 書き手の求め 2026-09-15: Terminal の面の Reset。**この面の値だけ**——
     // 既定の接続先、紙の地、書体と大きさ。シェルの一覧は設定ファイルのもので、
     // 画面から足したものではないので触らない。
@@ -163,32 +128,18 @@ pub fn wire_terminal_look(
     window.on_terminal_reset(move || {
         if let Some(window) = weak.upgrade() {
             window.set_default_shell(0);
-            window.set_terminal_font(crate::TERMINAL_FONT_DEFAULT.into());
-            window.set_terminal_size(crate::TERMINAL_SIZE_DEFAULT);
             window.set_terminal_confirm_paste(true);
             window.set_terminal_confirm_close(true);
             window.set_terminal_restore_output(true);
             window.set_terminal_history_limit(10_000);
             window.set_terminal_timestamp_format(crate::timestamp::DEFAULT_FORMAT.into());
-            window.set_panel_defaults(Default::default());
             cache.borrow_mut().log_diag("spec", "terminal reset");
-            // 地と字をひとまとめで戻し、書き出しと描き直しもそこで済む。
-            window.invoke_terminal_theme_chosen(false);
+            // 外観の3つの既定を初期の外観へ（RFN01-66：古いTerminalの値は外した）。
             window.set_panel_defaults(ModelRc::new(VecModel::from(
                 (0..3)
-                    .map(|kind| crate::terminal_appearance::default_style(&window, kind))
+                    .map(|_| crate::terminal_appearance::initial_style())
                     .collect::<Vec<_>>(),
             )));
-        }
-    });
-
-    let weak = window.as_weak();
-    let cache = render_cache.clone();
-    window.on_terminal_size_stepped(move |by| {
-        if let Some(window) = weak.upgrade() {
-            let (low, high) = crate::TERMINAL_SIZE_RANGE;
-            let size = (window.get_terminal_size() + by).clamp(low, high);
-            window.set_terminal_size(size);
             after_terminal_look(&window, &cache);
         }
     });
@@ -513,20 +464,6 @@ impl ColourDoors {
                 }
                 schedule_relayout(window, &self.states, &self.cache, &self.timer);
             }
-            1 => {
-                let fallback = if slot == 0 {
-                    crate::text_blocks::DEFAULT_PAPER
-                } else {
-                    crate::text_blocks::DEFAULT_INK
-                };
-                let colour = slint_colour(rgb.unwrap_or(fallback));
-                if slot == 0 {
-                    window.set_terminal_paper(colour);
-                } else {
-                    window.set_terminal_ink(colour);
-                }
-                after_terminal_look(window, &self.cache);
-            }
             // 追加要件 2026-09-15（書き手）: Left Pane。0 背景、1 文字、2 フォルダ、3 ファイル。
             // フォルダとファイルは「既定の色」で外すと文字色に従う。
             6 => {
@@ -678,8 +615,6 @@ impl ColourDoors {
                         .unwrap_or_default(),
                 }
             }
-            1 if slot == 0 => window.get_terminal_paper(),
-            1 => window.get_terminal_ink(),
             6 => match slot {
                 0 => window.get_left_paper(),
                 2 if window.get_left_folder_own() => window.get_left_folder_ink(),
@@ -1313,15 +1248,6 @@ pub fn wire_typography(
         if let Some(window) = weak.upgrade() {
             // 追加要件 2026-09-08: **同じ一覧が2つの欄のために開く。**どちらの
             // ために開いたかは、開いた側が旗で言う（要件 6.8 の端末の書体）。
-            if window.get_font_for_terminal() {
-                window.set_font_for_terminal(false);
-                window.set_terminal_font(family.clone());
-                cache
-                    .borrow_mut()
-                    .log_diag("spec", &format!("terminal font={family}"));
-                after_terminal_look(&window, &cache);
-                return;
-            }
             let sheet = shown_sheet(&window);
             let slot = slot.max(0) as usize;
             families.set_row_data(font_row(sheet, slot), family.clone());

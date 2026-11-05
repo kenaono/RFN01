@@ -1319,7 +1319,7 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         if root.writing: MenuRow {
-                            title: @tr("Compare with Last Commit");
+                            title: @tr("Compare with Git Last Commit");
                             activated => {
                                 root.compare-head-requested();
                                 pane-menu.close();

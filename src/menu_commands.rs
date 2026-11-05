@@ -31,6 +31,8 @@ enum Command {
     Encoding(i32),
     Print,
     Exit,
+    /// RFN01-66: ヘルプ。0 キーの一覧、1 サンプル文書を開く、2 RFN Editについて。
+    Help(i32),
     FolderTerminal,
     Undo(bool),
     Copy(bool),
@@ -2073,16 +2075,9 @@ fn build(
                 (12, "行番号", "Line Numbers"),
                 (54, "空白・改行記号", "Spaces and Line Breaks"),
             ] {
-                let shared = Setting::from_index(setting)
-                    .is_some_and(|s| shared_sheet(window, 1, s.page()) == 0);
-                let suffix = if shared {
-                    pick("縦横共通", "horizontal and vertical, shared")
-                } else if t.id.vertical(window) {
-                    pick("縦書き共通", "vertical, shared")
-                } else {
-                    pick("横書き共通", "horizontal, shared")
-                };
-                let name = format!("{} ({suffix})", pick(ja, en));
+                // RFN01-66（書き手の判断 2026-11-05）: 今のペインの向きの設定を切り替える入口。
+                // 「（横書き共通）」の注記は外した——設定のLayoutと同じ値を、ここからも切り替えるだけ。
+                let name = pick(ja, en).to_owned();
                 let on = Setting::from_index(setting)
                     .is_some_and(|s| s.read(window, usize::from(t.id.vertical(window))) != 0);
                 row(
@@ -2371,22 +2366,23 @@ fn build(
                 );
             }
         }
+        // RFN01-66（書き手の判断 2026-11-05）: ヘルプを簡単に作る。使い方はキーの一覧と
+        // 紹介用のサンプル文書、RFN Editについては名前・版・著作権。
         6 => {
-            root.row(
-                pick("使い方…（未実装）", "User Guide… (not implemented)"),
-                0,
-                false,
-                false,
-            )?;
-            root.row(
-                pick(
-                    "RFN Editについて…（未実装）",
-                    "About RFN Edit… (not implemented)",
-                ),
-                0,
-                false,
-                false,
-            )?;
+            add!("キーの一覧…", "Keyboard Shortcuts…", Command::Help(0), true);
+            add!(
+                "サンプル文書を開く",
+                "Open Sample Document",
+                Command::Help(1),
+                true
+            );
+            root.sep()?;
+            add!(
+                "RFN Editについて…",
+                "About RFN Edit…",
+                Command::Help(2),
+                true
+            );
         }
         _ => return Ok(None),
     }
@@ -2744,6 +2740,9 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Reveal => window.invoke_reveal_requested(),
         Command::Encoding(i) => window.invoke_reopen_encoding(i),
         Command::Print => window.invoke_print_requested(),
+        Command::Help(0) => crate::open_settings_page(window, live, 6),
+        Command::Help(1) => crate::open_sample_document(window, live, t.id),
+        Command::Help(_) => crate::show_about(window, live),
         Command::Exit => {
             if let Some(hwnd) = window_chrome::window_handle(window) {
                 unsafe {
@@ -3363,10 +3362,8 @@ mod tests {
         let kills = Rc::new(RefCell::new(Kills::default()));
 
         assert!(menu_opens(&h.window, &h.live, &kills, 2), "挿入は開く");
-        assert!(
-            !menu_opens(&h.window, &h.live, &kills, 6),
-            "Helpは押せる行が無い（未実装だけ）"
-        );
+        // RFN01-66（2026-11-05）: ヘルプに行ができた（以前は未実装の行だけで開かなかった）。
+        assert!(menu_opens(&h.window, &h.live, &kills, 6), "Helpは開く");
     }
 
     /// 書式のボタン（2026-09-23）：**挿入メニューの1段目の全部に絵があり**、束は

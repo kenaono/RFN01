@@ -27,7 +27,7 @@ fn a_preset_puts_back_only_its_own_page() {
     settings_transfer::wire(window, &r.live);
 
     window.set_paper_random(1);
-    window.set_terminal_size(15);
+    window.set_terminal_history_limit(1500);
     save_settings(window, &r.live.cache);
     settings_transfer::save_as(window, &r.live, PresetKind::Editor, "執筆用");
     settings_transfer::save_as(window, &r.live, PresetKind::Terminal, "黒");
@@ -37,7 +37,7 @@ fn a_preset_puts_back_only_its_own_page() {
     assert!(!modified(window, 0));
     // 替えれば「変更あり」。名前は残る。
     window.set_paper_random(2);
-    window.set_terminal_size(20);
+    window.set_terminal_history_limit(2000);
     window.set_left_size(15);
     save_settings(window, &r.live.cache);
     assert_eq!(current(window, 0), "執筆用");
@@ -48,12 +48,12 @@ fn a_preset_puts_back_only_its_own_page() {
     // （言語は使わない——翻訳はプロセスで1つで、並んで走る試験の文言を変える。）
     window.invoke_preset_chosen(0, "執筆用".into());
     assert_eq!(window.get_paper_random(), 1);
-    assert_eq!(window.get_terminal_size(), 20);
+    assert_eq!(window.get_terminal_history_limit(), 2000);
     assert_eq!(window.get_left_size(), 15);
     assert_eq!(current(window, 0), "執筆用");
     assert!(!modified(window, 0));
     window.invoke_preset_chosen(1, "黒".into());
-    assert_eq!(window.get_terminal_size(), 15);
+    assert_eq!(window.get_terminal_history_limit(), 1500);
 
     // 書いたファイルを次の起動が読む。
     let directory = app_data::app_directory().unwrap();

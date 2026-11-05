@@ -147,3 +147,32 @@ fn ctrl_j_breaks_the_line_without_carrying_the_list_mark() {
     plain_enter_in_pane(window, live, id);
     assert_eq!(&*document.text.borrow(), "- 項目\n\n", "Ctrl+J does not");
 }
+
+/// RFN01-66（書き手の判断 2026-11-05）: ヘルプ。サンプル文書は無題で開き、元の文書は残る。
+/// 「RFN Editについて」は問いの窓に版を出す。「キーの一覧」は設定のKeysの面。
+#[test]
+fn help_opens_the_sample_the_keys_and_about() {
+    let root = scratch_directory("help");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "あ\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    let id = PaneId::FIRST;
+    open_sample_document(window, live, id);
+    let tab = live.tabs.borrow().of(id).current().cloned().unwrap();
+    assert!(tab.document.file.borrow().path().is_none(), "untitled");
+    assert!(tab.document.text.borrow().contains("灯台守の手紙"));
+    assert_eq!(names(live, id), ["a.md", "無題1"], "the open file stays");
+
+    show_about(window, live);
+    assert!(matches!(*live.pending.borrow(), Some(Question::About)));
+    assert!(
+        window
+            .get_question_text()
+            .contains(env!("CARGO_PKG_VERSION"))
+    );
+    answer_question(window, live, 0);
+    assert!(live.pending.borrow().is_none());
+
+    open_settings_page(window, live, 6);
+    assert_eq!(window.get_settings_tab(), 6);
+    assert!(live.tabs.borrow().of(id).current().unwrap().settings);
+}

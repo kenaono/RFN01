@@ -1097,8 +1097,6 @@ export component AppWindow inherits Window {
     // 書き手の求め 2026-11-05: 既定の倍率（新しいTABと Reset の戻り先）。開いているTABは変えない。
     in-out property <int> default-zoom: 120;
     callback default-zoom-stepped(int);
-    in-out property <color> terminal-paper: #fffefa;
-    in-out property <color> terminal-ink: #24211e;
     in-out property <[PanelStyle]> panel-defaults;
     callback terminal-settings-edited();
     in-out property <bool> appearance-open;
@@ -1135,16 +1133,10 @@ export component AppWindow inherits Window {
     pure callback terminal-timestamp-sample(string) -> string;
     /// The timestamp checkbox of the log's save dialog, as it was last left.
     in-out property <bool> terminal-log-stamp-file: false;
-    in-out property <string> terminal-font: "Consolas";
-    in-out property <int> terminal-size: 14;
-    callback terminal-font-picked();
     /// 書体の一覧は要件 9 のものと同じ`font-menu`を使う。**どちらの欄のために
     /// 開いたか**を、開いた側がここで言う——戻る先だけが違う。
-    in-out property <bool> font-for-terminal: false;
-    callback terminal-size-stepped(int);
     /// 黒地／紙のひとまとめの選択。**背景と文字を一度に置く**——片方だけ変えた状態は
     /// 読めない画面で、そこを通らせない。
-    callback terminal-theme-chosen(bool);
     /// 追加要件 2026-09-08: 要件 8.1 の自動退避を働かせるかどうか。
     ///
     /// **既定はOn。**何も言っていない書き手は、未保存の中身を捨ててくれとは
@@ -1675,19 +1667,9 @@ export component AppWindow inherits Window {
     /// Close whichever of the window's own menus is open, and say whether one
     /// was. The panes close theirs; this is what they ask about afterwards.
     ///
-    /// The tree's row menus are not here: each one belongs to the row it hangs
-    /// from, inside a repeater, and there is nothing to name from out here.
-    /// They close by being clicked away from.
+    /// RFN01-66（2026-11-05）: 窓のメニューだった☰（とそこから開くシェル・最近のフォルダの一覧）は
+    /// 外したので、いまは閉じるものが無い。呼ぶ側の作りはそのまま残す。
     function dismiss-menus() -> bool {
-        if (app-menu.is-open) {
-            app-menu.close();
-            return true;
-        }
-        // The folder history is closed blind, and it is
-        // the same case: it is opened from a row inside the app menu, which is
-        // two components up from here (要件 5.1). Reading its `is-open` is what
-        // makes that `show()` fail to compile — tried, and it does.
-        recent-menu.close();
         return false;
     }
 
@@ -1805,18 +1787,7 @@ export component AppWindow inherits Window {
                 // (40 - 26) / 2 on x, so the button sits in the middle of the
                 // rail; 30px apart down it.
                 IconButton {
-                    visible: !root.custom-title;
-                    x: 7px;
-                    y: 4px;
-                    icon: Icons.menu;
-                    tip: @tr("Menu");
-                    clicked => {
-                        app-menu.show();
-                    }
-                }
-
-                IconButton {
-                    x: 7px; y: root.custom-title ? 4px : 40px;
+                    x: 7px; y: 4px;
                     icon: "M1 1h5v5H1zM10 1h5v5h-5zM1 10h5v5H1zM10 10h5v5h-5z";
                     tip: @tr("Workspace");
                     checked: root.tree-open && root.left-tab == 4;
@@ -1834,7 +1805,7 @@ export component AppWindow inherits Window {
                 // was in stays with it.
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 34px : 70px;
+                    y: 34px;
                     icon: Icons.folder;
                     // 書き手の求め 2026-11-05: Workspaceを使っているあいだは使えない——Workspaceの外の
                     // ファイルは開けないので、見えても役に立たない。押せず、なぜかを説明に出す。
@@ -1851,7 +1822,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 64px : 100px;
+                    y: 64px;
                     icon: Icons.search;
                     tip: @tr("Search");
                     checked: root.tree-open && root.left-tab == 1;
@@ -1865,7 +1836,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 94px : 130px;
+                    y: 94px;
                     icon: Icons.history;
                     tip: @tr("History");
                     checked: root.tree-open && root.left-tab == 2;
@@ -1879,7 +1850,7 @@ export component AppWindow inherits Window {
 
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 124px : 160px;
+                    y: 124px;
                     icon: Icons.outline;
                     tip: @tr("Outline");
                     checked: root.tree-open && root.left-tab == 3;
@@ -1894,7 +1865,7 @@ export component AppWindow inherits Window {
                 // 書き手の求め 2026-09-22: Bookmark View。
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 154px : 190px;
+                    y: 154px;
                     icon: Icons.bookmark;
                     tip: @tr("Bookmarks");
                     checked: root.tree-open && root.left-tab == 5;
@@ -1909,7 +1880,7 @@ export component AppWindow inherits Window {
                 // 書き手の求め 2026-09-23: Tag View。
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 184px : 220px;
+                    y: 184px;
                     icon: Icons.tag;
                     tip: @tr("Tags");
                     checked: root.tree-open && root.left-tab == 6;
@@ -1924,7 +1895,7 @@ export component AppWindow inherits Window {
                 // RFN01-67（書き手と決めた 2026-10-03）: Git Changes。Backups の上。
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 214px : 250px;
+                    y: 214px;
                     icon: Icons.git;
                     tip: @tr("Git Changes");
                     checked: root.tree-open && root.left-tab == 8;
@@ -1939,7 +1910,7 @@ export component AppWindow inherits Window {
                 // RFN01-61（書き手の求め 2026-09-27）: バックアップの管理はここへ集める。
                 IconButton {
                     x: 7px;
-                    y: root.custom-title ? 244px : 280px;
+                    y: 244px;
                     icon: Icons.backup;
                     tip: @tr("Backups");
                     checked: root.tree-open && root.left-tab == 7;
@@ -1951,196 +1922,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Declared here so its position is read against the rail. A popup is
-                // its own layer, so it is drawn over the panes without the window
-                // having to hold it last the way the question overlay does.
-                //
-                // `close-on-click-outside` is the whole of "click away to dismiss".
-                // Escape is not wired yet: a FocusScope in here would take the
-                // keyboard, and clicking away closes the popup without running any
-                // of our code, so there would be no moment left to hand the
-                // keyboard back to the pane.
-                app-menu := PopupWindow {
-                    x: 40px;
-                    y: 4px;
-                    width: 264px;
-                    close-policy: close-on-click-outside;
-
-                    MenuFrame {
-                        width: 264px;
-
-                        VerticalLayout {
-                            padding: 6px;
-                            spacing: 1px;
-
-                            MenuRow {
-                                title: @tr("Open File…");
-                                shortcut: root.shortcut-keys[0]; activated => {
-                                    app-menu.close();
-                                    root.open-file-requested();
-                                    root.focus-generation += 1;
-                                }
-                            }
-                            MenuRow {
-                                title: @tr("Open Folder…");
-                                activated => {
-                                    app-menu.close();
-                                    root.work-folder-requested();
-                                    root.focus-generation += 1;
-                                }
-                            }
-                            MenuRow {
-                                title: @tr("Workspaces…");
-                                activated => { app-menu.close(); root.workspace-manager-requested(); }
-                            }
-                            // Nothing to go back to on a first run, and a row that
-                            // opens an empty menu is a row that lies.
-                            if root.recent-folders.length > 0: MenuRow {
-                                title: @tr("Recent Folders");
-                                // The mark a submenu carries, in the column the
-                                // shortcuts use. There is no key for this one.
-                                shortcut: "▸";
-                                // **Shown first, closed second**, which is the
-                                // opposite of every plain row above and the same
-                                // as the tab list's rows. An `if` compiles to a
-                                // repeater, so this row is a repeated element:
-                                // closing the menu takes the element whose handler
-                                // is running with it, and the line after it never
-                                // runs. Written the other way round the row is
-                                // there, the menu closes, and nothing opens.
-                                activated => {
-                                    recent-menu.show();
-                                    app-menu.close();
-                                }
-                            }
-                            MenuRow {
-                                title: @tr("New Terminal");
-                                // The mark a submenu carries, in the column the
-                                // shortcuts use — the same one Recent Folders
-                                // has. **Shown first, closed second**, for the
-                                // reason written there.
-                                shortcut: "▸";
-                                activated => {
-                                    shell-menu.show();
-                                    app-menu.close();
-                                }
-                            }
-                            MenuRow {
-                                title: @tr("Quick Draft…");
-                                activated => {
-                                    app-menu.close();
-                                    root.quick-draft-requested();
-                                    root.focus-generation += 1;
-                                }
-                            }
-                            MenuSep { }
-                            MenuRow {
-                                title: @tr("Save All");
-                                activated => {
-                                    app-menu.close();
-                                    root.save-all-requested();
-                                    root.focus-generation += 1;
-                                }
-                            }
-                            MenuSep { }
-                            // 追加要件 2026-09-08: **探す相手がいないときは
-                            // 出さない。**この行は要件 7.7 の帯をいま鍵盤を
-                            // 持っているペインの上に開くが、そこにシェルが
-                            // 立っているなら帯が読むのはその裏の見えない文書
-                            // ——押せて、開いて、何も見つからない。
-                            //
-                            // **`if`の中の行は頼んでから閉じる**（6.24）。
-                            if !root.panes[root.current-pane-row].terminal: MenuRow {
-                                title: @tr("Find in File…");
-                                shortcut: root.shortcut-keys[4]; activated => {
-                                    root.find-pane = root.focused-pane;
-                                    root.find-replacing = false;
-                                    root.find-open = true;
-                                    root.find-generation += 1;
-                                    root.focus-generation += 1;
-                                    app-menu.close();
-                                }
-                            }
-                            MenuRow {
-                                title: @tr("Find in Folder…");
-                                activated => {
-                                    app-menu.close();
-                                    root.tree-open = true;
-                                    root.left-tab = 1;
-                                    root.left-tab-chosen(1);
-                                    root.focus-generation += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 要件 5.1: the folders worked in before this one. A menu of its
-                // own rather than a submenu — the row above closes `app-menu` and
-                // shows this one, which is how `Layout…` already opens a panel
-                // from a menu. It stands in the same place, so the list appears
-                // where the writer was looking.
-                // 追加要件 Terminal: which shell the new tab runs. **A list
-                // rather than two rows**, because the writer will meet the same
-                // choice again in the `+` button and it should read the same
-                // way in both places.
-                shell-menu := PopupWindow {
-                    x: 40px;
-                    y: 4px;
-                    width: 264px;
-                    close-policy: close-on-click-outside;
-
-                    MenuFrame {
-                        width: 264px;
-
-                        VerticalLayout {
-                            padding: 6px;
-                            spacing: 1px;
-
-                            for shell[index] in root.terminal-shells: MenuRow {
-                                title: shell;
-                                // **閉じるのは最後**（2026-09-07）。`close`の
-                                // 後ろに書いたものは、木ごと捨てられた行から
-                                // `root`へ登れずに落ちることがある——下の
-                                // `recent-menu`の注記と同じ話で、順を揃えた。
-                                activated => {
-                                    root.terminal-requested(index);
-                                    root.focus-generation += 1;
-                                    shell-menu.close();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                recent-menu := PopupWindow {
-                    x: 40px;
-                    y: 4px;
-                    width: 264px;
-                    close-policy: close-on-click-outside;
-
-                    MenuFrame {
-                        width: 264px;
-
-                        VerticalLayout {
-                            padding: 6px;
-                            spacing: 1px;
-
-                            for folder[index] in root.recent-folders: MenuRow {
-                                title: folder;
-                                // **Chosen first, closed second**, for the reason
-                                // the tab list gives: these rows are a repeater
-                                // inside the popup, and closing first takes the
-                                // element whose handler is running with it.
-                                activated => {
-                                    root.recent-folder-chosen(index);
-                                    root.focus-generation += 1;
-                                    recent-menu.close();
-                                }
-                            }
-                        }
-                    }
-                }
 
                 // 追加要件 2026-09-06: **everything that is set for the whole
                 // editor is behind this one button**, and it stands at the foot

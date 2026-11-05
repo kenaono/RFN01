@@ -37,7 +37,7 @@ const NAMES: &[(&str, &str)] = &[
     ("Kill Ringへコピー", "Copy to Kill Ring"),
     ("Kill Ringへ切り取り", "Cut to Kill Ring"),
     ("最新のKillを貼り付け", "Paste Latest Kill"),
-    ("前のKillへ置き換え", "Replace with Previous Kill"),
+    ("前のKillへ置換", "Replace with Previous Kill"),
     ("1単語後まで選択", "Select Forward One Word"),
     ("1単語前まで選択", "Select Back One Word"),
     ("行を削除", "Delete Line"),
@@ -56,11 +56,12 @@ const NAMES: &[(&str, &str)] = &[
         "Paste to Tab (in Quick Draft)",
     ),
     ("縦書き・横書きを切り替え", "Toggle Vertical / Horizontal"),
+    // RFN01-66（2026-11-05）: 名前はタイトルバーのメニューにそろえる。
+    ("Source・Preview切替", "Toggle Source / Preview"),
     (
-        "ソース・Previewを切り替え（Viewer終了）",
-        "Toggle Source / Preview (Exits Viewer)",
+        "Viewer・ReadOnly開始／終了",
+        "Start / Exit Viewer or ReadOnly",
     ),
-    ("Viewerを開始・終了", "Start or Exit Viewer"),
     ("印刷プレビューを開く", "Open Print Preview"),
 ];
 const DEFAULTS: &[&str] = &[
@@ -348,7 +349,7 @@ const PANE_ACTIONS: &[MenuAction] = &[
         ShortcutAction::OpenSettings
     ),
     menu_action!(
-        "右に分割",
+        "右へ分割",
         "Split Right",
         "Ctrl+\\",
         ShortcutAction::SplitRight
@@ -1076,7 +1077,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.set_shortcut_bindings(encode(&keys).into());
         app.set_shortcut_edit(key.into());
         publish(&app);
-        crate::write_session(&app, &saved_live);
+        crate::save_settings(&app, &saved_live.cache);
         let name = shown(name_at(i));
         let told = crate::say!("{name}の設定を保存しました", "Saved the key for {name}");
         app.set_shortcut_status(told.into());
@@ -1092,7 +1093,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.set_shortcut_selected(-1);
         app.set_shortcut_edit("".into());
         publish(&app);
-        crate::write_session(&app, &reset_live);
+        crate::save_settings(&app, &reset_live.cache);
         app.set_shortcut_status(
             shown((
                 "すべてのキーを既定に戻しました",

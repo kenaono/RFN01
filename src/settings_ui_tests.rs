@@ -476,14 +476,14 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
 
         // Recent colours: newest first, no repeats, ten at most, and kept.
         for shade in 0..12u8 {
-            window.invoke_colour_set(1, 1, Color::from_rgb_u8(shade, shade, shade));
+            window.invoke_colour_set(6, 1, Color::from_rgb_u8(shade, shade, shade));
         }
-        window.invoke_colour_set(1, 1, Color::from_rgb_u8(11, 11, 11));
+        window.invoke_colour_set(6, 1, Color::from_rgb_u8(11, 11, 11));
         let recent: Vec<Color> = window.global::<Colours>().get_recent().iter().collect();
         assert_eq!(recent.len(), wiring::RECENT_COLOURS);
         assert_eq!(recent[0], Color::from_rgb_u8(11, 11, 11));
         assert_eq!(recent[1], Color::from_rgb_u8(10, 10, 10));
-        assert_eq!(window.get_terminal_ink(), Color::from_rgb_u8(11, 11, 11));
+        assert_eq!(window.get_left_ink(), Color::from_rgb_u8(11, 11, 11));
         let stored = settings_values(&window);
         window
             .global::<Colours>()
@@ -1778,4 +1778,110 @@ fn the_key_list_is_searched_with_full_width_letters_too() {
             "{query:?}: {names:?}"
         );
     }
+}
+
+/// RFN01-66（2026-11-05）: 古いTerminalの値（地・字・書体・大きさ）は、読めば外観の既定へ移り、
+/// もう書かない。後ろに外観の値があれば、そちらが勝つ。
+#[test]
+fn old_terminal_values_move_into_the_appearance_defaults() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("legacy-terminal");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let window = &harness.window;
+    let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
+    let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+    let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+    reset_settings(&numbers, &palette, &fonts);
+    let old = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    apply_settings(
+        window,
+        &numbers,
+        &palette,
+        &fonts,
+        &old(&[
+            ("terminal.paper", "#101010"),
+            ("terminal.ink", "#e0e0e0"),
+            ("terminal.font", "Cascadia Mono"),
+            ("terminal.size", "20"),
+        ]),
+    );
+    let style = |kind| terminal_appearance::default_style(window, kind);
+    for kind in 0..3 {
+        assert_eq!(
+            style(kind).paper,
+            Color::from_rgb_u8(0x10, 0x10, 0x10),
+            "{kind}"
+        );
+        assert_eq!(
+            style(kind).ink,
+            Color::from_rgb_u8(0xe0, 0xe0, 0xe0),
+            "{kind}"
+        );
+        assert_eq!(style(kind).family.as_str(), "Cascadia Mono", "{kind}");
+    }
+    assert_eq!(style(0).size, 20);
+    assert_eq!(style(1).size, 14, "the Editor Panel kept its own size");
+    assert_eq!(style(2).size, 20);
+    let written = settings_values(window);
+    assert!(
+        written.iter().all(|(k, _)| !matches!(
+            k.as_str(),
+            "terminal.paper" | "terminal.ink" | "terminal.font" | "terminal.size"
+        )),
+        "the old values are no longer written"
+    );
+    // 外観の値が後ろにあれば、そちらが勝つ。
+    let mut appearance = initial_style_written();
+    appearance.insert(0, ("terminal.size".into(), "25".into()));
+    apply_settings(window, &numbers, &palette, &fonts, &appearance);
+    assert_eq!(style(0).size, 14);
+
+    fn initial_style_written() -> Vec<(String, String)> {
+        vec![(
+            "terminal.appearance.0".into(),
+            terminal_appearance::encode(&terminal_appearance::initial_style()),
+        )]
+    }
+}
+
+/// RFN01-66（書き手の判断 2026-11-05）: キーの割り当ては設定ファイルにある。作業の記録には
+/// もう書かず、書き出しでは「keys」の節で運ぶ（設定の節に重ねない）。
+#[test]
+fn key_bindings_live_in_the_settings_file() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("keys-in-settings");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    window.set_shortcut_bindings("0=Ctrl+Alt+O;v=4".into());
+    let written = settings_values(window);
+    assert!(written.contains(&(
+        SHORTCUT_BINDINGS_SETTING.to_owned(),
+        "0=Ctrl+Alt+O;v=4".to_owned()
+    )));
+    assert!(
+        session::capture_session(window, live)
+            .shortcut_bindings
+            .is_empty()
+    );
+    let export = settings_transfer::export_now(window);
+    assert!(
+        export
+            .settings
+            .iter()
+            .all(|(name, _)| name != SHORTCUT_BINDINGS_SETTING)
+    );
+    assert_eq!(export.keys.as_deref(), Some("0=Ctrl+Alt+O;v=4"));
+
+    window.set_shortcut_bindings("".into());
+    let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
+    let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+    let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+    reset_settings(&numbers, &palette, &fonts);
+    apply_settings(window, &numbers, &palette, &fonts, &written);
+    assert_eq!(window.get_shortcut_bindings().as_str(), "0=Ctrl+Alt+O;v=4");
 }

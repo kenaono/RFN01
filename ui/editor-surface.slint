@@ -1910,7 +1910,7 @@ export component EditorSurface inherits Rectangle {
                                             MenuSep { }
 
                                             MenuRow {
-                                                title: @tr("Start Selection");
+                                                title: @tr("Start / Cancel Selection");
                                                 shortcut: root.shortcut-keys[25];
                                                 activated => {
                                                     root.mark-toggled(false);
@@ -1918,7 +1918,7 @@ export component EditorSurface inherits Rectangle {
                                                 }
                                             }
                                             MenuRow {
-                                                title: @tr("Start Rectangle Selection");
+                                                title: @tr("Start / Cancel Rectangle Selection");
                                                 shortcut: root.shortcut-keys[26];
                                                 activated => {
                                                     root.mark-toggled(true);

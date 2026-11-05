@@ -133,10 +133,7 @@ msgid "Column gap"
 msgstr "行間"
 
 msgid "Compare with Another File…"
-msgstr "別のファイルと比較…"
-
-msgid "Compare with Last Commit"
-msgstr "前回のCommitと比較"
+msgstr "別ファイルと比較…"
 
 msgid "Compare with Saved"
 msgstr "保存版と比較"
@@ -511,7 +508,7 @@ msgid "Open Folder…"
 msgstr "フォルダーを開く…"
 
 msgid "Open in Another Tab"
-msgstr "同じ文書を別TABで開く"
+msgstr "別TABで開く"
 
 msgid "Opens the word set file in a tab. Saving it reloads the words."
 msgstr "単語帳のファイルをタブで開きます。保存すると取り込みます。"
@@ -595,7 +592,7 @@ msgid "Regular expression"
 msgstr "正規表現"
 
 msgid "Rename"
-msgstr "名前の変更"
+msgstr "名前を変更"
 
 msgid "Rename…"
 msgstr "名前の変更…"
@@ -625,7 +622,7 @@ msgid "Reset All"
 msgstr "すべてリセット"
 
 msgid "Reset Zoom"
-msgstr "倍率を戻す"
+msgstr "既定倍率に戻す"
 
 msgid "Restore Default"
 msgstr "既定に戻す"
@@ -634,7 +631,7 @@ msgid "Restores General, Terminal, Left Pane, Text, Layout, Page and Keys to the
 msgstr "全般・Terminal・Left Pane・文字・レイアウト・ページ・キーを既定に戻し、文書のモードは「なし」にします。単語帳とモードは残ります。"
 
 msgid "Reveal in Explorer"
-msgstr "エクスプローラーで表示"
+msgstr "Explorerで表示"
 
 msgid "Right: {}"
 msgstr "右：{}"
@@ -787,34 +784,28 @@ msgid "Size"
 msgstr "サイズ"
 
 msgid "Split Down"
-msgstr "下に分割"
+msgstr "下へ分割"
 
 msgid "Split Right"
-msgstr "右に分割"
+msgstr "右へ分割"
 
 msgid "Standard Colors"
 msgstr "標準の色"
-
-msgid "Start Rectangle Selection"
-msgstr "矩形選択を開始"
-
-msgid "Start Selection"
-msgstr "選択を開始"
 
 msgid "Strikethrough"
 msgstr "取消線"
 
 msgid "Swap Down"
-msgstr "下と入れ替え"
+msgstr "下と入替"
 
 msgid "Swap Left"
-msgstr "左と入れ替え"
+msgstr "左と入替"
 
 msgid "Swap Right"
-msgstr "右と入れ替え"
+msgstr "右と入替"
 
 msgid "Swap Up"
-msgstr "上と入れ替え"
+msgstr "上と入替"
 
 msgid "Switch to {}"
 msgstr "{}に切り替え"
@@ -1192,7 +1183,7 @@ msgid "Terminal in This Folder"
 msgstr "このフォルダでTerminalを開く"
 
 msgid "Terminal in Document Folder"
-msgstr "文書のフォルダでTerminalを開く"
+msgstr "文書のフォルダでTerminal起動"
 
 msgid "Transparency"
 msgstr "透過率"
@@ -1580,3 +1571,13 @@ msgstr "Workspaceを使用中はExplorerを使えません"
 
 msgid "Change Keyboard Shortcut"
 msgstr "キーの割り当てを変える"
+
+# RFN01-66（2026-11-05）: タイトルバーのメニューと同じ名前にそろえた。
+msgid "Compare with Git Last Commit"
+msgstr "Gitの最終Commitと比較"
+
+msgid "Start / Cancel Selection"
+msgstr "選択を開始・解除"
+
+msgid "Start / Cancel Rectangle Selection"
+msgstr "矩形選択を開始・解除"
