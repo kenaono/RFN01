@@ -1541,7 +1541,6 @@ fn the_left_pane_has_its_own_look() {
             open,
             parent: -1,
             is_root: false,
-            outside: false,
         };
         window.set_left_rows(ModelRc::new(VecModel::from(vec![
             row("第一部", 0, true, true),

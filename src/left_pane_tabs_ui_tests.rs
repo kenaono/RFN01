@@ -102,3 +102,25 @@ fn search_results_mark_the_file_in_front_of_each_pane() {
     publish_tabs(window, live);
     assert_eq!(marks(window), [-1, -1]);
 }
+
+/// 書き手の求め 2026-11-05: Workspaceを使っているあいだ、Explorerは使えない。どの道から
+/// Explorerを選んでも、左ペインはWorkspaceの表示に替わる。使っていなければExplorerのまま。
+#[test]
+fn the_explorer_gives_way_to_a_workspace_in_use() {
+    let root = scratch_directory("explorer-workspace");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "あ\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    window.set_workspace_active(false);
+    window.set_left_tab(LeftTab::Explorer.index());
+    publish_left(window, live);
+    assert_eq!(window.get_left_tab(), LeftTab::Explorer.index());
+
+    window.set_workspace_active(true);
+    window.set_left_tab(LeftTab::Explorer.index());
+    publish_left(window, live);
+    assert_eq!(window.get_left_tab(), LeftTab::Workspace.index());
+    // ほかの面はそのまま。
+    window.set_left_tab(LeftTab::Search.index());
+    publish_left(window, live);
+    assert_eq!(window.get_left_tab(), LeftTab::Search.index());
+}

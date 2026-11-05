@@ -177,8 +177,9 @@ pub(crate) fn is_wsl(shell: &TerminalShell) -> bool {
 /// フォルダかホームで始める。**以前は何も渡さず、エディタ自身の作業フォルダ（起動した場所）を
 /// 継いでいた——新しいTerminalがホームにならず、Workspaceを開いても外のフォルダのままだった。
 ///
-/// `workspace`は使用中のWorkspaceの最初の登録フォルダ。無ければホーム：WSLは`~`、
-/// ほかは`%USERPROFILE%`。指定のあるプロファイルはそのまま。
+/// `workspace`は使用中のWorkspaceの最初の登録フォルダ、Workspaceを使っていなければExplorerで
+/// 開いているフォルダ（呼ぶ側が決める）。無ければホーム：WSLは`~`、ほかは`%USERPROFILE%`。
+/// 指定のあるプロファイルはそのまま。
 pub(crate) fn with_start_folder(shell: &TerminalShell, workspace: Option<&Path>) -> TerminalShell {
     let mut started = shell.clone();
     if !started.directory.trim().is_empty() {

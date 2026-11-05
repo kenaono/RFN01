@@ -238,15 +238,11 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         &readonly
     ));
 
-    // An Explorer view change must preserve its own folder location and tabs.
+    // 書き手の求め 2026-11-05: Workspace使用中はExplorerを選んでもWorkspaceの表示に替わり、
+    // Workspaceもタブもそのまま。Explorerの場所はWorkspaceを離れたときに戻る（下のReset）。
     window.set_left_tab(0);
     publish_left(&window, &live);
-    assert_eq!(live.folder.borrow().root.as_ref(), Some(&explorer_root));
-    assert!(live.folder.borrow().expanded.contains(&explorer_root));
-    assert_eq!(
-        live.folder.borrow().selected.as_ref(),
-        Some(&explorer_selected)
-    );
+    assert_eq!(window.get_left_tab(), 4);
     assert_eq!(runtime.borrow().active_workspace(), Some(second));
     assert!(Rc::ptr_eq(
         &live.tabs.borrow().of(id).tabs[0].document,
@@ -326,6 +322,10 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     publish_left(&window, &live);
     assert_eq!(live.folder.borrow().root.as_ref(), Some(&explorer_root));
     assert!(live.folder.borrow().expanded.contains(&explorer_root));
+    assert_eq!(
+        live.folder.borrow().selected.as_ref(),
+        Some(&explorer_selected)
+    );
     workspace_manager_requested(&window, &live);
 
     // Explicit external startup paths opt out without changing the default.

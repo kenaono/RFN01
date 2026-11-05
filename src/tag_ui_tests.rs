@@ -67,7 +67,6 @@ fn the_tag_view_answers_its_clicks() {
             open: false,
             parent: -1,
             is_root: false,
-            outside: false,
         },
         LeftRow {
             name: "メモ".into(),
@@ -76,7 +75,6 @@ fn the_tag_view_answers_its_clicks() {
             open: false,
             parent: -1,
             is_root: false,
-            outside: false,
         },
     ])));
     window.set_tag_counts(ModelRc::new(VecModel::from(vec![
@@ -105,7 +103,6 @@ fn the_tag_view_renders() {
         open,
         parent: -1,
         is_root: false,
-        outside: false,
     };
     window.set_left_tab(6);
     window.set_tag_available(true);
