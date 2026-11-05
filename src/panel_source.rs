@@ -41,6 +41,8 @@ pub(crate) fn sync(window: &AppWindow, live: &Live) {
         id.update_screen(window, |s| {
             s.panel_owner = owner.index();
             s.panel_style = parent.panel_style.clone();
+            // 書き手の求め 2026-11-05: 倍率は持ち主のペインのもの。ステータスバーも同じ数を出す。
+            s.zoom = parent.zoom;
             s.viewer = state.borrow().viewer;
             s.paper_h_own = true;
             s.paper_h = parent.panel_style.paper;

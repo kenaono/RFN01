@@ -562,6 +562,22 @@ const DEFAULT_ZOOM_SETTING: &str = "zoom.default";
 fn default_zoom(window: &AppWindow) -> i32 {
     window.get_default_zoom().clamp(ZOOM_MIN, ZOOM_MAX)
 }
+
+/// 倍率を持つペイン（書き手の求め 2026-11-05）。**下段のEditor Panelは持ち主のペインの倍率**で
+/// 拡大する——倍率はペインに1つで、上段と下段は同じ数で読む。
+fn zoom_owner(window: &AppWindow, id: PaneId) -> PaneId {
+    if id.is_panel() {
+        PaneId::from_index(id.screen(window).panel_owner)
+    } else {
+        id
+    }
+}
+
+/// 書式の大きさにペインの倍率を掛ける（書き手の求め 2026-11-05）。Terminal・Terminal Panel・
+/// Editor Panelは書式の文字サイズを持ち、画面ではそれをペインの倍率で拡大する。
+fn zoomed_size(size: f32, zoom_percent: i32) -> f32 {
+    size * zoom_percent as f32 / 100.0
+}
 /// How long the caret must stop moving before the Markdown of its line is
 /// revealed. Revealing rewrites that block's text, which costs a whole block's
 /// worth of pixels; a held arrow key would pay that on every repeat.
@@ -3252,7 +3268,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let timer = spec_timer.clone();
     window.on_pane_zoom(move |pane, notches| {
         if let Some(window) = weak.upgrade() {
-            let id = PaneId::from_index(pane);
+            let id = zoom_owner(&window, PaneId::from_index(pane));
             let percent = id.zoom(&window) + notches * ZOOM_STEP;
             zoom_pane(&window, &states, &cache, &timer, id, percent);
         }
@@ -14989,7 +15005,10 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
     }
     if id.is_panel() {
         let style = &screen.panel_style;
-        spec.font_size = style.size.max(8) as f32;
+        spec.font_size = zoomed_size(
+            style.size.max(8) as f32,
+            zoom_owner(window, id).zoom(window),
+        );
         spec.body_font = style.family.to_string();
         spec.ink = channels(style.ink);
         spec.paper = channels(style.paper);
@@ -17356,6 +17375,7 @@ fn zoom_pane(
     id: PaneId,
     percent: i32,
 ) {
+    let id = zoom_owner(window, id);
     if id.zoom(window) == zoom_from(percent, default_zoom(window)) {
         return;
     }
@@ -17375,6 +17395,9 @@ fn zoom_pane(
     id.set_zoom(window, percent);
     hold_view(cache, id, top, caret);
     schedule_relayout(window, states, cache, timer);
+    // 書き手の求め 2026-11-05: 升目と下段も同じ倍率で組み直す。升目の桁数・行数はシェルへ
+    // 伝え直され（`refresh_terminal`の`resize`）、Editor Panelは`panel_source::sync`が描き直す。
+    window.invoke_terminal_woken();
 }
 
 fn schedule_relayout(
@@ -19691,7 +19714,9 @@ fn start_shell(
     shell: &TerminalShell,
     extent: f32,
 ) -> Option<TerminalSession> {
-    let look = terminal_look(window);
+    let mut look = terminal_look(window);
+    // 書き手の求め 2026-11-05: 描くときと同じ倍率で桁数を数える。
+    look.font_size = zoomed_size(look.font_size, id.zoom(window));
     let cell = cells::terminal_cell_size(&look).unwrap_or(cells::CellSize {
         advance: 8.0,
         line: 18.0,

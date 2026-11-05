@@ -1461,3 +1461,48 @@ fn terminal_panel_shell_selection_same_cancel_and_replace() {
     );
     assert_eq!(h.live.tabs.borrow().of(id).tabs[0].below.active, 0);
 }
+
+/// 書き手の求め 2026-11-05: **倍率はペインに1つで、Terminalと下段にも効く。**字の大きさは
+/// 書式の文字サイズ × ペインの倍率。下段のEditor Panelから倍率を動かしても、持ち主のペインの
+/// 倍率が動く。
+#[test]
+fn the_pane_zoom_reaches_the_terminal_and_its_panels() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let owner = PaneId::FIRST;
+    owner.update_screen(&h.window, |screen| {
+        screen.terminal = true;
+        screen.below_kind = 2;
+        screen.below_height = 240.;
+        screen.front_style = terminal_appearance::initial_style();
+        screen.panel_style = terminal_appearance::initial_style();
+    });
+    let size = terminal_appearance::initial_style().size as f32;
+    owner.set_zoom(&h.window, 100);
+    terminal_panels::ensure(&h.window, &h.live, owner);
+    panel_source::sync(&h.window, &h.live);
+    let entry = terminal_panels::current(&h.live, owner).unwrap();
+    let panel = entry.borrow().source_id.unwrap();
+    let font = |spot| terminal_appearance::look(&h.window, owner, spot).font_size;
+    assert_eq!(font(TerminalSpot::Front), size);
+    assert_eq!(font(TerminalSpot::Below), size);
+    assert_eq!(pane_typography(&h.window, panel).font_size, size);
+
+    owner.set_zoom(&h.window, 200);
+    panel_source::sync(&h.window, &h.live);
+    assert_eq!(font(TerminalSpot::Front), size * 2.0, "the shell above");
+    assert_eq!(font(TerminalSpot::Below), size * 2.0, "the shell below");
+    assert_eq!(pane_typography(&h.window, panel).font_size, size * 2.0);
+    assert_eq!(
+        panel.zoom(&h.window),
+        200,
+        "the status bar reads the owner's"
+    );
+
+    // 下段から動かしても、ペインの倍率が1つ動く。
+    let timer = Rc::new(Timer::default());
+    zoom_pane(&h.window, &h.live.states, &h.live.cache, &timer, panel, 120);
+    assert_eq!(owner.zoom(&h.window), 120);
+    panel_source::sync(&h.window, &h.live);
+    assert_eq!(panel.zoom(&h.window), 120);
+    assert_eq!(font(TerminalSpot::Front), size * 1.2);
+}

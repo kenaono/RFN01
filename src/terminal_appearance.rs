@@ -84,7 +84,10 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
     });
 }
 
+/// 書き手の求め 2026-11-05: **字の大きさは書式の文字サイズ × ペインの倍率。**上段の
+/// Terminalも下段のTerminal Panelも、そのペインの倍率で拡大する。
 pub(crate) fn look(window: &AppWindow, id: PaneId, spot: TerminalSpot) -> cells::TerminalLook {
+    let zoom = zoom_owner(window, id).zoom(window);
     let screen = id.screen(window);
     let style = if spot == TerminalSpot::Front {
         screen.front_style
@@ -92,12 +95,14 @@ pub(crate) fn look(window: &AppWindow, id: PaneId, spot: TerminalSpot) -> cells:
         screen.panel_style
     };
     if style.size == 0 {
-        return terminal_look(window);
+        let mut look = terminal_look(window);
+        look.font_size = zoomed_size(look.font_size, zoom);
+        return look;
     }
     let paper = channels(style.paper);
     cells::TerminalLook {
         family: style.family.to_string(),
-        font_size: style.size.clamp(8, 72) as f32,
+        font_size: zoomed_size(style.size.clamp(8, 72) as f32, zoom),
         paper,
         ink: channels(style.ink),
         palette: cells::TerminalLook::palette_for(paper),
