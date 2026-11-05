@@ -47,6 +47,8 @@ pub(crate) enum Command {
     /// 行へ移動。`true`はキーから（出ていれば畳む）、`false`はメニューから（出ていれば欄へ）。
     Goto(bool),
     FolderFind,
+    /// RFN01-75: フォルダ内を置換（検索に置換の欄を出して開く）。
+    FolderReplace,
     Line(i32),
     Mark(bool),
     Kill(i32),
@@ -1734,6 +1736,7 @@ impl<'a> Scene<'a> {
             | Command::Exit
             | Command::Help(_)
             | Command::FolderFind
+            | Command::FolderReplace
             | Command::Sidebar(1..)
             | Command::Toolbar
             | Command::Palette
@@ -2756,9 +2759,7 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
     // RFN01-75/76: **the left pane's, not a document's** — no Pane or TAB is
     // acted on, so none has to be valid.
     match action {
-        ShortcutAction::SearchInFolder => return window.invoke_open_folder_search(),
         ShortcutAction::ExplorePane => return window.invoke_focus_explore(),
-        ShortcutAction::ReplaceInFolder => return window.invoke_open_folder_replace(),
         ShortcutAction::ToggleLeftPane => return window.invoke_toggle_left_pane(),
         ShortcutAction::ShowLeftTab(tab) => return window.invoke_show_left_tab(tab),
         ShortcutAction::OpenSettings => return window.invoke_settings_requested(),
@@ -2807,11 +2808,11 @@ fn shortcut_command(window: &AppWindow, action: ShortcutAction) -> Option<Comman
         ShortcutAction::SpellingStep(back) => Command::SpellingStep(back),
         ShortcutAction::ReadAloud => Command::ReadAloud,
         ShortcutAction::SplitRight => Command::Split(true),
+        ShortcutAction::SearchInFolder => Command::FolderFind,
+        ShortcutAction::ReplaceInFolder => Command::FolderReplace,
         ShortcutAction::ScrollLine(down) => Command::ScrollLine(down),
         ShortcutAction::SelectLine => Command::SelectLine,
-        ShortcutAction::SearchInFolder
-        | ShortcutAction::ExplorePane
-        | ShortcutAction::ReplaceInFolder
+        ShortcutAction::ExplorePane
         | ShortcutAction::ToggleLeftPane
         | ShortcutAction::ShowLeftTab(_)
         | ShortcutAction::OpenSettings
@@ -2943,11 +2944,9 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::WordMove(forward, select) => {
             window.invoke_pane_move(p, if forward { 3 } else { -3 }, select)
         }
-        Command::FolderFind => {
-            window.set_tree_open(true);
-            window.set_left_tab(1);
-            window.invoke_left_tab_chosen(1);
-        }
+        // RFN01-66 第3弾: Ctrl+Shift+F／Ctrl+Shift+Hと同じ1つの入口（以前は検索の面を開くだけだった）。
+        Command::FolderFind => crate::open_folder_search(window, live, false, None),
+        Command::FolderReplace => crate::open_folder_search(window, live, true, None),
         Command::Line(n) => window.invoke_pane_line_edit(p, n),
         Command::Mark(rect) => window.invoke_pane_mark_toggled(p, rect),
         Command::Kill(n) => window.invoke_pane_kill(p, n),
@@ -3085,6 +3084,12 @@ fn shortcut(window: &AppWindow, command: &Command, field: bool) -> String {
             return shortcuts::action_label(window, ShortcutAction::SpellingStep(*back));
         }
         Command::ReadAloud => return shortcuts::action_label(window, ShortcutAction::ReadAloud),
+        Command::FolderFind => {
+            return shortcuts::action_label(window, ShortcutAction::SearchInFolder);
+        }
+        Command::FolderReplace => {
+            return shortcuts::action_label(window, ShortcutAction::ReplaceInFolder);
+        }
         _ => return String::new(),
     };
     shortcuts::label(window, id)
@@ -3550,6 +3555,29 @@ mod tests {
         assert!(menu_opens(&h.window, &h.live, 2), "挿入は開く");
         // RFN01-66（2026-11-05）: ヘルプに行ができた（以前は未実装の行だけで開かなかった）。
         assert!(menu_opens(&h.window, &h.live, 6), "Helpは開く");
+    }
+
+    /// RFN01-66 第3弾: タイトルバーの「フォルダ内を検索…」は、Ctrl+Shift+Fと同じ1つの入口
+    /// （`open_folder_search`）を通る。左ペインが閉じていればExplorerの木の上で、Outlineなどが
+    /// 出ていれば検索の面で探す（以前は、いつも検索の面を開くだけだった）。
+    #[test]
+    fn find_in_folder_is_one_road_from_the_menu_and_the_key() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        let target = Target::for_shortcut(window, live);
+        window.set_tree_open(false);
+        run(window, live, &target, Command::FolderFind, "");
+        assert!(window.get_tree_open());
+        assert_eq!(window.get_left_tab(), 0, "Explorer");
+        assert!(window.get_tree_searching(), "木の上で探す");
+        window.invoke_close_tree_search();
+        window.set_left_tab(3);
+        run_shortcut(window, live, ShortcutAction::SearchInFolder);
+        assert_eq!(window.get_left_tab(), 1, "Outlineからは検索の面");
+        // 置換は、木の上で探しているときに置換の欄を出す。
+        window.set_left_tab(0);
+        run(window, live, &target, Command::FolderReplace, "");
+        assert!(window.get_tree_searching() && window.get_tree_replacing());
     }
 
     /// RFN01-66 第3弾: **入口は`run`1つで、実行の直前に前提を確かめる。**パレットを開いたあとで

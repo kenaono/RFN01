@@ -446,7 +446,7 @@ export component AppWindow inherits Window {
     /// clears the words and the results, and the whole tree comes back.
     in-out property <bool> tree-searching;
     /// The replace field under the search field, shown when asked for.
-    property <bool> tree-replacing;
+    in-out property <bool> tree-replacing;
     property <length> tree-scroll-kept;
     // **Another tree ends it**: its results would be another folder's answer.
     changed left-tab => {
@@ -507,42 +507,9 @@ export component AppWindow inherits Window {
         root.tree-search-closed();
     }
 
-    /// RFN01-75/76 (`Ctrl+Shift+F`): search the folder from wherever the
-    /// writer is. **Over the tree when a tree is showing**, or when the left
-    /// pane is closed — the Explorer is what opens; the Search panel when
-    /// another panel (Outline, Tags…) is up, which is not a list of files.
-    public function open-folder-search() {
-        // **Search only**: from a search that has the replace field out, this
-        // key puts it away (`Ctrl+Shift+H` puts it back) — the way the two keys
-        // switch between the two in VS Code.
-        root.tree-replacing = false;
-        if root.tree-open && root.left-tab == 1 {
-            root.left-field-generation += 1;
-            root.left-field-wanted = true;
-        } else if root.tree-open && (root.left-tab == 0 || root.left-tab == 4) {
-            root.open-tree-search();
-        } else if !root.tree-open {
-            root.tree-open = true;
-            root.left-tab = 0;
-            root.left-tab-chosen(0);
-            root.open-tree-search();
-        } else {
-            root.left-tab = 1;
-            root.left-tab-chosen(1);
-            root.left-field-generation += 1;
-            root.left-field-wanted = true;
-        }
-    }
-
-    /// `Ctrl+Shift+H`: the same, with the replace field out (書き手の求め
-    /// 2026-11-02: 置換の入口が分からなかった). The Search panel shows its
-    /// replace field always.
-    public function open-folder-replace() {
-        root.open-folder-search();
-        if root.tree-searching {
-            root.tree-replacing = true;
-        }
-    }
+    /// RFN01-66 第3弾: 見出しの🔍。始める・やめるはRust（`toggle_tree_search`）——フォルダ内を検索する
+    /// 入口はRustの`open_folder_search`1つで、Ctrl+Shift+F・メニュー・右クリックと同じ道を通る。
+    callback tree-search-toggled();
 
     /// RFN01-76 (`Ctrl+Shift+E`): the keyboard to the Explore pane — its
     /// filter field, the one thing in it that takes keys (the tree has no
@@ -2025,7 +1992,7 @@ export component AppWindow inherits Window {
                         }
                             IconButton { icon: Icons.plus; tip: @tr("Add Folder…"); clicked => { root.workspace-tree-command(0); } }
                             IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
-                            IconButton { icon: Icons.search; tip: @tr("Search in Folder"); checked: root.tree-searching; clicked => { if root.tree-searching { root.close-tree-search(); } else { root.open-tree-search(); } } }
+                            IconButton { icon: Icons.search; tip: @tr("Search in Folder"); checked: root.tree-searching; clicked => { root.tree-search-toggled(); } }
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
                     }
@@ -2242,13 +2209,7 @@ export component AppWindow inherits Window {
                                 icon: Icons.search;
                                 tip: @tr("Search in Folder");
                                 checked: root.tree-searching;
-                                clicked => {
-                                    if root.tree-searching {
-                                        root.close-tree-search();
-                                    } else {
-                                        root.open-tree-search();
-                                    }
-                                }
+                                clicked => { root.tree-search-toggled(); }
                             }
                             if root.work-folder != "": IconButton {
                                 icon: "M8 1v3M8 12v3M1 8h3M12 8h3M3.5 3.5h9v9h-9z";

@@ -1109,6 +1109,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
     // RFN01-75/76: from a field of the left pane, only the left pane's own
     // operations — as assigned, so a key the writer moved works there too.
     let weak = app.as_weak();
+    let field_live = live.clone();
     app.on_left_field_shortcut(move |text, control, alt, shift| {
         let Some(app) = weak.upgrade() else {
             return false;
@@ -1118,8 +1119,13 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return false;
         };
         match action.action {
-            ShortcutAction::SearchInFolder => app.invoke_open_folder_search(),
-            ShortcutAction::ReplaceInFolder => app.invoke_open_folder_replace(),
+            // RFN01-66 第3弾: キーやメニューと同じ1つの入口。
+            ShortcutAction::SearchInFolder => {
+                crate::open_folder_search(&app, &field_live, false, None)
+            }
+            ShortcutAction::ReplaceInFolder => {
+                crate::open_folder_search(&app, &field_live, true, None)
+            }
             ShortcutAction::ExplorePane => app.invoke_focus_explore(),
             ShortcutAction::ToggleLeftPane => app.invoke_toggle_left_pane(),
             ShortcutAction::ShowLeftTab(tab) => app.invoke_show_left_tab(tab),

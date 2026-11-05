@@ -7447,6 +7447,61 @@ struct PanelSearch {
 
 /// The tree's search starts: the panel's search is put aside, and the tree's
 /// starts from nothing — no words, no results, the whole tree.
+/// RFN01-66 第3弾（書き手と合意 2026-11-05）: **フォルダ内を検索する入口は、ここ1つ。**
+/// Ctrl+Shift+F／Ctrl+Shift+H・タイトルバーの「フォルダ内を検索…」・Explorerと Workspaceの見出しの🔍・
+/// 木の右クリック「このフォルダを検索」が、みなここを通る（以前は入口ごとに動きが違った）。
+///
+/// - `folder`があれば（右クリック）：木の上で、そのフォルダに絞って探す。
+/// - 無ければ（RFN01-75/76）：木が出ていれば木の上で、検索の面が出ていればその欄へ、左ペインが
+///   閉じていればExplorerを開いて木の上で、ほかの面（Outline・Tagsなど）なら検索の面で。
+/// - `replace`なら置換の欄も出す（Ctrl+Shift+H）。検索だけなら置換の欄はしまう（VS Codeと同じ）。
+pub(crate) fn open_folder_search(
+    window: &AppWindow,
+    live: &Live,
+    replace: bool,
+    folder: Option<PathBuf>,
+) {
+    window.set_tree_replacing(false);
+    if let Some(folder) = folder {
+        if !window.get_tree_searching() {
+            window.set_tree_searching(true);
+            tree_search_opened(window, live);
+        }
+        search_in_folder(window, live, Some(folder));
+        window.invoke_focus_left_field();
+        publish_left(window, live);
+    } else {
+        let open = window.get_tree_open();
+        let tab = window.get_left_tab();
+        if open && tab == 1 {
+            window.invoke_focus_left_field();
+        } else if open && (tab == 0 || tab == 4) {
+            window.invoke_open_tree_search();
+        } else if !open {
+            window.set_tree_open(true);
+            window.set_left_tab(0);
+            window.invoke_left_tab_chosen(0);
+            window.invoke_open_tree_search();
+        } else {
+            window.set_left_tab(1);
+            window.invoke_left_tab_chosen(1);
+            window.invoke_focus_left_field();
+        }
+    }
+    if replace && window.get_tree_searching() {
+        window.set_tree_replacing(true);
+    }
+}
+
+/// 見出しの🔍：木の上の検索を始める・やめる。始めるのは[`open_folder_search`]と同じ道。
+pub(crate) fn toggle_tree_search(window: &AppWindow, live: &Live) {
+    if window.get_tree_searching() {
+        window.invoke_close_tree_search();
+    } else {
+        open_folder_search(window, live, false, None);
+    }
+}
+
 fn tree_search_opened(window: &AppWindow, live: &Live) {
     {
         let mut folder = live.folder.borrow_mut();
@@ -12042,13 +12097,7 @@ fn tree_command(window: &AppWindow, live: &Live, command: TreeCommand) {
             };
             // RFN01-75: **over the tree**, like 🔍 — narrowed to the row's
             // folder, from empty, with the keyboard in the field.
-            if !window.get_tree_searching() {
-                window.set_tree_searching(true);
-                tree_search_opened(window, live);
-            }
-            search_in_folder(window, live, Some(into));
-            window.invoke_focus_left_field();
-            publish_left(window, live);
+            open_folder_search(window, live, false, Some(into));
         }
     }
 }
