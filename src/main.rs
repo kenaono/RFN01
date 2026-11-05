@@ -11543,6 +11543,56 @@ fn open_startup_paths(window: &AppWindow, live: &Live, pane: PaneId, paths: &[Pa
             open_path_in_pane(window, live, pane, path, Opening::Kept);
         }
     }
+    // RFN01-110（書き手の報告 2026-11-05：指定したファイルのほかに無題が開いていた）: 前回の
+    // 並びを使わない起動では、空のペインに置かれた中身の無い「無題」が残る。指定したファイルが
+    // 開いたら片付ける。書きかけの無題（作業コピーから戻ったもの）は中身があるので残る。
+    let opened_file = paths.iter().any(|path| path.is_file());
+    if opened_file {
+        let front = live
+            .tabs
+            .borrow()
+            .of(pane)
+            .current()
+            .map(|tab| tab.document.clone());
+        let tidied = {
+            let mut tabs = live.tabs.borrow_mut();
+            let Some(strip) = tabs.of_mut(pane) else {
+                return;
+            };
+            let before = strip.tabs.len();
+            strip.tabs.retain(|tab| {
+                tab.terminal.is_some()
+                    || tab.settings
+                    || tab.document.file.borrow().path().is_some()
+                    || !tab.document.text.borrow().is_empty()
+                    || tab.document.text.edited()
+            });
+            let blank = |place: &NavigationPlace| {
+                place.document.file.borrow().path().is_none()
+                    && place.document.text.borrow().is_empty()
+            };
+            strip.history.retain(|place| !blank(place));
+            strip.at = strip.at.min(strip.history.len().saturating_sub(1));
+            strip.active = front
+                .as_ref()
+                .and_then(|front| {
+                    strip
+                        .tabs
+                        .iter()
+                        .position(|tab| Rc::ptr_eq(&tab.document, front))
+                })
+                .unwrap_or(0)
+                .min(strip.tabs.len().saturating_sub(1));
+            before != strip.tabs.len()
+        };
+        if tidied {
+            let tab = live.tabs.borrow().of(pane).current().cloned();
+            if let Some(tab) = tab {
+                live.show_tab(window, pane, &tab);
+            }
+            publish_tabs(window, live);
+        }
+    }
     // RFN01-110: フォルダを指定したらExplorerでそのフォルダを、ファイルだけなら左ペインを閉じて。
     if paths.iter().any(|path| path.is_dir()) {
         window.set_tree_open(true);
