@@ -2097,12 +2097,6 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
     );
     deferred!(
         window,
-        on_explorer_workspace_leave_requested,
-        live,
-        crate::explorer_workspace_leave_requested
-    );
-    deferred!(
-        window,
         on_workspace_manager_requested,
         live,
         crate::workspace_manager_requested
