@@ -910,6 +910,8 @@ export component AppWindow inherits Window {
     callback pane-bookmark-requested(int);
     /// E3の③: Enterで字下げ・箇条書き・引用を継ぐ。2つめはShiftが押されているか。
     callback pane-enter(int, bool);
+    /// RFN01-108: `Ctrl+J`、ただの改行。
+    callback pane-plain-enter(int);
     callback pane-selection-update(int, float, float);
     callback pane-selection-end(int, float, float);
     callback pane-picture-resize(int, int, int, float, float);
@@ -3502,6 +3504,9 @@ export component AppWindow inherits Window {
                         }
                         enter-pressed(soft) => {
                             root.pane-enter(pane.id, soft);
+                        }
+                        plain-enter-pressed => {
+                            root.pane-plain-enter(pane.id);
                         }
                         selection-update(x, y) => { root.pane-selection-update(pane.id, x, y); }
                         selection-end(x, y) => { root.pane-selection-end(pane.id, x, y); }

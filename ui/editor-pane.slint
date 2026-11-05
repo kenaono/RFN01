@@ -441,6 +441,7 @@ export component EditorPane inherits Rectangle {
     /// （書き手の選択 2026-09-10）：Enterは段ごと捨てて素の行頭へ、Shift+Enterは
     /// 印だけ捨てて項目の本文の列に残る。
     callback enter-pressed(bool);
+    callback plain-enter-pressed();
     /// E3の②: 行そのものを動かす・写す・消す。0=前へ、1=後へ、2=前へ写す、
     /// 3=後へ写す、4=消す。**上下ではなく文書順の前と後**（書き手の選択
     /// 2026-09-10）——縦書きでも`Alt+↑`が「前の行と入れ替える」である。
@@ -1893,6 +1894,7 @@ export component EditorPane inherits Rectangle {
             table-picker-dismissed => { root.table-picker-dismissed(); }
             tab-pressed(a0) => { root.tab-pressed(a0); }
             enter-pressed(a0) => { root.enter-pressed(a0); }
+            plain-enter-pressed => { root.plain-enter-pressed(); }
             line-edit(a0) => { root.line-edit(a0); }
             list-edit(a0, a1) => { root.list-edit(a0, a1); }
             preedit-changed(a0) => { root.preedit-changed(a0); }

@@ -124,3 +124,26 @@ fn the_explorer_gives_way_to_a_workspace_in_use() {
     publish_left(window, live);
     assert_eq!(window.get_left_tab(), LeftTab::Search.index());
 }
+
+/// RFN01-108: `Ctrl+J`はただの改行。箇条書きの行でも印を継がない（Enterは継ぐ）。
+#[test]
+fn ctrl_j_breaks_the_line_without_carrying_the_list_mark() {
+    let root = scratch_directory("ctrl-j");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "- 項目\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    let id = PaneId::from_index(0);
+    let document = live.states.document(id);
+    let at_end_of_item = "- 項目".len();
+    live.states.of(id).borrow_mut().caret_source_byte = Some(at_end_of_item);
+    enter_in_pane(window, live, id, false);
+    assert_eq!(
+        &*document.text.borrow(),
+        "- 項目\n- \n",
+        "Enter carries the mark"
+    );
+    undo_in_pane(window, id, &document, &live.states, &live.cache, false);
+    assert_eq!(&*document.text.borrow(), "- 項目\n");
+    live.states.of(id).borrow_mut().caret_source_byte = Some(at_end_of_item);
+    plain_enter_in_pane(window, live, id);
+    assert_eq!(&*document.text.borrow(), "- 項目\n\n", "Ctrl+J does not");
+}
