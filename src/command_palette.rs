@@ -54,6 +54,7 @@ pub(crate) enum List {
 
 /// パレットの1行の操作。
 struct Operation {
+    category: crate::actions::Category,
     title: (String, String),
     description: (String, String),
     key: String,
@@ -209,6 +210,17 @@ pub fn close(window: &AppWindow) {
     window.set_focus_generation(window.get_focus_generation() + 1);
 }
 
+fn setting_score(query: &str, titles: &(String, String)) -> i64 {
+    let (ja, en) = titles;
+    let bare_ja = ja.strip_prefix("設定 › ").unwrap_or(ja);
+    let bare_en = en.strip_prefix("Settings › ").unwrap_or(en);
+    best_score(query, bare_ja, bare_en)
+        .into_iter()
+        .chain(best_score(query, ja, en))
+        .max()
+        .unwrap_or(0)
+}
+
 fn setting_row(titles: &(String, String), key: &str) -> PaletteRow {
     let (ja, en) = titles;
     let (title, detail) = if crate::i18n::japanese() {
@@ -221,6 +233,7 @@ fn setting_row(titles: &(String, String), key: &str) -> PaletteRow {
         detail: detail.into(),
         key: key.into(),
         assign: SharedString::new(),
+        ..Default::default()
     }
 }
 
@@ -233,14 +246,14 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                 let templates = palette
                     .templates
                     .get_or_insert_with(|| crate::templates_in_use(live));
-                let (rows, shown) = template_rows(templates, text.trim(), false);
+                let (rows, shown) = finish_ranked(ranked_templates(templates, text.trim(), false));
                 palette.shown = shown;
                 return Some(rows);
             }
             let operations = palette
                 .operations
                 .get_or_insert_with(|| data_operations(window, live, Some(list)));
-            let (rows, shown) = operation_rows(operations, text.trim());
+            let (rows, shown) = finish_ranked(ranked_operations(operations, text.trim(), false));
             palette.shown = shown;
             return Some(rows);
         }
@@ -250,22 +263,22 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                 let operations = palette
                     .operations
                     .get_or_insert_with(|| operations_now(window, live, pane));
-                let (mut rows, mut shown) = operation_rows(operations, query.trim());
+                let mut ranked = ranked_operations(operations, query.trim(), true);
                 // RFN01-88: each template is an operation of its own here.
                 let templates = palette
                     .templates
                     .get_or_insert_with(|| crate::templates_in_use(live));
-                let (more_rows, more_shown) = template_rows(templates, query.trim(), true);
-                rows.extend(more_rows);
-                shown.extend(more_shown);
+                ranked.extend(ranked_templates(templates, query.trim(), true));
+                let settings_category = crate::actions::Category::ALL.len() as i32;
                 let folded_query = crate::fold_for_search(query.trim());
                 if !folded_query.is_empty() {
                     for group in crate::settings_items::Group::all(window)
                         .into_iter()
                         .filter(|group| group.matches(&folded_query))
                     {
-                        rows.push(setting_row(&group.titles, ""));
-                        shown.push(Shown::SettingGroup(group));
+                        let points = setting_score(query, &group.titles);
+                        let row = setting_row(&group.titles, "");
+                        ranked.push((points, settings_category, Shown::SettingGroup(group), row));
                     }
                     for item in crate::settings_items::Item::all()
                         .filter(|item| item.matches(&folded_query))
@@ -273,10 +286,17 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                         let key = item.toggle.map_or("", |toggle| {
                             if toggle.current(window) { "ON" } else { "OFF" }
                         });
-                        rows.push(setting_row(&item.titles(), key));
-                        shown.push(Shown::SettingItem(item));
+                        let titles = item.titles();
+                        let points = setting_score(query, &titles);
+                        ranked.push((
+                            points,
+                            settings_category,
+                            Shown::SettingItem(item),
+                            setting_row(&titles, key),
+                        ));
                     }
                 }
+                let (mut rows, mut shown) = finish_ranked(ranked);
                 // RFN01-107（書き手と合意 2026-11-05）: 設定の項目は、設定の画面の検索で探す。
                 // 語があれば最後に1行、選べば設定のTABがその語で絞られて開く。
                 if !query.trim().is_empty() {
@@ -291,6 +311,7 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                         detail: SharedString::new(),
                         key: SharedString::new(),
                         assign: SharedString::new(),
+                        ..Default::default()
                     });
                     shown.push(Shown::Settings);
                 }
@@ -308,7 +329,14 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
             }
         })
     });
-    let rows = rows.unwrap_or_default();
+    let mut rows = rows.unwrap_or_default();
+    let query = text.strip_prefix('>').unwrap_or(text).trim();
+    if !query.is_empty() {
+        for row in &mut rows {
+            row.title_parts = highlight(query, &row.title);
+            row.detail_parts = highlight(query, &row.detail);
+        }
+    }
     let note = if rows.is_empty() {
         crate::i18n::pick("一致するものはありません", "No matches")
     } else {
@@ -415,16 +443,16 @@ enum Chosen {
 
 /// RFN01-88: the templates that match `query`. Among the operations (`named`)
 /// each is called "Insert Template: name"; listed alone, by its name.
-fn template_rows(
+fn ranked_templates(
     templates: &[crate::template::Template],
     query: &str,
     named: bool,
-) -> (Vec<PaletteRow>, Vec<Shown>) {
-    let mut found: Vec<(i64, Shown, PaletteRow)> = Vec::new();
+) -> Vec<RankedRow> {
+    let mut found: Vec<RankedRow> = Vec::new();
     for (at, template) in templates.iter().enumerate() {
         let (title, other) = if named {
-            let ja = format!("テンプレートを挿入: {}", template.name);
-            let en = format!("Insert Template: {}", template.name);
+            let ja = format!("挿入: テンプレートを挿入: {}", template.name);
+            let en = format!("Insert: Insert Template: {}", template.name);
             if crate::i18n::japanese() {
                 (ja, en)
             } else {
@@ -433,28 +461,24 @@ fn template_rows(
         } else {
             (template.name.clone(), String::new())
         };
-        let points = score(query, &title).or_else(|| score(query, &other));
+        let points = best_score(query, &title, &other);
         if let Some(points) = points {
             let (upper, lower) = two_lines(&title, &other);
             found.push((
                 points,
+                crate::actions::Category::Insert.index(),
                 Shown::Template(at),
                 PaletteRow {
                     title: upper.into(),
                     detail: lower.into(),
                     key: SharedString::new(),
                     assign: SharedString::new(),
+                    ..Default::default()
                 },
             ));
         }
     }
-    if !query.is_empty() {
-        found.sort_by_key(|(points, _, _)| std::cmp::Reverse(*points));
-    }
     found
-        .into_iter()
-        .map(|(_, shown, row)| (row, shown))
-        .unzip()
 }
 
 /// The files a name search looks through, recent ones first.
@@ -619,6 +643,10 @@ fn skipped_folder(name: &str) -> bool {
 /// the same letters spread out, and a match at the start more than one later.
 /// Case and full-width/half-width forms are not told apart.
 pub(crate) fn score(query: &str, text: &str) -> Option<i64> {
+    score_match(query, text, |_| {})
+}
+
+fn score_match(query: &str, text: &str, mut matched: impl FnMut(usize)) -> Option<i64> {
     let query: Vec<char> = fold(query).chars().filter(|c| !c.is_whitespace()).collect();
     if query.is_empty() {
         return Some(0);
@@ -628,6 +656,7 @@ pub(crate) fn score(query: &str, text: &str) -> Option<i64> {
     let whole: String = text.iter().collect();
     if let Some(at) = whole.find(&joined) {
         let at = whole[..at].chars().count() as i64;
+        (at as usize..at as usize + query.len()).for_each(matched);
         return Some(10_000 - at * 10 - text.len() as i64);
     }
     let mut points = 0i64;
@@ -639,11 +668,55 @@ pub(crate) fn score(query: &str, text: &str) -> Option<i64> {
             Some(before) if before + 1 == at => 30,
             _ => 5,
         };
+        matched(at);
         points -= at as i64;
         previous = Some(at);
         next = at + 1;
     }
     Some(points)
+}
+
+/// Map folded character positions back to complete graphemes in the rendered line.
+fn highlight(query: &str, line: &str) -> slint::ModelRc<crate::PalettePart> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let query = query.trim();
+    if query.is_empty() || line.is_empty() {
+        return Default::default();
+    }
+    let graphemes: Vec<_> = line.graphemes(true).collect();
+    let owners: Vec<_> = graphemes
+        .iter()
+        .enumerate()
+        .flat_map(|(index, part)| std::iter::repeat_n(index, fold(part).chars().count()))
+        .collect();
+    let mut marks = vec![false; graphemes.len()];
+    let mut mark = |index| marks[owners[index]] = true;
+    let folded_line = fold(line);
+    let folded_query = fold(query);
+    let found = if let Some(at) = folded_line.find(&folded_query) {
+        let start = folded_line[..at].chars().count();
+        (start..start + folded_query.chars().count()).for_each(mark);
+        true
+    } else {
+        score_match(query, line, &mut mark).is_some()
+    };
+    if !found {
+        return Default::default();
+    }
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < graphemes.len() {
+        let end = marks[start..]
+            .iter()
+            .position(|value| *value != marks[start])
+            .map_or(graphemes.len(), |at| start + at);
+        parts.push(crate::PalettePart {
+            text: graphemes[start..end].concat().into(),
+            matched: marks[start],
+        });
+        start = end;
+    }
+    slint::ModelRc::new(slint::VecModel::from(parts))
 }
 
 fn fold(text: &str) -> String {
@@ -696,6 +769,7 @@ fn file_rows(files: &[FileCandidate], query: &str) -> (Vec<PaletteRow>, Vec<Show
                     SharedString::default()
                 },
                 assign: SharedString::new(),
+                ..Default::default()
             }
         })
         .collect();
@@ -716,6 +790,7 @@ fn operations_now(window: &AppWindow, live: &Live, pane: PaneId) -> Vec<Operatio
             (menu_commands::allowed_for(window, live, pane, &command)
                 == menu_commands::Allowed::Yes)
                 .then(|| Operation {
+                    category: action.category,
                     title: action.title.clone(),
                     description: action.description.clone(),
                     key: shortcuts::label(window, at),
@@ -744,6 +819,7 @@ fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<O
         for path in crate::offered_folders(live) {
             let name = path.display().to_string();
             found.push(Operation {
+                category: crate::actions::Category::File,
                 title: (
                     format!("最近のフォルダ：{name}"),
                     format!("Recent Folder: {name}"),
@@ -761,6 +837,7 @@ fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<O
     if wants(List::WordModes) {
         for mode in crate::word_modes_now() {
             found.push(Operation {
+                category: crate::actions::Category::Edit,
                 title: (
                     format!("単語チェック：{}", mode.name),
                     format!("Word Check: {}", mode.name),
@@ -778,6 +855,7 @@ fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<O
     if wants(List::Shells) {
         for (at, shell) in crate::configured_shells(window).iter().enumerate() {
             found.push(Operation {
+                category: crate::actions::Category::File,
                 title: (
                     format!("新しいTerminal：{}", shell.name),
                     format!("New Terminal: {}", shell.name),
@@ -798,18 +876,35 @@ fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<O
 /// 「Title（Description）」を、上の段に日本語・下の段に英語で（書き手の求め 2026-11-05：説明を
 /// 出し、英語でも探せるように）。英語の画面では英語の1段だけ（`two_lines`）。探すのはTitleの両方の
 /// 言葉と、別名。
-fn operation_rows(operations: &[Operation], query: &str) -> (Vec<PaletteRow>, Vec<Shown>) {
-    let mut found: Vec<(i64, Shown, PaletteRow)> = Vec::new();
+fn ranked_operations(operations: &[Operation], query: &str, categorized: bool) -> Vec<RankedRow> {
+    let mut found = Vec::new();
     for (at, operation) in operations.iter().enumerate() {
         let (ja, en) = (&operation.title.0, &operation.title.1);
-        let points = score(query, ja)
-            .or_else(|| score(query, en))
+        let (category_ja, category_en) = operation.category.title();
+        let (title_ja, title_en) = if categorized {
+            (
+                format!("{category_ja}: {ja}"),
+                format!("{category_en}: {en}"),
+            )
+        } else {
+            (ja.clone(), en.clone())
+        };
+        let points = best_score(query, ja, en)
+            .into_iter()
+            .chain(best_score(query, &title_ja, &title_en))
+            .max()
             .or_else(|| alias_score(query, ja, en));
         let Some(points) = points else {
             continue;
         };
-        let japanese = format!("{ja}（{}）", operation.description.0.trim_end_matches('。'));
-        let english = format!("{en} ({})", operation.description.1.trim_end_matches('.'));
+        let japanese = format!(
+            "{title_ja}（{}）",
+            operation.description.0.trim_end_matches('。')
+        );
+        let english = format!(
+            "{title_en} ({})",
+            operation.description.1.trim_end_matches('.')
+        );
         let (upper, lower) = if crate::i18n::japanese() {
             two_lines(&japanese, &english)
         } else {
@@ -817,6 +912,7 @@ fn operation_rows(operations: &[Operation], query: &str) -> (Vec<PaletteRow>, Ve
         };
         found.push((
             points,
+            operation.category.index(),
             Shown::Operation(at),
             PaletteRow {
                 title: upper.into(),
@@ -827,16 +923,24 @@ fn operation_rows(operations: &[Operation], query: &str) -> (Vec<PaletteRow>, Ve
                     .map(|at| crate::actions::all()[at].id.clone())
                     .unwrap_or_default()
                     .into(),
+                ..Default::default()
             },
         ));
     }
-    if !query.is_empty() {
-        found.sort_by_key(|(points, _, _)| std::cmp::Reverse(*points));
-    }
-    found.truncate(ROWS_SHOWN);
     found
-        .into_iter()
-        .map(|(_, shown, row)| (row, shown))
+}
+
+type RankedRow = (i64, i32, Shown, PaletteRow);
+
+fn best_score(query: &str, ja: &str, en: &str) -> Option<i64> {
+    score(query, ja).into_iter().chain(score(query, en)).max()
+}
+
+fn finish_ranked(mut rows: Vec<RankedRow>) -> (Vec<PaletteRow>, Vec<Shown>) {
+    rows.sort_by_key(|(points, category, _, _)| (std::cmp::Reverse(*points), *category));
+    rows.truncate(ROWS_SHOWN);
+    rows.into_iter()
+        .map(|(_, _, shown, row)| (row, shown))
         .unzip()
 }
 
@@ -894,6 +998,38 @@ mod tests {
     use super::*;
 
     /// RFN01-87: the letters in order, together counting for more.
+    #[test]
+    fn highlighting_preserves_visible_text_and_marks_only_the_match() {
+        let parts = |query, text| {
+            highlight(query, text)
+                .iter()
+                .map(|part| (part.text.to_string(), part.matched))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parts("ＳＡＶＥ ａｓ", "File: Save As…"),
+            [
+                ("File: ".into(), false),
+                ("Save As".into(), true),
+                ("…".into(), false),
+            ]
+        );
+        assert_eq!(
+            parts("fm", "file.md"),
+            [
+                ("f".into(), true),
+                ("ile.".into(), false),
+                ("m".into(), true),
+                ("d".into(), false),
+            ]
+        );
+        assert_eq!(
+            parts("か", "か\u{3099}き"),
+            [("か\u{3099}".into(), true), ("き".into(), false),]
+        );
+        assert!(parts("xyz", "File: Save As…").is_empty());
+    }
+
     #[test]
     fn a_name_search_takes_the_letters_in_order() {
         assert!(score("memo", "memo.md").is_some());
