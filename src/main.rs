@@ -550,6 +550,8 @@ const ZOOM_DEFAULT: i32 = 120;
 /// 書き手の求め 2026-11-05: 既定の倍率。新しいTABと Reset の戻り先だけに効き、
 /// **開いているTABの倍率は変えない**。
 const DEFAULT_ZOOM_SETTING: &str = "zoom.default";
+/// RFN01-66（書き手の判断 2026-11-05）: キーの割り当て。以前は作業の記録（session）にあった。
+pub(crate) const SHORTCUT_BINDINGS_SETTING: &str = "shortcut-bindings";
 
 /// 設定の既定の倍率（書き手の求め 2026-11-05）。新しいTAB・ペイン、Reset、倍率を持たない
 /// セッションの行がこれを使う。
@@ -3366,6 +3368,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // 要件 9: what the last run was set to, before anything is drawn with it.
     if let Some(values) = &stored_settings {
         apply_settings(&window, &numbers, &palette, &sheet_fonts, values);
+    }
+    // RFN01-66: キーの割り当てを作業の記録から設定ファイルへ移す。設定ファイルにまだ無く、記録に
+    // あれば（上で記録から置いた値）、ここで一度書いておく——記録にはもう書かないので。
+    let keys_in_settings = stored_settings.as_ref().is_some_and(|values| {
+        values
+            .iter()
+            .any(|(name, _)| name == SHORTCUT_BINDINGS_SETTING)
+    });
+    if !keys_in_settings && !window.get_shortcut_bindings().is_empty() {
+        save_settings(&window, &render_cache);
     }
     // 追加要件 2026-09-15: 表示の言語。**窓を作ったあと、画面の文言を作る前に**決める。
     i18n::apply(window.get_language());
@@ -17185,6 +17197,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         default_zoom(window).to_string(),
     ));
     values.push((
+        SHORTCUT_BINDINGS_SETTING.to_owned(),
+        window.get_shortcut_bindings().to_string(),
+    ));
+    values.push((
         LANGUAGE_SETTING.to_owned(),
         window.get_language().to_string(),
     ));
@@ -17421,6 +17437,10 @@ fn apply_settings(
         // 書き手の求め 2026-11-05: 読めない値は出荷時の値へ。開いているペインはここでも変えない。
         if written == DEFAULT_ZOOM_SETTING {
             window.set_default_zoom(read_default_zoom(value));
+            continue;
+        }
+        if written == SHORTCUT_BINDINGS_SETTING {
+            window.set_shortcut_bindings(value.trim().into());
             continue;
         }
         if written == LANGUAGE_SETTING {

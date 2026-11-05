@@ -472,7 +472,7 @@ fn apply_keys(window: &AppWindow, live: &Live, keys: &str) {
     window.set_shortcut_selected(-1);
     window.set_shortcut_edit("".into());
     crate::shortcuts::publish(window);
-    crate::write_session(window, live);
+    crate::save_settings(window, &live.cache);
 }
 
 /// 設定の値を画面に当てて、組み直し、書く。**起動のときと同じ`apply_settings`を通る**。
@@ -510,7 +510,11 @@ fn apply_values(window: &AppWindow, live: &Live, values: &[(String, String)]) {
 /// いまの姿の書き出し。
 pub(crate) fn export_now(window: &AppWindow) -> Export {
     Export {
-        settings: crate::settings_values(window),
+        // キーは「keys」の節で運ぶ（設定の節に重ねない）。
+        settings: crate::settings_values(window)
+            .into_iter()
+            .filter(|(name, _)| name != KEYS_SETTING)
+            .collect(),
         keys: Some(window.get_shortcut_bindings().to_string()),
         presets: presets_now(),
         words: crate::words_now_encoded(),

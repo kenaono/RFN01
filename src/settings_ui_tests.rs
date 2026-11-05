@@ -1848,3 +1848,40 @@ fn old_terminal_values_move_into_the_appearance_defaults() {
         )]
     }
 }
+
+/// RFN01-66（書き手の判断 2026-11-05）: キーの割り当ては設定ファイルにある。作業の記録には
+/// もう書かず、書き出しでは「keys」の節で運ぶ（設定の節に重ねない）。
+#[test]
+fn key_bindings_live_in_the_settings_file() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("keys-in-settings");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    window.set_shortcut_bindings("0=Ctrl+Alt+O;v=4".into());
+    let written = settings_values(window);
+    assert!(written.contains(&(
+        SHORTCUT_BINDINGS_SETTING.to_owned(),
+        "0=Ctrl+Alt+O;v=4".to_owned()
+    )));
+    assert!(
+        session::capture_session(window, live)
+            .shortcut_bindings
+            .is_empty()
+    );
+    let export = settings_transfer::export_now(window);
+    assert!(
+        export
+            .settings
+            .iter()
+            .all(|(name, _)| name != SHORTCUT_BINDINGS_SETTING)
+    );
+    assert_eq!(export.keys.as_deref(), Some("0=Ctrl+Alt+O;v=4"));
+
+    window.set_shortcut_bindings("".into());
+    let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
+    let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+    let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+    reset_settings(&numbers, &palette, &fonts);
+    apply_settings(window, &numbers, &palette, &fonts, &written);
+    assert_eq!(window.get_shortcut_bindings().as_str(), "0=Ctrl+Alt+O;v=4");
+}

@@ -408,7 +408,9 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
             window.get_folder_whole_word(),
             window.get_folder_regex(),
         ],
-        shortcut_bindings: window.get_shortcut_bindings().to_string(),
+        // RFN01-66（2026-11-05）: キーの割り当ては設定ファイルへ移した。記録にはもう書かない
+        // （古い記録の値は、起動で設定ファイルへ移す）。
+        shortcut_bindings: String::new(),
         expanded: folder.expanded.iter().cloned().collect(),
         tree_shown: window.get_tree_open(),
         // 追加要件 2026-09-06: and how wide the writer left it.

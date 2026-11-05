@@ -1077,7 +1077,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.set_shortcut_bindings(encode(&keys).into());
         app.set_shortcut_edit(key.into());
         publish(&app);
-        crate::write_session(&app, &saved_live);
+        crate::save_settings(&app, &saved_live.cache);
         let name = shown(name_at(i));
         let told = crate::say!("{name}の設定を保存しました", "Saved the key for {name}");
         app.set_shortcut_status(told.into());
@@ -1093,7 +1093,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.set_shortcut_selected(-1);
         app.set_shortcut_edit("".into());
         publish(&app);
-        crate::write_session(&app, &reset_live);
+        crate::save_settings(&app, &reset_live.cache);
         app.set_shortcut_status(
             shown((
                 "すべてのキーを既定に戻しました",
