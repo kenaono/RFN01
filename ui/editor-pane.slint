@@ -549,7 +549,6 @@ export component EditorPane inherits Rectangle {
     callback compare-saved-requested();
     callback compare-head-requested();
     callback reopen-closed-requested();
-    in property <[string]> shortcut-keys: ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+Shift+T", "Ctrl+Z", "Ctrl+Y"];
     callback shortcut-key(string, bool, bool, bool) -> bool;
 
     callback goto-typed();
@@ -1025,7 +1024,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.horizontal;
-                        tip: @tr("Horizontal") + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
+                        tip: @tr("Horizontal") + (MenuActions.key(MenuAction.toggle-direction, MenuActions.keys-generation) == "" ? "" : " · " + MenuActions.key(MenuAction.toggle-direction, MenuActions.keys-generation));
                         checked: !root.vertical;
                         // 追加要件 2026-09-06: **a shell has one direction.**
                         // The grid is rows of cells across; there is nothing
@@ -1040,7 +1039,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.vertical;
-                        tip: @tr("Vertical") + (root.shortcut-keys[42] == "" ? "" : " · " + root.shortcut-keys[42]);
+                        tip: @tr("Vertical") + (MenuActions.key(MenuAction.toggle-direction, MenuActions.keys-generation) == "" ? "" : " · " + MenuActions.key(MenuAction.toggle-direction, MenuActions.keys-generation));
                         checked: root.vertical;
                         enabled: root.writing && !root.reading-only;
                         clicked => {
@@ -1051,7 +1050,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: Icons.preview;
-                        tip: @tr("Live Preview") + (root.shortcut-keys[43] == "" ? "" : " · " + root.shortcut-keys[43]);
+                        tip: @tr("Live Preview") + (MenuActions.key(MenuAction.toggle-preview, MenuActions.keys-generation) == "" ? "" : " · " + MenuActions.key(MenuAction.toggle-preview, MenuActions.keys-generation));
                         checked: root.preview;
                         enabled: !root.viewer && !root.settings;
                         clicked => {
@@ -1060,7 +1059,7 @@ export component EditorPane inherits Rectangle {
                     }
                     IconButton {
                         icon: "M1 2h5l2 2 2-2h5v12h-5l-2 1-2-1H1z M8 4v11";
-                        tip: (root.reading-only ? @tr("Exit ReadOnly") : root.viewer ? @tr("Exit Viewer") : root.preview ? @tr("Viewer Mode") : @tr("ReadOnly Mode")) + (root.shortcut-keys[44] == "" ? "" : " · " + root.shortcut-keys[44]);
+                        tip: (root.reading-only ? @tr("Exit ReadOnly") : root.viewer ? @tr("Exit Viewer") : root.preview ? @tr("Viewer Mode") : @tr("ReadOnly Mode")) + (MenuActions.key(MenuAction.toggle-viewer, MenuActions.keys-generation) == "" ? "" : " · " + MenuActions.key(MenuAction.toggle-viewer, MenuActions.keys-generation));
                         checked: root.viewer;
                         enabled: root.writing;
                         clicked => { root.viewer-toggled(); }
@@ -1152,7 +1151,7 @@ export component EditorPane inherits Rectangle {
                             MenuRow {
                                 enabled: MenuActions.allowed(MenuAction.save, MenuActions.generation);
                                 title: @tr("Save");
-                                shortcut: root.shortcut-keys[1];
+                                shortcut: MenuActions.key(MenuAction.save, MenuActions.keys-generation);
                                 activated => {
                                     MenuActions.run(MenuAction.save);
                                     pane-menu.close();
@@ -1161,7 +1160,7 @@ export component EditorPane inherits Rectangle {
                             MenuRow {
                                 enabled: MenuActions.allowed(MenuAction.save-as, MenuActions.generation);
                                 title: @tr("Save As…");
-                                shortcut: root.shortcut-keys[2];
+                                shortcut: MenuActions.key(MenuAction.save-as, MenuActions.keys-generation);
                                 activated => {
                                     MenuActions.run(MenuAction.save-as);
                                     pane-menu.close();
@@ -1185,7 +1184,7 @@ export component EditorPane inherits Rectangle {
                         MenuRow {
                             enabled: MenuActions.allowed(MenuAction.close-tab, MenuActions.generation);
                             title: @tr("Close Tab");
-                            shortcut: root.shortcut-keys[3];
+                            shortcut: MenuActions.key(MenuAction.close-tab, MenuActions.keys-generation);
                             activated => {
                                 MenuActions.run(MenuAction.close-tab);
                                 pane-menu.close();
@@ -1288,7 +1287,7 @@ export component EditorPane inherits Rectangle {
                         if !root.settings: MenuRow {
                             enabled: MenuActions.allowed(MenuAction.below, MenuActions.generation);
                             title: root.terminal ? @tr("Editor Panel") : @tr("Terminal Panel");
-                            shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
+                            shortcut: root.terminal ? "Ctrl+`" : MenuActions.key(MenuAction.below, MenuActions.keys-generation);
                             activated => {
                                 MenuActions.run(MenuAction.below);
                                 pane-menu.close();
@@ -1320,7 +1319,7 @@ export component EditorPane inherits Rectangle {
                         if root.writing: MenuRow {
                             enabled: MenuActions.allowed(MenuAction.goto, MenuActions.generation);
                             title: @tr("Go to Line…");
-                            shortcut: root.shortcut-keys[6];
+                            shortcut: MenuActions.key(MenuAction.goto, MenuActions.keys-generation);
                             activated => {
                                 MenuActions.run(MenuAction.goto);
                                 pane-menu.close();
@@ -1329,7 +1328,7 @@ export component EditorPane inherits Rectangle {
                         if root.writing: MenuRow {
                             enabled: MenuActions.allowed(MenuAction.reopen, MenuActions.generation);
                             title: @tr("Reopen Closed Tab");
-                            shortcut: root.shortcut-keys[7];
+                            shortcut: MenuActions.key(MenuAction.reopen, MenuActions.keys-generation);
                             activated => { MenuActions.run(MenuAction.reopen); pane-menu.close(); }
                         }
                         if root.writing: MenuRow {
@@ -1361,7 +1360,7 @@ export component EditorPane inherits Rectangle {
                         if root.writing: MenuRow {
                             enabled: MenuActions.allowed(MenuAction.print, MenuActions.generation);
                             title: @tr("Print…");
-                            shortcut: root.shortcut-keys[45];
+                            shortcut: MenuActions.key(MenuAction.print, MenuActions.keys-generation);
                             activated => {
                                 MenuActions.run(MenuAction.print);
                                 pane-menu.close();
@@ -1943,7 +1942,6 @@ export component EditorPane inherits Rectangle {
             find-requested(a0) => { root.find-requested(a0); }
             goto-requested(a0) => { root.goto-requested(a0); }
             reopen-closed-requested() => { root.reopen-closed-requested(); }
-            shortcut-keys: root.shortcut-keys;
             shortcut-key(a0, a1, a2, a3) => { root.shortcut-key(a0, a1, a2, a3); }
             undo-requested(a0) => { root.undo-requested(a0); }
             copy-requested(a0) => { root.copy-requested(a0); }
@@ -2531,7 +2529,7 @@ export component EditorPane inherits Rectangle {
                 MenuRow {
                     enabled: MenuActions.allowed(MenuAction.close-tab, MenuActions.generation);
                     title: @tr("Close");
-                    shortcut: root.shortcut-keys[3];
+                    shortcut: MenuActions.key(MenuAction.close-tab, MenuActions.keys-generation);
                     activated => {
                         MenuActions.run(MenuAction.close-tab);
                         tab-menu.close();
@@ -2676,7 +2674,7 @@ export component EditorPane inherits Rectangle {
                     MenuRow {
                         enabled: MenuActions.allowed(MenuAction.save, MenuActions.generation);
                         title: @tr("Save");
-                        shortcut: root.shortcut-keys[1];
+                        shortcut: MenuActions.key(MenuAction.save, MenuActions.keys-generation);
                         activated => {
                             MenuActions.run(MenuAction.save);
                             tab-menu.close();
@@ -2685,7 +2683,7 @@ export component EditorPane inherits Rectangle {
                     MenuRow {
                         enabled: MenuActions.allowed(MenuAction.save-as, MenuActions.generation);
                         title: @tr("Save As…");
-                        shortcut: root.shortcut-keys[2];
+                        shortcut: MenuActions.key(MenuAction.save-as, MenuActions.keys-generation);
                         activated => {
                             MenuActions.run(MenuAction.save-as);
                             tab-menu.close();
@@ -2745,7 +2743,7 @@ export component EditorPane inherits Rectangle {
                 MenuRow {
                     enabled: MenuActions.allowed(MenuAction.open-file, MenuActions.generation);
                     title: @tr("Open File…");
-                    shortcut: root.shortcut-keys[0];
+                    shortcut: MenuActions.key(MenuAction.open-file, MenuActions.keys-generation);
                     activated => {
                         MenuActions.run(MenuAction.open-file);
                         strip-menu.close();
@@ -2755,7 +2753,7 @@ export component EditorPane inherits Rectangle {
                 MenuRow {
                     enabled: MenuActions.allowed(MenuAction.close-tab, MenuActions.generation);
                     title: @tr("Close");
-                    shortcut: root.shortcut-keys[3];
+                    shortcut: MenuActions.key(MenuAction.close-tab, MenuActions.keys-generation);
                     activated => {
                         MenuActions.run(MenuAction.close-tab);
                         strip-menu.close();

@@ -1,626 +1,152 @@
+//! 設定のKeys（キーの割り当て）。RFN01-114: **割り当てられる操作はアクションの表
+//! （`crate::actions`）の行で、保存はIDで書く**。ここに操作の名前の表は持たない。
+use crate::actions::{self, Category, Scope};
 use crate::document::{CalloutType, InsertEdit, LineNoteEdit};
-use crate::menu_commands::{InsertShape, ShortcutAction};
+use crate::menu_commands::{Command, InsertShape};
 use crate::{AppWindow, Live, ShortcutItem};
 use slint::{ComponentHandle, ModelRc, VecModel};
-/// 操作名：日本語と英語（追加要件 2026-09-15、表示の国際化）。
-const NAMES: &[(&str, &str)] = &[
-    ("ファイルを開く", "Open File"),
-    ("保存", "Save"),
-    ("名前を付けて保存", "Save As"),
-    ("TABを閉じる", "Close Tab"),
-    ("本文を検索", "Find in Text"),
-    ("本文を置換", "Replace in Text"),
-    ("行へ移動", "Go to Line"),
-    ("閉じたTABを開き直す", "Reopen Closed Tab"),
-    ("元に戻す", "Undo"),
-    ("やり直し", "Redo"),
-    ("Quick Draftを開く（本文）", "Open Quick Draft (from Text)"),
-    ("次のTAB", "Next Tab"),
-    ("前のTAB", "Previous Tab"),
-    ("左のPaneへ", "To Left Pane"),
-    ("右のPaneへ", "To Right Pane"),
-    ("上のPaneへ", "To Upper Pane"),
-    ("下段または下のPaneへ", "To Strip Below or Lower Pane"),
-    ("下段を表示・閉じる", "Show or Hide Strip Below"),
-    ("新しいTAB", "New Tab"),
-    ("戻る", "Back"),
-    ("進む", "Forward"),
-    ("次の1文字を削除", "Delete Next Character"),
-    ("1単語後へ", "Forward One Word"),
-    ("1単語前へ", "Back One Word"),
-    ("行末まで切り取り", "Cut to End of Line"),
-    ("選択を開始・解除", "Start or Cancel Selection"),
-    (
-        "矩形選択を開始・解除",
-        "Start or Cancel Rectangle Selection",
-    ),
-    ("Kill Ringへコピー", "Copy to Kill Ring"),
-    ("Kill Ringへ切り取り", "Cut to Kill Ring"),
-    ("最新のKillを貼り付け", "Paste Latest Kill"),
-    ("前のKillへ置換", "Replace with Previous Kill"),
-    ("1単語後まで選択", "Select Forward One Word"),
-    ("1単語前まで選択", "Select Back One Word"),
-    ("行を削除", "Delete Line"),
-    ("行を上へ移動", "Move Line Up"),
-    ("行を下へ移動", "Move Line Down"),
-    ("行を上へ複製", "Duplicate Line Up"),
-    ("行を下へ複製", "Duplicate Line Down"),
-    ("全文をコピー（Quick Draft内）", "Copy All (in Quick Draft)"),
-    (
-        "コピーして閉じる（Quick Draft内）",
-        "Copy and Close (in Quick Draft)",
-    ),
-    ("クリア（Quick Draft内）", "Clear (in Quick Draft)"),
-    (
-        "TABへ貼り付け（Quick Draft内）",
-        "Paste to Tab (in Quick Draft)",
-    ),
-    ("縦書き・横書きを切り替え", "Toggle Vertical / Horizontal"),
-    // RFN01-66（2026-11-05）: 名前はタイトルバーのメニューにそろえる。
-    ("Source・Preview切替", "Toggle Source / Preview"),
-    (
-        "Viewer・ReadOnly開始／終了",
-        "Start / Exit Viewer or ReadOnly",
-    ),
-    ("印刷プレビューを開く", "Open Print Preview"),
-];
-const DEFAULTS: &[&str] = &[
-    "Ctrl+O",
-    "Ctrl+S",
-    "Ctrl+Shift+S",
-    "Ctrl+W",
-    "Ctrl+F",
-    "Ctrl+H",
-    "Ctrl+G",
-    "Ctrl+Shift+T",
-    "Ctrl+Z",
-    "Ctrl+Y",
-    "",
-    "Ctrl+Tab",
-    "Ctrl+Shift+Tab",
-    "Ctrl+Alt+Left",
-    "Ctrl+Alt+Right",
-    "Ctrl+Alt+Up",
-    "Ctrl+Alt+Down",
-    "Ctrl+`",
-    "",
-    "Alt+Left",
-    "Alt+Right",
-    "Ctrl+D",
-    "Alt+F",
-    "Alt+B",
-    "Ctrl+K",
-    "Ctrl+Space",
-    "Ctrl+Shift+Space",
-    "Alt+W",
-    "Alt+X",
-    "Alt+Y",
-    "Alt+Shift+Y",
-    "Alt+Shift+F",
-    "Alt+Shift+B",
-    "Ctrl+Shift+K",
-    "Alt+Up",
-    "Alt+Down",
-    "Alt+Shift+Up",
-    "Alt+Shift+Down",
-    "Ctrl+Shift+C",
-    "",
-    "",
-    "",
-    // RFN01-87（書き手の求め 2026-11-03）: 縦書き・横書きの切り替え。
-    "Ctrl+R",
-    // RFN01-82: VS Codeの「Toggle Markdown Preview」と同じ。
-    "Ctrl+Shift+V",
-    "",
-    // RFN01-87（書き手の決定 2026-11-03）: Ctrl+Pはファイル名で開くへ。印刷プレビューはキーなし。
-    "",
-];
-const CATEGORIES: &[i32] = &[
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 0, 0, 0, 0, 0, 6, 6, 6, 6, 4, 4, 4, 0,
-];
-/// Keys の面の分類（書き手の求め 2026-09-15：タブで切り替えず、全部を並べて
-/// 分類ごとに畳めるように）。番号は[`CATEGORIES`]の値。
-const CATEGORY_NAMES: [(&str, &str); 10] = [
-    ("本文の操作", "Text Actions"),
-    ("基本編集", "Basic Editing"),
-    ("Terminal", "Terminal"),
-    ("入力欄", "Input Fields"),
-    ("Pane・TAB", "Panes & Tabs"),
-    ("Emacs", "Emacs"),
-    ("Quick Draft", "Quick Draft"),
-    ("ファイル", "File"),
-    ("挿入", "Insert"),
-    ("実行", "Run"),
-];
-const CATEGORY_NOTES: [(&str, &str); 10] = [
-    (
-        "本文にフォーカスがあり、IME変換中でないときに有効です。",
-        "Active when the text has focus and no IME conversion is in progress.",
-    ),
-    (
-        "固定 · 本文の編集時に使います。Viewerでは編集できません。",
-        "Fixed · Used while editing the text. Nothing can be edited in Viewer.",
-    ),
-    (
-        "固定 · Terminalにフォーカスがあるときに有効です。その他のキーは実行中のシェル・プログラムへ渡します。",
-        "Fixed · Active when a Terminal has focus. Other keys go to the running shell or program.",
-    ),
-    (
-        "固定 · 検索欄などの文字入力欄にフォーカスがあるときに有効です。Enter・Escの動作は入力欄ごとの用途に従います。",
-        "Fixed · Active when an input field such as Find has focus. Enter and Esc work as each field needs.",
-    ),
-    (
-        "本文からのPane・TAB操作です。Terminal内のキーは固定です。",
-        "Pane and tab actions from the text. Keys inside a Terminal are fixed.",
-    ),
-    (
-        "本文で常時使えるEmacs風キーです。専用モードの切り替えはありません。",
-        "Emacs-style keys always available in the text. There is no separate mode to switch to.",
-    ),
-    (
-        "本文から開く操作と、Quick Draft内の操作を区別します。",
-        "Tells opening from the text apart from actions inside Quick Draft.",
-    ),
-    (
-        "メニューの「ファイル」と同じ操作です。既定では割り当てていません。",
-        "The same actions as the File menu. Nothing is assigned to most of them by default.",
-    ),
-    (
-        "メニューの「挿入」と同じ操作です。選んだ字が要る形は、選んでいないときは何もしません。",
-        "The same actions as the Insert menu. A form that needs a picked word does nothing when nothing is picked.",
-    ),
-    (
-        "メニューの「実行」と同じ操作です。スペルミスへ移るのは、スペルチェック中だけです。",
-        "The same actions as the Run menu. Moving to a spelling error works only during a spell check.",
-    ),
-];
+
 /// 変えられないキー。**同じ一覧に並べる**——「このキーは何か」を探す書き手に
 /// とって、変えられるかどうかは探したあとの話である。
-const FIXED: &[(i32, (&str, &str), &str)] = &[
-    (1, ("コピー", "Copy"), "Ctrl+C"),
-    (1, ("切り取り", "Cut"), "Ctrl+X"),
-    (1, ("貼り付け", "Paste"), "Ctrl+V"),
-    (1, ("全選択", "Select All"), "Ctrl+A"),
+const FIXED: &[(Category, (&str, &str), &str)] = &[
     (
-        2,
+        Category::Terminal,
         ("選択した文字をコピー", "Copy Selected Text"),
         "Ctrl+Shift+C",
     ),
-    (2, ("貼り付け", "Paste"), "Ctrl+V"),
+    (Category::Terminal, ("貼り付け", "Paste"), "Ctrl+V"),
     (
-        2,
+        Category::Terminal,
         ("下段を表示・閉じる", "Show or Hide Strip Below"),
         "Ctrl+`",
     ),
     (
-        2,
+        Category::Terminal,
         ("下段から本文へ戻る", "Back to Text from Strip Below"),
         "Ctrl+Alt+Up",
     ),
-    (3, ("コピー", "Copy"), "Ctrl+C"),
-    (3, ("切り取り", "Cut"), "Ctrl+X"),
-    (3, ("貼り付け", "Paste"), "Ctrl+V"),
-    (3, ("全選択", "Select All"), "Ctrl+A"),
+    (
+        Category::Edit,
+        ("コピー（入力欄）", "Copy (in a field)"),
+        "Ctrl+C",
+    ),
+    (
+        Category::Edit,
+        ("切り取り（入力欄）", "Cut (in a field)"),
+        "Ctrl+X",
+    ),
+    (
+        Category::Edit,
+        ("貼り付け（入力欄）", "Paste (in a field)"),
+        "Ctrl+V",
+    ),
+    (
+        Category::Edit,
+        ("全選択（入力欄）", "Select All (in a field)"),
+        "Ctrl+A",
+    ),
 ];
 
 /// 日本語と英語の対から、いまの言語のほうを。
 fn shown((japanese, english): (&'static str, &'static str)) -> &'static str {
     crate::i18n::pick(japanese, english)
 }
-/// 追加要件 2026-09-14: 設定のTABが前にあるときに通す操作。**TABとペインを
-/// 移る・閉じる・開く**だけで、本文に効くもの（保存・置換・Undo・字の編集）は
-/// 通さない——設定のTABの下にあるのは代役の空文書で、保存すれば空の無題が
-/// ディスクへ出ていく。
-///
-/// **検索（4）は通す**（書き手の報告 2026-09-15：設定TABでCtrl+Fが効かない）。設定のTABでは
-/// 検索欄が「設定を探す」欄になり、代役の文書は探さない。
-const SETTINGS_PASS: &[i32] = &[0, 3, 4, 7, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20];
-/// 設定のTABが前にあるときに通す操作か（追加要件 2026-09-14、RFN01-18で拡張）。
-///
-/// 既存の46枠は[`SETTINGS_PASS`]のまま。**メニューから来た分は、新しいTABを
-/// 作るものだけ通す**——挿入は代役の空文書へ入ってしまうので通さない。
+
+/// 割り当ての一覧のid（アクションの表の中の位置）の操作。
+fn command_at(id: usize) -> Option<&'static Command> {
+    actions::all().get(id)?.command.as_ref()
+}
+/// 追加要件 2026-09-14: 設定のTABが前にあるときに通す操作。**TABとペインを移る・閉じる・
+/// 開く**だけで、本文に効くもの（保存・置換・Undo・字の編集）は通さない——設定のTABの下に
+/// あるのは代役の空文書で、保存すれば空の無題がディスクへ出ていく。**検索は通す**（書き手の
+/// 報告 2026-09-15）。設定のTABでは検索欄が「設定を探す」欄になる。
 fn passes_settings(command: i32) -> bool {
-    let Ok(id) = usize::try_from(command) else {
-        return false;
-    };
-    if id < NAMES.len() {
-        return SETTINGS_PASS.contains(&command);
-    }
-    matches!(
-        menu_at(id).map(|(action, _)| action.action),
-        Some(
-            ShortcutAction::NewFile | ShortcutAction::NewTerminal | ShortcutAction::FolderTerminal
-        )
-    )
-}
-const SCOPES: &[i32] = &[
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0,
-];
-/// メニューから来た操作（RFN01-18）。**`NAMES`の後ろへ続く**——並びの位置が
-/// そのままidなので、既存の46枠を動かさないよう末尾へだけ足す。
-///
-/// **名前はメニューの文言と同じ**にする。設定画面で探す書き手が見るのは、どちらも
-/// メニューの言葉である。**既定は空（未設定）**で、キーは書き手が決める。
-struct MenuAction {
-    /// 文言（日本語・英語）。**挿入の形は`None`**——挿入メニューの表
-    /// （`InsertShape::title`）から引き、メニューと同じ言葉を2か所に書かない。
-    name: Option<(&'static str, &'static str)>,
-    /// 既定のキー。**空は「まだ決めていない」**（`DEFAULTS`の空と同じ意味）。
-    default: &'static str,
-    action: ShortcutAction,
-}
-/// 既定を持たない操作を並べるための短い書き方。
-macro_rules! menu_action {
-    ($ja:expr, $en:expr, $action:expr) => {
-        MenuAction {
-            name: Some(($ja, $en)),
-            default: "",
-            action: $action,
-        }
-    };
-    // 既定を持つもの（いまは新規文書の`Ctrl+N`だけ）。
-    ($ja:expr, $en:expr, $default:expr, $action:expr) => {
-        MenuAction {
-            name: Some(($ja, $en)),
-            default: $default,
-            action: $action,
-        }
-    };
-}
-/// メニューから来た操作の分類。`CATEGORY_NAMES`の番号。
-const FILE_CATEGORY: i32 = 7;
-const INSERT_CATEGORY: i32 = 8;
-const RUN_CATEGORY: i32 = 9;
-/// 実行の分類に並べる、メニューから来た操作（RFN01-63）。
-///
-/// **スペルミスへ移る操作は既定を持つ**（F8／Shift+F8、書き手と合意 2026-09-28）。
-/// F3（検索の次の一致）と共用すると、どちらに効くかの決まりが要るので分けた。
-const RUN_ACTIONS: &[MenuAction] = &[
-    menu_action!(
-        "次のスペルミス",
-        "Next Spelling Error",
-        "F8",
-        ShortcutAction::SpellingStep(false)
-    ),
-    menu_action!(
-        "前のスペルミス",
-        "Previous Spelling Error",
-        "Shift+F8",
-        ShortcutAction::SpellingStep(true)
-    ),
-    // RFN01-62: 読み上げ。**既定なし**で、書き手が割り当てる（書き手と合意 2026-09-28）。
-    // idは末尾へ足す。
-    menu_action!(
-        "読み上げ・停止",
-        "Read Aloud / Stop",
-        ShortcutAction::ReadAloud
-    ),
-];
-/// Pane・TABの分類に足す、左のPaneの操作（RFN01-75/76、書き手と合意 2026-11-02）。
-/// **idは末尾へ足す**——設定は番号で持っているので、途中に入れると後ろの割り当てがずれる。
-const PANE_CATEGORY: i32 = 4;
-const PANE_ACTIONS: &[MenuAction] = &[
-    menu_action!(
-        "フォルダ内を検索",
-        "Search in Folder",
-        "Ctrl+Shift+F",
-        ShortcutAction::SearchInFolder
-    ),
-    menu_action!(
-        "Explore Paneへ",
-        "To Explore Pane",
-        "Ctrl+Shift+E",
-        ShortcutAction::ExplorePane
-    ),
-    // 書き手の求め 2026-11-02: 置換の入口をキーにも。末尾へ足す。
-    menu_action!(
-        "フォルダ内を置換",
-        "Replace in Folder",
-        "Ctrl+Shift+H",
-        ShortcutAction::ReplaceInFolder
-    ),
-    // RFN01-82（書き手の求め 2026-11-03）: 左ペインの開閉をキーにも。末尾へ足す。
-    // **キーはVS Codeの「Toggle Sidebar Visibility」**（最初はCtrl+Alt+L、同じ日に替えた）。
-    menu_action!(
-        "左ペインを開く・閉じる",
-        "Show or Hide Left Pane",
-        "Ctrl+B",
-        ShortcutAction::ToggleLeftPane
-    ),
-    // RFN01-82: VS Codeの既定に合わせて足す（書き手と合意 2026-11-03）。末尾へ。
-    menu_action!(
-        "Outlineを開く",
-        "Show Outline",
-        "Ctrl+Shift+O",
-        ShortcutAction::ShowLeftTab(3)
-    ),
-    menu_action!(
-        "Git Changesを開く",
-        "Show Git Changes",
-        "Ctrl+Shift+G",
-        ShortcutAction::ShowLeftTab(8)
-    ),
-    menu_action!(
-        "設定を開く",
-        "Open Settings",
-        "Ctrl+,",
-        ShortcutAction::OpenSettings
-    ),
-    menu_action!(
-        "右へ分割",
-        "Split Right",
-        "Ctrl+\\",
-        ShortcutAction::SplitRight
-    ),
-];
-/// 本文の操作の分類に足す、VS Codeに合わせた操作（RFN01-82、書き手と合意 2026-11-03）。
-/// **idは末尾へ足す。**
-const TEXT_CATEGORY: i32 = 0;
-const TEXT_ACTIONS: &[MenuAction] = &[
-    // 横書きで本文を1行ぶん動かす。キャレットは動かさない。縦書きでは画面の上下へ
-    // 動かす先が無いので、これまでどおり矢印として効く。
-    menu_action!(
-        "1行上へスクロール",
-        "Scroll Line Up",
-        "Ctrl+Up",
-        ShortcutAction::ScrollLine(false)
-    ),
-    menu_action!(
-        "1行下へスクロール",
-        "Scroll Line Down",
-        "Ctrl+Down",
-        ShortcutAction::ScrollLine(true)
-    ),
-    menu_action!(
-        "行を選択",
-        "Select Line",
-        "Ctrl+L",
-        ShortcutAction::SelectLine
-    ),
-    // RFN01-87: コマンドパレット。VS Codeの「Go to File」と「Show All Commands」。
-    menu_action!(
-        "ファイル名で開く",
-        "Go to File",
-        "Ctrl+P",
-        ShortcutAction::Palette(false)
-    ),
-    menu_action!(
-        "コマンドパレット",
-        "Command Palette",
-        "Ctrl+Shift+P",
-        ShortcutAction::Palette(true)
-    ),
-];
-/// RFN01-107（書き手の求め 2026-11-05）: 下段の操作。Pane・TABの分類に並べるが、**idは
-/// いちばん後ろ**——`PANE_ACTIONS`に足すと、後ろの`TEXT_ACTIONS`の割り当てがずれる。
-const STRIP_ACTIONS: &[MenuAction] = &[menu_action!(
-    "下段のTABを閉じる",
-    "Close Strip Tab",
-    "",
-    ShortcutAction::CloseStripTab
-)];
-
-/// RFN01-107: この操作が「下段のTABを閉じる」か（パレットは下段が無ければ出さない）。
-pub(crate) fn closes_strip(id: i32) -> bool {
-    usize::try_from(id)
+    usize::try_from(command)
         .ok()
-        .and_then(menu_at)
-        .is_some_and(|(action, _)| action.action == ShortcutAction::CloseStripTab)
+        .and_then(command_at)
+        .is_some_and(|command| {
+            !matches!(
+                command,
+                // 本文に効くもの。左ペイン・設定・パレットなど、文書を持たない操作は通す。
+                Command::Save(_)
+                    | Command::Find(true)
+                    | Command::Goto(_)
+                    | Command::Undo(_)
+                    | Command::Line(_)
+                    | Command::Mark(_)
+                    | Command::Kill(_)
+                    | Command::Insert(_)
+                    | Command::List(..)
+                    | Command::DeleteNext
+                    | Command::WordMove(..)
+                    | Command::ScrollLine(_)
+                    | Command::SelectLine
+                    | Command::DirectionToggle
+                    | Command::Preview
+                    | Command::Viewer
+                    | Command::Print
+                    | Command::Below
+                    | Command::CopyBody
+                    | Command::Rename
+                    | Command::Duplicate
+                    | Command::CopyPath
+                    | Command::Reveal
+                    | Command::Encoding(_)
+                    | Command::Compare(_)
+                    | Command::Spelling
+                    | Command::SpellingStep(_)
+                    | Command::ReadAloud
+                    | Command::Paper(_)
+                    | Command::Direction(_)
+                    | Command::Display(_)
+                    | Command::Word(_)
+                    | Command::WordModePicker
+                    | Command::CloseOthers(_)
+                    | Command::CloseClean
+                    | Command::SaveAll
+                    | Command::Split(_)
+                    | Command::OtherPanes
+                    | Command::Swap(_)
+                    | Command::Zoom(_)
+                    | Command::ZoomReset
+                    | Command::Terminal(_)
+                    | Command::Panel(_)
+                    | Command::Appearance(_)
+                    | Command::Above
+                    | Command::CloseStripTab
+            )
+        })
 }
-
-/// RFN01-107: この名前（いまの言語の表示）の操作がキーに割り当てられるか。パレットの行に
-/// 鍵の印を出すかを決める。メニューの行は道の最後の名前で訊く。
-pub(crate) fn assignable(name: &str) -> bool {
-    (0..count()).any(|id| scope_at(id) == 0 && shown(name_at(id)) == name)
-}
-
-/// ファイルの分類に並べる、メニューから来た操作。
-///
-/// **新規文書だけは既定を持つ**（`Ctrl+N`、書き手の合意 2026-09-21）——Windowsの
-/// 慣例どおりのキーで、どこも使っていない。
-const FILE_ACTIONS: &[MenuAction] = &[
-    menu_action!("新規文書", "New File", "Ctrl+N", ShortcutAction::NewFile),
-    menu_action!(
-        "新しいTerminal",
-        "New Terminal",
-        ShortcutAction::NewTerminal
-    ),
-    // RFN01-82: VS Codeの「Open New Command Prompt」（Ctrl+Shift+C）に当たる。
-    // Quick Draftの全文コピーとTerminalのコピーも同じキーだが、場面が違う。
-    menu_action!(
-        "文書のフォルダでTerminal起動",
-        "Terminal in Document Folder",
-        "Ctrl+Shift+C",
-        ShortcutAction::FolderTerminal
-    ),
-];
-impl MenuAction {
-    fn name(&self) -> (&'static str, &'static str) {
-        match (self.name, self.action) {
-            (Some(name), _) => name,
-            (None, ShortcutAction::Insert(shape)) => shape.title(),
-            (None, _) => ("", ""),
-        }
-    }
-}
-/// 挿入の形を並べるための短い書き方。**番号は書かない**——形で指す（RFN01-48）。
-/// 文言は挿入メニューの表から引く。
-const fn insert_shape(shape: InsertShape) -> MenuAction {
-    MenuAction {
-        name: None,
-        default: "",
-        action: ShortcutAction::Insert(shape),
-    }
-}
-const fn insert(what: InsertEdit) -> MenuAction {
-    insert_shape(InsertShape::Edit(what))
-}
-const fn line_note(what: LineNoteEdit) -> MenuAction {
-    insert_shape(InsertShape::Line(what))
-}
-/// 挿入の分類に並べる、メニューから来た操作。
-///
-/// **持つのは形であって番号ではない。**番号はメニューの並びが変わるたびに動くので、
-/// 番号で持つと数え違えて別の形を走らせてしまう。**idは末尾へ足す**——既に割り当てた
-/// キーを動かさないためで、だから画面の並びとこの一覧の並びは同じとは限らない
-/// （画像はメニューの途中、一覧では末尾にある）。
-const INSERT_ACTIONS: &[MenuAction] = &[
-    // リンク・ルビ・注記
-    insert(InsertEdit::MarkdownLink),
-    insert(InsertEdit::WikiLink),
-    insert(InsertEdit::WikiLinkAlias),
-    insert(InsertEdit::Ruby),
-    insert(InsertEdit::SideNote),
-    insert(InsertEdit::RubyWithSideNote),
-    // 傍点
-    insert(InsertEdit::EmphasisDots),
-    insert(InsertEdit::SesameDotsNote),
-    insert(InsertEdit::RoundDotsNote),
-    insert(InsertEdit::WhiteRoundDotsNote),
-    insert(InsertEdit::DoubleRoundDotsNote),
-    insert(InsertEdit::CrossDotsNote),
-    // 傍線
-    insert(InsertEdit::LineNote),
-    insert(InsertEdit::DoubleLineNote),
-    insert(InsertEdit::WaveLineNote),
-    insert(InsertEdit::ChainLineNote),
-    insert(InsertEdit::DashLineNote),
-    // 文字注記
-    insert(InsertEdit::Upright),
-    insert(InsertEdit::Warichu),
-    insert(InsertEdit::SmallText),
-    insert(InsertEdit::LargeText),
-    // 見出し
-    line_note(LineNoteEdit::Heading(1)),
-    line_note(LineNoteEdit::Heading(2)),
-    line_note(LineNoteEdit::Heading(3)),
-    line_note(LineNoteEdit::Heading(4)),
-    line_note(LineNoteEdit::Heading(5)),
-    line_note(LineNoteEdit::Heading(6)),
-    line_note(LineNoteEdit::NoHeading),
-    // 字下げ
-    line_note(LineNoteEdit::Indent(1)),
-    line_note(LineNoteEdit::Indent(2)),
-    line_note(LineNoteEdit::Indent(3)),
-    line_note(LineNoteEdit::Indent(4)),
-    line_note(LineNoteEdit::NoIndent),
-    // 地付き
-    line_note(LineNoteEdit::AlignToEnd(0)),
-    line_note(LineNoteEdit::AlignToEnd(1)),
-    line_note(LineNoteEdit::AlignToEnd(2)),
-    line_note(LineNoteEdit::AlignToEnd(3)),
-    line_note(LineNoteEdit::AlignToEnd(4)),
-    line_note(LineNoteEdit::NoAlignToEnd),
-    // 改ページ
-    insert_shape(InsertShape::PageBreak),
-    // 箇条書き（`document::BULLET_MARKS`の並び）
-    menu_action!("箇条書き -", "Bullet List -", ShortcutAction::Bullets(0)),
-    menu_action!("箇条書き *", "Bullet List *", ShortcutAction::Bullets(1)),
-    menu_action!("箇条書き +", "Bullet List +", ShortcutAction::Bullets(2)),
-    menu_action!(
-        "番号付きリスト",
-        "Numbered List",
-        ShortcutAction::NumberedList
-    ),
-    menu_action!("番号を振り直す", "Renumber", ShortcutAction::Renumber),
-    // 画像（RFN01-48）。**idは末尾へ足す**——既に割り当てたキーを動かさないため。
-    insert(InsertEdit::MarkdownImage),
-    insert(InsertEdit::WikiImage),
-    // Obsidianの記法（書き手の求め 2026-09-22）。同じく末尾へ。
-    insert(InsertEdit::Highlight),
-    insert(InsertEdit::Comment),
-    insert(InsertEdit::Footnote),
-    insert(InsertEdit::Callout(CalloutType::Note)),
-    insert(InsertEdit::Callout(CalloutType::Tip)),
-    insert(InsertEdit::Callout(CalloutType::Important)),
-    insert(InsertEdit::Callout(CalloutType::Warning)),
-    insert(InsertEdit::Callout(CalloutType::Caution)),
-    // 表（RFN01-49）。キーではマス目がキャレットの所に開く。同じく末尾へ。
-    insert_shape(InsertShape::Table),
-    // RFN01-88: テンプレート。パレットがテンプレートの一覧で開く。同じく末尾へ。
-    insert_shape(InsertShape::Template),
-];
-/// 変更できる操作の数——既存の46枠と、メニューから来た分。
+/// 変更できる操作の数——アクションの表の行の数。
 fn count() -> usize {
-    NAMES.len()
-        + FILE_ACTIONS.len()
-        + INSERT_ACTIONS.len()
-        + RUN_ACTIONS.len()
-        + PANE_ACTIONS.len()
-        + TEXT_ACTIONS.len()
-        + STRIP_ACTIONS.len()
-}
-/// idがメニューから来たものなら、その1つと分類の番号。
-pub(crate) fn menu_action_at(id: usize) -> Option<ShortcutAction> {
-    menu_at(id).map(|(action, _)| action.action)
-}
-
-fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
-    let index = id.checked_sub(NAMES.len())?;
-    FILE_ACTIONS
-        .get(index)
-        .map(|action| (action, FILE_CATEGORY))
-        .or_else(|| {
-            INSERT_ACTIONS
-                .get(index - FILE_ACTIONS.len())
-                .map(|action| (action, INSERT_CATEGORY))
-        })
-        .or_else(|| {
-            RUN_ACTIONS
-                .get(index - FILE_ACTIONS.len() - INSERT_ACTIONS.len())
-                .map(|action| (action, RUN_CATEGORY))
-        })
-        .or_else(|| {
-            let before = FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len();
-            PANE_ACTIONS
-                .get(index - before)
-                .map(|action| (action, PANE_CATEGORY))
-        })
-        .or_else(|| {
-            let before =
-                FILE_ACTIONS.len() + INSERT_ACTIONS.len() + RUN_ACTIONS.len() + PANE_ACTIONS.len();
-            TEXT_ACTIONS
-                .get(index - before)
-                .map(|action| (action, TEXT_CATEGORY))
-        })
-        .or_else(|| {
-            let before = FILE_ACTIONS.len()
-                + INSERT_ACTIONS.len()
-                + RUN_ACTIONS.len()
-                + PANE_ACTIONS.len()
-                + TEXT_ACTIONS.len();
-            STRIP_ACTIONS
-                .get(index - before)
-                .map(|action| (action, PANE_CATEGORY))
-        })
+    actions::all().len()
 }
 fn name_at(id: usize) -> (&'static str, &'static str) {
-    match menu_at(id) {
-        Some((action, _)) => action.name(),
-        None => NAMES[id],
-    }
+    let action = &actions::all()[id];
+    (action.title.0.as_str(), action.title.1.as_str())
 }
 fn default_at(id: usize) -> &'static str {
-    match menu_at(id) {
-        Some((action, _)) => action.default,
-        None => DEFAULTS[id],
-    }
+    actions::all()[id].key
 }
-fn category_at(id: usize) -> i32 {
-    match menu_at(id) {
-        Some((_, category)) => category,
-        None => CATEGORIES[id],
-    }
+fn category_at(id: usize) -> Category {
+    actions::all()[id].category
 }
+/// どこでキーを受けるか：0は窓、1はQuick Draft。
 fn scope_at(id: usize) -> i32 {
-    match menu_at(id) {
-        // **メニューの操作は本文の場面**——メニューも本文から開く。
-        Some(_) => 0,
-        None => SCOPES[id],
+    // RFN01-114: キーが固定の行は、割り当ての場面に入れない（resolveも重なりの検査も見ない）。
+    if actions::all()[id].fixed {
+        return -1;
+    }
+    match actions::all()[id].scope {
+        Scope::Main => 0,
+        Scope::QuickDraft => 1,
     }
 }
+/// いまの言語の名前（Keysの行、知らせ）。
+pub(crate) fn name(id: usize) -> &'static str {
+    shown(name_at(id))
+}
+
 /// 割り当てられない組み合わせ。
 ///
 /// **固定の基本編集**（要件 11.1）と、**窓とアプリが先に使う鍵**——`F3`／
@@ -796,68 +322,213 @@ fn conflict(keys: &[String], i: usize, key: &str) -> Option<usize> {
         .enumerate()
         .position(|(other, value)| other != i && scope_at(other) == scope_at(i) && value == key)
 }
-/// RFN01-82: 割り当ての書き方の版。**保存はどの枠も明示して書く**ので（`i=`は
-/// 「キーなし」）、既定を替えても、前に保存した書き手には古い既定が残る。この印の
-/// 無い割り当ては、[`migrations`]の古い既定のままの枠だけを新しい既定へ移す。
-/// 印は保存のたびに書くので、移すのは一度きり——後で書き手が外した枠は外れたまま。
-const BINDINGS_VERSION: u32 = 4;
+/// 割り当ての書き方の版。**5からはIDで書く**（RFN01-114）。4までは表の位置の番号で書いていた
+/// ので、読むときに[`LEGACY`]でIDへ移す。保存はどの枠も明示して書く（`id=`は「キーなし」）ので、
+/// 既定を替えても、前に保存した書き手には古い既定が残る——その枠は[`migrations`]で移す。
+const BINDINGS_VERSION: u32 = 5;
+/// 4までの番号の並び（それぞれのIDか、挿入の形）。**移し替えのためだけに残す。**
+enum Legacy {
+    Id(&'static str),
+    Shape(InsertShape),
+    Gone,
+}
+const fn ins(what: InsertEdit) -> Legacy {
+    Legacy::Shape(InsertShape::Edit(what))
+}
+const fn line(what: LineNoteEdit) -> Legacy {
+    Legacy::Shape(InsertShape::Line(what))
+}
+const LEGACY: &[Legacy] = &[
+    Legacy::Id("file.open"),
+    Legacy::Id("file.save"),
+    Legacy::Id("file.save-as"),
+    Legacy::Id("file.close-tab"),
+    Legacy::Id("edit.find"),
+    Legacy::Id("edit.replace"),
+    Legacy::Id("edit.goto"),
+    Legacy::Id("file.reopen"),
+    Legacy::Id("edit.undo"),
+    Legacy::Id("edit.redo"),
+    Legacy::Id("view.quick-draft"),
+    Legacy::Id("view.next-tab"),
+    Legacy::Id("view.previous-tab"),
+    Legacy::Id("view.focus-left"),
+    Legacy::Id("view.focus-right"),
+    Legacy::Id("view.focus-up"),
+    Legacy::Id("view.focus-down"),
+    Legacy::Id("view.below"),
+    Legacy::Gone,
+    Legacy::Id("view.back"),
+    Legacy::Id("view.forward"),
+    Legacy::Id("text.delete-next"),
+    Legacy::Id("text.word-forward"),
+    Legacy::Id("text.word-back"),
+    Legacy::Id("edit.kill-line"),
+    Legacy::Id("edit.mark"),
+    Legacy::Id("edit.mark-rect"),
+    Legacy::Id("edit.kill-copy"),
+    Legacy::Id("edit.kill-cut"),
+    Legacy::Id("edit.yank"),
+    Legacy::Id("edit.yank-pop"),
+    Legacy::Id("text.select-word-forward"),
+    Legacy::Id("text.select-word-back"),
+    Legacy::Id("edit.delete-line"),
+    Legacy::Id("edit.move-line-up"),
+    Legacy::Id("edit.move-line-down"),
+    Legacy::Id("edit.copy-line-up"),
+    Legacy::Id("edit.copy-line-down"),
+    Legacy::Id("draft.copy-all"),
+    Legacy::Id("draft.copy-and-close"),
+    Legacy::Id("draft.clear"),
+    Legacy::Id("draft.paste-to-tab"),
+    Legacy::Id("layout.toggle-direction"),
+    Legacy::Id("view.toggle-preview"),
+    Legacy::Id("view.toggle-viewer"),
+    Legacy::Id("file.print"),
+    // メニューから来た操作（RFN01-18）
+    Legacy::Id("file.new"),
+    Legacy::Id("file.new-terminal"),
+    Legacy::Id("file.terminal-in-folder"),
+    ins(InsertEdit::MarkdownLink),
+    ins(InsertEdit::WikiLink),
+    ins(InsertEdit::WikiLinkAlias),
+    ins(InsertEdit::Ruby),
+    ins(InsertEdit::SideNote),
+    ins(InsertEdit::RubyWithSideNote),
+    ins(InsertEdit::EmphasisDots),
+    ins(InsertEdit::SesameDotsNote),
+    ins(InsertEdit::RoundDotsNote),
+    ins(InsertEdit::WhiteRoundDotsNote),
+    ins(InsertEdit::DoubleRoundDotsNote),
+    ins(InsertEdit::CrossDotsNote),
+    ins(InsertEdit::LineNote),
+    ins(InsertEdit::DoubleLineNote),
+    ins(InsertEdit::WaveLineNote),
+    ins(InsertEdit::ChainLineNote),
+    ins(InsertEdit::DashLineNote),
+    ins(InsertEdit::Upright),
+    ins(InsertEdit::Warichu),
+    ins(InsertEdit::SmallText),
+    ins(InsertEdit::LargeText),
+    line(LineNoteEdit::Heading(1)),
+    line(LineNoteEdit::Heading(2)),
+    line(LineNoteEdit::Heading(3)),
+    line(LineNoteEdit::Heading(4)),
+    line(LineNoteEdit::Heading(5)),
+    line(LineNoteEdit::Heading(6)),
+    line(LineNoteEdit::NoHeading),
+    line(LineNoteEdit::Indent(1)),
+    line(LineNoteEdit::Indent(2)),
+    line(LineNoteEdit::Indent(3)),
+    line(LineNoteEdit::Indent(4)),
+    line(LineNoteEdit::NoIndent),
+    line(LineNoteEdit::AlignToEnd(0)),
+    line(LineNoteEdit::AlignToEnd(1)),
+    line(LineNoteEdit::AlignToEnd(2)),
+    line(LineNoteEdit::AlignToEnd(3)),
+    line(LineNoteEdit::AlignToEnd(4)),
+    line(LineNoteEdit::NoAlignToEnd),
+    Legacy::Shape(InsertShape::PageBreak),
+    Legacy::Id("insert.bullet-dash"),
+    Legacy::Id("insert.bullet-star"),
+    Legacy::Id("insert.bullet-plus"),
+    Legacy::Id("insert.numbered"),
+    Legacy::Id("insert.renumber"),
+    ins(InsertEdit::MarkdownImage),
+    ins(InsertEdit::WikiImage),
+    ins(InsertEdit::Highlight),
+    ins(InsertEdit::Comment),
+    ins(InsertEdit::Footnote),
+    ins(InsertEdit::Callout(CalloutType::Note)),
+    ins(InsertEdit::Callout(CalloutType::Tip)),
+    ins(InsertEdit::Callout(CalloutType::Important)),
+    ins(InsertEdit::Callout(CalloutType::Warning)),
+    ins(InsertEdit::Callout(CalloutType::Caution)),
+    Legacy::Shape(InsertShape::Table),
+    Legacy::Shape(InsertShape::Template),
+    Legacy::Id("run.next-spelling"),
+    Legacy::Id("run.previous-spelling"),
+    Legacy::Id("run.read-aloud"),
+    Legacy::Id("edit.find-in-folder"),
+    Legacy::Id("left.explore"),
+    Legacy::Id("edit.replace-in-folder"),
+    Legacy::Id("left.toggle"),
+    Legacy::Id("view.sidebar.outline"),
+    Legacy::Id("view.sidebar.git"),
+    Legacy::Id("left.settings"),
+    Legacy::Id("view.split-right"),
+    Legacy::Id("text.scroll-up"),
+    Legacy::Id("text.scroll-down"),
+    Legacy::Id("text.select-line"),
+    Legacy::Id("view.go-to-file"),
+    Legacy::Id("view.command-palette"),
+    Legacy::Id("view.close-strip-tab"),
+];
+/// 4までの番号を、いまの表の位置へ。
+fn legacy_index(number: usize) -> Option<usize> {
+    match LEGACY.get(number)? {
+        Legacy::Id(id) => actions::index_of(id),
+        Legacy::Shape(shape) => actions::index_of(&actions::insert_id(*shape)),
+        Legacy::Gone => None,
+    }
+}
 /// 既定を替えた枠と、その前の既定、替えた版。
 ///
 /// 2：VS Codeに合わせた（RFN01-82、2026-11-03）。3：Ctrl+Pをファイル名で開くへ
 /// 譲り、印刷プレビューはキーなし（RFN01-87、2026-11-03）。4：縦書き・横書きの
 /// 切り替えにCtrl+R（同）。
-fn migrations() -> Vec<(u32, usize, &'static str)> {
-    let mut moved = vec![(2, 43, ""), (3, 45, "Ctrl+P"), (4, 42, "")];
-    for (version, action, before) in [
-        (2, ShortcutAction::FolderTerminal, ""),
-        (2, ShortcutAction::ToggleLeftPane, "Ctrl+Alt+L"),
-    ] {
-        if let Some(id) = id_of(action) {
-            moved.push((version, id, before));
-        }
-    }
-    moved
-}
+const MIGRATIONS: &[(u32, &str, &str)] = &[
+    (2, "view.toggle-preview", ""),
+    (3, "file.print", "Ctrl+P"),
+    (4, "layout.toggle-direction", ""),
+    (2, "file.terminal-in-folder", ""),
+    (2, "left.toggle", "Ctrl+Alt+L"),
+];
 /// 保存した割り当ての版。印が無ければ1（RFN01-82より前）。
 fn saved_version(raw: &str) -> u32 {
     raw.split(';')
         .find_map(|entry| entry.strip_prefix("v=")?.parse().ok())
         .unwrap_or(1)
 }
-/// メニューから来た操作のid。
-fn id_of(action: ShortcutAction) -> Option<usize> {
-    (NAMES.len()..count()).find(|id| menu_at(*id).is_some_and(|(held, _)| held.action == action))
-}
-/// 保存する形。[`BINDINGS_VERSION`]を添える。
+/// 保存する形。**IDで書く**（RFN01-114）。[`BINDINGS_VERSION`]を添える。
 fn encode(keys: &[String]) -> String {
-    keys.iter()
-        .enumerate()
-        .map(|(i, k)| format!("{i}={k}"))
+    actions::all()
+        .iter()
+        .zip(keys)
+        .map(|(action, k)| format!("{}={k}", action.id))
         .chain(std::iter::once(format!("v={BINDINGS_VERSION}")))
         .collect::<Vec<_>>()
         .join(";")
 }
 fn bindings(raw: &str) -> Vec<String> {
     let mut keys: Vec<_> = (0..count()).map(|i| default_at(i).to_string()).collect();
+    let saved = saved_version(raw);
     for entry in raw.split(';') {
-        if let Some((i, value)) = entry.split_once('=') {
-            if let (Ok(i), Some(key)) = (i.parse::<usize>(), normalize(value)) {
-                if i < keys.len() {
-                    keys[i] = key;
-                }
-            }
+        let Some((name, value)) = entry.split_once('=') else {
+            continue;
+        };
+        if name == "v" {
+            continue;
+        }
+        let at = if saved < 5 {
+            name.parse::<usize>().ok().and_then(legacy_index)
+        } else {
+            actions::index_of(name)
+        };
+        if let (Some(at), Some(key)) = (at, normalize(value)) {
+            keys[at] = key;
         }
     }
     if !raw.trim().is_empty() {
-        let saved = saved_version(raw);
-        for (version, id, before) in migrations() {
-            if version > saved && keys.get(id).is_some_and(|key| key == before) {
-                keys[id] = default_at(id).to_owned();
+        for (version, id, before) in MIGRATIONS {
+            if *version > saved
+                && let Some(at) = actions::index_of(id)
+                && keys[at] == *before
+            {
+                keys[at] = default_at(at).to_owned();
             }
         }
     }
-    // ID 18 stays reserved for saved bindings; New Tab is now the + button only.
-    keys[18].clear();
     if keys
         .iter()
         .enumerate()
@@ -874,10 +545,11 @@ pub(crate) fn label(app: &AppWindow, id: usize) -> String {
         .cloned()
         .unwrap_or_default()
 }
-/// メニューから来た操作に、いま割り当てているキー（メニューの行に併記する）。
-pub(crate) fn action_label(app: &AppWindow, action: ShortcutAction) -> String {
-    (NAMES.len()..count())
-        .find(|id| menu_at(*id).is_some_and(|(held, _)| held.action == action))
+/// その操作に、いま割り当てているキー（メニューの行に併記する）。
+pub(crate) fn label_of(app: &AppWindow, command: &Command) -> String {
+    actions::all()
+        .iter()
+        .position(|action| action.command.as_ref() == Some(command))
         .map(|id| label(app, id))
         .unwrap_or_default()
 }
@@ -905,6 +577,7 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
         -1
     }
 }
+
 /// The Keys page's list: a heading row per group, and under an open one its
 /// keys (書き手の求め 2026-09-15).
 ///
@@ -926,14 +599,25 @@ pub fn publish(app: &AppWindow) {
             && (key_query.is_empty() || key == key_query)
     };
     let mut rows = Vec::new();
-    for (category, title) in CATEGORY_NAMES.iter().enumerate() {
-        let category = category as i32;
+    for kind in Category::ALL {
+        let category = kind.index();
+        let only = app.get_shortcut_only();
         let changeable = (0..count())
-            .filter(|i| *i != 18 && category_at(*i) == category)
-            .map(|i| (i as i32, shown(name_at(i)), keys[i].as_str(), false));
+            .filter(|i| category_at(*i) == kind)
+            .filter(|i| only < 0 || *i as i32 == only)
+            .map(|i| {
+                let fixed = actions::all()[i].fixed;
+                (
+                    if fixed { -1 } else { i as i32 },
+                    shown(name_at(i)),
+                    keys[i].as_str(),
+                    fixed,
+                )
+            });
         let fixed = FIXED
             .iter()
-            .filter(|(owner, _, _)| *owner == category)
+            .filter(|_| only < 0)
+            .filter(|(owner, _, _)| *owner == kind)
             .map(|(_, name, key)| (-1, shown(*name), *key, true));
         let items: Vec<ShortcutItem> = changeable
             .chain(fixed)
@@ -956,13 +640,13 @@ pub fn publish(app: &AppWindow) {
         let open = searching || folded & (1 << category) == 0;
         rows.push(ShortcutItem {
             id: -1,
-            name: shown(*title).into(),
+            name: shown(kind.title()).into(),
             key: Default::default(),
             header: true,
             category,
             open,
             fixed: false,
-            note: shown(CATEGORY_NOTES[category as usize]).into(),
+            note: shown(kind.note()).into(),
             count: items.len() as i32,
         });
         if open {
@@ -975,6 +659,9 @@ pub fn publish(app: &AppWindow) {
             .map(Into::into)
             .collect::<Vec<slint::SharedString>>(),
     )));
+    // RFN01-114: ⋮・右クリックの行に併記するキーも読み直させる。
+    let actions = app.global::<crate::MenuActions>();
+    actions.set_keys_generation(actions.get_keys_generation() + 1);
     // キーのプリセット（RFN01-31）がいまの割り当てに合うか。
     crate::settings_transfer::publish(app);
 }
@@ -1115,20 +802,16 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return false;
         };
         let command = resolve(&app.get_shortcut_bindings(), 0, &text, control, alt, shift);
-        let Some((action, _)) = usize::try_from(command).ok().and_then(menu_at) else {
+        let Some(found) = usize::try_from(command).ok().and_then(command_at) else {
             return false;
         };
-        match action.action {
+        match found {
             // RFN01-66 第3弾: キーやメニューと同じ1つの入口。
-            ShortcutAction::SearchInFolder => {
-                crate::open_folder_search(&app, &field_live, false, None)
-            }
-            ShortcutAction::ReplaceInFolder => {
-                crate::open_folder_search(&app, &field_live, true, None)
-            }
-            ShortcutAction::ExplorePane => app.invoke_focus_explore(),
-            ShortcutAction::ToggleLeftPane => app.invoke_toggle_left_pane(),
-            ShortcutAction::ShowLeftTab(tab) => app.invoke_show_left_tab(tab),
+            Command::FolderFind => crate::open_folder_search(&app, &field_live, false, None),
+            Command::FolderReplace => crate::open_folder_search(&app, &field_live, true, None),
+            Command::ExplorePane => app.invoke_focus_explore(),
+            Command::ToggleLeftPane => app.invoke_toggle_left_pane(),
+            Command::ShowLeftTab(tab) => app.invoke_show_left_tab(*tab),
             _ => return false,
         }
         true
@@ -1177,7 +860,8 @@ pub fn wire(app: &AppWindow, live: &Live) {
         // RFN01-67（書き手の求め 2026-10-03）: Git Repository の画面では「戻る」で画面を閉じる。
         // ほかのショートカットは、下に隠れているペインへは届けない。
         if app.get_git_repo_active() {
-            if command == 19 {
+            if usize::try_from(command).ok().and_then(command_at) == Some(&Command::Navigate(false))
+            {
                 let weak = weak.clone();
                 slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                     if let Some(app) = weak.upgrade() {
@@ -1192,8 +876,8 @@ pub fn wire(app: &AppWindow, live: &Live) {
         // RFN01-82: **縦書きのCtrl+↑↓は矢印のまま**——画面の上下へ動かす先が無い。
         if usize::try_from(command)
             .ok()
-            .and_then(menu_at)
-            .is_some_and(|(action, _)| matches!(action.action, ShortcutAction::ScrollLine(_)))
+            .and_then(command_at)
+            .is_some_and(|command| matches!(command, Command::ScrollLine(_)))
             && pane.vertical(&app)
         {
             return false;
@@ -1218,124 +902,127 @@ pub fn wire(app: &AppWindow, live: &Live) {
     });
 }
 /// RFN01-98・102: the commands a shell does not get first — the palette, New
-/// File, Next Tab (11) and Previous Tab (12).
+/// File, Next Tab and Previous Tab.
 fn passes_terminal(command: i32) -> bool {
-    command == 11
-        || command == 12
-        || usize::try_from(command)
-            .ok()
-            .and_then(menu_at)
-            .is_some_and(|(action, _)| {
-                matches!(
-                    action.action,
-                    ShortcutAction::Palette(_) | ShortcutAction::NewFile
-                )
-            })
-}
-
-/// RFN01-87: コマンドパレットに並べる、キーの一覧の操作。
-pub(crate) struct PaletteAction {
-    pub title: String,
-    /// 表示していない側の言葉。
-    pub other: String,
-    pub key: String,
-    pub id: i32,
-}
-
-/// RFN01-87: 本文の場面の操作を、いまの割り当てと一緒に。**パレットを開く操作自身と、
-/// 枠だけの18番は除く。**メニューにもある操作は、パレットの側で名前を見て重ねない。
-pub(crate) fn palette_actions(app: &AppWindow) -> Vec<PaletteAction> {
-    let keys = bindings(&app.get_shortcut_bindings());
-    (0..count())
-        .filter(|id| *id != 18 && scope_at(*id) == 0)
-        .filter(|id| {
-            !menu_at(*id)
-                .is_some_and(|(action, _)| matches!(action.action, ShortcutAction::Palette(_)))
+    usize::try_from(command)
+        .ok()
+        .and_then(command_at)
+        .is_some_and(|command| {
+            matches!(
+                command,
+                Command::Step(_) | Command::CommandPalette(_) | Command::NewFile
+            )
         })
-        .map(|id| {
-            let (ja, en) = name_at(id);
-            let title = shown((ja, en));
-            PaletteAction {
-                title: title.to_owned(),
-                other: if title == ja { en } else { ja }.to_owned(),
-                key: keys[id].clone(),
-                id: id as i32,
-            }
-        })
-        .collect()
 }
 
-/// 割り当ての一覧のidで、その操作を走らせる。キーからも、コマンドパレットからも
-/// （RFN01-87）——**同じ道**なので、パレットで選んだ操作はキーと同じに効く。
+/// 割り当ての一覧のid（アクションの表の位置）で、その操作を走らせる。キーからも、コマンド
+/// パレットからも（RFN01-87）——**同じ道**（`menu_commands::run`）で、前提もそこで確かめる。
 pub(crate) fn run_command(app: &AppWindow, live: &Live, pane: crate::PaneId, command: i32) {
-    // RFN01-66 第3弾: 文書の操作は、メニューと同じ入口（`menu_commands::run`）を通る。そこで前提を
-    // 確かめ、使えない場所なら知らせる。
-    if crate::menu_commands::run_key(app, live, pane, command, &label(app, command as usize)) {
+    let Ok(id) = usize::try_from(command) else {
         return;
-    }
-    // 文書の対象を持たない操作（左ペイン・設定・パレット・下段のTAB）。
-    if let Some(action) = usize::try_from(command).ok().and_then(menu_action_at) {
-        crate::menu_commands::run_shortcut(app, live, action);
-    }
+    };
+    crate::menu_commands::run_key(app, live, pane, id, name(id));
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 表の位置（IDから）。
+    fn at(id: &str) -> usize {
+        actions::index_of(id).unwrap_or_else(|| panic!("{id} is not listed"))
+    }
+    fn hit(id: &str) -> i32 {
+        at(id) as i32
+    }
+
+    /// RFN01-114: **保存はIDで書き、読み戻せる。**並びを変えても割り当ては動かない。
     #[test]
-    fn removed_new_tab_binding_does_not_shift_following_ids() {
-        assert!(bindings("18=Ctrl+Alt+N;19=Ctrl+Alt+B")[18].is_empty());
+    fn bindings_are_saved_by_id() {
+        let mut keys = bindings("");
+        keys[at("file.save")] = "Ctrl+Alt+S".into();
+        let written = encode(&keys);
+        assert!(written.contains("file.save=Ctrl+Alt+S"));
+        assert!(written.ends_with(&format!("v={BINDINGS_VERSION}")));
+        assert_eq!(bindings(&written)[at("file.save")], "Ctrl+Alt+S");
+        // 知らないIDは読み飛ばす（ほかの割り当ては残る）。
+        let with_unknown = format!("gone.action=Ctrl+Alt+G;{written}");
+        assert_eq!(bindings(&with_unknown)[at("file.save")], "Ctrl+Alt+S");
+    }
+
+    /// RFN01-114: **4までの番号の保存も読める**（一度だけIDへ移す）。18番（新しいTAB）は無い。
+    #[test]
+    fn bindings_saved_by_number_move_to_ids() {
+        let keys = bindings("1=Ctrl+Alt+S;18=Ctrl+Alt+N;19=Ctrl+Alt+B;v=4");
+        assert_eq!(keys[at("file.save")], "Ctrl+Alt+S");
+        assert_eq!(keys[at("view.back")], "Ctrl+Alt+B");
         assert_eq!(
-            resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B", 0, "n", true, true, false),
+            resolve("1=Ctrl+Alt+S;18=Ctrl+Alt+N;v=4", 0, "n", true, true, false),
             -1
         );
+        // 挿入の形は形で移す（番号の並びと表の並びは違う）。
+        let table = 46 + 3 + 57;
+        let keys = bindings(&format!("{}=Ctrl+Alt+T;v=4", table - 2));
         assert_eq!(
-            resolve("18=Ctrl+Alt+N;19=Ctrl+Alt+B", 0, "b", true, true, false),
-            19
+            keys[at(&actions::insert_id(InsertShape::Table))],
+            "Ctrl+Alt+T"
         );
     }
+
     #[test]
     fn settings_validate_and_roundtrip() {
         assert_eq!(normalize("ctrl+alt+s").as_deref(), Some("Ctrl+Alt+S"));
         assert!(normalize("S").is_none());
         assert!(normalize("Ctrl+A").is_none());
-        assert_eq!(bindings("1=Ctrl+Alt+S")[1], "Ctrl+Alt+S");
-        assert_eq!(bindings("1=Ctrl+O")[1], "Ctrl+S");
+        let save = at("file.save");
+        assert_eq!(bindings("file.save=Ctrl+Alt+S;v=5")[save], "Ctrl+Alt+S");
+        // ほかの操作の既定とぶつかれば、全部を既定へ戻す。
+        assert_eq!(bindings("file.save=Ctrl+O;v=5")[save], "Ctrl+S");
     }
+
     #[test]
     fn scopes_allow_reuse_but_body_categories_conflict() {
-        let keys = bindings("1=Ctrl+Alt+S;38=Ctrl+Alt+S");
-        assert_eq!(keys[1], "Ctrl+Alt+S");
-        assert_eq!(keys[38], "Ctrl+Alt+S");
+        let raw = "file.save=Ctrl+Alt+S;draft.copy-all=Ctrl+Alt+S;v=5";
+        let keys = bindings(raw);
+        assert_eq!(keys[at("file.save")], "Ctrl+Alt+S");
+        assert_eq!(keys[at("draft.copy-all")], "Ctrl+Alt+S");
+        assert_eq!(resolve(raw, 0, "s", true, true, false), hit("file.save"));
         assert_eq!(
-            resolve("1=Ctrl+Alt+S;38=Ctrl+Alt+S", 0, "s", true, true, false),
-            1
+            resolve(raw, 1, "s", true, true, false),
+            hit("draft.copy-all")
         );
         assert_eq!(
-            resolve("1=Ctrl+Alt+S;38=Ctrl+Alt+S", 1, "s", true, true, false),
-            38
+            conflict(&keys, at("edit.kill-line"), "Ctrl+Alt+S"),
+            Some(at("file.save"))
         );
-        assert_eq!(conflict(&keys, 24, "Ctrl+Alt+S"), Some(1));
-        assert!(conflict(&keys, 10, "").is_none());
+        assert!(conflict(&keys, at("view.quick-draft"), "").is_none());
     }
+
     #[test]
     fn modified_emacs_and_tab_keys_consume_the_old_binding() {
-        assert_eq!(resolve("24=Ctrl+Alt+K", 0, "k", true, false, false), -2);
-        assert_eq!(resolve("24=Ctrl+Alt+K", 0, "k", true, true, false), 24);
-        assert_eq!(resolve("38=Ctrl+Alt+C", 1, "C", true, false, true), -2);
-        assert_eq!(resolve("38=Ctrl+Alt+C", 1, "c", true, true, false), 38);
+        let raw = "edit.kill-line=Ctrl+Alt+K;draft.copy-all=Ctrl+Alt+C;v=5";
+        assert_eq!(resolve(raw, 0, "k", true, false, false), -2);
+        assert_eq!(
+            resolve(raw, 0, "k", true, true, false),
+            hit("edit.kill-line")
+        );
+        assert_eq!(resolve(raw, 1, "C", true, false, true), -2);
+        assert_eq!(
+            resolve(raw, 1, "c", true, true, false),
+            hit("draft.copy-all")
+        );
         let tab: slint::SharedString = slint::platform::Key::Tab.into();
-        assert_eq!(resolve("", 0, &tab, true, false, true), 12);
+        assert_eq!(
+            resolve("", 0, &tab, true, false, true),
+            hit("view.previous-tab")
+        );
         // RFN01-63: F8／Shift+F8は既定で次／前のスペルミス。
         let f8: slint::SharedString = slint::platform::Key::F8.into();
-        let next = resolve("", 0, &f8, false, false, false);
-        let back = resolve("", 0, &f8, false, false, true);
         assert_eq!(
-            menu_at(next as usize).map(|(action, _)| action.action),
-            Some(ShortcutAction::SpellingStep(false))
+            resolve("", 0, &f8, false, false, false),
+            hit("run.next-spelling")
         );
         assert_eq!(
-            menu_at(back as usize).map(|(action, _)| action.action),
-            Some(ShortcutAction::SpellingStep(true))
+            resolve("", 0, &f8, false, false, true),
+            hit("run.previous-spelling")
         );
         assert_eq!(
             chord(" ", true, false, true).as_deref(),
@@ -1345,11 +1032,14 @@ mod tests {
             assert!(normalize(fixed).is_none());
         }
         assert_eq!(resolve("", 1, "k", true, false, false), -1);
+        // キーが固定の行（コピーなど）は、割り当ての引き当てに出てこない。
+        assert_eq!(resolve("", 0, "c", true, false, false), -1);
     }
+
     #[test]
     fn modifiers_do_not_become_letters() {
         use slint::platform::Key;
-        let settings = "42=Ctrl+Alt+R;43=Ctrl+Alt+P";
+        let settings = "layout.toggle-direction=Ctrl+Alt+R;view.toggle-preview=Ctrl+Alt+P;v=5";
         for key in [
             Key::Shift,
             Key::ShiftR,
@@ -1367,84 +1057,99 @@ mod tests {
                 assert!(chord(&text, true, true, false).is_none());
             }
         }
-        assert_eq!(resolve(settings, 0, "r", true, true, false), 42);
-        assert_eq!(resolve(settings, 0, "p", true, true, false), 43);
+        assert_eq!(
+            resolve(settings, 0, "r", true, true, false),
+            hit("layout.toggle-direction")
+        );
+        assert_eq!(
+            resolve(settings, 0, "p", true, true, false),
+            hit("view.toggle-preview")
+        );
         // RFN01-87: Ctrl+Rは縦書き・横書きの既定。書き手が別のキーへ移したあとは、
         // 古い処理へ回さずに飲み込む（`-2`、既定のキーの扱いと同じ）。
         assert_eq!(resolve(settings, 0, "r", true, false, false), -2);
-        assert_eq!(resolve("", 0, "r", true, false, false), 42);
+        assert_eq!(
+            resolve("", 0, "r", true, false, false),
+            hit("layout.toggle-direction")
+        );
     }
 
-    /// RFN01-18: **メニューから来た操作は、既定では何も決まっていない。**
-    /// 例外は新規文書の`Ctrl+N`だけ（書き手の合意 2026-09-21）。
-    #[test]
-    fn menu_actions_start_unassigned_except_new_file() {
-        let keys = bindings("");
-        assert_eq!(keys[NAMES.len()], "Ctrl+N");
-        assert_eq!(keys[NAMES.len() + 1], "");
-        for (id, key) in keys.iter().enumerate().skip(NAMES.len()) {
-            let expected = default_at(id);
-            assert_eq!(key, expected, "{id}");
-        }
-    }
-
+    /// RFN01-114: **表の操作はすべて割り当てられる**（キーが固定の行と、既定の空の行を含め）。
     /// 割り当てれば効き、割り当てていなければ効かない。
     #[test]
-    fn an_assigned_menu_action_runs_and_an_unassigned_one_does_not() {
-        let new_file = NAMES.len() as i32;
-        let insert = new_file + FILE_ACTIONS.len() as i32;
-        let raw = format!("{insert}=Ctrl+Shift+U");
-        assert_eq!(resolve(&raw, 0, "u", true, false, true), insert);
+    fn every_action_can_take_a_key() {
+        for (id, action) in actions::all().iter().enumerate() {
+            if action.fixed {
+                continue;
+            }
+            let scope = scope_at(id);
+            let mut keys = bindings("");
+            for key in keys.iter_mut() {
+                if key == "Ctrl+Alt+Shift+F12" {
+                    key.clear();
+                }
+            }
+            keys[id] = "Ctrl+Alt+Shift+F12".into();
+            let raw = encode(&keys);
+            let f12: slint::SharedString = slint::platform::Key::F12.into();
+            assert_eq!(
+                resolve(&raw, scope, &f12, true, true, true),
+                id as i32,
+                "{}",
+                action.id
+            );
+        }
         assert_eq!(resolve("", 0, "u", true, false, true), -1);
-        // 新規文書の`Ctrl+N`は既定のまま効く。
-        assert_eq!(resolve("", 0, "n", true, false, false), new_file);
+        assert_eq!(resolve("", 0, "n", true, false, false), hit("file.new"));
     }
 
     /// RFN01-82: VS Codeの既定に合わせたキー（書き手と合意 2026-11-03）。
     #[test]
     fn vs_code_keys_are_the_defaults() {
-        let id = |action| id_of(action).expect("the action is listed") as i32;
+        assert_eq!(resolve("", 0, "b", true, false, false), hit("left.toggle"));
         assert_eq!(
-            resolve("", 0, "b", true, false, false),
-            id(ShortcutAction::ToggleLeftPane)
+            resolve("", 0, "V", true, false, true),
+            hit("view.toggle-preview")
         );
-        assert_eq!(resolve("", 0, "V", true, false, true), 43);
         assert_eq!(
             resolve("", 0, "O", true, false, true),
-            id(ShortcutAction::ShowLeftTab(3))
+            hit("view.sidebar.outline")
         );
         assert_eq!(
             resolve("", 0, "G", true, false, true),
-            id(ShortcutAction::ShowLeftTab(8))
+            hit("view.sidebar.git")
         );
         assert_eq!(
             resolve("", 0, ",", true, false, false),
-            id(ShortcutAction::OpenSettings)
+            hit("left.settings")
         );
         assert_eq!(
             resolve("", 0, "\\", true, false, false),
-            id(ShortcutAction::SplitRight)
+            hit("view.split-right")
         );
         assert_eq!(
             resolve("", 0, "l", true, false, false),
-            id(ShortcutAction::SelectLine)
+            hit("text.select-line")
         );
         let up: slint::SharedString = slint::platform::Key::UpArrow.into();
         let down: slint::SharedString = slint::platform::Key::DownArrow.into();
         assert_eq!(
             resolve("", 0, &up, true, false, false),
-            id(ShortcutAction::ScrollLine(false))
+            hit("text.scroll-up")
         );
         assert_eq!(
             resolve("", 0, &down, true, false, false),
-            id(ShortcutAction::ScrollLine(true))
+            hit("text.scroll-down")
         );
         // Ctrl+Shift+Cは場面で分かれる：本文ではTerminal起動、Quick Draftでは全文コピー。
         assert_eq!(
             resolve("", 0, "C", true, false, true),
-            id(ShortcutAction::FolderTerminal)
+            hit("file.terminal-in-folder")
         );
-        assert_eq!(resolve("", 1, "C", true, false, true), 38);
+        assert_eq!(
+            resolve("", 1, "C", true, false, true),
+            hit("draft.copy-all")
+        );
         // Ctrl+Alt+Lはもう何にも当たっていない。
         assert_eq!(resolve("", 0, "l", true, true, false), -1);
     }
@@ -1455,29 +1160,23 @@ mod tests {
     /// 移さない——後で外した枠は外れたまま。
     #[test]
     fn bindings_saved_before_the_change_take_the_new_defaults_once() {
-        let toggle = id_of(ShortcutAction::ToggleLeftPane).unwrap();
-        let folder = id_of(ShortcutAction::FolderTerminal).unwrap();
-        // 書き手のセッションと同じ形：どの枠も書いてあり、ふたつは自分で決めたキー。
-        let mut saved: Vec<String> = (0..count())
-            .map(|i| format!("{i}={}", default_at(i)))
-            .collect();
-        saved[43] = "43=".into();
-        saved[folder] = format!("{folder}=");
-        saved[toggle] = format!("{toggle}=Ctrl+Alt+L");
-        saved[10] = "10=F5".into();
-        let saved = saved.join(";");
-        let keys = bindings(&saved);
-        assert_eq!(keys[43], "Ctrl+Shift+V");
-        assert_eq!(keys[folder], "Ctrl+Shift+C");
-        assert_eq!(keys[toggle], "Ctrl+B");
-        assert_eq!(keys[10], "F5", "the writer's own key stays");
+        // 4までの番号の形：43＝Source・Preview切替、48＝文書のフォルダでTerminal、112＝左ペイン、10＝Quick Draft。
+        let saved = "43=;48=;112=Ctrl+Alt+L;10=F5";
+        let keys = bindings(saved);
+        assert_eq!(keys[at("view.toggle-preview")], "Ctrl+Shift+V");
+        assert_eq!(keys[at("file.terminal-in-folder")], "Ctrl+Shift+C");
+        assert_eq!(keys[at("left.toggle")], "Ctrl+B");
+        assert_eq!(
+            keys[at("view.quick-draft")],
+            "F5",
+            "the writer's own key stays"
+        );
         // 印のある保存では、空は「外した」の意味で、そのまま。
         let mut after = keys.clone();
-        after[43].clear();
+        after[at("view.toggle-preview")].clear();
         let encoded = encode(&after);
-        assert!(encoded.ends_with(&format!("v={BINDINGS_VERSION}")));
-        assert_eq!(bindings(&encoded)[43], "");
-        assert_eq!(bindings(&encoded)[toggle], "Ctrl+B");
+        assert_eq!(bindings(&encoded)[at("view.toggle-preview")], "");
+        assert_eq!(bindings(&encoded)[at("left.toggle")], "Ctrl+B");
     }
 
     /// RFN01-87: Ctrl+Pはファイル名で開く、Ctrl+Shift+Pはコマンドパレット。**前に
@@ -1485,26 +1184,29 @@ mod tests {
     /// 割り当てが全部既定に戻ってしまう。v=2で保存した書き手も同じ。
     #[test]
     fn ctrl_p_goes_to_the_palette_and_print_preview_lets_it_go() {
-        let quick = id_of(ShortcutAction::Palette(false)).unwrap();
-        let commands = id_of(ShortcutAction::Palette(true)).unwrap();
-        assert_eq!(resolve("", 0, "p", true, false, false), quick as i32);
-        assert_eq!(resolve("", 0, "P", true, false, true), commands as i32);
+        assert_eq!(
+            resolve("", 0, "p", true, false, false),
+            hit("view.go-to-file")
+        );
+        assert_eq!(
+            resolve("", 0, "P", true, false, true),
+            hit("view.command-palette")
+        );
         for saved in [
             "0=Ctrl+O;42=;45=Ctrl+P;94=F5",
             "0=Ctrl+O;42=;45=Ctrl+P;94=F5;v=2",
         ] {
             let keys = bindings(saved);
-            assert_eq!(keys[45], "", "{saved}");
+            assert_eq!(keys[at("file.print")], "", "{saved}");
             // 版4：縦書き・横書きの切り替えにCtrl+R。空のまま保存していた書き手にも付く。
-            assert_eq!(keys[42], "Ctrl+R", "{saved}");
-            assert_eq!(keys[quick], "Ctrl+P", "{saved}");
-            assert_eq!(keys[94], "F5", "{saved}");
+            assert_eq!(keys[at("layout.toggle-direction")], "Ctrl+R", "{saved}");
+            assert_eq!(keys[at("view.go-to-file")], "Ctrl+P", "{saved}");
         }
         // 版3のあとで書き手が印刷プレビューに戻したなら、それは書き手の決めたこと。
         let mut keys = bindings("");
-        keys[quick].clear();
-        keys[45] = "Ctrl+P".into();
-        assert_eq!(bindings(&encode(&keys))[45], "Ctrl+P");
+        keys[at("view.go-to-file")].clear();
+        keys[at("file.print")] = "Ctrl+P".into();
+        assert_eq!(bindings(&encode(&keys))[at("file.print")], "Ctrl+P");
     }
 
     /// RFN01-82: 開閉しても、出ていた面はそのまま。
@@ -1534,27 +1236,16 @@ mod tests {
     }
 
     /// 挿入の操作は、`document::INSERT_EDITS`と`LINE_NOTE_EDITS`の**形を1つずつ
-    /// 重複なく指す**。番号ではなく形で持つので、挿入の並びが動いても追随する。
-    ///
-    /// **画面の並びと一覧の並びは同じとは限らない**——idは末尾へ足すので、画像の
-    /// ようにメニューの途中へ入る項目は、一覧では最後に来る（RFN01-48）。
+    /// 重複なく指す**。形の名前からIDを作るので、挿入の並びが動いても割り当ては動かない。
     #[test]
     fn insert_actions_cover_every_shape_once() {
-        let mut used = Vec::new();
-        for action in INSERT_ACTIONS.iter().map(|action| action.action) {
-            match action {
-                ShortcutAction::Insert(shape) => used.push(shape),
-                ShortcutAction::Bullets(_)
-                | ShortcutAction::NumberedList
-                | ShortcutAction::Renumber => {}
-                other => panic!("挿入の操作ではない: {other:?}"),
-            }
-        }
-        // 文言は挿入メニューの表から来る。**どの行も名前を持つ。**
-        for action in INSERT_ACTIONS {
-            let (ja, en) = action.name();
-            assert!(!ja.is_empty() && !en.is_empty(), "{:?}", action.action);
-        }
+        let used: Vec<InsertShape> = actions::all()
+            .iter()
+            .filter_map(|action| match action.command {
+                Some(Command::Insert(shape)) => Some(shape),
+                _ => None,
+            })
+            .collect();
         for what in crate::document::INSERT_EDITS {
             let count = used
                 .iter()
@@ -1581,6 +1272,12 @@ mod tests {
             used.len(),
             crate::document::INSERT_EDITS.len() + crate::document::LINE_NOTE_EDITS.len() + 3
         );
+        // 4までの番号の並びも、挿入の形を1つずつ持っていた。
+        let legacy = LEGACY
+            .iter()
+            .filter(|entry| matches!(entry, Legacy::Shape(_)))
+            .count();
+        assert_eq!(legacy, used.len());
     }
 
     /// 指定できるキーは**修飾キー付きかF1〜F12**。素の打鍵と、窓・アプリが先に
@@ -1630,13 +1327,18 @@ mod tests {
         assert!(chord("a", false, false, false).is_none());
     }
 
-    /// 設定のTABでは、**新しいTABを作るものだけ**通す。
+    /// 設定のTABでは、**新しいTABを作るもの・移るもの**を通し、本文に効くものは通さない。
     #[test]
     fn only_new_panes_pass_the_settings_tab() {
-        assert!(passes_settings(0), "ファイルを開く");
-        assert!(passes_settings(NAMES.len() as i32), "新規文書");
-        assert!(passes_settings(NAMES.len() as i32 + 1), "新しいTerminal");
-        let insert = (NAMES.len() + FILE_ACTIONS.len()) as i32;
+        assert!(passes_settings(hit("file.open")), "ファイルを開く");
+        assert!(passes_settings(hit("file.new")), "新規文書");
+        assert!(passes_settings(hit("file.new-terminal")), "新しいTerminal");
+        assert!(passes_settings(hit("edit.find")), "設定を探す");
+        assert!(
+            !passes_settings(hit("file.save")),
+            "代役の空文書を保存してしまう"
+        );
+        let insert = hit(&actions::insert_id(InsertShape::Table));
         assert!(!passes_settings(insert), "挿入は代役の空文書へ入ってしまう");
     }
 }

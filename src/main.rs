@@ -9,6 +9,7 @@ mod editor_interaction;
 mod editor_render;
 mod input_platform;
 use input_platform::{double_click_time, shift_really_held};
+mod actions;
 mod appearance;
 mod bookmark_ui;
 #[cfg(test)]
@@ -13509,6 +13510,14 @@ pub(crate) fn open_settings_searching(
     window.set_find_focus(true);
     window.set_find_open(true);
     window.set_find_generation(window.get_find_generation() + 1);
+}
+
+/// RFN01-114: パレットの鍵の印から。設定のKeysを、**その操作の行だけ**に絞って開く。
+/// 絞りは検索の語（その操作の名前）を書き換えるまで続く。
+pub(crate) fn open_keys_for(window: &AppWindow, live: &Live, id: usize) {
+    window.set_shortcut_only(id as i32);
+    open_settings_searching(window, live, shortcuts::name(id), true);
+    shortcuts::publish(window);
 }
 
 /// RFN01-66: 設定のTABをこの面で開く（ヘルプの「キーの一覧」は6＝Keys）。
