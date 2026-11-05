@@ -553,6 +553,10 @@ fn count() -> usize {
         + STRIP_ACTIONS.len()
 }
 /// idがメニューから来たものなら、その1つと分類の番号。
+pub(crate) fn menu_action_at(id: usize) -> Option<ShortcutAction> {
+    menu_at(id).map(|(action, _)| action.action)
+}
+
 fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
     let index = id.checked_sub(NAMES.len())?;
     FILE_ACTIONS
@@ -1258,6 +1262,16 @@ pub(crate) fn palette_actions(app: &AppWindow) -> Vec<PaletteAction> {
 /// 割り当ての一覧のidで、その操作を走らせる。キーからも、コマンドパレットからも
 /// （RFN01-87）——**同じ道**なので、パレットで選んだ操作はキーと同じに効く。
 pub(crate) fn run_command(app: &AppWindow, live: &Live, pane: crate::PaneId, command: i32) {
+    // RFN01-66 第2弾: メニューで押せない場面では動かさず、知らせる（前提はメニューと同じ答え）。
+    if (0..=45).contains(&command) {
+        match crate::menu_commands::key_allowed(app, live, pane, command) {
+            crate::menu_commands::Allowed::Yes => {}
+            crate::menu_commands::Allowed::Tell => {
+                return crate::menu_commands::tell_unavailable(app, &label(app, command as usize));
+            }
+            crate::menu_commands::Allowed::Quiet => return,
+        }
+    }
     match command {
         0 => app.invoke_open_file_requested(),
         1 => app.invoke_save_requested(),

@@ -221,6 +221,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&memo),
@@ -820,6 +821,12 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let saves = Rc::new(Cell::new(0));
     let received = saves.clone();
     window.on_save_requested(move || received.set(received.get() + 1));
+    // RFN01-66 第2弾: 保存できるのは本文を出しているとき（メニューと同じ前提）。消したあとの
+    // 中身の無いTABでは動かず知らせるので、文書を開いてから確かめる。
+    assert!(window.invoke_shortcut_key("s".into(), true, true, false));
+    slint::platform::update_timers_and_animations();
+    assert_eq!(saves.get(), 0, "nothing to save in an empty tab");
+    crate::new_file_tab(&window, &live, crate::focused_pane(&window));
     assert!(window.invoke_shortcut_key("s".into(), true, false, false));
     slint::platform::update_timers_and_animations();
     assert_eq!(saves.get(), 0, "old binding is disabled");
@@ -1022,6 +1029,7 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&memo),

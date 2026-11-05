@@ -62,6 +62,7 @@ fn a_new_vertical_tab_opens_at_the_start() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&short),

@@ -997,11 +997,7 @@ const GROUP_TITLES: [Title; MENU_GROUPS as usize] = [
     ("ヘルプ", "Help"),
 ];
 
-pub(crate) fn menu_snapshot(
-    window: &AppWindow,
-    live: &Live,
-    kills: &Rc<RefCell<Kills>>,
-) -> MenuSnapshot {
+pub(crate) fn menu_snapshot(window: &AppWindow, live: &Live) -> MenuSnapshot {
     let target = Target::for_shortcut(window, live);
     let mut commands = Vec::new();
     let mut entries = Vec::new();
@@ -1054,7 +1050,7 @@ pub(crate) fn menu_snapshot(
         }
     }
     for group in 0..MENU_GROUPS {
-        let Some(items) = build(window, live, kills, &target, group) else {
+        let Some(items) = build(window, live, &target, group) else {
             continue;
         };
         let (ja, en) = GROUP_TITLES[group as usize];
@@ -1116,9 +1112,9 @@ fn step_openable(from: i32, delta: i32, openable: &[bool; MENU_GROUPS as usize])
 }
 
 /// 押せる末端の行が1つでもあるか（RFN01-38）。
-pub fn menu_opens(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>, group: i32) -> bool {
+pub fn menu_opens(window: &AppWindow, live: &Live, group: i32) -> bool {
     let target = Target::capture(window, live);
-    build(window, live, kills, &target, group).is_some_and(|items| Item::any_enabled(&items))
+    build(window, live, &target, group).is_some_and(|items| Item::any_enabled(&items))
 }
 
 /// タイトルバーで、段落注記の中をもう1段分ける組（A案の並び）。右クリックの
@@ -1207,7 +1203,9 @@ impl Target {
         Self::with_field(window, live, 0)
     }
     fn with_field(window: &AppWindow, live: &Live, field: i32) -> Self {
-        let id = focused_pane(window);
+        Self::of(window, live, focused_pane(window), field)
+    }
+    fn of(window: &AppWindow, live: &Live, id: PaneId, field: i32) -> Self {
         let parent = if id.is_panel() {
             PaneId::from_index(id.screen(window).panel_owner)
         } else {
@@ -1264,7 +1262,7 @@ impl Target {
     }
 }
 
-pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
+pub fn install(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
     window.global::<MenuInput>().on_open_menu(move || {
         if let Some(window) = weak.upgrade() {
@@ -1300,7 +1298,6 @@ pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
     });
     let weak = window.as_weak();
     let live = live.clone();
-    let kills = kills.clone();
     window.on_title_menu_requested(move |group| {
         let Some(window) = weak.upgrade() else {
             return;
@@ -1314,25 +1311,19 @@ pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
         // **押せる行が1つも無い分類は開かない**（書き手の決定 2026-09-21）。
         // タイトルバーも同じ判定で灰色にしているが、**開くのはここ**なので、
         // ここでも断る——見た目と実際が食い違わないように、同じ答えを使う。
-        if !menu_opens(&window, &live, &kills, group) {
+        if !menu_opens(&window, &live, group) {
             return;
         }
         let target = Rc::new(Target::capture(&window, &live));
-        queue_group(&window, live.clone(), kills.clone(), target, group);
+        queue_group(&window, live.clone(), target, group);
     });
 }
 
-fn queue_group(
-    window: &AppWindow,
-    live: Live,
-    kills: Rc<RefCell<Kills>>,
-    target: Rc<Target>,
-    group: i32,
-) {
+fn queue_group(window: &AppWindow, live: Live, target: Rc<Target>, group: i32) {
     // **押せる行が1つも無い分類は開かない**（書き手の決定 2026-09-21）。開く道は
     // ここ1つに集まっているので、断るのもここに置く——見た目（灰色）と実際が
     // 食い違わないように、同じ問いを、答えを使う場所で聞く。
-    if !menu_opens(window, &live, &kills, group) {
+    if !menu_opens(window, &live, group) {
         return;
     }
     window.set_title_menu_open(true);
@@ -1363,8 +1354,8 @@ fn queue_group(
             );
             return;
         }
-        match show(&window, &live, &kills, &target, group) {
-            Ok(Some(next)) => queue_group(&window, live, kills, target, next),
+        match show(&window, &live, &target, group) {
+            Ok(Some(next)) => queue_group(&window, live, target, next),
             result => {
                 window.set_title_menu_open(false);
                 if let Err(error) = result {
@@ -1446,7 +1437,6 @@ impl Item {
 pub(crate) struct Scene<'a> {
     window: &'a AppWindow,
     live: &'a Live,
-    kills: &'a Rc<RefCell<Kills>>,
     t: &'a Target,
     screen: PaneScreen,
     /// 対象がTerminal（上段のTerminalか、下段のTerminal Panel）。
@@ -1467,19 +1457,13 @@ pub(crate) struct Scene<'a> {
     inserts: OnceCell<(document::LineNoteState, Places)>,
 }
 impl<'a> Scene<'a> {
-    pub(crate) fn read(
-        window: &'a AppWindow,
-        live: &'a Live,
-        kills: &'a Rc<RefCell<Kills>>,
-        t: &'a Target,
-    ) -> Self {
+    pub(crate) fn read(window: &'a AppWindow, live: &'a Live, t: &'a Target) -> Self {
         let screen = t.id.screen(window);
         let (text, editable) = text_state(window, live, t);
         let terminal = screen.terminal || matches!(t.spot, TerminalSpot::Below);
         Self {
             window,
             live,
-            kills,
             t,
             terminal,
             text,
@@ -1623,10 +1607,11 @@ impl<'a> Scene<'a> {
             Command::Kill(i) => match i {
                 1 => text && self.selected() && !field,
                 2 => editable && self.selected(),
-                3 => editable && !self.kills.borrow().ring.is_empty(),
+                3 => editable && !self.live.kills.borrow().ring.is_empty(),
                 4 => {
                     editable
-                        && standing_yank(t.id, &self.live.states, &t.document, self.kills).is_some()
+                        && standing_yank(t.id, &self.live.states, &t.document, &self.live.kills)
+                            .is_some()
                 }
                 _ => editable,
             },
@@ -1730,14 +1715,8 @@ impl<'a> Scene<'a> {
 /// **出す前に、押せる行があるかを見るのにも使う**——子が全部無効なら親も無効に
 /// するためである（書き手の決定 2026-09-21）。RFN01-66 第2弾: 押せるかは行ごとに
 /// [`Scene::enabled`]が答える（ここには書かない）。
-fn build(
-    window: &AppWindow,
-    live: &Live,
-    kills: &Rc<RefCell<Kills>>,
-    t: &Target,
-    group: i32,
-) -> Option<Vec<Item>> {
-    let scene = Scene::read(window, live, kills, t);
+fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<Item>> {
+    let scene = Scene::read(window, live, t);
     let mut root: Vec<Item> = Vec::new();
     let terminal = scene.terminal;
     let zoom_now = t.parent.zoom(window);
@@ -2237,11 +2216,10 @@ fn native(
 fn show(
     window: &AppWindow,
     live: &Live,
-    kills: &Rc<RefCell<Kills>>,
     t: &Target,
     group: i32,
 ) -> windows::core::Result<Option<i32>> {
-    let Some(items) = build(window, live, kills, t, group) else {
+    let Some(items) = build(window, live, t, group) else {
         return Ok(None);
     };
     let (root, commands) = native(window, items, t.field > 0)?;
@@ -2265,7 +2243,7 @@ fn show(
     }
     // **開ける分類を、メニューの輪へも渡す**（RFN01-38）——開いている間の横移動は
     // Slintを通らないので、ここで渡さないと灰色の分類へも動いてしまう。
-    let openable = std::array::from_fn(|group| menu_opens(window, live, kills, group as i32));
+    let openable = std::array::from_fn(|group| menu_opens(window, live, group as i32));
     let navigation = Navigation::begin(hwnd, root.handle, group, scale, openable)?;
     let navigation_guard = NavigationGuard;
     let picked = unsafe {
@@ -2468,6 +2446,100 @@ unsafe extern "system" fn menu_filter(
 /// **対象は、いまフォーカスしているPane・TAB**——メニューは開いた時点で対象を
 /// 捕まえるが、キーには捕まえる瞬間が無い。押せない条件（選んだ字が要る形など）は
 /// それぞれの実行先が同じ判定を持っているので、ここでは断らない。
+/// RFN01-66 第2弾: 割り当ての一覧のid（0〜45、メニューに無いキーの操作）が、`pane`を対象に
+/// いま実行できるか。**メニューと同じ答え**（[`Scene::enabled`]）を読む。
+pub(crate) fn key_allowed(window: &AppWindow, live: &Live, pane: PaneId, id: i32) -> Allowed {
+    let target = Target::of(window, live, pane, 0);
+    let scene = Scene::read(window, live, &target);
+    let command = match id {
+        0 => Command::Open,
+        1 => Command::Save(false),
+        2 => Command::Save(true),
+        3 => Command::Close,
+        4 => Command::Find(false),
+        5 => Command::Find(true),
+        6 => Command::Goto,
+        7 => Command::Reopen,
+        8 => Command::Undo(false),
+        9 => Command::Undo(true),
+        10 => Command::Draft,
+        11 => Command::Step(false),
+        12 => Command::Step(true),
+        13..=16 => Command::Focus(id - 13),
+        17 => Command::Below,
+        19 => Command::Navigate(false),
+        20 => Command::Navigate(true),
+        // Emacs風の削除・移動・選択（メニューに無い）：消すのは書き換えられるとき、
+        // 動く・選ぶのは本文を出しているとき。
+        21 => return Allowed::from(scene.editable, false),
+        22 | 23 | 31 | 32 => return Allowed::from(scene.text, false),
+        24 => Command::Kill(0),
+        25 => Command::Mark(false),
+        26 => Command::Mark(true),
+        27..=30 => Command::Kill(id - 26),
+        33 => Command::Line(4),
+        34..=37 => Command::Line(id - 34),
+        42 => Command::Direction(!pane.vertical(window)),
+        43 => Command::Preview,
+        44 => Command::Viewer,
+        45 => Command::Print,
+        _ => match crate::shortcuts::menu_action_at(id as usize)
+            .and_then(|action| shortcut_command(window, action))
+        {
+            Some(command) => command,
+            None => return Allowed::Yes,
+        },
+    };
+    Allowed::from(scene.enabled(&command), quiet(&command))
+}
+
+/// キーで押した操作を実行できるか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Allowed {
+    Yes,
+    /// この場面では使えない。知らせる（Terminalで保存を押した、など）。
+    Tell,
+    /// いまの状態では何も起きない。知らせない（戻す履歴が無い、隣のPaneが無い、など）。
+    Quiet,
+}
+impl Allowed {
+    fn from(enabled: bool, quiet: bool) -> Self {
+        match (enabled, quiet) {
+            (true, _) => Allowed::Yes,
+            (false, true) => Allowed::Quiet,
+            (false, false) => Allowed::Tell,
+        }
+    }
+}
+
+/// RFN01-66 第2弾: 押せない理由が**場所ではなく、その時の状態**の操作。キーを押すたびに
+/// 知らせると煩いので、黙って何もしない（以前と同じ）。
+fn quiet(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Undo(_)
+            | Command::Step(_)
+            | Command::Focus(_)
+            | Command::Swap(_)
+            | Command::Navigate(_)
+            | Command::Zoom(_)
+            | Command::Kill(3 | 4)
+            | Command::SpellingStep(_)
+    )
+}
+
+/// RFN01-66 第2弾: キーで押した操作が、いまの場面では使えないことを知らせる
+/// （以前は何も起きず、知らせも無かった）。
+pub(crate) fn tell_unavailable(window: &AppWindow, name: &str) {
+    window.tell(
+        format!(
+            "{}: {name}",
+            pick("この場面では使えません", "Not available here")
+        )
+        .into(),
+    );
+}
+
 pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
     // RFN01-75/76: **the left pane's, not a document's** — no Pane or TAB is
     // acted on, so none has to be valid.
@@ -2494,7 +2566,23 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         }
         return;
     }
-    let command = match action {
+    let Some(command) = shortcut_command(window, action) else {
+        return;
+    };
+    // RFN01-66 第2弾: **メニューで押せない場面では動かさず、知らせる。**
+    if !Scene::read(window, live, &target).enabled(&command) {
+        if !quiet(&command) {
+            tell_unavailable(window, &crate::shortcuts::action_label(window, action));
+        }
+        return;
+    }
+    execute(window, live, &target, command);
+}
+
+/// 割り当てたキーの操作（メニューの操作）を、メニューと同じ[`Command`]へ落とす。
+/// 左ペイン・設定・パレット・下段のTABのように、文書の対象を持たない操作は`None`。
+fn shortcut_command(window: &AppWindow, action: ShortcutAction) -> Option<Command> {
+    Some(match action {
         ShortcutAction::NewFile => Command::NewFile,
         // **既定のシェルで開く。**シェルの一覧は設定で変わるので、キーには
         // 特定のシェルを結び付けない（書き手の合意 2026-09-21）。
@@ -2517,9 +2605,8 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         | ShortcutAction::ShowLeftTab(_)
         | ShortcutAction::OpenSettings
         | ShortcutAction::Palette(_)
-        | ShortcutAction::CloseStripTab => return,
-    };
-    execute(window, live, &target, command);
+        | ShortcutAction::CloseStripTab => return None,
+    })
 }
 
 fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
@@ -3243,11 +3330,56 @@ mod tests {
     #[test]
     fn a_category_with_nothing_to_pick_does_not_open() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
-        let kills = Rc::new(RefCell::new(Kills::default()));
 
-        assert!(menu_opens(&h.window, &h.live, &kills, 2), "挿入は開く");
+        assert!(menu_opens(&h.window, &h.live, 2), "挿入は開く");
         // RFN01-66（2026-11-05）: ヘルプに行ができた（以前は未実装の行だけで開かなかった）。
-        assert!(menu_opens(&h.window, &h.live, &kills, 6), "Helpは開く");
+        assert!(menu_opens(&h.window, &h.live, 6), "Helpは開く");
+    }
+
+    /// RFN01-66 第2弾: キーは**メニューと同じ前提**を読む。使えない場所では動かさずに知らせ、
+    /// その時の状態で何も起きないだけの操作（戻す履歴が無い等）は黙る。パレットも同じ答え。
+    #[test]
+    fn keys_and_the_palette_read_the_menus_premises() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        let pane = PaneId::FIRST;
+        assert_eq!(key_allowed(window, live, pane, 1), Allowed::Yes, "保存");
+        assert_eq!(
+            key_allowed(window, live, pane, 8),
+            Allowed::Quiet,
+            "戻す履歴が無い"
+        );
+        // メニューの行とキーが同じ答え。
+        let snapshot = menu_snapshot(window, live);
+        let save = snapshot
+            .entries
+            .iter()
+            .position(|entry| entry.title.ends_with("› 保存") || entry.title.ends_with("› Save"))
+            .unwrap();
+        assert!(snapshot.entries[save].enabled);
+
+        crate::open_settings_page(window, live, 0);
+        let saves = Rc::new(Cell::new(0));
+        let seen = saves.clone();
+        window.on_save_requested(move || seen.set(seen.get() + 1));
+        assert_eq!(
+            key_allowed(window, live, pane, 1),
+            Allowed::Tell,
+            "設定のTABは保存できない"
+        );
+        crate::shortcuts::run_command(window, live, pane, 1);
+        assert_eq!(saves.get(), 0);
+        assert!(
+            window.get_render_status().contains("使えません"),
+            "知らせる"
+        );
+        let snapshot = menu_snapshot(window, live);
+        let save = snapshot
+            .entries
+            .iter()
+            .position(|entry| entry.title.ends_with("› 保存") || entry.title.ends_with("› Save"))
+            .unwrap();
+        assert!(!snapshot.entries[save].enabled, "メニューでも灰色");
     }
 
     /// 書式のボタン（2026-09-23）：**挿入メニューの1段目の全部に絵があり**、束は

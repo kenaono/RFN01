@@ -474,6 +474,7 @@ fn dragging_the_corner_of_a_picture_writes_its_width() {
     let document = OpenDocument::new(file, text, window.as_weak());
     let live = Live {
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&document),
