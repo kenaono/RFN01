@@ -37,10 +37,13 @@ mod diag;
 mod diff_view;
 mod directwrite_probe;
 mod directwrite_render;
+mod disk_entry;
 mod document;
 mod document_ui;
 mod file_dialog;
 mod file_io;
+#[cfg(test)]
+mod file_move_ui_tests;
 mod file_tree;
 mod find;
 mod folder_replace;
@@ -5263,9 +5266,8 @@ struct Live {
     /// still to come and is dropped.
     settled: Rc<ime::Settled>,
     states: PaneStates,
-    /// The work folder and which of its folders are open (要件 5.1, 5.2).
-    /// **One folder per window** — 要件 5.1 says so, and the tree is what the
-    /// writer reaches their documents through.
+    /// Explorer and Workspace tree state, including expanded folders and
+    /// the scope of the current folder search.
     folder: Rc<RefCell<WorkFolder>>,
     /// What each row of the published tree stands for. The window draws names
     /// and depths; a click has to name a path, and a path is not something the
@@ -12250,16 +12252,27 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
     // **A name already taken is a question, not a refusal** (要件 5.2). The
     // writer aimed at a folder, not at the thing that happens to be in it, so
     // the answer they have not given yet is whether that thing may go.
-    if to.exists() {
+    if !matches!(std::fs::symlink_metadata(&to), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        let version = match disk_entry::Version::read(&to) {
+            Ok(version) => version,
+            Err(error) => {
+                cannot_move(window, &error);
+                return;
+            }
+        };
+        if !can_replace_move_target(window, &move_destination_documents(live, &to)) {
+            return;
+        }
         let going = entry_name(&to);
         // RFN01-64: **where there is no bin, the question says so** rather
         // than promising a bin Windows will then say it cannot use.
         let told = if shell::has_recycle_bin(&to) {
             say!(
                 "「{going}」はすでにあります。\n\n\
-                 いまある「{going}」はごみ箱へ移ります。Windowsのごみ箱から戻せます。",
+                 いまある「{going}」はごみ箱へ移ります。ごみ箱に記録される元の場所は、移動先の隣の退避フォルダです。",
                 "\"{going}\" already exists.\n\n\
-                 The existing \"{going}\" goes to the Recycle Bin, where you can restore it."
+                 The existing \"{going}\" goes to the Recycle Bin, with a holding folder beside the destination recorded as its original location."
             )
         } else {
             say!(
@@ -12272,7 +12285,7 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
         ask_question(
             window,
             live,
-            Question::ReplaceOnMove(source, to),
+            Question::ReplaceOnMove(source, to, version),
             told,
             &[pick("上書きする", "Replace"), cancel()],
             0,
@@ -12282,32 +12295,38 @@ fn drop_tree_row(window: &AppWindow, live: &Live, from: usize, onto: i32) {
     finish_move(window, live, &source, &to);
 }
 
-/// Put what is already there in the recycle bin, then move (要件 5.2).
-///
-/// **Overwriting is deleting**, and 要件 5.2 says what deleting means here: the
-/// bin, never the void. The move follows only if the bin took it, so a refusal
-/// leaves both the writer's file and the one that was there.
-///
-/// Across drives the bin comes after the copy instead (RFN01-64, see
-/// `file_tree::carry`): what was there goes only once what replaces it is
-/// whole.
-fn replace_on_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
+/// Refuse to replace any open document with edits at the destination.
+fn can_replace_move_target(window: &AppWindow, documents: &[(Rc<OpenDocument>, PathBuf)]) -> bool {
+    if documents.iter().any(|(document, _)| document.text.edited()) {
+        window.tell(pick(
+            "移動先に未保存のTABがあります。保存するか、編集を破棄してから移動し直してください",
+            "There are unsaved tabs at the destination. Save or discard their edits, then try the move again",
+        ).into());
+        return false;
+    }
+    true
+}
+
+fn replace_on_move(
+    window: &AppWindow,
+    live: &Live,
+    from: &Path,
+    to: &Path,
+    version: disk_entry::Version,
+) {
+    let destination = move_destination_documents(live, to);
+    if !can_replace_move_target(window, &destination) {
+        return;
+    }
     let owner = ime::window_handle(window);
-    let mut clear = |path: &Path| shell::recycle(owner, path);
-    match carry_entry(window, live, from, to, Some(&mut clear)) {
-        Err(file_tree::Stopped::Kept) => {
-            let told = if shell::has_recycle_bin(to) {
-                pick(
-                    "ごみ箱へ移動できませんでした",
-                    "Could not move it to the Recycle Bin",
-                )
-            } else {
-                pick("削除できませんでした", "Could not delete it")
-            };
-            window.tell(told.into());
-        }
-        Err(file_tree::Stopped::Failed(error)) => cannot_move(window, &error),
+    let mut recycle = |path: &Path| shell::recycle(owner, path);
+    let overwrite = file_tree::Overwrite {
+        version,
+        recycle: &mut recycle,
+    };
+    match carry_entry(window, live, from, to, Some(overwrite), destination) {
         Ok(()) => after_move(window, live, from, to),
+        Err(error) => cannot_move(window, &error),
     }
 }
 
@@ -12347,45 +12366,55 @@ fn after_move(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 /// not the name. Drawing the tree again is left to the caller, because the one
 /// that carried something into a folder has that folder to open first.
 fn move_entry(window: &AppWindow, live: &Live, from: &Path, to: &Path) -> std::io::Result<()> {
-    match carry_entry(window, live, from, to, None) {
-        Err(file_tree::Stopped::Failed(error)) => Err(error),
-        // Nothing was asked to be cleared, so nothing could refuse.
-        Err(file_tree::Stopped::Kept) | Ok(()) => Ok(()),
-    }
+    carry_entry(window, live, from, to, None, Vec::new())
 }
 
-/// [`move_entry`], with what is at `to` taken away first by `clear`.
-///
-/// **Across drives it is a copy** (RFN01-64): `fs::rename` cannot leave the
-/// volume it is on, and a network folder or another drive in the Workspace is
-/// another volume. A copy that is all there with its source still standing is
-/// a move that happened, and is followed as one — the writer is only told the
-/// original is still there.
 fn carry_entry(
     window: &AppWindow,
     live: &Live,
     from: &Path,
     to: &Path,
-    clear: Option<&mut dyn FnMut(&Path) -> bool>,
-) -> Result<(), file_tree::Stopped> {
+    overwrite: Option<file_tree::Overwrite<'_>>,
+    destination: Vec<(Rc<OpenDocument>, PathBuf)>,
+) -> std::io::Result<()> {
     if live.folder.borrow().link_move_job.is_some() {
-        return Err(file_tree::Stopped::Failed(std::io::Error::other(pick(
+        return Err(std::io::Error::other(pick(
             "リンク更新中です。完了後に移動してください",
             "Link update in progress. Try moving again after it finishes.",
-        ))));
+        )));
     }
-    let before = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
+    let before = from.canonicalize()?;
+    let moves: Vec<_> = open_documents(live)
+        .into_iter()
+        .filter_map(|document| {
+            let file = document.file.borrow();
+            let path = file.path()?;
+            let moved = move_document_path(from, to, path)
+                .or_else(|| move_document_path(&before, to, &path.canonicalize().ok()?))?;
+            drop(file);
+            Some((document, moved))
+        })
+        .collect();
     let into = to.parent().unwrap_or(to);
     let across = !shell::same_volume(from, into);
-    if file_tree::carry(from, to, across, clear)? {
+    let carried = file_tree::carry(from, to, across, overwrite)?;
+    documents_follow(window, live, moves, destination);
+    if carried.source_remains {
         let told = say!(
             "「{}」を移動先へコピーしましたが、元の場所から消せませんでした",
-            "Copied \"{}\" to where it was going, but could not remove the original",
+            r#"Copied "{}" to where it was going, but could not remove the original"#,
             entry_name(to)
         );
         window.tell(told.into());
     }
-    documents_follow(window, live, from, to);
+    if let Some(retained) = carried.retained {
+        let path = retained.display();
+        let told = say!(
+            "移動しました。以前の移動先は退避したままです: {path}",
+            "Moved. The previous destination is kept at {path}"
+        );
+        window.tell(told.into());
+    }
     // RFN01-61: Editorの中での名前変更・移動には、バックアップも付いていく。
     saving::backups_follow(window, live, from, to);
     let after = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
@@ -12403,37 +12432,66 @@ fn carry_entry(
     Ok(())
 }
 
-/// Point every open document at where its file has just gone (要件 5.2).
-///
-/// **A rename is not a way to make somebody re-open their work.** The document
-/// is the same one — same text, same history, same tab — and only the name it
-/// is filed under has changed.
-fn documents_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
-    for document in open_documents(live) {
-        let moved = {
+/// Match Windows aliases without changing the spelling of the relative suffix.
+fn move_document_path(from: &Path, to: &Path, path: &Path) -> Option<PathBuf> {
+    let key = file_tree::path_key(from);
+    let ancestor = path.ancestors().find(|p| file_tree::path_key(p) == key)?;
+    let relative = path.strip_prefix(ancestor).ok()?;
+    Some(if relative.as_os_str().is_empty() {
+        to.to_path_buf()
+    } else {
+        to.join(relative)
+    })
+}
+
+fn move_destination_documents(live: &Live, to: &Path) -> Vec<(Rc<OpenDocument>, PathBuf)> {
+    let canonical = to.canonicalize().ok();
+    open_documents(live)
+        .into_iter()
+        .filter_map(|document| {
             let file = document.file.borrow();
-            let path = file.path();
-            path.and_then(|path| {
-                file_tree::moved_path(from, to, path).or_else(|| {
-                    let from = PathBuf::from(link_completion::path_to_string(from));
-                    let path = PathBuf::from(link_completion::path_to_string(path));
-                    file_tree::moved_path(&from, to, &path)
-                })
-            })
-        };
-        let Some(moved) = moved else {
-            continue;
-        };
-        let was = work_identity(&document.file.borrow());
+            let path = file.path()?;
+            let destination = move_document_path(to, to, path).or_else(|| {
+                move_document_path(canonical.as_deref()?, to, &path.canonicalize().ok()?)
+            })?;
+            drop(file);
+            Some((document, destination))
+        })
+        .collect()
+}
+
+/// Move the existing source document, including its edits and Undo history.
+/// If both sides had tabs, the destination views now share the source document.
+fn documents_follow(
+    window: &AppWindow,
+    live: &Live,
+    moves: Vec<(Rc<OpenDocument>, PathBuf)>,
+    mut destination: Vec<(Rc<OpenDocument>, PathBuf)>,
+) {
+    for (document, moved) in moves {
+        let previous = work_identity(&document.file.borrow());
+        let key = file_tree::path_key(&moved);
         document.file.borrow_mut().follow_rename(moved);
-        // **Written under the new name before the copy under the old one is
-        // dropped.** The other order has a moment with no copy at all, and
-        // 要件 8.1 is about the work surviving exactly such moments.
-        document.text.mark_pending();
-        write_work_copy_of(window, live, &document);
-        discard_work_copy(live, &was);
+        if let Some(index) = destination
+            .iter()
+            .position(|(_, path)| file_tree::path_key(path) == key)
+        {
+            let (old, _) = destination.swap_remove(index);
+            if !Rc::ptr_eq(&old, &document) {
+                merge_documents(window, live, &old, &document);
+            }
+        }
+        saving::work_copy_follows(window, live, &document, previous);
     }
-    // A tab is titled after its file, and the file has just been renamed.
+    for (document, path) in destination {
+        document.outside.set(true);
+        if path.is_file() {
+            saving::reload_document(window, live, &document);
+        } else {
+            // As with an external removal, keep the text in the tab.
+            document.missing.set(true);
+        }
+    }
     window.invoke_republish_tabs();
 }
 
@@ -13863,7 +13921,7 @@ enum Question {
     /// Something carried onto a name that is already taken (要件 5.2): what is
     /// being moved, and where it would land. **The order is the same as
     /// `move_entry`'s**, from and to.
-    ReplaceOnMove(PathBuf, PathBuf),
+    ReplaceOnMove(PathBuf, PathBuf, disk_entry::Version),
     /// 窓を閉じようとしているが、自動退避が切ってあって未保存の文書がある
     /// （2026-09-08、要件 8.1・8.4）。**退避が働いていれば訊かない**——
     /// そちらは閉じても失われないので、問いは書き手の邪魔でしかない。
@@ -14522,7 +14580,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             }
             delete_entry(window, live, &path);
         }
-        (Question::ReplaceOnMove(from, to), 0) => replace_on_move(window, live, &from, &to),
+        (Question::ReplaceOnMove(from, to, version), 0) => {
+            replace_on_move(window, live, &from, &to, version);
+        }
         // キャンセル, and every other way out of a question about closing. The
         // run stops here rather than going on to ask about the next tab.
         (

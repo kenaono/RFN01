@@ -411,6 +411,29 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
+        self.keep_bytes(original, &bytes, keep, taken, false)
+    }
+
+    /// Folder replacement needs a backup of the exact bytes it is changing.
+    pub(crate) fn take_exact(
+        &self,
+        original: &Path,
+        bytes: &[u8],
+        keep: usize,
+        taken: LocalTime,
+    ) -> io::Result<()> {
+        self.keep_bytes(original, bytes, keep, taken, true)
+            .map(|_| ())
+    }
+
+    fn keep_bytes(
+        &self,
+        original: &Path,
+        bytes: &[u8],
+        keep: usize,
+        taken: LocalTime,
+        require_exact: bool,
+    ) -> io::Result<Option<PathBuf>> {
         let folder = folder_of(&self.root, original).ok_or_else(|| unsupported(original))?;
         let name = name_for(&self.format, original, taken).ok_or_else(|| unsupported(original))?;
         let existing = self.list(original);
@@ -418,12 +441,18 @@ impl Store {
             .first()
             .is_some_and(|newest| fs::read(&newest.path).is_ok_and(|held| held == bytes));
         let target = folder.join(name);
+        if require_exact && !same && target.exists() && fs::read(&target)? != bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "A different backup already uses this timestamp",
+            ));
+        }
         // 同じ秒にもう取ってある（1秒に2回保存した）なら、その1つで足りる。
         let written = if same || target.exists() {
             None
         } else {
             fs::create_dir_all(&folder)?;
-            crate::file_io::write_atomically(&target, &bytes)?;
+            crate::file_io::write_atomically(&target, bytes)?;
             Some(target)
         };
         self.prune(original, keep.max(1));

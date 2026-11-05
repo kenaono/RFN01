@@ -239,6 +239,9 @@ pub struct OpenDocument {
     /// Failure recovery remains available even when ordinary backups are off.
     pub protective_recovery: Cell<bool>,
     pub recovery_failed: Cell<bool>,
+    /// Keep earlier copies until the write for the current name succeeds.
+    pub(crate) previous_work_copies: RefCell<std::collections::BTreeSet<String>>,
+    pub(crate) recovery_write: Cell<Option<usize>>,
     /// What has been done to this text and can be taken back (要件 7.1). It
     /// belongs to the document because 要件 7.6 says it does: one file, one
     /// history, however many panes are showing it.
@@ -269,6 +272,8 @@ impl OpenDocument {
             missing: Cell::new(false),
             protective_recovery: Cell::new(false),
             recovery_failed: Cell::new(false),
+            previous_work_copies: RefCell::new(Default::default()),
+            recovery_write: Cell::new(None),
             history: RefCell::new(History::default()),
             counts: RefCell::new(CountsSlot::default()),
             spelling: RefCell::new(None),

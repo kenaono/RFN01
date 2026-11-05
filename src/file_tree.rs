@@ -497,139 +497,159 @@ pub fn create_folder(path: &Path) -> io::Result<()> {
     fs::create_dir(path)
 }
 
-/// Give something a different name or place (要件 5.2).
-///
-/// **Refuses to write over what is already there.** `fs::rename` replaces a
-/// file without a word, and a rename is not a way to delete a note. A name that
-/// differs only in case is the same name to Windows, and is allowed through so
-/// that `memo.md` can become `Memo.md`.
-pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
-    let same = from.to_string_lossy().to_lowercase();
-    let wanted = to.to_string_lossy().to_lowercase();
-    if same != wanted && to.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            crate::i18n::pick(
-                "同じ名前のものがあります",
-                "Something with that name already exists",
-            ),
-        ));
-    }
-    fs::rename(from, to)
+/// The destination version the writer agreed to replace, and how to dispose
+/// of it after the incoming entry is in place.
+pub(crate) struct Overwrite<'a> {
+    pub(crate) version: crate::disk_entry::Version,
+    pub(crate) recycle: &'a mut dyn FnMut(&Path) -> bool,
 }
 
-/// Why a move stopped (RFN01-64).
-pub enum Stopped {
-    /// What was in the way could not be cleared, so nothing moved.
-    Kept,
-    /// The disk refused; nothing moved.
-    Failed(io::Error),
+pub(crate) struct Carried {
+    pub(crate) source_remains: bool,
+    pub(crate) retained: Option<PathBuf>,
 }
 
-/// Put `from` at `to`, on the same drive or another one (RFN01-64).
-///
-/// `clear`, when there is one, takes away what is already at `to` — the
-/// writer said it may go. Returns whether `from` was left behind: on another
-/// drive the move is a copy, and a copy that is all there with its source
-/// still standing is not a failed move.
-///
-/// **On another drive, nothing is taken away until the copy is whole.**
-/// `fs::rename` cannot cross drives, so the thing is copied beside where it is
-/// going under a name no one would pick, and only then is what was in the way
-/// cleared, the copy named, and the source removed. Stopping anywhere before
-/// the last step leaves the source and what was in the way as they were.
-/// Clearing first, as the same drive can afford to, was how a replace across
-/// drives deleted what was there and then failed to put anything in its place.
-pub fn carry(
+/// Put `from` at `to`. For a cross-volume move, first copy into a directory
+/// reserved for this operation on the destination volume.
+pub(crate) fn carry(
     from: &Path,
     to: &Path,
     across: bool,
-    clear: Option<&mut dyn FnMut(&Path) -> bool>,
-) -> Result<bool, Stopped> {
-    if !across {
-        if let Some(clear) = clear
-            && !clear(to)
-        {
-            return Err(Stopped::Kept);
-        }
-        return rename(from, to).map(|()| false).map_err(Stopped::Failed);
-    }
-    let Some(into) = to.parent() else {
-        return Err(Stopped::Failed(io::Error::from(
-            io::ErrorKind::InvalidInput,
-        )));
-    };
-    let name = to.file_name().unwrap_or_default().to_string_lossy();
-    let staging = into.join(unique_name(&names_in(into), &format!(".{name}.moving")));
-    let folder = from.is_dir();
-    let copied = if folder {
-        copy_folder(from, &staging)
-    } else {
-        fs::copy(from, &staging).map(|_| ())
-    };
-    let discard = |staging: &Path| {
-        let _ = if folder {
-            fs::remove_dir_all(staging)
-        } else {
-            fs::remove_file(staging)
-        };
-    };
-    if let Err(error) = copied {
-        discard(&staging);
-        return Err(Stopped::Failed(error));
-    }
-    if let Some(clear) = clear
-        && !clear(to)
-    {
-        discard(&staging);
-        return Err(Stopped::Kept);
-    }
-    if let Err(error) = rename(&staging, to) {
-        discard(&staging);
-        return Err(Stopped::Failed(error));
-    }
-    let removed = if folder {
-        fs::remove_dir_all(from)
-    } else {
-        fs::remove_file(from)
-    };
-    Ok(removed.is_err())
-}
+    overwrite: Option<Overwrite<'_>>,
+) -> io::Result<Carried> {
+    use crate::disk_entry::{Stage, rename_new};
 
-/// Copy something beside itself under a name nothing else has (要件 5.2).
-///
-/// Returns where the copy landed, so the tree can put the writer on it.
-pub fn duplicate(path: &Path) -> io::Result<PathBuf> {
-    let Some(parent) = path.parent() else {
+    let source = from.canonicalize()?;
+    let parent = to
+        .parent()
+        .ok_or(io::ErrorKind::InvalidInput)?
+        .canonicalize()?;
+    let target = parent.join(to.file_name().ok_or(io::ErrorKind::InvalidInput)?);
+    let same_path = path_key(from) == path_key(to);
+    let same_entry = target
+        .canonicalize()
+        .is_ok_and(|p| path_key(&p) == path_key(&source));
+    if (same_entry && (overwrite.is_some() || !same_path)) || is_within(&source, &parent) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             crate::i18n::pick(
-                "複製できる場所がありません",
-                "There is nowhere to put a copy",
+                "同じ場所や移動元フォルダの中へは移動できません",
+                "Cannot move an entry onto itself or into its own folder",
             ),
         ));
+    }
+    if !across && overwrite.is_none() {
+        rename_new(from, to)?;
+        return Ok(Carried {
+            source_remains: false,
+            retained: None,
+        });
+    }
+
+    let stage = Stage::beside(to)?;
+    let incoming = stage.incoming();
+    let prepared = if across { incoming.as_path() } else { from };
+    let mut copied = Vec::new();
+    if across
+        && let Err(error) =
+            copy_entry(from, prepared, &mut copied).and_then(|()| verify_copy(&copied))
+    {
+        remove_staged_copy(prepared);
+        return Err(error);
+    }
+    let install = match overwrite {
+        Some(Overwrite { version, recycle }) => stage
+            .replace(prepared, to, version)
+            .map(|previous| (!recycle(&previous)).then_some(previous)),
+        None => rename_new(prepared, to).map(|()| None),
     };
-    let name = path.file_name().unwrap_or_default();
-    let name = name.to_string_lossy().into_owned();
+    let retained = match install {
+        Ok(retained) => retained,
+        Err(error) => {
+            if across {
+                remove_staged_copy(prepared);
+            }
+            return Err(error);
+        }
+    };
+    let source_remains = across && (verify_copy(&copied).is_err() || remove_entry(from).is_err());
+    Ok(Carried {
+        source_remains,
+        retained,
+    })
+}
+
+/// Copy something beside itself under a name nothing else has (要件 5.2).
+pub fn duplicate(path: &Path) -> io::Result<PathBuf> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let name = path
+        .file_name()
+        .ok_or(io::ErrorKind::InvalidInput)?
+        .to_string_lossy();
     let copy = parent.join(unique_name(&names_in(parent), &name));
-    if path.is_dir() {
-        copy_folder(path, &copy)?;
-    } else {
-        fs::copy(path, &copy)?;
+    let stage = crate::disk_entry::Stage::beside(&copy)?;
+    let incoming = stage.incoming();
+    let mut copied = Vec::new();
+    if let Err(error) = copy_entry(path, &incoming, &mut copied)
+        .and_then(|()| verify_copy(&copied))
+        .and_then(|()| crate::disk_entry::rename_new(&incoming, &copy))
+    {
+        remove_staged_copy(&incoming);
+        return Err(error);
     }
     Ok(copy)
 }
 
-/// Copy a folder and everything under it.
-fn copy_folder(from: &Path, to: &Path) -> io::Result<()> {
-    fs::create_dir(to)?;
-    for entry in fs::read_dir(from)?.flatten() {
-        let source = entry.path();
-        let target = to.join(entry.file_name());
-        if source.is_dir() {
-            copy_folder(&source, &target)?;
-        } else {
-            fs::copy(&source, &target)?;
+fn remove_staged_copy(path: &Path) {
+    let _ = remove_entry(path);
+}
+
+fn remove_entry(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+/// The source tree must be copied in full before the original is removed.
+fn copy_entry(
+    from: &Path,
+    to: &Path,
+    copied: &mut Vec<(PathBuf, crate::disk_entry::Version)>,
+) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(from)?;
+    if is_reparse_point(&metadata) {
+        let path = from.display();
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            crate::say!(
+                "リンクまたは再解析ポイントを含む項目はコピーできません: {path}",
+                "Cannot copy an entry containing a link or reparse point: {path}"
+            ),
+        ));
+    }
+    copied.push((from.to_path_buf(), crate::disk_entry::Version::read(from)?));
+    if metadata.is_dir() {
+        fs::create_dir(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy_entry(&entry.path(), &to.join(entry.file_name()), copied)?;
+        }
+    } else {
+        fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
+fn verify_copy(copied: &[(PathBuf, crate::disk_entry::Version)]) -> io::Result<()> {
+    for (path, expected) in copied {
+        if crate::disk_entry::Version::read(path)? != *expected {
+            let path = path.display();
+            return Err(io::Error::other(crate::say!(
+                "コピー中に移動元が変更されました: {path}",
+                "The source changed while it was being copied: {path}"
+            )));
         }
     }
     Ok(())
@@ -820,18 +840,14 @@ pub fn files_under_many_cancellable(
 }
 
 fn is_directory_link(path: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        metadata.file_type().is_symlink()
-    }
+    fs::symlink_metadata(path).is_ok_and(|metadata| is_reparse_point(&metadata))
+}
+
+pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
 }
 
 #[cfg(test)]
@@ -1307,55 +1323,189 @@ mod tests {
         held
     }
 
-    /// RFN01-64: across drives a replace is a copy, then the clearing, then
-    /// the source going — and it ends where a same-drive replace ends.
     #[test]
-    fn a_replace_across_drives_ends_with_one_file_where_it_went() {
+    fn a_replace_across_drives_installs_the_copy_before_recycling() {
         let dir = scratch("replace");
-        let from = dir.join("元").join("原稿.md");
-        let to = dir.join("先").join("原稿.md");
+        let from = dir.join("元/原稿.md");
+        let to = dir.join("先/原稿.md");
         fs::write(&from, "新しい").unwrap();
         fs::write(&to, "古い").unwrap();
-        let mut cleared = Vec::new();
-        let mut clear = |path: &Path| {
-            // The copy is already whole when what was there is taken away.
-            assert!(
-                names_in(path.parent().unwrap())
-                    .iter()
-                    .any(|n| n.ends_with(".moving"))
-            );
-            cleared.push(path.to_path_buf());
-            fs::remove_file(path).is_ok()
+        let mut recycle = |previous: &Path| {
+            assert_eq!(fs::read_to_string(&to).unwrap(), "新しい");
+            assert_eq!(fs::read_to_string(previous).unwrap(), "古い");
+            fs::remove_file(previous).is_ok()
+        };
+        let overwrite = Overwrite {
+            version: crate::disk_entry::Version::read(&to).unwrap(),
+            recycle: &mut recycle,
         };
 
-        let left = carry(&from, &to, true, Some(&mut clear)).ok();
+        let carried = carry(&from, &to, true, Some(overwrite)).unwrap();
 
-        assert_eq!(left, Some(false));
-        assert_eq!(cleared, vec![to.clone()]);
-        assert_eq!(fs::read_to_string(&to).unwrap(), "新しい");
+        assert!(!carried.source_remains);
+        assert_eq!(carried.retained, None);
         assert!(!from.exists());
         assert_eq!(names(&dir.join("先")), vec!["原稿.md"]);
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// RFN01-64: a refused clearing leaves both files, and no copy behind.
     #[test]
-    fn a_refused_clearing_across_drives_leaves_both() {
+    fn a_failed_recycle_keeps_the_previous_destination() {
         let dir = scratch("refused");
-        let from = dir.join("元").join("原稿.md");
-        let to = dir.join("先").join("原稿.md");
+        let from = dir.join("元/原稿.md");
+        let to = dir.join("先/原稿.md");
         fs::write(&from, "新しい").unwrap();
         fs::write(&to, "古い").unwrap();
-        let mut clear = |_: &Path| false;
+        let overwrite = Overwrite {
+            version: crate::disk_entry::Version::read(&to).unwrap(),
+            recycle: &mut |_| false,
+        };
 
-        assert!(matches!(
-            carry(&from, &to, true, Some(&mut clear)),
-            Err(Stopped::Kept)
-        ));
+        let carried = carry(&from, &to, true, Some(overwrite)).unwrap();
 
-        assert_eq!(fs::read_to_string(&from).unwrap(), "新しい");
+        assert_eq!(fs::read_to_string(&to).unwrap(), "新しい");
+        assert_eq!(
+            fs::read_to_string(carried.retained.unwrap()).unwrap(),
+            "古い"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_inaccessible_source_restores_the_previous_destination() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = scratch("rollback");
+        let from = dir.join("元/原稿.md");
+        let to = dir.join("先/原稿.md");
+        fs::write(&from, "新しい").unwrap();
+        fs::write(&to, "古い").unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(&from)
+            .unwrap();
+        let version = crate::disk_entry::Version::read(&to).unwrap();
+        let mut recycle = |_: &Path| panic!("recycling before successful install");
+        assert!(
+            carry(
+                &from,
+                &to,
+                false,
+                Some(Overwrite {
+                    version,
+                    recycle: &mut recycle
+                })
+            )
+            .is_err()
+        );
         assert_eq!(fs::read_to_string(&to).unwrap(), "古い");
+        assert_eq!(fs::read_to_string(&from).unwrap(), "新しい");
         assert_eq!(names(&dir.join("先")), vec!["原稿.md"]);
+        drop(locked);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_source_or_replaced_destination_does_not_recycle_anything() {
+        let dir = scratch("changed");
+        let from = dir.join("元/原稿.md");
+        let to = dir.join("先/原稿.md");
+        fs::write(&to, "古い").unwrap();
+        let version = crate::disk_entry::Version::read(&to).unwrap();
+        let mut recycle = |_: &Path| panic!("recycling after a stale confirmation");
+        assert!(
+            carry(
+                &from,
+                &to,
+                false,
+                Some(Overwrite {
+                    version,
+                    recycle: &mut recycle
+                })
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&to).unwrap(), "古い");
+
+        fs::write(&from, "新しい").unwrap();
+        fs::rename(&to, dir.join("original.md")).unwrap();
+        fs::write(&to, "外部版").unwrap();
+        assert!(
+            carry(
+                &from,
+                &to,
+                true,
+                Some(Overwrite {
+                    version,
+                    recycle: &mut recycle
+                })
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&to).unwrap(), "外部版");
+        assert_eq!(fs::read_to_string(&from).unwrap(), "新しい");
+        assert_eq!(names(&dir.join("先")), vec!["原稿.md"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_case_only_rename_keeps_the_contents() {
+        let dir = scratch("case");
+        let folder = dir.join("元");
+        let from = folder.join("memo.md");
+        let to = folder.join("Memo.md");
+        fs::write(&from, "本文").unwrap();
+
+        carry(&from, &to, false, None).unwrap();
+
+        assert_eq!(names(&folder), vec!["Memo.md"]);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "本文");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copies_refuse_junctions_without_publishing_a_partial_tree() {
+        let dir = scratch("junction");
+        let from = dir.join("元").join("章");
+        let to = dir.join("先").join("章");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        fs::write(from.join("a.md"), "本文").unwrap();
+        fs::write(to.join("old.md"), "古い").unwrap();
+        for (name, target) in [("loop", &from), ("outside", &dir)] {
+            let link = from.join(name);
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "junction fixture: {made:?}");
+            let mut recycle =
+                |_: &Path| panic!("recycled a destination before copying its replacement");
+            let overwrite = Overwrite {
+                version: crate::disk_entry::Version::read(&to).unwrap(),
+                recycle: &mut recycle,
+            };
+            assert_eq!(
+                duplicate(&from).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+            assert_eq!(
+                carry(&from, &to, true, Some(overwrite))
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::Unsupported
+            );
+            assert_eq!(names(&dir.join("先")), vec!["章"]);
+            assert_eq!(names(&dir.join("元")), vec!["章"]);
+            assert_eq!(fs::read_to_string(to.join("old.md")).unwrap(), "古い");
+            assert_eq!(fs::read_to_string(from.join("a.md")).unwrap(), "本文");
+            fs::remove_dir(link).unwrap();
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1368,7 +1518,7 @@ mod tests {
         fs::write(from.join("下書き").join("断片.md"), "断片").unwrap();
         let to = dir.join("先").join("章");
 
-        assert!(matches!(carry(&from, &to, true, None), Ok(false)));
+        assert!(!carry(&from, &to, true, None).unwrap().source_remains);
 
         let fragment = to.join("下書き").join("断片.md");
         assert_eq!(fs::read_to_string(fragment).unwrap(), "断片");
