@@ -19741,6 +19741,16 @@ fn new_terminal_tab(window: &AppWindow, live: &Live, id: PaneId, shell: Terminal
 
 /// Start a shell for a pane, sized to the space it will be drawn in.
 ///
+/// RFN01-105: 開始フォルダを空にしたプロファイルが始める場所。使用中のWorkspaceの最初の
+/// 登録フォルダ、Workspaceを使っていなければExplorerで開いているフォルダ（書き手の求め
+/// 2026-11-05、Workspaceが優先）。どちらも無ければ`None`で、呼ぶ側がホームにする。
+fn terminal_start_folder(live: &Live) -> Option<PathBuf> {
+    git_ui::workspace_folders(live)
+        .into_iter()
+        .next()
+        .or_else(|| live.folder.borrow().root.clone())
+}
+
 /// **The size is worked out before the shell exists**, because the first thing
 /// it does is draw a prompt for the screen it was told about.
 fn start_shell(
@@ -19765,9 +19775,10 @@ fn start_shell(
         // any of it (要件 2).
         let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
     };
-    // RFN01-105: 開始フォルダが空なら Workspace のフォルダかホーム。プロファイルは書き換えない。
-    let workspace = git_ui::workspace_folders(live).into_iter().next();
-    let started = terminal_shells::with_start_folder(shell, workspace.as_deref());
+    // RFN01-105: 開始フォルダが空なら terminal_start_folder、どちらも無ければホーム。
+    // プロファイルは書き換えない。
+    let folder = terminal_start_folder(live);
+    let started = terminal_shells::with_start_folder(shell, folder.as_deref());
     let (command, directory) = terminal_shells::launch(&started);
     match TerminalSession::start_in(
         &shell.name,

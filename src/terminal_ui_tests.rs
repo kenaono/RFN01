@@ -1506,3 +1506,14 @@ fn the_pane_zoom_reaches_the_terminal_and_its_panels() {
     assert_eq!(panel.zoom(&h.window), 120);
     assert_eq!(font(TerminalSpot::Front), zoomed_size(size, 120));
 }
+
+/// RFN01-105: Workspaceを使っていなければ、Explorerで開いているフォルダで始める。
+/// どちらも無ければ`None`（ホームは`with_start_folder`が決める）。
+#[test]
+fn a_new_terminal_starts_in_the_explorer_folder_without_a_workspace() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    assert_eq!(terminal_start_folder(&h.live), None);
+    let folder = PathBuf::from("D:\\原稿");
+    h.live.folder.borrow_mut().root = Some(folder.clone());
+    assert_eq!(terminal_start_folder(&h.live), Some(folder));
+}
