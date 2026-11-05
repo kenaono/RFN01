@@ -1370,12 +1370,23 @@ fn install_menu_actions(window: &AppWindow, live: &Live) {
     });
 }
 
-/// 画面の配置だけを確かめる試験（`Live`を持たない窓）のための`MenuActions`。行はどれも押せ、
-/// 押せば試験が見張る窓のコールバックへ渡す。
+/// 画面の配置だけを確かめる試験（`Live`を持たない窓）のための`MenuActions`。元に戻す・やり直しは
+/// 画面の行の値で、ほかの行はどれも押せ、押せば試験が見張る窓のコールバックへ渡す。
 #[cfg(test)]
 pub(crate) fn wire_bare_menu_actions(window: &AppWindow) {
     let actions = window.global::<MenuActions>();
-    actions.on_allowed(|_, _| true);
+    let weak = window.as_weak();
+    actions.on_allowed(move |action, _| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let screen = PaneId::from_index(window.get_focused_pane()).screen(&window);
+        match action {
+            MenuAction::Undo => screen.can_undo,
+            MenuAction::Redo => screen.can_redo,
+            _ => true,
+        }
+    });
     let weak = window.as_weak();
     actions.on_run(move |action| {
         let Some(window) = weak.upgrade() else {
@@ -1388,6 +1399,12 @@ pub(crate) fn wire_bare_menu_actions(window: &AppWindow) {
             MenuAction::Forward => window.invoke_pane_navigate(p, true),
             MenuAction::Below => window.invoke_pane_below_toggled(p),
             MenuAction::FolderTerminal => window.invoke_shell_profile_action(8, 0),
+            MenuAction::Goto => window.invoke_goto_requested(true),
+            MenuAction::CompareSaved => window.invoke_compare_saved_requested(),
+            MenuAction::CompareHead => window.invoke_compare_head_requested(),
+            MenuAction::CompareFile => window.invoke_compare_files_requested(),
+            MenuAction::Undo => window.invoke_pane_undo(p, false),
+            MenuAction::Redo => window.invoke_pane_undo(p, true),
             _ => {}
         }
     });
