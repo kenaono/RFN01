@@ -2074,3 +2074,73 @@ fn the_setting_catalog_covers_persisted_preferences_and_resolves_its_routes() {
         [false; 3]
     ));
 }
+
+#[test]
+fn the_palette_toggles_a_single_setting_and_opens_named_setting_groups() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("palette-setting-groups");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    command_palette::install(window, live);
+    wiring::wire_word_modes(window, live);
+    hold_word_modes(
+        window,
+        live,
+        vec![word_marks::WordMode {
+            id: 51,
+            name: "作品A".into(),
+            groups: vec![],
+        }],
+        false,
+    );
+    hold_shells(
+        window,
+        &[
+            TerminalShell {
+                name: "PowerShell".into(),
+                command: "powershell.exe -NoLogo".into(),
+                directory: "".into(),
+            },
+            TerminalShell {
+                name: "WSL".into(),
+                command: "wsl.exe -d Ubuntu".into(),
+                directory: "/tmp".into(),
+            },
+        ],
+    );
+    window.set_ruby_marks(true);
+    let weak = window.as_weak();
+    window.on_ruby_marks_toggled(move |wanted| weak.upgrade().unwrap().set_ruby_marks(wanted));
+    let select = |query: &str, title: &str| {
+        command_palette::open(window, live, true);
+        window.invoke_palette_edited(query.into());
+        let rows = window.get_palette_rows();
+        let index = rows
+            .iter()
+            .position(|row| row.title.contains(title) || row.detail.contains(title))
+            .unwrap_or_else(|| panic!("missing {title} for {query}"));
+        let key = rows.row_data(index).unwrap().key;
+        window.set_palette_selected(index as i32);
+        window.invoke_palette_accepted();
+        slint::platform::update_timers_and_animations();
+        key
+    };
+
+    assert_eq!(select("> Ruby Markup", "Ruby Markup"), "ON");
+    assert!(!window.get_ruby_marks());
+    assert!(!window.get_find_open());
+
+    select("> WSL 引数", "WSL");
+    assert_eq!(window.get_settings_item_id(), "terminal.profiles");
+    assert_eq!(window.get_shell_profile_index(), 1);
+    assert_eq!(window.get_shell_profile_name(), "WSL");
+
+    select("> 作品A 語群", "作品A");
+    assert_eq!(window.get_settings_item_id(), "words.manage");
+    assert_eq!(window.get_word_mode_opened_at(), 0);
+    assert_eq!(
+        window.get_word_mode(),
+        0,
+        "editing a mode does not activate it"
+    );
+}

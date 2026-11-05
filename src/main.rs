@@ -13507,9 +13507,12 @@ pub(crate) fn open_settings_searching(
 
 /// Open the setting by identity. The query is a label for the existing search field.
 pub(crate) fn open_setting_item(window: &AppWindow, live: &Live, item: &settings_items::Item) {
-    let title = item.title();
-    open_settings_searching(window, live, &title, false);
-    window.set_settings_tab(item.tab);
+    open_setting_target(window, live, &item.title(), &item.id, item.tab);
+}
+
+fn open_setting_target(window: &AppWindow, live: &Live, title: &str, id: &str, tab: i32) {
+    open_settings_searching(window, live, title, false);
+    window.set_settings_tab(tab);
     window.set_settings_inherited_text(
         pick(
             "縦書きは横書きの設定を使っています。",
@@ -13518,7 +13521,7 @@ pub(crate) fn open_setting_item(window: &AppWindow, live: &Live, item: &settings
         .into(),
     );
     window.set_settings_item_query(title.into());
-    window.set_settings_item_id(item.id.as_str().into());
+    window.set_settings_item_id(id.into());
 }
 
 /// RFN01-114: パレットの鍵の印から。設定のKeysを、**その操作の行だけ**に絞って開く。

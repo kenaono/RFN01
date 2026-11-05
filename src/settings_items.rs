@@ -1,6 +1,8 @@
 use std::sync::OnceLock;
 
-use crate::{Setting, colour_name, fold_for_search, font_name, i18n};
+use crate::{
+    AppWindow, Live, Setting, TerminalShell, colour_name, fold_for_search, font_name, i18n,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -22,10 +24,191 @@ pub(crate) struct Item {
     ja: String,
     en: String,
     search_terms: String,
-    route: &'static str,
+    group: &'static str,
+    pub(crate) toggle: Option<Toggle>,
     pub(crate) tab: i32,
     scope: Scope,
     inherits: Inherits,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Toggle {
+    RubyMarkup,
+    CountRuby,
+    TextShared,
+    LayoutShared,
+    PaperShared,
+    TerminalPaste,
+    TerminalClose,
+    TerminalRestore,
+    Sheet { setting: Setting, scope: usize },
+}
+
+impl Toggle {
+    fn for_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "ruby.marks" => Self::RubyMarkup,
+            "count.ruby" => Self::CountRuby,
+            "text.shared" => Self::TextShared,
+            "layout.shared" => Self::LayoutShared,
+            "paper.shared" => Self::PaperShared,
+            "terminal.confirm_paste" => Self::TerminalPaste,
+            "terminal.confirm_close" => Self::TerminalClose,
+            "terminal.restore_output" => Self::TerminalRestore,
+            _ => {
+                let (scope, name) = id.split_once('.')?;
+                let scope = match scope {
+                    "h" => 0,
+                    "v" => 1,
+                    _ => return None,
+                };
+                let setting = Setting::from_name(name)?;
+                match setting {
+                    Setting::LineNumbers
+                    | Setting::Whitespace
+                    | Setting::UprightDigits
+                    | Setting::UprightMarks => Self::Sheet { setting, scope },
+                    _ => return None,
+                }
+            }
+        })
+    }
+
+    fn sheet(window: &AppWindow, setting: Setting, scope: usize) -> usize {
+        match setting {
+            Setting::UprightDigits | Setting::UprightMarks => scope,
+            _ => crate::shared_sheet(window, scope, setting.page()),
+        }
+    }
+
+    pub(crate) fn current(self, window: &AppWindow) -> bool {
+        match self {
+            Self::RubyMarkup => window.get_ruby_marks(),
+            Self::CountRuby => window.get_count_ruby(),
+            Self::TextShared => window.get_text_shared(),
+            Self::LayoutShared => window.get_layout_shared(),
+            Self::PaperShared => window.get_paper_shared(),
+            Self::TerminalPaste => window.get_terminal_confirm_paste(),
+            Self::TerminalClose => window.get_terminal_confirm_close(),
+            Self::TerminalRestore => window.get_terminal_restore_output(),
+            Self::Sheet { setting, scope } => {
+                setting.read_own(window, Self::sheet(window, setting, scope)) != 0
+            }
+        }
+    }
+
+    pub(crate) fn flip(self, window: &AppWindow) {
+        let wanted = !self.current(window);
+        match self {
+            Self::RubyMarkup => window.invoke_ruby_marks_toggled(wanted),
+            Self::CountRuby => window.invoke_count_ruby_toggled(wanted),
+            Self::TextShared => window.invoke_text_shared_toggled(wanted),
+            Self::LayoutShared => window.invoke_layout_shared_toggled(wanted),
+            Self::PaperShared => window.invoke_paper_shared_toggled(wanted),
+            Self::TerminalPaste => window.set_terminal_confirm_paste(wanted),
+            Self::TerminalClose => window.set_terminal_confirm_close(wanted),
+            Self::TerminalRestore => window.set_terminal_restore_output(wanted),
+            Self::Sheet { setting, scope } => {
+                let original_sheet = window.get_sheet();
+                window.set_sheet(Self::sheet(window, setting, scope) as i32);
+                window.invoke_sheet_chose(setting.row_in_sheet() as i32, i32::from(wanted));
+                window.set_sheet(original_sheet);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum GroupId {
+    Shell(TerminalShell),
+    WordMode(u32),
+}
+
+#[derive(Clone)]
+pub(crate) struct Group {
+    id: GroupId,
+    pub(crate) titles: (String, String),
+    members: &'static [(&'static str, &'static str)],
+}
+
+impl Group {
+    pub(crate) fn all(window: &AppWindow) -> Vec<Self> {
+        let shells = crate::configured_shells(window).into_iter().map(|shell| {
+            let name = &shell.name;
+            Self {
+                titles: (
+                    format!("設定 › Terminal › {name} のプロファイル設定"),
+                    format!("Settings › Terminal › {name} Profile"),
+                ),
+                members: &[
+                    ("名前", "Name"),
+                    ("実行ファイル", "Executable"),
+                    ("引数", "Arguments"),
+                    ("開始フォルダ", "Start Folder"),
+                    ("既定", "Default"),
+                ],
+                id: GroupId::Shell(shell),
+            }
+        });
+        let modes = crate::word_modes()
+            .iter()
+            .map(|marks| {
+                let name = &marks.mode.name;
+                Self {
+                    titles: (
+                        format!("設定 › Editor › {name} の単語チェック設定"),
+                        format!("Settings › Editor › {name} Word Check Settings"),
+                    ),
+                    members: &[
+                        ("モード名", "Mode Name"),
+                        ("語群", "Group"),
+                        ("色", "Color"),
+                        ("登録語", "Words"),
+                        ("覚え書き", "Notes"),
+                    ],
+                    id: GroupId::WordMode(marks.mode.id),
+                }
+            })
+            .collect::<Vec<_>>();
+        shells.chain(modes).collect()
+    }
+
+    pub(crate) fn matches(&self, folded_query: &str) -> bool {
+        let (ja, en) = &self.titles;
+        let title = fold_for_search(&format!("{ja} {en}"));
+        folded_query.split_whitespace().all(|word| {
+            title.contains(word)
+                || self.members.iter().any(|(ja, en)| {
+                    fold_for_search(ja).contains(word) || fold_for_search(en).contains(word)
+                })
+        })
+    }
+
+    pub(crate) fn open(self, window: &AppWindow, live: &Live) {
+        let title = i18n::pick(&self.titles.0, &self.titles.1);
+        match self.id {
+            GroupId::Shell(expected) => {
+                let shells = crate::configured_shells(window);
+                let mut matches = shells
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, shell)| **shell == expected);
+                if let Some((at, _)) = matches.next().filter(|_| matches.next().is_none()) {
+                    crate::open_setting_target(window, live, title, "terminal.profiles", 1);
+                    crate::terminal_shells::action(window, live, 0, at as i32);
+                }
+            }
+            GroupId::WordMode(id) => {
+                if let Some(at) = crate::word_modes()
+                    .iter()
+                    .position(|marks| marks.mode.id == id)
+                {
+                    crate::open_setting_target(window, live, title, "words.manage", 3);
+                    window.invoke_word_mode_opened(at as i32);
+                }
+            }
+        }
+    }
 }
 
 impl Item {
@@ -95,10 +278,10 @@ pub(crate) fn shows(
             Inherits::Paper => "paper.shared",
         };
         let inherited = item.scope == Scope::Vertical && effective == 0;
-        let visible = (route_matches(item.route) && effective == sheet)
+        let visible = (route_matches(item.group) && effective == sheet)
             || (inherited && sheet == 1 && route_matches(dependency))
             || (route == "layout.wrap-mode"
-                && item.route == "layout.wrap-length"
+                && item.group == "layout.wrap-length"
                 && sheet == effective);
         visible && (!selected.is_empty() || item.matches(&query))
     })
@@ -125,7 +308,8 @@ fn items() -> Vec<Item> {
             search_terms: fold_for_search(&format!(
                 "設定 Settings {scope_ja}{ja} {scope_en}{en} {aliases}"
             )),
-            route,
+            group: route,
+            toggle: Toggle::for_id(id),
             tab,
             scope,
             inherits,
@@ -296,7 +480,7 @@ fn items() -> Vec<Item> {
         "terminal.profiles",
         "シェルプロファイルの管理",
         "Manage Shell Profiles",
-        "Terminal WSL PowerShell cmd Profile name Executable Arguments Start folder シェル"
+        "Terminal Profile name Executable Arguments Start folder シェル"
     );
     app!(
         1,
