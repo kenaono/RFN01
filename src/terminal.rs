@@ -1975,12 +1975,10 @@ pub struct Modifiers {
 }
 
 impl Modifiers {
-    #[cfg(test)]
     pub fn none() -> Self {
         Self::default()
     }
 
-    #[cfg(test)]
     pub fn control() -> Self {
         Self {
             control: true,
@@ -2272,8 +2270,36 @@ pub fn encode_paste(text: &str, modes: Modes) -> Vec<u8> {
 /// `ls` and a return moved the prompt down a line and ran nothing. Without
 /// them a return is the return key, and the line runs — which is what the
 /// writer asked for by putting it there.
-pub fn encode_typing(text: &str) -> Vec<u8> {
-    returns_only(text).into_bytes()
+///
+/// RFN01-104（書き手と合意 2026-11-05）: **途中の改行は`Ctrl+J`、末尾の改行は`Enter`を
+/// 1回。**どれも`Enter`で送っていたときは、Claude Codeが1行ごとに送信した——Claude Code
+/// にとって`Enter`（CR）は送信、`Ctrl+J`（LF）は入力欄の中の改行である。bashはどちらでも
+/// 行を実行するので、シェルでの結果は変わらない。キーは書き手が押したときと同じ形で送る
+/// （[`encode_key`]、ConPTYのwin32-input-modeならWindowsのキーの出来事）。末尾に改行が
+/// 無ければ`Enter`は送らない（以前と同じ）。
+///
+/// **`Ctrl+J`で区切るのは、受け取る側が貼り付けの印（`?2004`）を受け付けている間だけ。**
+/// 実測（2026-11-05）：bashとClaude Codeは受け付けていて、`Ctrl+J`で正しく動く。
+/// PowerShell（PSReadLine）とcmdは受け付けておらず、PowerShellは`Ctrl+J`を「上に行を挿入」と
+/// 読んで順番が入れ替わり、cmdは無視して行がつながった——そちらは以前どおり各行`Enter`。
+pub fn encode_typing(text: &str, modes: Modes) -> Vec<u8> {
+    if !modes.bracketed_paste {
+        return returns_only(text).into_bytes();
+    }
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let body = text.trim_end_matches('\n');
+    let submit = body.len() < text.len();
+    let mut out = Vec::new();
+    for (index, line) in body.split('\n').enumerate() {
+        if index > 0 {
+            out.extend(encode_key(Key::Char('j'), Modifiers::control(), modes));
+        }
+        out.extend_from_slice(line.as_bytes());
+    }
+    if submit {
+        out.extend(encode_key(Key::Enter, Modifiers::none(), modes));
+    }
+    out
 }
 
 /// Line endings as the shell's line editor wants them.
@@ -3068,11 +3094,42 @@ mod key_tests {
     fn what_is_typed_over_carries_no_paste_markers() {
         let mut modes = modes();
         modes.bracketed_paste = true;
-        assert_eq!(encode_typing("ls\n"), b"ls\r".to_vec());
+        assert_eq!(encode_typing("ls\n", modes), b"ls\r".to_vec());
         assert_ne!(
-            encode_typing("ls\n"),
+            encode_typing("ls\n", modes),
             encode_paste("ls\n", modes),
             "貼り付けは抱えさせ、打鍵は走らせる"
+        );
+    }
+
+    /// RFN01-104: 途中の改行は`Ctrl+J`（LF）、末尾の改行はまとめて`Enter`（CR）を1回。
+    /// 末尾に改行が無ければ`Enter`は送らない。win32-input-modeでは押したキーと同じ出来事。
+    #[test]
+    fn a_draft_breaks_lines_with_ctrl_j_and_ends_with_one_return() {
+        // 貼り付けの印を受け付けないシェル（PowerShell・cmd）には、以前どおり各行Enter。
+        assert_eq!(encode_typing("a\r\nb\n", modes()), b"a\rb\r".to_vec());
+        let mut plain = modes();
+        plain.bracketed_paste = true;
+        assert_eq!(
+            encode_typing("一行目\r\n二行目\n\n", plain),
+            "一行目\n二行目\r".as_bytes()
+        );
+        assert_eq!(
+            encode_typing("a\nb", plain),
+            b"a\nb".to_vec(),
+            "no return at the end"
+        );
+        assert_eq!(encode_typing("ls\r", plain), b"ls\r".to_vec());
+        let mut win32 = plain;
+        win32.win32_input = true;
+        let mut expected = b"a".to_vec();
+        expected.extend(encode_key(Key::Char('j'), Modifiers::control(), win32));
+        expected.extend_from_slice(b"b");
+        expected.extend(encode_key(Key::Enter, Modifiers::none(), win32));
+        assert_eq!(encode_typing("a\nb\n", win32), expected);
+        assert_ne!(
+            encode_key(Key::Char('j'), Modifiers::control(), win32),
+            encode_key(Key::Enter, Modifiers::none(), win32)
         );
     }
 

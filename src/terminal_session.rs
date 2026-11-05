@@ -36,7 +36,7 @@ struct FileLog {
 use crate::pty::Pty;
 use crate::terminal::{
     Key, Modifiers, MouseAction, MouseButton, MouseTracking, Screen, Terminal, encode_focus,
-    encode_key, encode_mouse, encode_paste,
+    encode_key, encode_mouse, encode_paste, encode_typing,
 };
 use crate::timestamp::Stamp;
 
@@ -606,6 +606,12 @@ impl TerminalSession {
         self.send(text.as_bytes());
     }
 
+    /// RFN01-104: Editor PanelのCtrl+Enter——打ったものとして送る（[`encode_typing`]）。
+    pub fn send_draft(&mut self, text: &str) {
+        let bytes = encode_typing(text, self.terminal.screen.modes());
+        self.send(&bytes);
+    }
+
     pub fn paste(&mut self, text: &str) {
         let bytes = encode_paste(text, self.terminal.screen.modes());
         self.send(&bytes);
@@ -1019,6 +1025,122 @@ mod tests {
         assert!(answered, "the shell's answer never reached the screen");
 
         session.send_key(Key::Char('d'), Modifiers::control());
+    }
+
+    /// RFN01-104: Editor PanelのCtrl+Enter（途中の改行は`Ctrl+J`、末尾は`Enter`）を本物の
+    /// シェルへ。**どのシェルでも2行とも実行される**ことを見る。
+    /// `cargo test --offline a_draft_runs_every_line -- --ignored --nocapture`
+    #[test]
+    #[ignore = "starts real Windows shells; run explicitly"]
+    fn a_draft_runs_every_line_in_each_shell() {
+        for command in ["powershell.exe -NoLogo -NoProfile", "cmd.exe", "wsl.exe"] {
+            let mut session =
+                TerminalSession::start("test", command, 100, 30, || {}).expect("open the shell");
+            let waited = Instant::now();
+            while waited.elapsed() < Duration::from_secs(15)
+                && (0..session.screen().rows()).all(|row| session.screen().row_text(row).is_empty())
+            {
+                session.wait(Duration::from_millis(200));
+            }
+            session.wait(Duration::from_millis(1500));
+            session.drain();
+            println!(
+                "{command}: bracketed_paste={} win32_input={}",
+                session.screen().modes().bracketed_paste,
+                session.screen().modes().win32_input
+            );
+            session.send_draft("echo RFN-AAA\necho RFN-BBB\n");
+            let printed = |session: &TerminalSession, word: &str| {
+                (0..session.screen().rows())
+                    .filter(|row| session.screen().row_text(*row).trim() == word)
+                    .count()
+            };
+            let waited = Instant::now();
+            while waited.elapsed() < Duration::from_secs(10)
+                && (printed(&session, "RFN-AAA") == 0 || printed(&session, "RFN-BBB") == 0)
+            {
+                session.wait(Duration::from_millis(200));
+            }
+            println!("==== {command}");
+            for row in 0..session.screen().rows() {
+                let text = session.screen().row_text(row);
+                if !text.trim().is_empty() {
+                    println!("{row}: {text}");
+                }
+            }
+            let both = printed(&session, "RFN-AAA") >= 1 && printed(&session, "RFN-BBB") >= 1;
+            session.send(b"exit\r");
+            assert!(both, "{command}: not every line ran");
+        }
+    }
+
+    /// RFN01-104: Claude Code（WSLの`claude`）は貼り付けの印を受け付け、`Ctrl+J`で区切った
+    /// 下書きは入力欄の中の改行になる。**末尾に改行を付けないので送信はしない**——画面を出して
+    /// Ctrl+Cで閉じる。`CLAUDE_PROBE=1`のときだけ動く。
+    #[test]
+    #[ignore = "starts Claude Code in WSL; run explicitly with CLAUDE_PROBE=1"]
+    fn claude_code_takes_a_draft_as_one_input() {
+        if std::env::var("CLAUDE_PROBE").is_err() {
+            return;
+        }
+        let mut session = TerminalSession::start(
+            "test",
+            "wsl.exe --cd /mnt/d/Projects/10_Creation/50_Dev -e bash -ic claude",
+            110,
+            40,
+            || {},
+        )
+        .expect("open claude");
+        // 起動役のbashも貼り付けの印を立てるので、**Claude Codeの画面が出るまで**待つ。
+        let drawn = |session: &TerminalSession| {
+            (0..session.screen().rows())
+                .filter(|row| !session.screen().row_text(*row).trim().is_empty())
+                .count()
+        };
+        // `wait`は出力が来れば戻るので、決まった時間はこちらで刻む。
+        let settle = |session: &mut TerminalSession, how_long: Duration| {
+            let started = Instant::now();
+            while started.elapsed() < how_long {
+                session.wait(Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(50));
+            }
+            session.drain();
+        };
+        let waited = Instant::now();
+        while waited.elapsed() < Duration::from_secs(40) && drawn(&session) < 3 {
+            session.wait(Duration::from_millis(300));
+        }
+        settle(&mut session, Duration::from_secs(5));
+        let modes = session.screen().modes();
+        println!(
+            "bracketed_paste={} win32_input={}",
+            modes.bracketed_paste, modes.win32_input
+        );
+        session.send_draft("RFN-LINE-ONE\nRFN-LINE-TWO");
+        settle(&mut session, Duration::from_secs(3));
+        for row in 0..session.screen().rows() {
+            let text = session.screen().row_text(row);
+            if !text.trim().is_empty() {
+                println!("{row}: {text}");
+            }
+        }
+        let rows: Vec<String> = (0..session.screen().rows())
+            .map(|row| session.screen().row_text(row))
+            .collect();
+        let one = rows.iter().position(|row| row.contains("RFN-LINE-ONE"));
+        let two = rows.iter().position(|row| row.contains("RFN-LINE-TWO"));
+        for _ in 0..3 {
+            session.send_key(Key::Char('c'), Modifiers::control());
+            settle(&mut session, Duration::from_millis(500));
+        }
+        assert!(
+            modes.bracketed_paste,
+            "Claude Code did not turn bracketed paste on"
+        );
+        assert!(
+            matches!((one, two), (Some(a), Some(b)) if b == a + 1),
+            "the two lines are not one input on consecutive rows: {one:?} {two:?}"
+        );
     }
 
     /// A command that ends says so, and what it printed is still there.

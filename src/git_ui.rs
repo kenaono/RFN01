@@ -250,7 +250,7 @@ fn inside(path: &Path, folder: &Path) -> bool {
 }
 
 /// 使用中の Workspace の登録フォルダ。
-fn workspace_folders(live: &Live) -> Vec<PathBuf> {
+pub(crate) fn workspace_folders(live: &Live) -> Vec<PathBuf> {
     let folder = live.folder.borrow();
     let Some(runtime) = folder.workspace.as_ref() else {
         return Vec::new();

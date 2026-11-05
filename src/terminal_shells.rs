@@ -165,12 +165,37 @@ pub(crate) fn windows_drive_path(text: &str) -> Option<PathBuf> {
         .then(|| PathBuf::from(text))
 }
 
+/// Whether this profile starts WSL (`wsl.exe`).
+pub(crate) fn is_wsl(shell: &TerminalShell) -> bool {
+    let (program, _) = command_parts(&shell.command);
+    Path::new(program)
+        .file_stem()
+        .is_some_and(|p| p.to_string_lossy().eq_ignore_ascii_case("wsl"))
+}
+
+/// RFN01-105（書き手と合意 2026-11-05）: **開始フォルダが空のプロファイルは、Workspaceの
+/// フォルダかホームで始める。**以前は何も渡さず、エディタ自身の作業フォルダ（起動した場所）を
+/// 継いでいた——新しいTerminalがホームにならず、Workspaceを開いても外のフォルダのままだった。
+///
+/// `workspace`は使用中のWorkspaceの最初の登録フォルダ。無ければホーム：WSLは`~`、
+/// ほかは`%USERPROFILE%`。指定のあるプロファイルはそのまま。
+pub(crate) fn with_start_folder(shell: &TerminalShell, workspace: Option<&Path>) -> TerminalShell {
+    let mut started = shell.clone();
+    if !started.directory.trim().is_empty() {
+        return started;
+    }
+    started.directory = match workspace {
+        Some(folder) => folder.to_string_lossy().into_owned(),
+        None if is_wsl(shell) => "~".to_owned(),
+        None => std::env::var("USERPROFILE").unwrap_or_default(),
+    };
+    started
+}
+
 pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
     let cwd = shell.directory.trim();
     let (program, args) = command_parts(&shell.command);
-    let wsl = Path::new(program)
-        .file_stem()
-        .is_some_and(|p| p.to_string_lossy().eq_ignore_ascii_case("wsl"));
+    let wsl = is_wsl(shell);
     // WSL inherits a Windows working directory through CreateProcess. Linux
     // paths are passed to WSL itself, never used as Windows currentDirectory.
     if wsl && (cwd.starts_with('/') || cwd == "~") {
@@ -449,5 +474,49 @@ mod tests {
                 None
             )
         );
+    }
+
+    /// RFN01-105: 開始フォルダが空なら Workspace のフォルダ、無ければホーム（WSLは`~`）。
+    /// 指定のあるプロファイルはそのまま。
+    #[test]
+    fn an_empty_start_folder_opens_in_the_workspace_or_home() {
+        let windows = TerminalShell {
+            name: "PowerShell".into(),
+            command: "powershell.exe -NoLogo".into(),
+            directory: String::new(),
+        };
+        let wsl = TerminalShell {
+            name: "WSL".into(),
+            command: "wsl.exe -d Ubuntu".into(),
+            directory: "  ".into(),
+        };
+        let workspace = Path::new("D:\\原稿");
+        assert_eq!(
+            with_start_folder(&windows, Some(workspace)).directory,
+            "D:\\原稿"
+        );
+        assert_eq!(
+            with_start_folder(&wsl, Some(workspace)).directory,
+            "D:\\原稿"
+        );
+        assert_eq!(
+            with_start_folder(&windows, None).directory,
+            std::env::var("USERPROFILE").unwrap_or_default()
+        );
+        assert_eq!(with_start_folder(&wsl, None).directory, "~");
+        assert_eq!(
+            launch(&with_start_folder(&wsl, None)).0,
+            "\"wsl.exe\" --cd \"~\" -d Ubuntu"
+        );
+        // A Windows folder reaches WSL as the working folder it inherits.
+        assert_eq!(
+            launch(&with_start_folder(&wsl, Some(workspace))).1,
+            Some(PathBuf::from("D:\\原稿"))
+        );
+        let named = TerminalShell {
+            directory: "C:\\work".into(),
+            ..windows.clone()
+        };
+        assert_eq!(with_start_folder(&named, Some(workspace)), named);
     }
 }
