@@ -549,7 +549,53 @@ const ZOOM_MAX: i32 = 240;
 /// **本文の大きさと組みで決まっている。**本文の既定は紙の大きさ（10.5pt、
 /// [`BASE_FONT_SIZE`]）にしてあるので、画面ではそのままだと小さい——読む側の拡大で
 /// 補う。**紙に焼く大きさと、光る面を読む大きさは別のもの**で、分けたのがこの2つである。
-const ZOOM_DEFAULT: i32 = 150;
+///
+/// **これは出荷時の値で、使うのは設定の「Default Zoom」**（書き手の求め 2026-11-05、
+/// [`default_zoom`]）。画面で読みやすい大きさはディスプレイと距離で違うので、書き手が決める。
+/// 書き手の決定 2026-11-05: 出荷時（Reset All）は120%。
+const ZOOM_DEFAULT: i32 = 120;
+/// 書き手の求め 2026-11-05: 既定の倍率。新しいTABと Reset の戻り先だけに効き、
+/// **開いているTABの倍率は変えない**。
+const DEFAULT_ZOOM_SETTING: &str = "zoom.default";
+
+/// 設定の既定の倍率（書き手の求め 2026-11-05）。新しいTAB・ペイン、Reset、倍率を持たない
+/// セッションの行がこれを使う。
+fn default_zoom(window: &AppWindow) -> i32 {
+    window.get_default_zoom().clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+/// 倍率を持つペイン（書き手の求め 2026-11-05）。**下段のEditor Panelは持ち主のペインの倍率**、
+/// つまり上段で前に出ているTABの倍率で拡大する——上段と下段は同じ数で読む。
+fn zoom_owner(window: &AppWindow, id: PaneId) -> PaneId {
+    if id.is_panel() {
+        PaneId::from_index(id.screen(window).panel_owner)
+    } else {
+        id
+    }
+}
+
+/// 倍率を、そのペインで前に出ているTABへ書き込む（書き手の求め 2026-11-05）。
+///
+/// **変えたその場で。**TABの見え方は切り替えるときに写し取るが、前に出ているTABを
+/// 出し直す道もあり、そこで古い倍率へ戻らないように。
+fn remember_tab_zoom(window: &AppWindow, live: &Live, id: PaneId) {
+    let id = zoom_owner(window, id);
+    let zoom = id.zoom(window);
+    if let Ok(mut tabs) = live.tabs.try_borrow_mut()
+        && let Some(strip) = tabs.of_mut(id)
+    {
+        let active = strip.active;
+        if let Some(tab) = strip.tabs.get_mut(active) {
+            tab.view.zoom = zoom;
+        }
+    }
+}
+
+/// 書式の大きさに倍率を掛ける（書き手の求め 2026-11-05）。Terminal・Terminal Panel・
+/// Editor Panelは書式の文字サイズを持ち、画面ではそれを前に出ているTABの倍率で拡大する。
+fn zoomed_size(size: f32, zoom_percent: i32) -> f32 {
+    size * zoom_percent as f32 / 100.0
+}
 /// How long the caret must stop moving before the Markdown of its line is
 /// revealed. Revealing rewrites that block's text, which costs a whole block's
 /// worth of pixels; a held arrow key would pay that on every repeat.
@@ -1708,6 +1754,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let session = app_data::app_directory()
         .as_deref()
         .and_then(app_data::read_session);
+    // 書き手の求め 2026-11-05: 設定も**ペインを作る前に**読む。既定の倍率は新しいペインの行と、
+    // 倍率を持たないセッションの行が使う。全体を当てるのは下の`apply_settings`で、同じ値を使う。
+    let stored_settings = app_data::app_directory()
+        .as_deref()
+        .and_then(app_data::read_settings);
+    if let Some(values) = &stored_settings {
+        apply_default_zoom(&window, values);
+    }
     // The panes, published before anything can read one. Each row carries its
     // own number and direction; everything else in it is either what a refresh
     // has put there or what the pane itself reports once it exists.
@@ -1921,6 +1975,8 @@ fn main() -> Result<(), slint::PlatformError> {
         id.set_scroll(&window, tab.view.scroll);
         id.set_shows_preview(&window, tab.view.preview);
         set_pane_direction(&window, &render_cache, id, tab.view.vertical);
+        // 書き手の求め 2026-11-05: 倍率は前に出ているTABのもの。
+        id.set_zoom(&window, tab.view.zoom);
         // 要件 8.5: the passage it was looking at, which is what actually puts
         // the view back — the scroll above is pixels, and the zoom, the split
         // and the extent all change what those mean before the window stands
@@ -3230,11 +3286,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
+    let zoom_live = live.clone();
     window.on_pane_zoom(move |pane, notches| {
         if let Some(window) = weak.upgrade() {
-            let id = PaneId::from_index(pane);
+            let id = zoom_owner(&window, PaneId::from_index(pane));
             let percent = id.zoom(&window) + notches * ZOOM_STEP;
             zoom_pane(&window, &states, &cache, &timer, id, percent);
+            remember_tab_zoom(&window, &zoom_live, id);
         }
     });
 
@@ -3242,10 +3300,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
+    let zoom_live = live.clone();
     window.on_pane_zoom_set(move |pane, percent| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             zoom_pane(&window, &states, &cache, &timer, id, percent);
+            remember_tab_zoom(&window, &zoom_live, id);
         }
     });
 
@@ -3253,10 +3313,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
+    let zoom_live = live.clone();
     window.on_pane_zoom_reset(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            zoom_pane(&window, &states, &cache, &timer, id, ZOOM_DEFAULT);
+            zoom_pane(&window, &states, &cache, &timer, id, default_zoom(&window));
+            remember_tab_zoom(&window, &zoom_live, id);
         }
     });
 
@@ -3275,10 +3337,8 @@ fn main() -> Result<(), slint::PlatformError> {
     window.set_sheet_fonts(ModelRc::from(sheet_fonts.clone()));
     // 設定を読む前に置く——読むときは行を書き換えるだけなので。
     // 要件 9: what the last run was set to, before anything is drawn with it.
-    if let Some(directory) = app_data::app_directory()
-        && let Some(values) = app_data::read_settings(&directory)
-    {
-        apply_settings(&window, &numbers, &palette, &sheet_fonts, &values);
+    if let Some(values) = &stored_settings {
+        apply_settings(&window, &numbers, &palette, &sheet_fonts, values);
     }
     // 追加要件 2026-09-15: 表示の言語。**窓を作ったあと、画面の文言を作る前に**決める。
     i18n::apply(window.get_language());
@@ -4681,6 +4741,9 @@ struct TabView {
     /// file can be open横書き in one pane and縦書き in another.
     vertical: bool,
     preview: bool,
+    /// 書き手の求め 2026-11-05: **倍率はTABのもの。**同じペインでも、TerminalのTABと文書の
+    /// TABは別の倍率で読む。`0`は「既定の倍率」で、新しいTABはそれで開く（[`zoom_from`]）。
+    zoom: i32,
 }
 
 /// **まだ誰も見ていない表示は、文書の先頭に立つ**（書き手の報告 2026-09-15：
@@ -4698,6 +4761,7 @@ impl Default for TabView {
             top: Some(0),
             vertical: false,
             preview: false,
+            zoom: 0,
         }
     }
 }
@@ -5237,6 +5301,7 @@ impl Live {
             top: self.view_top(window, id),
             vertical: id.vertical(window),
             preview: id.shows_preview(window),
+            zoom: id.zoom(window),
         }
     }
 
@@ -5267,6 +5332,8 @@ impl Live {
         // The direction first: everything below is in a screen axis, and which
         // axis that is comes from the tab (要件 7.2).
         set_pane_direction(window, &self.cache, id, tab.view.vertical);
+        // 書き手の求め 2026-11-05: 倍率もTABのもの。組版は字の設定が変われば測り直す。
+        id.set_zoom(window, tab.view.zoom);
         // **What the pane is showing, told to the pane — twice, because two
         // sides ask.** Every path that draws reaches `refresh_pane` and none of
         // them carries a tab, so the render cache is told; and the keyboard is
@@ -6047,6 +6114,8 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                     view: TabView {
                         vertical: like.vertical(window),
                         preview: like.shows_preview(window),
+                        // 書き手の求め 2026-11-05: 分割でできたTABは元のTABの倍率を継ぐ。
+                        zoom: like.zoom(window),
                         ..TabView::default()
                     },
                     terminal: None,
@@ -12228,7 +12297,7 @@ fn publish_panes(window: &AppWindow, count: usize) {
     let Some(rows) = panes.as_any().downcast_ref::<VecModel<PaneScreen>>() else {
         // Nothing published yet: this is the first list there has been.
         let made = (0..count)
-            .map(|row| PaneId(row as u32).initial_screen(false, false))
+            .map(|row| PaneId(row as u32).initial_screen(default_zoom(window), false, false))
             .collect::<Vec<PaneScreen>>();
         window.set_panes(ModelRc::new(VecModel::from(made)));
         return;
@@ -12238,7 +12307,10 @@ fn publish_panes(window: &AppWindow, count: usize) {
     }
     while PaneId::count(window) < count {
         let at = PaneId::count(window);
-        rows.insert(at, PaneId(at as u32).initial_screen(false, false));
+        rows.insert(
+            at,
+            PaneId(at as u32).initial_screen(default_zoom(window), false, false),
+        );
     }
 }
 
@@ -14919,9 +14991,9 @@ fn usable_preview_height(height: f32) -> u32 {
 /// editor opens" rather than "invisible". Everything else is held inside the
 /// bounds the keys hold it to, so neither a hand-edited session nor a wheel
 /// spun a hundred notches can leave a pane somewhere it cannot be read at.
-fn zoom_from(stored: i32) -> i32 {
+fn zoom_from(stored: i32, default: i32) -> i32 {
     match stored {
-        0 => ZOOM_DEFAULT,
+        0 => default,
         percent => percent.clamp(ZOOM_MIN, ZOOM_MAX),
     }
 }
@@ -14968,7 +15040,10 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
     }
     if id.is_panel() {
         let style = &screen.panel_style;
-        spec.font_size = style.size.max(8) as f32;
+        spec.font_size = zoomed_size(
+            style.size.max(8) as f32,
+            zoom_owner(window, id).zoom(window),
+        );
         spec.body_font = style.family.to_string();
         spec.ink = channels(style.ink);
         spec.paper = channels(style.paper);
@@ -15795,6 +15870,21 @@ const LEFT_SIZE_RANGE: (i32, i32) = (9, 28);
 /// 既定の地と字——窓の`Tok.chrome`と`Tok.ink-strong`と同じ色。
 const LEFT_PAPER_DEFAULT: [f32; 3] = [250.0 / 255.0, 249.0 / 255.0, 252.0 / 255.0];
 const LEFT_INK_DEFAULT: [f32; 3] = [23.0 / 255.0, 19.0 / 255.0, 33.0 / 255.0];
+
+/// 設定ファイルの既定の倍率を読む（書き手の求め 2026-11-05）。10%刻みの範囲に収める。
+fn read_default_zoom(value: &str) -> i32 {
+    value.trim().parse::<i32>().map_or(ZOOM_DEFAULT, |percent| {
+        (percent.clamp(ZOOM_MIN, ZOOM_MAX) + ZOOM_STEP / 2) / ZOOM_STEP * ZOOM_STEP
+    })
+}
+
+/// 起動時、ペインを作る前に既定の倍率だけ当てる（書き手の求め 2026-11-05）。設定全体は
+/// あとの`apply_settings`が当てるが、ペインの行と倍率を持たないセッションの行はその前に作られる。
+fn apply_default_zoom(window: &AppWindow, values: &[(String, String)]) {
+    if let Some((_, value)) = values.iter().find(|(name, _)| name == DEFAULT_ZOOM_SETTING) {
+        window.set_default_zoom(read_default_zoom(value));
+    }
+}
 
 /// Left Pane の書式を既定へ（面のReset・Reset All）。
 fn reset_left_look(window: &AppWindow) {
@@ -16706,6 +16796,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         window.get_paper_random().to_string(),
     ));
     values.push((
+        DEFAULT_ZOOM_SETTING.to_owned(),
+        default_zoom(window).to_string(),
+    ));
+    values.push((
         LANGUAGE_SETTING.to_owned(),
         window.get_language().to_string(),
     ));
@@ -16953,6 +17047,11 @@ fn apply_settings(
         // そちらへ倒す。
         if written == PAPER_RANDOM_SETTING {
             window.set_paper_random(value.trim().parse::<i32>().unwrap_or(0).clamp(0, 2));
+            continue;
+        }
+        // 書き手の求め 2026-11-05: 読めない値は出荷時の値へ。開いているペインはここでも変えない。
+        if written == DEFAULT_ZOOM_SETTING {
+            window.set_default_zoom(read_default_zoom(value));
             continue;
         }
         if written == LANGUAGE_SETTING {
@@ -17311,7 +17410,8 @@ fn zoom_pane(
     id: PaneId,
     percent: i32,
 ) {
-    if id.zoom(window) == zoom_from(percent) {
+    let id = zoom_owner(window, id);
+    if id.zoom(window) == zoom_from(percent, default_zoom(window)) {
         return;
     }
     let caret = states.of(id).borrow().caret_source_byte;
@@ -17330,6 +17430,9 @@ fn zoom_pane(
     id.set_zoom(window, percent);
     hold_view(cache, id, top, caret);
     schedule_relayout(window, states, cache, timer);
+    // 書き手の求め 2026-11-05: 升目と下段も同じ倍率で組み直す。升目の桁数・行数はシェルへ
+    // 伝え直され（`refresh_terminal`の`resize`）、Editor Panelは`panel_source::sync`が描き直す。
+    window.invoke_terminal_woken();
 }
 
 fn schedule_relayout(
@@ -17741,14 +17844,14 @@ impl PaneId {
     /// draws the way the tab in front of it says, and a pane made by a split
     /// opens with a copy of the tab it was split from (要件 6.4) — so what a
     /// new row starts as is the splitting pane's business, not its number's.
-    fn initial_screen(self, vertical: bool, preview: bool) -> PaneScreen {
+    fn initial_screen(self, zoom: i32, vertical: bool, preview: bool) -> PaneScreen {
         PaneScreen {
             id: self.index(),
             front_style: terminal_appearance::initial_style(),
             panel_style: terminal_appearance::initial_style(),
             vertical,
             preview,
-            zoom: ZOOM_DEFAULT,
+            zoom,
             content_width: 640,
             content_height: 520,
             shown_width: 640.0,
@@ -18099,11 +18202,11 @@ impl PaneId {
     /// A row that has never been written says 0, which [`zoom_from`] reads as
     /// no zoom at all rather than as 0%.
     fn zoom(self, window: &AppWindow) -> i32 {
-        zoom_from(self.screen(window).zoom)
+        zoom_from(self.screen(window).zoom, default_zoom(window))
     }
 
     fn set_zoom(self, window: &AppWindow, percent: i32) {
-        let held = zoom_from(percent);
+        let held = zoom_from(percent, default_zoom(window));
         self.update_screen(window, |screen| screen.zoom = held);
     }
 
@@ -19646,7 +19749,9 @@ fn start_shell(
     shell: &TerminalShell,
     extent: f32,
 ) -> Option<TerminalSession> {
-    let look = terminal_look(window);
+    let mut look = terminal_look(window);
+    // 書き手の求め 2026-11-05: 描くときと同じ倍率で桁数を数える。
+    look.font_size = zoomed_size(look.font_size, id.zoom(window));
     let cell = cells::terminal_cell_size(&look).unwrap_or(cells::CellSize {
         advance: 8.0,
         line: 18.0,
@@ -25334,16 +25439,18 @@ mod tests {
     /// set to 0% would be a pane with nothing on it.
     #[test]
     fn a_stored_zoom_of_zero_means_the_default() {
-        assert_eq!(zoom_from(0), ZOOM_DEFAULT);
-        assert_eq!(zoom_from(125), 125);
+        assert_eq!(zoom_from(0, ZOOM_DEFAULT), ZOOM_DEFAULT);
+        // 書き手の求め 2026-11-05: 0は設定の既定の倍率。
+        assert_eq!(zoom_from(0, 120), 120);
+        assert_eq!(zoom_from(125, 120), 125);
         // Held inside the bounds the keys hold it to, whichever way it came in.
-        assert_eq!(zoom_from(4000), ZOOM_MAX);
-        assert_eq!(zoom_from(1), ZOOM_MIN);
-        assert_eq!(zoom_from(-30), ZOOM_MIN);
+        assert_eq!(zoom_from(4000, ZOOM_DEFAULT), ZOOM_MAX);
+        assert_eq!(zoom_from(1, ZOOM_DEFAULT), ZOOM_MIN);
+        assert_eq!(zoom_from(-30, ZOOM_DEFAULT), ZOOM_MIN);
         // A pane at either end stays there rather than wrapping when the next
         // notch arrives, which is what `on_pane_zoom` adds to.
-        assert_eq!(zoom_from(ZOOM_MAX + ZOOM_STEP), ZOOM_MAX);
-        assert_eq!(zoom_from(ZOOM_MIN - ZOOM_STEP), ZOOM_MIN);
+        assert_eq!(zoom_from(ZOOM_MAX + ZOOM_STEP, ZOOM_DEFAULT), ZOOM_MAX);
+        assert_eq!(zoom_from(ZOOM_MIN - ZOOM_STEP, ZOOM_DEFAULT), ZOOM_MIN);
     }
 
     /// A new pane opens at the size the writer left nothing about, and every
@@ -25351,8 +25458,8 @@ mod tests {
     #[test]
     fn a_pane_opens_at_the_default_zoom() {
         for pane in 0..4_u32 {
-            let row = PaneId(pane).initial_screen(false, false);
-            assert_eq!(zoom_from(row.zoom), ZOOM_DEFAULT, "{row:?}");
+            let row = PaneId(pane).initial_screen(ZOOM_DEFAULT, false, false);
+            assert_eq!(zoom_from(row.zoom, 120), ZOOM_DEFAULT, "{row:?}");
         }
     }
 
@@ -25364,7 +25471,7 @@ mod tests {
     #[test]
     fn a_pane_row_sits_at_the_position_its_number_names() {
         let rows = (0..5_u32)
-            .map(|pane| PaneId(pane).initial_screen(false, false))
+            .map(|pane| PaneId(pane).initial_screen(ZOOM_DEFAULT, false, false))
             .collect::<Vec<PaneScreen>>();
 
         for (position, row) in rows.iter().enumerate() {
@@ -26393,7 +26500,8 @@ mod tests {
         // **画面の拡大で測る**（`ZOOM_DEFAULT`）。本文の既定は紙の大きさになったので
         // （10.5pt、2026-09-16）、素の大きさで組むと同じ文書が狭くなる——ここで欲しいのは
         // 「一画面では到底収まらない広さ」である。
-        let engine = engine_for(&text, ZOOM_DEFAULT);
+        // 150%で（出荷時の既定は2026-11-05から120%。広さの前提はこの倍率で決めてある）。
+        let engine = engine_for(&text, 150);
         let width = engine.total_flow_size();
         let middle = -((width / 2) as f32);
 

@@ -986,6 +986,8 @@ fn a_note_indent_moves_where_the_line_starts() {
     window.set_tree_open(false);
     publish_panes(&window, 1);
     let id = PaneId::FIRST;
+    // 字の升（22px×1.3）は150%で測ってある（出荷時の既定は2026-11-05から120%）。
+    id.set_zoom(&window, 150);
     let source = "地の文。\n［＃ここから2字下げ］\n手紙の行。\n［＃ここで字下げ終わり］\n地の文。\n［＃1字下げ］この行だけ。\n［＃地付き］署名。\n［＃地から2字上げ］結び。\n";
     let document = OpenDocument::new(DocumentFile::untitled(1), source.into(), window.as_weak());
     let states = PaneStates::new(&document);

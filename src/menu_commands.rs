@@ -1522,6 +1522,10 @@ fn build(
     let terminal = screen.terminal || matches!(t.spot, TerminalSpot::Below);
     let (text, editable) = text_state(window, live, t);
     let main = text && !t.id.is_panel();
+    // 書き手の求め 2026-11-05: 倍率は上段のTABのもので、Terminal・下段にも効く。下段から押しても
+    // 上段のTABの倍率が動く（`zoom_owner`）。
+    let zoomable = (text || terminal) && !screen.settings;
+    let zoom_now = t.parent.zoom(window);
     let parent_screen = t.parent.screen(window);
     let neighbours = [
         parent_screen.swap_left,
@@ -2198,15 +2202,15 @@ fn build(
                 "拡大",
                 "Zoom In",
                 Command::Zoom(1),
-                main && t.id.zoom(window) < ZOOM_MAX
+                zoomable && zoom_now < ZOOM_MAX
             );
             add!(
                 "縮小",
                 "Zoom Out",
                 Command::Zoom(-1),
-                main && t.id.zoom(window) > ZOOM_MIN
+                zoomable && zoom_now > ZOOM_MIN
             );
-            add!("既定倍率に戻す", "Reset Zoom", Command::ZoomReset, main);
+            add!("既定倍率に戻す", "Reset Zoom", Command::ZoomReset, zoomable);
             let zoom = Popup::new()?;
             for percent in (ZOOM_MIN..=ZOOM_MAX).step_by(ZOOM_STEP as usize) {
                 let name = format!("{percent}%");
@@ -2216,8 +2220,8 @@ fn build(
                     &name,
                     &name,
                     Command::ZoomSet(percent),
-                    main,
-                    t.id.zoom(window) == percent,
+                    zoomable,
+                    zoom_now == percent,
                 )?;
             }
             root.child_named("倍率", "Zoom", zoom)?;

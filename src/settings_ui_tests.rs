@@ -951,6 +951,17 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     window.invoke_layout_shared_toggled(false);
     assert_ne!(vertical().ink, channels(red));
     assert_ne!(Setting::BodySize.read(&window, 1), 30);
+
+    // 書き手の求め 2026-11-05: 既定の倍率は全般の値。面の Reset では動かず、Reset All で戻る。
+    window.set_default_zoom(130);
+    window.invoke_typography_reset(5);
+    assert_eq!(window.get_default_zoom(), 130, "Page leaves it");
+    window.invoke_typography_reset(3);
+    assert_eq!(window.get_default_zoom(), 130, "Text leaves it");
+    let open_zoom = id.zoom(&window);
+    window.invoke_typography_reset(-1);
+    assert_eq!(window.get_default_zoom(), ZOOM_DEFAULT);
+    assert_eq!(id.zoom(&window), open_zoom, "the open pane keeps its zoom");
 }
 
 /// 書き手の報告 2026-09-15: **Paneメニューの「Terminal Below」が効かない。**
@@ -1588,4 +1599,78 @@ fn the_left_pane_has_its_own_look() {
     assert_eq!(window.get_left_size(), LEFT_SIZE_DEFAULT);
     assert_eq!(window.get_left_paper(), slint_colour(LEFT_PAPER_DEFAULT));
     assert!(!window.get_left_file_own());
+
+    // 書き手の求め 2026-11-05: 既定の倍率。10%刻みで範囲に収まり、**開いているペインは変えない**。
+    // 新しいペインと、倍率を持たない行（Resetの戻り先と同じ読み方）がこれを使う。
+    assert_eq!(
+        window.get_default_zoom(),
+        ZOOM_DEFAULT,
+        "the window's default is Rust's"
+    );
+    let open_zoom = id.zoom(&window);
+    window.invoke_default_zoom_stepped(-3);
+    assert_eq!(window.get_default_zoom(), ZOOM_DEFAULT - 3 * ZOOM_STEP);
+    assert_eq!(id.zoom(&window), open_zoom, "the open pane keeps its zoom");
+    window.invoke_default_zoom_stepped(-100);
+    assert_eq!(window.get_default_zoom(), ZOOM_MIN);
+    window.invoke_default_zoom_stepped(100);
+    assert_eq!(window.get_default_zoom(), ZOOM_MAX);
+    window.invoke_default_zoom_stepped(-(ZOOM_MAX - 130) / ZOOM_STEP);
+    assert_eq!(window.get_default_zoom(), 130);
+    publish_panes(&window, 2);
+    assert_eq!(
+        PaneId::from_index(1).zoom(&window),
+        130,
+        "a new pane opens at it"
+    );
+    assert_eq!(id.zoom(&window), open_zoom);
+    id.set_zoom(&window, 0);
+    assert_eq!(
+        id.zoom(&window),
+        130,
+        "a row without a zoom reads the default"
+    );
+    let values = settings_values(&window);
+    assert!(values.contains(&("zoom.default".to_owned(), "130".to_owned())));
+    // 全般の設定なので、どのプリセットにも入らない。
+    assert_eq!(crate::settings_transfer::kind_of("zoom.default"), None);
+    let other = AppWindow::new().unwrap();
+    other.set_sheet_stride(SHEET_NUMBERS as i32);
+    apply_settings(&other, &numbers, &palette, &fonts, &values);
+    assert_eq!(other.get_default_zoom(), 130);
+    // 手で書き換えた値も範囲と刻みに収める。読めなければ出荷時の値。
+    for (written, read) in [
+        ("4000", ZOOM_MAX),
+        ("1", ZOOM_MIN),
+        ("134", 130),
+        ("x", ZOOM_DEFAULT),
+    ] {
+        apply_settings(
+            &other,
+            &numbers,
+            &palette,
+            &fonts,
+            &[("zoom.default".to_owned(), written.to_owned())],
+        );
+        assert_eq!(other.get_default_zoom(), read, "{written}");
+    }
+    // 起動ではペインを作る前に既定の倍率だけ当てる。
+    let early = AppWindow::new().unwrap();
+    apply_default_zoom(&early, &values);
+    assert_eq!(early.get_default_zoom(), 130);
+
+    // 書き手の求め 2026-11-05: **倍率はTABのもの。**同じペインでもTABを替えればそのTABの
+    // 倍率で読み、新しいTABは既定の倍率で開く。TABの列は1つなので、ペインも1つに戻す。
+    publish_panes(&window, 1);
+    id.set_zoom(&window, 200);
+    remember_tab_zoom(&window, &live, id);
+    new_tab(&window, &live, id);
+    assert_eq!(id.zoom(&window), 130, "a new tab opens at the default");
+    switch_to_tab(&window, &live, id, 0);
+    assert_eq!(id.zoom(&window), 200, "the first tab keeps its own");
+    switch_to_tab(&window, &live, id, 1);
+    assert_eq!(id.zoom(&window), 130);
+    let session = session::capture_session(&window, &live);
+    let zooms: Vec<i32> = session.panes[0].tabs.iter().map(|tab| tab.zoom).collect();
+    assert!(zooms.contains(&200), "{zooms:?}");
 }

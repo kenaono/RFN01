@@ -28,7 +28,7 @@ impl<'a> EditorHost<'a> {
         self.live.states.next_panel.set(next + 1);
         let id = PaneId(next);
         self.live.states.panels.borrow_mut().insert(next, session);
-        let mut screen = id.initial_screen(false, false);
+        let mut screen = id.initial_screen(crate::default_zoom(&self.window), false, false);
         screen.embedded_panel = true;
         screen.panel_owner = owner.index();
         rows.push(screen);

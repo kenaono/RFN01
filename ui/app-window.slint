@@ -1096,6 +1096,9 @@ export component AppWindow inherits Window {
     in-out property <color> left-file-ink: #171321;
     callback left-size-stepped(int);
     callback left-reset();
+    // 書き手の求め 2026-11-05: 既定の倍率（新しいTABと Reset の戻り先）。開いているTABは変えない。
+    in-out property <int> default-zoom: 120;
+    callback default-zoom-stepped(int);
     in-out property <color> terminal-paper: #fffefa;
     in-out property <color> terminal-ink: #24211e;
     in-out property <[PanelStyle]> panel-defaults;
@@ -4311,6 +4314,24 @@ export component AppWindow inherits Window {
                                             }
                                             if !root.settings-searching: Rectangle { height: 12px; }
 
+                                            // 書き手の求め 2026-11-05: 既定の倍率。**全般の設定**——倍率はTABのもので、
+                                            // 文書にもTerminalにも効く。新しいTABとResetの戻り先。
+                                            if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): Rectangle { height: 1px; background: Tok.rule; }
+                                            if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): Text {
+                                                text: root.section-title(@tr("General"), @tr("ZOOM"));
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                letter-spacing: 0.9px;
+                                            }
+                                            if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): StepRow {
+                                                label: @tr("Default Zoom");
+                                                value: root.default-zoom + "%";
+                                                stepped(by) => {
+                                                    root.default-zoom-stepped(by);
+                                                }
+                                            }
+                                            if !root.settings-searching: Rectangle { height: 12px; }
+
                                             // RFN01-62（書き手と合意 2026-09-28）: **読み上げの声と速さ。**全体に1つ。
                                             // 日本語の声が無ければ、声の欄にそう出す（読み上げは押せない）。
                                             if root.shows-any([@tr("READ ALOUD"), @tr("Voice"), @tr("Speed")]): Rectangle { height: 1px; background: Tok.rule; }
@@ -6838,8 +6859,9 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
+                                // 書き手の報告 2026-11-05: 戻る先は設定の既定の倍率なので、数字ではなく Reset。
                                 TextButton {
-                                    title: "100%";
+                                    title: @tr("Reset");
                                     wide: true;
                                     clicked => {
                                         zoom-menu.close();

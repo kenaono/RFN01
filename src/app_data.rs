@@ -86,6 +86,9 @@ pub struct SessionTab {
     /// The four modes of 要件 7.2, kept per tab.
     pub vertical: bool,
     pub preview: bool,
+    /// 書き手の求め 2026-11-05: このTABの倍率。`0`は書いていない＝この版より前のセッションで、
+    /// 読む側がペインの倍率を写す。
+    pub zoom: i32,
     /// Where the pane was looking, along the flow.
     ///
     /// **In pixels, and therefore only a hint**: the same number means a
@@ -451,6 +454,9 @@ pub fn encode_session(session: &Session) -> String {
             if let Some(top) = tab.top {
                 out.push_str(&format!("top: {top}\n"));
             }
+            if tab.zoom != 0 {
+                out.push_str(&format!("tab-zoom: {}\n", tab.zoom));
+            }
             if tab.empty {
                 out.push_str("empty: 1\n");
             }
@@ -619,6 +625,12 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "top" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.top = value.parse().ok();
+            }
+            // 書き手の求め 2026-11-05: TABの倍率。読めなければ0（ペインの倍率を写す）。
+            // 鍵は`tab-zoom`——`zoom`はペインが倍率を持つ前の、窓全体の倍率の鍵である。
+            "tab-zoom" => {
+                let tab = session.panes.last_mut()?.tabs.last_mut()?;
+                tab.zoom = value.trim().parse().unwrap_or(0);
             }
             "anchor" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
@@ -1762,6 +1774,23 @@ mod tests {
         let read = decode_session(&encode_session(&session())).expect("decodes");
         assert!(!read.panes[0].tabs[0].below);
         assert_eq!(read.panes[0].tabs[0].below_height, 0);
+    }
+
+    /// 書き手の求め 2026-11-05: 倍率はTABのもの。`tab-zoom`で書き、窓全体の`zoom`と混ざらない。
+    /// 書いていないセッションは0のまま（読む側がペインの倍率を写す）。
+    #[test]
+    fn a_session_remembers_each_tab_zoom() {
+        let mut opened = session();
+        opened.panes[0].zoom = 120;
+        opened.panes[0].tabs[0].zoom = 200;
+        let written = encode_session(&opened);
+        assert!(written.contains("tab-zoom: 200\n"), "{written}");
+        let read = decode_session(&written).expect("decodes");
+        assert_eq!(read.panes[0].tabs[0].zoom, 200);
+        assert_eq!(read.panes[0].zoom, 120, "the pane's own stays");
+
+        let read = decode_session(&encode_session(&session())).expect("decodes");
+        assert_eq!(read.panes[0].tabs[0].zoom, 0);
     }
 
     /// 要件 8.5: **the screen is part of the arrangement.** A window put on

@@ -58,6 +58,8 @@ fn read_only_follows_a_growing_file_until_scrolled_away() {
     surface.set_size(slint::PhysicalSize::new(1000, 740));
     publish_panes(&window, 1);
     let id = PaneId::from_index(0);
+    // この試験の位置は150%で測ってある（出荷時の既定は2026-11-05から120%）。
+    id.set_zoom(&window, 150);
     window.set_autosave(false);
     let log_path = directory.join("app.log");
     std::fs::write(&log_path, log_lines(0, 80)).unwrap();
