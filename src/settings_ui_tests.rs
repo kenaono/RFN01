@@ -1759,6 +1759,80 @@ fn the_palette_lists_operations_by_other_words_and_offers_settings() {
     );
 }
 
+/// RFN01-114（書き手と合意 2026-11-05）: パレットは**1行目にTitle、2行目にDescription**
+/// （メニューの道ではない）。鍵の印はアクションの表のIDで、押すとKeysがその行だけに絞られる。
+/// データの行（最近のフォルダ・シェル）も並び、汎用のアクションはその一覧だけを出す。
+#[test]
+fn the_palette_shows_titles_and_descriptions_from_the_action_table() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("palette-table");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    command_palette::install(window, live);
+    shortcuts::wire(window, live);
+    let rows = |text: &str| -> Vec<PaletteRow> {
+        window.invoke_palette_edited(text.into());
+        window.get_palette_rows().iter().collect()
+    };
+    command_palette::open(window, live, true);
+    let found = rows("> 名前を付けて保存");
+    let save_as = found
+        .iter()
+        .find(|row| row.title == "名前を付けて保存…")
+        .expect("Save As is listed");
+    assert!(save_as.detail.contains("名前と場所"), "{}", save_as.detail);
+    assert!(!save_as.detail.contains('›'), "no menu path");
+    assert_eq!(save_as.assign.as_str(), "file.save-as");
+    assert_eq!(save_as.key.as_str(), "Ctrl+Shift+S");
+    // 下の段の項目も、それだけで分かる名前で。
+    let utf8 = rows("> UTF-8");
+    assert!(
+        utf8.iter()
+            .any(|row| row.title == "文字コードを指定して開き直す：UTF-8"),
+        "{:?}",
+        utf8.iter()
+            .map(|row| row.title.to_string())
+            .collect::<Vec<_>>()
+    );
+    // 汎用のアクション：シェルを選ぶ一覧だけを出す。
+    command_palette::close(window);
+    command_palette::open_list(window, live, command_palette::List::Shells);
+    let shells = rows("");
+    assert!(!shells.is_empty());
+    assert!(
+        shells
+            .iter()
+            .all(|row| row.title.starts_with("新しいTerminal："))
+    );
+    assert!(
+        shells.iter().all(|row| row.assign.is_empty()),
+        "data rows take no key"
+    );
+    command_palette::close(window);
+
+    // 鍵の印から：Keysは、その操作の行だけ。
+    let at = crate::actions::index_of("file.save-as").unwrap();
+    open_keys_for(window, live, at);
+    let listed: Vec<_> = window
+        .get_shortcut_rows()
+        .iter()
+        .filter(|row| !row.header)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(listed, [at as i32]);
+    // 語を書き換えれば、ふだんの検索へ戻る。
+    window.set_shortcut_only(-1);
+    shortcuts::publish(window);
+    assert!(
+        window
+            .get_shortcut_rows()
+            .iter()
+            .filter(|row| !row.header)
+            .count()
+            > 1
+    );
+}
+
 /// 書き手の報告 2026-11-05: 設定の検索でIMEから打った「閉じたＴＡＢ」（全角）が、キーの一覧で
 /// 見つからなかった。項目の名前と同じく、全角・半角と大文字・小文字をそろえて探す。
 #[test]
