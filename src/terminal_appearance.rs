@@ -8,7 +8,7 @@ pub(crate) fn initial_style() -> PanelStyle {
         paper: Color::from_rgb_u8(255, 254, 250),
         ink: Color::from_rgb_u8(36, 33, 30),
         family: "Consolas".into(),
-        size: 15,
+        size: 14,
         ..Default::default()
     }
 }

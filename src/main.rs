@@ -15902,7 +15902,8 @@ const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
 /// What the terminal is set in until the writer says otherwise — the values
 /// `app-window.slint` starts with, and what Terminal's Reset puts back.
 const TERMINAL_FONT_DEFAULT: &str = "Consolas";
-const TERMINAL_SIZE_DEFAULT: i32 = 15;
+/// 書き手の決定 2026-11-05: Editorの本文と同じ14px（10.5pt）。以前は15px。
+const TERMINAL_SIZE_DEFAULT: i32 = 14;
 
 thread_local! {
     /// 鍵盤を持っている素の欄の数（書き手の報告 2026-09-08）。
@@ -19764,7 +19765,10 @@ fn start_shell(
         // any of it (要件 2).
         let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
     };
-    let (command, directory) = terminal_shells::launch(shell);
+    // RFN01-105: 開始フォルダが空なら Workspace のフォルダかホーム。プロファイルは書き換えない。
+    let workspace = git_ui::workspace_folders(live).into_iter().next();
+    let started = terminal_shells::with_start_folder(shell, workspace.as_deref());
+    let (command, directory) = terminal_shells::launch(&started);
     match TerminalSession::start_in(
         &shell.name,
         &command,

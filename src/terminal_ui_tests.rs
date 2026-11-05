@@ -1504,5 +1504,5 @@ fn the_pane_zoom_reaches_the_terminal_and_its_panels() {
     assert_eq!(owner.zoom(&h.window), 120);
     panel_source::sync(&h.window, &h.live);
     assert_eq!(panel.zoom(&h.window), 120);
-    assert_eq!(font(TerminalSpot::Front), size * 1.2);
+    assert_eq!(font(TerminalSpot::Front), zoomed_size(size, 120));
 }
