@@ -552,7 +552,8 @@ const ZOOM_MAX: i32 = 240;
 ///
 /// **これは出荷時の値で、使うのは設定の「Default Zoom」**（書き手の求め 2026-11-05、
 /// [`default_zoom`]）。画面で読みやすい大きさはディスプレイと距離で違うので、書き手が決める。
-const ZOOM_DEFAULT: i32 = 150;
+/// 書き手の決定 2026-11-05: 出荷時（Reset All）は120%。
+const ZOOM_DEFAULT: i32 = 120;
 /// 書き手の求め 2026-11-05: 既定の倍率。新しいTABと Reset の戻り先だけに効き、
 /// **開いているTABの倍率は変えない**。
 const DEFAULT_ZOOM_SETTING: &str = "zoom.default";
@@ -26499,7 +26500,8 @@ mod tests {
         // **画面の拡大で測る**（`ZOOM_DEFAULT`）。本文の既定は紙の大きさになったので
         // （10.5pt、2026-09-16）、素の大きさで組むと同じ文書が狭くなる——ここで欲しいのは
         // 「一画面では到底収まらない広さ」である。
-        let engine = engine_for(&text, ZOOM_DEFAULT);
+        // 150%で（出荷時の既定は2026-11-05から120%。広さの前提はこの倍率で決めてある）。
+        let engine = engine_for(&text, 150);
         let width = engine.total_flow_size();
         let middle = -((width / 2) as f32);
 
