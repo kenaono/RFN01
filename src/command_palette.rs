@@ -82,6 +82,7 @@ enum Shown {
     Template(usize),
     /// RFN01-107: 設定をこの語で探す行。
     Settings,
+    SettingItem(&'static crate::settings_items::Item),
 }
 
 pub fn install(window: &AppWindow, live: &Live) {
@@ -241,6 +242,26 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                 let (more_rows, more_shown) = template_rows(templates, query.trim(), true);
                 rows.extend(more_rows);
                 shown.extend(more_shown);
+                let folded_query = crate::fold_for_search(query.trim());
+                if !folded_query.is_empty() {
+                    for item in crate::settings_items::Item::all()
+                        .filter(|item| item.matches(&folded_query))
+                    {
+                        let (ja, en) = item.titles();
+                        let (title, detail) = if crate::i18n::japanese() {
+                            two_lines(&ja, &en)
+                        } else {
+                            two_lines(&en, &ja)
+                        };
+                        rows.push(PaletteRow {
+                            title: title.into(),
+                            detail: detail.into(),
+                            key: SharedString::new(),
+                            assign: SharedString::new(),
+                        });
+                        shown.push(Shown::SettingItem(item));
+                    }
+                }
                 // RFN01-107（書き手と合意 2026-11-05）: 設定の項目は、設定の画面の検索で探す。
                 // 語があれば最後に1行、選べば設定のTABがその語で絞られて開く。
                 if !query.trim().is_empty() {
@@ -301,6 +322,7 @@ fn accept(window: &AppWindow, live: &Live) {
             Shown::Template(at) => {
                 Chosen::Template(palette.templates.as_ref()?.get(at)?.path.clone())
             }
+            Shown::SettingItem(item) => Chosen::SettingItem(item),
             Shown::Settings => Chosen::Settings(
                 window
                     .get_palette_text()
@@ -328,6 +350,7 @@ fn accept(window: &AppWindow, live: &Live) {
                 menu_commands::run(&window, &live, &target, command, &name);
             }
             Chosen::Template(path) => crate::insert_template(&window, &live, pane, &path),
+            Chosen::SettingItem(item) => crate::open_setting_item(&window, &live, item),
             Chosen::Settings(query) => {
                 crate::open_settings_searching(&window, &live, &query, false)
             }
@@ -363,6 +386,7 @@ enum Chosen {
     Operation(menu_commands::Command, String),
     Template(PathBuf),
     Settings(String),
+    SettingItem(&'static crate::settings_items::Item),
 }
 
 /// RFN01-88: the templates that match `query`. Among the operations (`named`)

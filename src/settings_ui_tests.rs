@@ -1282,15 +1282,6 @@ fn the_screen_speaks_japanese_and_english() {
 /// （「見つかりません」を言わない）、Keysの一覧も同じ語で絞る。`EDITOR_SETTINGS_SNAPSHOT`があれば画像も書く。
 #[test]
 fn the_find_bar_searches_the_settings() {
-    assert!(settings_match("font", ["Code Font".into()]));
-    assert!(settings_match("Ｈ１", ["H1".into()]), "full width");
-    assert!(settings_match(" 色 ", ["背景色".into()]), "trimmed");
-    assert!(!settings_match(
-        "margin",
-        ["Line height".into(), "PAGE".into()]
-    ));
-    assert!(settings_match("", []), "nothing asked shows everything");
-
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = AppWindow::new().unwrap();
@@ -1349,7 +1340,7 @@ fn the_find_bar_searches_the_settings() {
         searched: Rc::default(),
     };
     shortcuts::wire(&window, &live);
-    window.on_settings_match(|query, labels| settings_match(&query, labels.iter()));
+    settings_items::wire(&window);
     open_settings(&window, &live);
     assert!(id.screen(&window).settings);
     window.show().unwrap();
@@ -1975,4 +1966,111 @@ fn key_bindings_live_in_the_settings_file() {
     reset_settings(&numbers, &palette, &fonts);
     apply_settings(window, &numbers, &palette, &fonts, &written);
     assert_eq!(window.get_shortcut_bindings().as_str(), "0=Ctrl+Alt+O;v=4");
+}
+
+#[test]
+fn the_palette_opens_the_vertical_body_font_by_id_without_changing_inheritance() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("palette-body-setting");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    command_palette::install(window, live);
+    window.set_text_shared(true);
+    let before = settings_values(window);
+
+    command_palette::open(window, live, true);
+    window.invoke_palette_edited("> Ｂｏｄｙ Ｆｏｎｔ".into());
+    let selected = window
+        .get_palette_rows()
+        .iter()
+        .position(|row| {
+            row.detail.contains("Vertical › Body Font")
+                || row.title.contains("Vertical › Body Font")
+        })
+        .expect("vertical font is found in English");
+    window.set_palette_selected(selected as i32);
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+
+    assert_eq!(window.get_settings_item_id().as_str(), "v.font-body");
+    assert!(window.get_text_shared());
+    assert_eq!(settings_values(window), before);
+    assert_eq!(shared_sheet(window, 1, 3), 0);
+    window.set_text_shared(false);
+    assert_eq!(shared_sheet(window, 1, 3), 1);
+    open_settings_searching(window, live, "本文の文字色", false);
+    assert!(window.get_settings_item_id().is_empty());
+    assert!(settings_items::shows(
+        "text.body",
+        0,
+        "本文の文字色",
+        "",
+        [false; 3]
+    ));
+}
+
+#[test]
+fn the_setting_catalog_covers_persisted_preferences_and_resolves_its_routes() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("setting-catalog");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文", weak));
+
+    let items: std::collections::HashSet<_> = settings_items::Item::all()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(items.len(), settings_items::Item::all().count());
+    for (key, _) in settings_values(&harness.window) {
+        let outside_settings = [
+            "print.size",
+            "print.head",
+            "print.foot",
+            "terminal.log_stamp_file",
+            "colour.recent",
+            SHORTCUT_BINDINGS_SETTING,
+        ]
+        .contains(&key.as_str());
+        let horizontal_vertical_only = key == format!("h.{}", Setting::UprightDigits.name())
+            || key == format!("h.{}", Setting::UprightMarks.name());
+        assert!(
+            items.contains(key.as_str())
+                || outside_settings
+                || horizontal_vertical_only
+                || key.starts_with("terminal.shell.")
+                || key.starts_with("terminal.appearance."),
+            "uncatalogued setting: {key}",
+        );
+    }
+    let shows = settings_items::shows;
+    assert!(shows("text.h1", 0, "Ｈ１ Ｆｏｎｔ", "", [false; 3]));
+    assert!(!shows("text.h2", 0, "H1 font", "", [false; 3]));
+    assert!(shows("layout.numbers", 0, "", "v.line-numbers", [true; 3]));
+    assert!(shows("layout.shared", 1, "", "v.line-numbers", [true; 3]));
+    assert!(!shows(
+        "style.terminal-panel",
+        -1,
+        "",
+        "v.line-numbers",
+        [true; 3]
+    ));
+    assert!(shows("page.paper", 0, "", "v.paper", [true; 3]));
+    assert!(shows("paper.shared", 1, "", "v.paper", [true; 3]));
+    let digits = format!("v.{}", Setting::UprightDigits.name());
+    assert!(shows("layout.upright-digits", 1, "", &digits, [true; 3]));
+    assert!(!shows("layout.shared", 1, "", &digits, [true; 3]));
+    assert!(shows("terminal.history", -1, "履歴 行数", "", [false; 3]));
+    assert!(!shows("terminal.profiles", -1, "履歴 行数", "", [false; 3]));
+    assert!(shows(
+        "style.terminal-panel",
+        -1,
+        "",
+        "style.terminal-panel.font",
+        [false; 3]
+    ));
+    assert!(!shows(
+        "style.terminal",
+        -1,
+        "",
+        "style.terminal-panel.font",
+        [false; 3]
+    ));
 }

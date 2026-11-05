@@ -97,6 +97,7 @@ mod rectangle_ui_tests;
 mod saving;
 mod searcher;
 mod session;
+mod settings_items;
 mod settings_transfer;
 #[cfg(test)]
 mod settings_transfer_ui_tests;
@@ -2586,7 +2587,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wiring::wire_workspace(&window, &live);
 
     wiring::wire_find(&window, &live);
-    window.on_settings_match(|query, labels| settings_match(&query, labels.iter()));
+    settings_items::wire(&window);
 
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
@@ -5609,15 +5610,6 @@ pub(crate) fn fold_for_search(text: &str) -> String {
         })
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-fn settings_match(query: &str, labels: impl IntoIterator<Item = SharedString>) -> bool {
-    let fold = fold_for_search;
-    let query = fold(query.trim());
-    query.is_empty()
-        || labels
-            .into_iter()
-            .any(|label| fold(&label).contains(&query))
 }
 
 /// 問いのやめる側（国際化②）。
@@ -13484,6 +13476,7 @@ pub(crate) fn open_settings_searching(
     keys_only: bool,
 ) {
     open_settings(window, live);
+    window.set_settings_item_id(SharedString::new());
     window.set_settings_keys_query(if keys_only {
         query.into()
     } else {
@@ -13510,6 +13503,22 @@ pub(crate) fn open_settings_searching(
     window.set_find_focus(true);
     window.set_find_open(true);
     window.set_find_generation(window.get_find_generation() + 1);
+}
+
+/// Open the setting by identity. The query is a label for the existing search field.
+pub(crate) fn open_setting_item(window: &AppWindow, live: &Live, item: &settings_items::Item) {
+    let title = item.title();
+    open_settings_searching(window, live, &title, false);
+    window.set_settings_tab(item.tab);
+    window.set_settings_inherited_text(
+        pick(
+            "縦書きは横書きの設定を使っています。",
+            "Vertical writing uses the horizontal setting.",
+        )
+        .into(),
+    );
+    window.set_settings_item_query(title.into());
+    window.set_settings_item_id(item.id.as_str().into());
 }
 
 /// RFN01-114: パレットの鍵の印から。設定のKeysを、**その操作の行だけ**に絞って開く。
